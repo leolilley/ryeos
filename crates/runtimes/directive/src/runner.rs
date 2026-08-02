@@ -5,8 +5,8 @@ use serde_json::{Value, json};
 use crate::budget::BudgetTracker;
 use crate::continuation::ContinuationCheck;
 use crate::directive::{
-    ContinuationConfig, ExecutionConfig, FinishReason, OutputSpec, ProviderMessage, ReturnNudge,
-    SamplingConfig, StreamEvent, ToolSchema,
+    ContinuationConfig, ExecutionConfig, FinishReason, OutputSpec, ProviderMessage,
+    ReasoningConfig, ReturnNudge, SamplingConfig, StreamEvent, ToolSchema,
 };
 use crate::dispatcher::{DispatchKind, Dispatcher};
 use crate::harness::{Harness, HookAction};
@@ -185,6 +185,9 @@ pub struct Runner {
     /// Passed to the provider adapter for inclusion in request body.
     /// `None` = use provider defaults.
     sampling: Option<SamplingConfig>,
+    /// Signed provider-neutral reasoning policy from the bound model.
+    /// The selected provider descriptor owns all wire-path/value mappings.
+    reasoning: Option<ReasoningConfig>,
     /// Shared HTTP client — created once and reused across all turns.
     /// Connection pooling keeps TCP/TLS handshakes to a minimum.
     http_client: reqwest::Client,
@@ -604,6 +607,7 @@ pub struct RunnerConfig {
     pub return_nudge: ReturnNudge,
     pub continuation: ContinuationConfig,
     pub sampling: Option<SamplingConfig>,
+    pub reasoning: Option<ReasoningConfig>,
     pub terminal_state_root: std::path::PathBuf,
     pub terminal_source_path: String,
 }
@@ -631,6 +635,7 @@ impl Runner {
             return_nudge,
             continuation,
             sampling,
+            reasoning,
             matched_profile,
             config_hash,
             financial_authority,
@@ -671,6 +676,7 @@ impl Runner {
             return_nudge_sent: false,
             continuation_config: continuation,
             sampling,
+            reasoning,
             // Retain the existing per-process client and pool size; no
             // protocol or keepalive tuning is added without measurement. The
             // custom resolver preserves reqwest's default getaddrinfo behavior
@@ -974,6 +980,7 @@ impl Runner {
                             turn,
                             attempt: attempt_number,
                             sampling: self.sampling.as_ref(),
+                            reasoning: self.reasoning.as_ref(),
                             cancel_flag: Some(cancel_flag.clone()),
                             interrupt_flag: Some(interrupt_flag.clone()),
                         };
@@ -4232,6 +4239,7 @@ mod tests {
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            reasoning: None,
             terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
             terminal_source_path: "directive:test/fixture".to_string(),
         });
@@ -4294,6 +4302,7 @@ mod tests {
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            reasoning: None,
             terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
             terminal_source_path: "directive:test/fixture".to_string(),
         });
@@ -4352,6 +4361,7 @@ mod tests {
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            reasoning: None,
             terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
             terminal_source_path: "directive:test/fixture".to_string(),
         });
@@ -4408,6 +4418,7 @@ mod tests {
             outputs,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            reasoning: None,
             terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
             terminal_source_path: "directive:test/fixture".to_string(),
         });
@@ -4476,6 +4487,7 @@ mod tests {
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            reasoning: None,
             terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
             terminal_source_path: "directive:test/fixture".to_string(),
         });
@@ -4649,6 +4661,7 @@ mod tests {
                 temperature: Some(0.3),
                 seed: Some(42),
             }),
+            reasoning: None,
             terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
             terminal_source_path: "directive:test/fixture".to_string(),
         });
@@ -4713,6 +4726,7 @@ mod tests {
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            reasoning: None,
             terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
             terminal_source_path: "directive:test/fixture".to_string(),
         });
@@ -4779,6 +4793,7 @@ mod tests {
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            reasoning: None,
             terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
             terminal_source_path: "directive:test/fixture".to_string(),
         });
@@ -4831,6 +4846,7 @@ mod tests {
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            reasoning: None,
             terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
             terminal_source_path: "directive:test/fixture".to_string(),
         });
@@ -5572,6 +5588,7 @@ mod tests {
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            reasoning: None,
             terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
             terminal_source_path: "directive:test/fixture".to_string(),
         })

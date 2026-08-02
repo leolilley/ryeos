@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-08-02T05:54:25Z:f5504a75052dee42eddf58d8e46e19c4ac43c7efb5b5732e3d8c077b2f309961:mkNEMNktAbV6L4ee538oyO9EIBTe0F/7dGoIoACpNIQzNYYcq7UgW0MptBbwFTpYRQ9RO0IC1geRUb1remG3Aw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-02T07:16:51Z:b35382fd0390158043b47529cd0c32262661f2d3a7f9c9dc95b1646974dd773f:ss5MI5VWdXVDknHsgzB1wDjl2L8bb6I4Odh7hym6HVLEtfdGabzLxJ0kozjLdVxLGSPh97c9/eF+w+qzJj4iCQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/development
 name: chat-latency-investigation
 title: Chat Latency Investigation Runbook
 description: Correlation rules, event semantics, prompt accounting, and decision gates for streamed directive latency investigations
 entry_type: runbook
-version: "1.1.0"
+version: "1.2.0"
 ```
 
 # Chat Latency Investigation Runbook
@@ -175,6 +175,22 @@ Reasoning controls are a semantic policy. Benchmark the same provider/model and
 provider-ready request with reasoning enabled and disabled, then expose the
 choice through signed configuration. Do not use keywords, greeting shortcuts,
 or an automatic complexity guess to change reasoning mode.
+
+The model-side signed shape is:
+
+```yaml
+model:
+  reasoning:
+    mode: provider_default # provider_default | enabled | disabled
+    effort: high           # optional; provider-declared values only
+```
+
+Provider descriptors own the wire mapping under `schemas.reasoning`; runtime
+code must not branch on provider or model identity. Absence writes no reasoning
+field. `provider_default` leaves the provider mode untouched, `disabled` plus
+effort is invalid, and any unmapped mode or effort fails during launch
+preparation. Confirm the sealed `reasoning` runtime fact for every benchmark
+sample. This policy never exposes hidden reasoning text to the user.
 
 ## Benchmark discipline
 

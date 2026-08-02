@@ -9,10 +9,11 @@ use serde_json::Value;
 pub use ryeos_directive_core::{
     AssistantToolCallsPlacement, MessageSchemas, ModelRoutingConfig, ModelSpec, OutputLimitConfig,
     OutputLimitSemantics, PricingConfig, ProtocolFamily, ProviderAccountingConfig, ProviderConfig,
-    ProviderProfile, ReportedCostUnit, SamplingConfig, SchemasConfig, StreamErrorConfig,
-    StreamMetadataConfig, StreamPaths, StreamUsageConfig, StreamingConfig, StreamingMode,
-    SystemMessageConfig, SystemMessageMode, TextPlacement, ToolResultConfig, ToolResultWrapMode,
-    ToolSchemaConfig, UsageAggregation,
+    ProviderProfile, ReasoningConfig, ReasoningEffortSchemaConfig, ReasoningMode,
+    ReasoningModeSchemaConfig, ReasoningModeValues, ReasoningSchemaConfig, ReportedCostUnit,
+    SamplingConfig, SchemasConfig, StreamErrorConfig, StreamMetadataConfig, StreamPaths,
+    StreamUsageConfig, StreamingConfig, StreamingMode, SystemMessageConfig, SystemMessageMode,
+    TextPlacement, ToolResultConfig, ToolResultWrapMode, ToolSchemaConfig, UsageAggregation,
 };
 
 /// Typed runtime view of a directive's effective header *after* the

@@ -29,6 +29,7 @@ pub struct BootstrapOutput {
     pub model_name: String,
     pub context_window: u64,
     pub sampling: Option<SamplingConfig>,
+    pub reasoning: Option<ReasoningConfig>,
 }
 
 /// Filebundle roots needed for bootstrap resolution.
@@ -268,6 +269,7 @@ pub fn bootstrap(
         model_name: resolved.model_name.clone(),
         context_window: resolved.context_window,
         sampling: resolved.sampling.clone(),
+        reasoning: resolved.reasoning.clone(),
     })
 }
 

@@ -13,8 +13,8 @@ use anyhow::{Result, anyhow};
 use std::time::Instant;
 
 use super::streaming::{
-    self, StreamingCallInput, apply_declared_output_limit, build_request_body,
-    declared_output_limit_from_body, inject_sampling,
+    self, StreamingCallInput, apply_declared_output_limit, apply_declared_reasoning,
+    build_request_body, declared_output_limit_from_body, inject_sampling,
 };
 
 /// Credential frozen at prepare time. The env read happens during prepare —
@@ -179,6 +179,14 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
     // Sampling parameters — gated by provider capabilities so we never send
     // a field the upstream API will reject with a 400.
     inject_sampling(&mut body, provider.family, input.sampling);
+    apply_declared_reasoning(
+        &mut body,
+        provider
+            .schemas
+            .as_ref()
+            .and_then(|schemas| schemas.reasoning.as_ref()),
+        input.reasoning,
+    )?;
     apply_declared_output_limit(
         &mut body,
         provider
@@ -307,4 +315,101 @@ fn serialized_len(value: &impl serde::Serialize) -> u64 {
     serde_json::to_vec(value)
         .map(|bytes| bytes.len() as u64)
         .unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::directive::{
+        ExecutionConfig, ProviderConfig, ProviderMessage, ReasoningConfig, ReasoningMode,
+    };
+    use ryeos_runtime::callback_client::CallbackClient;
+    use ryeos_runtime::envelope::EnvelopeCallback;
+    use serde_json::{Value, json};
+
+    fn provider() -> ProviderConfig {
+        serde_json::from_value(json!({
+            "family": "chat_completions",
+            "base_url": "https://example.invalid",
+            "schemas": {
+                "output_limit": {
+                    "path": "max_tokens",
+                    "semantics": "provider_native_output_tokens"
+                },
+                "reasoning": {
+                    "mode": {
+                        "path": "thinking.type",
+                        "values": {"enabled": "on", "disabled": "off"}
+                    }
+                }
+            },
+            "body_template": {
+                "model": "{model}",
+                "messages": "{messages}",
+                "stream": "{stream}"
+            },
+            "extra": {"stream_url": "/chat/completions"}
+        }))
+        .expect("provider fixture")
+    }
+
+    fn prepare(reasoning: Option<&ReasoningConfig>) -> PreparedProviderRequest {
+        let provider = provider();
+        let client = reqwest::Client::new();
+        let execution = ExecutionConfig::default();
+        let messages = [ProviderMessage {
+            role: "user".to_string(),
+            content: Some(json!("hello")),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }];
+        let callback_config = EnvelopeCallback {
+            socket_path: std::path::PathBuf::from("/nonexistent/ryeos-callback.sock"),
+            token: "unused".to_string(),
+        };
+        let callback = CallbackClient::new(
+            &callback_config,
+            "T-reasoning-request-fixture",
+            "/project",
+            "unused",
+        );
+        prepare_provider_request(&StreamingCallInput {
+            client: &client,
+            provider: &provider,
+            provider_id: "fixture",
+            matched_profile: None,
+            config_hash: "0",
+            execution: &execution,
+            model: "fixture-model",
+            messages: &messages,
+            tools: &[],
+            callback: &callback,
+            turn: 1,
+            attempt: 1,
+            sampling: None,
+            reasoning,
+            cancel_flag: None,
+            interrupt_flag: None,
+        })
+        .expect("prepare provider request")
+    }
+
+    #[test]
+    fn reasoning_policy_is_applied_before_request_bytes_and_digest_are_frozen() {
+        let provider_default = prepare(None);
+        let disabled = prepare(Some(&ReasoningConfig {
+            mode: ReasoningMode::Disabled,
+            effort: None,
+        }));
+
+        let provider_default_body: Value =
+            serde_json::from_slice(&provider_default.body_bytes).expect("default request body");
+        let disabled_body: Value =
+            serde_json::from_slice(&disabled.body_bytes).expect("disabled request body");
+        assert!(provider_default_body.get("thinking").is_none());
+        assert_eq!(disabled_body["thinking"]["type"], "off");
+        assert_ne!(provider_default.body_sha256, disabled.body_sha256);
+        assert_ne!(provider_default.request_digest, disabled.request_digest);
+    }
 }

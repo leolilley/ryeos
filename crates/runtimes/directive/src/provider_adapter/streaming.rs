@@ -11,8 +11,8 @@ use sha2::{Digest, Sha256};
 use crate::directive::FinishReason;
 use crate::directive::{
     ExecutionConfig, MalformedArgs, ProtocolFamily, ProviderConfig, ProviderMessage,
-    SamplingConfig, StreamEvent, SystemMessageMode, ToolCall, ToolSchema, UsageUpdate,
-    normalize_finish_reason,
+    ReasoningConfig, ReasoningMode, ReasoningSchemaConfig, SamplingConfig, StreamEvent,
+    SystemMessageMode, ToolCall, ToolSchema, UsageUpdate, normalize_finish_reason,
 };
 use crate::provider_adapter::http::{
     AdapterResponse, ObservedOutput, ProviderLimitContractStatus, ProviderUsageSource, TokenUsage,
@@ -1288,6 +1288,7 @@ pub struct StreamingCallInput<'a> {
     /// One-based attempt number within this turn.
     pub attempt: u32,
     pub sampling: Option<&'a SamplingConfig>,
+    pub reasoning: Option<&'a ReasoningConfig>,
     /// Optional cancellation flag (SIGTERM). When set mid-stream, the loop
     /// breaks and the call returns [`StreamOutcome::Cancelled`].
     pub cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -2661,7 +2662,50 @@ pub(crate) fn apply_declared_output_limit(
             .min(hard_limit),
     };
     let segments = config.path.split('.').collect::<Vec<_>>();
-    write_optional_object_path(body, &segments, Some(Value::Number(effective.into())))
+    write_optional_object_path(
+        body,
+        &segments,
+        Some(Value::Number(effective.into())),
+        "output-limit",
+    )
+}
+
+/// Apply a signed provider-neutral reasoning policy through provider-declared
+/// object paths and wire values. No provider or model identity is consulted.
+pub(crate) fn apply_declared_reasoning(
+    body: &mut Value,
+    schema: Option<&ReasoningSchemaConfig>,
+    reasoning: Option<&ReasoningConfig>,
+) -> Result<()> {
+    let Some(reasoning) = reasoning else {
+        return Ok(());
+    };
+
+    if reasoning.mode != ReasoningMode::ProviderDefault {
+        let mode = schema
+            .and_then(|schema| schema.mode.as_ref())
+            .ok_or_else(|| anyhow!("provider route has no declared reasoning mode mapping"))?;
+        let value = match reasoning.mode {
+            ReasoningMode::Enabled => mode.values.enabled.clone(),
+            ReasoningMode::Disabled => mode.values.disabled.clone(),
+            ReasoningMode::ProviderDefault => unreachable!("guarded above"),
+        };
+        let segments = mode.path.split('.').collect::<Vec<_>>();
+        write_optional_object_path(body, &segments, Some(value), "reasoning mode")?;
+    }
+
+    if let Some(effort) = reasoning.effort.as_deref() {
+        let effort_schema = schema
+            .and_then(|schema| schema.effort.as_ref())
+            .ok_or_else(|| anyhow!("provider route has no declared reasoning effort mapping"))?;
+        let value = effort_schema.values.get(effort).cloned().ok_or_else(|| {
+            anyhow!("provider route does not declare reasoning effort {effort:?}")
+        })?;
+        let segments = effort_schema.path.split('.').collect::<Vec<_>>();
+        write_optional_object_path(body, &segments, Some(value), "reasoning effort")?;
+    }
+
+    Ok(())
 }
 
 pub(crate) fn declared_output_limit_from_body(
@@ -2791,27 +2835,28 @@ fn write_optional_object_path(
     root: &mut Value,
     segments: &[&str],
     value: Option<Value>,
+    label: &str,
 ) -> Result<()> {
     let Some((last, parents)) = segments.split_last() else {
-        return Err(anyhow!("provider output-limit path is empty"));
+        return Err(anyhow!("provider {label} path is empty"));
     };
     let mut cursor = root;
     for segment in parents {
         if cursor.get(*segment).is_none() {
             cursor[*segment] = json!({});
         }
-        cursor = cursor.get_mut(*segment).ok_or_else(|| {
-            anyhow!("provider output-limit path segment `{segment}` is unavailable")
-        })?;
+        cursor = cursor
+            .get_mut(*segment)
+            .ok_or_else(|| anyhow!("provider {label} path segment `{segment}` is unavailable"))?;
         if !cursor.is_object() {
             return Err(anyhow!(
-                "provider output-limit path segment `{segment}` is not an object"
+                "provider {label} path segment `{segment}` is not an object"
             ));
         }
     }
-    let object = cursor.as_object_mut().ok_or_else(|| {
-        anyhow!("provider request body is not an object at the output-limit path")
-    })?;
+    let object = cursor
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("provider request body is not an object at the {label} path"))?;
     match value {
         Some(value) => {
             object.insert((*last).to_string(), value);
@@ -3742,6 +3787,84 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         assert!(body.get("seed").is_none());
     }
 
+    fn reasoning_schema() -> ReasoningSchemaConfig {
+        ReasoningSchemaConfig {
+            mode: Some(crate::directive::ReasoningModeSchemaConfig {
+                path: "thinking.type".to_string(),
+                values: crate::directive::ReasoningModeValues {
+                    enabled: json!("on"),
+                    disabled: json!("off"),
+                },
+            }),
+            effort: Some(crate::directive::ReasoningEffortSchemaConfig {
+                path: "reasoning_effort".to_string(),
+                values: std::collections::BTreeMap::from([
+                    ("high".to_string(), json!("high")),
+                    ("max".to_string(), json!("max")),
+                ]),
+            }),
+        }
+    }
+
+    #[test]
+    fn absent_reasoning_policy_does_not_change_the_request_body() {
+        let mut body = json!({"model": "test", "thinking": {"type": "provider-default"}});
+        let before = body.clone();
+        apply_declared_reasoning(&mut body, Some(&reasoning_schema()), None).unwrap();
+        assert_eq!(body, before);
+    }
+
+    #[test]
+    fn disabled_reasoning_uses_only_the_declared_path_and_wire_value() {
+        let mut body = json!({"model": "test", "messages": []});
+        apply_declared_reasoning(
+            &mut body,
+            Some(&reasoning_schema()),
+            Some(&ReasoningConfig {
+                mode: ReasoningMode::Disabled,
+                effort: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(body["thinking"]["type"], "off");
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn provider_default_reasoning_can_map_effort_without_overriding_mode() {
+        let mut body = json!({"thinking": {"type": "provider-default"}});
+        apply_declared_reasoning(
+            &mut body,
+            Some(&reasoning_schema()),
+            Some(&ReasoningConfig {
+                mode: ReasoningMode::ProviderDefault,
+                effort: Some("max".to_string()),
+            }),
+        )
+        .unwrap();
+        assert_eq!(body["thinking"]["type"], "provider-default");
+        assert_eq!(body["reasoning_effort"], "max");
+    }
+
+    #[test]
+    fn reasoning_mapping_fails_if_a_declared_parent_is_not_an_object() {
+        let mut body = json!({"thinking": false});
+        let error = apply_declared_reasoning(
+            &mut body,
+            Some(&reasoning_schema()),
+            Some(&ReasoningConfig {
+                mode: ReasoningMode::Enabled,
+                effort: None,
+            }),
+        )
+        .expect_err("invalid provider template shape must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("reasoning mode path segment `thinking`")
+        );
+    }
+
     // ── Body template tests ────────────────────────────────────────
 
     #[test]
@@ -3827,6 +3950,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
                     path: "max_tokens".into(),
                     semantics: crate::directive::OutputLimitSemantics::ProviderNativeOutputTokens,
                 }),
+                reasoning: None,
             }),
             pricing: None,
             extra: Default::default(),
@@ -4034,6 +4158,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
                 }),
                 tools: None,
                 streaming: None,
+                reasoning: None,
             }),
             pricing: None,
             extra: Default::default(),
@@ -4454,6 +4579,7 @@ owner = "ryeos-dev"
             model_name: model.to_string(),
             context_window: 128_000,
             sampling: None,
+            reasoning: None,
             matched_profile,
             config_value_digest: "0".repeat(64),
             config_sources: vec![ProviderConfigSource {
@@ -5086,6 +5212,7 @@ owner = "ryeos-dev"
             turn: 15,
             attempt: 1,
             sampling: None,
+            reasoning: None,
             cancel_flag: None,
             interrupt_flag: None,
         })
@@ -5212,6 +5339,7 @@ owner = "ryeos-dev"
             turn: 1,
             attempt: 1,
             sampling: None,
+            reasoning: None,
             cancel_flag: None,
             interrupt_flag: None,
         })

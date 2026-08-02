@@ -287,6 +287,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     let context_window = bootstrap_output.context_window;
     let execution = bootstrap_output.config.execution.clone();
     let sampling = bootstrap_output.sampling.clone();
+    let reasoning = bootstrap_output.reasoning.clone();
     let matched_profile = provider_snapshot.matched_profile.clone();
     let config_hash = provider_snapshot.config_hash.clone();
 
@@ -534,6 +535,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
                     .continuation_runtime
                     .context_threshold_ratio,
                 sampling,
+                reasoning,
                 terminal_state_root: state_root.clone(),
                 terminal_source_path: envelope
                     .resolution
@@ -626,6 +628,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
                 .continuation_runtime
                 .context_threshold_ratio,
             sampling,
+            reasoning,
             terminal_state_root: state_root.clone(),
             terminal_source_path: envelope
                 .resolution

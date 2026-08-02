@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-27T01:32:27Z:b3c27d2cf5fc8cd6444b7512d0fb40523167b47d45e0e7cc2c9266057e869700:55Q1C0pPJ/CAQdSLWBrGZMd/bP69cQbQFK3DuWyO9pe+ZxQqiDJbcf2hO6d53xuM4+7apibK4wmk/xaGYWupAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-02T07:16:40Z:2206c62fdf3d03d6e193424d8c0430e397e2af9236d42b77bf9d8786e017f487:kJKHGrWGjjG9uELHgzaWmfZ8FhYGv+VG7fbvcUl4I6RcsJsn/ZWgNhBAbXr/sBxS0poD5gsuZxP2hlpmK0fnAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
 base_url: "https://api.deepseek.com"
@@ -52,6 +52,13 @@ schemas:
         code_path: code
         finish_reasons: [content_filter, insufficient_system_resource]
   output_limit: {path: max_tokens, semantics: provider_native_output_tokens}
+  reasoning:
+    mode:
+      path: thinking.type
+      values: {enabled: enabled, disabled: disabled}
+    effort:
+      path: reasoning_effort
+      values: {high: high, max: max}
 body_template:
   model: "{model}"
   messages: "{messages}"

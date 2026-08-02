@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-07-27T01:32:34Z:83123d8c7ce4dc94a17f7bb43a818584e368e34d4a3b3b3b637530751735c388:EWFdJkmpPpwfid7LI8XLSc5GPBZqewK77N9BKIXwER/tmTlyogLaqs7SZWDQRnFCS4/z1ulwsSdGDM8Mfv05Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-02T07:16:40Z:da67bbe4ab4d9cce9af68855c1247789596dc1ed00d9a8683f84e8a3d0892792:6h1iDY8B4ezBrsVYMvcqGTGJBvRTqkp5ZiQOsGy+g8voJ7biKuq7ZpLhpDj1WguLT6rEO+riha4JparPYBKADw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
 tags: [models, providers, routing, runtime, security]
-version: "1.1.0"
+version: "1.2.0"
 description: >
   Directive-owned model/provider launch preparation, routing tiers,
   provider configs, frozen runtime data, and adding new providers.
@@ -68,14 +68,29 @@ result is audited and transferred to the scheduled runtime spawn.
 
 The directive runtime requires and consumes `provider_snapshot`. It rejects a
 missing snapshot and any unknown runtime-data key. The snapshot includes the
-selected provider id, model name, context window, config hash, source digests,
-and fully resolved provider schema. Freezing this data avoids a
+selected provider id, model name, context window, sampling and reasoning
+policies, config hash, source digests, and fully resolved provider schema.
+Freezing this data avoids a
 time-of-check/time-of-use split between authoritative launch preparation and
 runtime HTTP calls.
 
 Provider configs control outbound URLs and auth env vars, so project-root
 provider contributions are excluded by the signed launch contract. The
 `model_providers` catalog accepts trusted bundle entries only.
+
+## Provider-neutral reasoning policy
+
+A signed model binding may optionally select `model.reasoning.mode` as
+`provider_default`, `enabled`, or `disabled`, plus a provider-declared effort.
+The selected provider config must declare the corresponding object paths and
+wire values under `schemas.reasoning`. The directive runtime follows that data;
+it never switches on a provider ID or model name to mutate the request.
+
+Absence preserves the provider's existing request shape. Unsupported values,
+`disabled` combined with effort, and invalid provider mappings fail during
+launch preparation. The resolved policy is frozen in the provider snapshot and
+recorded as a runtime fact before the exact provider request is serialized and
+digested.
 
 ## Active configs
 
