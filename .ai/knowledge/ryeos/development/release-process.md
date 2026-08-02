@@ -5,7 +5,7 @@ name: "release-process"
 title: "Release Process"
 description: "Checklist for cutting RyeOS releases from next to main without stale versions, tags, or install validation mistakes"
 entry_type: reference
-version: "1.2.0"
+version: "1.3.0"
 ```
 
 # RyeOS Release Process
@@ -337,23 +337,31 @@ Two ambiguous states require operator intervention:
 
 ## 8. GHCR release channel
 
-GHCR is the active deployment channel. The Docker release workflow builds from
-the tagged repository state and runs `scripts/populate-bundles.sh` inside the
-image builder with the publisher key secret, so generated bundle binaries,
-CAS/refs/manifests, and trust docs are produced during image build rather than
-coming from the raw GitHub source archive.
+GHCR is the active deployment channel. The `Publish RyeOS release artifacts`
+workflow builds from the immutable tagged repository state and runs
+`scripts/populate-bundles.sh` inside the artifact/image builders with the
+publisher key secret. Generated bundle binaries, CAS/refs/manifests, and trust
+docs therefore come from the release workflow rather than the raw GitHub source
+archive.
 
-After pushing the tag, verify the GHCR workflow/image for the release tag:
+After pushing the tag, verify that the workflow succeeds and that all immutable
+release outputs exist:
 
-```bash
-# Check the GitHub Actions workflow for the tag in the UI or with gh if available.
-# Expected image tag:
-#   ghcr.io/leolilley/ryeosd-full:v$new
+```text
+GitHub release assets:
+  ryeos-bundles-$new-x86_64.tar.gz
+  ryeos-bundles-$new-x86_64.tar.gz.sha256
+
+GHCR image tags:
+  ghcr.io/leolilley/ryeos-standard:$new
+  ghcr.io/leolilley/ryeos-central-host:$new
 ```
 
-If a hosted-node image is part of a specific release, verify the workflow or
-manual publish step for `Dockerfile.hosted-node` separately. The default release
-workflow currently covers the full daemon image path.
+The workflow qualifies the exact image digests, checks provenance and SBOM
+attestations, verifies keyless signatures, promotes the immutable version tags,
+and only then advances both `latest` tags. Verify the immutable tags, release
+assets, and successful workflow run; do not use the mutable tags as the release
+identity.
 
 ## 9. AUR is deferred, not the active release channel
 
