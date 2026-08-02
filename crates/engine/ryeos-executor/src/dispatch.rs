@@ -1914,7 +1914,7 @@ pub(crate) async fn dispatch_method(
             &ctx.plan_ctx,
             &ctx.plan_ctx,
             project_binding,
-            history_attestation,
+            std::sync::Arc::new(history_attestation),
             &state.node_history_policy,
             thread_profile_str.to_string(),
             request.ref_bindings.clone(),
@@ -4701,27 +4701,18 @@ fn finish_root_dispatch_preflight(
             class: class.as_str().to_owned(),
         });
     }
-    let subject_authority = project_binding.subject_resolution_authority().clone();
     let admitted_root_ref = root_subject.resolved.canonical_ref.to_string();
     let cached_root_matches = cached_root_attestation.is_some_and(|attestation| {
         attestation.verified_subject().resolved.canonical_ref == root_subject.resolved.canonical_ref
     });
     let root_attestation = match cached_root_attestation.filter(|_| cached_root_matches) {
-        Some(attestation) => match admitted_request_snapshot.as_ref() {
-            Some(authority) => ctx
-                .engine
-                .reissue_verified_attestation_under_admitted_authority(
-                    &ctx.plan_ctx,
-                    attestation,
-                    &subject_authority,
-                    authority,
-                ),
-            None => ctx.engine.reissue_verified_attestation(
-                &ctx.plan_ctx,
-                attestation,
-                &subject_authority,
-            ),
-        },
+        // This attestation came from the resolution closure validated above.
+        // Do not consume and reissue it here only for final admission to
+        // consume it again immediately below. The admission boundary remains
+        // the fail-closed authority gate: it consumes this opaque engine
+        // evidence under the current/admitted project authority before any
+        // execution authority is created.
+        Some(attestation) => Ok(std::sync::Arc::clone(attestation)),
         None => match admitted_request_snapshot.as_ref() {
             Some(authority) => {
                 let project_root = project_binding.execution_workspace().ok_or_else(|| {
@@ -4739,7 +4730,8 @@ fn finish_root_dispatch_preflight(
             None => ctx
                 .engine
                 .verify_attested(&ctx.plan_ctx, root_subject.resolved),
-        },
+        }
+        .map(std::sync::Arc::new),
     }
     .map_err(|error| {
         DispatchError::Internal(anyhow::anyhow!(
