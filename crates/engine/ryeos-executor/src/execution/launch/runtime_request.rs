@@ -366,17 +366,22 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
     })
 }
 
-const MAX_CAPTURED_CHILD_TIMING_RECORDS: usize = 128;
+// Up to 127 provider attempts, one profiling shape record per attempt, and one
+// process-stage summary. Ordinary builds emit only the timing half.
+const MAX_CAPTURED_CHILD_TIMING_RECORDS: usize = 256;
 const MAX_CAPTURED_CHILD_TIMING_RECORD_BYTES: usize = 64 * 1024;
 const MAX_CAPTURED_CHILD_TIMING_ID_BYTES: usize = 256;
 const MAX_CAPTURED_CHILD_PROVIDER_ID_BYTES: usize = 256;
+const MAX_CAPTURED_CHILD_MODEL_ID_BYTES: usize = 256;
 const MAX_CAPTURED_CHILD_HTTP_VERSION_BYTES: usize = 32;
+const SHA256_HEX_BYTES: usize = 64;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CapturedProviderCallTiming {
     call_id: u64,
     provider_id: String,
+    model_id: String,
     turn: u32,
     attempt: u32,
     call_started_us: u64,
@@ -384,6 +389,7 @@ struct CapturedProviderCallTiming {
     response_headers_us: Option<u64>,
     http_version: Option<String>,
     first_provider_event_us: Option<u64>,
+    first_reasoning_event_us: Option<u64>,
     dns_lookup_first_started_us: Option<u64>,
     dns_lookup_last_done_us: Option<u64>,
     dns_lookup_count: u32,
@@ -415,7 +421,33 @@ struct CapturedDirectiveStageTiming {
     provider_response_headers_us: Option<u64>,
     provider_http_version: Option<String>,
     first_provider_event_us: Option<u64>,
+    first_reasoning_event_us: Option<u64>,
     first_non_whitespace_text_us: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CapturedProviderRequestProfile {
+    provider_call_id: Option<u64>,
+    provider_id: String,
+    model_id: String,
+    turn: u32,
+    attempt: u32,
+    request_prepare_duration_us: u64,
+    request_body_bytes: u64,
+    estimated_request_tokens: u64,
+    token_estimate_method: String,
+    source_message_count: u32,
+    system_message_bytes: u64,
+    user_message_bytes: u64,
+    assistant_message_bytes: u64,
+    tool_message_bytes: u64,
+    reasoning_replay_bytes: u64,
+    converted_messages_bytes: u64,
+    extracted_system_prompt_bytes: u64,
+    provider_tool_schema_bytes: u64,
+    provider_tool_count: u32,
+    provider_tool_schema_sha256: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -447,6 +479,15 @@ enum CapturedChildTimingRecord {
         summary_emitted_us: u64,
         completion: String,
     },
+    #[serde(rename = "directive_provider_request_profile")]
+    ProviderRequestProfile {
+        schema_version: u32,
+        clock_domain: String,
+        invocation_id: Option<String>,
+        thread_id: Option<String>,
+        item_ref_kind: String,
+        profile: CapturedProviderRequestProfile,
+    },
 }
 
 impl CapturedProviderCallTiming {
@@ -454,6 +495,7 @@ impl CapturedProviderCallTiming {
         self.call_id > 0
             && self.attempt > 0
             && bounded_nonempty(&self.provider_id, MAX_CAPTURED_CHILD_PROVIDER_ID_BYTES)
+            && bounded_nonempty(&self.model_id, MAX_CAPTURED_CHILD_MODEL_ID_BYTES)
             && self
                 .http_version
                 .as_deref()
@@ -464,6 +506,22 @@ impl CapturedProviderCallTiming {
                     "completed" | "interrupted" | "cancelled" | "error"
                 )
             })
+    }
+}
+
+impl CapturedProviderRequestProfile {
+    fn validate(&self) -> bool {
+        self.provider_call_id.is_none_or(|call_id| call_id > 0)
+            && self.attempt > 0
+            && self.request_body_bytes > 0
+            && bounded_nonempty(&self.provider_id, MAX_CAPTURED_CHILD_PROVIDER_ID_BYTES)
+            && bounded_nonempty(&self.model_id, MAX_CAPTURED_CHILD_MODEL_ID_BYTES)
+            && self.token_estimate_method == "ceil(serialized_provider_body_bytes/4)"
+            && self.provider_tool_schema_sha256.len() == SHA256_HEX_BYTES
+            && self
+                .provider_tool_schema_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
     }
 }
 
@@ -481,7 +539,7 @@ impl CapturedChildTimingRecord {
                 exact_tcp_tls_split_available,
                 timing,
             } => {
-                *schema_version == 1
+                *schema_version == 2
                     && clock_domain == "directive_process_monotonic"
                     && item_ref_kind == "directive"
                     && dns_lookup_scope == "exact_resolver_future"
@@ -505,7 +563,7 @@ impl CapturedChildTimingRecord {
                 completion,
                 ..
             } => {
-                *schema_version == 2
+                *schema_version == 3
                     && clock_domain == "directive_process_monotonic"
                     && item_ref_kind == "directive"
                     && connection_establishment_scope
@@ -525,6 +583,21 @@ impl CapturedChildTimingRecord {
                         completion.as_str(),
                         "first_non_whitespace_text_published" | "process_exit"
                     )
+            }
+            Self::ProviderRequestProfile {
+                schema_version,
+                clock_domain,
+                invocation_id,
+                thread_id,
+                item_ref_kind,
+                profile,
+            } => {
+                *schema_version == 1
+                    && clock_domain == "directive_process_monotonic"
+                    && item_ref_kind == "directive"
+                    && valid_identity(invocation_id.as_deref())
+                    && thread_id.as_deref() == Some(expected_thread_id)
+                    && profile.validate()
             }
         }
     }
@@ -600,12 +673,14 @@ fn emit_captured_child_timing_records(
                 thread_id = expected_thread_id,
                 provider_call_id = timing.call_id,
                 provider_id = timing.provider_id.as_str(),
+                model_id = timing.model_id.as_str(),
                 turn = timing.turn,
                 attempt = timing.attempt,
                 completion = timing.completion.as_deref(),
                 request_submitted_us = timing.request_submitted_us,
                 response_headers_us = timing.response_headers_us,
                 first_provider_event_us = timing.first_provider_event_us,
+                first_reasoning_event_us = timing.first_reasoning_event_us,
                 dns_lookup_total_us = timing.dns_lookup_total_us,
                 connection_establishment_total_us = timing.connection_establishment_total_us,
                 exact_tcp_tls_split_available = false,
@@ -632,10 +707,38 @@ fn emit_captured_child_timing_records(
                 provider_request_submitted_us = timing.provider_request_submitted_us,
                 provider_response_headers_us = timing.provider_response_headers_us,
                 first_provider_event_us = timing.first_provider_event_us,
+                first_reasoning_event_us = timing.first_reasoning_event_us,
                 first_non_whitespace_text_us = timing.first_non_whitespace_text_us,
                 exact_tcp_tls_split_available = false,
                 child_timing_json = normalized.as_str(),
                 "captured runtime child stage timing record"
+            ),
+            CapturedChildTimingRecord::ProviderRequestProfile {
+                schema_version,
+                invocation_id,
+                profile,
+                ..
+            } => tracing::info!(
+                event = "runtime_child_timing_record",
+                child_event = "directive_provider_request_profile",
+                child_schema_version = schema_version,
+                invocation_id = invocation_id.as_deref(),
+                thread_id = expected_thread_id,
+                provider_call_id = profile.provider_call_id,
+                provider_id = profile.provider_id.as_str(),
+                model_id = profile.model_id.as_str(),
+                turn = profile.turn,
+                attempt = profile.attempt,
+                request_prepare_duration_us = profile.request_prepare_duration_us,
+                request_body_bytes = profile.request_body_bytes,
+                estimated_request_tokens = profile.estimated_request_tokens,
+                source_message_count = profile.source_message_count,
+                reasoning_replay_bytes = profile.reasoning_replay_bytes,
+                provider_tool_schema_bytes = profile.provider_tool_schema_bytes,
+                provider_tool_count = profile.provider_tool_count,
+                provider_tool_schema_sha256 = profile.provider_tool_schema_sha256.as_str(),
+                child_timing_json = normalized.as_str(),
+                "captured runtime child provider request profile"
             ),
         }
     }
@@ -782,10 +885,11 @@ mod tests {
             provider_response_headers_us: Some(8),
             provider_http_version: Some("HTTP/2.0".to_string()),
             first_provider_event_us: Some(9),
+            first_reasoning_event_us: None,
             first_non_whitespace_text_us: Some(10),
         };
         let record = CapturedChildTimingRecord::RuntimeStage {
-            schema_version: 2,
+            schema_version: 3,
             clock_domain: "directive_process_monotonic".to_string(),
             invocation_id: Some("invocation-1".to_string()),
             thread_id: Some("T-expected".to_string()),
@@ -814,10 +918,104 @@ mod tests {
         );
 
         let mut wrong_version = serde_json::to_value(&record).expect("timing fixture value");
-        wrong_version["schema_version"] = json!(1);
+        wrong_version["schema_version"] = json!(2);
         assert!(
             decode_captured_child_timing_record("T-expected", &wrong_version.to_string()).is_none(),
             "predecessor timing schemas are not accepted"
+        );
+    }
+
+    #[test]
+    fn captured_provider_call_schema_includes_model_and_reasoning_milestones() {
+        let record = CapturedChildTimingRecord::ProviderCall {
+            schema_version: 2,
+            clock_domain: "directive_process_monotonic".to_string(),
+            invocation_id: Some("invocation-1".to_string()),
+            thread_id: Some("T-expected".to_string()),
+            item_ref_kind: "directive".to_string(),
+            dns_lookup_scope: "exact_resolver_future".to_string(),
+            connection_establishment_scope:
+                "aggregate_reqwest_connector_may_include_dns_tcp_proxy_tls".to_string(),
+            exact_tcp_tls_split_available: false,
+            timing: CapturedProviderCallTiming {
+                call_id: 1,
+                provider_id: "provider-a".to_string(),
+                model_id: "model-a".to_string(),
+                turn: 1,
+                attempt: 1,
+                call_started_us: 10,
+                request_submitted_us: Some(20),
+                response_headers_us: Some(30),
+                http_version: Some("HTTP/2.0".to_string()),
+                first_provider_event_us: Some(40),
+                first_reasoning_event_us: Some(50),
+                dns_lookup_first_started_us: None,
+                dns_lookup_last_done_us: None,
+                dns_lookup_count: 0,
+                dns_lookup_completed_count: 0,
+                dns_lookup_total_us: 0,
+                dns_lookup_failures: 0,
+                connection_establishment_first_started_us: None,
+                connection_establishment_last_done_us: None,
+                connection_establishment_count: 0,
+                connection_establishment_completed_count: 0,
+                connection_establishment_total_us: 0,
+                connection_establishment_failures: 0,
+                call_finished_us: Some(60),
+                completion: Some("completed".to_string()),
+            },
+        };
+        let encoded = serde_json::to_string(&record).expect("encode provider timing");
+        assert!(decode_captured_child_timing_record("T-expected", &encoded).is_some());
+
+        let mut predecessor = serde_json::to_value(&record).expect("provider timing value");
+        predecessor["schema_version"] = json!(1);
+        assert!(
+            decode_captured_child_timing_record("T-expected", &predecessor.to_string()).is_none(),
+            "provider timing schema changes require an explicit version"
+        );
+    }
+
+    #[test]
+    fn captured_provider_request_profile_accepts_only_content_free_shape_metrics() {
+        let record = CapturedChildTimingRecord::ProviderRequestProfile {
+            schema_version: 1,
+            clock_domain: "directive_process_monotonic".to_string(),
+            invocation_id: Some("invocation-1".to_string()),
+            thread_id: Some("T-expected".to_string()),
+            item_ref_kind: "directive".to_string(),
+            profile: CapturedProviderRequestProfile {
+                provider_call_id: Some(1),
+                provider_id: "provider-a".to_string(),
+                model_id: "model-a".to_string(),
+                turn: 1,
+                attempt: 1,
+                request_prepare_duration_us: 80,
+                request_body_bytes: 4_096,
+                estimated_request_tokens: 1_024,
+                token_estimate_method: "ceil(serialized_provider_body_bytes/4)".to_string(),
+                source_message_count: 3,
+                system_message_bytes: 100,
+                user_message_bytes: 200,
+                assistant_message_bytes: 300,
+                tool_message_bytes: 400,
+                reasoning_replay_bytes: 50,
+                converted_messages_bytes: 1_100,
+                extracted_system_prompt_bytes: 90,
+                provider_tool_schema_bytes: 500,
+                provider_tool_count: 2,
+                provider_tool_schema_sha256: "a".repeat(SHA256_HEX_BYTES),
+            },
+        };
+        let encoded = serde_json::to_string(&record).expect("encode request profile");
+        assert!(decode_captured_child_timing_record("T-expected", &encoded).is_some());
+
+        let mut content_bearing = serde_json::to_value(&record).expect("request profile value");
+        content_bearing["profile"]["prompt"] = json!("must never be accepted");
+        assert!(
+            decode_captured_child_timing_record("T-expected", &content_bearing.to_string())
+                .is_none(),
+            "unknown content-bearing fields must fail closed"
         );
     }
 }

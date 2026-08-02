@@ -34,6 +34,9 @@ libc = { workspace = true }
 # need the live HandlerRegistry / ParserDispatcher wiring against the
 # core bundle (see `crates/engine/ryeos-engine/src/test_support.rs`).
 test-support = []
+# Release-equivalent diagnostic instrumentation. Disabled in ordinary builds;
+# enabled only for bounded latency investigations in non-production nodes.
+latency-profiling = []
 
 [dev-dependencies]
 tempfile = { workspace = true }

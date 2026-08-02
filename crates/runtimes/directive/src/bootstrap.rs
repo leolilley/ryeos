@@ -19,6 +19,8 @@ const DERIVED_BODY: &str = "body";
 /// `composer_config` for the merged `Map<String, Vec<String>>`
 /// context positions.
 const DERIVED_COMPOSED_CONTEXT: &str = "composed_context";
+#[cfg(feature = "latency-profiling")]
+const DERIVED_RENDERED_CONTEXTS_META: &str = "rendered_contexts_meta";
 
 pub struct BootstrapOutput {
     pub config: BootstrapConfig,
@@ -224,6 +226,22 @@ pub fn bootstrap(
     let context_before = rendered.get("before").cloned();
     let context_after = rendered.get("after").cloned();
 
+    #[cfg(feature = "latency-profiling")]
+    {
+        let context_item_contributions = composed_view
+            .derived
+            .get(DERIVED_RENDERED_CONTEXTS_META)
+            .and_then(sanitized_context_item_contributions)
+            .unwrap_or_else(|| serde_json::json!({}));
+        tracing::info!(
+            target: "ryeos_directive_runtime",
+            event = "directive_context_composition",
+            schema_version = 1_u32,
+            context_item_contributions = %context_item_contributions,
+            "directive context contribution metrics"
+        );
+    }
+
     let user_prompt = composed_view
         .derived_string(DERIVED_BODY)
         .ok_or_else(|| {
@@ -257,6 +275,34 @@ pub fn bootstrap(
         context_window: resolved.context_window,
         sampling: resolved.sampling.clone(),
     })
+}
+
+/// Retain only signed item refs, positions, and composer token estimates. The
+/// augmentation metadata value is deliberately not logged wholesale because a
+/// future composer may add request-correlated or sensitive fields.
+#[cfg(feature = "latency-profiling")]
+fn sanitized_context_item_contributions(value: &serde_json::Value) -> Option<serde_json::Value> {
+    let positions = value.as_object()?;
+    let mut sanitized = serde_json::Map::new();
+    for (position, composition) in positions {
+        let items = composition
+            .get("resolved_items")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        Some(serde_json::json!({
+                            "item_id": item.get("item_id")?.as_str()?,
+                            "tokens": item.get("tokens")?.as_u64()?,
+                        }))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        sanitized.insert(position.clone(), serde_json::Value::Array(items));
+    }
+    Some(serde_json::Value::Object(sanitized))
 }
 
 /// Project the engine-supplied composed view down to the keys the

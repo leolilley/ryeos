@@ -5590,6 +5590,7 @@ mod tests {
             credential: None,
             headers: vec![],
             request_digest: lillux::cas::sha256_hex(body_sha256.as_bytes()),
+            request_metrics: Default::default(),
         }
     }
 

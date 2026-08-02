@@ -196,6 +196,16 @@ fn run_directive() -> Result<RuntimeResult> {
     };
     startup_timing::set_identity(&envelope.invocation_id, &envelope.thread_id);
     startup_timing::mark_envelope_parsed();
+    #[cfg(feature = "latency-profiling")]
+    tracing::info!(
+        target: "ryeos_directive_runtime",
+        event = "latency_profiling_enabled",
+        schema_version = 1_u32,
+        invocation_id = %envelope.invocation_id,
+        thread_id = %envelope.thread_id,
+        build_profile = "release",
+        "release-equivalent latency profiling is enabled"
+    );
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(run_with_envelope(envelope))
@@ -376,6 +386,42 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     let budget = budget::BudgetTracker::new(envelope.policy.hard_limits.spend_usd);
 
     let hooks = bootstrap_output.config.hooks.clone();
+
+    #[cfg(feature = "latency-profiling")]
+    {
+        let request_input_bytes = envelope
+            .request
+            .inputs
+            .as_object()
+            .map(|inputs| {
+                inputs
+                    .iter()
+                    .map(|(name, value)| {
+                        (
+                            name.clone(),
+                            serde_json::to_vec(value).map_or(u64::MAX, |bytes| bytes.len() as u64),
+                        )
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        tracing::info!(
+            target: "ryeos_directive_runtime",
+            event = "directive_prompt_source_composition",
+            schema_version = 1_u32,
+            invocation_id = %envelope.invocation_id,
+            thread_id = %envelope.thread_id,
+            provider_id = %bootstrap_output.provider_id,
+            model_id = %bootstrap_output.model_name,
+            directive_template_bytes = bootstrap_output.config.user_prompt.len(),
+            system_context_bytes = bootstrap_output.config.system_prompt.as_ref().map_or(0, String::len),
+            before_context_bytes = bootstrap_output.config.context_before.as_ref().map_or(0, String::len),
+            after_context_bytes = bootstrap_output.config.context_after.as_ref().map_or(0, String::len),
+            tool_count = bootstrap_output.config.tools.len(),
+            request_input_bytes = %serde_json::to_string(&request_input_bytes).unwrap_or_else(|_| "{}".to_string()),
+            "directive prompt source contribution metrics"
+        );
+    }
 
     // The opening stimulus is rendered only where it is actually injected (fresh
     // launch, or operator follow-up). A MACHINE continuation suppresses it

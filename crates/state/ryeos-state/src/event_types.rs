@@ -65,6 +65,9 @@ pub const STREAM_OPENED: &str = "stream_opened";
 pub const TOKEN_DELTA: &str = "token_delta";
 pub const STREAM_SNAPSHOT: &str = "stream_snapshot";
 pub const STREAM_CLOSED: &str = "stream_closed";
+pub const PROVIDER_RESPONSE_HEADERS: &str = "provider_response_headers";
+pub const PROVIDER_STREAM_STARTED: &str = "provider_stream_started";
+pub const PROVIDER_REASONING_STARTED: &str = "provider_reasoning_started";
 
 pub const ARTIFACT_PUBLISHED: &str = "artifact_published";
 pub const AS_LAUNCHED_RESOLUTION: &str = "as_launched_resolution";

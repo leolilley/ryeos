@@ -1209,8 +1209,20 @@ pub async fn send_prepared_streaming(
     input: &StreamingCallInput<'_>,
     prepared: &super::prepared::PreparedProviderRequest,
 ) -> Result<StreamOutcome> {
-    let call_id =
-        crate::startup_timing::begin_provider_call(input.provider_id, input.turn, input.attempt);
+    let call_id = crate::startup_timing::begin_provider_call(
+        input.provider_id,
+        input.model,
+        input.turn,
+        input.attempt,
+    );
+    crate::startup_timing::record_provider_request_profile(
+        call_id,
+        input.provider_id,
+        input.model,
+        input.turn,
+        input.attempt,
+        &prepared.request_metrics,
+    );
     let result = crate::startup_timing::scope_provider_call(
         call_id,
         send_prepared_streaming_inner(input, prepared),
@@ -1233,6 +1245,8 @@ async fn send_prepared_streaming_inner(
     let client = input.client;
     let provider = input.provider;
     let provider_id = input.provider_id;
+    #[cfg(feature = "latency-profiling")]
+    let model = input.model;
     let matched_profile = input.matched_profile;
     let config_hash = input.config_hash;
     let execution = input.execution;
@@ -1343,7 +1357,8 @@ async fn send_prepared_streaming_inner(
             })
         }
     })?;
-    crate::startup_timing::mark_provider_response_headers(&format!("{:?}", resp.version()));
+    let provider_http_version = format!("{:?}", resp.version());
+    crate::startup_timing::mark_provider_response_headers(&provider_http_version);
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -1390,6 +1405,23 @@ async fn send_prepared_streaming_inner(
         }));
     }
 
+    #[cfg(feature = "latency-profiling")]
+    if let Err(error) = callback
+        .append_runtime_event(
+            RuntimeEventType::ProviderResponseHeaders,
+            json!({
+                "provider_id": provider_id,
+                "model_id": model,
+                "turn": turn,
+                "attempt": input.attempt,
+                "http_version": provider_http_version,
+            }),
+        )
+        .await
+    {
+        tracing::warn!(%error, "provider response-header milestone publication failed");
+    }
+
     let stream_mode = provider
         .schemas
         .as_ref()
@@ -1433,6 +1465,10 @@ async fn send_prepared_streaming_inner(
     let mut accumulated_reasoning = String::new();
     let mut accumulated_tools: Vec<ToolCall> = Vec::new();
     let mut output_meter = StreamOutputMeter::default();
+    #[cfg(feature = "latency-profiling")]
+    let mut provider_stream_started_published = false;
+    #[cfg(feature = "latency-profiling")]
+    let mut provider_reasoning_started_published = false;
     let max_stream_output_bytes = execution.max_stream_output_bytes_per_turn;
     let mut last_usage: Option<TokenUsage> = None;
     let mut last_finish: Option<String> = None;
@@ -1633,6 +1669,25 @@ async fn send_prepared_streaming_inner(
                 requested_output_tokens,
             )?;
 
+            #[cfg(feature = "latency-profiling")]
+            if !provider_stream_started_published && !new_events.is_empty() {
+                provider_stream_started_published = true;
+                if let Err(error) = callback
+                    .append_runtime_event(
+                        RuntimeEventType::ProviderStreamStarted,
+                        json!({
+                            "provider_id": provider_id,
+                            "model_id": model,
+                            "turn": turn,
+                            "attempt": input.attempt,
+                        }),
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, "provider stream-start milestone publication failed");
+                }
+            }
+
             for ev in new_events {
                 if !metadata_usage_declared && let StreamEvent::Usage(update) = &ev {
                     merge_stream_usage_update(&mut last_usage, update);
@@ -1760,6 +1815,25 @@ async fn send_prepared_streaming_inner(
                     StreamEvent::Usage(_) => {}
                     StreamEvent::Warning { .. } => {}
                     StreamEvent::ReasoningDelta(text) => {
+                        crate::startup_timing::mark_first_reasoning_event();
+                        #[cfg(feature = "latency-profiling")]
+                        if !provider_reasoning_started_published {
+                            provider_reasoning_started_published = true;
+                            if let Err(error) = callback
+                                .append_runtime_event(
+                                    RuntimeEventType::ProviderReasoningStarted,
+                                    json!({
+                                        "provider_id": provider_id,
+                                        "model_id": model,
+                                        "turn": turn,
+                                        "attempt": input.attempt,
+                                    }),
+                                )
+                                .await
+                            {
+                                tracing::warn!(%error, "provider reasoning-start milestone publication failed");
+                            }
+                        }
                         accumulated_reasoning.push_str(text);
                     }
                 }
@@ -1854,6 +1928,23 @@ async fn send_prepared_streaming_inner(
             last_response_id.clone(),
             requested_output_tokens,
         )?;
+        #[cfg(feature = "latency-profiling")]
+        if !provider_stream_started_published && !final_events.is_empty() {
+            if let Err(error) = callback
+                .append_runtime_event(
+                    RuntimeEventType::ProviderStreamStarted,
+                    json!({
+                        "provider_id": provider_id,
+                        "model_id": model,
+                        "turn": turn,
+                        "attempt": input.attempt,
+                    }),
+                )
+                .await
+            {
+                tracing::warn!(%error, "provider stream-start milestone publication failed");
+            }
+        }
         for ev in final_events {
             if !metadata_usage_declared && let StreamEvent::Usage(update) = &ev {
                 merge_stream_usage_update(&mut last_usage, update);
@@ -1977,6 +2068,25 @@ async fn send_prepared_streaming_inner(
                 StreamEvent::Usage(_) => {}
                 StreamEvent::Warning { .. } => {}
                 StreamEvent::ReasoningDelta(text) => {
+                    crate::startup_timing::mark_first_reasoning_event();
+                    #[cfg(feature = "latency-profiling")]
+                    if !provider_reasoning_started_published {
+                        provider_reasoning_started_published = true;
+                        if let Err(error) = callback
+                            .append_runtime_event(
+                                RuntimeEventType::ProviderReasoningStarted,
+                                json!({
+                                    "provider_id": provider_id,
+                                    "model_id": model,
+                                    "turn": turn,
+                                    "attempt": input.attempt,
+                                }),
+                            )
+                            .await
+                        {
+                            tracing::warn!(%error, "provider reasoning-start milestone publication failed");
+                        }
+                    }
                     accumulated_reasoning.push_str(text);
                 }
             }
@@ -4838,6 +4948,18 @@ owner = "ryeos-dev"
         );
         assert!(usage.is_valid());
         assert_eq!(recorder.event_count("cognition_out"), 56);
+        #[cfg(feature = "latency-profiling")]
+        {
+            assert_eq!(recorder.event_count("provider_response_headers"), 1);
+            assert_eq!(recorder.event_count("provider_stream_started"), 1);
+            assert_eq!(recorder.event_count("provider_reasoning_started"), 0);
+        }
+        #[cfg(not(feature = "latency-profiling"))]
+        {
+            assert_eq!(recorder.event_count("provider_response_headers"), 0);
+            assert_eq!(recorder.event_count("provider_stream_started"), 0);
+            assert_eq!(recorder.event_count("provider_reasoning_started"), 0);
+        }
     }
 
     #[test]

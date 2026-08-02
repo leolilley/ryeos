@@ -9,6 +9,8 @@
 //! declared header name participates.
 
 use anyhow::{Result, anyhow};
+#[cfg(feature = "latency-profiling")]
+use std::time::Instant;
 
 use super::streaming::{
     self, StreamingCallInput, apply_declared_output_limit, build_request_body,
@@ -46,13 +48,41 @@ pub struct PreparedProviderRequest {
     /// sha256 hex over canonical JSON of
     /// `{method, url, sorted header names, body_sha256, requested_output_tokens}`.
     pub request_digest: String,
+    /// Content-free request-shape telemetry captured while rendering the exact
+    /// bytes above. Safe to log: lengths, counts, and a tool-schema digest only.
+    pub request_metrics: PreparedRequestMetrics,
 }
+
+#[cfg(feature = "latency-profiling")]
+#[derive(Clone, Debug, Default)]
+pub struct PreparedRequestMetrics {
+    pub prepare_duration_us: u64,
+    pub body_bytes: u64,
+    pub estimated_body_tokens: u64,
+    pub source_message_count: u32,
+    pub system_message_bytes: u64,
+    pub user_message_bytes: u64,
+    pub assistant_message_bytes: u64,
+    pub tool_message_bytes: u64,
+    pub reasoning_replay_bytes: u64,
+    pub converted_messages_bytes: u64,
+    pub extracted_system_prompt_bytes: u64,
+    pub provider_tool_schema_bytes: u64,
+    pub provider_tool_count: u32,
+    pub provider_tool_schema_sha256: String,
+}
+
+#[cfg(not(feature = "latency-profiling"))]
+#[derive(Clone, Debug, Default)]
+pub struct PreparedRequestMetrics;
 
 /// Build the exact provider request for one attempt. Mirrors what the
 /// streaming transport used to assemble inline, but freezes every input —
 /// endpoint, rendered body, effective output limit, credential — before any
 /// reservation digest is taken.
 pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<PreparedProviderRequest> {
+    #[cfg(feature = "latency-profiling")]
+    let prepare_started = Instant::now();
     let provider = input.provider;
     let execution = input.execution;
     let model = input.model;
@@ -63,6 +93,56 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
 
     let tool_schema = provider.schemas.as_ref().and_then(|s| s.tools.clone());
     let tools_val = super::tools::serialize_tools(input.tools, &tool_schema);
+    #[cfg(feature = "latency-profiling")]
+    let (
+        converted_messages_bytes,
+        provider_tool_schema_bytes,
+        provider_tool_schema_sha256,
+        system_message_bytes,
+        user_message_bytes,
+        assistant_message_bytes,
+        tool_message_bytes,
+        reasoning_replay_bytes,
+    ) = {
+        let converted_messages_bytes = serialized_len(&converted_messages);
+        let provider_tool_schema_bytes = serialized_len(&tools_val);
+        let provider_tool_schema_sha256 = serde_json::to_vec(&tools_val)
+            .map(|bytes| streaming::sha256_hex(&bytes))
+            .unwrap_or_else(|_| "<serialization-failed>".to_string());
+        let mut system_message_bytes = 0_u64;
+        let mut user_message_bytes = 0_u64;
+        let mut assistant_message_bytes = 0_u64;
+        let mut tool_message_bytes = 0_u64;
+        let mut reasoning_replay_bytes = 0_u64;
+        for message in input.messages {
+            let bytes = serialized_len(message);
+            match message.role.as_str() {
+                "system" => system_message_bytes = system_message_bytes.saturating_add(bytes),
+                "user" => user_message_bytes = user_message_bytes.saturating_add(bytes),
+                "assistant" => {
+                    assistant_message_bytes = assistant_message_bytes.saturating_add(bytes)
+                }
+                "tool" => tool_message_bytes = tool_message_bytes.saturating_add(bytes),
+                _ => {}
+            }
+            reasoning_replay_bytes = reasoning_replay_bytes.saturating_add(
+                message
+                    .reasoning_content
+                    .as_ref()
+                    .map_or(0, |reasoning| reasoning.len() as u64),
+            );
+        }
+        (
+            converted_messages_bytes,
+            provider_tool_schema_bytes,
+            provider_tool_schema_sha256,
+            system_message_bytes,
+            user_message_bytes,
+            assistant_message_bytes,
+            tool_message_bytes,
+            reasoning_replay_bytes,
+        )
+    };
 
     let stream_url = provider.extra.get("stream_url").and_then(|v| v.as_str());
     // Resolve {model} template in base_url (e.g. gemini profiles use
@@ -185,6 +265,28 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
     let canonical = lillux::cas::canonical_json(&digest_input)
         .map_err(|e| anyhow!("canonicalize prepared-request digest input: {e}"))?;
     let request_digest = streaming::sha256_hex(canonical.as_bytes());
+    #[cfg(feature = "latency-profiling")]
+    let request_metrics = PreparedRequestMetrics {
+        prepare_duration_us: u64::try_from(prepare_started.elapsed().as_micros())
+            .unwrap_or(u64::MAX),
+        body_bytes: body_bytes.len() as u64,
+        // Deliberately labelled as an estimate. Exact provider tokenization is
+        // reported later through usage accounting.
+        estimated_body_tokens: (body_bytes.len() as u64).saturating_add(3) / 4,
+        source_message_count: u32::try_from(input.messages.len()).unwrap_or(u32::MAX),
+        system_message_bytes,
+        user_message_bytes,
+        assistant_message_bytes,
+        tool_message_bytes,
+        reasoning_replay_bytes,
+        converted_messages_bytes,
+        extracted_system_prompt_bytes: system_prompt.as_ref().map_or(0, |value| value.len() as u64),
+        provider_tool_schema_bytes,
+        provider_tool_count: u32::try_from(input.tools.len()).unwrap_or(u32::MAX),
+        provider_tool_schema_sha256,
+    };
+    #[cfg(not(feature = "latency-profiling"))]
+    let request_metrics = PreparedRequestMetrics::default();
 
     Ok(PreparedProviderRequest {
         method: reqwest::Method::POST,
@@ -196,5 +298,13 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
         credential,
         headers,
         request_digest,
+        request_metrics,
     })
+}
+
+#[cfg(feature = "latency-profiling")]
+fn serialized_len(value: &impl serde::Serialize) -> u64 {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len() as u64)
+        .unwrap_or(u64::MAX)
 }
