@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-07T05:37:38Z:9954b2537029d7f444528391fa604655237fc35fe9a840d461d4d1e7ffb40542:hrum0hd3nw8KfWJS7b1g7eGHssue1fIzPhxzUKxXFfqSQS6Fiq+i7dyPUA5NmOgsmfqPAFT9LUuUeqp1638bBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-02T08:58:48Z:5596be02389513e98f046993fcb479fd592fb7e90f63f41e69319b2ffd9db67d:Lbi5IYhSLuRt5u+x1uedA/QPK7qwVRH8QxjQyCMpjHeg8krymefLKCp5FYg0aOLsmAXYHqVmQlTByAoAKLr1Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: "ryeos/core/python"
 description: "Python comment-YAML tool metadata parser"
@@ -11,6 +11,8 @@ parser_config:
       marker: ryeos-tool
       comment_prefix: "#"
       allow_after_shebang: true
+cache:
+  mode: content_addressed
 output_schema:
   root_type: mapping
   required: {}

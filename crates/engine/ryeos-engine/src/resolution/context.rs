@@ -722,6 +722,7 @@ pub(crate) fn field_as_list(
 
 fn parser_failure_class(error: &EngineError) -> ResolutionFailureClass {
     match error {
+        EngineError::Shared(error) => parser_failure_class(error),
         EngineError::ParserFailed {
             kind: ParseErrKind::Syntax | ParseErrKind::Schema,
             ..
@@ -739,6 +740,25 @@ fn parser_failure_class(error: &EngineError) -> ResolutionFailureClass {
         | EngineError::Handler(_)
         | EngineError::Internal(_) => ResolutionFailureClass::InternalInvariant,
         _ => ResolutionFailureClass::InternalInvariant,
+    }
+}
+
+#[cfg(test)]
+mod parser_failure_class_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn shared_parser_failure_preserves_its_classification() {
+        let error = EngineError::Shared(Arc::new(EngineError::ParserFailed {
+            parser_id: "parser:test/example".to_string(),
+            kind: ParseErrKind::Syntax,
+            message: "invalid input".to_string(),
+        }));
+        assert_eq!(
+            parser_failure_class(&error),
+            ResolutionFailureClass::InvalidDefinition
+        );
     }
 }
 

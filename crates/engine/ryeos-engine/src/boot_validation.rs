@@ -1071,6 +1071,7 @@ composed_value_contract:
             handler: handler.into(),
             parser_api_version: 1,
             parser_config,
+            cache: Default::default(),
             output_schema: crate::contracts::ValueShape::any_mapping(),
         }
     }
@@ -1128,6 +1129,7 @@ composed_value_contract:
             handler: handler.into(),
             parser_api_version: 1,
             parser_config,
+            cache: Default::default(),
             output_schema,
         }
     }

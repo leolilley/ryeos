@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-06-08T00:42:19Z:ba69b16f437d6ddcb24c140e3f0dc2d5f11985f94e3fd2cce4897abdc6e37a96:Kq5Q+eGJ2gBRxUUaEPjYXCvDCnttWBDpMFAhlOJeWXd+TNosjIXkEZPq7txZujNr6PGHUXHCb/AAxnzuteEPBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-02T09:07:49Z:c8981a3022ef35d27489575e0f53b68bcb6d805583c633eadfde6b1622956738:MXbolZuhEu67xjlt0+Den07RNJGcTrwTXoiQexS/9g0GSgITC+tz7STEXFZx/RJFpyQiNA6HLaO2Vqjj7jnFAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # ryeos:signed:2026-06-07T05:37:38Z:578da9a3092b96b72a3914815df0bb04b95d3d8e1fd328d777d86d9a67c7a900:4c/7joPzCtkgJiYd+/tNnsWztoe1FPVMIIBl6tjFjHyO5HDZyURr4D1WQj03hJwu8pdiXe1QGp4kvpQyT9IiAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 ---
 category: ryeos/core
 tags: [reference, parsers, formats, parsing]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   How file parsing works — parsers, handlers, and the multi-format
   metadata extraction pipeline.
@@ -75,6 +75,30 @@ Handlers are the executable backends that parsers delegate to:
 | `extends-chain`                | composer | Resolve inheritance chains               |
 | `graph-permissions`            | composer | Lift graph permissions into policy facts  |
 | `identity`                     | composer | No-op pass-through                       |
+
+## Result caching
+
+Parser execution is uncached unless the signed parser descriptor explicitly
+declares that it is deterministic and side-effect-free:
+
+```yaml
+cache:
+  mode: content_addressed
+```
+
+The cache key binds the effective parser and handler registry fingerprint, the
+canonical parser ref, the digest of the exact signature-stripped content, and
+the exact source-path string supplied to the handler. A parser descriptor or
+handler-binary change therefore causes a safe miss. Signature verification,
+trust checks, metadata anchoring, and composition still run normally; a cache
+hit skips only the parser handler subprocess.
+
+Only successful results are retained. Entries and bytes are bounded with LRU
+eviction, and concurrent identical misses share one in-flight parse. Parsers
+that omit `cache` remain uncached, which is required for implementations that
+are nondeterministic, depend on external state, or have visible side effects.
+The built-in parser descriptors opt in because their handlers are pure
+functions of their signed configuration, content, and source path.
 
 ## Format Normalization
 
