@@ -59,6 +59,13 @@ struct ProviderCallOffsets {
     connection_establishment_completed_count: u32,
     connection_establishment_total_us: u64,
     connection_establishment_failures: u32,
+    progressive_callback_batch_count: u32,
+    progressive_callback_batch_failures: u32,
+    progressive_source_event_count: u64,
+    progressive_callback_event_count: u64,
+    progressive_callback_total_us: u64,
+    progressive_callback_max_us: u64,
+    progressive_callback_max_batch_items: u32,
     call_finished_us: Option<u64>,
     completion: Option<&'static str>,
 }
@@ -127,6 +134,34 @@ impl ProviderCallOffsets {
             self.connection_establishment_failures =
                 self.connection_establishment_failures.saturating_add(1);
         }
+    }
+
+    fn record_progressive_callback_batch(
+        &mut self,
+        source_event_count: usize,
+        callback_event_count: usize,
+        duration_us: u64,
+        succeeded: bool,
+    ) {
+        self.progressive_callback_batch_count =
+            self.progressive_callback_batch_count.saturating_add(1);
+        if !succeeded {
+            self.progressive_callback_batch_failures =
+                self.progressive_callback_batch_failures.saturating_add(1);
+        }
+        self.progressive_source_event_count = self
+            .progressive_source_event_count
+            .saturating_add(u64::try_from(source_event_count).unwrap_or(u64::MAX));
+        self.progressive_callback_event_count = self
+            .progressive_callback_event_count
+            .saturating_add(u64::try_from(callback_event_count).unwrap_or(u64::MAX));
+        self.progressive_callback_total_us = self
+            .progressive_callback_total_us
+            .saturating_add(duration_us);
+        self.progressive_callback_max_us = self.progressive_callback_max_us.max(duration_us);
+        self.progressive_callback_max_batch_items = self
+            .progressive_callback_max_batch_items
+            .max(u32::try_from(callback_event_count).unwrap_or(u32::MAX));
     }
 }
 
@@ -268,6 +303,13 @@ impl DirectiveStageTimings {
             connection_establishment_completed_count: 0,
             connection_establishment_total_us: 0,
             connection_establishment_failures: 0,
+            progressive_callback_batch_count: 0,
+            progressive_callback_batch_failures: 0,
+            progressive_source_event_count: 0,
+            progressive_callback_event_count: 0,
+            progressive_callback_total_us: 0,
+            progressive_callback_max_us: 0,
+            progressive_callback_max_batch_items: 0,
             call_finished_us: None,
             completion: None,
         };
@@ -395,7 +437,7 @@ impl DirectiveStageTimings {
         tracing::info!(
             target: "ryeos_directive_runtime",
             event = "directive_provider_call_timing",
-            schema_version = 2_u32,
+            schema_version = 4_u32,
             invocation_id = identity.invocation_id.as_deref().unwrap_or("<unavailable>"),
             thread_id = identity.thread_id.as_deref().unwrap_or("<unavailable>"),
             item_ref_kind = "directive",
@@ -444,13 +486,20 @@ impl DirectiveStageTimings {
             connection_establishment_scope =
                 "aggregate_reqwest_connector_may_include_dns_tcp_proxy_tls",
             exact_tcp_tls_split_available = false,
+            progressive_callback_batch_count = call.progressive_callback_batch_count,
+            progressive_callback_batch_failures = call.progressive_callback_batch_failures,
+            progressive_source_event_count = call.progressive_source_event_count,
+            progressive_callback_event_count = call.progressive_callback_event_count,
+            progressive_callback_total_us = call.progressive_callback_total_us,
+            progressive_callback_max_us = call.progressive_callback_max_us,
+            progressive_callback_max_batch_items = call.progressive_callback_max_batch_items,
             call_finished_us = call.call_finished_us,
             call_duration_us = duration_us(Some(call.call_started_us), call.call_finished_us),
             "directive provider call timings"
         );
         emit_captured_timing_record(serde_json::json!({
             "event": "directive_provider_call_timing",
-            "schema_version": 2,
+            "schema_version": 4,
             "clock_domain": "directive_process_monotonic",
             "invocation_id": identity.invocation_id,
             "thread_id": identity.thread_id,
@@ -482,7 +531,7 @@ impl DirectiveStageTimings {
         tracing::info!(
             target: "ryeos_directive_runtime",
             event = "directive_runtime_stage_timing",
-            schema_version = 3_u32,
+            schema_version = 5_u32,
             invocation_id = offsets.invocation_id.as_deref().unwrap_or("<unavailable>"),
             thread_id = offsets.thread_id.as_deref().unwrap_or("<unavailable>"),
             item_ref_kind = "directive",
@@ -539,7 +588,7 @@ impl DirectiveStageTimings {
         );
         emit_captured_timing_record(serde_json::json!({
             "event": "directive_runtime_stage_timing",
-            "schema_version": 3,
+            "schema_version": 5,
             "clock_domain": "directive_process_monotonic",
             "invocation_id": offsets.invocation_id,
             "thread_id": offsets.thread_id,
@@ -860,6 +909,28 @@ pub(crate) fn finish_connection_establishment(
     });
 }
 
+pub fn record_progressive_callback_batch(
+    source_event_count: usize,
+    callback_event_count: usize,
+    duration_us: u64,
+    succeeded: bool,
+) {
+    let Some(timings) = process_timings() else {
+        return;
+    };
+    let Some(call_id) = current_provider_call_id() else {
+        return;
+    };
+    timings.with_provider_call(call_id, |call, _| {
+        call.record_progressive_callback_batch(
+            source_event_count,
+            callback_event_count,
+            duration_us,
+            succeeded,
+        );
+    });
+}
+
 pub fn set_identity(invocation_id: &str, thread_id: &str) {
     if let Some(timings) = process_timings() {
         timings.set_identity(invocation_id, thread_id);
@@ -1010,6 +1081,32 @@ mod tests {
         assert_eq!(call.http_version.as_deref(), Some("HTTP/2.0"));
         assert_eq!(call.first_provider_event_us, Some(29));
         assert_eq!(call.first_reasoning_event_us, Some(31));
+        assert_eq!(call.progressive_callback_batch_count, 0);
+    }
+
+    #[test]
+    fn progressive_callback_metrics_aggregate_batches_and_failures() {
+        let timings = DirectiveStageTimings::new(Instant::now());
+        let call_id = timings
+            .begin_provider_call("provider-a", "model-a", 1, 1)
+            .expect("provider call timing slot");
+
+        timings.with_provider_call(call_id, |call, _| {
+            call.record_progressive_callback_batch(1, 1, 7_000, true);
+            call.record_progressive_callback_batch(55, 8, 9_000, true);
+            call.record_progressive_callback_batch(4, 2, 11_000, false);
+        });
+
+        let call = timings
+            .first_provider_call_snapshot()
+            .expect("provider call");
+        assert_eq!(call.progressive_callback_batch_count, 3);
+        assert_eq!(call.progressive_callback_batch_failures, 1);
+        assert_eq!(call.progressive_source_event_count, 60);
+        assert_eq!(call.progressive_callback_event_count, 11);
+        assert_eq!(call.progressive_callback_total_us, 27_000);
+        assert_eq!(call.progressive_callback_max_us, 11_000);
+        assert_eq!(call.progressive_callback_max_batch_items, 8);
     }
 
     #[test]

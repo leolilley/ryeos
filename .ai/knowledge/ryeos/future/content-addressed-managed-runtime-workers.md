@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-28T23:56:25Z:ea89d4eaf02858c22cd5589662ab3bc5d612649d67584e52a40de40ae779110b:u956yG6BseWJJ8xUAst7DNJ33AQSdfqepKugqzHNoSL4sEir2gKzD7MxH4CKiYrbZ+Ax87+4FozfbNM6YWncBw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-02T05:43:49Z:fe4a684731693ec915a61766eaf6aa7a83c5194a853b49ca0ea0fb4cd2f90ba6:t+q6T2ajxe1hriF4HEXq8TiahiUo+YdM3DrtC3OOUE9wm2xCiJm7xh/20vjV7amUBpIG8mQWAQiaYTr2jiOBDg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/future
 name: content-addressed-managed-runtime-workers
@@ -15,7 +15,9 @@ version: "0.1.0"
 This is a future design, not the current execution contract. Pull it forward
 only after the content-addressed admission and augmentation fast paths have
 landed and measurements still show material time between durable planning and
-provider request submission.
+provider request submission. Progressive provider output must also use bounded
+ordered callback batching first; a warm worker cannot fix per-delta daemon
+round-trip backpressure inside an already-running provider call.
 
 The first implementation is deliberately narrower than a general distributed
 worker system:
@@ -91,7 +93,9 @@ pre-worker work, both conditions are true:
    context construction.
 
 If warm local admission and runtime handoff are already subsecond, provider and
-workflow changes have better leverage than a worker pool.
+workflow changes have better leverage than a worker pool. Likewise, high
+`progressive_callback_total_us` belongs to the runtime callback path and must
+not be counted as evidence for process reuse.
 
 ## Non-goals
 

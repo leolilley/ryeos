@@ -182,6 +182,53 @@ impl CallbackClient {
         }
     }
 
+    /// Append multiple typed runtime events atomically and publish them in the
+    /// supplied order. This is primarily useful for high-frequency ephemeral
+    /// progress where one acknowledged daemon RPC per event would otherwise
+    /// backpressure the producer.
+    ///
+    /// The storage class remains a per-event decision derived from the same
+    /// typed event and payload policy as [`Self::append_runtime_event`]. A batch
+    /// containing any transcript-bearing event fails closed when the callback
+    /// channel is absent.
+    pub async fn append_runtime_events(
+        &self,
+        events: Vec<(RuntimeEventType, Value)>,
+    ) -> Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let contains_transcript = events
+            .iter()
+            .any(|(event_type, _)| event_type.is_transcript());
+        match &self.inner {
+            Some(client) => {
+                let events = events
+                    .into_iter()
+                    .map(|(event_type, payload)| {
+                        let storage_class = storage_class_for_payload(event_type, &payload);
+                        serde_json::json!({
+                            "event_type": event_type.as_str(),
+                            "payload": payload,
+                            "storage_class": storage_class,
+                        })
+                    })
+                    .collect();
+                client
+                    .append_events(&self.thread_id, events)
+                    .await
+                    .map_err(|error| anyhow::anyhow!("{error}"))?;
+                Ok(())
+            }
+            None if contains_transcript => Err(anyhow::anyhow!(
+                "callback append_runtime_events called without an inner UDS client \
+                 (socket missing); transcript-bearing event batch must not be silently dropped"
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// Typed provider-attempt budget lifecycle wrappers. All five are
     /// financial authority operations: they hard-fail when the callback
     /// channel is absent — an attempt whose reservation state cannot be
@@ -1481,6 +1528,59 @@ mod tests {
                 "{event_type:?}: {err}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn append_runtime_events_preserves_batch_order() {
+        let (client, recorder) = make_recorder_client();
+        client
+            .append_runtime_events(vec![
+                (
+                    RuntimeEventType::CognitionOut,
+                    json!({"turn": 1, "delta": "first"}),
+                ),
+                (
+                    RuntimeEventType::CognitionOut,
+                    json!({"turn": 1, "delta": " second"}),
+                ),
+                (RuntimeEventType::StreamSnapshot, json!({"kind": "after"})),
+            ])
+            .await
+            .unwrap();
+
+        let events = recorder.events.lock().unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(
+            events[0],
+            (
+                "cognition_out".to_string(),
+                json!({"turn": 1, "delta": "first"})
+            )
+        );
+        assert_eq!(
+            events[1],
+            (
+                "cognition_out".to_string(),
+                json!({"turn": 1, "delta": " second"})
+            )
+        );
+        assert_eq!(
+            events[2],
+            ("stream_snapshot".to_string(), json!({"kind": "after"}))
+        );
+    }
+
+    #[tokio::test]
+    async fn append_runtime_events_transcript_batch_errors_when_disconnected() {
+        let client = make_client();
+        let error = client
+            .append_runtime_events(vec![(
+                RuntimeEventType::CognitionOut,
+                json!({"turn": 1, "delta": "text"}),
+            )])
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("socket missing"), "{error}");
     }
 
     #[tokio::test]

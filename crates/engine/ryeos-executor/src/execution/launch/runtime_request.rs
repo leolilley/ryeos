@@ -411,6 +411,13 @@ struct CapturedProviderCallTiming {
     connection_establishment_completed_count: u32,
     connection_establishment_total_us: u64,
     connection_establishment_failures: u32,
+    progressive_callback_batch_count: u32,
+    progressive_callback_batch_failures: u32,
+    progressive_source_event_count: u64,
+    progressive_callback_event_count: u64,
+    progressive_callback_total_us: u64,
+    progressive_callback_max_us: u64,
+    progressive_callback_max_batch_items: u32,
     call_finished_us: Option<u64>,
     completion: Option<String>,
 }
@@ -562,6 +569,23 @@ impl CapturedProviderCallTiming {
                     "completed" | "interrupted" | "cancelled" | "error"
                 )
             })
+            && self.progressive_callback_batch_failures <= self.progressive_callback_batch_count
+            && self.progressive_callback_max_batch_items as usize
+                <= ryeos_runtime::MAX_RUNTIME_EVENT_BATCH_ITEMS
+            && self.progressive_callback_total_us >= self.progressive_callback_max_us
+            && self.progressive_source_event_count >= self.progressive_callback_event_count
+            && if self.progressive_callback_batch_count == 0 {
+                self.progressive_callback_batch_failures == 0
+                    && self.progressive_source_event_count == 0
+                    && self.progressive_callback_event_count == 0
+                    && self.progressive_callback_total_us == 0
+                    && self.progressive_callback_max_us == 0
+                    && self.progressive_callback_max_batch_items == 0
+            } else {
+                self.progressive_callback_max_batch_items > 0
+                    && self.progressive_callback_event_count
+                        >= u64::from(self.progressive_callback_batch_count)
+            }
     }
 }
 
@@ -587,9 +611,10 @@ impl CapturedPromptSourceProfile {
             && bounded_nonempty(&self.model_id, MAX_CAPTURED_CHILD_MODEL_ID_BYTES)
             && self.tool_count <= MAX_CAPTURED_TOOL_COUNT
             && self.request_input_bytes.len() <= MAX_CAPTURED_REQUEST_INPUTS
-            && self.request_input_bytes.keys().all(|name| {
-                bounded_nonempty(name, MAX_CAPTURED_REQUEST_INPUT_NAME_BYTES)
-            })
+            && self
+                .request_input_bytes
+                .keys()
+                .all(|name| bounded_nonempty(name, MAX_CAPTURED_REQUEST_INPUT_NAME_BYTES))
     }
 }
 
@@ -597,16 +622,17 @@ fn validate_context_item_contributions(
     contributions: &BTreeMap<String, Vec<CapturedContextItemContribution>>,
 ) -> bool {
     contributions.len() <= MAX_CAPTURED_CONTEXT_POSITIONS
-        && contributions.keys().all(|position| {
-            bounded_nonempty(position, MAX_CAPTURED_CONTEXT_POSITION_BYTES)
-        })
+        && contributions
+            .keys()
+            .all(|position| bounded_nonempty(position, MAX_CAPTURED_CONTEXT_POSITION_BYTES))
         && contributions
             .values()
             .try_fold(0usize, |total, items| total.checked_add(items.len()))
             .is_some_and(|total| total <= MAX_CAPTURED_CONTEXT_ITEMS)
-        && contributions.values().flatten().all(|item| {
-            bounded_nonempty(&item.item_id, MAX_CAPTURED_CONTEXT_ITEM_ID_BYTES)
-        })
+        && contributions
+            .values()
+            .flatten()
+            .all(|item| bounded_nonempty(&item.item_id, MAX_CAPTURED_CONTEXT_ITEM_ID_BYTES))
 }
 
 impl CapturedChildTimingRecord {
@@ -668,7 +694,7 @@ impl CapturedChildTimingRecord {
                 exact_tcp_tls_split_available,
                 timing,
             } => {
-                *schema_version == 2
+                *schema_version == 4
                     && clock_domain == "directive_process_monotonic"
                     && item_ref_kind == "directive"
                     && dns_lookup_scope == "exact_resolver_future"
@@ -692,7 +718,7 @@ impl CapturedChildTimingRecord {
                 completion,
                 ..
             } => {
-                *schema_version == 3
+                *schema_version == 5
                     && clock_domain == "directive_process_monotonic"
                     && item_ref_kind == "directive"
                     && connection_establishment_scope
@@ -1083,7 +1109,7 @@ mod tests {
             first_non_whitespace_text_us: Some(10),
         };
         let record = CapturedChildTimingRecord::RuntimeStage {
-            schema_version: 3,
+            schema_version: 5,
             clock_domain: "directive_process_monotonic".to_string(),
             invocation_id: Some("invocation-1".to_string()),
             thread_id: Some("T-expected".to_string()),
@@ -1112,7 +1138,7 @@ mod tests {
         );
 
         let mut wrong_version = serde_json::to_value(&record).expect("timing fixture value");
-        wrong_version["schema_version"] = json!(2);
+        wrong_version["schema_version"] = json!(4);
         assert!(
             decode_captured_child_timing_record("T-expected", &wrong_version.to_string()).is_none(),
             "predecessor timing schemas are not accepted"
@@ -1137,8 +1163,7 @@ mod tests {
         let mut wrong_profile = serde_json::to_value(&record).expect("activation profile value");
         wrong_profile["build_profile"] = json!("debug");
         assert!(
-            decode_captured_child_timing_record("T-expected", &wrong_profile.to_string())
-                .is_none(),
+            decode_captured_child_timing_record("T-expected", &wrong_profile.to_string()).is_none(),
             "only the release-equivalent profiling build marker is accepted"
         );
     }
@@ -1208,9 +1233,9 @@ mod tests {
     }
 
     #[test]
-    fn captured_provider_call_schema_includes_model_and_reasoning_milestones() {
+    fn captured_provider_call_schema_includes_stream_and_callback_metrics() {
         let record = CapturedChildTimingRecord::ProviderCall {
-            schema_version: 2,
+            schema_version: 4,
             clock_domain: "directive_process_monotonic".to_string(),
             invocation_id: Some("invocation-1".to_string()),
             thread_id: Some("T-expected".to_string()),
@@ -1243,6 +1268,13 @@ mod tests {
                 connection_establishment_completed_count: 0,
                 connection_establishment_total_us: 0,
                 connection_establishment_failures: 0,
+                progressive_callback_batch_count: 2,
+                progressive_callback_batch_failures: 0,
+                progressive_source_event_count: 56,
+                progressive_callback_event_count: 2,
+                progressive_callback_total_us: 14_000,
+                progressive_callback_max_us: 8_000,
+                progressive_callback_max_batch_items: 1,
                 call_finished_us: Some(60),
                 completion: Some("completed".to_string()),
             },
@@ -1251,7 +1283,7 @@ mod tests {
         assert!(decode_captured_child_timing_record("T-expected", &encoded).is_some());
 
         let mut predecessor = serde_json::to_value(&record).expect("provider timing value");
-        predecessor["schema_version"] = json!(1);
+        predecessor["schema_version"] = json!(3);
         assert!(
             decode_captured_child_timing_record("T-expected", &predecessor.to_string()).is_none(),
             "provider timing schema changes require an explicit version"

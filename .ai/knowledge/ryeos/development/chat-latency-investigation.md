@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-08-02T04:37:45Z:eef7af93f425085b2c4451b7c320f84ab6799bab893074ab9a7a023a8cf5451e:HbuCM7dEU0IC81a7gv4nlDd84rRmKWHAAVNUffoGOlI+RYhGPYQ1qQ1cjXy46CX/l/l7ppLBX3aojPoIbM46Cw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-02T05:54:25Z:f5504a75052dee42eddf58d8e46e19c4ac43c7efb5b5732e3d8c077b2f309961:mkNEMNktAbV6L4ee538oyO9EIBTe0F/7dGoIoACpNIQzNYYcq7UgW0MptBbwFTpYRQ9RO0IC1geRUb1remG3Aw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/development
 name: chat-latency-investigation
 title: Chat Latency Investigation Runbook
 description: Correlation rules, event semantics, prompt accounting, and decision gates for streamed directive latency investigations
 entry_type: runbook
-version: "1.0.0"
+version: "1.1.0"
 ```
 
 # Chat Latency Investigation Runbook
@@ -98,7 +98,8 @@ records each signed context item and its composer token estimate.
 size, source-message role sizes, converted-message size, tool-schema size and
 digest, reasoning replay bytes, and an explicitly heuristic
 `ceil(body_bytes / 4)` token estimate. `directive_provider_call_timing` retains
-the provider/network timeline and joins by provider call ID.
+the provider/network timeline, progressive callback aggregation, and joins by
+provider call ID.
 
 Compare provider-call records by turn:
 
@@ -109,6 +110,34 @@ Compare provider-call records by turn:
   estimates are diagnostic only;
 - never log prompt text, tool-result text, credentials, or reasoning content to
   obtain these measurements.
+
+## Progressive callback backpressure
+
+Provider read time includes any time the streaming adapter spends awaiting the
+daemon callback. Publishing one authenticated callback RPC per provider delta
+can therefore throttle the provider byte stream even when the provider and SSE
+consumer are both fast.
+
+RyeOS publishes the first non-whitespace text and first tool activity
+immediately. Later progressive `cognition_out` events use the daemon's ordered
+batch callback, flushing within 50 milliseconds, at the 64-event admission
+ceiling, before a complete tool call, on interrupt, and on normal stream
+completion. Adjacent text deltas in one batch are coalesced without changing a
+single byte or crossing a tool event; exact text and tool ordering are
+preserved. The final durable turn record and transcript folding are unchanged.
+
+Provider-call timing schema v4 records:
+
+- `progressive_source_event_count` before text coalescing;
+- `progressive_callback_event_count`;
+- `progressive_callback_batch_count` and failures;
+- total and maximum callback duration;
+- maximum events in one batch.
+
+Treat a high callback-duration share or an event-to-batch ratio near one as a
+RyeOS streaming transport problem, not provider reasoning. Compare these fields
+with provider request-to-first-event and provider-call duration before
+considering workers.
 
 ## Cache audit
 
