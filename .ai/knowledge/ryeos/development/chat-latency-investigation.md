@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-02T02:55:18Z:c18ec81fc208e62e6ba7e5d3a54c4b70568fbaa9e2f8c4ead05fd27056903b58:fnbHdfT60UlQjF0OV1L7SOzE1R0Kobcv4+8KSxFcQkSQAAto9TdOFLS/SOAA52htxEmp9YFdanvp9eBmYNu+DA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-02T04:37:45Z:eef7af93f425085b2c4451b7c320f84ab6799bab893074ab9a7a023a8cf5451e:HbuCM7dEU0IC81a7gv4nlDd84rRmKWHAAVNUffoGOlI+RYhGPYQ1qQ1cjXy46CX/l/l7ppLBX3aojPoIbM46Cw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/development
 name: chat-latency-investigation
@@ -41,6 +41,14 @@ so it has observer cost. Compare ordinary and profiling artifacts on a bounded
 local fixture before treating very small differences as application latency.
 Profiling fixtures remain generic: workload-specific prompts and data belong in
 the external benchmark driver, never in RyeOS code or tests.
+
+Successful managed runtimes do not expose their raw stderr as an observability
+surface. The daemon therefore accepts the content-free child records through a
+strict, thread-bound schema and re-emits activation, context composition, and
+prompt-source composition as `runtime_child_profiling_record`; provider request
+and timing records remain `runtime_child_timing_record`. Join on `thread_id` and
+inspect `child_event` for the exact record name. Unknown fields, content-bearing
+fields, overlong identifiers, and mismatched thread identities fail closed.
 
 ## Event semantics
 

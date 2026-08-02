@@ -233,13 +233,7 @@ pub fn bootstrap(
             .get(DERIVED_RENDERED_CONTEXTS_META)
             .and_then(sanitized_context_item_contributions)
             .unwrap_or_else(|| serde_json::json!({}));
-        tracing::info!(
-            target: "ryeos_directive_runtime",
-            event = "directive_context_composition",
-            schema_version = 1_u32,
-            context_item_contributions = %context_item_contributions,
-            "directive context contribution metrics"
-        );
+        crate::startup_timing::record_context_composition(&context_item_contributions);
     }
 
     let user_prompt = composed_view

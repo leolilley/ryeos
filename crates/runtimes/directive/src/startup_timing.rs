@@ -1,3 +1,5 @@
+#[cfg(feature = "latency-profiling")]
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -584,6 +586,118 @@ fn process_timings() -> Option<&'static DirectiveStageTimings> {
     PROCESS_TIMINGS.get()
 }
 
+#[cfg(feature = "latency-profiling")]
+fn profiling_identity() -> (String, String) {
+    let identity = process_timings().map(DirectiveStageTimings::snapshot);
+    let invocation_id = identity
+        .as_ref()
+        .and_then(|offsets| offsets.invocation_id.as_deref())
+        .unwrap_or("<unavailable>")
+        .to_string();
+    let thread_id = identity
+        .as_ref()
+        .and_then(|offsets| offsets.thread_id.as_deref())
+        .unwrap_or("<unavailable>")
+        .to_string();
+    (invocation_id, thread_id)
+}
+
+#[cfg(feature = "latency-profiling")]
+pub fn record_profiling_enabled() {
+    let (invocation_id, thread_id) = profiling_identity();
+    tracing::info!(
+        target: "ryeos_directive_runtime",
+        event = "latency_profiling_enabled",
+        schema_version = 1_u32,
+        invocation_id,
+        thread_id,
+        build_profile = "release",
+        "release-equivalent latency profiling is enabled"
+    );
+    emit_captured_timing_record(serde_json::json!({
+        "event": "latency_profiling_enabled",
+        "schema_version": 1,
+        "clock_domain": "directive_process_monotonic",
+        "invocation_id": invocation_id,
+        "thread_id": thread_id,
+        "item_ref_kind": "directive",
+        "build_profile": "release",
+    }));
+}
+
+#[cfg(feature = "latency-profiling")]
+pub fn record_context_composition(context_item_contributions: &serde_json::Value) {
+    let (invocation_id, thread_id) = profiling_identity();
+    tracing::info!(
+        target: "ryeos_directive_runtime",
+        event = "directive_context_composition",
+        schema_version = 1_u32,
+        invocation_id,
+        thread_id,
+        context_item_contributions = %context_item_contributions,
+        "directive context contribution metrics"
+    );
+    emit_captured_timing_record(serde_json::json!({
+        "event": "directive_context_composition",
+        "schema_version": 1,
+        "clock_domain": "directive_process_monotonic",
+        "invocation_id": invocation_id,
+        "thread_id": thread_id,
+        "item_ref_kind": "directive",
+        "context_item_contributions": context_item_contributions,
+    }));
+}
+
+#[cfg(feature = "latency-profiling")]
+#[allow(clippy::too_many_arguments)]
+pub fn record_prompt_source_composition(
+    provider_id: &str,
+    model_id: &str,
+    directive_template_bytes: usize,
+    system_context_bytes: usize,
+    before_context_bytes: usize,
+    after_context_bytes: usize,
+    tool_count: usize,
+    request_input_bytes: &BTreeMap<String, u64>,
+) {
+    let (invocation_id, thread_id) = profiling_identity();
+    tracing::info!(
+        target: "ryeos_directive_runtime",
+        event = "directive_prompt_source_composition",
+        schema_version = 1_u32,
+        invocation_id,
+        thread_id,
+        provider_id,
+        model_id,
+        directive_template_bytes,
+        system_context_bytes,
+        before_context_bytes,
+        after_context_bytes,
+        tool_count,
+        request_input_bytes = %serde_json::to_string(request_input_bytes)
+            .unwrap_or_else(|_| "{}".to_string()),
+        "directive prompt source contribution metrics"
+    );
+    emit_captured_timing_record(serde_json::json!({
+        "event": "directive_prompt_source_composition",
+        "schema_version": 1,
+        "clock_domain": "directive_process_monotonic",
+        "invocation_id": invocation_id,
+        "thread_id": thread_id,
+        "item_ref_kind": "directive",
+        "profile": {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "directive_template_bytes": directive_template_bytes,
+            "system_context_bytes": system_context_bytes,
+            "before_context_bytes": before_context_bytes,
+            "after_context_bytes": after_context_bytes,
+            "tool_count": tool_count,
+            "request_input_bytes": request_input_bytes,
+        },
+    }));
+}
+
 fn current_provider_call_id() -> Option<u64> {
     if let Ok(call_id) = CURRENT_PROVIDER_CALL_ID.try_with(|call_id| *call_id) {
         // A present task-local containing `None` deliberately disables
@@ -613,15 +727,7 @@ pub fn record_provider_request_profile(
     attempt: u32,
     metrics: &crate::provider_adapter::prepared::PreparedRequestMetrics,
 ) {
-    let identity = process_timings().map(DirectiveStageTimings::snapshot);
-    let invocation_id = identity
-        .as_ref()
-        .and_then(|offsets| offsets.invocation_id.as_deref())
-        .unwrap_or("<unavailable>");
-    let thread_id = identity
-        .as_ref()
-        .and_then(|offsets| offsets.thread_id.as_deref())
-        .unwrap_or("<unavailable>");
+    let (invocation_id, thread_id) = profiling_identity();
     tracing::info!(
         target: "ryeos_directive_runtime",
         event = "directive_provider_request_profile",
