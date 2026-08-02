@@ -11,18 +11,138 @@ use sha2::{Digest, Sha256};
 use crate::directive::FinishReason;
 use crate::directive::{
     ExecutionConfig, MalformedArgs, ProtocolFamily, ProviderConfig, ProviderMessage,
-    SamplingConfig, StreamEvent, SystemMessageMode, ToolCall, ToolSchema, UsageUpdate,
-    normalize_finish_reason,
+    ReasoningConfig, ReasoningMode, ReasoningSchemaConfig, SamplingConfig, StreamEvent,
+    SystemMessageMode, ToolCall, ToolSchema, UsageUpdate, normalize_finish_reason,
 };
 use crate::provider_adapter::http::{
     AdapterResponse, ObservedOutput, ProviderLimitContractStatus, ProviderUsageSource, TokenUsage,
 };
 use ryeos_runtime::callback_client::CallbackClient;
-use ryeos_runtime::events::RuntimeEventType;
+use ryeos_runtime::events::{MAX_RUNTIME_EVENT_BATCH_ITEMS, RuntimeEventType};
 
 mod metadata;
 
 use metadata::harvest_chunk_meta;
+
+/// Keep progressive streaming responsive without making the provider wait for
+/// one authenticated daemon round-trip per tiny delta. The first visible text
+/// and first tool activity are flushed explicitly by the caller; subsequent
+/// events are published in exact order at this maximum cadence or batch size.
+const PROGRESSIVE_EVENT_FLUSH_INTERVAL: Duration = Duration::from_millis(50);
+
+#[derive(Default)]
+struct ProgressiveEventBuffer {
+    events: Vec<(RuntimeEventType, Value)>,
+    source_event_count: usize,
+    started_at: Option<tokio::time::Instant>,
+    contains_non_whitespace_text: bool,
+    contains_tool_activity: bool,
+}
+
+#[derive(Default)]
+struct ProgressiveFlushOutcome {
+    callback_event_count: usize,
+    source_event_count: usize,
+    contained_non_whitespace_text: bool,
+    contained_tool_activity: bool,
+}
+
+impl ProgressiveEventBuffer {
+    fn push_text(&mut self, turn: u32, text: &str) {
+        self.start_if_empty();
+        self.source_event_count = self.source_event_count.saturating_add(1);
+        self.contains_non_whitespace_text |= !text.trim().is_empty();
+        if let Some((RuntimeEventType::CognitionOut, payload)) = self.events.last_mut()
+            && payload.get("turn").and_then(Value::as_u64) == Some(u64::from(turn))
+            && let Some(Value::String(existing)) = payload.get_mut("delta")
+        {
+            existing.push_str(text);
+            return;
+        }
+        self.events.push((
+            RuntimeEventType::CognitionOut,
+            json!({"turn": turn, "delta": text}),
+        ));
+    }
+
+    fn push_tool_use(&mut self, turn: u32, payload: Value) {
+        self.start_if_empty();
+        self.source_event_count = self.source_event_count.saturating_add(1);
+        self.contains_tool_activity = true;
+        self.events.push((
+            RuntimeEventType::CognitionOut,
+            json!({"turn": turn, "tool_use": payload}),
+        ));
+    }
+
+    fn push_tool_use_partial(
+        &mut self,
+        turn: u32,
+        id: &Option<String>,
+        name: &str,
+        delta: &str,
+        total_len: usize,
+    ) {
+        self.start_if_empty();
+        self.source_event_count = self.source_event_count.saturating_add(1);
+        self.contains_tool_activity = true;
+        self.events.push((
+            RuntimeEventType::CognitionOut,
+            json!({
+                "turn": turn,
+                "tool_use_partial": {
+                    "id": id,
+                    "name": name,
+                    "delta": delta,
+                    "total_len": total_len,
+                },
+            }),
+        ));
+    }
+
+    fn start_if_empty(&mut self) {
+        if self.events.is_empty() {
+            self.started_at = Some(tokio::time::Instant::now());
+        }
+    }
+
+    fn is_full(&self) -> bool {
+        self.events.len() >= MAX_RUNTIME_EVENT_BATCH_ITEMS
+    }
+
+    fn deadline(&self) -> Option<tokio::time::Instant> {
+        self.started_at
+            .map(|started_at| started_at + PROGRESSIVE_EVENT_FLUSH_INTERVAL)
+    }
+
+    async fn flush(&mut self, callback: &CallbackClient) -> Result<ProgressiveFlushOutcome> {
+        if self.events.is_empty() {
+            return Ok(ProgressiveFlushOutcome::default());
+        }
+
+        let events = std::mem::take(&mut self.events);
+        let outcome = ProgressiveFlushOutcome {
+            callback_event_count: events.len(),
+            source_event_count: self.source_event_count,
+            contained_non_whitespace_text: self.contains_non_whitespace_text,
+            contained_tool_activity: self.contains_tool_activity,
+        };
+        self.started_at = None;
+        self.source_event_count = 0;
+        self.contains_non_whitespace_text = false;
+        self.contains_tool_activity = false;
+        let callback_started_at = std::time::Instant::now();
+        let callback_result = callback.append_runtime_events(events).await;
+        crate::startup_timing::record_progressive_callback_batch(
+            outcome.source_event_count,
+            outcome.callback_event_count,
+            u64::try_from(callback_started_at.elapsed().as_micros()).unwrap_or(u64::MAX),
+            callback_result.is_ok(),
+        );
+        callback_result?;
+        Ok(outcome)
+    }
+}
 
 /// Compute a sha256 hex digest of the input bytes.
 pub(crate) fn sha256_hex(data: &[u8]) -> String {
@@ -1140,9 +1260,10 @@ fn emit_cumulative_channel(
 
 /// Streaming provider call. Issues the request rendered by the provider's
 /// signed body template and parses Server-Sent Events incrementally as they
-/// arrive. For each `StreamEvent::Delta` and `StreamEvent::ToolUse` the
-/// callback's progressive `cognition_out` event is published before moving to
-/// the next chunk. These payloads are live/ephemeral; the final turn-complete
+/// arrive. The first visible text and tool activity publish immediately;
+/// subsequent progressive `cognition_out` events use short, bounded, ordered
+/// callback batches so daemon acknowledgement cannot backpressure every tiny
+/// provider delta. These payloads are live/ephemeral; the final turn-complete
 /// cognition is the indexed transcript record.
 ///
 /// Returns the accumulated `AdapterResponse` (final assistant message + usage +
@@ -1167,6 +1288,7 @@ pub struct StreamingCallInput<'a> {
     /// One-based attempt number within this turn.
     pub attempt: u32,
     pub sampling: Option<&'a SamplingConfig>,
+    pub reasoning: Option<&'a ReasoningConfig>,
     /// Optional cancellation flag (SIGTERM). When set mid-stream, the loop
     /// breaks and the call returns [`StreamOutcome::Cancelled`].
     pub cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -1209,8 +1331,20 @@ pub async fn send_prepared_streaming(
     input: &StreamingCallInput<'_>,
     prepared: &super::prepared::PreparedProviderRequest,
 ) -> Result<StreamOutcome> {
-    let call_id =
-        crate::startup_timing::begin_provider_call(input.provider_id, input.turn, input.attempt);
+    let call_id = crate::startup_timing::begin_provider_call(
+        input.provider_id,
+        input.model,
+        input.turn,
+        input.attempt,
+    );
+    crate::startup_timing::record_provider_request_profile(
+        call_id,
+        input.provider_id,
+        input.model,
+        input.turn,
+        input.attempt,
+        &prepared.request_metrics,
+    );
     let result = crate::startup_timing::scope_provider_call(
         call_id,
         send_prepared_streaming_inner(input, prepared),
@@ -1233,6 +1367,8 @@ async fn send_prepared_streaming_inner(
     let client = input.client;
     let provider = input.provider;
     let provider_id = input.provider_id;
+    #[cfg(feature = "latency-profiling")]
+    let model = input.model;
     let matched_profile = input.matched_profile;
     let config_hash = input.config_hash;
     let execution = input.execution;
@@ -1343,7 +1479,8 @@ async fn send_prepared_streaming_inner(
             })
         }
     })?;
-    crate::startup_timing::mark_provider_response_headers(&format!("{:?}", resp.version()));
+    let provider_http_version = format!("{:?}", resp.version());
+    crate::startup_timing::mark_provider_response_headers(&provider_http_version);
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -1390,6 +1527,23 @@ async fn send_prepared_streaming_inner(
         }));
     }
 
+    #[cfg(feature = "latency-profiling")]
+    if let Err(error) = callback
+        .append_runtime_event(
+            RuntimeEventType::ProviderResponseHeaders,
+            json!({
+                "provider_id": provider_id,
+                "model_id": model,
+                "turn": turn,
+                "attempt": input.attempt,
+                "http_version": provider_http_version,
+            }),
+        )
+        .await
+    {
+        tracing::warn!(%error, "provider response-header milestone publication failed");
+    }
+
     let stream_mode = provider
         .schemas
         .as_ref()
@@ -1433,6 +1587,10 @@ async fn send_prepared_streaming_inner(
     let mut accumulated_reasoning = String::new();
     let mut accumulated_tools: Vec<ToolCall> = Vec::new();
     let mut output_meter = StreamOutputMeter::default();
+    #[cfg(feature = "latency-profiling")]
+    let mut provider_stream_started_published = false;
+    #[cfg(feature = "latency-profiling")]
+    let mut provider_reasoning_started_published = false;
     let max_stream_output_bytes = execution.max_stream_output_bytes_per_turn;
     let mut last_usage: Option<TokenUsage> = None;
     let mut last_finish: Option<String> = None;
@@ -1446,6 +1604,34 @@ async fn send_prepared_streaming_inner(
     // attempt. The count is carried on failures separately from locally
     // accepted semantic events.
     let mut live_output_events_emitted: usize = 0;
+    let mut progressive_events = ProgressiveEventBuffer::default();
+    let mut first_non_whitespace_text_published = false;
+    let mut first_tool_activity_published = false;
+
+    macro_rules! flush_progressive_events {
+        ($failure_context:expr) => {{
+            let flush = progressive_events.flush(callback).await.map_err(|error| {
+                callback_publication_error(
+                    format!("{}: {error}", $failure_context),
+                    &output_meter,
+                    live_output_events_emitted,
+                    last_usage.clone(),
+                    generation_header_id.clone(),
+                    last_response_id.clone(),
+                    requested_output_tokens,
+                )
+            })?;
+            live_output_events_emitted =
+                live_output_events_emitted.saturating_add(flush.callback_event_count);
+            if flush.contained_non_whitespace_text {
+                crate::startup_timing::mark_first_non_whitespace_text_published("visible");
+                first_non_whitespace_text_published = true;
+            }
+            if flush.contained_tool_activity {
+                first_tool_activity_published = true;
+            }
+        }};
+    }
 
     // How the loop terminated. `Closed` = upstream finished normally; the others
     // are out-of-band cuts. Cancel takes priority over interrupt (SIGTERM ends
@@ -1479,6 +1665,7 @@ async fn send_prepared_streaming_inner(
             break;
         }
 
+        let progressive_flush_deadline = progressive_events.deadline();
         let chunk_res = tokio::select! {
             biased;
 
@@ -1492,6 +1679,18 @@ async fn send_prepared_streaming_inner(
                 tracing::info!(turn = input.turn, "provider stream interrupted mid-flight (select)");
                 exit = LoopExit::Interrupted;
                 break;
+            }
+
+            _ = async {
+                match progressive_flush_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                flush_progressive_events!(
+                    "live cognition_out batch publication failed on flush deadline"
+                );
+                continue;
             }
 
             chunk = byte_stream.next() => {
@@ -1633,6 +1832,25 @@ async fn send_prepared_streaming_inner(
                 requested_output_tokens,
             )?;
 
+            #[cfg(feature = "latency-profiling")]
+            if !provider_stream_started_published && !new_events.is_empty() {
+                provider_stream_started_published = true;
+                if let Err(error) = callback
+                    .append_runtime_event(
+                        RuntimeEventType::ProviderStreamStarted,
+                        json!({
+                            "provider_id": provider_id,
+                            "model_id": model,
+                            "turn": turn,
+                            "attempt": input.attempt,
+                        }),
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, "provider stream-start milestone publication failed");
+                }
+            }
+
             for ev in new_events {
                 if !metadata_usage_declared && let StreamEvent::Usage(update) = &ev {
                     merge_stream_usage_update(&mut last_usage, update);
@@ -1658,30 +1876,14 @@ async fn send_prepared_streaming_inner(
                 match &ev {
                     StreamEvent::Delta(text) => {
                         accumulated_text.push_str(text);
-                        callback
-                            .append_runtime_event(
-                                RuntimeEventType::CognitionOut,
-                                json!({
-                                    "turn": turn,
-                                    "delta": text,
-                                }),
-                            )
-                            .await
-                            .map_err(|e| {
-                                callback_publication_error(
-                                    format!(
-                                        "live cognition_out delta publication failed mid-stream: {e}"
-                                    ),
-                                    &output_meter,
-                                    live_output_events_emitted,
-                                    last_usage.clone(),
-                                    generation_header_id.clone(),
-                                    last_response_id.clone(),
-                                    requested_output_tokens,
-                                )
-                            })?;
-                        live_output_events_emitted += 1;
-                        crate::startup_timing::mark_first_non_whitespace_text_published(text);
+                        progressive_events.push_text(turn, text);
+                        if (!text.trim().is_empty() && !first_non_whitespace_text_published)
+                            || progressive_events.is_full()
+                        {
+                            flush_progressive_events!(
+                                "live cognition_out delta batch publication failed mid-stream"
+                            );
+                        }
                     }
                     StreamEvent::ToolUse {
                         id,
@@ -1695,29 +1897,16 @@ async fn send_prepared_streaming_inner(
                             name: name.clone(),
                             arguments: arguments.clone(),
                         });
-                        callback
-                            .append_runtime_event(
-                                RuntimeEventType::CognitionOut,
-                                json!({
-                                    "turn": turn,
-                                    "tool_use": tool_use_payload(id, name, arguments, malformed_args),
-                                }),
-                            )
-                            .await
-                            .map_err(|e| {
-                                callback_publication_error(
-                                    format!(
-                                        "live cognition_out tool_use publication failed mid-stream: {e}"
-                                    ),
-                                    &output_meter,
-                                    live_output_events_emitted,
-                                    last_usage.clone(),
-                                    generation_header_id.clone(),
-                                    last_response_id.clone(),
-                                    requested_output_tokens,
-                                )
-                            })?;
-                        live_output_events_emitted += 1;
+                        flush_progressive_events!(
+                            "live cognition_out publication failed before tool_use mid-stream"
+                        );
+                        progressive_events.push_tool_use(
+                            turn,
+                            tool_use_payload(id, name, arguments, malformed_args),
+                        );
+                        flush_progressive_events!(
+                            "live cognition_out tool_use publication failed mid-stream"
+                        );
                     }
                     StreamEvent::ToolUsePartial {
                         id,
@@ -1726,40 +1915,44 @@ async fn send_prepared_streaming_inner(
                         total_len,
                         ..
                     } => {
-                        callback
-                            .append_runtime_event(
-                                RuntimeEventType::CognitionOut,
-                                json!({
-                                    "turn": turn,
-                                    "tool_use_partial": {
-                                        "id": id,
-                                        "name": name,
-                                        "delta": delta,
-                                        "total_len": total_len,
-                                    },
-                                }),
-                            )
-                            .await
-                            .map_err(|e| {
-                                callback_publication_error(
-                                    format!(
-                                        "live cognition_out tool_use_partial publication failed \
-                                         mid-stream: {e}"
-                                    ),
-                                    &output_meter,
-                                    live_output_events_emitted,
-                                    last_usage.clone(),
-                                    generation_header_id.clone(),
-                                    last_response_id.clone(),
-                                    requested_output_tokens,
-                                )
-                            })?;
-                        live_output_events_emitted += 1;
+                        progressive_events.push_tool_use_partial(turn, id, name, delta, *total_len);
+                        if !first_tool_activity_published || progressive_events.is_full() {
+                            flush_progressive_events!(
+                                "live cognition_out tool_use_partial batch publication failed \
+                                 mid-stream"
+                            );
+                        }
                     }
-                    StreamEvent::Finish { .. } => {}
+                    StreamEvent::Finish { .. } => {
+                        flush_progressive_events!(
+                            "live cognition_out batch publication failed before stream finish"
+                        );
+                    }
                     StreamEvent::Usage(_) => {}
                     StreamEvent::Warning { .. } => {}
                     StreamEvent::ReasoningDelta(text) => {
+                        crate::startup_timing::mark_first_reasoning_event();
+                        #[cfg(feature = "latency-profiling")]
+                        if !provider_reasoning_started_published {
+                            flush_progressive_events!(
+                                "live cognition_out batch publication failed before reasoning milestone"
+                            );
+                            provider_reasoning_started_published = true;
+                            if let Err(error) = callback
+                                .append_runtime_event(
+                                    RuntimeEventType::ProviderReasoningStarted,
+                                    json!({
+                                        "provider_id": provider_id,
+                                        "model_id": model,
+                                        "turn": turn,
+                                        "attempt": input.attempt,
+                                    }),
+                                )
+                                .await
+                            {
+                                tracing::warn!(%error, "provider reasoning-start milestone publication failed");
+                            }
+                        }
                         accumulated_reasoning.push_str(text);
                     }
                 }
@@ -1782,6 +1975,16 @@ async fn send_prepared_streaming_inner(
                 requested_output_tokens,
             }));
         }
+    }
+
+    // Preserve every fully parsed event on a normal close or interrupt. A
+    // cancellation intentionally drops the small unacknowledged tail: SIGTERM
+    // ends the run without constructing a partial response, and waiting on a
+    // callback would delay shutdown.
+    if exit != LoopExit::Cancelled {
+        flush_progressive_events!(
+            "live cognition_out batch publication failed while closing provider stream"
+        );
     }
 
     // Cancellation (SIGTERM) ends the run — no consequence to record. Bail out
@@ -1854,6 +2057,23 @@ async fn send_prepared_streaming_inner(
             last_response_id.clone(),
             requested_output_tokens,
         )?;
+        #[cfg(feature = "latency-profiling")]
+        if !provider_stream_started_published && !final_events.is_empty() {
+            if let Err(error) = callback
+                .append_runtime_event(
+                    RuntimeEventType::ProviderStreamStarted,
+                    json!({
+                        "provider_id": provider_id,
+                        "model_id": model,
+                        "turn": turn,
+                        "attempt": input.attempt,
+                    }),
+                )
+                .await
+            {
+                tracing::warn!(%error, "provider stream-start milestone publication failed");
+            }
+        }
         for ev in final_events {
             if !metadata_usage_declared && let StreamEvent::Usage(update) = &ev {
                 merge_stream_usage_update(&mut last_usage, update);
@@ -1878,27 +2098,14 @@ async fn send_prepared_streaming_inner(
             match &ev {
                 StreamEvent::Delta(text) => {
                     accumulated_text.push_str(text);
-                    callback
-                        .append_runtime_event(
-                            RuntimeEventType::CognitionOut,
-                            json!({"turn": turn, "delta": text}),
-                        )
-                        .await
-                        .map_err(|e| {
-                            callback_publication_error(
-                                format!(
-                                    "live cognition_out delta publication failed at stream end: {e}"
-                                ),
-                                &output_meter,
-                                live_output_events_emitted,
-                                last_usage.clone(),
-                                generation_header_id.clone(),
-                                last_response_id.clone(),
-                                requested_output_tokens,
-                            )
-                        })?;
-                    live_output_events_emitted += 1;
-                    crate::startup_timing::mark_first_non_whitespace_text_published(text);
+                    progressive_events.push_text(turn, text);
+                    if (!text.trim().is_empty() && !first_non_whitespace_text_published)
+                        || progressive_events.is_full()
+                    {
+                        flush_progressive_events!(
+                            "live cognition_out delta batch publication failed at stream end"
+                        );
+                    }
                 }
                 StreamEvent::ToolUse {
                     id,
@@ -1912,29 +2119,14 @@ async fn send_prepared_streaming_inner(
                         name: name.clone(),
                         arguments: arguments.clone(),
                     });
-                    callback
-                        .append_runtime_event(
-                            RuntimeEventType::CognitionOut,
-                            json!({
-                                "turn": turn,
-                                "tool_use": tool_use_payload(id, name, arguments, malformed_args),
-                            }),
-                        )
-                        .await
-                        .map_err(|e| {
-                            callback_publication_error(
-                                format!(
-                                    "live cognition_out tool_use publication failed at stream end: {e}"
-                                ),
-                                &output_meter,
-                                live_output_events_emitted,
-                                last_usage.clone(),
-                                generation_header_id.clone(),
-                                last_response_id.clone(),
-                                requested_output_tokens,
-                            )
-                        })?;
-                    live_output_events_emitted += 1;
+                    flush_progressive_events!(
+                        "live cognition_out publication failed before tool_use at stream end"
+                    );
+                    progressive_events
+                        .push_tool_use(turn, tool_use_payload(id, name, arguments, malformed_args));
+                    flush_progressive_events!(
+                        "live cognition_out tool_use publication failed at stream end"
+                    );
                 }
                 StreamEvent::ToolUsePartial {
                     id,
@@ -1943,44 +2135,67 @@ async fn send_prepared_streaming_inner(
                     total_len,
                     ..
                 } => {
-                    callback
-                        .append_runtime_event(
-                            RuntimeEventType::CognitionOut,
-                            json!({
-                                "turn": turn,
-                                "tool_use_partial": {
-                                    "id": id,
-                                    "name": name,
-                                    "delta": delta,
-                                    "total_len": total_len,
-                                },
-                            }),
-                        )
-                        .await
-                        .map_err(|e| {
-                            callback_publication_error(
-                                format!(
-                                    "live cognition_out tool_use_partial publication failed at \
-                                     stream end: {e}"
-                                ),
-                                &output_meter,
-                                live_output_events_emitted,
-                                last_usage.clone(),
-                                generation_header_id.clone(),
-                                last_response_id.clone(),
-                                requested_output_tokens,
-                            )
-                        })?;
-                    live_output_events_emitted += 1;
+                    progressive_events.push_tool_use_partial(turn, id, name, delta, *total_len);
+                    if !first_tool_activity_published || progressive_events.is_full() {
+                        flush_progressive_events!(
+                            "live cognition_out tool_use_partial batch publication failed at \
+                             stream end"
+                        );
+                    }
                 }
-                StreamEvent::Finish { .. } => {}
+                StreamEvent::Finish { .. } => {
+                    flush_progressive_events!(
+                        "live cognition_out batch publication failed before final stream finish"
+                    );
+                }
                 StreamEvent::Usage(_) => {}
                 StreamEvent::Warning { .. } => {}
                 StreamEvent::ReasoningDelta(text) => {
+                    crate::startup_timing::mark_first_reasoning_event();
+                    #[cfg(feature = "latency-profiling")]
+                    if !provider_reasoning_started_published {
+                        flush_progressive_events!(
+                            "live cognition_out batch publication failed before final reasoning milestone"
+                        );
+                        provider_reasoning_started_published = true;
+                        if let Err(error) = callback
+                            .append_runtime_event(
+                                RuntimeEventType::ProviderReasoningStarted,
+                                json!({
+                                    "provider_id": provider_id,
+                                    "model_id": model,
+                                    "turn": turn,
+                                    "attempt": input.attempt,
+                                }),
+                            )
+                            .await
+                        {
+                            tracing::warn!(%error, "provider reasoning-start milestone publication failed");
+                        }
+                    }
                     accumulated_reasoning.push_str(text);
                 }
             }
             all_events.push(ev);
+        }
+        let final_flush = progressive_events.flush(callback).await.map_err(|error| {
+            callback_publication_error(
+                format!(
+                    "live cognition_out batch publication failed after final provider events: \
+                     {error}"
+                ),
+                &output_meter,
+                live_output_events_emitted,
+                last_usage.clone(),
+                generation_header_id.clone(),
+                last_response_id.clone(),
+                requested_output_tokens,
+            )
+        })?;
+        live_output_events_emitted =
+            live_output_events_emitted.saturating_add(final_flush.callback_event_count);
+        if final_flush.contained_non_whitespace_text {
+            crate::startup_timing::mark_first_non_whitespace_text_published("visible");
         }
     }
 
@@ -2447,7 +2662,50 @@ pub(crate) fn apply_declared_output_limit(
             .min(hard_limit),
     };
     let segments = config.path.split('.').collect::<Vec<_>>();
-    write_optional_object_path(body, &segments, Some(Value::Number(effective.into())))
+    write_optional_object_path(
+        body,
+        &segments,
+        Some(Value::Number(effective.into())),
+        "output-limit",
+    )
+}
+
+/// Apply a signed provider-neutral reasoning policy through provider-declared
+/// object paths and wire values. No provider or model identity is consulted.
+pub(crate) fn apply_declared_reasoning(
+    body: &mut Value,
+    schema: Option<&ReasoningSchemaConfig>,
+    reasoning: Option<&ReasoningConfig>,
+) -> Result<()> {
+    let Some(reasoning) = reasoning else {
+        return Ok(());
+    };
+
+    if reasoning.mode != ReasoningMode::ProviderDefault {
+        let mode = schema
+            .and_then(|schema| schema.mode.as_ref())
+            .ok_or_else(|| anyhow!("provider route has no declared reasoning mode mapping"))?;
+        let value = match reasoning.mode {
+            ReasoningMode::Enabled => mode.values.enabled.clone(),
+            ReasoningMode::Disabled => mode.values.disabled.clone(),
+            ReasoningMode::ProviderDefault => unreachable!("guarded above"),
+        };
+        let segments = mode.path.split('.').collect::<Vec<_>>();
+        write_optional_object_path(body, &segments, Some(value), "reasoning mode")?;
+    }
+
+    if let Some(effort) = reasoning.effort.as_deref() {
+        let effort_schema = schema
+            .and_then(|schema| schema.effort.as_ref())
+            .ok_or_else(|| anyhow!("provider route has no declared reasoning effort mapping"))?;
+        let value = effort_schema.values.get(effort).cloned().ok_or_else(|| {
+            anyhow!("provider route does not declare reasoning effort {effort:?}")
+        })?;
+        let segments = effort_schema.path.split('.').collect::<Vec<_>>();
+        write_optional_object_path(body, &segments, Some(value), "reasoning effort")?;
+    }
+
+    Ok(())
 }
 
 pub(crate) fn declared_output_limit_from_body(
@@ -2577,27 +2835,28 @@ fn write_optional_object_path(
     root: &mut Value,
     segments: &[&str],
     value: Option<Value>,
+    label: &str,
 ) -> Result<()> {
     let Some((last, parents)) = segments.split_last() else {
-        return Err(anyhow!("provider output-limit path is empty"));
+        return Err(anyhow!("provider {label} path is empty"));
     };
     let mut cursor = root;
     for segment in parents {
         if cursor.get(*segment).is_none() {
             cursor[*segment] = json!({});
         }
-        cursor = cursor.get_mut(*segment).ok_or_else(|| {
-            anyhow!("provider output-limit path segment `{segment}` is unavailable")
-        })?;
+        cursor = cursor
+            .get_mut(*segment)
+            .ok_or_else(|| anyhow!("provider {label} path segment `{segment}` is unavailable"))?;
         if !cursor.is_object() {
             return Err(anyhow!(
-                "provider output-limit path segment `{segment}` is not an object"
+                "provider {label} path segment `{segment}` is not an object"
             ));
         }
     }
-    let object = cursor.as_object_mut().ok_or_else(|| {
-        anyhow!("provider request body is not an object at the output-limit path")
-    })?;
+    let object = cursor
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("provider request body is not an object at the {label} path"))?;
     match value {
         Some(value) => {
             object.insert((*last).to_string(), value);
@@ -3528,6 +3787,84 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         assert!(body.get("seed").is_none());
     }
 
+    fn reasoning_schema() -> ReasoningSchemaConfig {
+        ReasoningSchemaConfig {
+            mode: Some(crate::directive::ReasoningModeSchemaConfig {
+                path: "thinking.type".to_string(),
+                values: crate::directive::ReasoningModeValues {
+                    enabled: json!("on"),
+                    disabled: json!("off"),
+                },
+            }),
+            effort: Some(crate::directive::ReasoningEffortSchemaConfig {
+                path: "reasoning_effort".to_string(),
+                values: std::collections::BTreeMap::from([
+                    ("high".to_string(), json!("high")),
+                    ("max".to_string(), json!("max")),
+                ]),
+            }),
+        }
+    }
+
+    #[test]
+    fn absent_reasoning_policy_does_not_change_the_request_body() {
+        let mut body = json!({"model": "test", "thinking": {"type": "provider-default"}});
+        let before = body.clone();
+        apply_declared_reasoning(&mut body, Some(&reasoning_schema()), None).unwrap();
+        assert_eq!(body, before);
+    }
+
+    #[test]
+    fn disabled_reasoning_uses_only_the_declared_path_and_wire_value() {
+        let mut body = json!({"model": "test", "messages": []});
+        apply_declared_reasoning(
+            &mut body,
+            Some(&reasoning_schema()),
+            Some(&ReasoningConfig {
+                mode: ReasoningMode::Disabled,
+                effort: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(body["thinking"]["type"], "off");
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn provider_default_reasoning_can_map_effort_without_overriding_mode() {
+        let mut body = json!({"thinking": {"type": "provider-default"}});
+        apply_declared_reasoning(
+            &mut body,
+            Some(&reasoning_schema()),
+            Some(&ReasoningConfig {
+                mode: ReasoningMode::ProviderDefault,
+                effort: Some("max".to_string()),
+            }),
+        )
+        .unwrap();
+        assert_eq!(body["thinking"]["type"], "provider-default");
+        assert_eq!(body["reasoning_effort"], "max");
+    }
+
+    #[test]
+    fn reasoning_mapping_fails_if_a_declared_parent_is_not_an_object() {
+        let mut body = json!({"thinking": false});
+        let error = apply_declared_reasoning(
+            &mut body,
+            Some(&reasoning_schema()),
+            Some(&ReasoningConfig {
+                mode: ReasoningMode::Enabled,
+                effort: None,
+            }),
+        )
+        .expect_err("invalid provider template shape must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("reasoning mode path segment `thinking`")
+        );
+    }
+
     // ── Body template tests ────────────────────────────────────────
 
     #[test]
@@ -3613,6 +3950,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
                     path: "max_tokens".into(),
                     semantics: crate::directive::OutputLimitSemantics::ProviderNativeOutputTokens,
                 }),
+                reasoning: None,
             }),
             pricing: None,
             extra: Default::default(),
@@ -3820,6 +4158,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
                 }),
                 tools: None,
                 streaming: None,
+                reasoning: None,
             }),
             pricing: None,
             extra: Default::default(),
@@ -4240,6 +4579,7 @@ owner = "ryeos-dev"
             model_name: model.to_string(),
             context_window: 128_000,
             sampling: None,
+            reasoning: None,
             matched_profile,
             config_value_digest: "0".repeat(64),
             config_sources: vec![ProviderConfigSource {
@@ -4570,12 +4910,18 @@ owner = "ryeos-dev"
 
     struct StreamingEventRecorder {
         events: std::sync::Mutex<Vec<(String, Value)>>,
+        batch_sizes: std::sync::Mutex<Vec<usize>>,
+        batch_offsets: std::sync::Mutex<Vec<Duration>>,
+        started_at: std::time::Instant,
     }
 
     impl StreamingEventRecorder {
         fn new() -> Self {
             Self {
                 events: std::sync::Mutex::new(Vec::new()),
+                batch_sizes: std::sync::Mutex::new(Vec::new()),
+                batch_offsets: std::sync::Mutex::new(Vec::new()),
+                started_at: std::time::Instant::now(),
             }
         }
 
@@ -4586,6 +4932,30 @@ owner = "ryeos-dev"
                 .iter()
                 .filter(|(actual, _)| actual == event_type)
                 .count()
+        }
+
+        fn batch_sizes(&self) -> Vec<usize> {
+            self.batch_sizes
+                .lock()
+                .expect("batch size recorder lock")
+                .clone()
+        }
+
+        fn batch_offsets(&self) -> Vec<Duration> {
+            self.batch_offsets
+                .lock()
+                .expect("batch offset recorder lock")
+                .clone()
+        }
+
+        fn cognition_text(&self) -> String {
+            self.events
+                .lock()
+                .expect("event recorder lock")
+                .iter()
+                .filter(|(event_type, _)| event_type == "cognition_out")
+                .filter_map(|(_, payload)| payload.get("delta").and_then(Value::as_str))
+                .collect()
         }
     }
 
@@ -4647,8 +5017,34 @@ owner = "ryeos-dev"
         async fn append_events(
             &self,
             _thread_id: &str,
-            _events: Vec<Value>,
+            events: Vec<Value>,
         ) -> Result<Value, ryeos_runtime::callback::CallbackError> {
+            self.batch_offsets
+                .lock()
+                .expect("batch offset recorder lock")
+                .push(self.started_at.elapsed());
+            self.batch_sizes
+                .lock()
+                .expect("batch size recorder lock")
+                .push(events.len());
+            let mut recorded = self.events.lock().expect("event recorder lock");
+            for event in events {
+                let event_type =
+                    event
+                        .get("event_type")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            ryeos_runtime::callback::CallbackError::Transport(anyhow::anyhow!(
+                                "recorded batch event has no event_type"
+                            ))
+                        })?;
+                let payload = event.get("payload").cloned().ok_or_else(|| {
+                    ryeos_runtime::callback::CallbackError::Transport(anyhow::anyhow!(
+                        "recorded batch event has no payload"
+                    ))
+                })?;
+                recorded.push((event_type.to_string(), payload));
+            }
             Ok(json!({}))
         }
         async fn replay_events(
@@ -4816,6 +5212,7 @@ owner = "ryeos-dev"
             turn: 15,
             attempt: 1,
             sampling: None,
+            reasoning: None,
             cancel_flag: None,
             interrupt_flag: None,
         })
@@ -4828,6 +5225,7 @@ owner = "ryeos-dev"
         };
         assert_eq!(response.observed_output.text_bytes, 3_910);
         assert_eq!(response.observed_output.accepted_output_events, 56);
+        assert_eq!(response.observed_output.live_output_events_emitted, 2);
         assert_eq!(response.requested_output_tokens, Some(32_768));
         let usage = response.usage.expect("provider-native usage retained");
         assert_eq!(usage.output_tokens, Some(65_536));
@@ -4837,7 +5235,130 @@ owner = "ryeos-dev"
             ProviderLimitContractStatus::ReportedAboveRequestedLimit
         );
         assert!(usage.is_valid());
-        assert_eq!(recorder.event_count("cognition_out"), 56);
+        assert_eq!(recorder.event_count("cognition_out"), 2);
+        assert_eq!(
+            recorder.batch_sizes(),
+            vec![1, 1],
+            "first visible text must publish immediately, then adjacent text deltas coalesce"
+        );
+        assert_eq!(
+            recorder.cognition_text(),
+            "x".repeat(3_910),
+            "batching must preserve the exact streamed text"
+        );
+        #[cfg(feature = "latency-profiling")]
+        {
+            assert_eq!(recorder.event_count("provider_response_headers"), 1);
+            assert_eq!(recorder.event_count("provider_stream_started"), 1);
+            assert_eq!(recorder.event_count("provider_reasoning_started"), 0);
+        }
+        #[cfg(not(feature = "latency-profiling"))]
+        {
+            assert_eq!(recorder.event_count("provider_response_headers"), 0);
+            assert_eq!(recorder.event_count("provider_stream_started"), 0);
+            assert_eq!(recorder.event_count("provider_reasoning_started"), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn real_streaming_call_flushes_buffered_deltas_on_bounded_deadline() {
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock provider");
+        let address = listener.local_addr().expect("mock provider address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = vec![0u8; 16 * 1024];
+            let _ = socket.read(&mut request).await.expect("read request");
+
+            let initial = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"first\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\" second\"},\"finish_reason\":null}]}\n\n",
+            );
+            let finish = concat!(
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],",
+                "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}\n\n",
+            );
+            let content_length = initial.len() + finish.len();
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: \
+                 {content_length}\r\nConnection: close\r\n\r\n"
+            );
+            socket
+                .write_all(headers.as_bytes())
+                .await
+                .expect("write response headers");
+            socket
+                .write_all(initial.as_bytes())
+                .await
+                .expect("write initial deltas");
+            socket.flush().await.expect("flush initial deltas");
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            socket
+                .write_all(finish.as_bytes())
+                .await
+                .expect("write finish event");
+        });
+
+        let mut snapshot = resolve("openrouter", "anthropic/claude-sonnet-4.6");
+        snapshot.provider.base_url = format!("http://{address}");
+        snapshot.provider.auth.env_var = None;
+        snapshot
+            .provider
+            .extra
+            .insert("stream_url".to_string(), json!(""));
+
+        let recorder = Arc::new(StreamingEventRecorder::new());
+        let callback =
+            CallbackClient::from_inner(recorder.clone(), "T-deadline", "/project", "tat-test");
+        let messages = vec![ProviderMessage {
+            role: "user".to_string(),
+            content: Some(json!("respond")),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }];
+
+        let outcome = call_provider_streaming(StreamingCallInput {
+            client: &reqwest::Client::new(),
+            provider: &snapshot.provider,
+            provider_id: "opaque-test-route",
+            matched_profile: snapshot.matched_profile.as_deref(),
+            config_hash: &snapshot.config_hash,
+            execution: &ExecutionConfig {
+                timeout_seconds: 5,
+                ..ExecutionConfig::default()
+            },
+            model: &snapshot.model_name,
+            messages: &messages,
+            tools: &[],
+            callback: &callback,
+            turn: 1,
+            attempt: 1,
+            sampling: None,
+            reasoning: None,
+            cancel_flag: None,
+            interrupt_flag: None,
+        })
+        .await
+        .expect("delayed stream must complete");
+        server.await.expect("mock provider task");
+
+        let StreamOutcome::Completed { response, .. } = outcome else {
+            panic!("provider stream did not complete");
+        };
+        assert_eq!(response.message.content, Some(json!("first second")));
+        assert_eq!(recorder.batch_sizes(), vec![1, 1]);
+        let offsets = recorder.batch_offsets();
+        assert_eq!(offsets.len(), 2);
+        assert!(
+            offsets[1].saturating_sub(offsets[0]) < Duration::from_millis(200),
+            "buffered delta waited too long for its bounded flush: {:?}",
+            offsets[1].saturating_sub(offsets[0])
+        );
     }
 
     #[test]

@@ -36,6 +36,8 @@
 //! kind YAML, never a Rust file.
 
 use std::collections::HashMap;
+#[cfg(feature = "latency-profiling")]
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -174,7 +176,10 @@ fn build_inventory_for_kind_filtered(
     parsers: &ParserDispatcher,
     include: &mut impl FnMut(&CanonicalRef) -> bool,
 ) -> Result<Vec<ItemDescriptor>, EngineError> {
+    let mut profile = InventoryBuildProfile::new();
+    let enumeration_started = profile.start_phase();
     let refs = enumerate_kind_refs(roots, target_schema, inventoried_kind);
+    profile.finish_enumeration(enumeration_started);
     let mut out: Vec<ItemDescriptor> = Vec::with_capacity(refs.len());
     // Track which `item_id` first produced each flattened name so a
     // collision can name both sides in the diagnostic. Silent
@@ -185,14 +190,15 @@ fn build_inventory_for_kind_filtered(
         if !include(ref_) {
             continue;
         }
+        profile.record_authorized();
         let descriptor =
-            build_descriptor_for_ref(ref_, target_schema, roots, parsers).map_err(|e| {
-                EngineError::InventoryItemFailed {
+            build_descriptor_for_ref(ref_, target_schema, roots, parsers, &mut profile).map_err(
+                |e| EngineError::InventoryItemFailed {
                     kind: inventoried_kind.to_owned(),
                     bare_id: ref_.bare_id.clone(),
                     source: Box::new(e),
-                }
-            })?;
+                },
+            )?;
         // Tool inventory is a direct-invocation surface: runtimes hand
         // these descriptors back to dispatch as tools an agent may ask
         // to run as the requested/root item. A tool with no extracted
@@ -202,6 +208,7 @@ fn build_inventory_for_kind_filtered(
         // tool's executor chain, but they are not ordinary launchable
         // tools and should not be offered in inventory.
         if is_not_directly_invokable_tool_descriptor(inventoried_kind, &descriptor) {
+            profile.record_omitted();
             continue;
         }
         if let Some(prev_id) = seen_names.get(&descriptor.name) {
@@ -215,6 +222,7 @@ fn build_inventory_for_kind_filtered(
         seen_names.insert(descriptor.name.clone(), descriptor.item_id.clone());
         out.push(descriptor);
     }
+    profile.emit(inventoried_kind, refs.len(), out.len());
     Ok(out)
 }
 
@@ -223,15 +231,20 @@ fn build_descriptor_for_ref(
     target_schema: &KindSchema,
     roots: &ResolutionRoots,
     parsers: &ParserDispatcher,
+    profile: &mut InventoryBuildProfile,
 ) -> Result<ItemDescriptor, EngineError> {
+    let resolution_started = profile.start_phase();
     let resolution = resolve_item_full(roots, target_schema, ref_)?;
+    profile.finish_resolution(resolution_started);
 
+    let read_started = profile.start_phase();
     let content = std::fs::read_to_string(&resolution.winner_path).map_err(|e| {
         EngineError::Internal(format!(
             "build_inventory: read {}: {e}",
             resolution.winner_path.display()
         ))
     })?;
+    profile.finish_read(read_started, content.len());
 
     let source_format = target_schema
         .resolved_format_for(&resolution.matched_ext)
@@ -242,13 +255,16 @@ fn build_descriptor_for_ref(
             ))
         })?;
 
+    let parse_started = profile.start_phase();
     let parsed = parsers.dispatch(
         &source_format.parser,
         &content,
         Some(&resolution.winner_path),
         &source_format.signature,
     )?;
+    profile.finish_parse(parse_started);
 
+    let projection_started = profile.start_phase();
     let metadata = apply_extraction_rules(
         &parsed,
         &target_schema.extraction_rules,
@@ -291,13 +307,169 @@ fn build_descriptor_for_ref(
     let name = flatten_bare_id(&ref_.bare_id);
     let item_id = format!("{}:{}", ref_.kind, ref_.bare_id);
 
-    Ok(ItemDescriptor {
+    let descriptor = ItemDescriptor {
         name,
         item_id,
         description,
         schema,
         extra,
-    })
+    };
+    profile.finish_projection(projection_started);
+    Ok(descriptor)
+}
+
+/// Zero-sized and inlined away in ordinary release builds. Keeping the
+/// profiler behind this private abstraction avoids threading feature checks or
+/// kind knowledge through inventory semantics.
+struct InventoryBuildProfile {
+    #[cfg(feature = "latency-profiling")]
+    build_started: Instant,
+    #[cfg(feature = "latency-profiling")]
+    authorized_count: usize,
+    #[cfg(feature = "latency-profiling")]
+    omitted_count: usize,
+    #[cfg(feature = "latency-profiling")]
+    source_bytes: u64,
+    #[cfg(feature = "latency-profiling")]
+    enumeration_us: u64,
+    #[cfg(feature = "latency-profiling")]
+    resolution_us: u64,
+    #[cfg(feature = "latency-profiling")]
+    read_us: u64,
+    #[cfg(feature = "latency-profiling")]
+    parse_us: u64,
+    #[cfg(feature = "latency-profiling")]
+    projection_us: u64,
+}
+
+struct InventoryPhase {
+    #[cfg(feature = "latency-profiling")]
+    started: Instant,
+}
+
+impl InventoryBuildProfile {
+    #[inline(always)]
+    fn new() -> Self {
+        Self {
+            #[cfg(feature = "latency-profiling")]
+            build_started: Instant::now(),
+            #[cfg(feature = "latency-profiling")]
+            authorized_count: 0,
+            #[cfg(feature = "latency-profiling")]
+            omitted_count: 0,
+            #[cfg(feature = "latency-profiling")]
+            source_bytes: 0,
+            #[cfg(feature = "latency-profiling")]
+            enumeration_us: 0,
+            #[cfg(feature = "latency-profiling")]
+            resolution_us: 0,
+            #[cfg(feature = "latency-profiling")]
+            read_us: 0,
+            #[cfg(feature = "latency-profiling")]
+            parse_us: 0,
+            #[cfg(feature = "latency-profiling")]
+            projection_us: 0,
+        }
+    }
+
+    #[inline(always)]
+    fn start_phase(&self) -> InventoryPhase {
+        InventoryPhase {
+            #[cfg(feature = "latency-profiling")]
+            started: Instant::now(),
+        }
+    }
+
+    #[inline(always)]
+    fn finish_enumeration(&mut self, _phase: InventoryPhase) {
+        #[cfg(feature = "latency-profiling")]
+        {
+            self.enumeration_us = elapsed_us(_phase.started);
+        }
+    }
+
+    #[inline(always)]
+    fn record_authorized(&mut self) {
+        #[cfg(feature = "latency-profiling")]
+        {
+            self.authorized_count = self.authorized_count.saturating_add(1);
+        }
+    }
+
+    #[inline(always)]
+    fn record_omitted(&mut self) {
+        #[cfg(feature = "latency-profiling")]
+        {
+            self.omitted_count = self.omitted_count.saturating_add(1);
+        }
+    }
+
+    #[inline(always)]
+    fn finish_resolution(&mut self, _phase: InventoryPhase) {
+        #[cfg(feature = "latency-profiling")]
+        {
+            self.resolution_us = self
+                .resolution_us
+                .saturating_add(elapsed_us(_phase.started));
+        }
+    }
+
+    #[inline(always)]
+    fn finish_read(&mut self, _phase: InventoryPhase, _source_bytes: usize) {
+        #[cfg(feature = "latency-profiling")]
+        {
+            self.read_us = self.read_us.saturating_add(elapsed_us(_phase.started));
+            self.source_bytes = self
+                .source_bytes
+                .saturating_add(u64::try_from(_source_bytes).unwrap_or(u64::MAX));
+        }
+    }
+
+    #[inline(always)]
+    fn finish_parse(&mut self, _phase: InventoryPhase) {
+        #[cfg(feature = "latency-profiling")]
+        {
+            self.parse_us = self.parse_us.saturating_add(elapsed_us(_phase.started));
+        }
+    }
+
+    #[inline(always)]
+    fn finish_projection(&mut self, _phase: InventoryPhase) {
+        #[cfg(feature = "latency-profiling")]
+        {
+            self.projection_us = self
+                .projection_us
+                .saturating_add(elapsed_us(_phase.started));
+        }
+    }
+
+    #[inline(always)]
+    fn emit(&self, _inventoried_kind: &str, _discovered_count: usize, _descriptor_count: usize) {
+        #[cfg(feature = "latency-profiling")]
+        tracing::info!(
+            target: "ryeos.metrics",
+            event = "inventory_kind_build_timing",
+            schema_version = 1_u32,
+            inventoried_kind = _inventoried_kind,
+            discovered_count = _discovered_count,
+            authorized_count = self.authorized_count,
+            descriptor_count = _descriptor_count,
+            omitted_count = self.omitted_count,
+            source_bytes = self.source_bytes,
+            enumeration_us = self.enumeration_us,
+            resolution_us = self.resolution_us,
+            read_us = self.read_us,
+            parse_us = self.parse_us,
+            projection_us = self.projection_us,
+            total_us = elapsed_us(self.build_started),
+            "inventory kind build timing"
+        );
+    }
+}
+
+#[cfg(feature = "latency-profiling")]
+fn elapsed_us(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
 fn is_not_directly_invokable_tool_descriptor(

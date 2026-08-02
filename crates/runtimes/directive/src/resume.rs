@@ -10,6 +10,7 @@ use crate::directive::ProviderMessage;
 pub struct ResumeState {
     pub messages: Vec<ProviderMessage>,
     pub turns_completed: u32,
+    pub tool_calls_completed: u32,
     pub thread_usage: Option<ThreadUsage>,
     /// Whether the replayed events contained at least one `thread_usage`
     /// entry. Used by the resume gate in main.rs to refuse resume when
@@ -45,6 +46,7 @@ pub async fn load_resume_state(
 
     let messages = reconstruct_messages(&events)?;
     let turns_completed = count_turns(&messages);
+    let tool_calls_completed = count_tool_calls(&messages);
     let messages = trim_to_recent_turns(messages, carry_turns);
 
     let trimmed = trim_to_token_budget(messages, 16_000);
@@ -58,6 +60,7 @@ pub async fn load_resume_state(
     Ok(ResumeState {
         messages: trimmed,
         turns_completed,
+        tool_calls_completed,
         thread_usage,
         has_thread_usage_event,
     })
@@ -241,6 +244,14 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
 
 fn count_turns(messages: &[ProviderMessage]) -> u32 {
     messages.iter().filter(|m| m.role == "assistant").count() as u32
+}
+
+fn count_tool_calls(messages: &[ProviderMessage]) -> u32 {
+    messages
+        .iter()
+        .flat_map(|message| message.tool_calls.iter().flatten())
+        .filter(|tool_call| tool_call.name != "directive_return")
+        .fold(0u32, |count, _| count.saturating_add(1))
 }
 
 /// Keep only the most recent `carry_turns` assistant turns plus the context
@@ -670,6 +681,29 @@ mod tests {
     }
 
     #[test]
+    fn count_tool_calls_excludes_lifecycle_return() {
+        let messages = vec![ProviderMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![
+                crate::directive::ToolCall {
+                    id: Some("call-1".to_string()),
+                    name: "search".to_string(),
+                    arguments: json!({"query": "one"}),
+                },
+                crate::directive::ToolCall {
+                    id: Some("call-2".to_string()),
+                    name: "directive_return".to_string(),
+                    arguments: json!({"answer": "done"}),
+                },
+            ]),
+            tool_call_id: None,
+            reasoning_content: None,
+        }];
+        assert_eq!(count_tool_calls(&messages), 1);
+    }
+
+    #[test]
     fn trim_to_token_budget_works() {
         let mut messages = Vec::new();
         for i in 0..100 {
@@ -702,6 +736,7 @@ mod tests {
         let state = load_resume_state(&callback, "T-prev", 8).await.unwrap();
         assert_eq!(state.messages.len(), 2);
         assert_eq!(state.turns_completed, 1);
+        assert_eq!(state.tool_calls_completed, 0);
     }
 
     /// A chain where turn T2 continues T1, and T1 also has a non-continuation

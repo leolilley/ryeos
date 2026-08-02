@@ -1,3 +1,5 @@
+#[cfg(feature = "latency-profiling")]
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -28,6 +30,7 @@ struct StageOffsets {
     provider_response_headers_us: Option<u64>,
     provider_http_version: Option<String>,
     first_provider_event_us: Option<u64>,
+    first_reasoning_event_us: Option<u64>,
     first_non_whitespace_text_us: Option<u64>,
 }
 
@@ -35,6 +38,7 @@ struct StageOffsets {
 struct ProviderCallOffsets {
     call_id: u64,
     provider_id: String,
+    model_id: String,
     turn: u32,
     attempt: u32,
     call_started_us: u64,
@@ -42,6 +46,7 @@ struct ProviderCallOffsets {
     response_headers_us: Option<u64>,
     http_version: Option<String>,
     first_provider_event_us: Option<u64>,
+    first_reasoning_event_us: Option<u64>,
     dns_lookup_first_started_us: Option<u64>,
     dns_lookup_last_done_us: Option<u64>,
     dns_lookup_count: u32,
@@ -54,6 +59,13 @@ struct ProviderCallOffsets {
     connection_establishment_completed_count: u32,
     connection_establishment_total_us: u64,
     connection_establishment_failures: u32,
+    progressive_callback_batch_count: u32,
+    progressive_callback_batch_failures: u32,
+    progressive_source_event_count: u64,
+    progressive_callback_event_count: u64,
+    progressive_callback_total_us: u64,
+    progressive_callback_max_us: u64,
+    progressive_callback_max_batch_items: u32,
     call_finished_us: Option<u64>,
     completion: Option<&'static str>,
 }
@@ -71,6 +83,10 @@ impl ProviderCallOffsets {
 
     fn mark_first_provider_event(&mut self, elapsed_us: u64) {
         self.first_provider_event_us.get_or_insert(elapsed_us);
+    }
+
+    fn mark_first_reasoning_event(&mut self, elapsed_us: u64) {
+        self.first_reasoning_event_us.get_or_insert(elapsed_us);
     }
 
     fn begin_dns_lookup(&mut self, started_us: u64) {
@@ -119,6 +135,34 @@ impl ProviderCallOffsets {
                 self.connection_establishment_failures.saturating_add(1);
         }
     }
+
+    fn record_progressive_callback_batch(
+        &mut self,
+        source_event_count: usize,
+        callback_event_count: usize,
+        duration_us: u64,
+        succeeded: bool,
+    ) {
+        self.progressive_callback_batch_count =
+            self.progressive_callback_batch_count.saturating_add(1);
+        if !succeeded {
+            self.progressive_callback_batch_failures =
+                self.progressive_callback_batch_failures.saturating_add(1);
+        }
+        self.progressive_source_event_count = self
+            .progressive_source_event_count
+            .saturating_add(u64::try_from(source_event_count).unwrap_or(u64::MAX));
+        self.progressive_callback_event_count = self
+            .progressive_callback_event_count
+            .saturating_add(u64::try_from(callback_event_count).unwrap_or(u64::MAX));
+        self.progressive_callback_total_us = self
+            .progressive_callback_total_us
+            .saturating_add(duration_us);
+        self.progressive_callback_max_us = self.progressive_callback_max_us.max(duration_us);
+        self.progressive_callback_max_batch_items = self
+            .progressive_callback_max_batch_items
+            .max(u32::try_from(callback_event_count).unwrap_or(u32::MAX));
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -141,6 +185,8 @@ pub struct DirectiveStageTimings {
     active_provider_call_id: AtomicU64,
     first_provider_event_marked: AtomicBool,
     last_provider_call_with_first_event: AtomicU64,
+    first_reasoning_event_marked: AtomicBool,
+    last_provider_call_with_first_reasoning_event: AtomicU64,
     provider_call_limit_warned: AtomicBool,
     summary_emitted: AtomicBool,
 }
@@ -155,6 +201,8 @@ impl DirectiveStageTimings {
             active_provider_call_id: AtomicU64::new(NO_ACTIVE_PROVIDER_CALL),
             first_provider_event_marked: AtomicBool::new(false),
             last_provider_call_with_first_event: AtomicU64::new(NO_ACTIVE_PROVIDER_CALL),
+            first_reasoning_event_marked: AtomicBool::new(false),
+            last_provider_call_with_first_reasoning_event: AtomicU64::new(NO_ACTIVE_PROVIDER_CALL),
             provider_call_limit_warned: AtomicBool::new(false),
             summary_emitted: AtomicBool::new(false),
         }
@@ -201,7 +249,13 @@ impl DirectiveStageTimings {
             .clone()
     }
 
-    fn begin_provider_call(&self, provider_id: &str, turn: u32, attempt: u32) -> Option<u64> {
+    fn begin_provider_call(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+        turn: u32,
+        attempt: u32,
+    ) -> Option<u64> {
         let mut calls = self
             .provider_calls
             .lock()
@@ -224,6 +278,11 @@ impl DirectiveStageTimings {
             } else {
                 "<invalid-provider-id>".to_string()
             },
+            model_id: if bounded_nonempty(model_id, MAX_PROVIDER_ID_BYTES) {
+                model_id.to_owned()
+            } else {
+                "<invalid-model-id>".to_string()
+            },
             turn,
             attempt,
             call_started_us: self.elapsed_us(),
@@ -231,6 +290,7 @@ impl DirectiveStageTimings {
             response_headers_us: None,
             http_version: None,
             first_provider_event_us: None,
+            first_reasoning_event_us: None,
             dns_lookup_first_started_us: None,
             dns_lookup_last_done_us: None,
             dns_lookup_count: 0,
@@ -243,6 +303,13 @@ impl DirectiveStageTimings {
             connection_establishment_completed_count: 0,
             connection_establishment_total_us: 0,
             connection_establishment_failures: 0,
+            progressive_callback_batch_count: 0,
+            progressive_callback_batch_failures: 0,
+            progressive_source_event_count: 0,
+            progressive_callback_event_count: 0,
+            progressive_callback_total_us: 0,
+            progressive_callback_max_us: 0,
+            progressive_callback_max_batch_items: 0,
             call_finished_us: None,
             completion: None,
         };
@@ -316,6 +383,30 @@ impl DirectiveStageTimings {
         }
     }
 
+    fn mark_first_reasoning_event(&self, call_id: Option<u64>) {
+        let process_already_marked = self
+            .first_reasoning_event_marked
+            .swap(true, Ordering::AcqRel);
+        let call_already_marked = call_id.is_none_or(|call_id| {
+            self.last_provider_call_with_first_reasoning_event
+                .load(Ordering::Acquire)
+                == call_id
+        });
+        if process_already_marked && call_already_marked {
+            return;
+        }
+        if !process_already_marked {
+            self.mark(|offsets| &mut offsets.first_reasoning_event_us);
+        }
+        if let Some(call_id) = call_id.filter(|_| !call_already_marked) {
+            self.with_provider_call(call_id, |call, elapsed_us| {
+                call.mark_first_reasoning_event(elapsed_us);
+            });
+            self.last_provider_call_with_first_reasoning_event
+                .store(call_id, Ordering::Release);
+        }
+    }
+
     fn finish_provider_call(&self, call_id: u64, completion: &'static str) {
         let elapsed_us = self.elapsed_us();
         let call = {
@@ -346,13 +437,14 @@ impl DirectiveStageTimings {
         tracing::info!(
             target: "ryeos_directive_runtime",
             event = "directive_provider_call_timing",
-            schema_version = 1_u32,
+            schema_version = 4_u32,
             invocation_id = identity.invocation_id.as_deref().unwrap_or("<unavailable>"),
             thread_id = identity.thread_id.as_deref().unwrap_or("<unavailable>"),
             item_ref_kind = "directive",
             clock_domain = "directive_process_monotonic",
             provider_call_id = call.call_id,
             provider_id = call.provider_id.as_str(),
+            model_id = call.model_id.as_str(),
             turn = call.turn,
             attempt = call.attempt,
             completion = call.completion,
@@ -365,6 +457,7 @@ impl DirectiveStageTimings {
             ),
             provider_http_version = call.http_version.as_deref(),
             first_provider_event_us = call.first_provider_event_us,
+            first_reasoning_event_us = call.first_reasoning_event_us,
             headers_to_first_event_us = duration_us(
                 call.response_headers_us,
                 call.first_provider_event_us,
@@ -393,13 +486,20 @@ impl DirectiveStageTimings {
             connection_establishment_scope =
                 "aggregate_reqwest_connector_may_include_dns_tcp_proxy_tls",
             exact_tcp_tls_split_available = false,
+            progressive_callback_batch_count = call.progressive_callback_batch_count,
+            progressive_callback_batch_failures = call.progressive_callback_batch_failures,
+            progressive_source_event_count = call.progressive_source_event_count,
+            progressive_callback_event_count = call.progressive_callback_event_count,
+            progressive_callback_total_us = call.progressive_callback_total_us,
+            progressive_callback_max_us = call.progressive_callback_max_us,
+            progressive_callback_max_batch_items = call.progressive_callback_max_batch_items,
             call_finished_us = call.call_finished_us,
             call_duration_us = duration_us(Some(call.call_started_us), call.call_finished_us),
             "directive provider call timings"
         );
         emit_captured_timing_record(serde_json::json!({
             "event": "directive_provider_call_timing",
-            "schema_version": 1,
+            "schema_version": 4,
             "clock_domain": "directive_process_monotonic",
             "invocation_id": identity.invocation_id,
             "thread_id": identity.thread_id,
@@ -431,7 +531,7 @@ impl DirectiveStageTimings {
         tracing::info!(
             target: "ryeos_directive_runtime",
             event = "directive_runtime_stage_timing",
-            schema_version = 2_u32,
+            schema_version = 5_u32,
             invocation_id = offsets.invocation_id.as_deref().unwrap_or("<unavailable>"),
             thread_id = offsets.thread_id.as_deref().unwrap_or("<unavailable>"),
             item_ref_kind = "directive",
@@ -450,6 +550,7 @@ impl DirectiveStageTimings {
             provider_response_headers_us = offsets.provider_response_headers_us,
             provider_http_version = offsets.provider_http_version.as_deref(),
             first_provider_event_us = offsets.first_provider_event_us,
+            first_reasoning_event_us = offsets.first_reasoning_event_us,
             first_non_whitespace_text_us = offsets.first_non_whitespace_text_us,
             provider_dns_lookup_first_started_us = first_provider_call
                 .as_ref()
@@ -487,7 +588,7 @@ impl DirectiveStageTimings {
         );
         emit_captured_timing_record(serde_json::json!({
             "event": "directive_runtime_stage_timing",
-            "schema_version": 2,
+            "schema_version": 5,
             "clock_domain": "directive_process_monotonic",
             "invocation_id": offsets.invocation_id,
             "thread_id": offsets.thread_id,
@@ -534,6 +635,118 @@ fn process_timings() -> Option<&'static DirectiveStageTimings> {
     PROCESS_TIMINGS.get()
 }
 
+#[cfg(feature = "latency-profiling")]
+fn profiling_identity() -> (String, String) {
+    let identity = process_timings().map(DirectiveStageTimings::snapshot);
+    let invocation_id = identity
+        .as_ref()
+        .and_then(|offsets| offsets.invocation_id.as_deref())
+        .unwrap_or("<unavailable>")
+        .to_string();
+    let thread_id = identity
+        .as_ref()
+        .and_then(|offsets| offsets.thread_id.as_deref())
+        .unwrap_or("<unavailable>")
+        .to_string();
+    (invocation_id, thread_id)
+}
+
+#[cfg(feature = "latency-profiling")]
+pub fn record_profiling_enabled() {
+    let (invocation_id, thread_id) = profiling_identity();
+    tracing::info!(
+        target: "ryeos_directive_runtime",
+        event = "latency_profiling_enabled",
+        schema_version = 1_u32,
+        invocation_id,
+        thread_id,
+        build_profile = "release",
+        "release-equivalent latency profiling is enabled"
+    );
+    emit_captured_timing_record(serde_json::json!({
+        "event": "latency_profiling_enabled",
+        "schema_version": 1,
+        "clock_domain": "directive_process_monotonic",
+        "invocation_id": invocation_id,
+        "thread_id": thread_id,
+        "item_ref_kind": "directive",
+        "build_profile": "release",
+    }));
+}
+
+#[cfg(feature = "latency-profiling")]
+pub fn record_context_composition(context_item_contributions: &serde_json::Value) {
+    let (invocation_id, thread_id) = profiling_identity();
+    tracing::info!(
+        target: "ryeos_directive_runtime",
+        event = "directive_context_composition",
+        schema_version = 1_u32,
+        invocation_id,
+        thread_id,
+        context_item_contributions = %context_item_contributions,
+        "directive context contribution metrics"
+    );
+    emit_captured_timing_record(serde_json::json!({
+        "event": "directive_context_composition",
+        "schema_version": 1,
+        "clock_domain": "directive_process_monotonic",
+        "invocation_id": invocation_id,
+        "thread_id": thread_id,
+        "item_ref_kind": "directive",
+        "context_item_contributions": context_item_contributions,
+    }));
+}
+
+#[cfg(feature = "latency-profiling")]
+#[allow(clippy::too_many_arguments)]
+pub fn record_prompt_source_composition(
+    provider_id: &str,
+    model_id: &str,
+    directive_template_bytes: usize,
+    system_context_bytes: usize,
+    before_context_bytes: usize,
+    after_context_bytes: usize,
+    tool_count: usize,
+    request_input_bytes: &BTreeMap<String, u64>,
+) {
+    let (invocation_id, thread_id) = profiling_identity();
+    tracing::info!(
+        target: "ryeos_directive_runtime",
+        event = "directive_prompt_source_composition",
+        schema_version = 1_u32,
+        invocation_id,
+        thread_id,
+        provider_id,
+        model_id,
+        directive_template_bytes,
+        system_context_bytes,
+        before_context_bytes,
+        after_context_bytes,
+        tool_count,
+        request_input_bytes = %serde_json::to_string(request_input_bytes)
+            .unwrap_or_else(|_| "{}".to_string()),
+        "directive prompt source contribution metrics"
+    );
+    emit_captured_timing_record(serde_json::json!({
+        "event": "directive_prompt_source_composition",
+        "schema_version": 1,
+        "clock_domain": "directive_process_monotonic",
+        "invocation_id": invocation_id,
+        "thread_id": thread_id,
+        "item_ref_kind": "directive",
+        "profile": {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "directive_template_bytes": directive_template_bytes,
+            "system_context_bytes": system_context_bytes,
+            "before_context_bytes": before_context_bytes,
+            "after_context_bytes": after_context_bytes,
+            "tool_count": tool_count,
+            "request_input_bytes": request_input_bytes,
+        },
+    }));
+}
+
 fn current_provider_call_id() -> Option<u64> {
     if let Ok(call_id) = CURRENT_PROVIDER_CALL_ID.try_with(|call_id| *call_id) {
         // A present task-local containing `None` deliberately disables
@@ -545,8 +758,95 @@ fn current_provider_call_id() -> Option<u64> {
     process_timings()?.active_provider_call_fallback()
 }
 
-pub fn begin_provider_call(provider_id: &str, turn: u32, attempt: u32) -> Option<u64> {
-    process_timings()?.begin_provider_call(provider_id, turn, attempt)
+pub fn begin_provider_call(
+    provider_id: &str,
+    model_id: &str,
+    turn: u32,
+    attempt: u32,
+) -> Option<u64> {
+    process_timings()?.begin_provider_call(provider_id, model_id, turn, attempt)
+}
+
+#[cfg(feature = "latency-profiling")]
+pub fn record_provider_request_profile(
+    call_id: Option<u64>,
+    provider_id: &str,
+    model_id: &str,
+    turn: u32,
+    attempt: u32,
+    metrics: &crate::provider_adapter::prepared::PreparedRequestMetrics,
+) {
+    let (invocation_id, thread_id) = profiling_identity();
+    tracing::info!(
+        target: "ryeos_directive_runtime",
+        event = "directive_provider_request_profile",
+        schema_version = 1_u32,
+        invocation_id,
+        thread_id,
+        provider_call_id = call_id,
+        provider_id,
+        model_id,
+        turn,
+        attempt,
+        request_prepare_duration_us = metrics.prepare_duration_us,
+        request_body_bytes = metrics.body_bytes,
+        estimated_request_tokens = metrics.estimated_body_tokens,
+        token_estimate_method = "ceil(serialized_provider_body_bytes/4)",
+        source_message_count = metrics.source_message_count,
+        system_message_bytes = metrics.system_message_bytes,
+        user_message_bytes = metrics.user_message_bytes,
+        assistant_message_bytes = metrics.assistant_message_bytes,
+        tool_message_bytes = metrics.tool_message_bytes,
+        reasoning_replay_bytes = metrics.reasoning_replay_bytes,
+        converted_messages_bytes = metrics.converted_messages_bytes,
+        extracted_system_prompt_bytes = metrics.extracted_system_prompt_bytes,
+        provider_tool_schema_bytes = metrics.provider_tool_schema_bytes,
+        provider_tool_count = metrics.provider_tool_count,
+        provider_tool_schema_sha256 = metrics.provider_tool_schema_sha256.as_str(),
+        "directive provider request profile"
+    );
+    emit_captured_timing_record(serde_json::json!({
+        "event": "directive_provider_request_profile",
+        "schema_version": 1,
+        "clock_domain": "directive_process_monotonic",
+        "invocation_id": invocation_id,
+        "thread_id": thread_id,
+        "item_ref_kind": "directive",
+        "profile": {
+            "provider_call_id": call_id,
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "turn": turn,
+            "attempt": attempt,
+            "request_prepare_duration_us": metrics.prepare_duration_us,
+            "request_body_bytes": metrics.body_bytes,
+            "estimated_request_tokens": metrics.estimated_body_tokens,
+            "token_estimate_method": "ceil(serialized_provider_body_bytes/4)",
+            "source_message_count": metrics.source_message_count,
+            "system_message_bytes": metrics.system_message_bytes,
+            "user_message_bytes": metrics.user_message_bytes,
+            "assistant_message_bytes": metrics.assistant_message_bytes,
+            "tool_message_bytes": metrics.tool_message_bytes,
+            "reasoning_replay_bytes": metrics.reasoning_replay_bytes,
+            "converted_messages_bytes": metrics.converted_messages_bytes,
+            "extracted_system_prompt_bytes": metrics.extracted_system_prompt_bytes,
+            "provider_tool_schema_bytes": metrics.provider_tool_schema_bytes,
+            "provider_tool_count": metrics.provider_tool_count,
+            "provider_tool_schema_sha256": metrics.provider_tool_schema_sha256.as_str(),
+        },
+    }));
+}
+
+#[cfg(not(feature = "latency-profiling"))]
+#[inline(always)]
+pub fn record_provider_request_profile(
+    _call_id: Option<u64>,
+    _provider_id: &str,
+    _model_id: &str,
+    _turn: u32,
+    _attempt: u32,
+    _metrics: &crate::provider_adapter::prepared::PreparedRequestMetrics,
+) {
 }
 
 pub async fn scope_provider_call<F>(call_id: Option<u64>, future: F) -> F::Output
@@ -609,6 +909,28 @@ pub(crate) fn finish_connection_establishment(
     });
 }
 
+pub fn record_progressive_callback_batch(
+    source_event_count: usize,
+    callback_event_count: usize,
+    duration_us: u64,
+    succeeded: bool,
+) {
+    let Some(timings) = process_timings() else {
+        return;
+    };
+    let Some(call_id) = current_provider_call_id() else {
+        return;
+    };
+    timings.with_provider_call(call_id, |call, _| {
+        call.record_progressive_callback_batch(
+            source_event_count,
+            callback_event_count,
+            duration_us,
+            succeeded,
+        );
+    });
+}
+
 pub fn set_identity(invocation_id: &str, thread_id: &str) {
     if let Some(timings) = process_timings() {
         timings.set_identity(invocation_id, thread_id);
@@ -645,6 +967,12 @@ pub fn mark_provider_request_submitted() {
 pub fn mark_first_provider_event() {
     if let Some(timings) = process_timings() {
         timings.mark_first_provider_event(current_provider_call_id());
+    }
+}
+
+pub fn mark_first_reasoning_event() {
+    if let Some(timings) = process_timings() {
+        timings.mark_first_reasoning_event(current_provider_call_id());
     }
 }
 
@@ -727,13 +1055,14 @@ mod tests {
     fn provider_call_stage_offsets_are_first_write_wins() {
         let timings = DirectiveStageTimings::new(Instant::now());
         let call_id = timings
-            .begin_provider_call("provider-a", 3, 1)
+            .begin_provider_call("provider-a", "model-a", 3, 1)
             .expect("provider call timing slot");
 
         timings.with_provider_call(call_id, |call, _| {
             call.mark_request_submitted(11);
             call.mark_response_headers(23, "HTTP/2.0");
             call.mark_first_provider_event(29);
+            call.mark_first_reasoning_event(31);
             call.mark_request_submitted(101);
             call.mark_response_headers(103, "HTTP/1.1");
             call.mark_first_provider_event(109);
@@ -744,19 +1073,77 @@ mod tests {
             .expect("provider call");
         assert_eq!(call.call_id, call_id);
         assert_eq!(call.provider_id, "provider-a");
+        assert_eq!(call.model_id, "model-a");
         assert_eq!(call.turn, 3);
         assert_eq!(call.attempt, 1);
         assert_eq!(call.request_submitted_us, Some(11));
         assert_eq!(call.response_headers_us, Some(23));
         assert_eq!(call.http_version.as_deref(), Some("HTTP/2.0"));
         assert_eq!(call.first_provider_event_us, Some(29));
+        assert_eq!(call.first_reasoning_event_us, Some(31));
+        assert_eq!(call.progressive_callback_batch_count, 0);
+    }
+
+    #[test]
+    fn progressive_callback_metrics_aggregate_batches_and_failures() {
+        let timings = DirectiveStageTimings::new(Instant::now());
+        let call_id = timings
+            .begin_provider_call("provider-a", "model-a", 1, 1)
+            .expect("provider call timing slot");
+
+        timings.with_provider_call(call_id, |call, _| {
+            call.record_progressive_callback_batch(1, 1, 7_000, true);
+            call.record_progressive_callback_batch(55, 8, 9_000, true);
+            call.record_progressive_callback_batch(4, 2, 11_000, false);
+        });
+
+        let call = timings
+            .first_provider_call_snapshot()
+            .expect("provider call");
+        assert_eq!(call.progressive_callback_batch_count, 3);
+        assert_eq!(call.progressive_callback_batch_failures, 1);
+        assert_eq!(call.progressive_source_event_count, 60);
+        assert_eq!(call.progressive_callback_event_count, 11);
+        assert_eq!(call.progressive_callback_total_us, 27_000);
+        assert_eq!(call.progressive_callback_max_us, 11_000);
+        assert_eq!(call.progressive_callback_max_batch_items, 8);
+    }
+
+    #[test]
+    fn reasoning_milestone_fast_path_is_first_write_wins() {
+        let timings = DirectiveStageTimings::new(Instant::now());
+        let call_id = timings
+            .begin_provider_call("provider-a", "model-a", 1, 1)
+            .expect("provider call timing slot");
+
+        timings.mark_first_reasoning_event(Some(call_id));
+        let process_first = timings
+            .snapshot()
+            .first_reasoning_event_us
+            .expect("process reasoning milestone");
+        let call_first = timings
+            .first_provider_call_snapshot()
+            .and_then(|call| call.first_reasoning_event_us)
+            .expect("provider-call reasoning milestone");
+
+        timings.mark_first_reasoning_event(Some(call_id));
+        assert_eq!(
+            timings.snapshot().first_reasoning_event_us,
+            Some(process_first)
+        );
+        assert_eq!(
+            timings
+                .first_provider_call_snapshot()
+                .and_then(|call| call.first_reasoning_event_us),
+            Some(call_first)
+        );
     }
 
     #[test]
     fn transport_aggregation_counts_failures_and_uses_outer_bounds() {
         let timings = DirectiveStageTimings::new(Instant::now());
         let call_id = timings
-            .begin_provider_call("provider-a", 3, 1)
+            .begin_provider_call("provider-a", "model-a", 3, 1)
             .expect("provider call timing slot");
 
         timings.with_provider_call(call_id, |call, _| {
@@ -792,7 +1179,7 @@ mod tests {
     fn overlapping_calls_disable_spawned_task_fallback_attribution() {
         let sequential = DirectiveStageTimings::new(Instant::now());
         let sequential_call = sequential
-            .begin_provider_call("provider-a", 2, 1)
+            .begin_provider_call("provider-a", "model-a", 2, 1)
             .expect("provider call timing slot");
         assert_eq!(
             sequential.active_provider_call_fallback(),
@@ -803,12 +1190,12 @@ mod tests {
 
         let timings = DirectiveStageTimings::new(Instant::now());
         let first = timings
-            .begin_provider_call("provider-a", 3, 1)
+            .begin_provider_call("provider-a", "model-a", 3, 1)
             .expect("provider call timing slot");
         assert_eq!(timings.active_provider_call_fallback(), Some(first));
 
         let second = timings
-            .begin_provider_call("provider-a", 3, 2)
+            .begin_provider_call("provider-a", "model-a", 3, 2)
             .expect("provider call timing slot");
         assert_eq!(timings.active_provider_call_fallback(), None);
 
@@ -824,7 +1211,7 @@ mod tests {
         for attempt in 0..MAX_PROVIDER_CALL_TIMING_RECORDS {
             assert!(
                 timings
-                    .begin_provider_call("provider-a", 1, (attempt + 1) as u32)
+                    .begin_provider_call("provider-a", "model-a", 1, (attempt + 1) as u32)
                     .is_some(),
                 "timing slot within the bound"
             );
@@ -834,6 +1221,7 @@ mod tests {
             timings
                 .begin_provider_call(
                     "provider-a",
+                    "model-a",
                     1,
                     (MAX_PROVIDER_CALL_TIMING_RECORDS + 1) as u32,
                 )

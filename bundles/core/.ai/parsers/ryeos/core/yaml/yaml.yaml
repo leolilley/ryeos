@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:54Z:7809a4eec8a86e84b7499c38fddffb1886c9241bc1e94c19b85d6658bfb4961d:hyTh3PLac+aEa5Sv1kh2Nu7+uq5LSB/79CQ9DTRKAN0spJpYXKOfNvNOpJqB7xkrivT2WgLmtgIDLtt/OQMsDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-02T08:58:48Z:d377918622169d186440f255f641b09d8940335f45f2e4aecb71115cb48d7414:5AosiSiawefLA7BwGzmeSMfOW+SDVe6ab71PlGLokxDLe42Fy+etD6AGhvv1cCa+pUugH7Srar1pDba+qZ0nCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: "ryeos/core/yaml"
 description: "YAML document parser: parses entire file as a YAML mapping"
@@ -6,6 +6,8 @@ handler: "handler:ryeos/core/yaml-document"
 parser_api_version: 1
 parser_config:
   require_mapping: true
+cache:
+  mode: content_addressed
 output_schema:
   root_type: mapping
   required: {}

@@ -44,6 +44,8 @@ pub struct ModelSpec {
     pub context_window: Option<u64>,
     #[serde(default)]
     pub sampling: Option<SamplingConfig>,
+    #[serde(default)]
+    pub reasoning: Option<ReasoningConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +55,24 @@ pub struct SamplingConfig {
     pub temperature: Option<f64>,
     #[serde(default)]
     pub seed: Option<u64>,
+}
+
+/// Provider-neutral reasoning policy authored on a signed model directive.
+/// Absence preserves the provider descriptor's existing request shape.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReasoningConfig {
+    pub mode: ReasoningMode,
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReasoningMode {
+    ProviderDefault,
+    Enabled,
+    Disabled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,6 +215,41 @@ pub struct SchemasConfig {
     pub streaming: Option<StreamingConfig>,
     #[serde(default)]
     pub output_limit: Option<OutputLimitConfig>,
+    #[serde(default)]
+    pub reasoning: Option<ReasoningSchemaConfig>,
+}
+
+/// Signed mapping from provider-neutral reasoning policy to provider-native
+/// request fields. The runtime follows only these declared paths and values;
+/// provider and model identities never influence request mutation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReasoningSchemaConfig {
+    #[serde(default)]
+    pub mode: Option<ReasoningModeSchemaConfig>,
+    #[serde(default)]
+    pub effort: Option<ReasoningEffortSchemaConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReasoningModeSchemaConfig {
+    pub path: String,
+    pub values: ReasoningModeValues,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReasoningModeValues {
+    pub enabled: Value,
+    pub disabled: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReasoningEffortSchemaConfig {
+    pub path: String,
+    pub values: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1232,6 +1287,14 @@ impl ProviderConfig {
             );
         }
 
+        if let Some(reasoning) = self
+            .schemas
+            .as_ref()
+            .and_then(|schemas| schemas.reasoning.as_ref())
+        {
+            validate_reasoning_schema(reasoning, context)?;
+        }
+
         if let Some(pricing) = self.pricing.as_ref()
             && pricing.explicitly_free
             && (pricing
@@ -1448,6 +1511,8 @@ pub struct ResolvedProviderSnapshot {
     #[serde(deserialize_with = "deserialize_required_option")]
     pub sampling: Option<SamplingConfig>,
     #[serde(deserialize_with = "deserialize_required_option")]
+    pub reasoning: Option<ReasoningConfig>,
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub matched_profile: Option<String>,
     pub config_value_digest: String,
     pub config_sources: Vec<ProviderConfigSource>,
@@ -1564,6 +1629,7 @@ struct ResolvedTarget {
     model_name: String,
     context_window: u64,
     sampling: Option<SamplingConfig>,
+    reasoning: Option<ReasoningConfig>,
 }
 
 pub fn prepare_directive_launch(
@@ -1663,6 +1729,13 @@ pub fn prepare_directive_launch(
         .map_err(|error| {
             DirectivePreparationError::configuration("provider_config_invalid", error.to_string())
         })?;
+    validate_reasoning_selection(
+        target.reasoning.as_ref(),
+        resolved_provider
+            .schemas
+            .as_ref()
+            .and_then(|schemas| schemas.reasoning.as_ref()),
+    )?;
     let config_hash =
         ResolvedProviderSnapshot::compute_hash(&resolved_provider).map_err(|error| {
             DirectivePreparationError::internal(
@@ -1688,6 +1761,7 @@ pub fn prepare_directive_launch(
         model_name: target.model_name,
         context_window: target.context_window,
         sampling: target.sampling,
+        reasoning: target.reasoning,
         matched_profile,
         config_value_digest: provider_entry.value_digest.clone(),
         config_sources: provider_entry.contributors.clone(),
@@ -1803,6 +1877,7 @@ fn resolve_target(
             model_name: selected.model.clone(),
             context_window: selected.context_window,
             sampling: model.sampling.clone(),
+            reasoning: model.reasoning.clone(),
         });
     }
 
@@ -1817,6 +1892,7 @@ fn resolve_target(
         model_name,
         context_window,
         sampling: model.sampling.clone(),
+        reasoning: model.reasoning.clone(),
     })
 }
 
@@ -1861,6 +1937,145 @@ fn validate_model_name(
         ));
     }
     Ok(())
+}
+
+fn validate_reasoning_selection(
+    reasoning: Option<&ReasoningConfig>,
+    schema: Option<&ReasoningSchemaConfig>,
+) -> std::result::Result<(), DirectivePreparationError> {
+    let Some(reasoning) = reasoning else {
+        return Ok(());
+    };
+    if reasoning.mode == ReasoningMode::Disabled && reasoning.effort.is_some() {
+        return Err(DirectivePreparationError::configuration(
+            "model_reasoning_invalid",
+            "model.reasoning.effort cannot be combined with disabled reasoning",
+        ));
+    }
+    if reasoning.mode != ReasoningMode::ProviderDefault
+        && schema.and_then(|schema| schema.mode.as_ref()).is_none()
+    {
+        return Err(DirectivePreparationError::configuration(
+            "model_reasoning_unsupported",
+            "the selected provider route does not declare a reasoning mode mapping",
+        ));
+    }
+    if let Some(effort) = reasoning.effort.as_deref() {
+        validate_reasoning_effort_name(effort).map_err(|message| {
+            DirectivePreparationError::configuration("model_reasoning_invalid", message)
+        })?;
+        let supported = schema
+            .and_then(|schema| schema.effort.as_ref())
+            .is_some_and(|config| config.values.contains_key(effort));
+        if !supported {
+            return Err(DirectivePreparationError::configuration(
+                "model_reasoning_unsupported",
+                format!("the selected provider route does not declare reasoning effort {effort:?}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_reasoning_schema(config: &ReasoningSchemaConfig, context: &str) -> Result<()> {
+    if config.mode.is_none() && config.effort.is_none() {
+        bail!("provider config{context}: schemas.reasoning must declare mode or effort mapping");
+    }
+    if let Some(mode) = config.mode.as_ref() {
+        validate_reasoning_path("reasoning.mode.path", &mode.path, context)?;
+        validate_reasoning_wire_value(
+            "reasoning.mode.values.enabled",
+            &mode.values.enabled,
+            context,
+        )?;
+        validate_reasoning_wire_value(
+            "reasoning.mode.values.disabled",
+            &mode.values.disabled,
+            context,
+        )?;
+        if mode.values.enabled == mode.values.disabled {
+            bail!(
+                "provider config{context}: reasoning enabled and disabled wire values must differ"
+            );
+        }
+    }
+    if let Some(effort) = config.effort.as_ref() {
+        validate_reasoning_path("reasoning.effort.path", &effort.path, context)?;
+        if effort.values.is_empty() || effort.values.len() > 32 {
+            bail!("provider config{context}: reasoning.effort.values must contain 1-32 entries");
+        }
+        for (name, value) in &effort.values {
+            validate_reasoning_effort_name(name).map_err(|message| {
+                anyhow::anyhow!("provider config{context}: reasoning effort key: {message}")
+            })?;
+            validate_reasoning_wire_value("reasoning.effort.values", value, context)?;
+        }
+    }
+    if let (Some(mode), Some(effort)) = (config.mode.as_ref(), config.effort.as_ref())
+        && object_paths_conflict(&mode.path, &effort.path)
+    {
+        bail!(
+            "provider config{context}: reasoning mode and effort paths must not equal or contain one another"
+        );
+    }
+    Ok(())
+}
+
+fn validate_reasoning_path(label: &str, path: &str, context: &str) -> Result<()> {
+    let segments = path.split('.').collect::<Vec<_>>();
+    if path.is_empty()
+        || path.len() > 256
+        || segments.len() > 16
+        || segments.iter().any(|segment| {
+            segment.is_empty()
+                || segment.len() > 64
+                || !segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        })
+    {
+        bail!("provider config{context}: {label} must be a bounded dot-separated object path");
+    }
+    Ok(())
+}
+
+fn validate_reasoning_effort_name(value: &str) -> std::result::Result<(), String> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
+    {
+        return Err(
+            "reasoning effort must be 1-64 lowercase ASCII letters, digits, '_' or '-'".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_reasoning_wire_value(label: &str, value: &Value, context: &str) -> Result<()> {
+    if !matches!(value, Value::Bool(_) | Value::Number(_) | Value::String(_)) {
+        bail!("provider config{context}: {label} must be a non-null JSON scalar");
+    }
+    if value
+        .as_str()
+        .is_some_and(|value| value.len() > 128 || value.chars().any(char::is_control))
+    {
+        bail!(
+            "provider config{context}: {label} string must be at most 128 bytes without control characters"
+        );
+    }
+    Ok(())
+}
+
+fn object_paths_conflict(left: &str, right: &str) -> bool {
+    left == right
+        || left
+            .strip_prefix(right)
+            .is_some_and(|suffix| suffix.starts_with('.'))
+        || right
+            .strip_prefix(left)
+            .is_some_and(|suffix| suffix.starts_with('.'))
 }
 
 fn validate_context_window(value: u64) -> std::result::Result<(), DirectivePreparationError> {
@@ -1928,6 +2143,15 @@ fn runtime_facts(
             )
         })?,
     );
+    facts.insert(
+        "reasoning".to_string(),
+        serde_json::to_value(&snapshot.reasoning).map_err(|error| {
+            DirectivePreparationError::internal(
+                "runtime_facts_failed",
+                format!("could not serialize reasoning facts: {error}"),
+            )
+        })?,
+    );
     if let Some(profile) = &snapshot.matched_profile {
         facts.insert(
             "matched_profile".to_string(),
@@ -1953,4 +2177,247 @@ fn runtime_facts(
         ),
     );
     Ok(facts)
+}
+
+#[cfg(test)]
+mod reasoning_tests {
+    use super::*;
+
+    fn snapshot(reasoning: Option<ReasoningConfig>) -> ResolvedProviderSnapshot {
+        let provider = ProviderConfig {
+            category: None,
+            family: ProtocolFamily::ChatCompletions,
+            base_url: "https://example.invalid".to_string(),
+            auth: AuthConfig::default(),
+            headers: HashMap::new(),
+            schemas: None,
+            pricing: Some(PricingConfig {
+                explicitly_free: true,
+                input_per_million: None,
+                output_per_million: None,
+                models: HashMap::new(),
+            }),
+            spend_authority: None,
+            extra: HashMap::new(),
+            body_template: None,
+            body_extra: None,
+            profiles: Vec::new(),
+        };
+        ResolvedProviderSnapshot {
+            provider_id: "fixture".to_string(),
+            model_name: "fixture-model".to_string(),
+            context_window: 16_384,
+            sampling: None,
+            reasoning,
+            matched_profile: None,
+            config_value_digest: "0".repeat(64),
+            config_sources: vec![ProviderConfigSource {
+                space: SnapshotItemSpace::Bundle,
+                root_label: "bundle:fixture".to_string(),
+                canonical_id: "ryeos-runtime/model-providers/fixture".to_string(),
+                content_digest: "1".repeat(64),
+                trust_class: SnapshotTrustClass::TrustedBundle,
+            }],
+            config_hash: ResolvedProviderSnapshot::compute_hash(&provider).expect("provider hash"),
+            provider,
+        }
+    }
+
+    fn launch_provider() -> ProviderConfig {
+        serde_json::from_value(serde_json::json!({
+            "family": "chat_completions",
+            "base_url": "https://example.invalid",
+            "schemas": {
+                "streaming": {"mode": "delta_merge"},
+                "output_limit": {
+                    "path": "max_tokens",
+                    "semantics": "provider_native_output_tokens"
+                },
+                "reasoning": {
+                    "mode": {
+                        "path": "thinking.type",
+                        "values": {"enabled": "on", "disabled": "off"}
+                    },
+                    "effort": {
+                        "path": "reasoning_effort",
+                        "values": {"high": "high", "max": "max"}
+                    }
+                }
+            },
+            "pricing": {"explicitly_free": true},
+            "body_template": {
+                "model": "{model}",
+                "messages": "{messages}",
+                "stream": "{stream}"
+            }
+        }))
+        .expect("launch provider fixture")
+    }
+
+    fn schema() -> ReasoningSchemaConfig {
+        ReasoningSchemaConfig {
+            mode: Some(ReasoningModeSchemaConfig {
+                path: "thinking.type".to_string(),
+                values: ReasoningModeValues {
+                    enabled: Value::String("on".to_string()),
+                    disabled: Value::String("off".to_string()),
+                },
+            }),
+            effort: Some(ReasoningEffortSchemaConfig {
+                path: "reasoning_effort".to_string(),
+                values: BTreeMap::from([
+                    ("high".to_string(), Value::String("high".to_string())),
+                    ("max".to_string(), Value::String("max".to_string())),
+                ]),
+            }),
+        }
+    }
+
+    #[test]
+    fn absent_reasoning_policy_preserves_provider_default_without_schema() {
+        validate_reasoning_selection(None, None).expect("absent policy must remain compatible");
+        validate_reasoning_selection(
+            Some(&ReasoningConfig {
+                mode: ReasoningMode::ProviderDefault,
+                effort: None,
+            }),
+            None,
+        )
+        .expect("explicit provider_default must not require a provider mapping");
+    }
+
+    #[test]
+    fn explicit_reasoning_mode_requires_a_signed_provider_mapping() {
+        let error = validate_reasoning_selection(
+            Some(&ReasoningConfig {
+                mode: ReasoningMode::Disabled,
+                effort: None,
+            }),
+            None,
+        )
+        .expect_err("unmapped reasoning mode must fail before provider execution");
+        assert_eq!(error.code, "model_reasoning_unsupported");
+        assert_eq!(
+            error.classification,
+            DirectivePreparationErrorClass::Configuration
+        );
+        assert_eq!(error.binding, Some(MODEL_BINDING));
+    }
+
+    #[test]
+    fn disabled_reasoning_rejects_effort_even_when_both_are_mapped() {
+        let error = validate_reasoning_selection(
+            Some(&ReasoningConfig {
+                mode: ReasoningMode::Disabled,
+                effort: Some("high".to_string()),
+            }),
+            Some(&schema()),
+        )
+        .expect_err("disabled reasoning plus effort is contradictory");
+        assert_eq!(error.code, "model_reasoning_invalid");
+    }
+
+    #[test]
+    fn unsupported_effort_fails_closed_at_launch_preparation() {
+        let error = validate_reasoning_selection(
+            Some(&ReasoningConfig {
+                mode: ReasoningMode::Enabled,
+                effort: Some("low".to_string()),
+            }),
+            Some(&schema()),
+        )
+        .expect_err("unmapped effort must fail before provider execution");
+        assert_eq!(error.code, "model_reasoning_unsupported");
+        assert!(error.message.contains("low"));
+    }
+
+    #[test]
+    fn provider_reasoning_schema_rejects_conflicting_paths() {
+        let mut schema = schema();
+        schema.effort.as_mut().expect("effort schema").path = "thinking".to_string();
+        let error = validate_reasoning_schema(&schema, " test").expect_err("path conflict");
+        assert!(error.to_string().contains("must not equal or contain"));
+    }
+
+    #[test]
+    fn sealed_provider_snapshot_requires_an_explicit_reasoning_field() {
+        let mut value = serde_json::to_value(snapshot(None)).expect("serialize snapshot");
+        value
+            .as_object_mut()
+            .expect("snapshot object")
+            .remove("reasoning");
+        let error = serde_json::from_value::<ResolvedProviderSnapshot>(value)
+            .expect_err("old snapshot shape must fail closed");
+        assert!(error.to_string().contains("reasoning"));
+    }
+
+    #[test]
+    fn reasoning_policy_is_recorded_as_a_sealed_launch_fact() {
+        let expected = ReasoningConfig {
+            mode: ReasoningMode::Disabled,
+            effort: None,
+        };
+        let snapshot = snapshot(Some(expected.clone()));
+        let authority = resolve_accounting_authority(
+            &snapshot,
+            &AccountingAuthorityInputs {
+                context_window: snapshot.context_window,
+                max_provider_output_tokens_per_turn: 1024,
+            },
+        )
+        .expect("accounting authority");
+        let facts = runtime_facts(&snapshot, &authority).expect("runtime facts");
+        assert_eq!(
+            facts.get("reasoning"),
+            Some(&serde_json::to_value(expected).expect("reasoning fact"))
+        );
+    }
+
+    #[test]
+    fn launch_preparation_resolves_and_seals_reasoning_policy() {
+        let composed = serde_json::json!({
+            "model": {
+                "provider": "fixture",
+                "name": "fixture-model",
+                "context_window": 16384,
+                "reasoning": {"mode": "disabled"}
+            }
+        });
+        let config_id = "ryeos-runtime/model-providers/fixture".to_string();
+        let provider_catalog = BTreeMap::from([(
+            config_id.clone(),
+            VerifiedConfigItem {
+                value: serde_json::to_value(launch_provider()).expect("provider value"),
+                value_digest: "0".repeat(64),
+                contributors: vec![ProviderConfigSource {
+                    space: SnapshotItemSpace::Bundle,
+                    root_label: "bundle:fixture".to_string(),
+                    canonical_id: config_id,
+                    content_digest: "1".repeat(64),
+                    trust_class: SnapshotTrustClass::TrustedBundle,
+                }],
+            },
+        )]);
+
+        let prepared = prepare_directive_launch(DirectiveLaunchPreparationInput {
+            primary_ref: "directive:test/model",
+            primary_composed: &composed,
+            model_ref: "directive:test/model",
+            model_composed: &composed,
+            model_routing: None,
+            provider_catalog: &provider_catalog,
+            execution: None,
+        })
+        .expect("reasoning policy launch preparation");
+
+        let expected = ReasoningConfig {
+            mode: ReasoningMode::Disabled,
+            effort: None,
+        };
+        assert_eq!(prepared.snapshot.reasoning, Some(expected.clone()));
+        assert_eq!(
+            prepared.runtime_facts.get("reasoning"),
+            Some(&serde_json::to_value(expected).expect("reasoning fact"))
+        );
+    }
 }

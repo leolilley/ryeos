@@ -366,17 +366,31 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
     })
 }
 
-const MAX_CAPTURED_CHILD_TIMING_RECORDS: usize = 128;
+// A profiling build can emit two records per provider attempt (timing + request
+// shape), the process summary, and the activation/context/prompt-source records.
+// Keep a small fixed headroom over that exact bounded maximum; ordinary builds
+// emit only provider timings and the process summary.
+const MAX_CAPTURED_CHILD_TIMING_RECORDS: usize = 260;
 const MAX_CAPTURED_CHILD_TIMING_RECORD_BYTES: usize = 64 * 1024;
 const MAX_CAPTURED_CHILD_TIMING_ID_BYTES: usize = 256;
 const MAX_CAPTURED_CHILD_PROVIDER_ID_BYTES: usize = 256;
+const MAX_CAPTURED_CHILD_MODEL_ID_BYTES: usize = 256;
 const MAX_CAPTURED_CHILD_HTTP_VERSION_BYTES: usize = 32;
+const MAX_CAPTURED_CONTEXT_POSITIONS: usize = 16;
+const MAX_CAPTURED_CONTEXT_ITEMS: usize = 256;
+const MAX_CAPTURED_CONTEXT_POSITION_BYTES: usize = 64;
+const MAX_CAPTURED_CONTEXT_ITEM_ID_BYTES: usize = 512;
+const MAX_CAPTURED_REQUEST_INPUTS: usize = 256;
+const MAX_CAPTURED_REQUEST_INPUT_NAME_BYTES: usize = 256;
+const MAX_CAPTURED_TOOL_COUNT: u64 = 16_384;
+const SHA256_HEX_BYTES: usize = 64;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CapturedProviderCallTiming {
     call_id: u64,
     provider_id: String,
+    model_id: String,
     turn: u32,
     attempt: u32,
     call_started_us: u64,
@@ -384,6 +398,7 @@ struct CapturedProviderCallTiming {
     response_headers_us: Option<u64>,
     http_version: Option<String>,
     first_provider_event_us: Option<u64>,
+    first_reasoning_event_us: Option<u64>,
     dns_lookup_first_started_us: Option<u64>,
     dns_lookup_last_done_us: Option<u64>,
     dns_lookup_count: u32,
@@ -396,6 +411,13 @@ struct CapturedProviderCallTiming {
     connection_establishment_completed_count: u32,
     connection_establishment_total_us: u64,
     connection_establishment_failures: u32,
+    progressive_callback_batch_count: u32,
+    progressive_callback_batch_failures: u32,
+    progressive_source_event_count: u64,
+    progressive_callback_event_count: u64,
+    progressive_callback_total_us: u64,
+    progressive_callback_max_us: u64,
+    progressive_callback_max_batch_items: u32,
     call_finished_us: Option<u64>,
     completion: Option<String>,
 }
@@ -415,12 +437,85 @@ struct CapturedDirectiveStageTiming {
     provider_response_headers_us: Option<u64>,
     provider_http_version: Option<String>,
     first_provider_event_us: Option<u64>,
+    first_reasoning_event_us: Option<u64>,
     first_non_whitespace_text_us: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CapturedProviderRequestProfile {
+    provider_call_id: Option<u64>,
+    provider_id: String,
+    model_id: String,
+    turn: u32,
+    attempt: u32,
+    request_prepare_duration_us: u64,
+    request_body_bytes: u64,
+    estimated_request_tokens: u64,
+    token_estimate_method: String,
+    source_message_count: u32,
+    system_message_bytes: u64,
+    user_message_bytes: u64,
+    assistant_message_bytes: u64,
+    tool_message_bytes: u64,
+    reasoning_replay_bytes: u64,
+    converted_messages_bytes: u64,
+    extracted_system_prompt_bytes: u64,
+    provider_tool_schema_bytes: u64,
+    provider_tool_count: u32,
+    provider_tool_schema_sha256: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CapturedContextItemContribution {
+    item_id: String,
+    tokens: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CapturedPromptSourceProfile {
+    provider_id: String,
+    model_id: String,
+    directive_template_bytes: u64,
+    system_context_bytes: u64,
+    before_context_bytes: u64,
+    after_context_bytes: u64,
+    tool_count: u64,
+    request_input_bytes: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event", deny_unknown_fields)]
 enum CapturedChildTimingRecord {
+    #[serde(rename = "latency_profiling_enabled")]
+    ProfilingEnabled {
+        schema_version: u32,
+        clock_domain: String,
+        invocation_id: Option<String>,
+        thread_id: Option<String>,
+        item_ref_kind: String,
+        build_profile: String,
+    },
+    #[serde(rename = "directive_context_composition")]
+    ContextComposition {
+        schema_version: u32,
+        clock_domain: String,
+        invocation_id: Option<String>,
+        thread_id: Option<String>,
+        item_ref_kind: String,
+        context_item_contributions: BTreeMap<String, Vec<CapturedContextItemContribution>>,
+    },
+    #[serde(rename = "directive_prompt_source_composition")]
+    PromptSourceComposition {
+        schema_version: u32,
+        clock_domain: String,
+        invocation_id: Option<String>,
+        thread_id: Option<String>,
+        item_ref_kind: String,
+        profile: CapturedPromptSourceProfile,
+    },
     #[serde(rename = "directive_provider_call_timing")]
     ProviderCall {
         schema_version: u32,
@@ -447,6 +542,15 @@ enum CapturedChildTimingRecord {
         summary_emitted_us: u64,
         completion: String,
     },
+    #[serde(rename = "directive_provider_request_profile")]
+    ProviderRequestProfile {
+        schema_version: u32,
+        clock_domain: String,
+        invocation_id: Option<String>,
+        thread_id: Option<String>,
+        item_ref_kind: String,
+        profile: CapturedProviderRequestProfile,
+    },
 }
 
 impl CapturedProviderCallTiming {
@@ -454,6 +558,7 @@ impl CapturedProviderCallTiming {
         self.call_id > 0
             && self.attempt > 0
             && bounded_nonempty(&self.provider_id, MAX_CAPTURED_CHILD_PROVIDER_ID_BYTES)
+            && bounded_nonempty(&self.model_id, MAX_CAPTURED_CHILD_MODEL_ID_BYTES)
             && self
                 .http_version
                 .as_deref()
@@ -464,12 +569,120 @@ impl CapturedProviderCallTiming {
                     "completed" | "interrupted" | "cancelled" | "error"
                 )
             })
+            && self.progressive_callback_batch_failures <= self.progressive_callback_batch_count
+            && self.progressive_callback_max_batch_items as usize
+                <= ryeos_runtime::MAX_RUNTIME_EVENT_BATCH_ITEMS
+            && self.progressive_callback_total_us >= self.progressive_callback_max_us
+            && self.progressive_source_event_count >= self.progressive_callback_event_count
+            && if self.progressive_callback_batch_count == 0 {
+                self.progressive_callback_batch_failures == 0
+                    && self.progressive_source_event_count == 0
+                    && self.progressive_callback_event_count == 0
+                    && self.progressive_callback_total_us == 0
+                    && self.progressive_callback_max_us == 0
+                    && self.progressive_callback_max_batch_items == 0
+            } else {
+                self.progressive_callback_max_batch_items > 0
+                    && self.progressive_callback_event_count
+                        >= u64::from(self.progressive_callback_batch_count)
+            }
     }
+}
+
+impl CapturedProviderRequestProfile {
+    fn validate(&self) -> bool {
+        self.provider_call_id.is_none_or(|call_id| call_id > 0)
+            && self.attempt > 0
+            && self.request_body_bytes > 0
+            && bounded_nonempty(&self.provider_id, MAX_CAPTURED_CHILD_PROVIDER_ID_BYTES)
+            && bounded_nonempty(&self.model_id, MAX_CAPTURED_CHILD_MODEL_ID_BYTES)
+            && self.token_estimate_method == "ceil(serialized_provider_body_bytes/4)"
+            && self.provider_tool_schema_sha256.len() == SHA256_HEX_BYTES
+            && self
+                .provider_tool_schema_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+    }
+}
+
+impl CapturedPromptSourceProfile {
+    fn validate(&self) -> bool {
+        bounded_nonempty(&self.provider_id, MAX_CAPTURED_CHILD_PROVIDER_ID_BYTES)
+            && bounded_nonempty(&self.model_id, MAX_CAPTURED_CHILD_MODEL_ID_BYTES)
+            && self.tool_count <= MAX_CAPTURED_TOOL_COUNT
+            && self.request_input_bytes.len() <= MAX_CAPTURED_REQUEST_INPUTS
+            && self
+                .request_input_bytes
+                .keys()
+                .all(|name| bounded_nonempty(name, MAX_CAPTURED_REQUEST_INPUT_NAME_BYTES))
+    }
+}
+
+fn validate_context_item_contributions(
+    contributions: &BTreeMap<String, Vec<CapturedContextItemContribution>>,
+) -> bool {
+    contributions.len() <= MAX_CAPTURED_CONTEXT_POSITIONS
+        && contributions
+            .keys()
+            .all(|position| bounded_nonempty(position, MAX_CAPTURED_CONTEXT_POSITION_BYTES))
+        && contributions
+            .values()
+            .try_fold(0usize, |total, items| total.checked_add(items.len()))
+            .is_some_and(|total| total <= MAX_CAPTURED_CONTEXT_ITEMS)
+        && contributions
+            .values()
+            .flatten()
+            .all(|item| bounded_nonempty(&item.item_id, MAX_CAPTURED_CONTEXT_ITEM_ID_BYTES))
 }
 
 impl CapturedChildTimingRecord {
     fn validate(&self, expected_thread_id: &str) -> bool {
         match self {
+            Self::ProfilingEnabled {
+                schema_version,
+                clock_domain,
+                invocation_id,
+                thread_id,
+                item_ref_kind,
+                build_profile,
+            } => {
+                *schema_version == 1
+                    && clock_domain == "directive_process_monotonic"
+                    && item_ref_kind == "directive"
+                    && build_profile == "release"
+                    && valid_identity(invocation_id.as_deref())
+                    && thread_id.as_deref() == Some(expected_thread_id)
+            }
+            Self::ContextComposition {
+                schema_version,
+                clock_domain,
+                invocation_id,
+                thread_id,
+                item_ref_kind,
+                context_item_contributions,
+            } => {
+                *schema_version == 1
+                    && clock_domain == "directive_process_monotonic"
+                    && item_ref_kind == "directive"
+                    && valid_identity(invocation_id.as_deref())
+                    && thread_id.as_deref() == Some(expected_thread_id)
+                    && validate_context_item_contributions(context_item_contributions)
+            }
+            Self::PromptSourceComposition {
+                schema_version,
+                clock_domain,
+                invocation_id,
+                thread_id,
+                item_ref_kind,
+                profile,
+            } => {
+                *schema_version == 1
+                    && clock_domain == "directive_process_monotonic"
+                    && item_ref_kind == "directive"
+                    && valid_identity(invocation_id.as_deref())
+                    && thread_id.as_deref() == Some(expected_thread_id)
+                    && profile.validate()
+            }
             Self::ProviderCall {
                 schema_version,
                 clock_domain,
@@ -481,7 +694,7 @@ impl CapturedChildTimingRecord {
                 exact_tcp_tls_split_available,
                 timing,
             } => {
-                *schema_version == 1
+                *schema_version == 4
                     && clock_domain == "directive_process_monotonic"
                     && item_ref_kind == "directive"
                     && dns_lookup_scope == "exact_resolver_future"
@@ -505,7 +718,7 @@ impl CapturedChildTimingRecord {
                 completion,
                 ..
             } => {
-                *schema_version == 2
+                *schema_version == 5
                     && clock_domain == "directive_process_monotonic"
                     && item_ref_kind == "directive"
                     && connection_establishment_scope
@@ -525,6 +738,21 @@ impl CapturedChildTimingRecord {
                         completion.as_str(),
                         "first_non_whitespace_text_published" | "process_exit"
                     )
+            }
+            Self::ProviderRequestProfile {
+                schema_version,
+                clock_domain,
+                invocation_id,
+                thread_id,
+                item_ref_kind,
+                profile,
+            } => {
+                *schema_version == 1
+                    && clock_domain == "directive_process_monotonic"
+                    && item_ref_kind == "directive"
+                    && valid_identity(invocation_id.as_deref())
+                    && thread_id.as_deref() == Some(expected_thread_id)
+                    && profile.validate()
             }
         }
     }
@@ -587,6 +815,71 @@ fn emit_captured_child_timing_records(
         };
         emitted = emitted.saturating_add(1);
         match record {
+            CapturedChildTimingRecord::ProfilingEnabled {
+                schema_version,
+                invocation_id,
+                build_profile,
+                ..
+            } => tracing::info!(
+                event = "runtime_child_profiling_record",
+                child_event = "latency_profiling_enabled",
+                child_schema_version = schema_version,
+                invocation_id = invocation_id.as_deref(),
+                thread_id = expected_thread_id,
+                build_profile = build_profile.as_str(),
+                child_profile_json = normalized.as_str(),
+                "captured runtime child profiling activation record"
+            ),
+            CapturedChildTimingRecord::ContextComposition {
+                schema_version,
+                invocation_id,
+                context_item_contributions,
+                ..
+            } => {
+                let context_position_count = context_item_contributions.len();
+                let context_item_count = context_item_contributions
+                    .values()
+                    .map(Vec::len)
+                    .sum::<usize>();
+                let context_token_estimate = context_item_contributions
+                    .values()
+                    .flatten()
+                    .fold(0_u64, |total, item| total.saturating_add(item.tokens));
+                tracing::info!(
+                    event = "runtime_child_profiling_record",
+                    child_event = "directive_context_composition",
+                    child_schema_version = schema_version,
+                    invocation_id = invocation_id.as_deref(),
+                    thread_id = expected_thread_id,
+                    context_position_count,
+                    context_item_count,
+                    context_token_estimate,
+                    child_profile_json = normalized.as_str(),
+                    "captured runtime child context composition record"
+                );
+            }
+            CapturedChildTimingRecord::PromptSourceComposition {
+                schema_version,
+                invocation_id,
+                profile,
+                ..
+            } => tracing::info!(
+                event = "runtime_child_profiling_record",
+                child_event = "directive_prompt_source_composition",
+                child_schema_version = schema_version,
+                invocation_id = invocation_id.as_deref(),
+                thread_id = expected_thread_id,
+                provider_id = profile.provider_id.as_str(),
+                model_id = profile.model_id.as_str(),
+                directive_template_bytes = profile.directive_template_bytes,
+                system_context_bytes = profile.system_context_bytes,
+                before_context_bytes = profile.before_context_bytes,
+                after_context_bytes = profile.after_context_bytes,
+                tool_count = profile.tool_count,
+                request_input_count = profile.request_input_bytes.len(),
+                child_profile_json = normalized.as_str(),
+                "captured runtime child prompt source composition record"
+            ),
             CapturedChildTimingRecord::ProviderCall {
                 schema_version,
                 invocation_id,
@@ -600,12 +893,14 @@ fn emit_captured_child_timing_records(
                 thread_id = expected_thread_id,
                 provider_call_id = timing.call_id,
                 provider_id = timing.provider_id.as_str(),
+                model_id = timing.model_id.as_str(),
                 turn = timing.turn,
                 attempt = timing.attempt,
                 completion = timing.completion.as_deref(),
                 request_submitted_us = timing.request_submitted_us,
                 response_headers_us = timing.response_headers_us,
                 first_provider_event_us = timing.first_provider_event_us,
+                first_reasoning_event_us = timing.first_reasoning_event_us,
                 dns_lookup_total_us = timing.dns_lookup_total_us,
                 connection_establishment_total_us = timing.connection_establishment_total_us,
                 exact_tcp_tls_split_available = false,
@@ -632,10 +927,38 @@ fn emit_captured_child_timing_records(
                 provider_request_submitted_us = timing.provider_request_submitted_us,
                 provider_response_headers_us = timing.provider_response_headers_us,
                 first_provider_event_us = timing.first_provider_event_us,
+                first_reasoning_event_us = timing.first_reasoning_event_us,
                 first_non_whitespace_text_us = timing.first_non_whitespace_text_us,
                 exact_tcp_tls_split_available = false,
                 child_timing_json = normalized.as_str(),
                 "captured runtime child stage timing record"
+            ),
+            CapturedChildTimingRecord::ProviderRequestProfile {
+                schema_version,
+                invocation_id,
+                profile,
+                ..
+            } => tracing::info!(
+                event = "runtime_child_timing_record",
+                child_event = "directive_provider_request_profile",
+                child_schema_version = schema_version,
+                invocation_id = invocation_id.as_deref(),
+                thread_id = expected_thread_id,
+                provider_call_id = profile.provider_call_id,
+                provider_id = profile.provider_id.as_str(),
+                model_id = profile.model_id.as_str(),
+                turn = profile.turn,
+                attempt = profile.attempt,
+                request_prepare_duration_us = profile.request_prepare_duration_us,
+                request_body_bytes = profile.request_body_bytes,
+                estimated_request_tokens = profile.estimated_request_tokens,
+                source_message_count = profile.source_message_count,
+                reasoning_replay_bytes = profile.reasoning_replay_bytes,
+                provider_tool_schema_bytes = profile.provider_tool_schema_bytes,
+                provider_tool_count = profile.provider_tool_count,
+                provider_tool_schema_sha256 = profile.provider_tool_schema_sha256.as_str(),
+                child_timing_json = normalized.as_str(),
+                "captured runtime child provider request profile"
             ),
         }
     }
@@ -782,10 +1105,11 @@ mod tests {
             provider_response_headers_us: Some(8),
             provider_http_version: Some("HTTP/2.0".to_string()),
             first_provider_event_us: Some(9),
+            first_reasoning_event_us: None,
             first_non_whitespace_text_us: Some(10),
         };
         let record = CapturedChildTimingRecord::RuntimeStage {
-            schema_version: 2,
+            schema_version: 5,
             clock_domain: "directive_process_monotonic".to_string(),
             invocation_id: Some("invocation-1".to_string()),
             thread_id: Some("T-expected".to_string()),
@@ -814,10 +1138,198 @@ mod tests {
         );
 
         let mut wrong_version = serde_json::to_value(&record).expect("timing fixture value");
-        wrong_version["schema_version"] = json!(1);
+        wrong_version["schema_version"] = json!(4);
         assert!(
             decode_captured_child_timing_record("T-expected", &wrong_version.to_string()).is_none(),
             "predecessor timing schemas are not accepted"
+        );
+    }
+
+    #[test]
+    fn captured_profiling_activation_is_release_and_thread_bound() {
+        let record = CapturedChildTimingRecord::ProfilingEnabled {
+            schema_version: 1,
+            clock_domain: "directive_process_monotonic".to_string(),
+            invocation_id: Some("invocation-1".to_string()),
+            thread_id: Some("T-expected".to_string()),
+            item_ref_kind: "directive".to_string(),
+            build_profile: "release".to_string(),
+        };
+        let encoded = serde_json::to_string(&record).expect("encode activation profile");
+
+        assert!(decode_captured_child_timing_record("T-expected", &encoded).is_some());
+        assert!(decode_captured_child_timing_record("T-other", &encoded).is_none());
+
+        let mut wrong_profile = serde_json::to_value(&record).expect("activation profile value");
+        wrong_profile["build_profile"] = json!("debug");
+        assert!(
+            decode_captured_child_timing_record("T-expected", &wrong_profile.to_string()).is_none(),
+            "only the release-equivalent profiling build marker is accepted"
+        );
+    }
+
+    #[test]
+    fn captured_context_composition_accepts_only_bounded_item_metrics() {
+        let record = CapturedChildTimingRecord::ContextComposition {
+            schema_version: 1,
+            clock_domain: "directive_process_monotonic".to_string(),
+            invocation_id: Some("invocation-1".to_string()),
+            thread_id: Some("T-expected".to_string()),
+            item_ref_kind: "directive".to_string(),
+            context_item_contributions: BTreeMap::from([(
+                "system".to_string(),
+                vec![CapturedContextItemContribution {
+                    item_id: "knowledge:example/context".to_string(),
+                    tokens: 321,
+                }],
+            )]),
+        };
+        let encoded = serde_json::to_string(&record).expect("encode context profile");
+        assert!(decode_captured_child_timing_record("T-expected", &encoded).is_some());
+
+        let mut content_bearing = serde_json::to_value(&record).expect("context profile value");
+        content_bearing["context_item_contributions"]["system"][0]["content"] =
+            json!("must never be accepted");
+        assert!(
+            decode_captured_child_timing_record("T-expected", &content_bearing.to_string())
+                .is_none(),
+            "context payload fields must fail closed"
+        );
+    }
+
+    #[test]
+    fn captured_prompt_source_profile_accepts_only_bounded_shape_metrics() {
+        let record = CapturedChildTimingRecord::PromptSourceComposition {
+            schema_version: 1,
+            clock_domain: "directive_process_monotonic".to_string(),
+            invocation_id: Some("invocation-1".to_string()),
+            thread_id: Some("T-expected".to_string()),
+            item_ref_kind: "directive".to_string(),
+            profile: CapturedPromptSourceProfile {
+                provider_id: "provider-a".to_string(),
+                model_id: "model-a".to_string(),
+                directive_template_bytes: 100,
+                system_context_bytes: 200,
+                before_context_bytes: 300,
+                after_context_bytes: 400,
+                tool_count: 2,
+                request_input_bytes: BTreeMap::from([
+                    ("message".to_string(), 20),
+                    ("history".to_string(), 2),
+                ]),
+            },
+        };
+        let encoded = serde_json::to_string(&record).expect("encode prompt source profile");
+        assert!(decode_captured_child_timing_record("T-expected", &encoded).is_some());
+
+        let mut content_bearing =
+            serde_json::to_value(&record).expect("prompt source profile value");
+        content_bearing["profile"]["prompt"] = json!("must never be accepted");
+        assert!(
+            decode_captured_child_timing_record("T-expected", &content_bearing.to_string())
+                .is_none(),
+            "prompt payload fields must fail closed"
+        );
+    }
+
+    #[test]
+    fn captured_provider_call_schema_includes_stream_and_callback_metrics() {
+        let record = CapturedChildTimingRecord::ProviderCall {
+            schema_version: 4,
+            clock_domain: "directive_process_monotonic".to_string(),
+            invocation_id: Some("invocation-1".to_string()),
+            thread_id: Some("T-expected".to_string()),
+            item_ref_kind: "directive".to_string(),
+            dns_lookup_scope: "exact_resolver_future".to_string(),
+            connection_establishment_scope:
+                "aggregate_reqwest_connector_may_include_dns_tcp_proxy_tls".to_string(),
+            exact_tcp_tls_split_available: false,
+            timing: CapturedProviderCallTiming {
+                call_id: 1,
+                provider_id: "provider-a".to_string(),
+                model_id: "model-a".to_string(),
+                turn: 1,
+                attempt: 1,
+                call_started_us: 10,
+                request_submitted_us: Some(20),
+                response_headers_us: Some(30),
+                http_version: Some("HTTP/2.0".to_string()),
+                first_provider_event_us: Some(40),
+                first_reasoning_event_us: Some(50),
+                dns_lookup_first_started_us: None,
+                dns_lookup_last_done_us: None,
+                dns_lookup_count: 0,
+                dns_lookup_completed_count: 0,
+                dns_lookup_total_us: 0,
+                dns_lookup_failures: 0,
+                connection_establishment_first_started_us: None,
+                connection_establishment_last_done_us: None,
+                connection_establishment_count: 0,
+                connection_establishment_completed_count: 0,
+                connection_establishment_total_us: 0,
+                connection_establishment_failures: 0,
+                progressive_callback_batch_count: 2,
+                progressive_callback_batch_failures: 0,
+                progressive_source_event_count: 56,
+                progressive_callback_event_count: 2,
+                progressive_callback_total_us: 14_000,
+                progressive_callback_max_us: 8_000,
+                progressive_callback_max_batch_items: 1,
+                call_finished_us: Some(60),
+                completion: Some("completed".to_string()),
+            },
+        };
+        let encoded = serde_json::to_string(&record).expect("encode provider timing");
+        assert!(decode_captured_child_timing_record("T-expected", &encoded).is_some());
+
+        let mut predecessor = serde_json::to_value(&record).expect("provider timing value");
+        predecessor["schema_version"] = json!(3);
+        assert!(
+            decode_captured_child_timing_record("T-expected", &predecessor.to_string()).is_none(),
+            "provider timing schema changes require an explicit version"
+        );
+    }
+
+    #[test]
+    fn captured_provider_request_profile_accepts_only_content_free_shape_metrics() {
+        let record = CapturedChildTimingRecord::ProviderRequestProfile {
+            schema_version: 1,
+            clock_domain: "directive_process_monotonic".to_string(),
+            invocation_id: Some("invocation-1".to_string()),
+            thread_id: Some("T-expected".to_string()),
+            item_ref_kind: "directive".to_string(),
+            profile: CapturedProviderRequestProfile {
+                provider_call_id: Some(1),
+                provider_id: "provider-a".to_string(),
+                model_id: "model-a".to_string(),
+                turn: 1,
+                attempt: 1,
+                request_prepare_duration_us: 80,
+                request_body_bytes: 4_096,
+                estimated_request_tokens: 1_024,
+                token_estimate_method: "ceil(serialized_provider_body_bytes/4)".to_string(),
+                source_message_count: 3,
+                system_message_bytes: 100,
+                user_message_bytes: 200,
+                assistant_message_bytes: 300,
+                tool_message_bytes: 400,
+                reasoning_replay_bytes: 50,
+                converted_messages_bytes: 1_100,
+                extracted_system_prompt_bytes: 90,
+                provider_tool_schema_bytes: 500,
+                provider_tool_count: 2,
+                provider_tool_schema_sha256: "a".repeat(SHA256_HEX_BYTES),
+            },
+        };
+        let encoded = serde_json::to_string(&record).expect("encode request profile");
+        assert!(decode_captured_child_timing_record("T-expected", &encoded).is_some());
+
+        let mut content_bearing = serde_json::to_value(&record).expect("request profile value");
+        content_bearing["profile"]["prompt"] = json!("must never be accepted");
+        assert!(
+            decode_captured_child_timing_record("T-expected", &content_bearing.to_string())
+                .is_none(),
+            "unknown content-bearing fields must fail closed"
         );
     }
 }

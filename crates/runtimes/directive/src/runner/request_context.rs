@@ -24,9 +24,16 @@ pub(super) fn visible_provider_tools(
     tools: &[ToolSchema],
     effective_caps: &[String],
     directive_outputs: Option<&[OutputSpec]>,
+    dispatch_tools_available: bool,
 ) -> Vec<ToolSchema> {
-    let visible_tools = crate::provider_adapter::tools::filter_tools_by_caps(tools, effective_caps);
-    let mut visible_tools_owned: Vec<_> = visible_tools.into_iter().cloned().collect();
+    let mut visible_tools_owned: Vec<_> = if dispatch_tools_available {
+        crate::provider_adapter::tools::filter_tools_by_caps(tools, effective_caps)
+            .into_iter()
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // The lifecycle tool follows filtered dispatchable tools. It is intercepted
     // by the runner and never reaches capability lookup or tool dispatch.
@@ -125,6 +132,29 @@ mod tests {
 
     #[test]
     fn empty_outputs_do_not_advertise_directive_return() {
-        assert!(visible_provider_tools(&[], &[], Some(&[])).is_empty());
+        assert!(visible_provider_tools(&[], &[], Some(&[]), true).is_empty());
+    }
+
+    #[test]
+    fn exhausted_dispatch_budget_hides_tools_but_preserves_lifecycle_return() {
+        let tool = ToolSchema {
+            name: "search".to_string(),
+            item_id: "tool:example/search".to_string(),
+            description: None,
+            input_schema: None,
+        };
+        let outputs = [OutputSpec {
+            name: "answer".to_string(),
+            description: None,
+            r#type: None,
+        }];
+        let visible = visible_provider_tools(
+            &[tool],
+            &["ryeos.execute.tool.*".to_string()],
+            Some(&outputs),
+            false,
+        );
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].name, "directive_return");
     }
 }

@@ -196,6 +196,8 @@ fn run_directive() -> Result<RuntimeResult> {
     };
     startup_timing::set_identity(&envelope.invocation_id, &envelope.thread_id);
     startup_timing::mark_envelope_parsed();
+    #[cfg(feature = "latency-profiling")]
+    startup_timing::record_profiling_enabled();
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(run_with_envelope(envelope))
@@ -285,6 +287,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     let context_window = bootstrap_output.context_window;
     let execution = bootstrap_output.config.execution.clone();
     let sampling = bootstrap_output.sampling.clone();
+    let reasoning = bootstrap_output.reasoning.clone();
     let matched_profile = provider_snapshot.matched_profile.clone();
     let config_hash = provider_snapshot.config_hash.clone();
 
@@ -376,6 +379,48 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     let budget = budget::BudgetTracker::new(envelope.policy.hard_limits.spend_usd);
 
     let hooks = bootstrap_output.config.hooks.clone();
+
+    #[cfg(feature = "latency-profiling")]
+    {
+        let request_input_bytes = envelope
+            .request
+            .inputs
+            .as_object()
+            .map(|inputs| {
+                inputs
+                    .iter()
+                    .map(|(name, value)| {
+                        (
+                            name.clone(),
+                            serde_json::to_vec(value).map_or(u64::MAX, |bytes| bytes.len() as u64),
+                        )
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        startup_timing::record_prompt_source_composition(
+            &bootstrap_output.provider_id,
+            &bootstrap_output.model_name,
+            bootstrap_output.config.user_prompt.len(),
+            bootstrap_output
+                .config
+                .system_prompt
+                .as_ref()
+                .map_or(0, String::len),
+            bootstrap_output
+                .config
+                .context_before
+                .as_ref()
+                .map_or(0, String::len),
+            bootstrap_output
+                .config
+                .context_after
+                .as_ref()
+                .map_or(0, String::len),
+            bootstrap_output.config.tools.len(),
+            &request_input_bytes,
+        );
+    }
 
     // The opening stimulus is rendered only where it is actually injected (fresh
     // launch, or operator follow-up). A MACHINE continuation suppresses it
@@ -490,6 +535,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
                     .continuation_runtime
                     .context_threshold_ratio,
                 sampling,
+                reasoning,
                 terminal_state_root: state_root.clone(),
                 terminal_source_path: envelope
                     .resolution
@@ -582,6 +628,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
                 .continuation_runtime
                 .context_threshold_ratio,
             sampling,
+            reasoning,
             terminal_state_root: state_root.clone(),
             terminal_source_path: envelope
                 .resolution

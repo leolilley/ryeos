@@ -8,6 +8,13 @@ license.workspace = true
 name = "ryeos-directive-runtime"
 path = "src/main.rs"
 
+[features]
+default = []
+# Content-free prompt/request accounting and provider lifecycle milestones for
+# release-equivalent profiling builds. The engine feature keeps launch and
+# runtime measurements on the same build switch.
+latency-profiling = ["ryeos-engine/latency-profiling"]
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }

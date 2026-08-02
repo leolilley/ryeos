@@ -9,10 +9,12 @@
 //! declared header name participates.
 
 use anyhow::{Result, anyhow};
+#[cfg(feature = "latency-profiling")]
+use std::time::Instant;
 
 use super::streaming::{
-    self, StreamingCallInput, apply_declared_output_limit, build_request_body,
-    declared_output_limit_from_body, inject_sampling,
+    self, StreamingCallInput, apply_declared_output_limit, apply_declared_reasoning,
+    build_request_body, declared_output_limit_from_body, inject_sampling,
 };
 
 /// Credential frozen at prepare time. The env read happens during prepare —
@@ -46,13 +48,41 @@ pub struct PreparedProviderRequest {
     /// sha256 hex over canonical JSON of
     /// `{method, url, sorted header names, body_sha256, requested_output_tokens}`.
     pub request_digest: String,
+    /// Content-free request-shape telemetry captured while rendering the exact
+    /// bytes above. Safe to log: lengths, counts, and a tool-schema digest only.
+    pub request_metrics: PreparedRequestMetrics,
 }
+
+#[cfg(feature = "latency-profiling")]
+#[derive(Clone, Debug, Default)]
+pub struct PreparedRequestMetrics {
+    pub prepare_duration_us: u64,
+    pub body_bytes: u64,
+    pub estimated_body_tokens: u64,
+    pub source_message_count: u32,
+    pub system_message_bytes: u64,
+    pub user_message_bytes: u64,
+    pub assistant_message_bytes: u64,
+    pub tool_message_bytes: u64,
+    pub reasoning_replay_bytes: u64,
+    pub converted_messages_bytes: u64,
+    pub extracted_system_prompt_bytes: u64,
+    pub provider_tool_schema_bytes: u64,
+    pub provider_tool_count: u32,
+    pub provider_tool_schema_sha256: String,
+}
+
+#[cfg(not(feature = "latency-profiling"))]
+#[derive(Clone, Debug, Default)]
+pub struct PreparedRequestMetrics;
 
 /// Build the exact provider request for one attempt. Mirrors what the
 /// streaming transport used to assemble inline, but freezes every input —
 /// endpoint, rendered body, effective output limit, credential — before any
 /// reservation digest is taken.
 pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<PreparedProviderRequest> {
+    #[cfg(feature = "latency-profiling")]
+    let prepare_started = Instant::now();
     let provider = input.provider;
     let execution = input.execution;
     let model = input.model;
@@ -63,6 +93,56 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
 
     let tool_schema = provider.schemas.as_ref().and_then(|s| s.tools.clone());
     let tools_val = super::tools::serialize_tools(input.tools, &tool_schema);
+    #[cfg(feature = "latency-profiling")]
+    let (
+        converted_messages_bytes,
+        provider_tool_schema_bytes,
+        provider_tool_schema_sha256,
+        system_message_bytes,
+        user_message_bytes,
+        assistant_message_bytes,
+        tool_message_bytes,
+        reasoning_replay_bytes,
+    ) = {
+        let converted_messages_bytes = serialized_len(&converted_messages);
+        let provider_tool_schema_bytes = serialized_len(&tools_val);
+        let provider_tool_schema_sha256 = serde_json::to_vec(&tools_val)
+            .map(|bytes| streaming::sha256_hex(&bytes))
+            .unwrap_or_else(|_| "<serialization-failed>".to_string());
+        let mut system_message_bytes = 0_u64;
+        let mut user_message_bytes = 0_u64;
+        let mut assistant_message_bytes = 0_u64;
+        let mut tool_message_bytes = 0_u64;
+        let mut reasoning_replay_bytes = 0_u64;
+        for message in input.messages {
+            let bytes = serialized_len(message);
+            match message.role.as_str() {
+                "system" => system_message_bytes = system_message_bytes.saturating_add(bytes),
+                "user" => user_message_bytes = user_message_bytes.saturating_add(bytes),
+                "assistant" => {
+                    assistant_message_bytes = assistant_message_bytes.saturating_add(bytes)
+                }
+                "tool" => tool_message_bytes = tool_message_bytes.saturating_add(bytes),
+                _ => {}
+            }
+            reasoning_replay_bytes = reasoning_replay_bytes.saturating_add(
+                message
+                    .reasoning_content
+                    .as_ref()
+                    .map_or(0, |reasoning| reasoning.len() as u64),
+            );
+        }
+        (
+            converted_messages_bytes,
+            provider_tool_schema_bytes,
+            provider_tool_schema_sha256,
+            system_message_bytes,
+            user_message_bytes,
+            assistant_message_bytes,
+            tool_message_bytes,
+            reasoning_replay_bytes,
+        )
+    };
 
     let stream_url = provider.extra.get("stream_url").and_then(|v| v.as_str());
     // Resolve {model} template in base_url (e.g. gemini profiles use
@@ -99,6 +179,14 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
     // Sampling parameters — gated by provider capabilities so we never send
     // a field the upstream API will reject with a 400.
     inject_sampling(&mut body, provider.family, input.sampling);
+    apply_declared_reasoning(
+        &mut body,
+        provider
+            .schemas
+            .as_ref()
+            .and_then(|schemas| schemas.reasoning.as_ref()),
+        input.reasoning,
+    )?;
     apply_declared_output_limit(
         &mut body,
         provider
@@ -185,6 +273,28 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
     let canonical = lillux::cas::canonical_json(&digest_input)
         .map_err(|e| anyhow!("canonicalize prepared-request digest input: {e}"))?;
     let request_digest = streaming::sha256_hex(canonical.as_bytes());
+    #[cfg(feature = "latency-profiling")]
+    let request_metrics = PreparedRequestMetrics {
+        prepare_duration_us: u64::try_from(prepare_started.elapsed().as_micros())
+            .unwrap_or(u64::MAX),
+        body_bytes: body_bytes.len() as u64,
+        // Deliberately labelled as an estimate. Exact provider tokenization is
+        // reported later through usage accounting.
+        estimated_body_tokens: (body_bytes.len() as u64).saturating_add(3) / 4,
+        source_message_count: u32::try_from(input.messages.len()).unwrap_or(u32::MAX),
+        system_message_bytes,
+        user_message_bytes,
+        assistant_message_bytes,
+        tool_message_bytes,
+        reasoning_replay_bytes,
+        converted_messages_bytes,
+        extracted_system_prompt_bytes: system_prompt.as_ref().map_or(0, |value| value.len() as u64),
+        provider_tool_schema_bytes,
+        provider_tool_count: u32::try_from(input.tools.len()).unwrap_or(u32::MAX),
+        provider_tool_schema_sha256,
+    };
+    #[cfg(not(feature = "latency-profiling"))]
+    let request_metrics = PreparedRequestMetrics::default();
 
     Ok(PreparedProviderRequest {
         method: reqwest::Method::POST,
@@ -196,5 +306,110 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
         credential,
         headers,
         request_digest,
+        request_metrics,
     })
+}
+
+#[cfg(feature = "latency-profiling")]
+fn serialized_len(value: &impl serde::Serialize) -> u64 {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len() as u64)
+        .unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::directive::{
+        ExecutionConfig, ProviderConfig, ProviderMessage, ReasoningConfig, ReasoningMode,
+    };
+    use ryeos_runtime::callback_client::CallbackClient;
+    use ryeos_runtime::envelope::EnvelopeCallback;
+    use serde_json::{Value, json};
+
+    fn provider() -> ProviderConfig {
+        serde_json::from_value(json!({
+            "family": "chat_completions",
+            "base_url": "https://example.invalid",
+            "schemas": {
+                "output_limit": {
+                    "path": "max_tokens",
+                    "semantics": "provider_native_output_tokens"
+                },
+                "reasoning": {
+                    "mode": {
+                        "path": "thinking.type",
+                        "values": {"enabled": "on", "disabled": "off"}
+                    }
+                }
+            },
+            "body_template": {
+                "model": "{model}",
+                "messages": "{messages}",
+                "stream": "{stream}"
+            },
+            "extra": {"stream_url": "/chat/completions"}
+        }))
+        .expect("provider fixture")
+    }
+
+    fn prepare(reasoning: Option<&ReasoningConfig>) -> PreparedProviderRequest {
+        let provider = provider();
+        let client = reqwest::Client::new();
+        let execution = ExecutionConfig::default();
+        let messages = [ProviderMessage {
+            role: "user".to_string(),
+            content: Some(json!("hello")),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }];
+        let callback_config = EnvelopeCallback {
+            socket_path: std::path::PathBuf::from("/nonexistent/ryeos-callback.sock"),
+            token: "unused".to_string(),
+        };
+        let callback = CallbackClient::new(
+            &callback_config,
+            "T-reasoning-request-fixture",
+            "/project",
+            "unused",
+        );
+        prepare_provider_request(&StreamingCallInput {
+            client: &client,
+            provider: &provider,
+            provider_id: "fixture",
+            matched_profile: None,
+            config_hash: "0",
+            execution: &execution,
+            model: "fixture-model",
+            messages: &messages,
+            tools: &[],
+            callback: &callback,
+            turn: 1,
+            attempt: 1,
+            sampling: None,
+            reasoning,
+            cancel_flag: None,
+            interrupt_flag: None,
+        })
+        .expect("prepare provider request")
+    }
+
+    #[test]
+    fn reasoning_policy_is_applied_before_request_bytes_and_digest_are_frozen() {
+        let provider_default = prepare(None);
+        let disabled = prepare(Some(&ReasoningConfig {
+            mode: ReasoningMode::Disabled,
+            effort: None,
+        }));
+
+        let provider_default_body: Value =
+            serde_json::from_slice(&provider_default.body_bytes).expect("default request body");
+        let disabled_body: Value =
+            serde_json::from_slice(&disabled.body_bytes).expect("disabled request body");
+        assert!(provider_default_body.get("thinking").is_none());
+        assert_eq!(disabled_body["thinking"]["type"], "off");
+        assert_ne!(provider_default.body_sha256, disabled.body_sha256);
+        assert_ne!(provider_default.request_digest, disabled.request_digest);
+    }
 }

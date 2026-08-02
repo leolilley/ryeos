@@ -522,8 +522,8 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
         &[PROVIDER_SNAPSHOT_KEY],
     )?;
 
-    if request.runtime_facts.len() != 10 {
-        return Err("runtime_facts must declare the ten directive fact fields".into());
+    if request.runtime_facts.len() != 11 {
+        return Err("runtime_facts must declare the eleven directive fact fields".into());
     }
     fact(
         request,
@@ -547,6 +547,7 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
         32,
     )?;
     fact(request, "sampling", true, RuntimeFactKindWire::Json, 4096)?;
+    fact(request, "reasoning", true, RuntimeFactKindWire::Json, 4096)?;
     fact(
         request,
         "matched_profile",
@@ -755,6 +756,22 @@ mod tests {
             .expect("validate DeepSeek provider");
         assert_eq!(provider.base_url, "https://api.deepseek.com");
         assert_eq!(provider.auth.env_var.as_deref(), Some("DEEPSEEK_API_KEY"));
+        let reasoning = provider
+            .schemas
+            .as_ref()
+            .and_then(|schemas| schemas.reasoning.as_ref())
+            .expect("DeepSeek must declare its signed reasoning wire mapping");
+        let mode = reasoning.mode.as_ref().expect("DeepSeek reasoning mode");
+        assert_eq!(mode.path, "thinking.type");
+        assert_eq!(mode.values.enabled, serde_json::json!("enabled"));
+        assert_eq!(mode.values.disabled, serde_json::json!("disabled"));
+        let effort = reasoning
+            .effort
+            .as_ref()
+            .expect("DeepSeek reasoning effort");
+        assert_eq!(effort.path, "reasoning_effort");
+        assert_eq!(effort.values.get("high"), Some(&serde_json::json!("high")));
+        assert_eq!(effort.values.get("max"), Some(&serde_json::json!("max")));
 
         for model in ["deepseek-v4-pro", "deepseek-v4-flash"] {
             let profile = provider

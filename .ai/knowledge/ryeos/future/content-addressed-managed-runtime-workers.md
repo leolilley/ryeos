@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-28T23:56:25Z:ea89d4eaf02858c22cd5589662ab3bc5d612649d67584e52a40de40ae779110b:u956yG6BseWJJ8xUAst7DNJ33AQSdfqepKugqzHNoSL4sEir2gKzD7MxH4CKiYrbZ+Ax87+4FozfbNM6YWncBw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-02T11:12:41Z:f2aa8665d9e2452417204e772f8e90ff20bba742fdf69afefc8ce6adb69ebd7f:tNMcLPIYFVr73AX+3i2kh+yTI/IJAX1S7Huj1GJfw4mrZWaIpJy3WnInlZPwx5Tzh3UOKh5ezR/RzR2LcRPkBw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/future
 name: content-addressed-managed-runtime-workers
@@ -15,7 +15,9 @@ version: "0.1.0"
 This is a future design, not the current execution contract. Pull it forward
 only after the content-addressed admission and augmentation fast paths have
 landed and measurements still show material time between durable planning and
-provider request submission.
+provider request submission. Progressive provider output must also use bounded
+ordered callback batching first; a warm worker cannot fix per-delta daemon
+round-trip backpressure inside an already-running provider call.
 
 The first implementation is deliberately narrower than a general distributed
 worker system:
@@ -30,6 +32,21 @@ worker system:
 
 Distributed placement, hostile multi-tenant outer isolation, and remote worker
 leases remain separate work.
+
+### Measurement checkpoint: 2 August 2026
+
+A controlled chat-latency profile measured warm daemon launch to runtime-ready
+at about 0.23 seconds. One first provider call recorded about 25 ms of DNS and
+68 ms of aggregate connection establishment; later provider calls in the same
+invocation recorded neither, confirming existing connection reuse. Multi-round
+provider/tool execution remained the dominant latency term.
+
+Those measurements do not pass this document's pull-forward gate. Workers
+remain a valid cold-tail and throughput design, but they are not the next fix
+for current multi-second first text or long serial tool loops. Re-evaluate with
+a distribution, not a single sample, after signed workflow bounds and provider
+reasoning/model policy have been benchmarked. See
+`knowledge:ryeos/future/chat-latency-investigation` for the measurement model.
 
 This document's "worker" is a reusable trusted managed-runtime process inside
 one RyeOS node. It is not the hostile-workload outer worker/VM described by
@@ -91,7 +108,9 @@ pre-worker work, both conditions are true:
    context construction.
 
 If warm local admission and runtime handoff are already subsecond, provider and
-workflow changes have better leverage than a worker pool.
+workflow changes have better leverage than a worker pool. Likewise, high
+`progressive_callback_total_us` belongs to the runtime callback path and must
+not be counted as evidence for process reuse.
 
 ## Non-goals
 

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-30T00:35:21Z:25aad2336802ee7302b4f7d3b9912d6f0782dcb22ab4a9fda387831c0cde8720:1wnMfEpX3Pj5338dq0S/Z/7QlmZsfqgDJPpSKGDeZIX6GOjGyKbg+GsRaszbWjLtTYXtS/JUnLR9yVPeBb/PBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-02T10:32:26Z:0154d1cfd2fcd509ce7540b809522ac6764a7ad3e364391f73749d2be6fb149a:oHtlEBi7Nrx9IlMH+xyXBCBUQ91rszTERHvMaP3sQb/fwMknlx1BuI/Ta6n7tA7K0yy1KanE9sj0mYI0PaMTCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.0.1"
@@ -112,6 +112,10 @@ widens beyond the parent fails compose.
 
 ### Limits
 - `limits.turns` — max LLM round-trips
+- `limits.tool_calls` — max non-lifecycle tool-call attempts across the run.
+  Once exhausted, the directive runtime returns ordered limit results for any
+  excess calls and stops advertising dispatchable tools, so the model must
+  answer from results already gathered. `0` means unlimited.
 - `limits.tokens` — settled provider-native token threshold (checked after
   each attempt settles; not a pre-issue token reservation)
 - `limits.spend_usd` — hard USD budget as a canonical decimal string (e.g.

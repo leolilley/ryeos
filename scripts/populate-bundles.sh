@@ -10,7 +10,7 @@
 # Idempotent. Safe to re-run.
 #
 # Usage:
-#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|central-host|standard|hosted-node|hosted-workflow]
+#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|central-host|standard|hosted-node|hosted-workflow] [--latency-profiling]
 #
 # Bundle sets:
 #   full            core + standard + web + browser + ryeos-ui + hosted-node (default)
@@ -26,6 +26,7 @@
 #   CARGO              cargo binary (default: cargo from PATH)
 #   CARGO_TARGET_DIR   cargo target dir (default: .cargo/config target-dir or ./target)
 #   TRIPLE             host triple (default: x86_64-unknown-linux-gnu)
+#   RYEOS_LATENCY_PROFILING  1 enables the same mode as --latency-profiling
 
 set -euo pipefail
 
@@ -42,6 +43,9 @@ BUNDLE_SET="full"
 JOBS=""            # cargo -j N; empty = cargo default (all cores)
 CRATES_OVERRIDE="" # space-separated crate list; empty = bundle-set default
 POPULATE_ALL=0     # explicit opt-in to rebuild the whole bundle set
+# Release build with opt-in content-free latency telemetry. The environment
+# form lets Docker/Railway select the build without changing a Dockerfile RUN.
+LATENCY_PROFILING="${RYEOS_LATENCY_PROFILING:-0}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -54,10 +58,16 @@ while [[ $# -gt 0 ]]; do
     # be built (e.g. from a prior populate). Use when iterating on one binary —
     # `--crates ryeos-core-tools` rebuilds core-tools without the full workspace.
     --crates) CRATES_OVERRIDE="$2"; shift 2 ;;
+    --latency-profiling) LATENCY_PROFILING=1; shift ;;
     --all) POPULATE_ALL=1; shift ;;
     *) ryeos_term_fail "unknown argument: $1"; exit 2 ;;
   esac
 done
+
+case "$LATENCY_PROFILING" in
+  0|1) ;;
+  *) ryeos_term_fail "RYEOS_LATENCY_PROFILING must be 0 or 1"; exit 2 ;;
+esac
 
 # Refuse to build the whole workspace implicitly — that full release build is
 # what exhausts memory. The caller must be explicit: name the crates that
@@ -252,13 +262,34 @@ fi
 
 build_args=()
 for p in "${pkgs[@]}"; do build_args+=(-p "$p"); done
+feature_args=()
+if [[ "$LATENCY_PROFILING" -eq 1 ]]; then
+  profiling_features=()
+  for p in "${pkgs[@]}"; do
+    case "$p" in
+      ryeosd) profiling_features+=("ryeosd/latency-profiling") ;;
+      ryeos-directive-runtime)
+        profiling_features+=("ryeos-directive-runtime/latency-profiling")
+        ;;
+    esac
+  done
+  if (( ${#profiling_features[@]} > 0 )); then
+    feature_list="$(IFS=,; printf '%s' "${profiling_features[*]}")"
+    feature_args=(--features "$feature_list")
+  else
+    ryeos_term_fail "latency profiling requires ryeosd and/or ryeos-directive-runtime in --crates"
+    exit 2
+  fi
+fi
 jobs_args=()
 [[ -n "$JOBS" ]] && jobs_args=(-j "$JOBS")
 
-ryeos_term_begin PUBLISH "building release binaries${JOBS:+ (jobs=$JOBS)}"
+build_flavour="release"
+[[ "$LATENCY_PROFILING" -eq 1 ]] && build_flavour="release + latency profiling"
+ryeos_term_begin PUBLISH "building $build_flavour binaries${JOBS:+ (jobs=$JOBS)}"
 ryeos_term_update "building release binaries" "${pkgs[*]}"
 ryeos_term_suspend
-"$CARGO" build --release "${jobs_args[@]}" "${build_args[@]}"
+"$CARGO" build --release "${jobs_args[@]}" "${build_args[@]}" "${feature_args[@]}"
 ryeos_term_resume "release build complete"
 
 # ── Guard: no stale sibling binaries under --crates ──────────────────

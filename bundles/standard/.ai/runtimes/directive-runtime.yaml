@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-28T12:15:12Z:eac322969e37f8918bb6901cdafd51eb43e9dbca67eb2db777577165255fe5f5:WCMY5CAKe+wSwrEPTIQMQVoZgP1LVIkAKic6Lcmc0Vf05SH/WpIG6vo+NoVmezu4kHpu79XyAFX24R442/LIDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-02T07:16:40Z:42c07922d3bc70230678cdca5d2b8a676e79463de1e631151468d88ba0165ee6:ZcfN87RMODxaRxakSFfmGgs2jX0nvqqgaSTuJ7n6wUoculHY2+/GOabzgNwfrtOjC7JpmPoFANpxCkWnNtmbBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: directive
 default: true
@@ -87,6 +87,7 @@ launch_contract:
     model_name: {required: true, kind: string, max_bytes: 256}
     context_window: {required: true, kind: integer, max_bytes: 32}
     sampling: {required: true, kind: json, max_bytes: 4096}
+    reasoning: {required: true, kind: json, max_bytes: 4096}
     matched_profile: {required: false, kind: string, max_bytes: 128}
     # Limits cover canonical JSON, including the two quotes around each 64-byte digest.
     config_hash: {required: true, kind: string, max_bytes: 66}

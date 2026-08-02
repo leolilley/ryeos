@@ -12,7 +12,7 @@
 
 use serde_json::json;
 
-use super::descriptor::ParserDescriptor;
+use super::descriptor::{ParserCachePolicy, ParserDescriptor};
 use super::dispatcher::ParserDispatcher;
 
 fn mk(handler: &str, parser_config: serde_json::Value) -> ParserDescriptor {
@@ -23,6 +23,7 @@ fn mk(handler: &str, parser_config: serde_json::Value) -> ParserDescriptor {
         handler: handler.into(),
         parser_api_version: 1,
         parser_config,
+        cache: ParserCachePolicy::ContentAddressed,
         output_schema: crate::contracts::ValueShape::any_mapping(),
     }
 }

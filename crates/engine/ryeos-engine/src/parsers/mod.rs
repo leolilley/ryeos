@@ -22,10 +22,11 @@
 pub mod descriptor;
 pub mod dispatcher;
 pub mod registry;
+mod result_cache;
 
 #[cfg(test)]
 pub(crate) mod test_helpers;
 
-pub use descriptor::ParserDescriptor;
+pub use descriptor::{ParserCachePolicy, ParserDescriptor};
 pub use dispatcher::ParserDispatcher;
 pub use registry::{DuplicateRef, ParserRegistry};

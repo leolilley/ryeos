@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-21T00:24:56Z:5c25d8ab80379a9d6369b70cafdf8032e892f265a9b8aae37521d9adc0a7280b:fvborgWUxRwyVzayzck4oNKEoG7uENJahGDmnKqf/anuat4V6EyEx186uzdOOIqIjBUaNmJpMsdjQEVWicP8Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-02T11:12:41Z:f3eca272834966006d78e8e550aeff1ba9e72866f511c10d6936972072cbe3b3:aZcXuIgD6pLw++ZVnLYw5QZ+W4zlZPyZX+y9p8YUmL1lzvSxs+AkDj79pzMT604Sck3oVf3e7U1ayEvnkvvfCQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/future
 name: README
@@ -26,6 +26,9 @@ Completed work from the June 2026 planning scratch files includes:
 Deferred entries are individual knowledge items in this directory. Notes moved
 from the former top-level `docs/future` tree include:
 
+- [`chat-latency-investigation.md`](chat-latency-investigation.md) — measured
+  chat-latency boundaries, optimization order, and the evidence gate for
+  managed workers;
 - [`mcp-server-auth.md`](mcp-server-auth.md) — authentication for any future
   non-local MCP transport;
 - [`native-resume-snapshot-pinning.md`](native-resume-snapshot-pinning.md) —

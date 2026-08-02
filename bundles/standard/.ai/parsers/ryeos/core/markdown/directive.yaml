@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-22T04:23:10Z:3b7b2112a3fec90091b90919dcae56b861b1430d4af25eb96d4df52c3dc4a8ca:yJlHLem2xsMgbmo4wH8IF/OZnCigKkiCqdYyo6WRwxNq5FMKlGF/BKl6I3mQYECUu3p7/UbwizmWmESZOxt3Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-02T08:58:48Z:da1587f8ec2c3933e6e9a8f63ca31f489f70991908ccdace0fc21243b957df85:WVtiINt/mgMVFPUefwcg1QaXcjXPcjk3SVbeNYOnJ1gpGeu5vo73s8bfLq3y2qZ63C6gt6JaQXQB3SuWGRGsDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: "ryeos/core/markdown"
 description: "Directive parser: extracts YAML header (frontmatter or fenced block) and body from markdown"
@@ -12,6 +12,8 @@ parser_config:
       delimiter: "---"
     - kind: fenced_block
       language: yaml
+cache:
+  mode: content_addressed
 output_schema:
   root_type: mapping
   required:

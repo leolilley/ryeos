@@ -16,9 +16,10 @@ use serde_json::Value;
 use crate::contracts::SignatureEnvelope;
 use crate::error::EngineError;
 use crate::handlers::subprocess::run_handler_subprocess;
-use crate::handlers::{HandlerRegistry, HandlerServes};
+use crate::handlers::{HandlerRegistry, HandlerServes, VerifiedHandler};
 
 use super::registry::ParserRegistry;
+use super::result_cache::{ParseResultCache, ParseResultCacheKey};
 
 const PARSE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -26,6 +27,7 @@ const PARSE_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct ParserDispatcher {
     pub parser_tools: ParserRegistry,
     handlers: Arc<HandlerRegistry>,
+    parse_results: Arc<ParseResultCache>,
 }
 
 impl ParserDispatcher {
@@ -33,6 +35,7 @@ impl ParserDispatcher {
         Self {
             parser_tools,
             handlers,
+            parse_results: Arc::new(ParseResultCache::default()),
         }
     }
 
@@ -40,6 +43,7 @@ impl ParserDispatcher {
         Self {
             parser_tools,
             handlers: Arc::clone(&self.handlers),
+            parse_results: Arc::clone(&self.parse_results),
         }
     }
 
@@ -88,20 +92,47 @@ impl ParserDispatcher {
             signature_envelope.suffix.as_deref(),
         );
 
+        let source_bytes = stripped.len();
+        let content_digest = descriptor
+            .cache
+            .is_content_addressed()
+            .then(|| lillux::cas::sha256_hex(stripped.as_bytes()));
+        let source_path = path.map(|path| path.display().to_string());
         let request = HandlerRequest::Parse(ParseRequest {
             parser_config: descriptor.parser_config.clone(),
             content: stripped,
-            source_path: path.map(|p| p.display().to_string()),
+            source_path: source_path.clone(),
         });
 
-        let resp = run_handler_subprocess(
+        if let Some(content_digest) = content_digest {
+            let key = ParseResultCacheKey::new(
+                self.fingerprint(),
+                parser_ref.to_string(),
+                content_digest,
+                source_path,
+            );
+            self.parse_results.get_or_build(key, source_bytes, || {
+                self.execute_parse(handler, &request, parser_ref)
+            })
+        } else {
+            self.execute_parse(handler, &request, parser_ref)
+        }
+    }
+
+    fn execute_parse(
+        &self,
+        handler: &VerifiedHandler,
+        request: &HandlerRequest,
+        parser_ref: &str,
+    ) -> Result<Value, EngineError> {
+        let response = run_handler_subprocess(
             handler,
-            &request,
+            request,
             PARSE_TIMEOUT,
             self.handlers.launch_runtime(),
         )?;
 
-        match resp {
+        match response {
             HandlerResponse::ParseOk { value } => Ok(value),
             HandlerResponse::ParseErr { kind, message } => Err(EngineError::ParserFailed {
                 parser_id: parser_ref.into(),

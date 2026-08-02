@@ -414,6 +414,16 @@ pub enum RuntimeEventType {
     TokenDelta,
     StreamSnapshot,
     StreamClosed,
+    /// A profiling runtime observed successful provider HTTP response headers.
+    /// This is distinct from gateway `stream_started`, which only means launch
+    /// handoff is ready.
+    ProviderResponseHeaders,
+    /// A profiling runtime parsed the first complete provider stream event for
+    /// one model call.
+    ProviderStreamStarted,
+    /// A profiling runtime observed the first hidden reasoning delta for one
+    /// model call. The event carries no reasoning content.
+    ProviderReasoningStarted,
 
     // ── Audit / artifact ────────────────────────────────────────
     ArtifactPublished,
@@ -498,6 +508,9 @@ impl RuntimeEventType {
             Self::TokenDelta => wire::TOKEN_DELTA,
             Self::StreamSnapshot => wire::STREAM_SNAPSHOT,
             Self::StreamClosed => wire::STREAM_CLOSED,
+            Self::ProviderResponseHeaders => wire::PROVIDER_RESPONSE_HEADERS,
+            Self::ProviderStreamStarted => wire::PROVIDER_STREAM_STARTED,
+            Self::ProviderReasoningStarted => wire::PROVIDER_REASONING_STARTED,
             Self::ArtifactPublished => wire::ARTIFACT_PUBLISHED,
             Self::AsLaunchedResolution => wire::AS_LAUNCHED_RESOLUTION,
             Self::AsLaunchedRefBindings => wire::AS_LAUNCHED_REF_BINDINGS,
@@ -551,6 +564,9 @@ impl RuntimeEventType {
             wire::TOKEN_DELTA => Ok(Self::TokenDelta),
             wire::STREAM_SNAPSHOT => Ok(Self::StreamSnapshot),
             wire::STREAM_CLOSED => Ok(Self::StreamClosed),
+            wire::PROVIDER_RESPONSE_HEADERS => Ok(Self::ProviderResponseHeaders),
+            wire::PROVIDER_STREAM_STARTED => Ok(Self::ProviderStreamStarted),
+            wire::PROVIDER_REASONING_STARTED => Ok(Self::ProviderReasoningStarted),
             wire::ARTIFACT_PUBLISHED => Ok(Self::ArtifactPublished),
             wire::AS_LAUNCHED_RESOLUTION => Ok(Self::AsLaunchedResolution),
             wire::AS_LAUNCHED_REF_BINDINGS => Ok(Self::AsLaunchedRefBindings),
@@ -631,6 +647,9 @@ impl RuntimeEventType {
             Self::TokenDelta
             | Self::StreamSnapshot
             | Self::CognitionReasoning
+            | Self::ProviderResponseHeaders
+            | Self::ProviderStreamStarted
+            | Self::ProviderReasoningStarted
             | Self::GraphForeachIteration => StorageClass::Ephemeral,
             // Everything else: thread lifecycle, edges, commands,
             // cognition turn boundaries, tool dispatch, graph
@@ -769,6 +788,9 @@ mod tests {
             RuntimeEventType::TokenDelta,
             RuntimeEventType::StreamSnapshot,
             RuntimeEventType::StreamClosed,
+            RuntimeEventType::ProviderResponseHeaders,
+            RuntimeEventType::ProviderStreamStarted,
+            RuntimeEventType::ProviderReasoningStarted,
             RuntimeEventType::ArtifactPublished,
             RuntimeEventType::AsLaunchedResolution,
             RuntimeEventType::AsLaunchedRefBindings,

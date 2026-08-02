@@ -34,6 +34,7 @@ fn dispatcher_for_yaml_and_markdown_directive() -> ParserDispatcher {
         handler: handler.into(),
         parser_api_version: 1,
         parser_config,
+        cache: Default::default(),
         output_schema: ryeos_engine::contracts::ValueShape::any_mapping(),
     };
     let entries = vec![

@@ -5,8 +5,8 @@ use serde_json::{Value, json};
 use crate::budget::BudgetTracker;
 use crate::continuation::ContinuationCheck;
 use crate::directive::{
-    ContinuationConfig, ExecutionConfig, FinishReason, OutputSpec, ProviderMessage, ReturnNudge,
-    SamplingConfig, StreamEvent, ToolSchema,
+    ContinuationConfig, ExecutionConfig, FinishReason, OutputSpec, ProviderMessage,
+    ReasoningConfig, ReturnNudge, SamplingConfig, StreamEvent, ToolSchema,
 };
 use crate::dispatcher::{DispatchKind, Dispatcher};
 use crate::harness::{Harness, HookAction};
@@ -56,6 +56,44 @@ struct RenderedToolResult {
 /// for the bounded concurrent window.
 fn batch_is_lifecycle_bearing(calls: &[crate::directive::ToolCall]) -> bool {
     calls.iter().any(|tc| tc.name == "directive_return")
+}
+
+fn tool_call_limit_error() -> String {
+    serde_json::to_string(&json!({
+        "error": {
+            "code": "tool_call_limit_exceeded",
+            "message": "The signed tool-call limit is exhausted. No further dispatchable tools are available; answer using the results already gathered."
+        }
+    }))
+    .unwrap_or_else(|_| {
+        "{\"error\":{\"code\":\"tool_call_limit_exceeded\"}}".to_string()
+    })
+}
+
+fn state_after_serial_tool_result(
+    pending: Vec<crate::directive::ToolCall>,
+    index: usize,
+    turn: u32,
+    definition_ref: &str,
+    definition_hash: &str,
+) -> State {
+    let next_index = index + 1;
+    if next_index < pending.len() {
+        State::DispatchingTools {
+            pending,
+            index: next_index,
+        }
+    } else {
+        State::FiringHooks {
+            occurrence: ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
+                definition_ref: definition_ref.to_string(),
+                definition_hash: definition_hash.to_string(),
+                turn,
+            },
+            context: json!({"turn": turn}),
+            resume_to: Box::new(State::CheckingContinuation),
+        }
+    }
 }
 
 /// The pure emission decision for one rendered tool result:
@@ -185,6 +223,9 @@ pub struct Runner {
     /// Passed to the provider adapter for inclusion in request body.
     /// `None` = use provider defaults.
     sampling: Option<SamplingConfig>,
+    /// Signed provider-neutral reasoning policy from the bound model.
+    /// The selected provider descriptor owns all wire-path/value mappings.
+    reasoning: Option<ReasoningConfig>,
     /// Shared HTTP client — created once and reused across all turns.
     /// Connection pooling keeps TCP/TLS handshakes to a minimum.
     http_client: reqwest::Client,
@@ -604,6 +645,7 @@ pub struct RunnerConfig {
     pub return_nudge: ReturnNudge,
     pub continuation: ContinuationConfig,
     pub sampling: Option<SamplingConfig>,
+    pub reasoning: Option<ReasoningConfig>,
     pub terminal_state_root: std::path::PathBuf,
     pub terminal_source_path: String,
 }
@@ -631,6 +673,7 @@ impl Runner {
             return_nudge,
             continuation,
             sampling,
+            reasoning,
             matched_profile,
             config_hash,
             financial_authority,
@@ -671,6 +714,7 @@ impl Runner {
             return_nudge_sent: false,
             continuation_config: continuation,
             sampling,
+            reasoning,
             // Retain the existing per-process client and pool size; no
             // protocol or keepalive tuning is added without measurement. The
             // custom resolver preserves reqwest's default getaddrinfo behavior
@@ -744,6 +788,9 @@ impl Runner {
                 .reseed(usage.input_tokens, usage.output_tokens, usage.spend_usd)
                 .map_err(|error| anyhow::anyhow!("invalid resume budget: {error}"))?;
         }
+        config
+            .harness
+            .reseed_tool_calls(resume.tool_calls_completed);
         config.messages = resume.messages;
         let mut runner = Self::new(config);
         runner.initial_turn = resume.turns_completed;
@@ -928,6 +975,7 @@ impl Runner {
                         &self.tools,
                         self.harness.effective_caps(),
                         self.directive_outputs.as_deref(),
+                        self.harness.tool_calls_available(),
                     );
                     // §1 retry loop. A retryable provider failure — a configured
                     // HTTP status, a send timeout/transport error, or a stream
@@ -974,6 +1022,7 @@ impl Runner {
                             turn,
                             attempt: attempt_number,
                             sampling: self.sampling.as_ref(),
+                            reasoning: self.reasoning.as_ref(),
                             cancel_flag: Some(cancel_flag.clone()),
                             interrupt_flag: Some(interrupt_flag.clone()),
                         };
@@ -2254,6 +2303,22 @@ impl Runner {
                                 call_id: tc.id.clone().unwrap_or_default(),
                                 raw_args: tc.arguments.to_string(),
                             }
+                        } else if !self.harness.try_record_tool_call() {
+                            let call_id = tc.id.clone().unwrap_or_default();
+                            let tool_name = tc.name.clone();
+                            let rendered =
+                                Self::rendered_error_envelope(&tool_name, tool_call_limit_error());
+                            if let Err(error) = self.settle_tool_result(call_id, rendered).await {
+                                state = State::Errored { error };
+                                continue;
+                            }
+                            state_after_serial_tool_result(
+                                pending,
+                                index,
+                                turn,
+                                &self.definition_ref,
+                                &self.definition_hash,
+                            )
                         } else {
                             // Permission check deferred to the dispatcher,
                             // which uses the canonical ref (not the LLM-
@@ -2299,24 +2364,13 @@ impl Runner {
                         continue;
                     }
 
-                    let next_index = index + 1;
-                    if next_index < pending.len() {
-                        State::DispatchingTools {
-                            pending,
-                            index: next_index,
-                        }
-                    } else {
-                        // All tools processed — fire after_step hook
-                        State::FiringHooks {
-                            occurrence: ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
-                                definition_ref: self.definition_ref.clone(),
-                                definition_hash: self.definition_hash.clone(),
-                                turn,
-                            },
-                            context: json!({"turn": turn}),
-                            resume_to: Box::new(State::CheckingContinuation),
-                        }
-                    }
+                    state_after_serial_tool_result(
+                        pending,
+                        index,
+                        turn,
+                        &self.definition_ref,
+                        &self.definition_hash,
+                    )
                 }
 
                 State::DispatchingToolBatch { pending } => {
@@ -2361,12 +2415,16 @@ impl Runner {
                         }
                         let call_id = tc.id.clone().unwrap_or_default();
                         let raw_args = tc.arguments.to_string();
-                        let work = match self
-                            .preflight_tool_call(&tc.name, &raw_args, &call_id, &mut warnings)
-                            .await
-                        {
-                            Ok(request) => BatchWork::Dispatch(Some(request)),
-                            Err(body) => BatchWork::Immediate(body),
+                        let work = if self.harness.try_record_tool_call() {
+                            match self
+                                .preflight_tool_call(&tc.name, &raw_args, &call_id, &mut warnings)
+                                .await
+                            {
+                                Ok(request) => BatchWork::Dispatch(Some(request)),
+                                Err(body) => BatchWork::Immediate(body),
+                            }
+                        } else {
+                            BatchWork::Immediate(tool_call_limit_error())
                         };
                         prepared.push((call_id, tc.name.clone(), work));
                     }
@@ -4141,6 +4199,40 @@ mod tests {
         assert_eq!(cost.basis, None);
     }
 
+    #[test]
+    fn tool_call_limit_error_is_structured_and_directs_finalization() {
+        let body: Value = serde_json::from_str(&tool_call_limit_error()).unwrap();
+        assert_eq!(body["error"]["code"], "tool_call_limit_exceeded");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("results already gathered"))
+        );
+    }
+
+    #[test]
+    fn serial_limit_result_preserves_remaining_call_order() {
+        let pending = vec![
+            crate::directive::ToolCall {
+                id: Some("first".to_string()),
+                name: "one".to_string(),
+                arguments: json!({}),
+            },
+            crate::directive::ToolCall {
+                id: Some("second".to_string()),
+                name: "two".to_string(),
+                arguments: json!({}),
+            },
+        ];
+        match state_after_serial_tool_result(pending, 0, 4, "directive:test", "hash") {
+            State::DispatchingTools { pending, index } => {
+                assert_eq!(index, 1);
+                assert_eq!(pending[index].id.as_deref(), Some("second"));
+            }
+            _ => panic!("first settled call must advance to the next call"),
+        }
+    }
+
     fn make_policy() -> EnvelopePolicy {
         EnvelopePolicy {
             effective_caps: vec!["ryeos.execute.tool.*".to_string()],
@@ -4232,6 +4324,7 @@ mod tests {
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            reasoning: None,
             terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
             terminal_source_path: "directive:test/fixture".to_string(),
         });
@@ -4294,6 +4387,7 @@ mod tests {
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            reasoning: None,
             terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
             terminal_source_path: "directive:test/fixture".to_string(),
         });
@@ -4352,6 +4446,7 @@ mod tests {
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            reasoning: None,
             terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
             terminal_source_path: "directive:test/fixture".to_string(),
         });
@@ -4408,6 +4503,7 @@ mod tests {
             outputs,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            reasoning: None,
             terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
             terminal_source_path: "directive:test/fixture".to_string(),
         });
@@ -4476,6 +4572,7 @@ mod tests {
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            reasoning: None,
             terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
             terminal_source_path: "directive:test/fixture".to_string(),
         });
@@ -4649,6 +4746,7 @@ mod tests {
                 temperature: Some(0.3),
                 seed: Some(42),
             }),
+            reasoning: None,
             terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
             terminal_source_path: "directive:test/fixture".to_string(),
         });
@@ -4713,6 +4811,7 @@ mod tests {
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            reasoning: None,
             terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
             terminal_source_path: "directive:test/fixture".to_string(),
         });
@@ -4779,6 +4878,7 @@ mod tests {
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            reasoning: None,
             terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
             terminal_source_path: "directive:test/fixture".to_string(),
         });
@@ -4831,6 +4931,7 @@ mod tests {
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            reasoning: None,
             terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
             terminal_source_path: "directive:test/fixture".to_string(),
         });
@@ -5572,6 +5673,7 @@ mod tests {
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            reasoning: None,
             terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
             terminal_source_path: "directive:test/fixture".to_string(),
         })
@@ -5590,6 +5692,7 @@ mod tests {
             credential: None,
             headers: vec![],
             request_digest: lillux::cas::sha256_hex(body_sha256.as_bytes()),
+            request_metrics: Default::default(),
         }
     }
 
