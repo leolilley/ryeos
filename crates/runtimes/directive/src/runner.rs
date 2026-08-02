@@ -58,6 +58,44 @@ fn batch_is_lifecycle_bearing(calls: &[crate::directive::ToolCall]) -> bool {
     calls.iter().any(|tc| tc.name == "directive_return")
 }
 
+fn tool_call_limit_error() -> String {
+    serde_json::to_string(&json!({
+        "error": {
+            "code": "tool_call_limit_exceeded",
+            "message": "The signed tool-call limit is exhausted. No further dispatchable tools are available; answer using the results already gathered."
+        }
+    }))
+    .unwrap_or_else(|_| {
+        "{\"error\":{\"code\":\"tool_call_limit_exceeded\"}}".to_string()
+    })
+}
+
+fn state_after_serial_tool_result(
+    pending: Vec<crate::directive::ToolCall>,
+    index: usize,
+    turn: u32,
+    definition_ref: &str,
+    definition_hash: &str,
+) -> State {
+    let next_index = index + 1;
+    if next_index < pending.len() {
+        State::DispatchingTools {
+            pending,
+            index: next_index,
+        }
+    } else {
+        State::FiringHooks {
+            occurrence: ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
+                definition_ref: definition_ref.to_string(),
+                definition_hash: definition_hash.to_string(),
+                turn,
+            },
+            context: json!({"turn": turn}),
+            resume_to: Box::new(State::CheckingContinuation),
+        }
+    }
+}
+
 /// The pure emission decision for one rendered tool result:
 /// `(body_is_inline, truncated, truncated_reason)`. Ordering of the checks is
 /// contract: the inline size cap dominates, then guard truncation, then an
@@ -750,6 +788,9 @@ impl Runner {
                 .reseed(usage.input_tokens, usage.output_tokens, usage.spend_usd)
                 .map_err(|error| anyhow::anyhow!("invalid resume budget: {error}"))?;
         }
+        config
+            .harness
+            .reseed_tool_calls(resume.tool_calls_completed);
         config.messages = resume.messages;
         let mut runner = Self::new(config);
         runner.initial_turn = resume.turns_completed;
@@ -934,6 +975,7 @@ impl Runner {
                         &self.tools,
                         self.harness.effective_caps(),
                         self.directive_outputs.as_deref(),
+                        self.harness.tool_calls_available(),
                     );
                     // §1 retry loop. A retryable provider failure — a configured
                     // HTTP status, a send timeout/transport error, or a stream
@@ -2261,6 +2303,22 @@ impl Runner {
                                 call_id: tc.id.clone().unwrap_or_default(),
                                 raw_args: tc.arguments.to_string(),
                             }
+                        } else if !self.harness.try_record_tool_call() {
+                            let call_id = tc.id.clone().unwrap_or_default();
+                            let tool_name = tc.name.clone();
+                            let rendered =
+                                Self::rendered_error_envelope(&tool_name, tool_call_limit_error());
+                            if let Err(error) = self.settle_tool_result(call_id, rendered).await {
+                                state = State::Errored { error };
+                                continue;
+                            }
+                            state_after_serial_tool_result(
+                                pending,
+                                index,
+                                turn,
+                                &self.definition_ref,
+                                &self.definition_hash,
+                            )
                         } else {
                             // Permission check deferred to the dispatcher,
                             // which uses the canonical ref (not the LLM-
@@ -2306,24 +2364,13 @@ impl Runner {
                         continue;
                     }
 
-                    let next_index = index + 1;
-                    if next_index < pending.len() {
-                        State::DispatchingTools {
-                            pending,
-                            index: next_index,
-                        }
-                    } else {
-                        // All tools processed — fire after_step hook
-                        State::FiringHooks {
-                            occurrence: ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
-                                definition_ref: self.definition_ref.clone(),
-                                definition_hash: self.definition_hash.clone(),
-                                turn,
-                            },
-                            context: json!({"turn": turn}),
-                            resume_to: Box::new(State::CheckingContinuation),
-                        }
-                    }
+                    state_after_serial_tool_result(
+                        pending,
+                        index,
+                        turn,
+                        &self.definition_ref,
+                        &self.definition_hash,
+                    )
                 }
 
                 State::DispatchingToolBatch { pending } => {
@@ -2368,12 +2415,16 @@ impl Runner {
                         }
                         let call_id = tc.id.clone().unwrap_or_default();
                         let raw_args = tc.arguments.to_string();
-                        let work = match self
-                            .preflight_tool_call(&tc.name, &raw_args, &call_id, &mut warnings)
-                            .await
-                        {
-                            Ok(request) => BatchWork::Dispatch(Some(request)),
-                            Err(body) => BatchWork::Immediate(body),
+                        let work = if self.harness.try_record_tool_call() {
+                            match self
+                                .preflight_tool_call(&tc.name, &raw_args, &call_id, &mut warnings)
+                                .await
+                            {
+                                Ok(request) => BatchWork::Dispatch(Some(request)),
+                                Err(body) => BatchWork::Immediate(body),
+                            }
+                        } else {
+                            BatchWork::Immediate(tool_call_limit_error())
                         };
                         prepared.push((call_id, tc.name.clone(), work));
                     }
@@ -4146,6 +4197,40 @@ mod tests {
         assert_eq!(cost.output_tokens, 0);
         assert_eq!(cost.total_usd, usd("0.125"));
         assert_eq!(cost.basis, None);
+    }
+
+    #[test]
+    fn tool_call_limit_error_is_structured_and_directs_finalization() {
+        let body: Value = serde_json::from_str(&tool_call_limit_error()).unwrap();
+        assert_eq!(body["error"]["code"], "tool_call_limit_exceeded");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("results already gathered"))
+        );
+    }
+
+    #[test]
+    fn serial_limit_result_preserves_remaining_call_order() {
+        let pending = vec![
+            crate::directive::ToolCall {
+                id: Some("first".to_string()),
+                name: "one".to_string(),
+                arguments: json!({}),
+            },
+            crate::directive::ToolCall {
+                id: Some("second".to_string()),
+                name: "two".to_string(),
+                arguments: json!({}),
+            },
+        ];
+        match state_after_serial_tool_result(pending, 0, 4, "directive:test", "hash") {
+            State::DispatchingTools { pending, index } => {
+                assert_eq!(index, 1);
+                assert_eq!(pending[index].id.as_deref(), Some("second"));
+            }
+            _ => panic!("first settled call must advance to the next call"),
+        }
     }
 
     fn make_policy() -> EnvelopePolicy {

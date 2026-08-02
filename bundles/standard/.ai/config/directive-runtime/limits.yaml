@@ -1,10 +1,11 @@
-# ryeos:signed:2026-07-23T15:25:30Z:7ebe546b0d7d8f6c8a0d55c271472375b693ca9359396360fb8e75303f20cc8b:+gggg9E/8Vw/dyyAwDhOEy+o/S0NS0WEVlP1MR8ayGF7ydyEDgw+cKlWSLLgYI+RN2PGBbcd8pmHk/4WAsUODQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-02T10:32:26Z:8cdd14e949dd2f178eddc28549ea7e245c9acc0972919bc0bfafb3e40f0e0ad5:eT7tpLWf0qqteQ48WV4sTaIMmbNjn5z+FnumYE3MBiJ//spw6Yb4noUnhlXqYTzRWFvaSweCkh0Z1GhXxFCFDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "directive-runtime"
 defaults:
   # 0 means unlimited. By default RyeOS applies no hard execution limits; runaways
   # are an operator/project policy via this config, directive-authored `limits:`,
   # execution policy, or caller overrides.
   turns: 0
+  tool_calls: 0
   tokens: 0
   spend_usd: "0"
   spawns: 0

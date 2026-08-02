@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-02T05:43:49Z:fe4a684731693ec915a61766eaf6aa7a83c5194a853b49ca0ea0fb4cd2f90ba6:t+q6T2ajxe1hriF4HEXq8TiahiUo+YdM3DrtC3OOUE9wm2xCiJm7xh/20vjV7amUBpIG8mQWAQiaYTr2jiOBDg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-02T11:12:41Z:f2aa8665d9e2452417204e772f8e90ff20bba742fdf69afefc8ce6adb69ebd7f:tNMcLPIYFVr73AX+3i2kh+yTI/IJAX1S7Huj1GJfw4mrZWaIpJy3WnInlZPwx5Tzh3UOKh5ezR/RzR2LcRPkBw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/future
 name: content-addressed-managed-runtime-workers
@@ -32,6 +32,21 @@ worker system:
 
 Distributed placement, hostile multi-tenant outer isolation, and remote worker
 leases remain separate work.
+
+### Measurement checkpoint: 2 August 2026
+
+A controlled chat-latency profile measured warm daemon launch to runtime-ready
+at about 0.23 seconds. One first provider call recorded about 25 ms of DNS and
+68 ms of aggregate connection establishment; later provider calls in the same
+invocation recorded neither, confirming existing connection reuse. Multi-round
+provider/tool execution remained the dominant latency term.
+
+Those measurements do not pass this document's pull-forward gate. Workers
+remain a valid cold-tail and throughput design, but they are not the next fix
+for current multi-second first text or long serial tool loops. Re-evaluate with
+a distribution, not a single sample, after signed workflow bounds and provider
+reasoning/model policy have been benchmarked. See
+`knowledge:ryeos/future/chat-latency-investigation` for the measurement model.
 
 This document's "worker" is a reusable trusted managed-runtime process inside
 one RyeOS node. It is not the hostile-workload outer worker/VM described by

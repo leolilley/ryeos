@@ -30,6 +30,8 @@ impl LimitsConfig {
 pub struct LimitValues {
     #[serde(default = "default_turns")]
     pub turns: u32,
+    #[serde(default = "default_tool_calls")]
+    pub tool_calls: u32,
     #[serde(default = "default_tokens")]
     pub tokens: u64,
     /// Fixed-point USD as a canonical decimal string; `"0"` = unlimited.
@@ -47,6 +49,7 @@ impl Default for LimitValues {
     fn default() -> Self {
         Self {
             turns: default_turns(),
+            tool_calls: default_tool_calls(),
             tokens: default_tokens(),
             spend_usd: default_spend(),
             spawns: default_spawns(),
@@ -68,6 +71,7 @@ impl LimitValues {
 #[serde(deny_unknown_fields)]
 pub struct LimitCaps {
     pub turns: Option<u32>,
+    pub tool_calls: Option<u32>,
     pub tokens: Option<u64>,
     pub spend_usd: Option<UsdNanos>,
     pub spawns: Option<u32>,
@@ -82,6 +86,9 @@ impl LimitCaps {
 }
 
 fn default_turns() -> u32 {
+    0
+}
+fn default_tool_calls() -> u32 {
     0
 }
 fn default_tokens() -> u64 {
@@ -115,6 +122,7 @@ pub fn compute_effective_limits(
     // launch depth — current depth travels separately in EnvelopeRequest.depth.
     let mut hard = HardLimits {
         turns: sentinel_clamp(requested.turns, caps.turns.unwrap_or(0)),
+        tool_calls: sentinel_clamp(requested.tool_calls, caps.tool_calls.unwrap_or(0)),
         tokens: sentinel_clamp(requested.tokens, caps.tokens.unwrap_or(0)),
         spend_usd: sentinel_clamp(
             requested.spend_usd,
@@ -131,6 +139,7 @@ pub fn compute_effective_limits(
     if let Some(parent) = parent_limits {
         // A child can never exceed the parent that spawned it.
         hard.turns = sentinel_clamp(hard.turns, parent.turns);
+        hard.tool_calls = sentinel_clamp(hard.tool_calls, parent.tool_calls);
         hard.tokens = sentinel_clamp(hard.tokens, parent.tokens);
         hard.spend_usd = sentinel_clamp(hard.spend_usd, parent.spend_usd);
         hard.spawns = sentinel_clamp(hard.spawns, parent.spawns);
@@ -317,6 +326,7 @@ mod tests {
         // inherit the PROJECT defaults (limits.yaml), not built-in constants.
         let base = LimitValues {
             turns: 40,
+            tool_calls: 9,
             tokens: 111_111,
             ..LimitValues::default()
         };
@@ -324,6 +334,7 @@ mod tests {
         let merged = merge_header_limits(&base, &header).unwrap();
         assert_eq!(merged.tokens, 250_000); // present header field wins
         assert_eq!(merged.turns, 40); // omitted inherits project default
+        assert_eq!(merged.tool_calls, 9);
     }
 
     #[test]
@@ -331,7 +342,20 @@ mod tests {
         let base = LimitValues::default();
         let merged = merge_header_limits(&base, &serde_json::json!({})).unwrap();
         assert_eq!(merged.turns, base.turns);
+        assert_eq!(merged.tool_calls, base.tool_calls);
         assert_eq!(merged.tokens, base.tokens);
+    }
+
+    #[test]
+    fn legacy_limits_config_defaults_tool_calls_to_unlimited() {
+        let config: LimitsConfig =
+            serde_yaml::from_str("defaults:\n  turns: 6\n  tokens: 65536\ncaps:\n  turns: 12\n")
+                .unwrap();
+
+        assert_eq!(config.defaults.turns, 6);
+        assert_eq!(config.defaults.tool_calls, 0);
+        assert_eq!(config.caps.turns, Some(12));
+        assert_eq!(config.caps.tool_calls, None);
     }
 
     #[test]
@@ -362,18 +386,21 @@ mod tests {
         // Zero (= unlimited) requests on every dimension must all be bounded by
         // their caps, not just turns/duration.
         let requested = LimitValues {
+            tool_calls: 0,
             tokens: 0,
             spend_usd: UsdNanos::ZERO,
             spawns: 0,
             ..Default::default()
         };
         let caps = LimitCaps {
+            tool_calls: Some(8),
             tokens: Some(1000),
             spend_usd: Some(UsdNanos::parse_canonical("1.5").unwrap()),
             spawns: Some(3),
             ..Default::default()
         };
         let hard = compute_effective_limits(Some(&requested), &LimitValues::default(), &caps, None);
+        assert_eq!(hard.tool_calls, 8);
         assert_eq!(hard.tokens, 1000);
         assert_eq!(hard.spend_usd, UsdNanos::parse_canonical("1.5").unwrap());
         assert_eq!(hard.spawns, 3);
@@ -468,15 +495,22 @@ mod tests {
     fn compute_effective_parent_reduces() {
         let parent = HardLimits {
             turns: 10,
+            tool_calls: 3,
             ..HardLimits::default()
         };
+        let requested = LimitValues {
+            turns: 20,
+            tool_calls: 7,
+            ..LimitValues::default()
+        };
         let hard = compute_effective_limits(
-            None,
+            Some(&requested),
             &LimitValues::default(),
             &LimitCaps::default(),
             Some(&parent),
         );
         assert_eq!(hard.turns, 10);
+        assert_eq!(hard.tool_calls, 3);
     }
 
     #[test]

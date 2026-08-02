@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T02:18:49Z:91bcf719c89ba424fc7096b19456239ad3895e64a12929bae2505fa86e9c08df:Nlol/Lr9vYa1cI0z0E+GKVD1D/tYGpoHmBTeDqqcY1rk1jjHJ+pP1qBJW33P4KwD7lD2ZTN45PqPe5zHUjZBDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-02T10:32:26Z:303f080a7145f9f7adea4e1f26cf51ccd1779ec60dd16e1491214e0c0f7a56b6:hYChCXxrRFbzLCCwYoZzr7M46hbDd72Bvo0k1iChDLrgOzymu+AJ4NMq0B4t/rYLgN8CNCMMAI9eCaiDHKSWBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [runtime, directive-runtime, graph-runtime, knowledge-runtime, llm]
@@ -39,7 +39,8 @@ LLM thread with a prompt + tool loop.
    - If tool call: dispatches through the daemon callback channel,
      adds result to messages, continues loop
    - If text: returns as the directive result
-4. Enforces limits: `turns`, `tokens`, `spend_usd`, `duration_seconds`
+4. Enforces limits: `turns`, `tool_calls`, `tokens`, `spend_usd`,
+   `duration_seconds`
 5. Returns a `RuntimeResult` with the final output
 
 ### Model Selection

@@ -5216,6 +5216,8 @@ async fn run_claimed_thread_row_inner(
         turns = hard_limits.turns,
         turns_source = %turns_source,
         turns_cap = ?limits_config.caps.turns,
+        tool_calls = hard_limits.tool_calls,
+        tool_calls_cap = ?limits_config.caps.tool_calls,
         header_limits_present = limits_header.is_some_and(|v| !v.is_null()),
         execution_policy_item_override = policy_item_override(execution_policy.timeout.as_ref())
             || policy_item_override(execution_policy.max_steps.as_ref()),
@@ -9895,6 +9897,7 @@ mod tests {
     fn parent_context_clamps_child_limits_and_increments_spawn_depth() {
         let parent_hard_limits = HardLimits {
             turns: 6,
+            tool_calls: 4,
             tokens: 1_000,
             spend_usd: ryeos_accounting::UsdNanos::parse_canonical("0.25").unwrap(),
             spawns: 2,
@@ -9913,6 +9916,7 @@ mod tests {
             .expect("parent hard limits present");
         let requested = LimitValues {
             turns: 20,
+            tool_calls: 12,
             tokens: 20_000,
             spend_usd: ryeos_accounting::UsdNanos::parse_canonical("2").unwrap(),
             spawns: 10,
@@ -9927,6 +9931,7 @@ mod tests {
         );
 
         assert_eq!(hard.turns, 6);
+        assert_eq!(hard.tool_calls, 4);
         assert_eq!(hard.tokens, 1_000);
         assert_eq!(
             hard.spend_usd,

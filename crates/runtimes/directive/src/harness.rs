@@ -31,6 +31,7 @@ pub struct Harness {
     interrupted: Arc<AtomicBool>,
     start: Instant,
     turns_used: u32,
+    tool_calls_used: u32,
     tokens_used: u64,
     spend_used: ryeos_runtime::envelope::UsdNanos,
     spawns_used: u32,
@@ -57,6 +58,7 @@ impl Harness {
             interrupted: Arc::new(AtomicBool::new(false)),
             start: Instant::now(),
             turns_used: 0,
+            tool_calls_used: 0,
             tokens_used: 0,
             spend_used: ryeos_runtime::envelope::UsdNanos::ZERO,
             spawns_used: 0,
@@ -191,6 +193,25 @@ impl Harness {
         self.turns_used += 1;
     }
 
+    /// Admit one non-lifecycle tool-call attempt against the sealed cumulative
+    /// limit. Invalid, denied, and failed attempts still consume the budget:
+    /// counting only successful dispatches would let a model loop forever on
+    /// malformed or unauthorized calls. A zero limit remains unlimited.
+    pub fn try_record_tool_call(&mut self) -> bool {
+        if self.limits.tool_calls > 0 && self.tool_calls_used >= self.limits.tool_calls {
+            return false;
+        }
+        self.tool_calls_used = self.tool_calls_used.saturating_add(1);
+        true
+    }
+
+    /// Whether at least one more dispatchable tool may be advertised. Lifecycle
+    /// tools such as `directive_return` do not consume this resource and remain
+    /// independently available to the caller.
+    pub fn tool_calls_available(&self) -> bool {
+        self.limits.tool_calls == 0 || self.tool_calls_used < self.limits.tool_calls
+    }
+
     /// Un-count a turn whose cognition was cut by a live interrupt before it
     /// completed. DECISION 1: an interrupted attempt is NOT a completed turn, so
     /// the redirect's fresh cognition stays within the turn limit (e.g. a redirect
@@ -260,8 +281,17 @@ impl Harness {
         self.spawns_used = spawns;
     }
 
+    pub fn reseed_tool_calls(&mut self, tool_calls: u32) {
+        self.tool_calls_used = tool_calls;
+    }
+
     pub fn turns_used(&self) -> u32 {
         self.turns_used
+    }
+
+    #[cfg(test)]
+    pub fn tool_calls_used(&self) -> u32 {
+        self.tool_calls_used
     }
 
     pub fn tokens_used(&self) -> u64 {
@@ -414,6 +444,7 @@ mod tests {
         let harness = make_harness(
             HardLimits {
                 turns: 10,
+                tool_calls: 4,
                 tokens: 1000,
                 spend_usd: ryeos_accounting::UsdNanos::parse_canonical("1").unwrap(),
                 spawns: 5,
@@ -437,6 +468,44 @@ mod tests {
         harness.record_turn();
         harness.record_turn();
         assert!(harness.check_limits().is_err());
+    }
+
+    #[test]
+    fn tool_call_limit_counts_attempts_and_zero_is_unlimited() {
+        let mut bounded = make_harness(
+            HardLimits {
+                tool_calls: 2,
+                ..HardLimits::default()
+            },
+            vec![],
+        );
+        assert!(bounded.tool_calls_available());
+        assert!(bounded.try_record_tool_call());
+        assert!(bounded.try_record_tool_call());
+        assert!(!bounded.tool_calls_available());
+        assert!(!bounded.try_record_tool_call());
+        assert_eq!(bounded.tool_calls_used(), 2);
+
+        let mut unlimited = make_harness(HardLimits::default(), vec![]);
+        for _ in 0..100 {
+            assert!(unlimited.try_record_tool_call());
+        }
+        assert!(unlimited.tool_calls_available());
+        assert_eq!(unlimited.tool_calls_used(), 100);
+    }
+
+    #[test]
+    fn resume_reseeds_tool_call_budget() {
+        let mut harness = make_harness(
+            HardLimits {
+                tool_calls: 3,
+                ..HardLimits::default()
+            },
+            vec![],
+        );
+        harness.reseed_tool_calls(3);
+        assert!(!harness.tool_calls_available());
+        assert!(!harness.try_record_tool_call());
     }
 
     #[test]

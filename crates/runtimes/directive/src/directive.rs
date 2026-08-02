@@ -127,6 +127,8 @@ pub struct LimitsSpec {
     #[serde(default)]
     pub turns: Option<u32>,
     #[serde(default)]
+    pub tool_calls: Option<u32>,
+    #[serde(default)]
     pub tokens: Option<u64>,
     /// Fixed-point USD as a canonical decimal string (e.g. `"0.03"`).
     /// Authored numeric spend values are rejected at this boundary.
