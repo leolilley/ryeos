@@ -4785,11 +4785,11 @@ fn admit_request_authority(
         .map_err(DispatchError::Internal)
 }
 
-type CachedRootDispatchSubject = (
-    VerifiedItem,
-    std::sync::Arc<ryeos_engine::engine::VerifiedArtifactAttestation>,
-    std::sync::Arc<ryeos_app::resolution_cache::ResolvedClosure>,
-);
+struct CachedRootDispatchSubject {
+    key: ryeos_app::resolution_cache::ResolutionCacheKey,
+    attestation: std::sync::Arc<ryeos_engine::engine::VerifiedArtifactAttestation>,
+    closure: std::sync::Arc<ryeos_app::resolution_cache::ResolvedClosure>,
+}
 
 fn cached_root_dispatch_subject(
     canonical_ref: &CanonicalRef,
@@ -4862,38 +4862,11 @@ fn cached_root_dispatch_subject(
     let Some(attestation) = closure.verified_attestation().cloned() else {
         return Ok(None);
     };
-    let verified_result = match admitted_request_snapshot {
-        Some(authority) => ctx
-            .engine
-            .consume_verified_attestation_under_admitted_authority(
-                &ctx.plan_ctx,
-                &attestation,
-                &subject_authority,
-                authority,
-            ),
-        None => {
-            ctx.engine
-                .consume_verified_attestation(&ctx.plan_ctx, &attestation, &subject_authority)
-        }
-    };
-    let verified = match verified_result {
-        Ok(verified) => verified,
-        Err(error) => {
-            state.resolution_cache.discard_if_same(&key, &closure);
-            ryeos_app::resolution_cache::emit_resolution_cache_metric(
-                ryeos_app::resolution_cache::ResolutionCacheMetric::Root,
-                ryeos_app::resolution_cache::ResolutionCachePhase::PreResolve,
-                ryeos_app::resolution_cache::ResolutionCacheOutcome::Stale,
-                Some(
-                    ryeos_app::resolution_cache::ResolutionCacheReason::AttestationRevalidationFailed,
-                ),
-                0,
-            );
-            tracing::debug!(error = %error, "root resolution attestation revalidation failed");
-            return Ok(None);
-        }
-    };
-    Ok(Some((verified, attestation, closure)))
+    Ok(Some(CachedRootDispatchSubject {
+        key,
+        attestation,
+        closure,
+    }))
 }
 
 #[derive(Debug, Clone)]
@@ -5035,50 +5008,94 @@ fn validate_root_resolution_inner(
         state,
         admitted_request_snapshot.as_deref(),
     )?;
-    let (root_attestation, prevalidated_closure) = match cached {
-        Some((_, attestation, closure)) => (attestation, Some(closure)),
-        None => {
-            let attestation = match admitted_request_snapshot.as_ref() {
-                Some(authority) => {
-                    let project_root = project_binding.execution_workspace().ok_or_else(|| {
-                        DispatchError::Internal(anyhow::anyhow!(
-                            "content-addressed root validation has no execution workspace"
-                        ))
-                    })?;
-                    ctx.engine.resolve_attested_under_admitted_authority(
-                        &ctx.plan_ctx,
-                        canonical_ref,
-                        project_root,
-                        authority,
-                    )
-                }
-                None => ctx.engine.resolve_attested(&ctx.plan_ctx, canonical_ref),
-            }
-            .map_err(|error| {
-                map_dispatch_root_resolution_validation_error(
-                    anyhow::Error::new(error)
-                        .context("attest exact caller-named root before resolution validation"),
-                    &canonical_ref.to_string(),
-                    ctx,
-                    state,
+    let resolve_root_attestation = || {
+        match admitted_request_snapshot.as_ref() {
+            Some(authority) => {
+                let project_root = project_binding.execution_workspace().ok_or_else(|| {
+                    DispatchError::Internal(anyhow::anyhow!(
+                        "content-addressed root validation has no execution workspace"
+                    ))
+                })?;
+                ctx.engine.resolve_attested_under_admitted_authority(
+                    &ctx.plan_ctx,
+                    canonical_ref,
+                    project_root,
+                    authority,
                 )
-            })?;
-            (std::sync::Arc::new(attestation), None)
+            }
+            None => ctx.engine.resolve_attested(&ctx.plan_ctx, canonical_ref),
+        }
+        .map_err(|error| {
+            map_dispatch_root_resolution_validation_error(
+                anyhow::Error::new(error)
+                    .context("attest exact caller-named root before resolution validation"),
+                &canonical_ref.to_string(),
+                ctx,
+                state,
+            )
+        })
+        .map(std::sync::Arc::new)
+    };
+    let (root_attestation, prevalidated_closure) = match cached.as_ref() {
+        Some(cached) => (
+            std::sync::Arc::clone(&cached.attestation),
+            Some(std::sync::Arc::clone(&cached.closure)),
+        ),
+        None => (resolve_root_attestation()?, None),
+    };
+    let validate = |attestation, closure, admitted_request_snapshot| {
+        ryeos_app::thread_lifecycle::validate_verified_root_resolution_with_timings(
+            &ctx.engine,
+            &ctx.plan_ctx,
+            project_binding,
+            attestation,
+            launch_timings,
+            Some(&*state.resolution_cache),
+            closure,
+            admitted_request_snapshot,
+        )
+    };
+    let validated = match validate(
+        root_attestation,
+        prevalidated_closure,
+        admitted_request_snapshot.clone(),
+    ) {
+        Ok(validated) => validated,
+        Err(error) if cached.is_some() => {
+            let cached = cached.as_ref().expect("cached branch checked");
+            state
+                .resolution_cache
+                .discard_if_same(&cached.key, &cached.closure);
+            ryeos_app::resolution_cache::emit_resolution_cache_metric(
+                ryeos_app::resolution_cache::ResolutionCacheMetric::Root,
+                ryeos_app::resolution_cache::ResolutionCachePhase::PreResolve,
+                ryeos_app::resolution_cache::ResolutionCacheOutcome::Stale,
+                Some(
+                    ryeos_app::resolution_cache::ResolutionCacheReason::AttestationRevalidationFailed,
+                ),
+                0,
+            );
+            tracing::debug!(%error, "cached root admission revalidation failed; resolving fresh");
+            validate(resolve_root_attestation()?, None, admitted_request_snapshot).map_err(
+                |error| {
+                    map_dispatch_root_resolution_validation_error(
+                        error,
+                        &canonical_ref.to_string(),
+                        ctx,
+                        state,
+                    )
+                },
+            )?
+        }
+        Err(error) => {
+            return Err(map_dispatch_root_resolution_validation_error(
+                error,
+                &canonical_ref.to_string(),
+                ctx,
+                state,
+            ));
         }
     };
-    let validated = ryeos_app::thread_lifecycle::validate_verified_root_resolution_with_timings(
-        &ctx.engine,
-        &ctx.plan_ctx,
-        project_binding,
-        root_attestation,
-        launch_timings,
-        Some(&*state.resolution_cache),
-        prevalidated_closure,
-        admitted_request_snapshot,
-    )
-    .map_err(|error| {
-        map_dispatch_root_resolution_validation_error(error, &canonical_ref.to_string(), ctx, state)
-    })?;
     let attestation = validated
         .resolution_closure()
         .verified_attestation()
