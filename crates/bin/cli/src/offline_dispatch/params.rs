@@ -61,6 +61,8 @@ pub(super) fn bind_params_minimal(
         params = ryeos_runtime::bind_argv(&canonical_tail);
     }
 
+    apply_project_parameter_binding(&mut params, command);
+
     Ok(params)
 }
 
@@ -154,6 +156,23 @@ fn command_project_resolution(command: &CommandDef) -> CommandProjectResolution 
         .unwrap_or_default()
 }
 
+fn apply_project_parameter_binding(params: &mut Value, command: &CommandDef) {
+    let Some(bind_parameter) = command
+        .project
+        .as_ref()
+        .and_then(|project| project.bind_parameter.as_ref())
+    else {
+        return;
+    };
+    let Some(obj) = params.as_object_mut() else {
+        return;
+    };
+    let Some(project) = obj.remove("project") else {
+        return;
+    };
+    obj.insert(bind_parameter.clone(), project);
+}
+
 pub(super) fn expand_template(
     template: &str,
     params_json: &str,
@@ -221,5 +240,67 @@ fn emit_param(out: &mut Vec<String>, key: &str, value: &Value) {
                 _ => other.to_string(),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use ryeos_runtime::{
+        CommandAvailability, CommandDef, CommandDispatch, CommandProjectDefault,
+        CommandProjectPolicy, CommandProjectResolution, CommandProvenance,
+    };
+    use serde_json::json;
+
+    use super::bind_params_minimal;
+
+    fn project_command(bind_parameter: &str) -> CommandDef {
+        CommandDef {
+            name: "status".into(),
+            tokens: vec!["status".into()],
+            description: String::new(),
+            aliases: Vec::new(),
+            help: None,
+            arguments: Vec::new(),
+            forms: Vec::new(),
+            sensitive_fields: Vec::new(),
+            defaults: Default::default(),
+            parameter_binding: None,
+            control_flags: Vec::new(),
+            project: Some(CommandProjectPolicy {
+                resolution: CommandProjectResolution::Required,
+                default: CommandProjectDefault::None,
+                no_project_flag: false,
+                request_project_path: true,
+                bind_parameter: Some(bind_parameter.into()),
+            }),
+            dispatch: CommandDispatch::ExecuteRef {
+                execute: "example:namespace/status".into(),
+                availability: CommandAvailability::Offline,
+            },
+            source_file: PathBuf::new(),
+            provenance: CommandProvenance::default(),
+        }
+    }
+
+    #[test]
+    fn offline_binding_honors_declared_project_parameter() {
+        let project_path = std::env::current_dir()
+            .expect("current directory")
+            .canonicalize()
+            .expect("canonical current directory");
+        let params = bind_params_minimal(
+            &[],
+            &project_command("project_path"),
+            project_path.to_str().expect("UTF-8 project path"),
+        )
+        .expect("bind offline parameters");
+
+        assert_eq!(
+            params,
+            json!({"project_path": project_path.to_string_lossy()})
+        );
+        assert!(params.get("project").is_none());
     }
 }

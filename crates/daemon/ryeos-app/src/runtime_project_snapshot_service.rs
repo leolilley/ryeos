@@ -22,9 +22,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::callback_token::{CallbackCapability, ThreadAuthState};
-use crate::execution_policy::{
-    LIVE_PROJECT_READ_CAPABILITY, LIVE_PROJECT_WRITE_CAPABILITY,
-};
+use crate::execution_policy::{LIVE_PROJECT_READ_CAPABILITY, LIVE_PROJECT_WRITE_CAPABILITY};
 use crate::state::AppState;
 use crate::state_store::NodeIdentitySigner;
 use ryeos_bundle::manifest::ProjectSnapshotOperation;
@@ -915,13 +913,15 @@ mod tests {
         let authorizer = Authorizer::new();
         let project_ceiling = vec![LIVE_PROJECT_WRITE_CAPABILITY.to_string()];
         let create_runtime = vec![project_snapshot_cap(&ProjectSnapshotOperation::Create)];
-        assert!(authorize_snapshot_operation(
-            &authorizer,
-            &project_ceiling,
-            &create_runtime,
-            &ProjectSnapshotOperation::Create,
-        )
-        .is_ok());
+        assert!(
+            authorize_snapshot_operation(
+                &authorizer,
+                &project_ceiling,
+                &create_runtime,
+                &ProjectSnapshotOperation::Create,
+            )
+            .is_ok()
+        );
 
         let missing_project = authorize_snapshot_operation(
             &authorizer,
@@ -982,10 +982,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(
-            error.contains(LIVE_PROJECT_READ_CAPABILITY),
-            "got: {error}"
-        );
+        assert!(error.contains(LIVE_PROJECT_READ_CAPABILITY), "got: {error}");
     }
 
     #[test]
