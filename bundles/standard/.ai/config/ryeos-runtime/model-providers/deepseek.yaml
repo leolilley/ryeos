@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-03T05:24:45Z:106a68ac9ae6ac8a06b63f22bf514a1bf7b02627bf20b7c9fcd422627a051ec8:TkViATPMTRXAjiVqTq2tfkLtArROfWKFVgJc82C9bLm7fC5PCz04wyvbxoQ5Ifhf37Et3D4bayOGAtfJngMwCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-03T07:50:04Z:f438a149e49701fa7582b236d3f8b22179439799c7515df90cc615161b6fa7a9:HIa8LyJNXkafdWTLe/cNol5h8oUygi66T1AzdwpFknFb+EWPVKYsmIqKmBzdVcduoQhx97hcA17zbQawiBGuDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
 base_url: "https://api.deepseek.com"
@@ -83,7 +83,7 @@ profiles:
         cache_read_per_million: "0.003625"
         cache_miss_per_million: "0.435"
         output_per_million: "0.87"
-        covered_dimensions: [cache_read_tokens, cache_miss_tokens, output_tokens]
+        covered_dimensions: [output_tokens, cache_read_tokens, cache_miss_tokens]
   - name: deepseek-v4-flash-spend
     match: [deepseek-v4-flash]
     spend_authority:
@@ -97,7 +97,7 @@ profiles:
         cache_read_per_million: "0.0028"
         cache_miss_per_million: "0.14"
         output_per_million: "0.28"
-        covered_dimensions: [cache_read_tokens, cache_miss_tokens, output_tokens]
+        covered_dimensions: [output_tokens, cache_read_tokens, cache_miss_tokens]
 pricing:
   models:
     deepseek-v4-pro:

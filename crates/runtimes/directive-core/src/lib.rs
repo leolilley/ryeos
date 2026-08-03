@@ -2486,3 +2486,25 @@ mod reasoning_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod shipped_provider_config_tests {
+    use super::ProviderConfig;
+
+    #[test]
+    fn deepseek_config_deserializes_and_validates_for_every_shipped_model() {
+        let value: serde_json::Value = serde_yaml::from_str(include_str!(
+            "../../../../bundles/standard/.ai/config/ryeos-runtime/model-providers/deepseek.yaml"
+        ))
+        .expect("shipped DeepSeek provider YAML");
+        let provider: ProviderConfig =
+            serde_json::from_value(value).expect("shipped DeepSeek provider config");
+
+        for model in ["deepseek-v4-pro", "deepseek-v4-flash"] {
+            provider
+                .resolve_for_model(model)
+                .validate(&format!(" for shipped model {model}"))
+                .unwrap_or_else(|error| panic!("invalid shipped DeepSeek config: {error:#}"));
+        }
+    }
+}
