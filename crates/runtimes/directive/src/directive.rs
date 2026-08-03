@@ -130,6 +130,10 @@ pub struct LimitsSpec {
     pub tool_calls: Option<u32>,
     #[serde(default)]
     pub tokens: Option<u64>,
+    /// Exact per-attempt serialized provider request-body ceiling. The daemon
+    /// seals the effective value into the launch envelope; `0` is unlimited.
+    #[serde(default)]
+    pub provider_request_body_bytes: Option<u64>,
     /// Fixed-point USD as a canonical decimal string (e.g. `"0.03"`).
     /// Authored numeric spend values are rejected at this boundary.
     #[serde(default)]
@@ -611,6 +615,7 @@ pub struct UsageUpdate {
     pub output_tokens: Option<u64>,
     pub reasoning_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,
+    pub cache_miss_tokens: Option<u64>,
     pub cache_write_tokens: Option<u64>,
     pub anomalies: Vec<String>,
 }

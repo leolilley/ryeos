@@ -584,6 +584,7 @@ fn build_ledger_settlement(
                                 BillableDimension::OutputTokens => usage.output_tokens?,
                                 BillableDimension::ReasoningTokens => usage.reasoning_tokens?,
                                 BillableDimension::CacheReadTokens => usage.cache_read_tokens?,
+                                BillableDimension::CacheMissTokens => usage.cache_miss_tokens?,
                                 BillableDimension::CacheWriteTokens => usage.cache_write_tokens?,
                                 // The daemon adds the tariff's flat per-request
                                 // rate itself; no provider observation is needed.
@@ -1023,6 +1024,9 @@ impl Runner {
                             attempt: attempt_number,
                             sampling: self.sampling.as_ref(),
                             reasoning: self.reasoning.as_ref(),
+                            provider_request_body_bytes_limit: self
+                                .harness
+                                .provider_request_body_bytes_limit(),
                             cancel_flag: Some(cancel_flag.clone()),
                             interrupt_flag: Some(interrupt_flag.clone()),
                         };
@@ -2177,6 +2181,7 @@ impl Runner {
                                     output = ?update.output_tokens,
                                     reasoning = ?update.reasoning_tokens,
                                     cache_read = ?update.cache_read_tokens,
+                                    cache_miss = ?update.cache_miss_tokens,
                                     cache_write = ?update.cache_write_tokens,
                                     "mid-stream usage update"
                                 );
@@ -3909,6 +3914,8 @@ impl Runner {
                     ryeos_directive_core::ModelPricing {
                         input_per_million: i,
                         output_per_million: o,
+                        cache_read_per_million: pricing.cache_read_per_million,
+                        cache_miss_per_million: pricing.cache_miss_per_million,
                     },
                     PricingSource::ProviderDefault,
                 ),
@@ -3965,6 +3972,48 @@ impl Runner {
                     },
                 });
             }
+        }
+        if let Some(usage) = usage
+            && usage.cache_partition_of_input
+            && usage.anomalies.is_empty()
+            && let (Some(cache_read_tokens), Some(cache_miss_tokens)) =
+                (usage.cache_read_tokens, usage.cache_miss_tokens)
+            && let Some(pricing) = self.provider_config.pricing.as_ref()
+            && !pricing.explicitly_free
+            && let Some(rates) = pricing.for_model(&self.model_name)
+            && let (Some(cache_read_rate), Some(cache_miss_rate)) =
+                (rates.cache_read_per_million, rates.cache_miss_per_million)
+        {
+            let cache_read_cost =
+                ryeos_runtime::envelope::UsdNanos::rate_per_million_mul_units_round_up(
+                    cache_read_rate,
+                    cache_read_tokens,
+                )
+                .map_err(|error| anyhow::anyhow!("cache-read token pricing overflowed: {error}"))?;
+            let cache_miss_cost =
+                ryeos_runtime::envelope::UsdNanos::rate_per_million_mul_units_round_up(
+                    cache_miss_rate,
+                    cache_miss_tokens,
+                )
+                .map_err(|error| anyhow::anyhow!("cache-miss token pricing overflowed: {error}"))?;
+            let output_cost =
+                ryeos_runtime::envelope::UsdNanos::rate_per_million_mul_units_round_up(
+                    rates.output_per_million,
+                    output_tokens,
+                )
+                .map_err(|error| anyhow::anyhow!("output token pricing overflowed: {error}"))?;
+            let usd = cache_read_cost
+                .checked_add(cache_miss_cost)
+                .and_then(|subtotal| subtotal.checked_add(output_cost))
+                .map_err(|error| anyhow::anyhow!("cache-aware turn pricing overflowed: {error}"))?;
+            return Ok(CostBreakdown {
+                usd,
+                source: if pricing.models.contains_key(&self.model_name) {
+                    PricingSource::PerModel
+                } else {
+                    PricingSource::ProviderDefault
+                },
+            });
         }
         self.compute_cost(input_tokens, output_tokens)
     }
@@ -4290,6 +4339,8 @@ mod tests {
                 explicitly_free: false,
                 input_per_million: Some(usd("3")),
                 output_per_million: Some(usd("15")),
+                cache_read_per_million: Some(usd("0.3")),
+                cache_miss_per_million: Some(usd("3")),
                 models: Default::default(),
             }),
             extra: Default::default(),
@@ -4343,6 +4394,20 @@ mod tests {
         let reported = runner.compute_cost_for_usage(Some(&usage)).unwrap();
         assert_eq!(reported.usd, usd("7.25"));
         assert_eq!(reported.source, PricingSource::ProviderReported);
+
+        let cache_partitioned = crate::provider_adapter::http::TokenUsage {
+            input_tokens: Some(1_000_000),
+            output_tokens: Some(500_000),
+            cache_read_tokens: Some(800_000),
+            cache_miss_tokens: Some(200_000),
+            cache_partition_of_input: true,
+            ..Default::default()
+        };
+        let cached = runner
+            .compute_cost_for_usage(Some(&cache_partitioned))
+            .unwrap();
+        assert_eq!(cached.usd, usd("8.34"));
+        assert_eq!(cached.source, PricingSource::ProviderDefault);
     }
 
     #[test]
@@ -4764,6 +4829,8 @@ mod tests {
             ModelPricing {
                 input_per_million: usd("0.8"),
                 output_per_million: usd("4"),
+                cache_read_per_million: None,
+                cache_miss_per_million: None,
             },
         );
         let provider = crate::directive::ProviderConfig {
@@ -4777,6 +4844,8 @@ mod tests {
                 explicitly_free: false,
                 input_per_million: Some(usd("0")), // would yield $0 if used
                 output_per_million: Some(usd("0")),
+                cache_read_per_million: None,
+                cache_miss_per_million: None,
                 models,
             }),
             extra: Default::default(),
@@ -4844,6 +4913,8 @@ mod tests {
                 explicitly_free: false,
                 input_per_million: Some(usd("1")),
                 output_per_million: Some(usd("5")),
+                cache_read_per_million: None,
+                cache_miss_per_million: None,
                 models: Default::default(),
             }),
             extra: Default::default(),
@@ -5214,6 +5285,7 @@ mod tests {
                 ),
                 reasoning_per_million: None,
                 cache_read_per_million: None,
+                cache_miss_per_million: None,
                 cache_write_per_million: None,
                 per_request: None,
                 covered_dimensions: ClosedBillableDimensionSet::new(vec![
@@ -5296,17 +5368,19 @@ mod tests {
     }
 
     #[test]
-    fn ledger_settlement_requires_and_preserves_covered_cache_dimensions() {
+    fn ledger_settlement_requires_and_preserves_cache_partition_dimensions() {
         let mut reconciliation = tariff_reconciliation();
         let ChargeReconciliationAuthority::DeterministicTariff { tariff } = &mut reconciliation
         else {
             unreachable!()
         };
         tariff.cache_read_per_million = Some(usd("0.3"));
+        tariff.cache_miss_per_million = Some(usd("3"));
+        tariff.input_per_million = None;
         tariff.covered_dimensions = ClosedBillableDimensionSet::new(vec![
-            BillableDimension::InputTokens,
             BillableDimension::OutputTokens,
             BillableDimension::CacheReadTokens,
+            BillableDimension::CacheMissTokens,
         ])
         .unwrap();
         let authority = paid_authority(reconciliation);
@@ -5316,15 +5390,12 @@ mod tests {
         assert!(matches!(spend, SpendAccounting::Unavailable { .. }));
 
         usage.cache_read_tokens = Some(60);
+        usage.cache_miss_tokens = Some(40);
         let (spend, _) = build_ledger_settlement(&authority, true, Some(&usage), None);
         assert_eq!(
             spend,
             SpendAccounting::TariffUnits {
                 unit_counts: vec![
-                    UnitCount {
-                        dimension: BillableDimension::InputTokens,
-                        units: 100,
-                    },
                     UnitCount {
                         dimension: BillableDimension::OutputTokens,
                         units: 40,
@@ -5332,6 +5403,10 @@ mod tests {
                     UnitCount {
                         dimension: BillableDimension::CacheReadTokens,
                         units: 60,
+                    },
+                    UnitCount {
+                        dimension: BillableDimension::CacheMissTokens,
+                        units: 40,
                     },
                 ],
             }

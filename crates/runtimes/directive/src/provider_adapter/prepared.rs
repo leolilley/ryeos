@@ -8,7 +8,7 @@
 //! send time. The credential VALUE stays outside every digest — only its
 //! declared header name participates.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 #[cfg(feature = "latency-profiling")]
 use std::time::Instant;
 
@@ -202,6 +202,16 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
     // else; transport must never re-serialize `body`.
     let body_bytes = serde_json::to_vec(&body)
         .map_err(|e| anyhow!("serialize prepared provider request body: {e}"))?;
+    let body_len = u64::try_from(body_bytes.len())
+        .map_err(|_| anyhow!("prepared provider request body length exceeds u64"))?;
+    if input.provider_request_body_bytes_limit != 0
+        && body_len > input.provider_request_body_bytes_limit
+    {
+        bail!(
+            "provider_request_body_limit_exceeded: prepared request body is {body_len} bytes, exceeding the signed per-attempt limit of {} bytes; zero provider requests",
+            input.provider_request_body_bytes_limit
+        );
+    }
     let body_sha256 = streaming::sha256_hex(&body_bytes);
 
     // Credential-generation model (plan §7.4, deliberate v1 property): the
@@ -389,6 +399,7 @@ mod tests {
             attempt: 1,
             sampling: None,
             reasoning,
+            provider_request_body_bytes_limit: 0,
             cancel_flag: None,
             interrupt_flag: None,
         })
@@ -411,5 +422,55 @@ mod tests {
         assert_eq!(disabled_body["thinking"]["type"], "off");
         assert_ne!(provider_default.body_sha256, disabled.body_sha256);
         assert_ne!(provider_default.request_digest, disabled.request_digest);
+    }
+
+    #[test]
+    fn signed_request_body_limit_refuses_preparation_before_transport() {
+        let client = reqwest::Client::new();
+        let provider = provider();
+        let execution = ExecutionConfig::default();
+        let messages = [ProviderMessage {
+            role: "user".to_string(),
+            content: Some(json!("hello")),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }];
+        let callback_config = EnvelopeCallback {
+            socket_path: std::path::PathBuf::from("/nonexistent/ryeos-callback.sock"),
+            token: "unused".to_string(),
+        };
+        let callback = CallbackClient::new(
+            &callback_config,
+            "T-request-body-limit-fixture",
+            "/project",
+            "unused",
+        );
+        let error = match prepare_provider_request(&StreamingCallInput {
+            client: &client,
+            provider: &provider,
+            provider_id: "fixture",
+            matched_profile: None,
+            config_hash: "0",
+            execution: &execution,
+            model: "fixture-model",
+            messages: &messages,
+            tools: &[],
+            callback: &callback,
+            turn: 1,
+            attempt: 1,
+            sampling: None,
+            reasoning: None,
+            provider_request_body_bytes_limit: 1,
+            cancel_flag: None,
+            interrupt_flag: None,
+        }) {
+            Ok(_) => panic!("one-byte signed limit must refuse the prepared request"),
+            Err(error) => error,
+        };
+
+        let message = format!("{error:#}");
+        assert!(message.contains("provider_request_body_limit_exceeded"));
+        assert!(message.contains("zero provider requests"));
     }
 }

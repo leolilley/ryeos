@@ -1750,6 +1750,7 @@ output_schema:
         fn add_fixed_parser_handler(&self, value: serde_json::Value) {
             let triple = host_triple();
             let name = "fixed-parser";
+            let handler_abi = ryeos_engine::handlers::SUPPORTED_HANDLER_ABI_VERSION;
             let bin_rel = format!("bin/{triple}/{name}");
             let bin_path = self.ai_dir.join(&bin_rel);
             fs::create_dir_all(bin_path.parent().unwrap()).unwrap();
@@ -1773,7 +1774,7 @@ name: fixed-parser
 kind: handler
 serves: parser
 binary_ref: {bin_rel}
-abi_version: "v1"
+abi_version: "{handler_abi}"
 required_caps: []
 description: "fixed parser handler for preflight tests"
 "#
@@ -2434,6 +2435,7 @@ strict_fields: warn
             runtime: None,
             inventory_kinds: vec![],
             inventory_schema_keys: vec![],
+            inventory_policy: Default::default(),
         }
     }
 

@@ -13,6 +13,8 @@
 //! ephemeral live-stream events; everything else is an `indexed`
 //! milestone unless a caller deliberately requests `journal_only`.
 
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -21,12 +23,53 @@ use serde_json::{Value, json};
 // reads), so the enum and the projection reference one source of truth.
 use ryeos_state::event_types as wire;
 
-/// Framing prefix for structured, non-payload child timing records written to
-/// captured stderr and re-emitted by the daemon after the child exits.
+/// Framing prefix for structured child observations written to captured stderr
+/// and re-emitted by the daemon after the child exits.
 ///
-/// This is observability transport only. It is not a persisted runtime event
-/// type or launch-envelope field.
-pub const CAPTURED_CHILD_TIMING_PREFIX: &str = "RYEOS_CHILD_TIMING_JSON ";
+/// This is observability transport only. Record names, versions, clock domains,
+/// and admission bounds are declared by the selected signed runtime descriptor;
+/// the engine and executor treat the remaining payload as opaque.
+pub const CAPTURED_CHILD_OBSERVATION_PREFIX: &str = "RYEOS_CHILD_OBSERVATION_JSON ";
+
+const MAX_CHILD_OBSERVATION_ID_BYTES: usize = 256;
+
+/// Generic outer frame for one signed-runtime-declared child observation.
+///
+/// Runtime-owned fields are flattened into `payload`. The daemon validates only
+/// this generic identity/version/clock frame against the selected runtime's
+/// signed declaration and never interprets payload names or values.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeChildObservationRecord {
+    pub event: String,
+    pub schema_version: u32,
+    pub clock_domain: String,
+    pub invocation_id: Option<String>,
+    pub thread_id: Option<String>,
+    #[serde(flatten)]
+    pub payload: BTreeMap<String, Value>,
+}
+
+impl RuntimeChildObservationRecord {
+    pub fn decode_declared(
+        expected_thread_id: &str,
+        encoded: &str,
+        declarations: &BTreeMap<String, ryeos_engine::runtime_registry::ChildObservationDecl>,
+    ) -> Option<Self> {
+        let record = serde_json::from_str::<Self>(encoded).ok()?;
+        let declaration = declarations.get(&record.event)?;
+        let identity_is_valid = record.invocation_id.as_deref().is_some_and(|value| {
+            !value.is_empty()
+                && value.len() <= MAX_CHILD_OBSERVATION_ID_BYTES
+                && !value.chars().any(char::is_control)
+        });
+        (encoded.len() <= declaration.max_record_bytes as usize
+            && record.schema_version == declaration.schema_version
+            && record.clock_domain == declaration.clock_domain
+            && identity_is_valid
+            && record.thread_id.as_deref() == Some(expected_thread_id))
+        .then_some(record)
+    }
+}
 
 /// Runtime-facing event admission ceilings. The daemon consumes these same
 /// constants, so producers can form an atomic batch that the event store will
@@ -414,16 +457,9 @@ pub enum RuntimeEventType {
     TokenDelta,
     StreamSnapshot,
     StreamClosed,
-    /// A profiling runtime observed successful provider HTTP response headers.
-    /// This is distinct from gateway `stream_started`, which only means launch
-    /// handoff is ready.
-    ProviderResponseHeaders,
-    /// A profiling runtime parsed the first complete provider stream event for
-    /// one model call.
-    ProviderStreamStarted,
-    /// A profiling runtime observed the first hidden reasoning delta for one
-    /// model call. The event carries no reasoning content.
-    ProviderReasoningStarted,
+    /// Generic ephemeral runtime observation. The payload carries a
+    /// runtime-owned namespaced `kind`; shared layers do not interpret it.
+    Observation,
 
     // ── Audit / artifact ────────────────────────────────────────
     ArtifactPublished,
@@ -508,9 +544,7 @@ impl RuntimeEventType {
             Self::TokenDelta => wire::TOKEN_DELTA,
             Self::StreamSnapshot => wire::STREAM_SNAPSHOT,
             Self::StreamClosed => wire::STREAM_CLOSED,
-            Self::ProviderResponseHeaders => wire::PROVIDER_RESPONSE_HEADERS,
-            Self::ProviderStreamStarted => wire::PROVIDER_STREAM_STARTED,
-            Self::ProviderReasoningStarted => wire::PROVIDER_REASONING_STARTED,
+            Self::Observation => wire::OBSERVATION,
             Self::ArtifactPublished => wire::ARTIFACT_PUBLISHED,
             Self::AsLaunchedResolution => wire::AS_LAUNCHED_RESOLUTION,
             Self::AsLaunchedRefBindings => wire::AS_LAUNCHED_REF_BINDINGS,
@@ -564,9 +598,7 @@ impl RuntimeEventType {
             wire::TOKEN_DELTA => Ok(Self::TokenDelta),
             wire::STREAM_SNAPSHOT => Ok(Self::StreamSnapshot),
             wire::STREAM_CLOSED => Ok(Self::StreamClosed),
-            wire::PROVIDER_RESPONSE_HEADERS => Ok(Self::ProviderResponseHeaders),
-            wire::PROVIDER_STREAM_STARTED => Ok(Self::ProviderStreamStarted),
-            wire::PROVIDER_REASONING_STARTED => Ok(Self::ProviderReasoningStarted),
+            wire::OBSERVATION => Ok(Self::Observation),
             wire::ARTIFACT_PUBLISHED => Ok(Self::ArtifactPublished),
             wire::AS_LAUNCHED_RESOLUTION => Ok(Self::AsLaunchedResolution),
             wire::AS_LAUNCHED_REF_BINDINGS => Ok(Self::AsLaunchedRefBindings),
@@ -647,9 +679,7 @@ impl RuntimeEventType {
             Self::TokenDelta
             | Self::StreamSnapshot
             | Self::CognitionReasoning
-            | Self::ProviderResponseHeaders
-            | Self::ProviderStreamStarted
-            | Self::ProviderReasoningStarted
+            | Self::Observation
             | Self::GraphForeachIteration => StorageClass::Ephemeral,
             // Everything else: thread lifecycle, edges, commands,
             // cognition turn boundaries, tool dispatch, graph
@@ -788,9 +818,7 @@ mod tests {
             RuntimeEventType::TokenDelta,
             RuntimeEventType::StreamSnapshot,
             RuntimeEventType::StreamClosed,
-            RuntimeEventType::ProviderResponseHeaders,
-            RuntimeEventType::ProviderStreamStarted,
-            RuntimeEventType::ProviderReasoningStarted,
+            RuntimeEventType::Observation,
             RuntimeEventType::ArtifactPublished,
             RuntimeEventType::AsLaunchedResolution,
             RuntimeEventType::AsLaunchedRefBindings,

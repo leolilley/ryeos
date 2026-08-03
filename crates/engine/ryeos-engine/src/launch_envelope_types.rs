@@ -282,10 +282,6 @@ pub struct EnvelopeRequest {
 pub struct HardLimits {
     #[serde(default)]
     pub turns: u32,
-    /// Maximum non-lifecycle tool-call attempts admitted by runtimes that
-    /// expose model-selected tools. `0` is the unlimited sentinel.
-    #[serde(default)]
-    pub tool_calls: u32,
     #[serde(default)]
     pub tokens: u64,
     /// Fixed-point USD as a canonical decimal string on the wire. `0` is the
@@ -299,18 +295,33 @@ pub struct HardLimits {
     pub depth: u32,
     #[serde(default)]
     pub duration_seconds: u64,
+    /// Runtime-declared numeric dimensions, keyed by opaque names from the
+    /// serving runtime's signed descriptor. `0` is the unlimited sentinel.
+    #[serde(default)]
+    pub runtime: BTreeMap<String, u64>,
+    /// Signed runtime-limit contract that gives the opaque keys above their
+    /// inheritance identity. Absent when no runtime dimensions are active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_contract: Option<String>,
+}
+
+impl HardLimits {
+    pub fn runtime_limit(&self, name: &str) -> u64 {
+        self.runtime.get(name).copied().unwrap_or(0)
+    }
 }
 
 impl Default for HardLimits {
     fn default() -> Self {
         Self {
             turns: 0,
-            tool_calls: 0,
             tokens: 0,
             spend_usd: ryeos_accounting::UsdNanos::ZERO,
             spawns: 0,
             depth: 0,
             duration_seconds: 0,
+            runtime: BTreeMap::new(),
+            runtime_contract: None,
         }
     }
 }
@@ -803,13 +814,13 @@ cost:
     fn hard_limits_defaults() {
         let limits = HardLimits::default();
         assert_eq!(limits.turns, 0);
-        assert_eq!(limits.tool_calls, 0);
+        assert_eq!(limits.runtime_limit("example"), 0);
         assert_eq!(limits.tokens, 0);
         assert_eq!(limits.spawns, 0);
     }
 
     #[test]
-    fn hard_limits_without_tool_calls_remain_wire_compatible() {
+    fn hard_limits_without_runtime_dimensions_default_to_unlimited() {
         let limits: HardLimits = serde_json::from_value(serde_json::json!({
             "turns": 6,
             "tokens": 65_536,
@@ -821,7 +832,7 @@ cost:
         .unwrap();
 
         assert_eq!(limits.turns, 6);
-        assert_eq!(limits.tool_calls, 0);
+        assert_eq!(limits.runtime_limit("example"), 0);
         assert_eq!(limits.tokens, 65_536);
     }
 

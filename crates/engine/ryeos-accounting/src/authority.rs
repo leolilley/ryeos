@@ -55,6 +55,7 @@ pub enum BillableDimension {
     OutputTokens,
     ReasoningTokens,
     CacheReadTokens,
+    CacheMissTokens,
     CacheWriteTokens,
     PerRequest,
 }
@@ -328,6 +329,8 @@ pub struct SpendTariffDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_per_million: Option<UsdNanos>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_miss_per_million: Option<UsdNanos>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_per_million: Option<UsdNanos>,
     /// Flat surcharge per request, canonical decimal USD.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -368,6 +371,7 @@ impl SpendTariffDocument {
             BillableDimension::OutputTokens => self.output_per_million,
             BillableDimension::ReasoningTokens => self.reasoning_per_million,
             BillableDimension::CacheReadTokens => self.cache_read_per_million,
+            BillableDimension::CacheMissTokens => self.cache_miss_per_million,
             BillableDimension::CacheWriteTokens => self.cache_write_per_million,
             BillableDimension::PerRequest => self.per_request,
         }
@@ -466,6 +470,7 @@ mod tests {
             output_per_million: Some(UsdNanos::parse_canonical("15").unwrap()),
             reasoning_per_million: None,
             cache_read_per_million: None,
+            cache_miss_per_million: None,
             cache_write_per_million: None,
             per_request: None,
             covered_dimensions: ClosedBillableDimensionSet::new(vec![

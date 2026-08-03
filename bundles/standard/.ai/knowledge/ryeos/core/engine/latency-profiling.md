@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-02T09:07:28Z:3299cabcce0063756ef0cb708cdf4a5b37cff56322ec0dea7f861f7fd2936084:+WZuzwrJOD0r8Z4OLo1H13SE+/Gi/vNcqxV1Ak3JWkwefpRrcd6UtddT8G50GOn9qCWDBgLogI0RecbgnkzNCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-03T06:49:18Z:91c1d8e436b9bc4fb08434e39c93eb337b39e65a5f86ac3d3b0cb5f275bf4bff:2HSsAOuP0tnYTRzC0XH3EYqGxeUZfWqXh1J9buyrlAr/WkOPUhbEmamf39QKEAIv/rAubLnxsOEt5sPtIjdOAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/engine
 tags: [latency, profiling, observability, streaming, providers, caching]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   How to build, measure, and interpret RyeOS latency without confusing launch,
   provider, reasoning, tool, and downstream delivery time.
@@ -44,7 +44,7 @@ scripts/pkg/install-local-direct.sh --trust-source-publishers
 
 Do not ship profiling binaries as an accidental release artifact. A runtime
 emits `latency_profiling_enabled`, and the daemon captures it as
-`runtime_child_profiling_record`, so a benchmark can prove which build ran.
+`runtime_child_observation_record`, so a benchmark can prove which build ran.
 
 ## Event semantics
 
@@ -54,9 +54,9 @@ These milestones are deliberately distinct:
 |---|---|
 | `execution_planning` | The gateway has accepted the request and launch planning is in progress. |
 | `stream_started` | Launch handoff is ready and the gateway can attach the thread stream. It says nothing about provider HTTP progress or visible model output. |
-| `provider_response_headers` | A profiling directive runtime received successful provider HTTP response headers. |
-| `provider_stream_started` | A profiling directive runtime parsed the first complete provider stream event for one model call. It may be metadata, reasoning, tool activity, or text. |
-| `provider_reasoning_started` | The runtime observed a reasoning delta. It contains no reasoning text and does not imply that reasoning is visible to the user. |
+| `observation` with `kind: directive.provider_response_headers` | A profiling directive runtime received successful provider HTTP response headers. |
+| `observation` with `kind: directive.provider_stream_started` | A profiling directive runtime parsed the first complete provider stream event for one model call. It may be metadata, reasoning, tool activity, or text. |
+| `observation` with `kind: directive.provider_reasoning_started` | The runtime observed a reasoning delta. It contains no reasoning text and does not imply that reasoning is visible to the user. |
 | first non-whitespace text | The runtime has had the daemon acknowledge publication of a visible text delta. Actual client receipt is measured by the client in its own clock domain. |
 
 Never report `stream_started` as provider time-to-first-byte or time-to-first-
@@ -68,6 +68,13 @@ The daemon writes structured events to
 `<app-root>/.ai/state/trace-events.ndjson`. Use identifiers to join records;
 never subtract raw offsets from different clock domains.
 
+Captured child records use one generic `runtime_child_observation_record` log
+shape. The selected signed runtime descriptor declares each accepted child
+event name, schema version, clock domain, record count, and byte ceiling. The
+engine and executor validate only that envelope and treat the remaining JSON as
+opaque runtime-owned data. Directive/provider field meanings stay in the
+directive runtime and this profiling documentation.
+
 - `launch_stage_timings` uses the daemon monotonic clock and records launch
   stages, milestones, the accounted critical path, and unattributed time.
 - `directive_runtime_stage_timing` uses the directive-process monotonic clock
@@ -76,8 +83,10 @@ never subtract raw offsets from different clock domains.
   text.
 - `directive_provider_call_timing` records every bounded provider call by turn
   and attempt, including request submission, headers, first event, DNS,
-  aggregate connection establishment, progressive callback batches, and
-  completion.
+  aggregate connection establishment, progressive callback batches, final
+  provider-reported input/output/reasoning and cache-token usage, usage
+  validity/source, and completion. The usage fields contain counts only; they
+  never contain prompt, reasoning, or response content.
 - `directive_provider_request_profile` reports serialized request bytes, a
   documented token estimate, message-role byte contributions, reasoning replay,
   and tool-schema bytes and digest. It does not record prompt content.

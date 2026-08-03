@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-02T10:32:26Z:8cdd14e949dd2f178eddc28549ea7e245c9acc0972919bc0bfafb3e40f0e0ad5:eT7tpLWf0qqteQ48WV4sTaIMmbNjn5z+FnumYE3MBiJ//spw6Yb4noUnhlXqYTzRWFvaSweCkh0Z1GhXxFCFDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-03T05:24:44Z:c1735b26410c7ed7fa78cc8bd6747c6b84e2df85c296516fc81b7249230e89f8:ujujz7i3OWZZSha6gVonfY2mttYFxZ0OhIJ9n11rzF6y5q1g2DnfTiCWz2w17ZnZa6bNxnfBhk7lUxN0OXUlAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "directive-runtime"
 defaults:
   # 0 means unlimited. By default RyeOS applies no hard execution limits; runaways
@@ -7,6 +7,7 @@ defaults:
   turns: 0
   tool_calls: 0
   tokens: 0
+  provider_request_body_bytes: 0
   spend_usd: "0"
   spawns: 0
   depth: 0

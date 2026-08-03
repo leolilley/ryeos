@@ -921,6 +921,34 @@ pub struct KindSchema {
     /// `directive`, `parser`). Tools typically declare
     /// `inventory_schema_keys: [input_schema, parameters, config_schema]`.
     pub inventory_schema_keys: Vec<String>,
+    /// Inventoried-side admission and projection policy. The engine applies
+    /// these declarations generically; kind-specific capability and metadata
+    /// names live only in the signed kind schema.
+    pub inventory_policy: InventoryPolicy,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InventoryPolicy {
+    #[serde(default)]
+    pub admission: Option<InventoryAdmissionPolicy>,
+    #[serde(default)]
+    pub required_metadata: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InventoryAdmissionPolicy {
+    pub capability_template: String,
+}
+
+impl InventoryAdmissionPolicy {
+    pub fn required_capability(&self, item_ref: &crate::canonical_ref::CanonicalRef) -> String {
+        self.capability_template
+            .replace("{kind}", &item_ref.kind)
+            .replace("{bare_id}", &item_ref.bare_id)
+            .replace("{canonical_ref}", &item_ref.to_string())
+    }
 }
 
 impl KindSchema {
@@ -1425,6 +1453,14 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
     // shape is a hard schema error rather than a silent default.
     let inventory_kinds = parse_optional_string_seq(&data, "inventory_kinds", display)?;
     let inventory_schema_keys = parse_optional_string_seq(&data, "inventory_schema_keys", display)?;
+    let inventory_policy = match data.get("inventory_policy") {
+        Some(value) if !value.is_null() => serde_yaml::from_value::<InventoryPolicy>(value.clone())
+            .map_err(|error| EngineError::SchemaLoaderError {
+                reason: format!("{display}: invalid `inventory_policy`: {error}"),
+            })?,
+        _ => InventoryPolicy::default(),
+    };
+    validate_inventory_policy(&inventory_policy, display)?;
 
     Ok(KindSchema {
         directory,
@@ -1440,7 +1476,61 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         runtime,
         inventory_kinds,
         inventory_schema_keys,
+        inventory_policy,
     })
+}
+
+fn validate_inventory_policy(policy: &InventoryPolicy, display: &str) -> Result<(), EngineError> {
+    if let Some(admission) = policy.admission.as_ref() {
+        let template = admission.capability_template.as_str();
+        let remainder = template
+            .replace("{kind}", "")
+            .replace("{bare_id}", "")
+            .replace("{canonical_ref}", "");
+        let supported_braces = !remainder
+            .chars()
+            .any(|character| character == '{' || character == '}');
+        if template.is_empty()
+            || template.len() > 512
+            || template.chars().any(char::is_whitespace)
+            || template.chars().any(char::is_control)
+            || !supported_braces
+        {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: inventory_policy.admission.capability_template must be a bounded non-whitespace template using only {{kind}}, {{bare_id}}, and {{canonical_ref}}"
+                ),
+            });
+        }
+    }
+    if policy.required_metadata.len() > 64 {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: inventory_policy.required_metadata exceeds the limit of 64"
+            ),
+        });
+    }
+    let mut seen = std::collections::HashSet::new();
+    for field in &policy.required_metadata {
+        let valid = !field.is_empty()
+            && field.len() <= 64
+            && field
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+            && field
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_lowercase())
+            && seen.insert(field);
+        if !valid {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: inventory_policy.required_metadata contains invalid or duplicate field `{field}`"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn parse_effective_trust_policy(
@@ -4536,5 +4626,38 @@ metadata:
             );
         }
         assert_eq!(method("compose").scope, MethodScope::SingleRoot);
+    }
+
+    #[test]
+    fn inventory_policy_renders_capabilities_without_kind_branches() {
+        let policy = InventoryPolicy {
+            admission: Some(InventoryAdmissionPolicy {
+                capability_template: "execute.{kind}.{bare_id}".to_string(),
+            }),
+            required_metadata: vec!["dispatch_identity".to_string()],
+        };
+        validate_inventory_policy(&policy, "test schema").expect("valid generic policy");
+        let item_ref = crate::canonical_ref::CanonicalRef::parse("widget:example/read").unwrap();
+        assert_eq!(
+            policy
+                .admission
+                .as_ref()
+                .expect("admission")
+                .required_capability(&item_ref),
+            "execute.widget.example/read"
+        );
+    }
+
+    #[test]
+    fn inventory_policy_rejects_unknown_template_placeholders() {
+        let policy = InventoryPolicy {
+            admission: Some(InventoryAdmissionPolicy {
+                capability_template: "execute.{kind}.{unknown}".to_string(),
+            }),
+            required_metadata: Vec::new(),
+        };
+        let error = validate_inventory_policy(&policy, "test schema")
+            .expect_err("unknown placeholders must fail closed");
+        assert!(error.to_string().contains("capability_template"));
     }
 }

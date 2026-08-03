@@ -107,7 +107,7 @@ kind: runtime
 serves: directive
 default: true
 binary_ref: bin/{host_triple}/directive_runner
-abi_version: v1
+abi_version: v2
 required_caps:
   - ryeos.read.directive.*
 launch_contract:
@@ -137,7 +137,7 @@ const MINIMAL_RUNTIME_YAML: &str = "\
 kind: runtime
 serves: directive
 binary_ref: bin/test-triple/runner
-abi_version: v1
+abi_version: v2
 launch_contract:
   primary_allowed_kinds: [directive]
   primary_allowed_spaces: [bundle]
@@ -190,7 +190,7 @@ fn parse_runtime_yaml_success() {
     assert_eq!(yaml.serves, "directive");
     assert_eq!(yaml.default, Some(true));
     assert_eq!(yaml.binary_ref, "bin/{host_triple}/directive_runner");
-    assert_eq!(yaml.abi_version, "v1");
+    assert_eq!(yaml.abi_version, "v2");
     assert_eq!(
         yaml.required_caps,
         vec!["ryeos.read.directive.*".to_string()]
@@ -212,7 +212,7 @@ fn parse_runtime_yaml_missing_serves_rejected() {
         "\
 kind: runtime
 binary_ref: bin/test-triple/x
-abi_version: v1
+abi_version: v2
 ",
         "directive",
     );
@@ -229,7 +229,7 @@ fn parse_runtime_yaml_missing_binary_ref_rejected() {
         "\
 kind: runtime
 serves: directive
-abi_version: v1
+abi_version: v2
 ",
         "directive",
     );
@@ -264,7 +264,7 @@ fn parse_runtime_yaml_wrong_kind_rejected() {
 kind: tool
 serves: directive
 binary_ref: bin/test-triple/x
-abi_version: v1
+abi_version: v2
 ",
         "directive",
     );
@@ -324,7 +324,7 @@ kind: runtime
 serves: directive
 default: true
 binary_ref: bin/test-triple/fast
-abi_version: v1
+abi_version: v2
 ",
             "directive",
         ),
@@ -337,7 +337,7 @@ abi_version: v1
 kind: runtime
 serves: directive
 binary_ref: bin/test-triple/slow
-abi_version: v1
+abi_version: v2
 ",
             "directive",
         ),
@@ -366,7 +366,7 @@ kind: runtime
 serves: directive
 default: true
 binary_ref: bin/test-triple/a
-abi_version: v1
+abi_version: v2
 ",
             "directive",
         ),
@@ -380,7 +380,7 @@ kind: runtime
 serves: directive
 default: true
 binary_ref: bin/test-triple/b
-abi_version: v1
+abi_version: v2
 ",
             "directive",
         ),
@@ -412,7 +412,7 @@ fn registry_two_runtimes_neither_default_lookup_fails() {
 kind: runtime
 serves: directive
 binary_ref: bin/test-triple/a
-abi_version: v1
+abi_version: v2
 ",
             "directive",
         ),
@@ -425,7 +425,7 @@ abi_version: v1
 kind: runtime
 serves: directive
 binary_ref: bin/test-triple/b
-abi_version: v1
+abi_version: v2
 ",
             "directive",
         ),
@@ -556,7 +556,7 @@ metadata:
             r#"kind: runtime
 serves: fake_kind
 binary_ref: bin/x86_64-unknown-linux-gnu/fake-binary
-abi_version: "v1"
+abi_version: "v2"
 "#,
             "fake_kind",
         ),
@@ -626,7 +626,7 @@ metadata:
             r#"kind: runtime
 serves: no_exec_kind
 binary_ref: bin/x86_64-unknown-linux-gnu/fake-binary
-abi_version: "v1"
+abi_version: "v2"
 "#,
             "no_exec_kind",
         ),

@@ -35,7 +35,7 @@ use crate::trust::TrustStore;
 ///
 /// Bump when the LaunchEnvelope, callback ABI, or any other
 /// daemon↔runtime contract surface changes incompatibly.
-pub const SUPPORTED_RUNTIME_ABI_VERSION: &str = "v1";
+pub const SUPPORTED_RUNTIME_ABI_VERSION: &str = "v2";
 
 const MAX_LAUNCH_BINDINGS: usize = 32;
 const MAX_LAUNCH_RUNTIME_DATA_KEYS: usize = 32;
@@ -46,6 +46,11 @@ const MAX_LAUNCH_FACT_BYTES: u32 = 16 * 1024;
 const MAX_LAUNCH_NAME_BYTES: usize = 64;
 const MAX_CONFIG_IDENTITY_BYTES: usize = 512;
 const MAX_CONFIG_SEGMENT_BYTES: usize = 128;
+const MAX_CHILD_OBSERVATION_KINDS: usize = 64;
+const MAX_CHILD_OBSERVATION_RECORDS: u32 = 1024;
+const MAX_CHILD_OBSERVATION_RECORD_BYTES: u32 = 64 * 1024;
+const MAX_CHILD_OBSERVATION_CLOCK_BYTES: usize = 128;
+const MAX_RUNTIME_LIMIT_DIMENSIONS: usize = 64;
 
 // ── Public types ─────────────────────────────────────────────────────
 
@@ -63,7 +68,7 @@ pub struct RuntimeYaml {
     pub default: Option<bool>,
     /// Binary reference. May contain `{host_triple}` placeholder.
     pub binary_ref: String,
-    /// ABI contract version, e.g. `"v1"`.
+    /// ABI contract version, e.g. `"v2"`.
     pub abi_version: String,
     #[serde(default)]
     pub required_caps: Vec<String>,
@@ -72,6 +77,17 @@ pub struct RuntimeYaml {
     /// required: adding a runtime without declaring its launch boundary is a
     /// boot-time error.
     pub launch_contract: LaunchContractDecl,
+    /// Runtime-owned, signed declaration of structured child observations the
+    /// daemon may capture from this runtime's stderr. Observation names and
+    /// payloads remain opaque to the engine and executor; this declaration
+    /// only binds framing, version, clock domain, and admission bounds.
+    #[serde(default)]
+    pub observability: RuntimeObservabilityDecl,
+    /// Runtime-owned declaration of additional numeric hard-limit dimensions.
+    /// The executor treats their names as opaque and only admits, validates,
+    /// merges, and clamps values declared by this signed descriptor.
+    #[serde(default)]
+    pub limits: RuntimeLimitsDecl,
     #[serde(default)]
     pub description: Option<String>,
     /// Replay-aware resume policy for this runtime. Presence ⇒ this runtime
@@ -88,6 +104,39 @@ pub struct RuntimeYaml {
         deserialize_with = "deserialize_native_resume"
     )]
     pub native_resume: Option<NativeResumeSpec>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeObservabilityDecl {
+    #[serde(default)]
+    pub child_records: BTreeMap<String, ChildObservationDecl>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildObservationDecl {
+    pub schema_version: u32,
+    pub clock_domain: String,
+    pub max_records: u32,
+    pub max_record_bytes: u32,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeLimitsDecl {
+    /// Extensionless config identity supplying defaults and operator caps for
+    /// this runtime. Omit when the runtime has no limits config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_identity: Option<String>,
+    /// Stable identity for inheritance of the opaque dimensions. Parent limits
+    /// clamp a child only when both runtimes declare this exact contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract: Option<String>,
+    /// Opaque dimension name to inclusive maximum wire value. Zero remains the
+    /// shared unlimited sentinel; maximums bound parsing and runtime casts.
+    #[serde(default)]
+    pub dimensions: BTreeMap<String, u64>,
 }
 
 /// Declarative launch boundary for one runtime.
@@ -597,6 +646,112 @@ pub(crate) fn validate_runtime_yaml(
         });
     }
     validate_launch_contract(yaml_path, yaml)?;
+    validate_runtime_observability(yaml_path, &yaml.observability)?;
+    validate_runtime_limits(yaml_path, &yaml.limits)?;
+    Ok(())
+}
+
+fn validate_runtime_limits(
+    yaml_path: &Path,
+    limits: &RuntimeLimitsDecl,
+) -> Result<(), EngineError> {
+    if limits.dimensions.len() > MAX_RUNTIME_LIMIT_DIMENSIONS {
+        return runtime_yaml_error(
+            yaml_path,
+            format!("limits.dimensions exceeds the limit of {MAX_RUNTIME_LIMIT_DIMENSIONS}"),
+        );
+    }
+    if let Some(identity) = limits.config_identity.as_deref() {
+        validate_config_identity(yaml_path, "limits.config_identity", identity)?;
+    } else if !limits.dimensions.is_empty() {
+        return runtime_yaml_error(
+            yaml_path,
+            "limits.dimensions requires limits.config_identity",
+        );
+    }
+    if let Some(contract) = limits.contract.as_deref() {
+        validate_config_identity(yaml_path, "limits.contract", contract)?;
+    } else if !limits.dimensions.is_empty() {
+        return runtime_yaml_error(yaml_path, "limits.dimensions requires limits.contract");
+    }
+    for (name, maximum) in &limits.dimensions {
+        validate_launch_name(yaml_path, "limits.dimensions", name)?;
+        if *maximum == 0 {
+            return runtime_yaml_error(
+                yaml_path,
+                format!("limits.dimensions.{name} must be greater than zero"),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_runtime_observability(
+    yaml_path: &Path,
+    observability: &RuntimeObservabilityDecl,
+) -> Result<(), EngineError> {
+    if observability.child_records.len() > MAX_CHILD_OBSERVATION_KINDS {
+        return runtime_yaml_error(
+            yaml_path,
+            format!(
+                "observability.child_records exceeds the limit of {MAX_CHILD_OBSERVATION_KINDS}"
+            ),
+        );
+    }
+    let mut total_records = 0_u32;
+    for (name, declaration) in &observability.child_records {
+        validate_launch_name(yaml_path, "observability.child_records", name)?;
+        if declaration.schema_version == 0 {
+            return runtime_yaml_error(
+                yaml_path,
+                format!(
+                    "observability.child_records.{name}.schema_version must be greater than zero"
+                ),
+            );
+        }
+        if declaration.clock_domain.is_empty()
+            || declaration.clock_domain.len() > MAX_CHILD_OBSERVATION_CLOCK_BYTES
+            || declaration.clock_domain.chars().any(char::is_control)
+            || declaration.clock_domain.chars().any(char::is_whitespace)
+        {
+            return runtime_yaml_error(
+                yaml_path,
+                format!(
+                    "observability.child_records.{name}.clock_domain must be a bounded non-whitespace label"
+                ),
+            );
+        }
+        if declaration.max_records == 0 {
+            return runtime_yaml_error(
+                yaml_path,
+                format!("observability.child_records.{name}.max_records must be greater than zero"),
+            );
+        }
+        total_records = total_records
+            .checked_add(declaration.max_records)
+            .ok_or_else(|| EngineError::RuntimeYamlInvalid {
+                path: yaml_path.to_owned(),
+                reason: "observability child-record count overflow".to_string(),
+            })?;
+        if declaration.max_record_bytes == 0
+            || declaration.max_record_bytes > MAX_CHILD_OBSERVATION_RECORD_BYTES
+        {
+            return runtime_yaml_error(
+                yaml_path,
+                format!(
+                    "observability.child_records.{name}.max_record_bytes must be in 1..={MAX_CHILD_OBSERVATION_RECORD_BYTES}"
+                ),
+            );
+        }
+    }
+    if total_records > MAX_CHILD_OBSERVATION_RECORDS {
+        return runtime_yaml_error(
+            yaml_path,
+            format!(
+                "observability.child_records declares {total_records} total records (max {MAX_CHILD_OBSERVATION_RECORDS})"
+            ),
+        );
+    }
     Ok(())
 }
 
@@ -1053,6 +1208,8 @@ mod tests {
                 runtime_facts: BTreeMap::new(),
                 financial_authority: FinancialAuthorityDecl::None,
             },
+            observability: RuntimeObservabilityDecl::default(),
+            limits: RuntimeLimitsDecl::default(),
             description: None,
             native_resume: None,
         }
@@ -1067,7 +1224,7 @@ mod tests {
         "kind: runtime\n",
         "serves: test_kind\n",
         "binary_ref: bin/test-triple/test\n",
-        "abi_version: v1\n",
+        "abi_version: v2\n",
         "launch_contract:\n",
         "  primary_allowed_kinds: [test_kind]\n",
         "  primary_allowed_spaces: [bundle]\n",
@@ -1252,6 +1409,50 @@ mod tests {
     }
 
     #[test]
+    fn runtime_limits_require_a_bounded_signed_contract() {
+        let mut yaml = minimal_yaml();
+        yaml.limits.config_identity = Some("example-runtime/limits".to_string());
+        yaml.limits.contract = Some("example-runtime/v1".to_string());
+        yaml.limits.dimensions.insert("actions".to_string(), 100);
+        validate_runtime_yaml(&test_path(), &yaml).expect("valid runtime limit declaration");
+
+        yaml.limits.contract = None;
+        let error = validate_runtime_yaml(&test_path(), &yaml)
+            .expect_err("dimensions without an inheritance contract must fail");
+        assert!(error.to_string().contains("limits.contract"));
+
+        yaml.limits.contract = Some("example-runtime/v1".to_string());
+        yaml.limits.dimensions.insert("actions".to_string(), 0);
+        let error = validate_runtime_yaml(&test_path(), &yaml)
+            .expect_err("a zero maximum cannot bound an admitted dimension");
+        assert!(error.to_string().contains("greater than zero"));
+    }
+
+    #[test]
+    fn child_observations_are_bounded_by_the_runtime_descriptor() {
+        let mut yaml = minimal_yaml();
+        yaml.observability.child_records.insert(
+            "phase_sample".to_string(),
+            ChildObservationDecl {
+                schema_version: 1,
+                clock_domain: "child_monotonic".to_string(),
+                max_records: 4,
+                max_record_bytes: 4096,
+            },
+        );
+        validate_runtime_yaml(&test_path(), &yaml).expect("valid observation declaration");
+
+        yaml.observability
+            .child_records
+            .get_mut("phase_sample")
+            .expect("inserted declaration")
+            .max_record_bytes = MAX_CHILD_OBSERVATION_RECORD_BYTES + 1;
+        let error = validate_runtime_yaml(&test_path(), &yaml)
+            .expect_err("oversized child records must fail closed");
+        assert!(error.to_string().contains("max_record_bytes"));
+    }
+
+    #[test]
     fn rejects_config_only_node_authority_for_primary_items() {
         let mut yaml = minimal_yaml();
         yaml.launch_contract.primary_allowed_spaces =
@@ -1326,7 +1527,7 @@ mod tests {
             EngineError::AbiVersionMismatch {
                 expected, found, ..
             } => {
-                assert_eq!(expected, "v1");
+                assert_eq!(expected, "v2");
                 assert_eq!(found, "v999");
             }
             other => panic!("wrong error variant: {other:?}"),

@@ -2569,6 +2569,7 @@ fn load_limits_snapshot_under_current_authority(
     node_config_root: Option<&Path>,
     node_trusted_keys_dir: &Path,
     project_materialization: Option<&ryeos_state::PinnedProjectMaterialization>,
+    declaration: &ryeos_engine::runtime_registry::RuntimeLimitsDecl,
 ) -> anyhow::Result<LimitsConfigSnapshot> {
     match project_materialization {
         Some(materialization) => {
@@ -2578,12 +2579,16 @@ fn load_limits_snapshot_under_current_authority(
                 node_trusted_keys_dir,
                 materialization,
             )?;
-            load_limits_config_snapshot_under_project_authority(&loader, materialization)
+            load_limits_config_snapshot_under_project_authority(
+                &loader,
+                materialization,
+                declaration,
+            )
         }
         None => {
             let loader =
                 build_verified_loader_for_thread(roots, node_config_root, node_trusted_keys_dir)?;
-            load_limits_config_snapshot(&loader)
+            load_limits_config_snapshot(&loader, declaration)
         }
     }
 }
@@ -2618,7 +2623,13 @@ impl ExecutionControlSnapshot {
                     .map(|bytes| bytes.len())
                     .unwrap_or(usize::MAX),
             )
-            .saturating_add(self.limits.dependency_proof.estimated_bytes())
+            .saturating_add(
+                self.limits
+                    .dependency_proof
+                    .as_ref()
+                    .map(|proof| proof.estimated_bytes())
+                    .unwrap_or(0),
+            )
     }
 }
 
@@ -2670,18 +2681,14 @@ fn execution_control_snapshot_status(
             ExecutionControlProofStatus::MutableAuthorityChanged,
         );
     };
+    let Some(limits_proof) = snapshot.limits.dependency_proof.as_ref() else {
+        return policy_status;
+    };
     let limits_status = if let Some(materialization) = project_materialization {
-        if !snapshot
-            .limits
-            .dependency_proof
-            .trust_identities_match(None, &current_node_trust)
-        {
+        if !limits_proof.trust_identities_match(None, &current_node_trust) {
             ExecutionControlProofStatus::MutableAuthorityChanged
         } else {
-            match snapshot
-                .limits
-                .dependency_proof
-                .revalidate_under_project_authority_status(
+            match limits_proof.revalidate_under_project_authority_status(
                     Some(materialization.path()),
                     node_config_root,
                     project.map(|(_, content)| content),
@@ -2706,10 +2713,10 @@ fn execution_control_snapshot_status(
                 ExecutionControlProofStatus::MutableAuthorityChanged,
             );
         };
-        if snapshot.limits.dependency_proof.trust_identities_match(
+        if limits_proof.trust_identities_match(
             Some(&loader.effective_trust_identity()),
             &current_node_trust,
-        ) && snapshot.limits.dependency_proof.revalidate_mutable_against(
+        ) && limits_proof.revalidate_mutable_against(
             roots
                 .ordered
                 .iter()
@@ -2774,6 +2781,7 @@ async fn load_execution_control_snapshot_cached(
     node_config_root: Option<&Path>,
     node_trusted_keys_dir: &Path,
     project_materialization: Option<&ryeos_state::PinnedProjectMaterialization>,
+    runtime_limits: &ryeos_engine::runtime_registry::RuntimeLimitsDecl,
 ) -> anyhow::Result<Arc<ExecutionControlSnapshot>> {
     let generation = engine.registered_bundle_generation_fingerprint();
     let generation_epoch = engine.registered_bundle_generation_epoch();
@@ -2805,6 +2813,7 @@ async fn load_execution_control_snapshot_cached(
         "effective_trust_identity": request_snapshot.effective_trust_identity,
         "node_trust_identity": node_trust_identity,
         "node_config_layer": node_config_root.is_some(),
+        "runtime_limits": runtime_limits,
         "roots": root_identity,
     });
     let canonical = lillux::canonical_json(&key_value)?;
@@ -2892,6 +2901,7 @@ async fn load_execution_control_snapshot_cached(
                 let load_project_materialization = project_materialization.cloned();
                 let load_node_config_root = node_config_root.map(Path::to_path_buf);
                 let load_node_trusted_keys_dir = node_trusted_keys_dir.to_path_buf();
+                let load_runtime_limits = runtime_limits.clone();
                 let loaded = tokio::task::spawn_blocking(move || {
                     let policy = ryeos_engine::execution_policy::ExecutionPolicyResolver::new(
                         ryeos_engine::config_loading::ConfigLoadContext {
@@ -2916,6 +2926,7 @@ async fn load_execution_control_snapshot_cached(
                         load_node_config_root.as_deref(),
                         &load_node_trusted_keys_dir,
                         load_project_materialization.as_ref(),
+                        &load_runtime_limits,
                     )?;
                     Ok::<_, anyhow::Error>(ExecutionControlSnapshot { policy, limits })
                 })
@@ -3004,6 +3015,7 @@ async fn load_execution_control_snapshot_cached(
                     node_config_root,
                     node_trusted_keys_dir,
                     project_materialization,
+                    runtime_limits,
                 )?;
                 let snapshot = Arc::new(ExecutionControlSnapshot { policy, limits });
                 if execution_control_snapshot_is_current(
@@ -4804,12 +4816,13 @@ fn map_launch_planning_check_error(
 
 fn inventory_ref_is_authorized(
     item_ref: &ryeos_engine::canonical_ref::CanonicalRef,
+    admission: Option<&ryeos_engine::kind_registry::InventoryAdmissionPolicy>,
     effective_caps: &[String],
 ) -> bool {
-    if item_ref.kind != "tool" {
+    let Some(admission) = admission else {
         return true;
-    }
-    let required = format!("ryeos.execute.{}.{}", item_ref.kind, item_ref.bare_id);
+    };
+    let required = admission.required_capability(item_ref);
     effective_caps
         .iter()
         .any(|granted| ryeos_runtime::cap_matches(granted, &required))
@@ -5083,6 +5096,7 @@ async fn run_claimed_thread_row_inner(
         node_config_root.as_deref(),
         &node_trusted_keys_dir,
         provenance.pinned_materialization(),
+        &selected_runtime.yaml.limits,
     )
     .await
     .with_context(|| {
@@ -5142,7 +5156,9 @@ async fn run_claimed_thread_row_inner(
     let execution_defaults =
         apply_execution_policy_defaults(&limits_config.defaults, execution_policy);
     let base_limits = match limits_header {
-        Some(v) if !v.is_null() => merge_header_limits(&execution_defaults, v)?,
+        Some(v) if !v.is_null() => {
+            merge_header_limits(&execution_defaults, v, &selected_runtime.yaml.limits)?
+        }
         _ => execution_defaults,
     };
     let requested_limits = apply_execution_policy_item_overrides(&base_limits, execution_policy);
@@ -5162,6 +5178,7 @@ async fn run_claimed_thread_row_inner(
         &limits_config.defaults,
         &limits_config.caps,
         parent_limits.as_ref(),
+        &selected_runtime.yaml.limits,
     );
     let header_has_limit = |field: &str| {
         limits_header
@@ -5185,7 +5202,13 @@ async fn run_claimed_thread_row_inner(
             .as_ref()
             .map(|policy| policy.source.describe())
             .unwrap_or_else(|| {
-                "directive-runtime/limits.yaml defaults or built-in default".to_string()
+                selected_runtime
+                    .yaml
+                    .limits
+                    .config_identity
+                    .as_deref()
+                    .map(|identity| format!("{identity} config defaults or built-in default"))
+                    .unwrap_or_else(|| "built-in default".to_string())
             })
     };
     let turns_source = if parameters.get("max_steps").is_some() {
@@ -5205,7 +5228,13 @@ async fn run_claimed_thread_row_inner(
             .as_ref()
             .map(|policy| policy.source.describe())
             .unwrap_or_else(|| {
-                "directive-runtime/limits.yaml defaults or built-in default".to_string()
+                selected_runtime
+                    .yaml
+                    .limits
+                    .config_identity
+                    .as_deref()
+                    .map(|identity| format!("{identity} config defaults or built-in default"))
+                    .unwrap_or_else(|| "built-in default".to_string())
             })
     };
     tracing::info!(
@@ -5216,8 +5245,10 @@ async fn run_claimed_thread_row_inner(
         turns = hard_limits.turns,
         turns_source = %turns_source,
         turns_cap = ?limits_config.caps.turns,
-        tool_calls = hard_limits.tool_calls,
-        tool_calls_cap = ?limits_config.caps.tool_calls,
+        runtime_limits = %serde_json::to_string(&hard_limits.runtime)
+            .unwrap_or_else(|_| "{}".to_string()),
+        runtime_limit_caps = %serde_json::to_string(&limits_config.caps.runtime)
+            .unwrap_or_else(|_| "{}".to_string()),
         header_limits_present = limits_header.is_some_and(|v| !v.is_null()),
         execution_policy_item_override = policy_item_override(execution_policy.timeout.as_ref())
             || policy_item_override(execution_policy.max_steps.as_ref()),
@@ -5545,7 +5576,13 @@ async fn run_claimed_thread_row_inner(
         &engine.kinds,
         &engine_roots,
         &effective_request_snapshot.parser_dispatcher,
-        |item_ref| inventory_ref_is_authorized(item_ref, &effective_caps),
+        |item_ref| {
+            let admission = engine
+                .kinds
+                .get(&item_ref.kind)
+                .and_then(|schema| schema.inventory_policy.admission.as_ref());
+            inventory_ref_is_authorized(item_ref, admission, &effective_caps)
+        },
     )
     .map_err(|e| anyhow::anyhow!("inventory build failed: {e}"))?;
     drop(inventory_timer);
@@ -5679,6 +5716,7 @@ async fn run_claimed_thread_row_inner(
     let duration = hard_limits.duration_seconds;
     let descriptor_clone = verified_protocol.descriptor.clone();
     let runtime_item_ref = selected_runtime.canonical_ref.clone();
+    let observation_declarations = selected_runtime.yaml.observability.child_records.clone();
     // The native-runtime spawn pipe must include vault_bindings the
     // same way `services::thread_lifecycle::spawn_item` does for
     // generic plan-node subprocesses. Without this, operator secrets
@@ -5792,6 +5830,7 @@ async fn run_claimed_thread_row_inner(
             state: &state_for_spawn,
             descriptor: &descriptor_clone,
             item_ref: &runtime_item_ref,
+            observation_declarations: &observation_declarations,
             acting_principal: &acting_principal_owned,
             binary: &binary_path,
             project_path: &project_owned,
@@ -8820,29 +8859,35 @@ mod tests {
     }
 
     #[test]
-    fn inventory_filter_uses_sealed_effective_tool_capabilities() {
+    fn inventory_filter_uses_schema_declared_capability_template() {
+        let admission = ryeos_engine::kind_registry::InventoryAdmissionPolicy {
+            capability_template: "ryeos.execute.{kind}.{bare_id}".to_string(),
+        };
         let allowed =
-            ryeos_engine::canonical_ref::CanonicalRef::parse("tool:example/api/read").unwrap();
+            ryeos_engine::canonical_ref::CanonicalRef::parse("action:example/api/read").unwrap();
         let sibling =
-            ryeos_engine::canonical_ref::CanonicalRef::parse("tool:example/api/write").unwrap();
+            ryeos_engine::canonical_ref::CanonicalRef::parse("action:example/api/write").unwrap();
         let knowledge =
             ryeos_engine::canonical_ref::CanonicalRef::parse("knowledge:example/context").unwrap();
 
         assert!(inventory_ref_is_authorized(
             &allowed,
-            &caps(&["ryeos.execute.tool.example/api/read"])
+            Some(&admission),
+            &caps(&["ryeos.execute.action.example/api/read"])
         ));
         assert!(!inventory_ref_is_authorized(
             &sibling,
-            &caps(&["ryeos.execute.tool.example/api/read"])
+            Some(&admission),
+            &caps(&["ryeos.execute.action.example/api/read"])
         ));
         assert!(inventory_ref_is_authorized(
             &sibling,
-            &caps(&["ryeos.execute.tool.example/api/*"])
+            Some(&admission),
+            &caps(&["ryeos.execute.action.example/api/*"])
         ));
         assert!(
-            inventory_ref_is_authorized(&knowledge, &[]),
-            "non-tool inventory semantics remain unchanged"
+            inventory_ref_is_authorized(&knowledge, None, &[]),
+            "an inventoried kind without an admission declaration remains visible"
         );
     }
 
@@ -9897,12 +9942,16 @@ mod tests {
     fn parent_context_clamps_child_limits_and_increments_spawn_depth() {
         let parent_hard_limits = HardLimits {
             turns: 6,
-            tool_calls: 4,
             tokens: 1_000,
             spend_usd: ryeos_accounting::UsdNanos::parse_canonical("0.25").unwrap(),
             spawns: 2,
             depth: 3,
             duration_seconds: 45,
+            runtime: BTreeMap::from([
+                ("actions".to_string(), 4),
+                ("payload_bytes".to_string(), 8_192),
+            ]),
+            runtime_contract: Some("example-runtime/v1".to_string()),
         };
         let ctx = crate::dispatch::ParentExecutionContext {
             parent_thread_id: "T-parent".to_string(),
@@ -9916,23 +9965,35 @@ mod tests {
             .expect("parent hard limits present");
         let requested = LimitValues {
             turns: 20,
-            tool_calls: 12,
             tokens: 20_000,
             spend_usd: ryeos_accounting::UsdNanos::parse_canonical("2").unwrap(),
             spawns: 10,
             depth: 8,
             duration_seconds: 300,
+            runtime: BTreeMap::from([
+                ("actions".to_string(), 12),
+                ("payload_bytes".to_string(), 65_536),
+            ]),
         };
         let hard = compute_effective_limits(
             Some(&requested),
             &LimitValues::default(),
             &LimitCaps::default(),
             Some(&parent_limits),
+            &ryeos_engine::runtime_registry::RuntimeLimitsDecl {
+                config_identity: Some("example-runtime/limits".to_string()),
+                contract: Some("example-runtime/v1".to_string()),
+                dimensions: BTreeMap::from([
+                    ("actions".to_string(), u32::MAX.into()),
+                    ("payload_bytes".to_string(), 1_073_741_824),
+                ]),
+            },
         );
 
         assert_eq!(hard.turns, 6);
-        assert_eq!(hard.tool_calls, 4);
+        assert_eq!(hard.runtime_limit("actions"), 4);
         assert_eq!(hard.tokens, 1_000);
+        assert_eq!(hard.runtime_limit("payload_bytes"), 8_192);
         assert_eq!(
             hard.spend_usd,
             ryeos_accounting::UsdNanos::parse_canonical("0.25").unwrap()

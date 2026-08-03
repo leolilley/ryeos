@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-08-02T11:12:40Z:1bc990acb2c5f6c0d5824ef342e85304bd555d82f301c5d257559da538e2e7d4:NEN5XEFfEYzIkiR0HBXQ+eKS2AHyka95pWHUVEsc/4GjruNYkQ4VK23qSlTetOByIjzaB2FkWzLBSJtdzUsKCg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-03T05:25:36Z:38250d13a4130babdbea0d19f3364f2c38ee54c6908acb7220aa2c7e80a638c7:h8VEJugiXxuVOsjxKWdKJCrzHaVOH68jaiA0ylReJ7qIUhqIMOKNXeTPQiElS4j+2sJyYNnDfqhD754ucDLUBw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/future
 name: chat-latency-investigation
 title: Chat Latency Investigation and Optimization Order
 description: Measurement contract, observed RyeOS latency boundaries, implemented safeguards, and evidence gates for future work
 entry_type: design
-version: "0.1.0"
+version: "0.2.0"
 ```
 
 # Chat Latency Investigation and Optimization Order
@@ -30,6 +30,13 @@ improvement in user-visible first text. Provider variance was larger than the
 saved local work, so these changes must not be presented as chat-latency wins
 without a paired benchmark.
 
+Provider-neutral cache hit/miss usage mapping and an exact signed
+`limits.provider_request_body_bytes` guard were added on 3 August 2026. The
+cache mapping supplies authenticated evidence and correct partitioned pricing;
+it does not create a provider cache. The request-body guard refuses an oversized
+prepared round before ledger admission or provider contact; it prevents slow
+tail drift but does not accelerate a compliant request.
+
 ## Event meanings
 
 The latency clock begins when the daemon receives the signed launch request.
@@ -51,9 +58,11 @@ Report these boundaries separately:
 `stream_started` means that RyeOS has durably admitted the execution, published
 the runtime handoff, and opened the daemon event stream. It does **not** mean
 that the provider has accepted a request or produced output. Provider-level
-milestones are `provider_response_headers`, `provider_stream_started`, and
-`provider_reasoning_started`. A client must not relabel runtime readiness as
-model activity.
+milestones use the generic `observation` event with namespaced payload kinds
+`directive.provider_response_headers`, `directive.provider_stream_started`, and
+`directive.provider_reasoning_started`. These are directive-runtime semantics,
+not provider-specific variants in the engine event vocabulary. A client must
+not relabel runtime readiness as model activity.
 
 Reasoning milestones expose timing only. Hidden chain-of-thought remains hidden
 and is replayed internally only where a provider's tool-continuation contract
@@ -119,12 +128,23 @@ not confuse local byte reuse with provider-side token reuse. Later tool results
 are the principal growth vector and need byte/token observability on every
 round.
 
+`limits.provider_request_body_bytes` is the exact serialized-body backstop for
+that growth. It is intentionally a byte limit, not a guessed token limit. The
+zero value remains unlimited, the effective value is daemon-sealed and parent/
+operator capped, and refusal contains sizes only—never prompt or tool-result
+content.
+
 ## Cache interpretation
 
 A `launch_augmentation_cache_hit` identifies the exact augmentation, cache-key
 digest, whether the caller waited for a concurrent fill, and that the child
 execution was omitted. It does not mean that prompt construction, provider
 inference, tool execution, or transcript persistence was skipped.
+
+Signed provider usage may separately report cache-read, cache-miss, and
+cache-write token dimensions. A declared read/miss partition is valid only when
+its checked sum equals total input tokens. Cache misses are not cache writes,
+and equal local request digests never fabricate a provider-side hit.
 
 Safe caches remain content-addressed and authority-scoped. Concurrent identical
 misses should use single-flight filling. Never share mutable results, secrets,
@@ -139,6 +159,23 @@ Candidate caches must be justified by measured local cost:
   dependency.
 
 Do not cache model answers or tool results as a generic latency optimization.
+
+## Kind-free extension boundaries
+
+Profiling, inventory, execution policy, and runtime hard limits remain
+data-driven extension surfaces:
+
+- a signed runtime descriptor declares bounded child-observation envelopes;
+- a signed inventoried-kind schema declares its admission capability template
+  and required descriptor metadata;
+- execution overrides are keyed by `items.<kind>.<bare_id>`; and
+- a signed runtime descriptor declares opaque numeric limit dimensions and a
+  stable inheritance contract.
+
+Engine and executor code may validate, render, merge, clamp, and transport
+these declarations, but must not interpret directive, provider, tool, graph,
+prompt, cache, or application-specific field names. Tests in those crates must
+use neutral fixture names for the same reason.
 
 ## Optimization order
 

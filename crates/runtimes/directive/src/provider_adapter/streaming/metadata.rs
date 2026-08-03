@@ -65,6 +65,52 @@ pub(super) fn harvest_chunk_meta(
                     usage_config.reasoning_tokens_path.as_deref(),
                     &mut anomalies,
                 );
+                let cache_read_tokens = if usage_config.cache_partition_of_input {
+                    read_required_u64(
+                        usage,
+                        usage_config.cache_read_tokens_path.as_deref(),
+                        &mut anomalies,
+                    )
+                } else {
+                    read_optional_u64(
+                        usage,
+                        usage_config.cache_read_tokens_path.as_deref(),
+                        &mut anomalies,
+                    )
+                };
+                let cache_miss_tokens = if usage_config.cache_partition_of_input {
+                    read_required_u64(
+                        usage,
+                        usage_config.cache_miss_tokens_path.as_deref(),
+                        &mut anomalies,
+                    )
+                } else {
+                    read_optional_u64(
+                        usage,
+                        usage_config.cache_miss_tokens_path.as_deref(),
+                        &mut anomalies,
+                    )
+                };
+                let cache_write_tokens = read_optional_u64(
+                    usage,
+                    usage_config.cache_write_tokens_path.as_deref(),
+                    &mut anomalies,
+                );
+                if usage_config.cache_partition_of_input
+                    && let (Some(input), Some(cache_read), Some(cache_miss)) =
+                        (input_tokens, cache_read_tokens, cache_miss_tokens)
+                {
+                    match cache_read.checked_add(cache_miss) {
+                        Some(partitioned) if partitioned == input => {}
+                        Some(partitioned) => anomalies.push(format!(
+                            "cache token partition {cache_read} + {cache_miss} = {partitioned} does not equal input_tokens {input}"
+                        )),
+                        None => anomalies.push(
+                            "cache token partition overflows u64 while validating input_tokens"
+                                .to_string(),
+                        ),
+                    }
+                }
                 let mut reported_cost_usd_raw = usage_config
                     .reported_cost_path
                     .as_deref()
@@ -108,8 +154,10 @@ pub(super) fn harvest_chunk_meta(
                     input_tokens,
                     output_tokens,
                     reasoning_tokens,
-                    cache_read_tokens: None,
-                    cache_write_tokens: None,
+                    cache_read_tokens,
+                    cache_miss_tokens,
+                    cache_write_tokens,
+                    cache_partition_of_input: usage_config.cache_partition_of_input,
                     reported_cost_usd,
                     reported_cost_usd_raw,
                     cost_details,
@@ -152,6 +200,7 @@ fn usage_is_empty(update: &TokenUsage) -> bool {
         && update.output_tokens.is_none()
         && update.reasoning_tokens.is_none()
         && update.cache_read_tokens.is_none()
+        && update.cache_miss_tokens.is_none()
         && update.cache_write_tokens.is_none()
         && update.reported_cost_usd.is_none()
         && update.reported_cost_usd_raw.is_none()
@@ -272,6 +321,12 @@ fn update_usage_cumulative(last_usage: &mut Option<TokenUsage>, update: TokenUsa
         update.cache_read_tokens,
         &mut anomalies,
     );
+    let cache_miss_tokens = merge_cumulative_counter(
+        "cache_miss_tokens",
+        previous.cache_miss_tokens,
+        update.cache_miss_tokens,
+        &mut anomalies,
+    );
     let cache_write_tokens = merge_cumulative_counter(
         "cache_write_tokens",
         previous.cache_write_tokens,
@@ -301,7 +356,10 @@ fn update_usage_cumulative(last_usage: &mut Option<TokenUsage>, update: TokenUsa
         output_tokens,
         reasoning_tokens,
         cache_read_tokens,
+        cache_miss_tokens,
         cache_write_tokens,
+        cache_partition_of_input: update.cache_partition_of_input
+            || previous.cache_partition_of_input,
         reported_cost_usd,
         reported_cost_usd_raw,
         cost_details: update.cost_details.or(previous.cost_details),
@@ -468,6 +526,10 @@ mod tests {
                     reasoning_tokens_path: Some(
                         "completion_tokens_details.reasoning_tokens".into(),
                     ),
+                    cache_read_tokens_path: None,
+                    cache_miss_tokens_path: None,
+                    cache_write_tokens_path: None,
+                    cache_partition_of_input: false,
                     reported_cost_path: Some("cost".into()),
                     reported_cost_unit: Some(crate::directive::ReportedCostUnit::Usd),
                     cost_details_path: Some("cost_details".into()),
@@ -515,6 +577,74 @@ mod tests {
                 .any(|anomaly| anomaly.contains("regressed"))
         );
         assert_eq!(finish.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn signed_cache_partition_is_captured_and_validated() {
+        let mut streaming = declared_metadata(UsageAggregation::LatestSnapshot);
+        let usage_config = streaming
+            .metadata
+            .as_mut()
+            .and_then(|metadata| metadata.usage.as_mut())
+            .expect("declared usage metadata");
+        usage_config.cache_read_tokens_path = Some("prompt_cache_hit_tokens".into());
+        usage_config.cache_miss_tokens_path = Some("prompt_cache_miss_tokens".into());
+        usage_config.cache_partition_of_input = true;
+
+        let block = concat!(
+            "data: {\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5,",
+            "\"prompt_cache_hit_tokens\":80,\"prompt_cache_miss_tokens\":20}}\n\n",
+        );
+        let mut usage = None;
+        let mut finish = None;
+        let mut response_id = None;
+        harvest_chunk_meta(
+            block,
+            &mut usage,
+            &mut finish,
+            &mut response_id,
+            Some(&streaming),
+        );
+
+        let usage = usage.expect("cache-aware usage");
+        assert_eq!(usage.input_tokens, Some(100));
+        assert_eq!(usage.cache_read_tokens, Some(80));
+        assert_eq!(usage.cache_miss_tokens, Some(20));
+        assert!(usage.is_valid(), "{:?}", usage.anomalies);
+    }
+
+    #[test]
+    fn signed_cache_partition_mismatch_invalidates_token_accounting() {
+        let mut streaming = declared_metadata(UsageAggregation::LatestSnapshot);
+        let usage_config = streaming
+            .metadata
+            .as_mut()
+            .and_then(|metadata| metadata.usage.as_mut())
+            .expect("declared usage metadata");
+        usage_config.cache_read_tokens_path = Some("prompt_cache_hit_tokens".into());
+        usage_config.cache_miss_tokens_path = Some("prompt_cache_miss_tokens".into());
+        usage_config.cache_partition_of_input = true;
+
+        let block = concat!(
+            "data: {\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5,",
+            "\"prompt_cache_hit_tokens\":79,\"prompt_cache_miss_tokens\":20}}\n\n",
+        );
+        let mut usage = None;
+        let mut finish = None;
+        let mut response_id = None;
+        harvest_chunk_meta(
+            block,
+            &mut usage,
+            &mut finish,
+            &mut response_id,
+            Some(&streaming),
+        );
+
+        let usage = usage.expect("cache-aware usage");
+        assert!(!usage.is_valid());
+        assert!(usage.anomalies.iter().any(|message| {
+            message.contains("cache token partition") && message.contains("input_tokens 100")
+        }));
     }
 
     #[test]

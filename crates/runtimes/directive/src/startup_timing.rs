@@ -66,6 +66,16 @@ struct ProviderCallOffsets {
     progressive_callback_total_us: u64,
     progressive_callback_max_us: u64,
     progressive_callback_max_batch_items: u32,
+    usage_source: Option<&'static str>,
+    usage_valid: Option<bool>,
+    usage_anomaly_count: u32,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    cache_miss_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+    cache_partition_of_input: bool,
     call_finished_us: Option<u64>,
     completion: Option<&'static str>,
 }
@@ -310,6 +320,16 @@ impl DirectiveStageTimings {
             progressive_callback_total_us: 0,
             progressive_callback_max_us: 0,
             progressive_callback_max_batch_items: 0,
+            usage_source: None,
+            usage_valid: None,
+            usage_anomaly_count: 0,
+            input_tokens: None,
+            output_tokens: None,
+            reasoning_tokens: None,
+            cache_read_tokens: None,
+            cache_miss_tokens: None,
+            cache_write_tokens: None,
+            cache_partition_of_input: false,
             call_finished_us: None,
             completion: None,
         };
@@ -430,6 +450,33 @@ impl DirectiveStageTimings {
         );
     }
 
+    fn record_provider_usage(
+        &self,
+        call_id: u64,
+        usage: &crate::provider_adapter::http::TokenUsage,
+    ) {
+        self.with_provider_call(call_id, |call, _| {
+            call.usage_source = Some(match usage.source {
+                crate::provider_adapter::http::ProviderUsageSource::SignedMetadata => {
+                    "signed_metadata"
+                }
+                crate::provider_adapter::http::ProviderUsageSource::ProtocolEvent => {
+                    "protocol_event"
+                }
+                crate::provider_adapter::http::ProviderUsageSource::Unknown => "unknown",
+            });
+            call.usage_valid = Some(usage.is_valid());
+            call.usage_anomaly_count = u32::try_from(usage.anomalies.len()).unwrap_or(u32::MAX);
+            call.input_tokens = usage.input_tokens;
+            call.output_tokens = usage.output_tokens;
+            call.reasoning_tokens = usage.reasoning_tokens;
+            call.cache_read_tokens = usage.cache_read_tokens;
+            call.cache_miss_tokens = usage.cache_miss_tokens;
+            call.cache_write_tokens = usage.cache_write_tokens;
+            call.cache_partition_of_input = usage.cache_partition_of_input;
+        });
+    }
+
     fn emit_provider_call_summary(&self, call: &ProviderCallOffsets) {
         let identity = self.snapshot();
         let connection_establishment_observed = call.connection_establishment_count > 0;
@@ -437,7 +484,7 @@ impl DirectiveStageTimings {
         tracing::info!(
             target: "ryeos_directive_runtime",
             event = "directive_provider_call_timing",
-            schema_version = 4_u32,
+            schema_version = 5_u32,
             invocation_id = identity.invocation_id.as_deref().unwrap_or("<unavailable>"),
             thread_id = identity.thread_id.as_deref().unwrap_or("<unavailable>"),
             item_ref_kind = "directive",
@@ -493,17 +540,26 @@ impl DirectiveStageTimings {
             progressive_callback_total_us = call.progressive_callback_total_us,
             progressive_callback_max_us = call.progressive_callback_max_us,
             progressive_callback_max_batch_items = call.progressive_callback_max_batch_items,
+            usage_source = call.usage_source,
+            usage_valid = call.usage_valid,
+            usage_anomaly_count = call.usage_anomaly_count,
+            input_tokens = call.input_tokens,
+            output_tokens = call.output_tokens,
+            reasoning_tokens = call.reasoning_tokens,
+            cache_read_tokens = call.cache_read_tokens,
+            cache_miss_tokens = call.cache_miss_tokens,
+            cache_write_tokens = call.cache_write_tokens,
+            cache_partition_of_input = call.cache_partition_of_input,
             call_finished_us = call.call_finished_us,
             call_duration_us = duration_us(Some(call.call_started_us), call.call_finished_us),
             "directive provider call timings"
         );
-        emit_captured_timing_record(serde_json::json!({
+        emit_captured_observation_record(serde_json::json!({
             "event": "directive_provider_call_timing",
-            "schema_version": 4,
+            "schema_version": 5,
             "clock_domain": "directive_process_monotonic",
             "invocation_id": identity.invocation_id,
             "thread_id": identity.thread_id,
-            "item_ref_kind": "directive",
             "dns_lookup_scope": "exact_resolver_future",
             "connection_establishment_scope":
                 "aggregate_reqwest_connector_may_include_dns_tcp_proxy_tls",
@@ -531,7 +587,7 @@ impl DirectiveStageTimings {
         tracing::info!(
             target: "ryeos_directive_runtime",
             event = "directive_runtime_stage_timing",
-            schema_version = 5_u32,
+            schema_version = 6_u32,
             invocation_id = offsets.invocation_id.as_deref().unwrap_or("<unavailable>"),
             thread_id = offsets.thread_id.as_deref().unwrap_or("<unavailable>"),
             item_ref_kind = "directive",
@@ -586,13 +642,12 @@ impl DirectiveStageTimings {
             summary_emitted_us = self.elapsed_us(),
             "directive runtime stage timings"
         );
-        emit_captured_timing_record(serde_json::json!({
+        emit_captured_observation_record(serde_json::json!({
             "event": "directive_runtime_stage_timing",
-            "schema_version": 5,
+            "schema_version": 6,
             "clock_domain": "directive_process_monotonic",
             "invocation_id": offsets.invocation_id,
             "thread_id": offsets.thread_id,
-            "item_ref_kind": "directive",
             "connection_establishment_scope":
                 "aggregate_reqwest_connector_may_include_dns_tcp_proxy_tls",
             "exact_tcp_tls_split_available": false,
@@ -604,17 +659,17 @@ impl DirectiveStageTimings {
     }
 }
 
-fn emit_captured_timing_record(record: serde_json::Value) {
+fn emit_captured_observation_record(record: serde_json::Value) {
     match serde_json::to_string(&record) {
         Ok(encoded) => eprintln!(
             "{}{}",
-            ryeos_runtime::events::CAPTURED_CHILD_TIMING_PREFIX,
+            ryeos_runtime::events::CAPTURED_CHILD_OBSERVATION_PREFIX,
             encoded
         ),
         Err(error) => tracing::warn!(
             target: "ryeos_directive_runtime",
             %error,
-            "failed to encode captured child timing record"
+            "failed to encode captured child observation record"
         ),
     }
 }
@@ -663,13 +718,12 @@ pub fn record_profiling_enabled() {
         build_profile = "release",
         "release-equivalent latency profiling is enabled"
     );
-    emit_captured_timing_record(serde_json::json!({
+    emit_captured_observation_record(serde_json::json!({
         "event": "latency_profiling_enabled",
         "schema_version": 1,
         "clock_domain": "directive_process_monotonic",
         "invocation_id": invocation_id,
         "thread_id": thread_id,
-        "item_ref_kind": "directive",
         "build_profile": "release",
     }));
 }
@@ -686,13 +740,12 @@ pub fn record_context_composition(context_item_contributions: &serde_json::Value
         context_item_contributions = %context_item_contributions,
         "directive context contribution metrics"
     );
-    emit_captured_timing_record(serde_json::json!({
+    emit_captured_observation_record(serde_json::json!({
         "event": "directive_context_composition",
         "schema_version": 1,
         "clock_domain": "directive_process_monotonic",
         "invocation_id": invocation_id,
         "thread_id": thread_id,
-        "item_ref_kind": "directive",
         "context_item_contributions": context_item_contributions,
     }));
 }
@@ -727,13 +780,12 @@ pub fn record_prompt_source_composition(
             .unwrap_or_else(|_| "{}".to_string()),
         "directive prompt source contribution metrics"
     );
-    emit_captured_timing_record(serde_json::json!({
+    emit_captured_observation_record(serde_json::json!({
         "event": "directive_prompt_source_composition",
         "schema_version": 1,
         "clock_domain": "directive_process_monotonic",
         "invocation_id": invocation_id,
         "thread_id": thread_id,
-        "item_ref_kind": "directive",
         "profile": {
             "provider_id": provider_id,
             "model_id": model_id,
@@ -805,13 +857,12 @@ pub fn record_provider_request_profile(
         provider_tool_schema_sha256 = metrics.provider_tool_schema_sha256.as_str(),
         "directive provider request profile"
     );
-    emit_captured_timing_record(serde_json::json!({
+    emit_captured_observation_record(serde_json::json!({
         "event": "directive_provider_request_profile",
         "schema_version": 1,
         "clock_domain": "directive_process_monotonic",
         "invocation_id": invocation_id,
         "thread_id": thread_id,
-        "item_ref_kind": "directive",
         "profile": {
             "provider_call_id": call_id,
             "provider_id": provider_id,
@@ -859,6 +910,15 @@ where
 pub fn finish_provider_call(call_id: Option<u64>, completion: &'static str) {
     if let (Some(timings), Some(call_id)) = (process_timings(), call_id) {
         timings.finish_provider_call(call_id, completion);
+    }
+}
+
+pub fn record_provider_usage(
+    call_id: Option<u64>,
+    usage: Option<&crate::provider_adapter::http::TokenUsage>,
+) {
+    if let (Some(timings), Some(call_id), Some(usage)) = (process_timings(), call_id, usage) {
+        timings.record_provider_usage(call_id, usage);
     }
 }
 
@@ -1082,6 +1142,39 @@ mod tests {
         assert_eq!(call.first_provider_event_us, Some(29));
         assert_eq!(call.first_reasoning_event_us, Some(31));
         assert_eq!(call.progressive_callback_batch_count, 0);
+    }
+
+    #[test]
+    fn provider_usage_profile_records_content_free_cache_partition() {
+        let timings = DirectiveStageTimings::new(Instant::now());
+        let call_id = timings
+            .begin_provider_call("provider-a", "model-a", 1, 1)
+            .expect("provider call timing slot");
+        let usage = crate::provider_adapter::http::TokenUsage {
+            input_tokens: Some(1_000),
+            output_tokens: Some(200),
+            reasoning_tokens: Some(150),
+            cache_read_tokens: Some(800),
+            cache_miss_tokens: Some(200),
+            cache_partition_of_input: true,
+            source: crate::provider_adapter::http::ProviderUsageSource::SignedMetadata,
+            ..crate::provider_adapter::http::TokenUsage::default()
+        };
+
+        timings.record_provider_usage(call_id, &usage);
+
+        let call = timings
+            .first_provider_call_snapshot()
+            .expect("provider call");
+        assert_eq!(call.usage_source, Some("signed_metadata"));
+        assert_eq!(call.usage_valid, Some(true));
+        assert_eq!(call.usage_anomaly_count, 0);
+        assert_eq!(call.input_tokens, Some(1_000));
+        assert_eq!(call.output_tokens, Some(200));
+        assert_eq!(call.reasoning_tokens, Some(150));
+        assert_eq!(call.cache_read_tokens, Some(800));
+        assert_eq!(call.cache_miss_tokens, Some(200));
+        assert!(call.cache_partition_of_input);
     }
 
     #[test]

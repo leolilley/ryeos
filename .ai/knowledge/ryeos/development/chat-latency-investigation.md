@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-08-02T07:16:51Z:b35382fd0390158043b47529cd0c32262661f2d3a7f9c9dc95b1646974dd773f:ss5MI5VWdXVDknHsgzB1wDjl2L8bb6I4Odh7hym6HVLEtfdGabzLxJ0kozjLdVxLGSPh97c9/eF+w+qzJj4iCQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-03T05:25:49Z:b8d0c83bbb3d2f376bda3b0d6e4fdb7576d902c1c5ace55730f13ae325a13ae5:2dec9gUjDttXqt4fZbv0TqyBOoE1xiGJl2wlVyEoM3UMFstBGPMhwNykF2TNXUHM7ZDU/jJEeUHKGH8Yd7hODg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/development
 name: chat-latency-investigation
 title: Chat Latency Investigation Runbook
 description: Correlation rules, event semantics, prompt accounting, and decision gates for streamed directive latency investigations
 entry_type: runbook
-version: "1.2.0"
+version: "1.4.0"
 ```
 
 # Chat Latency Investigation Runbook
@@ -44,11 +44,13 @@ the external benchmark driver, never in RyeOS code or tests.
 
 Successful managed runtimes do not expose their raw stderr as an observability
 surface. The daemon therefore accepts the content-free child records through a
-strict, thread-bound schema and re-emits activation, context composition, and
-prompt-source composition as `runtime_child_profiling_record`; provider request
-and timing records remain `runtime_child_timing_record`. Join on `thread_id` and
-inspect `child_event` for the exact record name. Unknown fields, content-bearing
-fields, overlong identifiers, and mismatched thread identities fail closed.
+signed-runtime-declared, thread-bound envelope and re-emits every accepted
+record as `runtime_child_observation_record`. Join on `thread_id` and inspect
+`child_event` for the exact runtime-owned record name. The executor checks only
+the declared event name, version, clock domain, count, byte ceiling, and bounded
+identities; it does not know directive, provider, cache, prompt, or tool fields.
+Undeclared records, overlong records, invalid identities, and mismatched thread
+identities are discarded.
 
 ## Event semantics
 
@@ -56,12 +58,15 @@ fields, overlong identifiers, and mismatched thread identities fail closed.
 - Gateway `stream_started` means the launch handoff succeeded and the RyeOS
   subscription is ready. It does not mean a provider request was submitted and
   it does not prove that provider output exists.
-- Profiling runtime `provider_response_headers` is emitted after successful
+- Profiling runtime `observation` with
+  `kind: directive.provider_response_headers` is emitted after successful
   provider HTTP headers arrive.
-- Profiling runtime `provider_stream_started` is emitted after the first
-  complete provider stream event is parsed.
-- Profiling runtime `provider_reasoning_started` is emitted on the first
-  reasoning delta. It contains no chain-of-thought content.
+- Profiling runtime `observation` with
+  `kind: directive.provider_stream_started` is emitted after the first complete
+  provider stream event is parsed.
+- Profiling runtime `observation` with
+  `kind: directive.provider_reasoning_started` is emitted on the first reasoning
+  delta. It contains no chain-of-thought content.
 - The first non-whitespace `cognition_out.delta` is the child-side proxy for
   first visible assistant text. Downstream delivery must be measured in the
   application clock domain.
@@ -98,8 +103,17 @@ records each signed context item and its composer token estimate.
 size, source-message role sizes, converted-message size, tool-schema size and
 digest, reasoning replay bytes, and an explicitly heuristic
 `ceil(body_bytes / 4)` token estimate. `directive_provider_call_timing` retains
-the provider/network timeline, progressive callback aggregation, and joins by
-provider call ID.
+the provider/network timeline, progressive callback aggregation, final signed
+provider usage and cache-hit/cache-miss token counts, and joins by provider
+call ID. Its cache partition flag is evidence only after the signed schema's
+checked read-plus-miss validation succeeds.
+
+When the signed provider contract exposes prompt-cache usage, retain reported
+cache-read and cache-miss tokens for each call and validate any declared
+partition against total input tokens. Do not infer provider cache behavior from
+matching request digests. For tail controls, record whether an exact signed
+`limits.provider_request_body_bytes` ceiling refused a prepared body before
+provider contact.
 
 Compare provider-call records by turn:
 
@@ -126,7 +140,7 @@ completion. Adjacent text deltas in one batch are coalesced without changing a
 single byte or crossing a tool event; exact text and tool ordering are
 preserved. The final durable turn record and transcript folding are unchanged.
 
-Provider-call timing schema v4 records:
+Provider-call timing schema v5 records:
 
 - `progressive_source_event_count` before text coalescing;
 - `progressive_callback_event_count`;
@@ -158,6 +172,18 @@ be schema-declared or cache an opaque, exact parser/projection result under all
 content, precedence, parser, trust, and authority generations that can affect
 it. Profiling evidence must identify the expensive generic phase before such a
 cache is designed.
+
+The inventoried kind schema also declares any capability template used for
+admission and metadata fields required for descriptor exposure. The executor
+renders the opaque template and applies capability matching without branching
+on an item kind. Execution-policy overrides follow the same rule and are keyed
+as `items.<kind>.<bare_id>` rather than a fixed set of plural kind sections.
+
+Additional hard-limit dimensions are declared by the selected signed runtime,
+including their config identity, maximum values, and stable inheritance
+contract. The executor admits and clamps only those opaque keys. A parent
+runtime dimension clamps a child only when both carry the same contract
+identity; equal field names across unrelated runtimes have no effect.
 
 ## Decision gates
 
