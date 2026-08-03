@@ -795,12 +795,10 @@ impl ExecutionProjectAuthority {
         match self {
             Self::Projectless { .. } => &[],
             Self::LiveProject {
-                capability_ceiling,
-                ..
+                capability_ceiling, ..
             }
             | Self::PinnedGeneration {
-                capability_ceiling,
-                ..
+                capability_ceiling, ..
             } => capability_ceiling,
         }
     }

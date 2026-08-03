@@ -592,10 +592,12 @@ mod tests {
                 "error should name the offending field: {:?}",
                 r.detail
             );
-            assert!(r.detail["remedy"]
-                .as_str()
-                .unwrap()
-                .contains("runtime_authority:"));
+            assert!(
+                r.detail["remedy"]
+                    .as_str()
+                    .unwrap()
+                    .contains("runtime_authority:")
+            );
             // The raw serde error is preserved for context.
             assert!(r.detail["serde_error"].is_string());
         }

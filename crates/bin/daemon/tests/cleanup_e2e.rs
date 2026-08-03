@@ -167,24 +167,21 @@ async fn daemon_only_service_errors_via_run_service() {
     );
 }
 
-// ── Test 7: CLI defaults project_path to "." ───────────────────────────
-//   (Catches Task M.1 regression — body must include project_path.)
+// ── Test 7: CLI status binds its resolved project as project_path ────────
 //
-// We assert this end-to-end by hitting the live daemon and confirming
-// the request succeeds with no explicit --project-path. The daemon's
-// /execute handler requires project_path; if the CLI dropped it, the
-// request would 4xx.
+// We assert this end-to-end through the signed `status` command and confirm
+// it succeeds with no explicit project selector. Its project policy binds the
+// resolved path to `project_path`; if offline dispatch leaves it as `project`,
+// the strict snapshot-status request decoder rejects it.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cli_execute_defaults_project_path_to_dot() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let ryeos = ryeos_binary();
 
-    // The CLI sends raw tokens (`["status"]`) to the daemon's /execute
-    // endpoint. The daemon resolves via its command registry. The app root
-    // locates daemon metadata and the operator signing key.
+    // The app root locates verified node metadata and the operator signing key.
     let out = tokio::process::Command::new(&ryeos)
-        .arg("status") // alias → service:node/status, no --project-path
+        .arg("status") // signed snapshot-status command, no project selector
         .env("RYEOS_APP_ROOT", &h.state_path)
         .env("HOME", h.user_space.path())
         .output()
