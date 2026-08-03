@@ -1289,6 +1289,8 @@ pub struct StreamingCallInput<'a> {
     pub attempt: u32,
     pub sampling: Option<&'a SamplingConfig>,
     pub reasoning: Option<&'a ReasoningConfig>,
+    /// Effective signed per-attempt request-body ceiling. `0` is unlimited.
+    pub provider_request_body_bytes_limit: u64,
     /// Optional cancellation flag (SIGTERM). When set mid-stream, the loop
     /// breaks and the call returns [`StreamOutcome::Cancelled`].
     pub cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -1350,6 +1352,7 @@ pub async fn send_prepared_streaming(
         send_prepared_streaming_inner(input, prepared),
     )
     .await;
+    crate::startup_timing::record_provider_usage(call_id, provider_usage_from_result(&result));
     let completion = match &result {
         Ok(StreamOutcome::Completed { .. }) => "completed",
         Ok(StreamOutcome::Interrupted { .. }) => "interrupted",
@@ -1358,6 +1361,40 @@ pub async fn send_prepared_streaming(
     };
     crate::startup_timing::finish_provider_call(call_id, completion);
     result
+}
+
+fn provider_usage_from_result(result: &Result<StreamOutcome>) -> Option<&TokenUsage> {
+    match result {
+        Ok(StreamOutcome::Completed { response, .. }) => response.usage.as_ref(),
+        Ok(StreamOutcome::Interrupted { attempt, .. })
+        | Ok(StreamOutcome::Cancelled { attempt }) => attempt.usage.as_ref(),
+        Err(error) => error
+            .downcast_ref::<LocalOutputByteLimitError>()
+            .and_then(|error| error.usage.as_ref())
+            .or_else(|| {
+                error
+                    .downcast_ref::<ProviderReportedStreamError>()
+                    .and_then(|error| error.usage.as_ref())
+            })
+            .or_else(|| {
+                error
+                    .downcast_ref::<ProviderProtocolStreamError>()
+                    .and_then(|error| error.usage.as_ref())
+            })
+            .or_else(|| {
+                error
+                    .downcast_ref::<RuntimeCallbackPublicationError>()
+                    .and_then(|error| error.usage.as_ref())
+            })
+            .or_else(|| {
+                error
+                    .downcast_ref::<ProviderStreamError>()
+                    .and_then(|error| match error {
+                        ProviderStreamError::MidStream(error) => error.usage.as_ref(),
+                        _ => None,
+                    })
+            }),
+    }
 }
 
 async fn send_prepared_streaming_inner(
@@ -1530,8 +1567,9 @@ async fn send_prepared_streaming_inner(
     #[cfg(feature = "latency-profiling")]
     if let Err(error) = callback
         .append_runtime_event(
-            RuntimeEventType::ProviderResponseHeaders,
+            RuntimeEventType::Observation,
             json!({
+                "kind": "directive.provider_response_headers",
                 "provider_id": provider_id,
                 "model_id": model,
                 "turn": turn,
@@ -1837,8 +1875,9 @@ async fn send_prepared_streaming_inner(
                 provider_stream_started_published = true;
                 if let Err(error) = callback
                     .append_runtime_event(
-                        RuntimeEventType::ProviderStreamStarted,
+                        RuntimeEventType::Observation,
                         json!({
+                            "kind": "directive.provider_stream_started",
                             "provider_id": provider_id,
                             "model_id": model,
                             "turn": turn,
@@ -1940,8 +1979,9 @@ async fn send_prepared_streaming_inner(
                             provider_reasoning_started_published = true;
                             if let Err(error) = callback
                                 .append_runtime_event(
-                                    RuntimeEventType::ProviderReasoningStarted,
+                                    RuntimeEventType::Observation,
                                     json!({
+                                        "kind": "directive.provider_reasoning_started",
                                         "provider_id": provider_id,
                                         "model_id": model,
                                         "turn": turn,
@@ -2061,8 +2101,9 @@ async fn send_prepared_streaming_inner(
         if !provider_stream_started_published && !final_events.is_empty() {
             if let Err(error) = callback
                 .append_runtime_event(
-                    RuntimeEventType::ProviderStreamStarted,
+                    RuntimeEventType::Observation,
                     json!({
+                        "kind": "directive.provider_stream_started",
                         "provider_id": provider_id,
                         "model_id": model,
                         "turn": turn,
@@ -2160,8 +2201,9 @@ async fn send_prepared_streaming_inner(
                         provider_reasoning_started_published = true;
                         if let Err(error) = callback
                             .append_runtime_event(
-                                RuntimeEventType::ProviderReasoningStarted,
+                                RuntimeEventType::Observation,
                                 json!({
+                                    "kind": "directive.provider_reasoning_started",
                                     "provider_id": provider_id,
                                     "model_id": model,
                                     "turn": turn,
@@ -2794,6 +2836,12 @@ fn merge_stream_usage_update(last_usage: &mut Option<TokenUsage>, update: &Usage
         &mut usage.anomalies,
     );
     merge_stream_usage_counter(
+        "cache_miss_tokens",
+        &mut usage.cache_miss_tokens,
+        update.cache_miss_tokens,
+        &mut usage.anomalies,
+    );
+    merge_stream_usage_counter(
         "cache_write_tokens",
         &mut usage.cache_write_tokens,
         update.cache_write_tokens,
@@ -3080,6 +3128,10 @@ mod tests {
                     input_tokens_path: Some("prompt_tokens".into()),
                     output_tokens_path: Some("completion_tokens".into()),
                     reasoning_tokens_path: None,
+                    cache_read_tokens_path: None,
+                    cache_miss_tokens_path: None,
+                    cache_write_tokens_path: None,
+                    cache_partition_of_input: false,
                     reported_cost_path: None,
                     reported_cost_unit: None,
                     cost_details_path: None,
@@ -5213,6 +5265,7 @@ owner = "ryeos-dev"
             attempt: 1,
             sampling: None,
             reasoning: None,
+            provider_request_body_bytes_limit: 0,
             cancel_flag: None,
             interrupt_flag: None,
         })
@@ -5340,6 +5393,7 @@ owner = "ryeos-dev"
             attempt: 1,
             sampling: None,
             reasoning: None,
+            provider_request_body_bytes_limit: 0,
             cancel_flag: None,
             interrupt_flag: None,
         })

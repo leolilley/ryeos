@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-17T05:31:30Z:f5bf723a7ddbec7b314dccb78ae3db5498079ab286683bd6f22615972381a3ab:YJqyi1p1BItHhYdFPs+oL63RDXN/wIFwczFqw+5t9Z0ZeVjbpLicfm/ZWIk9gaZ4qot5P7Xps4OSukIKHPMOCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-03T06:49:04Z:1feb14e4d670289401bcdf6cdacbeb51247b7163f29c6ebe444d9f95fcfac9ce:gpl6R82mjSxWu31deKtUVxQUqb6axGIXau+9TmzwuDXSsV0bdoEJl6svvTf6L/9Mje82BIKfKcBDcHdhLrMxAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
 version: "1.0.0"
 location:
@@ -42,6 +42,10 @@ formats:
 # not enforced at the kind-level shape.
 # Identity composer — this kind has no multi-document composition (no extends chain, no inheritance). Items are loaded as-is.
 inventory_schema_keys: [input_schema, parameters, config_schema]
+inventory_policy:
+  admission:
+    capability_template: "ryeos.execute.{kind}.{bare_id}"
+  required_metadata: [executor_id]
 composer: handler:ryeos/core/identity
 composed_value_contract:
   root_type: mapping

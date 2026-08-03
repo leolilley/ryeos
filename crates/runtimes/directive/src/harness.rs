@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use ryeos_runtime::envelope::{EnvelopePolicy, HardLimits, RuntimeCost, RuntimeCostError};
 
+const TOOL_CALLS_LIMIT: &str = "tool_calls";
+const PROVIDER_REQUEST_BODY_BYTES_LIMIT: &str = "provider_request_body_bytes";
+
 /// Typed risk level — serde rejects unknown values so typos like
 /// `"HIGH"` fail at config load time instead of silently being ignored.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -198,7 +201,8 @@ impl Harness {
     /// counting only successful dispatches would let a model loop forever on
     /// malformed or unauthorized calls. A zero limit remains unlimited.
     pub fn try_record_tool_call(&mut self) -> bool {
-        if self.limits.tool_calls > 0 && self.tool_calls_used >= self.limits.tool_calls {
+        let limit = self.tool_calls_limit();
+        if limit > 0 && self.tool_calls_used >= limit {
             return false;
         }
         self.tool_calls_used = self.tool_calls_used.saturating_add(1);
@@ -209,7 +213,8 @@ impl Harness {
     /// tools such as `directive_return` do not consume this resource and remain
     /// independently available to the caller.
     pub fn tool_calls_available(&self) -> bool {
-        self.limits.tool_calls == 0 || self.tool_calls_used < self.limits.tool_calls
+        let limit = self.tool_calls_limit();
+        limit == 0 || self.tool_calls_used < limit
     }
 
     /// Un-count a turn whose cognition was cut by a live interrupt before it
@@ -304,6 +309,15 @@ impl Harness {
 
     pub fn token_limit(&self) -> Option<u64> {
         (self.limits.tokens > 0).then_some(self.limits.tokens)
+    }
+
+    pub fn provider_request_body_bytes_limit(&self) -> u64 {
+        self.limits.runtime_limit(PROVIDER_REQUEST_BODY_BYTES_LIMIT)
+    }
+
+    fn tool_calls_limit(&self) -> u32 {
+        u32::try_from(self.limits.runtime_limit(TOOL_CALLS_LIMIT))
+            .expect("signed directive runtime contract bounds tool_calls to u32")
     }
 
     pub fn spend_limit_usd(&self) -> Option<ryeos_runtime::envelope::UsdNanos> {
@@ -430,6 +444,14 @@ pub struct RiskAssessment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    fn runtime_limits(entries: &[(&str, u64)]) -> BTreeMap<String, u64> {
+        entries
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), *value))
+            .collect()
+    }
 
     fn make_harness(limits: HardLimits, caps: Vec<String>) -> Harness {
         let policy = EnvelopePolicy {
@@ -444,16 +466,21 @@ mod tests {
         let harness = make_harness(
             HardLimits {
                 turns: 10,
-                tool_calls: 4,
                 tokens: 1000,
                 spend_usd: ryeos_accounting::UsdNanos::parse_canonical("1").unwrap(),
                 spawns: 5,
                 depth: 3,
                 duration_seconds: 60,
+                runtime: runtime_limits(&[
+                    (TOOL_CALLS_LIMIT, 4),
+                    (PROVIDER_REQUEST_BODY_BYTES_LIMIT, 4096),
+                ]),
+                runtime_contract: Some("directive-runtime/v1".to_string()),
             },
             vec![],
         );
         assert!(harness.check_limits().is_ok());
+        assert_eq!(harness.provider_request_body_bytes_limit(), 4096);
     }
 
     #[test]
@@ -474,7 +501,7 @@ mod tests {
     fn tool_call_limit_counts_attempts_and_zero_is_unlimited() {
         let mut bounded = make_harness(
             HardLimits {
-                tool_calls: 2,
+                runtime: runtime_limits(&[(TOOL_CALLS_LIMIT, 2)]),
                 ..HardLimits::default()
             },
             vec![],
@@ -498,7 +525,7 @@ mod tests {
     fn resume_reseeds_tool_call_budget() {
         let mut harness = make_harness(
             HardLimits {
-                tool_calls: 3,
+                runtime: runtime_limits(&[(TOOL_CALLS_LIMIT, 3)]),
                 ..HardLimits::default()
             },
             vec![],

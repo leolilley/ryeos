@@ -339,11 +339,7 @@ pub struct ExecutionPolicyDocument {
     #[serde(default)]
     pub defaults: ExecutionPolicyValues,
     #[serde(default)]
-    pub tools: HashMap<String, ExecutionPolicyValues>,
-    #[serde(default)]
-    pub graphs: HashMap<String, ExecutionPolicyValues>,
-    #[serde(default)]
-    pub directives: HashMap<String, ExecutionPolicyValues>,
+    pub items: HashMap<String, HashMap<String, ExecutionPolicyValues>>,
     /// Root-history policy is intentionally opaque to per-item execution-limit
     /// resolution. Its typed consumer parses the strict signed block.
     #[serde(default)]
@@ -369,10 +365,7 @@ pub struct ExecutionPolicyResolver<'a> {
 }
 
 pub fn value_has_execution_policy_shape(value: &Value) -> bool {
-    value.get("defaults").is_some()
-        || value.get("tools").is_some()
-        || value.get("graphs").is_some()
-        || value.get("directives").is_some()
+    value.get("defaults").is_some() || value.get("items").is_some()
 }
 
 impl<'a> ExecutionPolicyResolver<'a> {
@@ -501,12 +494,10 @@ fn apply_item_override_layer(
     path: Option<PathBuf>,
     space: Option<ItemSpace>,
 ) -> Result<(), EngineError> {
-    let (section, values) = match item_ref.kind.as_str() {
-        "tool" => ("tools", doc.tools.get(&item_ref.bare_id)),
-        "graph" => ("graphs", doc.graphs.get(&item_ref.bare_id)),
-        "directive" => ("directives", doc.directives.get(&item_ref.bare_id)),
-        _ => ("", None),
-    };
+    let values = doc
+        .items
+        .get(&item_ref.kind)
+        .and_then(|items| items.get(&item_ref.bare_id));
     if let Some(values) = values {
         apply_values(
             policy,
@@ -514,7 +505,7 @@ fn apply_item_override_layer(
             PolicySourceKind::ExecutionYamlItemOverride,
             path,
             space,
-            format!("{section}.{}", item_ref.bare_id),
+            format!("items.{}.{}", item_ref.kind, item_ref.bare_id),
         )?;
     }
     Ok(())
@@ -788,9 +779,11 @@ mod tests {
                 "cancellation_mode": "graceful",
                 "cancellation_grace_secs": 5
             },
-            "tools": {
-                "snap-track/scrapers/hydrate-shows": {
-                    "timeout": 7200
+            "items": {
+                "tool": {
+                    "snap-track/scrapers/hydrate-shows": {
+                        "timeout": 7200
+                    }
                 }
             }
         });
@@ -813,7 +806,7 @@ mod tests {
         );
         assert_eq!(
             timeout.source.scope.as_deref(),
-            Some("tools.snap-track/scrapers/hydrate-shows")
+            Some("items.tool.snap-track/scrapers/hydrate-shows")
         );
         assert_eq!(policy.max_steps.unwrap().value, 5);
         assert_eq!(policy.max_concurrency.unwrap().value, 10);
@@ -824,14 +817,16 @@ mod tests {
     }
 
     #[test]
-    fn graph_and_directive_maps_are_kind_aware() {
+    fn item_map_is_kind_keyed() {
         let graph_ref = CanonicalRef::parse("graph:snap-track/show_rescrape").unwrap();
         let directive_ref = CanonicalRef::parse("directive:agent/workflow").unwrap();
         let value = json!({
             "defaults": { "timeout": 300 },
-            "tools": { "snap-track/show_rescrape": { "timeout": 111 } },
-            "graphs": { "snap-track/show_rescrape": { "timeout": 7200 } },
-            "directives": { "agent/workflow": { "max_steps": 50 } }
+            "items": {
+                "tool": { "snap-track/show_rescrape": { "timeout": 111 } },
+                "graph": { "snap-track/show_rescrape": { "timeout": 7200 } },
+                "directive": { "agent/workflow": { "max_steps": 50 } }
+            }
         });
 
         let graph =
@@ -873,12 +868,15 @@ mod tests {
                 timeout: Some(300),
                 ..Default::default()
             },
-            tools: HashMap::from([(
-                "x".to_string(),
-                ExecutionPolicyValues {
-                    timeout: Some(7200),
-                    ..Default::default()
-                },
+            items: HashMap::from([(
+                "tool".to_string(),
+                HashMap::from([(
+                    "x".to_string(),
+                    ExecutionPolicyValues {
+                        timeout: Some(7200),
+                        ..Default::default()
+                    },
+                )]),
             )]),
             ..Default::default()
         };

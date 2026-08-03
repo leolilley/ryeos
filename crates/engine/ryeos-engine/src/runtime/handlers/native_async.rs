@@ -306,10 +306,10 @@ impl RuntimeHandler for NativeAsyncHandler {
 
         ctx.spec_overrides.execution.native_async = Some(NativeAsyncSpec { cancellation_mode });
 
-        // Subprocess-facing flag so tools can branch on
+        // Subprocess-facing flag so runtimes can branch on
         // "do I drive my own event stream?". Spec field stays the
         // canonical source of truth for the daemon/runner; this env
-        // var is purely a runtime convenience for tool code.
+        // var is purely a runtime convenience for child code.
         ctx.env
             .insert("RYEOS_NATIVE_ASYNC".to_owned(), "1".to_owned());
 
@@ -359,9 +359,9 @@ mod tests {
         current_index: usize,
     ) -> Result<(SpecOverrides, HashMap<String, String>), EngineError> {
         let chain = vec![ChainIntermediate {
-            executor_id: "tool:demo".into(),
-            resolved_ref: "tool:demo".into(),
-            kind: "tool".into(),
+            executor_id: "widget:demo".into(),
+            resolved_ref: "widget:demo".into(),
+            kind: "widget".into(),
             source_path: PathBuf::from("/tmp/demo.yaml"),
             parsed: json!({ "native_async": block.clone() }),
         }];
@@ -485,12 +485,14 @@ mod tests {
     }
 
     #[test]
-    fn per_tool_override_beats_defaults() {
+    fn per_item_override_beats_defaults() {
         let params = json!({
             "resolved_config": {
                 "defaults": { "cancellation_grace_secs": 5 },
-                "tools": {
-                    "demo": { "cancellation_grace_secs": 90 }
+                "items": {
+                    "widget": {
+                        "demo": { "cancellation_grace_secs": 90 }
+                    }
                 }
             }
         });
@@ -526,8 +528,10 @@ mod tests {
         let params = json!({
             "resolved_config": {
                 "defaults": { "cancellation_grace_secs": 999 },
-                "tools": {
-                    "demo": { "cancellation_grace_secs": 90 }
+                "items": {
+                    "widget": {
+                        "demo": { "cancellation_grace_secs": 90 }
+                    }
                 }
             }
         });
@@ -548,23 +552,25 @@ mod tests {
         let params = json!({
             "resolved_config": {
                 "defaults": { "cancellation_grace_secs": 30 },
-                "tools": {
-                    "my/app/tool": { "cancellation_grace_secs": 90 }
+                "items": {
+                    "widget": {
+                        "my/app/item": { "cancellation_grace_secs": 90 }
+                    }
                 }
             }
         });
         let chain = vec![
             ChainIntermediate {
-                executor_id: "tool:my/runtimes/native".into(),
-                resolved_ref: "tool:my/app/tool".into(),
-                kind: "tool".into(),
-                source_path: PathBuf::from("/tmp/tool.yaml"),
+                executor_id: "widget:my/runtimes/native".into(),
+                resolved_ref: "widget:my/app/item".into(),
+                kind: "widget".into(),
+                source_path: PathBuf::from("/tmp/item.yaml"),
                 parsed: json!({}),
             },
             ChainIntermediate {
-                executor_id: "tool:my/runtimes/native".into(),
-                resolved_ref: "tool:my/runtimes/native".into(),
-                kind: "tool".into(),
+                executor_id: "widget:my/runtimes/native".into(),
+                resolved_ref: "widget:my/runtimes/native".into(),
+                kind: "widget".into(),
                 source_path: PathBuf::from("/tmp/runtime.yaml"),
                 parsed: json!({ "native_async": block.clone() }),
             },
@@ -586,16 +592,16 @@ mod tests {
         });
         let chain = vec![
             ChainIntermediate {
-                executor_id: "tool:my/runtimes/native".into(),
-                resolved_ref: "tool:my/app/tool".into(),
-                kind: "tool".into(),
-                source_path: PathBuf::from("/tmp/tool.yaml"),
+                executor_id: "widget:my/runtimes/native".into(),
+                resolved_ref: "widget:my/app/item".into(),
+                kind: "widget".into(),
+                source_path: PathBuf::from("/tmp/item.yaml"),
                 parsed: json!({}),
             },
             ChainIntermediate {
-                executor_id: "tool:my/runtimes/native".into(),
-                resolved_ref: "tool:my/runtimes/native".into(),
-                kind: "tool".into(),
+                executor_id: "widget:my/runtimes/native".into(),
+                resolved_ref: "widget:my/runtimes/native".into(),
+                kind: "widget".into(),
                 source_path: PathBuf::from("/tmp/runtime.yaml"),
                 parsed: json!({ "native_async": block.clone() }),
             },

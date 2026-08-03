@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-27T09:03:55Z:ec6fa2358547998310b66b77be1f17ced3f8028f99f5b72de15e26dd2729235e:dTW4hCRuDYKqF+IS1W7ZoS3ifecoNx5TdeXYHgRxrT7UDABTlZSmQUrl2sxX8J8W90s/w8Uz204kfg4WsTL7BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-03T06:49:21Z:f672df56075471eae40efa4b4c553263266dd4b1c12c50ac52d3cd1ed21cfb32:BzwrEKEVQe7tqxeAgl2BfIpWN0y4czkb4GYwGkemFG2okVjvKp25c/atcsduL0W/6BEWtYBUUseeLLNmqpSdAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, runtimes, execution, subprocess]
@@ -48,6 +48,17 @@ All runtimes inherit defaults from `config:execution/execution`:
 | `cancellation_grace_secs`| 5             |
 
 Override at project level in `.ai/config/execution/execution.yaml`.
+
+Per-item overrides are kind-keyed so the policy format extends without an
+engine code change:
+
+```yaml
+items:
+  tool:
+    my/project/action:
+      timeout: 600
+      max_steps: 20
+```
 
 ## The `@subprocess` Alias
 

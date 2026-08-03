@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-02T07:16:40Z:3ece61307e2f48e03231c8149818a8595db5cd3ba293b81ec0c62ea0d8f09456:DrXqmqrQtKcpHl3PbkN6U1QWiYREOlxCR2q8TJ+8lTXgEooQvb12Yed1OjezQSx8S7wP8OAQU7LXYtvz7qkaCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-03T05:24:51Z:8fcd98d138254788124716424dc3bb31bb56fca66f3523bc90414e1d26dd9fcb:yndZCZe8A1L64gKi0A93KqFdxrdgrchJAubHr2gdzFFenXxAc7udRIRCSt15NMJxMWzBLo8657Wmqm2WSLHxBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/config/providers
 tags: [provider, deepseek, v4, models]
-version: "1.1.0"
+version: "1.2.0"
 description: Direct DeepSeek provider config reference.
 ---
 
@@ -30,18 +30,23 @@ DeepSeek retired them on 24 July 2026.
 
 The provider requires the final stream usage snapshot. Reported
 `completion_tokens` include reasoning tokens, with the reasoning subset read
-from `completion_tokens_details.reasoning_tokens`.
+from `completion_tokens_details.reasoning_tokens`. The signed usage schema also
+reads `prompt_cache_hit_tokens` and `prompt_cache_miss_tokens` and declares that
+they partition `prompt_tokens`; a missing field, malformed count, overflow, or
+partition mismatch invalidates token settlement instead of inventing a cache
+hit.
 
-Signed spend profiles use DeepSeek's USD cache-miss input prices as the
-conservative upper bound:
+Signed spend profiles reserve a conservative upper bound and settle the actual
+cache-hit/cache-miss partition at DeepSeek's USD rates:
 
-| Model | Input / 1M | Output / 1M |
-|---|---:|---:|
-| `deepseek-v4-pro` | $0.435 | $0.87 |
-| `deepseek-v4-flash` | $0.14 | $0.28 |
+| Model | Cache hit / 1M | Cache miss / 1M | Output / 1M |
+|---|---:|---:|---:|
+| `deepseek-v4-pro` | $0.003625 | $0.435 | $0.87 |
+| `deepseek-v4-flash` | $0.0028 | $0.14 | $0.28 |
 
-Cache-hit input is cheaper, but RyeOS does not rely on that discount for hard
-spend admission.
+Provider-reported cache counts remain usage/accounting facts. Equal request
+digests do not synthesize cache hits, and RyeOS does not share provider cache
+state across authorities.
 
 ## Explicit selection
 

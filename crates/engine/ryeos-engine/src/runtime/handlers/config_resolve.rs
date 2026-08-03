@@ -577,7 +577,7 @@ metadata:
             &rig.project_ai,
             "exec.yaml",
             "defaults:\n  timeout: 30\n  max_steps: 5\n  max_concurrency: 2\n\
-             tools:\n  mytool:\n    timeout: 60\n",
+             items:\n  tool:\n    mytool:\n      timeout: 60\n",
         );
 
         // chain[0] = the root tool; chain[1] = a runtime element
@@ -615,7 +615,7 @@ metadata:
             &rig.project_ai,
             "exec.yaml",
             "defaults:\n  timeout: 300\n\
-             tools:\n  my/app/tool:\n    timeout: 7200\n  my/runtimes/python-function:\n    timeout: 111\n",
+             items:\n  tool:\n    my/app/tool:\n      timeout: 7200\n    my/runtimes/python-function:\n      timeout: 111\n",
         );
 
         let chain = vec![
@@ -646,7 +646,7 @@ metadata:
             &rig.project_ai,
             "exec.yaml",
             "defaults:\n  cancellation_mode: graceful\n  cancellation_grace_secs: 5\n\
-             tools:\n  my/app/tool:\n    cancellation_grace_secs: 90\n",
+             items:\n  tool:\n    my/app/tool:\n      cancellation_grace_secs: 90\n",
         );
 
         let chain = vec![

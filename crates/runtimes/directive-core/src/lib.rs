@@ -377,6 +377,16 @@ pub struct StreamUsageConfig {
     #[serde(default)]
     pub reasoning_tokens_path: Option<String>,
     #[serde(default)]
+    pub cache_read_tokens_path: Option<String>,
+    #[serde(default)]
+    pub cache_miss_tokens_path: Option<String>,
+    #[serde(default)]
+    pub cache_write_tokens_path: Option<String>,
+    /// When true, the signed protocol declares that cache-read and cache-miss
+    /// tokens are a complete, non-overlapping partition of input tokens.
+    #[serde(default)]
+    pub cache_partition_of_input: bool,
+    #[serde(default)]
     pub reported_cost_path: Option<String>,
     #[serde(default)]
     pub reported_cost_unit: Option<ReportedCostUnit>,
@@ -463,6 +473,10 @@ pub struct PricingConfig {
     #[serde(default)]
     pub output_per_million: Option<UsdNanos>,
     #[serde(default)]
+    pub cache_read_per_million: Option<UsdNanos>,
+    #[serde(default)]
+    pub cache_miss_per_million: Option<UsdNanos>,
+    #[serde(default)]
     pub models: HashMap<String, ModelPricing>,
 }
 
@@ -471,6 +485,10 @@ pub struct PricingConfig {
 pub struct ModelPricing {
     pub input_per_million: UsdNanos,
     pub output_per_million: UsdNanos,
+    #[serde(default)]
+    pub cache_read_per_million: Option<UsdNanos>,
+    #[serde(default)]
+    pub cache_miss_per_million: Option<UsdNanos>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -563,6 +581,8 @@ impl PricingConfig {
             Some(ModelPricing {
                 input_per_million: self.input_per_million?,
                 output_per_million: self.output_per_million?,
+                cache_read_per_million: self.cache_read_per_million,
+                cache_miss_per_million: self.cache_miss_per_million,
             })
         })
     }
@@ -696,6 +716,7 @@ fn dimension_bound(
     match dim {
         BillableDimension::InputTokens
         | BillableDimension::CacheReadTokens
+        | BillableDimension::CacheMissTokens
         | BillableDimension::CacheWriteTokens => Some((dim, inputs.context_window)),
         BillableDimension::OutputTokens | BillableDimension::ReasoningTokens => {
             (inputs.max_provider_output_tokens_per_turn != 0)
@@ -1123,6 +1144,14 @@ impl ProviderConfig {
                         "provider config{context}: streaming metadata usage.single_snapshot requires latest_snapshot aggregation"
                     );
                 }
+                if usage.cache_partition_of_input
+                    && (usage.cache_read_tokens_path.is_none()
+                        || usage.cache_miss_tokens_path.is_none())
+                {
+                    bail!(
+                        "provider config{context}: streaming metadata usage.cache_partition_of_input requires cache_read_tokens_path and cache_miss_tokens_path"
+                    );
+                }
                 for (label, path) in [
                     (
                         "usage.input_tokens_path",
@@ -1135,6 +1164,18 @@ impl ProviderConfig {
                     (
                         "usage.reasoning_tokens_path",
                         usage.reasoning_tokens_path.as_deref(),
+                    ),
+                    (
+                        "usage.cache_read_tokens_path",
+                        usage.cache_read_tokens_path.as_deref(),
+                    ),
+                    (
+                        "usage.cache_miss_tokens_path",
+                        usage.cache_miss_tokens_path.as_deref(),
+                    ),
+                    (
+                        "usage.cache_write_tokens_path",
+                        usage.cache_write_tokens_path.as_deref(),
                     ),
                     (
                         "usage.reported_cost_path",
@@ -1303,11 +1344,33 @@ impl ProviderConfig {
                 || pricing
                     .output_per_million
                     .is_some_and(|rate| !rate.is_zero())
+                || pricing
+                    .cache_read_per_million
+                    .is_some_and(|rate| !rate.is_zero())
+                || pricing
+                    .cache_miss_per_million
+                    .is_some_and(|rate| !rate.is_zero())
                 || !pricing.models.is_empty())
         {
             bail!(
                 "provider config{context}: pricing.explicitly_free cannot be combined with non-zero/default or per-model prices"
             );
+        }
+        if let Some(pricing) = self.pricing.as_ref() {
+            if pricing.cache_read_per_million.is_some() != pricing.cache_miss_per_million.is_some()
+            {
+                bail!(
+                    "provider config{context}: default cache_read_per_million and cache_miss_per_million must be declared together"
+                );
+            }
+            for (model, rates) in &pricing.models {
+                if rates.cache_read_per_million.is_some() != rates.cache_miss_per_million.is_some()
+                {
+                    bail!(
+                        "provider config{context}: pricing model {model} must declare cache_read_per_million and cache_miss_per_million together"
+                    );
+                }
+            }
         }
 
         if let Some(spend_authority) = self.spend_authority.as_ref() {
@@ -2195,6 +2258,8 @@ mod reasoning_tests {
                 explicitly_free: true,
                 input_per_million: None,
                 output_per_million: None,
+                cache_read_per_million: None,
+                cache_miss_per_million: None,
                 models: HashMap::new(),
             }),
             spend_authority: None,
@@ -2419,5 +2484,27 @@ mod reasoning_tests {
             prepared.runtime_facts.get("reasoning"),
             Some(&serde_json::to_value(expected).expect("reasoning fact"))
         );
+    }
+}
+
+#[cfg(test)]
+mod shipped_provider_config_tests {
+    use super::ProviderConfig;
+
+    #[test]
+    fn deepseek_config_deserializes_and_validates_for_every_shipped_model() {
+        let value: serde_json::Value = serde_yaml::from_str(include_str!(
+            "../../../../bundles/standard/.ai/config/ryeos-runtime/model-providers/deepseek.yaml"
+        ))
+        .expect("shipped DeepSeek provider YAML");
+        let provider: ProviderConfig =
+            serde_json::from_value(value).expect("shipped DeepSeek provider config");
+
+        for model in ["deepseek-v4-pro", "deepseek-v4-flash"] {
+            provider
+                .resolve_for_model(model)
+                .validate(&format!(" for shipped model {model}"))
+                .unwrap_or_else(|error| panic!("invalid shipped DeepSeek config: {error:#}"));
+        }
     }
 }

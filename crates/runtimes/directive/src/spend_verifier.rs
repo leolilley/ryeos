@@ -42,6 +42,7 @@ fn dimension_bound(
     let units = match dimension {
         BillableDimension::InputTokens
         | BillableDimension::CacheReadTokens
+        | BillableDimension::CacheMissTokens
         | BillableDimension::CacheWriteTokens => context_window,
         BillableDimension::OutputTokens | BillableDimension::ReasoningTokens => {
             if max_provider_output_tokens_per_turn == 0 {
@@ -305,6 +306,7 @@ mod tests {
             output_per_million: Some(usd("15")),
             reasoning_per_million: None,
             cache_read_per_million: None,
+            cache_miss_per_million: None,
             cache_write_per_million: None,
             per_request: None,
             covered_dimensions: ClosedBillableDimensionSet::new(vec![
@@ -669,6 +671,8 @@ mod tests {
             explicitly_free: true,
             input_per_million: None,
             output_per_million: None,
+            cache_read_per_million: None,
+            cache_miss_per_million: None,
             models: Default::default(),
         });
         let prepared = prepared(serde_json::json!({"messages": []}), Some(OUTPUT_CEILING));

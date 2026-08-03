@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-02T10:32:26Z:303f080a7145f9f7adea4e1f26cf51ccd1779ec60dd16e1491214e0c0f7a56b6:hYChCXxrRFbzLCCwYoZzr7M46hbDd72Bvo0k1iChDLrgOzymu+AJ4NMq0B4t/rYLgN8CNCMMAI9eCaiDHKSWBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-03T06:49:24Z:0e4c93fd84e8858b4b228501ae44933d963cdc13685b869fa998cc585dd7af3c:3wdN7mYmnvCdYlMIFHWZ0uaaRY6IHjNlnVzXS63dgqsjbDjyeEA5YE5+m8gvb5wwsQpGqfW2flQETHfhT1YeBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [runtime, directive-runtime, graph-runtime, knowledge-runtime, llm]
@@ -121,7 +121,7 @@ the same kind can be registered but are not yet selected automatically.
 
 ## ABI Version
 
-All runtime declarations use binary ABI version `v1`. The signed protocol
+All runtime declarations use binary ABI version `v2`. The signed protocol
 selected for an invocation independently versions its wire:
 `runtime` carries `LaunchEnvelope`/`RuntimeResult`, while
 `method_runtime` carries `MethodCallEnvelope`/`MethodCallResult`. A breaking

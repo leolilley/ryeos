@@ -5012,6 +5012,7 @@ mod tests {
             output_per_million: Some(usd("10")),
             reasoning_per_million: None,
             cache_read_per_million: None,
+            cache_miss_per_million: None,
             cache_write_per_million: None,
             per_request: None,
             covered_dimensions: dims(vec![
@@ -5031,6 +5032,7 @@ mod tests {
             output_per_million: None,
             reasoning_per_million: None,
             cache_read_per_million: None,
+            cache_miss_per_million: None,
             cache_write_per_million: None,
             per_request: Some(usd("0.01")),
             covered_dimensions: dims(vec![

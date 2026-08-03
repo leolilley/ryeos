@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-30T00:35:21Z:841f4d5cd9d31b9732b2b0899de8c9fa12e009cbf25a82c9fbfe9e576b6b240f:DxPx3zfHiOHf+11LpVJ8VC1zQZC9fv8N+JBrjpozImP10roh0NVQbpu5lzOEDepqKA3unO9xVoIAy47FTTdRAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-03T06:49:23Z:02f4161e4b1726b2129b077028b81ea70fb09ebf35fd682cf3a251d082f41bda:TUCUg1qIm9qmDGTco5Q3fF7f9MRFEdnfhyeCYto/mDM4igiisf9NSd1vIHinBe1j7ryUnVehRvw+ik/xP0YDAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/directives
 tags: [directive, authoring, frontmatter]
-version: "1.0.1"
+version: "1.1.0"
 description: How to author directive markdown files.
 ---
 
@@ -32,7 +32,14 @@ Instructions for the runtime.
 - `requires.capabilities.manifest.runtime_authority`: runtime callback authority (bundle events / vault / item authoring / project snapshots) the daemon mints only as the signed bundle manifest backs it — not self-grantable.
 - `context`: knowledge refs grouped by position (`system`, `before`, `after`).
 - `model`: optional explicit provider/model/context window; otherwise routing tiers apply.
-- `limits`: runtime limits such as turn/token/spend budgets.
+- `limits`: runtime limits such as turn/tool/token/spend budgets.
+  `provider_request_body_bytes` is an exact per-model-attempt ceiling on the
+  serialized provider request. `0` is unlimited. A bounded request is prepared
+  once and refused before ledger admission or provider contact if it exceeds
+  the signed value; RyeOS does not truncate or rewrite the transcript to fit.
+  Directive-specific numeric dimensions are declared by the signed directive
+  runtime descriptor. The engine/executor transport and clamp them as opaque
+  keys and do not assign directive semantics to their names.
 - `inputs` / `outputs`: structured contract for callers and summaries.
 - `actions`: tool or service actions the runtime may call through callbacks.
 - `execution.tool_concurrency` (default 4, range 1..=16): how many tool calls

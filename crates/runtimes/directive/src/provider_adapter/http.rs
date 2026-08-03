@@ -69,7 +69,11 @@ pub struct TokenUsage {
     /// local stream enforcement.
     pub reasoning_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,
+    pub cache_miss_tokens: Option<u64>,
     pub cache_write_tokens: Option<u64>,
+    /// The signed usage schema declares that cache reads and misses form a
+    /// complete, non-overlapping partition of `input_tokens`.
+    pub cache_partition_of_input: bool,
     /// Provider-reported charge for this request, when a signed streaming
     /// metadata schema declares its location.
     pub reported_cost_usd: Option<f64>,

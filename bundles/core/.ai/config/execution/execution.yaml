@@ -1,9 +1,9 @@
-# ryeos:signed:2026-07-14T23:18:43Z:5a591fd80c1e1094e5ac7c792f8bf3b0f2a45962f6a44ddfbdf84acbb5fe14a7:zJfSIwENSL57830IBxfDhUTafXja7LKqVksslJ06G3bCxYurVXF2z87VdTouR7X2+9DkWJKhJnsgwXYHmcAbCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-03T06:49:04Z:7840fdd35b288aa257160ffc7ff4b6b5e20f4f815efd8e74bd77099f7dd08e71:m01vLTOK2BBPDIhu8zQuXPDgSCxHFtegf+A9L8wGUyQm5M9HemXxQTyAYxAuaSioEtqTxEQrPfZVvDQvbWu4Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Execution config — system defaults
 # Override per-project: .ai/config/execution/execution.yaml
 category: "execution"
-version: "1.0.0"
-schema_version: "1.0.0"
+version: "2.0.0"
+schema_version: "2.0.0"
 
 # Defaults applied to all tool executions
 defaults:
@@ -19,11 +19,12 @@ defaults:
   cancellation_mode: "graceful"
   cancellation_grace_secs: 5
 
-# Per-tool overrides (key = tool item_id)
-# tools:
-#   "my/scraper/tool":
-#     timeout: 600
-#     cancellation_grace_secs: 30
+# Per-item overrides, keyed first by canonical kind and then bare item id.
+# items:
+#   tool:
+#     "my/scraper/tool":
+#       timeout: 600
+#       cancellation_grace_secs: 30
 
 # Generic root-history default. The node's own signed config layer may replace
 # this complete block. No retention age exists in Rust; omitting all signed

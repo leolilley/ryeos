@@ -234,7 +234,7 @@ async fn e2e_direct_runtime_routes_through_native_dispatch() {
             "e2e-direct-runtime",
             "e2e_kind",
             true,
-            "v1",
+            "v2",
             &fixture.publisher,
         )?;
         common::fast_fixture::register_fixture_bundle(
@@ -296,7 +296,7 @@ async fn e2e_multi_default_conflict_aborts_startup() {
             "dup-runtime-a",
             "dup_kind",
             true,
-            "v1",
+            "v2",
             &fixture.publisher,
         )?;
         install_runtime(
@@ -304,7 +304,7 @@ async fn e2e_multi_default_conflict_aborts_startup() {
             "dup-runtime-b",
             "dup_kind",
             true,
-            "v1",
+            "v2",
             &fixture.publisher,
         )?;
         common::fast_fixture::register_fixture_bundle(
@@ -429,7 +429,7 @@ async fn e2e_malformed_runtime_binary_ref_is_rejected_at_boot_admission() {
             "p15-bad-runtime",
             "p15_kind",
             true,
-            "v1",
+            "v2",
             "badshape",
             &fixture.publisher,
         )?;

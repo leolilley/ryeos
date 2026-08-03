@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-08-02T07:16:40Z:da67bbe4ab4d9cce9af68855c1247789596dc1ed00d9a8683f84e8a3d0892792:6h1iDY8B4ezBrsVYMvcqGTGJBvRTqkp5ZiQOsGy+g8voJ7biKuq7ZpLhpDj1WguLT6rEO+riha4JparPYBKADw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-03T05:24:52Z:41012d699530ec721387d2f4c2c83a77d4f8e55700ade4e62c6cfb37ee451841:85bkLUKSgPTv1WMGqprOyuDbFmw0w19W61W7Pxybrs6mkzMAsl4ouWKHP3JYPpG1BueULzxcEl3x/PBnvuJKBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
 tags: [models, providers, routing, runtime, security]
-version: "1.2.0"
+version: "1.3.0"
 description: >
   Directive-owned model/provider launch preparation, routing tiers,
   provider configs, frozen runtime data, and adding new providers.
@@ -92,6 +92,20 @@ launch preparation. The resolved policy is frozen in the provider snapshot and
 recorded as a runtime fact before the exact provider request is serialized and
 digested.
 
+## Provider cache usage
+
+A signed streaming usage schema may map cache-read, cache-miss, and cache-write
+token paths. When it declares `cache_partition_of_input: true`, both read and
+miss paths are required and RyeOS validates that their checked sum equals the
+reported input-token total. Cache miss is a distinct accounting dimension; it
+is never relabelled as cache write.
+
+Pricing may declare paired cache-read/cache-miss rates for operational budgets,
+while the signed spend tariff covers the exact billable dimensions used for
+authoritative settlement. Missing or contradictory provider cache metadata
+fails closed for a tariff that requires it. Request equality alone is never
+evidence of a provider-side hit.
+
 ## Active configs
 
 The standard bundle ships signed provider configs for:
@@ -114,7 +128,7 @@ To add a provider:
 1. Add a signed YAML under
    `config/ryeos-runtime/model-providers/<provider>.yaml`.
 2. Declare the family, auth header, request/response schemas,
-   streaming mode, and pricing defaults.
+   streaming mode, usage/cache metadata, and pricing defaults.
 3. Add model-profile overrides when one endpoint serves multiple wire
    formats.
 4. Point a `model_routing.yaml` tier at the provider or use it from a

@@ -603,6 +603,7 @@ mod tests {
             runtime: None,
             inventory_kinds: Vec::new(),
             inventory_schema_keys: Vec::new(),
+            inventory_policy: Default::default(),
         }
     }
 

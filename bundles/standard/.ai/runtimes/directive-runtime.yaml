@@ -1,9 +1,9 @@
-# ryeos:signed:2026-08-02T07:16:40Z:42c07922d3bc70230678cdca5d2b8a676e79463de1e631151468d88ba0165ee6:ZcfN87RMODxaRxakSFfmGgs2jX0nvqqgaSTuJ7n6wUoculHY2+/GOabzgNwfrtOjC7JpmPoFANpxCkWnNtmbBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-03T06:49:26Z:ecf23d244d5384382e58371618fd3b4dcf64f0761c031ee6af543ba6e6035922:SQAyTjc3UNIe/UOkk/EVwSLxb2YTFERE0b+sB351zXh+3giY/OcC4Q4hT+4zHlGpdmWmvwVFFiuT3EwC3sK5CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: directive
 default: true
 binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-directive-runtime
-abi_version: "v1"
+abi_version: "v2"
 required_caps:
   - runtime.execute
 launch_contract:
@@ -95,4 +95,42 @@ launch_contract:
     config_sources: {required: true, kind: json, max_bytes: 4096}
     authority_digest: {required: true, kind: string, max_bytes: 66}
     spend_bound: {required: true, kind: string, max_bytes: 32}
+limits:
+  config_identity: directive-runtime/limits
+  contract: directive-runtime/v1
+  dimensions:
+    tool_calls: 4294967295
+    provider_request_body_bytes: 1073741824
+observability:
+  child_records:
+    latency_profiling_enabled:
+      schema_version: 1
+      clock_domain: directive_process_monotonic
+      max_records: 1
+      max_record_bytes: 4096
+    directive_context_composition:
+      schema_version: 1
+      clock_domain: directive_process_monotonic
+      max_records: 1
+      max_record_bytes: 65536
+    directive_prompt_source_composition:
+      schema_version: 1
+      clock_domain: directive_process_monotonic
+      max_records: 1
+      max_record_bytes: 65536
+    directive_provider_call_timing:
+      schema_version: 5
+      clock_domain: directive_process_monotonic
+      max_records: 127
+      max_record_bytes: 65536
+    directive_runtime_stage_timing:
+      schema_version: 6
+      clock_domain: directive_process_monotonic
+      max_records: 1
+      max_record_bytes: 65536
+    directive_provider_request_profile:
+      schema_version: 1
+      clock_domain: directive_process_monotonic
+      max_records: 127
+      max_record_bytes: 65536
 description: "Interprets directive workflows by orchestrating LLM threads"
