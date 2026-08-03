@@ -68,6 +68,10 @@ pub enum DaemonCommand {
         #[arg(long)]
         revision: bool,
 
+        /// Print only the compiled artifact profile.
+        #[arg(long)]
+        profile: bool,
+
         /// Print build provenance as JSON.
         #[arg(long)]
         json: bool,

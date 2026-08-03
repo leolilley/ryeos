@@ -16,8 +16,9 @@ path = "src/main.rs"
 
 [features]
 default = []
-# Propagate release-equivalent latency instrumentation into the generic engine.
-latency-profiling = ["ryeos-engine/latency-profiling"]
+# Propagate release-equivalent latency instrumentation and make the compiled
+# artifact profile observable through daemon build info.
+latency-profiling = ["ryeos-app/latency-profiling", "ryeos-engine/latency-profiling"]
 
 [dependencies]
 anyhow = { workspace = true }

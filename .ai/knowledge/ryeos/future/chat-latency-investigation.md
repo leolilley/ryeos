@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-08-03T05:25:36Z:38250d13a4130babdbea0d19f3364f2c38ee54c6908acb7220aa2c7e80a638c7:h8VEJugiXxuVOsjxKWdKJCrzHaVOH68jaiA0ylReJ7qIUhqIMOKNXeTPQiElS4j+2sJyYNnDfqhD754ucDLUBw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-03T10:15:05Z:9c869658f96f116f5beab19f61ff99dfd8a738f5fe77b418a757b4f3db0fe69f:koYoIX32OXk6jrrIlwQ8yw/hBWLzmmCP7LOuW2bSVXojZ7ffyQBHRNfXkfLJa4+9CuR2dn8fxQrsSq4Eivz3CA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/future
 name: chat-latency-investigation
 title: Chat Latency Investigation and Optimization Order
 description: Measurement contract, observed RyeOS latency boundaries, implemented safeguards, and evidence gates for future work
 entry_type: design
-version: "0.2.0"
+version: "0.3.0"
 ```
 
 # Chat Latency Investigation and Optimization Order
@@ -23,6 +23,13 @@ The investigation pulled forward four provider-neutral mechanisms:
 - signed provider reasoning policy with descriptor-owned wire mappings; and
 - signed cumulative directive `limits.tool_calls` with ordered refusal and
   resume-safe accounting.
+
+Latency profiling is a distinct, release-equivalent artifact profile rather
+than ambient runtime configuration. Artifact builders select the closed
+`latency-profiling` profile explicitly; the compiled daemon and OCI image expose
+matching profile identities, while official release qualification accepts only
+`release`. Downstream projects consume a pinned artifact and cannot enable the
+instrumentation through project configuration or a process environment value.
 
 Deterministic parser caching and launch-attestation fast paths were also added.
 They reduce RyeOS-owned work, but the samples did not demonstrate a causal
