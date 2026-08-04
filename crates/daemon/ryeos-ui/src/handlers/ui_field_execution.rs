@@ -115,6 +115,16 @@ struct CutTreeScope {
     outside_chains: BTreeSet<String>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ThreadTreeSummary {
+    parent_thread_id: Option<String>,
+    relation: String,
+    depth: usize,
+    has_children: bool,
+    path_count: usize,
+    parent_count: usize,
+}
+
 struct ExecutionAssembler {
     builder: FieldFactsBuilder,
     thread_facets: BTreeMap<String, BTreeMap<String, String>>,
@@ -235,16 +245,26 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
                 }
             }
 
-            for row in tree.threads.iter().take(MAX_DETAIL_THREADS) {
-                let thread_id = &row.thread.item.thread_id;
+            let detail_thread_ids = tree
+                .threads
+                .iter()
+                .map(|row| row.thread.item.thread_id.as_str())
+                .collect::<BTreeSet<_>>();
+            for &thread_id in detail_thread_ids.iter().take(MAX_DETAIL_THREADS) {
                 for artifact in state.threads.list_thread_artifacts(thread_id)? {
                     assembler.add_artifact(thread_id, artifact)?;
                 }
                 if let Some(result) = state.threads.get_thread_result(thread_id)? {
-                    assembler.add_result(&row.thread.item.status, thread_id, result)?;
+                    let status = tree
+                        .threads
+                        .iter()
+                        .find(|row| row.thread.item.thread_id == thread_id)
+                        .map(|row| row.thread.item.status.as_str())
+                        .expect("detail thread identity came from the execution closure");
+                    assembler.add_result(status, thread_id, result)?;
                 }
             }
-            if tree.threads.len() > MAX_DETAIL_THREADS {
+            if detail_thread_ids.len() > MAX_DETAIL_THREADS {
                 assembler.builder.mark_truncated();
                 assembler.builder.warn(
                     "detail_thread_limit",
@@ -355,6 +375,44 @@ fn include_tree_row(
         && cut.included_threads.contains(&row.thread.item.thread_id)
 }
 
+fn summarize_tree_positions<'a>(
+    positions: impl IntoIterator<Item = &'a ryeos_app::thread_lifecycle::ExecutionTreePosition>,
+) -> ThreadTreeSummary {
+    let mut canonical = None;
+    let mut has_children = false;
+    let mut path_count = 0usize;
+    let mut parents = BTreeSet::new();
+    for position in positions {
+        path_count += 1;
+        has_children |= position.has_children;
+        if let Some(parent) = position.parent_thread_id.as_deref() {
+            parents.insert(parent);
+        }
+        if canonical.is_none_or(|current| tree_position_cmp(position, current).is_lt()) {
+            canonical = Some(position);
+        }
+    }
+    let canonical = canonical.expect("an execution thread has at least one structural path");
+    ThreadTreeSummary {
+        parent_thread_id: canonical.parent_thread_id.clone(),
+        relation: canonical.relation.clone(),
+        depth: canonical.depth,
+        has_children,
+        path_count,
+        parent_count: parents.len(),
+    }
+}
+
+fn tree_position_cmp(
+    left: &ryeos_app::thread_lifecycle::ExecutionTreePosition,
+    right: &ryeos_app::thread_lifecycle::ExecutionTreePosition,
+) -> std::cmp::Ordering {
+    left.depth
+        .cmp(&right.depth)
+        .then_with(|| left.parent_thread_id.cmp(&right.parent_thread_id))
+        .then_with(|| left.relation.cmp(&right.relation))
+}
+
 fn field_navigation_ref(event: ryeos_app::state_store::PersistedEventRef) -> Result<FieldEventRef> {
     Ok(FieldEventRef {
         chain_root_id: event.chain_root_id,
@@ -388,10 +446,34 @@ impl ExecutionAssembler {
             .filter(|row| include_tree_row(row, cut))
             .map(|row| row.thread.item.thread_id.as_str())
             .collect::<BTreeSet<_>>();
-        for row in &tree.threads {
-            if !included.contains(row.thread.item.thread_id.as_str()) {
-                continue;
+        let mut rows_by_thread =
+            BTreeMap::<&str, Vec<&ryeos_app::thread_lifecycle::ExecutionTreeView>>::new();
+        for row in tree
+            .threads
+            .iter()
+            .filter(|row| included.contains(row.thread.item.thread_id.as_str()))
+        {
+            rows_by_thread
+                .entry(row.thread.item.thread_id.as_str())
+                .or_default()
+                .push(row);
+        }
+        for (thread_id, rows) in rows_by_thread {
+            let row = rows
+                .first()
+                .copied()
+                .expect("grouped execution thread has at least one path");
+            let representative =
+                serde_json::to_value(&row.thread).context("serialize execution thread snapshot")?;
+            for duplicate in rows.iter().skip(1) {
+                if serde_json::to_value(&duplicate.thread)
+                    .context("serialize duplicate execution thread snapshot")?
+                    != representative
+                {
+                    bail!("execution thread `{thread_id}` has divergent live snapshots");
+                }
             }
+            let tree_summary = summarize_tree_positions(rows.iter().map(|row| &row.tree));
             let mut facets = BTreeMap::new();
             for (key, value) in row.thread.facets.iter().take(MAX_THREAD_FACETS) {
                 if value.len() <= MAX_THREAD_FACET_VALUE_BYTES {
@@ -433,8 +515,7 @@ impl ExecutionAssembler {
                 id: id.clone(),
                 kind: "thread".to_string(),
                 label: row.thread.item.item_ref.clone(),
-                parent_id: row
-                    .tree
+                parent_id: tree_summary
                     .parent_thread_id
                     .as_ref()
                     .map(|parent| format!("thread:{parent}")),
@@ -453,9 +534,11 @@ impl ExecutionAssembler {
                     "created_at": row.thread.item.created_at,
                     "updated_at": row.thread.item.updated_at,
                     "tree": {
-                        "depth": row.tree.depth,
-                        "has_children": row.tree.has_children,
-                        "relation": row.tree.relation,
+                        "depth": tree_summary.depth,
+                        "has_children": tree_summary.has_children,
+                        "relation": tree_summary.relation,
+                        "path_count": tree_summary.path_count,
+                        "parent_count": tree_summary.parent_count,
                     },
                     "follow": row.thread.follow,
                     "temporal_scope": if cut.is_some() { "cut_context" } else { "live" },
@@ -465,24 +548,26 @@ impl ExecutionAssembler {
                     thread_id: row.thread.item.thread_id.clone(),
                 }]),
             })?;
-            if let Some(parent) = row.tree.parent_thread_id.as_deref()
-                && included.contains(parent)
-            {
-                self.builder.add_relation(FieldFactRelation {
-                    id: format!(
-                        "execution-tree:{}:{parent}:{}",
-                        row.tree.relation, row.thread.item.thread_id
-                    ),
-                    kind: row.tree.relation.clone(),
-                    source_id: format!("thread:{parent}"),
-                    target_id: id,
-                    status: None,
-                    directed: true,
-                    attributes: json!({"follow": row.thread.follow}),
-                    provenance: self.builder.provenance(vec![FieldEvidenceRef::Thread {
-                        thread_id: row.thread.item.thread_id.clone(),
-                    }]),
-                })?;
+            for path in rows {
+                if let Some(parent) = path.tree.parent_thread_id.as_deref()
+                    && included.contains(parent)
+                {
+                    self.builder.add_relation(FieldFactRelation {
+                        id: format!(
+                            "execution-tree:{}:{parent}:{}",
+                            path.tree.relation, path.thread.item.thread_id
+                        ),
+                        kind: path.tree.relation.clone(),
+                        source_id: format!("thread:{parent}"),
+                        target_id: id.clone(),
+                        status: None,
+                        directed: true,
+                        attributes: json!({"follow": path.thread.follow}),
+                        provenance: self.builder.provenance(vec![FieldEvidenceRef::Thread {
+                            thread_id: path.thread.item.thread_id.clone(),
+                        }]),
+                    })?;
+                }
             }
         }
         Ok(())
@@ -1711,6 +1796,54 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 mod tests {
     use super::*;
 
+    fn tree_view(
+        thread_id: &str,
+        parent_thread_id: Option<&str>,
+        relation: &str,
+        depth: usize,
+        has_children: bool,
+    ) -> ryeos_app::thread_lifecycle::ExecutionTreeView {
+        ryeos_app::thread_lifecycle::ExecutionTreeView {
+            thread: ryeos_app::thread_lifecycle::ThreadListView {
+                item: ryeos_app::state_store::ThreadListItem {
+                    thread_id: thread_id.to_string(),
+                    chain_root_id: "T-root".to_string(),
+                    kind: "graph".to_string(),
+                    status: "running".to_string(),
+                    item_ref: "graph:test/fan-in".to_string(),
+                    launch_mode: "detached".to_string(),
+                    current_site_id: "site:test".to_string(),
+                    origin_site_id: "site:test".to_string(),
+                    upstream_thread_id: None,
+                    successor_thread_id: None,
+                    requested_by: None,
+                    project_root: None,
+                    project_authority: None,
+                    lifecycle_authority: None,
+                    admitted_launch_capsule_hash: None,
+                    created_at: "2026-08-05T00:00:00Z".to_string(),
+                    updated_at: "2026-08-05T00:00:01Z".to_string(),
+                },
+                execution: ryeos_app::thread_lifecycle::ExecutionFacts {
+                    supports_continuation: true,
+                    supports_operator_followup: false,
+                },
+                follow: None,
+                project: None,
+                pending: 0,
+                facets: BTreeMap::new(),
+                current_node: None,
+                error: None,
+            },
+            tree: ryeos_app::thread_lifecycle::ExecutionTreePosition {
+                parent_thread_id: parent_thread_id.map(str::to_string),
+                relation: relation.to_string(),
+                depth,
+                has_children,
+            },
+        }
+    }
+
     fn event(chain_seq: i64, event_type: &str, payload: Value) -> PersistedEventRecord {
         PersistedEventRecord {
             event_id: chain_seq,
@@ -1739,6 +1872,66 @@ mod tests {
             .thread_facets
             .insert("T-root".to_string(), BTreeMap::new());
         assembler
+    }
+
+    #[test]
+    fn fan_in_emits_one_thread_entity_and_every_parent_relation() {
+        let tree = ryeos_app::thread_lifecycle::ExecutionTreeResult {
+            root_thread_id: Some("T-root".to_string()),
+            threads: vec![
+                tree_view("T-root", None, "root", 0, true),
+                tree_view("T-resumed-parent", Some("T-root"), "spawned", 3, true),
+                tree_view("T-suspended-parent", Some("T-root"), "spawned", 2, true),
+                tree_view(
+                    "T-shared-child",
+                    Some("T-resumed-parent"),
+                    "spawned",
+                    4,
+                    false,
+                ),
+                tree_view(
+                    "T-shared-child",
+                    Some("T-suspended-parent"),
+                    "follow",
+                    3,
+                    true,
+                ),
+            ],
+            truncated: false,
+        };
+        let mut assembler = assembler();
+        assembler.add_tree(&tree, None).expect("assemble fan-in");
+        let document = assembler.finish().expect("finish field facts");
+
+        let shared = document
+            .entities
+            .iter()
+            .filter(|entity| entity.id == "thread:T-shared-child")
+            .collect::<Vec<_>>();
+        assert_eq!(shared.len(), 1);
+        assert_eq!(
+            shared[0].parent_id.as_deref(),
+            Some("thread:T-suspended-parent")
+        );
+        assert_eq!(shared[0].attributes["tree"]["depth"], 3);
+        assert_eq!(shared[0].attributes["tree"]["relation"], "follow");
+        assert_eq!(shared[0].attributes["tree"]["path_count"], 2);
+        assert_eq!(shared[0].attributes["tree"]["parent_count"], 2);
+        assert_eq!(shared[0].attributes["tree"]["has_children"], true);
+
+        let parent_relations = document
+            .relations
+            .iter()
+            .filter(|relation| relation.target_id == "thread:T-shared-child")
+            .map(|relation| (relation.kind.as_str(), relation.source_id.as_str()))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            parent_relations,
+            BTreeSet::from([
+                ("follow", "thread:T-suspended-parent"),
+                ("spawned", "thread:T-resumed-parent"),
+            ])
+        );
     }
 
     #[test]
