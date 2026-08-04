@@ -322,7 +322,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     serde_json::to_value(graph).map_err(Into::into)
 }
 
-fn build_topology(
+pub(crate) fn build_topology(
     state: &AppState,
     project_root: Option<String>,
     root_surface: Option<String>,
@@ -693,6 +693,56 @@ pub(crate) fn read_item_body(path: &std::path::Path) -> Option<String> {
     Some(lillux::signature::strip_signature_lines(&raw))
 }
 
+/// Parse one already-verified graph body through the same structural collector
+/// used by the live project topology. No path resolution or mutable item lookup
+/// occurs here; callers must establish the exact source identity first.
+pub(crate) fn build_exact_graph_topology(
+    canonical_ref: &str,
+    raw_content: &str,
+    extension: &str,
+) -> Result<TopologyGraph> {
+    let value: Value = match extension.trim_start_matches('.') {
+        "yaml" | "yml" => serde_yaml::from_str(raw_content)?,
+        "json" => serde_json::from_str(raw_content)?,
+        other => anyhow::bail!("unsupported exact graph source extension `{other}`"),
+    };
+    let parsed = CanonicalRef::parse(canonical_ref)
+        .map_err(|error| anyhow::anyhow!("invalid exact graph ref `{canonical_ref}`: {error}"))?;
+    if parsed.kind != "graph" {
+        anyhow::bail!("exact definition source is not a graph: {canonical_ref}");
+    }
+    let mut builder = TopologyBuilder::new();
+    builder.add_node(TopologyNode {
+        id: canonical_ref.to_string(),
+        kind: "graph".to_string(),
+        label: label_for_bare_id(&parsed.bare_id),
+        ref_: canonical_ref.to_string(),
+        space: None,
+        path: None,
+        namespace: namespace_for_bare_id(&parsed.bare_id),
+        virtual_: false,
+        missing: false,
+        status: Some(NodeStatus {
+            resolved: true,
+            composed: None,
+            executable: true,
+        }),
+        trust: None,
+    });
+    add_workflow_definition_edges(
+        &mut builder,
+        canonical_ref,
+        &value,
+        std::path::Path::new("<admitted-program>"),
+    );
+    Ok(builder.finish(TopologyMetadata {
+        generated_at: String::new(),
+        project_root: None,
+        root_surface: None,
+        spaces: Vec::new(),
+    }))
+}
+
 fn read_structured_value(path: &std::path::Path, raw: &str) -> Option<serde_json::Value> {
     let ext = path.extension().and_then(|e| e.to_str())?;
     if matches!(ext, "yaml" | "yml") {
@@ -866,6 +916,102 @@ mod tests {
         assert_eq!(
             namespace_for_bare_id("ryeos/ryeos-ui/graph"),
             Some("ryeos/ryeos-ui".into())
+        );
+    }
+
+    #[test]
+    fn topology_response_wire_shape_is_golden() {
+        let mut builder = TopologyBuilder::new();
+        builder.add_node(TopologyNode {
+            id: "graph:test/build".to_string(),
+            kind: "graph".to_string(),
+            label: "build".to_string(),
+            ref_: "graph:test/build".to_string(),
+            space: Some("project".to_string()),
+            path: Some("/fixed/project/.ai/graphs/test/build.yaml".to_string()),
+            namespace: Some("test".to_string()),
+            virtual_: false,
+            missing: false,
+            status: Some(NodeStatus {
+                resolved: true,
+                composed: None,
+                executable: true,
+            }),
+            trust: Some(TrustSummary {
+                class: "trusted".to_string(),
+                signer: Some("f".repeat(64)),
+            }),
+        });
+        builder.add_ref_node("tool:test/run", "tool");
+        builder.add_edge(
+            "graph:test/build",
+            "tool:test/run",
+            "calls_tool",
+            "operation",
+            Some(EdgeSource {
+                field: Some("config.nodes.run.action".to_string()),
+                path: Some("/fixed/project/.ai/graphs/test/build.yaml".to_string()),
+            }),
+            "structural",
+        );
+        let graph = builder.finish(TopologyMetadata {
+            generated_at: "2026-08-04T00:00:00.000Z".to_string(),
+            project_root: Some("/fixed/project".to_string()),
+            root_surface: Some("surface:test/atlas".to_string()),
+            spaces: vec!["project".to_string(), "system".to_string()],
+        });
+        assert_eq!(
+            serde_json::to_value(graph).unwrap(),
+            serde_json::json!({
+                "version": "1.0.0",
+                "kind": "topology_graph",
+                "metadata": {
+                    "generated_at": "2026-08-04T00:00:00.000Z",
+                    "project_root": "/fixed/project",
+                    "root_surface": "surface:test/atlas",
+                    "spaces": ["project", "system"]
+                },
+                "nodes": [
+                    {
+                        "id": "graph:test/build",
+                        "kind": "graph",
+                        "label": "build",
+                        "ref": "graph:test/build",
+                        "space": "project",
+                        "path": "/fixed/project/.ai/graphs/test/build.yaml",
+                        "namespace": "test",
+                        "virtual": false,
+                        "missing": false,
+                        "status": {"resolved": true, "executable": true},
+                        "trust": {"class": "trusted", "signer": "f".repeat(64)}
+                    },
+                    {
+                        "id": "tool:test/run",
+                        "kind": "tool",
+                        "label": "run",
+                        "ref": "tool:test/run",
+                        "namespace": "test",
+                        "virtual": true,
+                        "missing": true
+                    }
+                ],
+                "edges": [{
+                    "id": "graph:test/build--calls_tool--tool:test/run",
+                    "from": "graph:test/build",
+                    "to": "tool:test/run",
+                    "type": "calls_tool",
+                    "label": "operation",
+                    "source": {
+                        "field": "config.nodes.run.action",
+                        "path": "/fixed/project/.ai/graphs/test/build.yaml"
+                    },
+                    "confidence": "structural"
+                }],
+                "views": {
+                    "defaults": {"group_by": "kind", "color_by": "kind", "label": "label"},
+                    "filters": {"kinds": ["graph", "tool"], "edge_types": ["calls_tool"]}
+                }
+            })
         );
     }
 

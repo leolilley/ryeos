@@ -7,6 +7,8 @@
 //! key_value/text gain files when they get renderers of their own; today they
 //! degrade through lines.
 
+pub mod field;
+pub mod indexed_grid;
 pub mod rows;
 pub mod scene;
 pub mod sections;

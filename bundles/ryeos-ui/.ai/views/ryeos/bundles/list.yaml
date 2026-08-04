@@ -1,13 +1,14 @@
-# ryeos:signed:2026-06-30T00:10:25Z:6c82e108434c7ef70c57bd790d4cf1ad82b75ced865a17e67dc1e2196b8ceed9:R1ceobVdHikP2x/CbmwK24ETZrqxLzdca2m2qslJL6TE3rWNXCBOP49piOp2LvrcloGriMkrtwdu9usj2rmTCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:25Z:00647898db1a1aa9807713d5b3e6c218aedfc20ddc877d5d273c427dc746e08f:Ftd6ciUgEgvTCjaACj3uNH/JJZ07EpvHII1+9zFkzr5S/SqEJtsmc3HY1N7hR4GgcuvcJ/DlMDnQlLOKoHefCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: bundles-list
 version: "1.0.0"
 description: Installed bundles (the content packs)
 
 widget: table
-source:
-  ref: service:bundle/list
-  params: {}
-  collection: bundles
+sources:
+  default:
+    ref: service:bundle/list
+    params: {}
+    collection: bundles
 projections:
   columns:
     - label: bundle

@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use super::effect::RyeOsEffectResult;
 use super::model::{BrowserSession, BrowserViewport, RyeOsDockEdge};
 use crate::atlas::{AtlasItemKind, AtlasLensVm, AtlasProjectionVm};
-use crate::workspace::{FocusDirection, ViewSpec};
+use crate::ids::RyeOsViewInstanceKey;
+use crate::workspace::{FieldCursorState, FocusDirection, ViewSpec};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -189,6 +190,63 @@ pub enum RyeOsUiEvent {
         root: String,
         path: String,
     },
+    SetFieldSelection {
+        instance_key: RyeOsViewInstanceKey,
+        entity_id: Option<String>,
+    },
+    MoveFieldSelection {
+        instance_key: RyeOsViewInstanceKey,
+        delta: i32,
+    },
+    SetFieldGroupCollapsed {
+        instance_key: RyeOsViewInstanceKey,
+        group_id: String,
+        collapsed: bool,
+    },
+    SetFieldLayerVisible {
+        instance_key: RyeOsViewInstanceKey,
+        layer_id: String,
+        visible: bool,
+    },
+    SetFieldCursor {
+        instance_key: RyeOsViewInstanceKey,
+        cursor: FieldCursorState,
+    },
+    StepFieldCursor {
+        instance_key: RyeOsViewInstanceKey,
+        direction: FieldStepDirection,
+    },
+    SetFieldPlayback {
+        instance_key: RyeOsViewInstanceKey,
+        playing: bool,
+    },
+    SetFieldQuery {
+        instance_key: RyeOsViewInstanceKey,
+        query: String,
+    },
+    MoveFieldSearchMatch {
+        instance_key: RyeOsViewInstanceKey,
+        delta: i32,
+    },
+    ToggleFieldCompare {
+        instance_key: RyeOsViewInstanceKey,
+        entity_id: String,
+    },
+    RequestFieldExpansion {
+        instance_key: RyeOsViewInstanceKey,
+        source: String,
+        root_id: String,
+    },
+    ContinueFieldExpansion {
+        instance_key: RyeOsViewInstanceKey,
+        source: String,
+        root_id: String,
+    },
+    ClearFieldExpansion {
+        instance_key: RyeOsViewInstanceKey,
+        source: String,
+        root_id: String,
+    },
     FocusChanged {
         target: Option<String>,
     },
@@ -290,6 +348,14 @@ pub enum RyeOsUiEvent {
 pub enum RyeOsStackMoveDirection {
     Up,
     Down,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldStepDirection {
+    Previous,
+    Next,
+    Live,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

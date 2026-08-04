@@ -53,6 +53,7 @@ struct Cli {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 struct MintRequest {
+    ui_binding_contract_revision: &'static str,
     surface_ref: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     project_path: Option<String>,
@@ -65,6 +66,7 @@ struct MintRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MintResponse {
+    ui_binding_contract_revision: String,
     launch_url: String,
     #[allow(dead_code)]
     session_id: String,
@@ -118,6 +120,7 @@ async fn main() -> Result<()> {
         })
         .transpose()?;
     let mint_req = MintRequest {
+        ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
         surface_ref: cli.surface,
         project_path,
         read_only: cli.read_only || !cli.allow_intents,
@@ -160,6 +163,13 @@ async fn main() -> Result<()> {
     }
 
     let mint_resp: MintResponse = resp.json().await.context("parse mint response")?;
+    if mint_resp.ui_binding_contract_revision != ryeos_client_base::UI_BINDING_CONTRACT_REVISION {
+        anyhow::bail!(
+            "UI binding contract mismatch: daemon advertised '{}', launcher requires '{}'",
+            mint_resp.ui_binding_contract_revision,
+            ryeos_client_base::UI_BINDING_CONTRACT_REVISION
+        );
+    }
 
     if cli.print_url || cli.no_open {
         println!("{}", mint_resp.launch_url);
@@ -461,6 +471,7 @@ mod tests {
     #[test]
     fn mint_request_serializes_surface() {
         let req = MintRequest {
+            ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
             surface_ref: "surface:ryeos/ryeos/base".to_string(),
             project_path: Some("/tmp/proj".to_string()),
             read_only: false,
@@ -470,11 +481,16 @@ mod tests {
         assert_eq!(json["surface_ref"], "surface:ryeos/ryeos/base");
         assert_eq!(json["project_path"], "/tmp/proj");
         assert_eq!(json["read_only"], false);
+        assert_eq!(
+            json["ui_binding_contract_revision"],
+            ryeos_client_base::UI_BINDING_CONTRACT_REVISION
+        );
     }
 
     #[test]
     fn mint_request_omits_none_project_path() {
         let req = MintRequest {
+            ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
             surface_ref: "surface:x/y/z".to_string(),
             project_path: None,
             read_only: true,
@@ -491,6 +507,7 @@ mod tests {
     #[test]
     fn mint_request_includes_user_principal_when_bound() {
         let req = MintRequest {
+            ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
             surface_ref: "surface:x/y/z".to_string(),
             project_path: None,
             read_only: true,
@@ -503,6 +520,7 @@ mod tests {
     #[test]
     fn mint_response_parses() {
         let raw = serde_json::json!({
+            "ui_binding_contract_revision": ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
             "token": "abc-123",
             "launch_url": "http://localhost:8080/custom/launch/abc-123",
             "session_id": "sess-456"

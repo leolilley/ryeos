@@ -1,14 +1,15 @@
-# ryeos:signed:2026-07-09T06:05:20Z:6e831b48b46b44b3875a988a6118ad5e7e3f9138992613c02ea6637f1db1d383:cS8CgaMqRDcCjIq4Uxw45xX6bOvvwoKNSyfYCo0O54wqw+fHBWE1/iWCPcY7/TLK6ZS84D7DFUOMdbemBwWbAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:25Z:64e4d519f2c8bf2417d2421f08b85dab5dac4f9ed01dacded7f5e50a328da1b0:YeBtvWjL4W5bN/ab5aUWzL+7NpPRlDU84JRt33N04fp3t8bOjkndojjvu5UUldwC/NGDlHuQKustTM4KqkObCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-bundles
 title: Bundles
 version: "1.0.0"
 description: Installed bundles on this node
 
 widget: table
-source:
-  ref: service:bundle/list
-  params: {}
-  collection: bundles
+sources:
+  default:
+    ref: service:bundle/list
+    params: {}
+    collection: bundles
 projections:
   columns:
     - label: bundle

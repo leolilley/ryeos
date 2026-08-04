@@ -1,0 +1,124 @@
+{
+  "schema_version": "ryeos.ui.field.facts.v1",
+  "source": "execution",
+  "subject": {
+    "kind": "thread",
+    "id": "T-build-root",
+    "definition_ref": "graph:example/build-deploy",
+    "definition_hash": "sha256:def-build-deploy-v1"
+  },
+  "revision": "event:build-root:18:hash-18",
+  "cursor": { "mode": "live" },
+  "truncated": false,
+  "entities": [
+    {
+      "id": "item:graph:example/build-deploy@sha256:signed-build-deploy-v1",
+      "kind": "item_version",
+      "label": "build-deploy",
+      "canonical_ref": "graph:example/build-deploy",
+      "source_content_hash": "sha256:signed-build-deploy-v1",
+      "attributes": { "trust": "verified" },
+      "provenance": { "evidence": [{ "kind": "item", "ref": "graph:example/build-deploy", "hash": "sha256:signed-build-deploy-v1" }] }
+    },
+    {
+      "id": "definition:graph:example/build-deploy@sha256:def-build-deploy-v1",
+      "kind": "graph_definition",
+      "label": "build-deploy@v1",
+      "canonical_ref": "graph:example/build-deploy",
+      "definition_hash": "sha256:def-build-deploy-v1",
+      "attributes": {},
+      "provenance": { "evidence": [{ "kind": "admitted_launch_capsule", "hash": "sha256:capsule-build-root" }] }
+    },
+    {
+      "id": "graph-node:graph:example/build-deploy@sha256:def-build-deploy-v1#build",
+      "kind": "graph_node",
+      "label": "build",
+      "parent_id": "definition:graph:example/build-deploy@sha256:def-build-deploy-v1",
+      "definition_hash": "sha256:def-build-deploy-v1",
+      "attributes": {},
+      "provenance": { "evidence": [{ "kind": "item", "ref": "graph:example/build-deploy", "hash": "sha256:signed-build-deploy-v1" }] }
+    },
+    {
+      "id": "graph-node:graph:example/build-deploy@sha256:def-build-deploy-v1#deploy",
+      "kind": "graph_node",
+      "label": "deploy",
+      "parent_id": "definition:graph:example/build-deploy@sha256:def-build-deploy-v1",
+      "definition_hash": "sha256:def-build-deploy-v1",
+      "attributes": {},
+      "provenance": { "evidence": [{ "kind": "item", "ref": "graph:example/build-deploy", "hash": "sha256:signed-build-deploy-v1" }] }
+    },
+    {
+      "id": "thread:T-build-root",
+      "kind": "thread",
+      "label": "build root",
+      "status": "running",
+      "attributes": { "thread": { "id": "T-build-root", "facets": { "environment": "staging" } } },
+      "provenance": { "evidence": [{ "kind": "thread", "thread_id": "T-build-root" }] }
+    },
+    {
+      "id": "occurrence:T-build-root:run-1:4:0:0",
+      "kind": "occurrence",
+      "label": "build attempt 1",
+      "status": "failed",
+      "event_ref": { "chain_root_id": "T-build-root", "chain_seq": 4, "event_hash": "hash-4" },
+      "attributes": { "thread": { "id": "T-build-root", "facets": { "environment": "staging" } }, "occurrence": { "graph_run_id": "run-1", "step": 4, "attempt": 0, "iteration": 0 } },
+      "provenance": { "evidence": [{ "kind": "event", "chain_root_id": "T-build-root", "chain_seq": 4, "event_hash": "hash-4" }] }
+    },
+    {
+      "id": "occurrence:T-build-root:run-1:4:1:0",
+      "kind": "occurrence",
+      "label": "build retry",
+      "status": "completed",
+      "event_ref": { "chain_root_id": "T-build-root", "chain_seq": 7, "event_hash": "hash-7" },
+      "attributes": { "thread": { "id": "T-build-root", "facets": { "environment": "staging" } }, "occurrence": { "graph_run_id": "run-1", "step": 4, "attempt": 1, "iteration": 0 } },
+      "provenance": { "evidence": [{ "kind": "event", "chain_root_id": "T-build-root", "chain_seq": 7, "event_hash": "hash-7" }] }
+    },
+    {
+      "id": "occurrence:T-build-root:run-1:8:0:2",
+      "kind": "occurrence",
+      "label": "package iteration 2",
+      "status": "completed",
+      "event_ref": { "chain_root_id": "T-build-root", "chain_seq": 10, "event_hash": "hash-10" },
+      "attributes": { "thread": { "id": "T-build-root", "facets": { "environment": "staging" } }, "occurrence": { "graph_run_id": "run-1", "step": 8, "attempt": 0, "iteration": 2 } },
+      "provenance": { "evidence": [{ "kind": "event", "chain_root_id": "T-build-root", "chain_seq": 10, "event_hash": "hash-10" }] }
+    },
+    {
+      "id": "thread:T-deploy-follow",
+      "kind": "thread",
+      "label": "deploy follow",
+      "status": "completed",
+      "attributes": { "thread": { "id": "T-deploy-follow", "facets": { "environment": "staging" } } },
+      "provenance": { "evidence": [{ "kind": "event", "chain_root_id": "T-build-root", "chain_seq": 12, "event_hash": "hash-12" }] }
+    },
+    {
+      "id": "thread:T-build-continuation",
+      "kind": "thread",
+      "label": "build continuation",
+      "status": "running",
+      "attributes": { "thread": { "id": "T-build-continuation", "facets": { "environment": "staging" } } },
+      "provenance": { "evidence": [{ "kind": "event", "chain_root_id": "T-build-root", "chain_seq": 15, "event_hash": "hash-15" }] }
+    },
+    {
+      "id": "artifact:T-deploy-follow:42",
+      "kind": "artifact",
+      "label": "deployment receipt",
+      "artifact_ref": { "thread_id": "T-deploy-follow", "artifact_id": 42, "content_hash": "sha256:artifact-42" },
+      "attributes": { "thread": { "id": "T-deploy-follow", "facets": { "environment": "staging" } } },
+      "provenance": { "evidence": [{ "kind": "artifact", "thread_id": "T-deploy-follow", "artifact_id": 42, "content_hash": "sha256:artifact-42" }] }
+    }
+  ],
+  "relations": [
+    { "id": "contains:definition:build", "kind": "contains", "source_id": "definition:graph:example/build-deploy@sha256:def-build-deploy-v1", "target_id": "graph-node:graph:example/build-deploy@sha256:def-build-deploy-v1#build", "directed": true },
+    { "id": "contains:definition:deploy", "kind": "contains", "source_id": "definition:graph:example/build-deploy@sha256:def-build-deploy-v1", "target_id": "graph-node:graph:example/build-deploy@sha256:def-build-deploy-v1#deploy", "directed": true },
+    { "id": "flow:build:deploy", "kind": "flows_to", "source_id": "graph-node:graph:example/build-deploy@sha256:def-build-deploy-v1#build", "target_id": "graph-node:graph:example/build-deploy@sha256:def-build-deploy-v1#deploy", "directed": true },
+    { "id": "retry:4:0:1", "kind": "retried_as", "source_id": "occurrence:T-build-root:run-1:4:0:0", "target_id": "occurrence:T-build-root:run-1:4:1:0", "directed": true, "event_ref": { "chain_root_id": "T-build-root", "chain_seq": 7, "event_hash": "hash-7" } },
+    { "id": "follow:root:deploy", "kind": "followed", "source_id": "thread:T-build-root", "target_id": "thread:T-deploy-follow", "directed": true, "event_ref": { "chain_root_id": "T-build-root", "chain_seq": 12, "event_hash": "hash-12" } },
+    { "id": "continue:root:next", "kind": "continued", "source_id": "thread:T-build-root", "target_id": "thread:T-build-continuation", "directed": true, "event_ref": { "chain_root_id": "T-build-root", "chain_seq": 15, "event_hash": "hash-15" } },
+    { "id": "trace:deploy:continuation", "kind": "trace_branch", "source_id": "thread:T-deploy-follow", "target_id": "thread:T-build-continuation", "directed": true, "event_ref": { "chain_root_id": "T-build-root", "chain_seq": 16, "event_hash": "hash-16" } },
+    { "id": "produced:deploy:receipt", "kind": "produced", "source_id": "thread:T-deploy-follow", "target_id": "artifact:T-deploy-follow:42", "directed": true, "event_ref": { "chain_root_id": "T-deploy-follow", "chain_seq": 9, "event_hash": "follow-hash-9" } }
+  ],
+  "previews": [],
+  "metrics": [],
+  "expansions": [],
+  "warnings": []
+}

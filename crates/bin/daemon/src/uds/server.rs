@@ -30,6 +30,7 @@ use ryeos_app::runtime_vault_service::{
     RuntimeVaultListParams, RuntimeVaultPutParams, RuntimeVaultRefParams, RuntimeVaultService,
 };
 use ryeos_app::state::AppState;
+use ryeos_app::state_store::StateAnchorPublishParams;
 use ryeos_app::thread_lifecycle::{
     ArtifactPublishParams, ThreadAttachProcessParams, ThreadContinuationParams, ThreadGetParams,
     ThreadMarkRunningParams,
@@ -450,6 +451,7 @@ pub(crate) async fn dispatch_runtime_method(
             Ok(result)
         }
         "runtime.publish_artifact" => handle_publish_artifact(&clean_params, state),
+        "runtime.publish_state_anchor" => handle_publish_state_anchor(&clean_params, state),
         "runtime.get_facets" => handle_get_facets(&clean_params, state),
         "runtime.get_thread" => handle_get(&clean_params, state),
         "runtime.submit_command" => handle_submit_command(&clean_params, state).await,
@@ -556,6 +558,7 @@ fn is_running_runtime_mutation(method: &str) -> bool {
             | "runtime.bundle_events_append"
             | "runtime.bundle_events_materialize_attachment"
             | "runtime.publish_artifact"
+            | "runtime.publish_state_anchor"
             | "runtime.submit_command"
             | "runtime.poll_input"
             | "runtime.provider_attempt_reserve"
@@ -1491,6 +1494,17 @@ fn handle_publish_artifact(
         serde_json::from_value(params.clone()).context("invalid artifacts.publish params")?;
     let artifact = state.threads.publish_artifact(&params)?;
     serde_json::to_value(artifact).context("failed to encode artifacts.publish result")
+}
+
+fn handle_publish_state_anchor(
+    params: &serde_json::Value,
+    state: &AppState,
+) -> Result<serde_json::Value> {
+    let params: StateAnchorPublishParams = serde_json::from_value(params.clone())
+        .context("invalid runtime.publish_state_anchor params")?;
+    let publication = state.threads.publish_state_anchor(&params)?;
+    serde_json::to_value(publication)
+        .context("failed to encode runtime.publish_state_anchor result")
 }
 
 fn handle_get_facets(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
@@ -5374,6 +5388,7 @@ mod tests {
             "runtime.mark_running",
             "runtime.request_continuation",
             "runtime.publish_artifact",
+            "runtime.publish_state_anchor",
         ] {
             let resp = dispatch(
                 rpc(

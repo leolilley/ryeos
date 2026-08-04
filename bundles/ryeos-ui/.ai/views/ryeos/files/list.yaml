@@ -1,16 +1,17 @@
-# ryeos:signed:2026-07-06T12:24:56Z:8e467ac87ea08b1eb4f3e65c04509b7f773fe449ad063eddbf81366b07c7a8be:tRovuS5XAhWEYtHKMe/rvalMjzR34jMKlB3YnTPzXw+Ppyhqvrq06mdjspCph+ftKp/Q9lrqOYsJvhvifm3YAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:25Z:d11a77ed85ab03af40c9be3d2cd9fecaf7ffcc59bc6746ee645de23d5abe4c90:aBshdvF1bAoNCM6IXvdOjvf6b7zOdl+uSN5kZgWEQrFN4zfIjYZOSZbpExrqyKjJAJPPHCbrwJb83CUjHpasDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: files-list
 version: "1.0.0"
 description: Project file tree listing rooted at the active project workspace
 
 widget: rows
-source:
-  ref: service:ui/ryeos-ui/files/list
-  params:
-    root: project
-    project_path: ""
-    path: ""
-  collection: entries
+sources:
+  default:
+    ref: service:ui/ryeos-ui/files/list
+    params:
+      root: project
+      project_path: ""
+      path: ""
+    collection: entries
 projections:
   primary: name
   meta: kind

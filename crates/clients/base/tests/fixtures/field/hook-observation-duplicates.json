@@ -1,0 +1,10 @@
+{
+  "valid": [
+    { "observation_id": "hook-observation:dispatch-1", "occurrence_thread_id": "T-build-root", "hook_id": "record-build", "response_hash": "sha256:response-1", "observation": { "kind": "example.build_recorded", "payload": { "artifact_ref": "artifact:T-build-root:42" } } },
+    { "observation_id": "hook-observation:dispatch-1", "occurrence_thread_id": "T-build-root", "hook_id": "record-build", "response_hash": "sha256:response-1", "observation": { "kind": "example.build_recorded", "payload": { "artifact_ref": "artifact:T-build-root:42" } } }
+  ],
+  "invalid": [
+    { "observation_id": "hook-observation:dispatch-2", "occurrence_thread_id": "T-build-root", "hook_id": "record-deploy", "response_hash": "sha256:response-a", "observation": { "kind": "example.deploy_recorded", "payload": { "status": "ready" } } },
+    { "observation_id": "hook-observation:dispatch-2", "occurrence_thread_id": "T-build-root", "hook_id": "record-deploy", "response_hash": "sha256:response-b", "observation": { "kind": "example.deploy_recorded", "payload": { "status": "failed" } } }
+  ]
+}

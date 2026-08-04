@@ -454,13 +454,16 @@ fn validate_iteration_variable(node_name: &str, node: &GraphNode) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_runtime::{ExpressionCondition, HookDefinition, HookLayer, HookSources};
+    use ryeos_runtime::{
+        ExpressionCondition, HookDefinition, HookLayer, HookResultMode, HookSources,
+    };
     use serde_json::json;
 
     fn hook(id: &str) -> HookDefinition {
         HookDefinition {
             id: id.to_string(),
             event: "graph_started".to_string(),
+            result: HookResultMode::Discard,
             condition: ExpressionCondition::Absent,
             action: json!({"item_id": "tool:test/noop"}),
         }
@@ -474,7 +477,7 @@ category: test
 config:
   start: done
   hooks:
-    - {id: authored, event: graph_started, action: {item_id: "tool:test/noop"}}
+    - {id: authored, event: graph_started, result: discard, action: {item_id: "tool:test/noop"}}
   nodes:
     done: {node_type: return}
 "#;

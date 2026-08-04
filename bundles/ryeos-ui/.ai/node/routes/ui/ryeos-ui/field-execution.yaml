@@ -1,0 +1,13 @@
+# ryeos:signed:2026-08-04T09:54:25Z:64265530d403348304022406e58be009391e5d610257b3227fe1b4edcfb470cb:bGsgQrJ0x4DZQ4tdUTk3k6YWFS+6NrLd7d6MXoTMFaVCc2PUC8FC9lS5SNMfSB8j3O3n0I62d+kvT5923nKuCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/ryeos-ui/field/execution
+path: /ui/api/ryeos-ui/field/execution
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 10000
+  concurrent_max: 32
+response:
+  mode: json
+  source: "service:ui/ryeos-ui/field/execution"

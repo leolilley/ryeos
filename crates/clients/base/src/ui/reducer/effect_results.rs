@@ -327,11 +327,17 @@ impl RyeOsCore {
                         let old = self.data.sources.get(tile_id).cloned();
                         self.note_source_row_changes(tile_id, old.as_ref(), &data);
                         self.data.sources.insert(tile_id.clone(), data);
+                        self.rebuild_field_source_cache(tile_id);
                         self.data.source_errors.remove(tile_id);
                         self.data
                             .source_stored_epoch
                             .insert(tile_id.clone(), result_id);
                         self.rebuild_timeline_source_cache(tile_id);
+                        self.note_field_semantic_changes(tile_id);
+                        let accepted = self.data.sources.get(tile_id).cloned();
+                        if let Some(accepted) = accepted.as_ref() {
+                            self.settle_field_source(tile_id, accepted);
+                        }
                     }
                     self.bump_generation();
                 }
@@ -494,6 +500,7 @@ impl RyeOsCore {
         self.data.source_epoch.clear();
         self.data.source_stored_epoch.clear();
         self.data.source_floor.clear();
+        self.data.source_subject_fingerprint.clear();
         self.deferred_source_fetches.clear();
         self.data.timeline_sources.clear();
         self.data.file_read = None;
@@ -855,6 +862,14 @@ mod tests {
     use super::*;
     use crate::ui::reducer::test_support::*;
 
+    fn test_instance() -> crate::ids::RyeOsViewInstanceKey {
+        crate::ids::RyeOsViewInstanceKey::workspace_tile(crate::ids::TileId::new(77))
+    }
+
+    fn test_source_key() -> String {
+        crate::ui::source_key::RyeOsSourceInstanceKey::named(test_instance(), "default").encode()
+    }
+
     #[test]
     fn service_ref_cancel_result_refreshes_without_launch_semantics() {
         use crate::ui::effect::{InvokeRef, RyeOsEffectResult, RyeOsEffectResultKind};
@@ -865,7 +880,7 @@ mod tests {
                 "tiles": ["view:ryeos/threads/list"],
                 "views": { "view:ryeos/threads/list": {
                     "widget": "table",
-                    "source": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "threads" },
+                    "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "threads" } },
                     "input": { "id": "filter", "feeds": { "param": "status" } }
                 }}
             })),
@@ -977,21 +992,22 @@ mod tests {
     fn stale_source_response_is_dropped_by_the_freshness_guard() {
         use crate::ui::effect::{RyeOsEffectKind, RyeOsEffectResult, RyeOsEffectResultKind};
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        let key = test_source_key();
         // Two fetches issued for the SAME key — a single-lens tile reused for a
         // new selection keeps its key. The second is the newest request.
         let older = core.emit(RyeOsEffectKind::FetchSource {
-            tile_id: "K".to_string(),
+            tile_id: key.clone(),
             source_ref: "service:x".to_string(),
             params: serde_json::json!({}),
         });
         let newer = core.emit(RyeOsEffectKind::FetchSource {
-            tile_id: "K".to_string(),
+            tile_id: key.clone(),
             source_ref: "service:x".to_string(),
             params: serde_json::json!({}),
         });
         assert!(newer.id > older.id);
         // build_fetch_source would record the newest request; simulate that.
-        core.data.source_epoch.insert("K".to_string(), newer.id);
+        core.data.source_epoch.insert(key.clone(), newer.id);
 
         let deliver = |core: &mut RyeOsCore, id: u64, tag: &str| {
             core.dispatch(RyeOsEvent::EffectResult {
@@ -1007,12 +1023,12 @@ mod tests {
 
         // Newest resolves first and lands.
         deliver(&mut core, newer.id, "new");
-        assert_eq!(core.data.sources["K"]["tag"], "new");
+        assert_eq!(core.data.sources[&key]["tag"], "new");
         // An older straggler resolving afterwards is DROPPED — a slow fetch for
         // the previous selection must not overwrite the current one.
         deliver(&mut core, older.id, "old");
         assert_eq!(
-            core.data.sources["K"]["tag"], "new",
+            core.data.sources[&key]["tag"], "new",
             "stale straggler must not overwrite the newest response"
         );
     }
@@ -1038,31 +1054,33 @@ mod tests {
         // replaces it monotonically.
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_view(&mut core, "view:test/slow");
+        let key = test_source_key();
         let older = core
-            .emit_fetch_source_keyed("K".to_string(), "view:test/slow")
+            .emit_fetch_source_for_instance(test_instance(), "view:test/slow")
             .pop()
             .expect("fetch emitted");
         let newer = core
-            .emit_fetch_source_keyed("K".to_string(), "view:test/slow")
+            .emit_fetch_source_for_instance(test_instance(), "view:test/slow")
             .pop()
             .expect("fetch emitted");
         assert!(newer.id > older.id);
 
         deliver(&mut core, older.id, "first");
         assert_eq!(
-            core.data.sources["K"]["tag"], "first",
+            core.data.sources[&key]["tag"], "first",
             "superseded-but-first response must render, not starve"
         );
         deliver(&mut core, newer.id, "second");
-        assert_eq!(core.data.sources["K"]["tag"], "second");
+        assert_eq!(core.data.sources[&key]["tag"], "second");
     }
 
     #[test]
     fn source_failure_is_visible_until_retry_or_success() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_view(&mut core, "view:test/slow");
+        let key = test_source_key();
         let failed = core
-            .emit_fetch_source_keyed("K".to_string(), "view:test/slow")
+            .emit_fetch_source_for_instance(test_instance(), "view:test/slow")
             .pop()
             .expect("fetch emitted");
 
@@ -1076,31 +1094,32 @@ mod tests {
             },
         });
         assert_eq!(
-            core.data.source_errors.get("K").map(String::as_str),
+            core.data.source_errors.get(&key).map(String::as_str),
             Some("daemon rejected source")
         );
 
         let retry = core
-            .emit_fetch_source_keyed("K".to_string(), "view:test/slow")
+            .emit_fetch_source_for_instance(test_instance(), "view:test/slow")
             .pop()
             .expect("retry emitted");
-        assert!(!core.data.source_errors.contains_key("K"));
+        assert!(!core.data.source_errors.contains_key(&key));
 
         deliver(&mut core, retry.id, "recovered");
-        assert_eq!(core.data.sources["K"]["tag"], "recovered");
-        assert!(!core.data.source_errors.contains_key("K"));
+        assert_eq!(core.data.sources[&key]["tag"], "recovered");
+        assert!(!core.data.source_errors.contains_key(&key));
     }
 
     #[test]
     fn superseded_source_failure_does_not_hide_newer_request() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_view(&mut core, "view:test/slow");
+        let key = test_source_key();
         let older = core
-            .emit_fetch_source_keyed("K".to_string(), "view:test/slow")
+            .emit_fetch_source_for_instance(test_instance(), "view:test/slow")
             .pop()
             .expect("older fetch emitted");
         let newer = core
-            .emit_fetch_source_keyed("K".to_string(), "view:test/slow")
+            .emit_fetch_source_for_instance(test_instance(), "view:test/slow")
             .pop()
             .expect("newer fetch emitted");
 
@@ -1113,10 +1132,10 @@ mod tests {
                 error: Some("stale failure".to_string()),
             },
         });
-        assert!(!core.data.source_errors.contains_key("K"));
+        assert!(!core.data.source_errors.contains_key(&key));
 
         deliver(&mut core, newer.id, "new");
-        assert_eq!(core.data.sources["K"]["tag"], "new");
+        assert_eq!(core.data.sources[&key]["tag"], "new");
     }
 
     #[test]
@@ -1130,15 +1149,18 @@ mod tests {
             serde_json::json!({
                 "widget": "rows",
                 "refresh": { "on_facet": "selection" },
-                "source": { "ref": "service:test/detail", "params": {}, "collection": "rows" }
+                "sources": { "default": { "ref": "service:test/detail", "params": {}, "collection": "rows" } }
             }),
         );
         let tile_id = core.workspace.add_tile(ViewSpec {
             view_ref: "view:test/detail".to_string(),
         });
-        let key = tile_id.0.to_string();
+        let instance_key = core.workspace.tiles[&tile_id].instance_key.clone();
+        let key =
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), "default")
+                .encode();
         let pre_write = core
-            .emit_fetch_source_keyed(key.clone(), "view:test/detail")
+            .emit_fetch_source_for_instance(instance_key, "view:test/detail")
             .pop()
             .expect("fetch emitted");
 
@@ -1163,14 +1185,21 @@ mod tests {
             "view:test/detail",
             serde_json::json!({
                 "widget": "sections",
+                "sources": {
+                    "a": { "ref": "service:a" },
+                    "b": { "ref": "service:b" }
+                },
                 "sections": [
-                    { "title": "A", "source": { "ref": "service:a" }, "projection": {} },
-                    { "title": "B", "source": { "ref": "service:b" }, "projection": {} }
+                    { "title": "A", "source_channel": "a", "projection": {} },
+                    { "title": "B", "source_channel": "b", "projection": {} }
                 ]
             }),
         );
-        let k0 = crate::ui::content::section_source_key("K", 0);
-        let k1 = crate::ui::content::section_source_key("K", 1);
+        let instance_key = test_instance();
+        let k0 = crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), "a")
+            .encode();
+        let k1 = crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), "b")
+            .encode();
         core.data
             .sources
             .insert(k0.clone(), serde_json::json!({ "stale": "A" }));
@@ -1183,7 +1212,7 @@ mod tests {
         // otherwise blank the view every coalesced tick. Staleness is the
         // epoch guard's job (see the out-of-order straggler test above), not
         // the emitter's.
-        let effects = core.emit_fetch_source_keyed("K".to_string(), "view:test/detail");
+        let effects = core.emit_fetch_source_for_instance(instance_key, "view:test/detail");
         assert!(core.data.sources.contains_key(&k0));
         assert!(core.data.sources.contains_key(&k1));
         assert_eq!(effects.len(), 2, "one fetch per section");
@@ -1202,18 +1231,23 @@ mod tests {
             serde_json::json!({
                 "widget": "sections",
                 "refresh": { "on_facet": "selection" },
+                "sources": {
+                    "a": { "ref": "service:a" },
+                    "b": { "ref": "service:b" }
+                },
                 "sections": [
-                    { "title": "A", "source": { "ref": "service:a" }, "projection": {} },
-                    { "title": "B", "source": { "ref": "service:b" }, "projection": {} }
+                    { "title": "A", "source_channel": "a", "projection": {} },
+                    { "title": "B", "source_channel": "b", "projection": {} }
                 ]
             }),
         );
         let tile_id = core.workspace.add_tile(ViewSpec {
             view_ref: "view:test/detail".to_string(),
         });
-        let key = tile_id.0.to_string();
-        let k0 = crate::ui::content::section_source_key(&key, 0);
-        let k1 = crate::ui::content::section_source_key(&key, 1);
+        let instance_key = core.workspace.tiles[&tile_id].instance_key.clone();
+        let k0 = crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), "a")
+            .encode();
+        let k1 = crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key, "b").encode();
         core.data
             .sources
             .insert(k0.clone(), serde_json::json!({ "stale": "A" }));

@@ -219,6 +219,13 @@ fn validate_runtime_event_batch(events: &[EventAppendItem]) -> Result<()> {
     let mut batch_bytes = 0usize;
     let mut cognition_in_chunks = CognitionInAssembler::default();
     for event in events {
+        if event.event_type == ryeos_state::event_types::MILESTONE
+            && event.payload.get("kind").and_then(Value::as_str) == Some("state_anchor")
+        {
+            bail!(
+                "event append refused: `state_anchor` milestones are daemon-authored through runtime.publish_state_anchor"
+            );
+        }
         let payload_bytes = serde_json::to_vec(&event.payload)?.len();
         if payload_bytes > MAX_RUNTIME_EVENT_PAYLOAD_BYTES {
             bail!(
@@ -266,10 +273,14 @@ fn validate_event_type(event_type: &str) -> Result<()> {
     // transactional outbox publisher (which appends via the state store, not
     // this runtime-facing service). A runtime-authored copy could poison the
     // outbox exact-once recovery check.
-    if event_type == ryeos_state::event_types::PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1 {
+    if matches!(
+        event_type,
+        ryeos_state::event_types::PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1
+            | ryeos_state::event_types::HOOK_OBSERVATION_RECORDED
+            | ryeos_state::event_types::HOOK_FAILED
+    ) {
         bail!(
-            "event append refused: `{event_type}` is a daemon-authored accounting audit \
-             event and cannot be appended by a runtime"
+            "event append refused: `{event_type}` is daemon-authored and cannot be appended by a runtime"
         );
     }
     ryeos_runtime::RuntimeEventType::parse(event_type).map(|_| ())
@@ -361,6 +372,40 @@ mod tests {
         for et in ["token_delta", "stream_snapshot", "cognition_reasoning"] {
             assert!(is_ephemeral_allowed(et, &json!({})));
         }
+    }
+
+    #[test]
+    fn runtime_cannot_forge_daemon_authored_hook_evidence() {
+        for event_type in [
+            ryeos_state::event_types::HOOK_OBSERVATION_RECORDED,
+            ryeos_state::event_types::HOOK_FAILED,
+        ] {
+            let error = validate_event_type(event_type).unwrap_err();
+            assert!(
+                error.to_string().contains("daemon-authored"),
+                "unexpected refusal for {event_type}: {error:#}"
+            );
+            assert!(
+                ryeos_runtime::RuntimeEventType::parse(event_type).is_ok(),
+                "hook evidence remains part of the indexed event vocabulary"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_cannot_forge_state_anchor_milestones() {
+        let error = validate_runtime_event_batch(&[EventAppendItem {
+            event_type: ryeos_state::event_types::MILESTONE.to_string(),
+            storage_class: "indexed".to_string(),
+            payload: json!({
+                "kind": "state_anchor",
+                "payload": {
+                    "manifest_ref": format!("cas:{}", "a".repeat(64))
+                }
+            }),
+        }])
+        .unwrap_err();
+        assert!(error.to_string().contains("daemon-authored"));
     }
 
     #[test]

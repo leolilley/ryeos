@@ -129,6 +129,7 @@ fn draw_layout_node(
     }
     match node {
         RyeOsLayoutNodeVm::Tile {
+            instance_key,
             tile_id,
             focused,
             title,
@@ -147,6 +148,7 @@ fn draw_layout_node(
                 chrome::draw_tile(
                     surface,
                     rect,
+                    instance_key,
                     tile_id,
                     *focused,
                     title,
@@ -222,6 +224,10 @@ fn split_rect(rect: Rect, axis: RyeOsSplitAxisVm, ratio: f32) -> (Rect, Option<R
 }
 
 fn draw_view(surface: &mut TextSurface, rect: Rect, view: &RyeOsViewVm, now_ms: u64) {
+    if let RyeOsViewVm::Field { field } = view {
+        widgets::field::draw_field(surface, rect, field);
+        return;
+    }
     if let RyeOsViewVm::Timeline {
         entries,
         entry_indents,
@@ -276,6 +282,7 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &RyeOsViewVm, now_ms: 
     }
     let mut lines = Vec::new();
     match view {
+        RyeOsViewVm::Field { .. } => unreachable!("field views return above"),
         RyeOsViewVm::Text { .. } => unreachable!("text views return above"),
         RyeOsViewVm::Rows { .. } => unreachable!("rows views return above"),
         RyeOsViewVm::Timeline { .. } => unreachable!("timeline views return above"),

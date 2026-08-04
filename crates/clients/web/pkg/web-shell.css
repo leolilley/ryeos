@@ -960,6 +960,146 @@ body {
   padding: 12px;
 }
 
+/* Living field ----------------------------------------------------------- */
+.ryeos-field {
+  position: relative;
+  min-width: 0;
+  min-height: 320px;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background:
+    linear-gradient(rgba(var(--ryeos-warn-rgb), .04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(var(--ryeos-warn-rgb), .04) 1px, transparent 1px),
+    #17191a;
+  background-size: 32px 32px;
+}
+
+.ryeos-field-toolbar {
+  position: absolute;
+  z-index: 3;
+  inset: 0 0 auto 0;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 6px 10px;
+  color: var(--ryeos-muted);
+  background: rgba(29, 32, 33, .9);
+  border-bottom: 1px solid var(--ryeos-shadow);
+  font-size: .72rem;
+}
+
+.ryeos-field-toolbar strong { color: var(--ryeos-warn); }
+.ryeos-field-heading { display: flex; gap: 9px; align-items: center; margin-right: auto; }
+.ryeos-field-controls { display: flex; gap: 4px; flex-wrap: wrap; }
+.ryeos-field-toolbar button,
+.ryeos-field-toolbar input {
+  min-height: 24px;
+  color: var(--ryeos-fg);
+  background: rgba(23, 25, 26, .92);
+  border: 1px solid var(--ryeos-shadow);
+  font: inherit;
+}
+.ryeos-field-toolbar button { cursor: pointer; }
+.ryeos-field-toolbar button:disabled { opacity: .42; cursor: default; }
+.ryeos-field-toolbar input { width: min(18ch, 24vw); padding: 2px 6px; }
+.ryeos-field-rail {
+  position: absolute;
+  z-index: 2;
+  inset: 46px 8px auto 8px;
+  display: flex;
+  gap: 3px;
+  overflow-x: auto;
+  padding: 3px;
+  background: rgba(23, 25, 26, .72);
+  border: 1px solid rgba(var(--ryeos-warn-rgb), .18);
+  scrollbar-width: thin;
+}
+.ryeos-field-rail[hidden] { display: none; }
+.ryeos-field-rail-event {
+  min-width: max-content;
+  padding: 3px 7px;
+  color: var(--ryeos-muted);
+  background: var(--ryeos-panel);
+  border: 1px solid var(--ryeos-shadow);
+  font: inherit;
+  font-size: .68rem;
+  cursor: pointer;
+}
+.ryeos-field-rail-event.selected,
+.ryeos-field-rail-event[aria-pressed="true"] {
+  color: var(--ryeos-bg);
+  background: var(--ryeos-warn);
+  border-color: var(--ryeos-warn);
+}
+.ryeos-field-canvas { width: 100%; height: 100%; min-height: 320px; display: block; cursor: grab; }
+.ryeos-field-canvas:active { cursor: grabbing; }
+.ryeos-field-detail {
+  position: absolute;
+  z-index: 2;
+  inset: auto 8px 8px auto;
+  display: grid;
+  gap: 4px;
+  width: min(260px, 42%);
+  max-height: 46%;
+  overflow: auto;
+  padding: 8px;
+  color: var(--ryeos-fg);
+  background: rgba(29, 32, 33, .92);
+  border: 1px solid var(--ryeos-shadow);
+  font-size: .72rem;
+}
+.ryeos-field-detail small { color: var(--ryeos-muted); }
+.ryeos-field-detail figure { margin: 4px 0; }
+.ryeos-field-detail figcaption { margin-bottom: 3px; color: var(--ryeos-warn); }
+.ryeos-field-detail canvas { width: auto; max-width: 100%; image-rendering: pixelated; }
+.ryeos-field-change { color: var(--ryeos-accent) !important; }
+.ryeos-field-warning { color: var(--ryeos-danger) !important; }
+.ryeos-field-a11y {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+.ryeos-field-a11y:focus-visible {
+  width: auto;
+  height: auto;
+  clip-path: none;
+  inset: 38px 8px auto;
+  padding: 6px;
+  color: var(--ryeos-fg);
+  background: var(--ryeos-panel);
+  outline: 2px solid var(--ryeos-accent);
+}
+
+.ryeos-field[data-high-contrast="true"] .ryeos-field-toolbar,
+.ryeos-field[data-high-contrast="true"] .ryeos-field-detail,
+.ryeos-field[data-high-contrast="true"] .ryeos-field-rail {
+  color: CanvasText;
+  background: Canvas;
+  border-color: CanvasText;
+}
+
+.ryeos-field[data-reduced-motion="true"],
+.ryeos-field[data-reduced-motion="true"] * {
+  scroll-behavior: auto !important;
+  animation: none !important;
+  transition: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ryeos-field, .ryeos-field * { animation: none !important; transition: none !important; }
+}
+
+@media (forced-colors: active) {
+  .ryeos-field { border: 1px solid CanvasText; background: Canvas; }
+  .ryeos-field-toolbar { color: CanvasText; background: Canvas; }
+}
+
 .ryeos-inspector-view h2,
 .ryeos-tile-body h2 { margin-top: 0; }
 

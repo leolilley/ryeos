@@ -166,6 +166,21 @@ pub struct ReplayEventRowsPage {
     pub has_more: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainEventRefRow {
+    pub chain_root_id: String,
+    pub chain_seq: i64,
+    pub event_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainEventNavigationRows {
+    pub previous: Option<ChainEventRefRow>,
+    pub current: Option<ChainEventRefRow>,
+    pub next: Option<ChainEventRefRow>,
+    pub live_head: Option<ChainEventRefRow>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ThreadResultRow {
     pub thread_id: String,
@@ -1089,6 +1104,50 @@ pub fn replay_events_bounded(
     limit: usize,
     max_serialized_bytes: usize,
 ) -> anyhow::Result<ReplayEventRowsPage> {
+    replay_events_range_bounded(
+        db,
+        chain_root_id,
+        thread_id,
+        after_seq,
+        None,
+        limit,
+        max_serialized_bytes,
+    )
+}
+
+/// Replay a bounded chain prefix ending at an exact durable chain sequence.
+///
+/// Unlike client-side truncation, the upper bound is part of the SQL query so
+/// a historical cut never materializes events beyond its claimed frontier.
+pub fn replay_events_through_bounded(
+    db: &ProjectionDb,
+    chain_root_id: &str,
+    thread_id: Option<&str>,
+    after_seq: Option<i64>,
+    through_seq: i64,
+    limit: usize,
+    max_serialized_bytes: usize,
+) -> anyhow::Result<ReplayEventRowsPage> {
+    replay_events_range_bounded(
+        db,
+        chain_root_id,
+        thread_id,
+        after_seq,
+        Some(through_seq),
+        limit,
+        max_serialized_bytes,
+    )
+}
+
+fn replay_events_range_bounded(
+    db: &ProjectionDb,
+    chain_root_id: &str,
+    thread_id: Option<&str>,
+    after_seq: Option<i64>,
+    through_seq: Option<i64>,
+    limit: usize,
+    max_serialized_bytes: usize,
+) -> anyhow::Result<ReplayEventRowsPage> {
     if limit == 0 {
         anyhow::bail!("replay_events_bounded limit must be greater than zero");
     }
@@ -1121,6 +1180,10 @@ pub fn replay_events_bounded(
     }
     if let Some(seq) = after_seq {
         sql.push_str(" AND chain_seq > ?");
+        params.push(Box::new(seq));
+    }
+    if let Some(seq) = through_seq {
+        sql.push_str(" AND chain_seq <= ?");
         params.push(Box::new(seq));
     }
 
@@ -1188,6 +1251,72 @@ pub fn replay_events_bounded(
     }
 
     Ok(ReplayEventRowsPage { rows, has_more })
+}
+
+/// Return source-authoritative navigation around one event in a single braid.
+/// No timestamp participates in this ordering.
+pub fn chain_event_navigation(
+    db: &ProjectionDb,
+    chain_root_id: &str,
+    chain_seq: i64,
+) -> anyhow::Result<ChainEventNavigationRows> {
+    fn read(
+        db: &ProjectionDb,
+        sql: &str,
+        chain_root_id: &str,
+        chain_seq: Option<i64>,
+    ) -> anyhow::Result<Option<ChainEventRefRow>> {
+        let map = |row: &rusqlite::Row<'_>| {
+            Ok(ChainEventRefRow {
+                chain_root_id: row.get(0)?,
+                chain_seq: row.get(1)?,
+                event_hash: row.get(2)?,
+            })
+        };
+        match chain_seq {
+            Some(chain_seq) => db
+                .connection()
+                .query_row(sql, rusqlite::params![chain_root_id, chain_seq], map)
+                .optional()
+                .context("query chain event navigation"),
+            None => db
+                .connection()
+                .query_row(sql, [chain_root_id], map)
+                .optional()
+                .context("query chain event live head"),
+        }
+    }
+
+    Ok(ChainEventNavigationRows {
+        previous: read(
+            db,
+            "SELECT chain_root_id, chain_seq, event_hash FROM events \
+             WHERE chain_root_id = ? AND chain_seq < ? ORDER BY chain_seq DESC LIMIT 1",
+            chain_root_id,
+            Some(chain_seq),
+        )?,
+        current: read(
+            db,
+            "SELECT chain_root_id, chain_seq, event_hash FROM events \
+             WHERE chain_root_id = ? AND chain_seq = ? LIMIT 1",
+            chain_root_id,
+            Some(chain_seq),
+        )?,
+        next: read(
+            db,
+            "SELECT chain_root_id, chain_seq, event_hash FROM events \
+             WHERE chain_root_id = ? AND chain_seq > ? ORDER BY chain_seq LIMIT 1",
+            chain_root_id,
+            Some(chain_seq),
+        )?,
+        live_head: read(
+            db,
+            "SELECT chain_root_id, chain_seq, event_hash FROM events \
+             WHERE chain_root_id = ? ORDER BY chain_seq DESC LIMIT 1",
+            chain_root_id,
+            None,
+        )?,
+    })
 }
 
 /// The thread that owns the chain's highest-`chain_seq` event — the thread a
@@ -3167,6 +3296,44 @@ mod tests {
 
         // A different chain is unaffected.
         assert_eq!(chain_head_thread(&db, "chain-B").unwrap(), None);
+    }
+
+    #[test]
+    fn bounded_chain_cut_and_navigation_use_chain_sequence_only() {
+        let db = test_db();
+        let conn = db.connection();
+        for seq in 1..=4_i64 {
+            let event_hash = format!("{seq:064x}");
+            // Deliberately reverse timestamps: navigation must remain braid-ordered.
+            let timestamp = format!("2026-01-01T00:00:0{}Z", 5 - seq);
+            conn.execute(
+                "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, \
+                 thread_seq, event_type, durability, ts, payload) \
+                 VALUES (?, 'chain-cut', ?, 'T-cut', ?, 'step', 'durable', ?, X'7B7D')",
+                rusqlite::params![event_hash, seq, seq, timestamp],
+            )
+            .unwrap();
+        }
+
+        let cut = replay_events_through_bounded(&db, "chain-cut", None, None, 2, 10, 1024 * 1024)
+            .unwrap();
+        assert_eq!(
+            cut.rows.iter().map(|row| row.chain_seq).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(!cut.has_more);
+
+        let navigation = chain_event_navigation(&db, "chain-cut", 2).unwrap();
+        assert_eq!(navigation.previous.unwrap().chain_seq, 1);
+        assert_eq!(navigation.current.unwrap().chain_seq, 2);
+        assert_eq!(navigation.next.unwrap().chain_seq, 3);
+        assert_eq!(navigation.live_head.unwrap().chain_seq, 4);
+        assert!(
+            chain_event_navigation(&db, "chain-cut", 99)
+                .unwrap()
+                .current
+                .is_none()
+        );
     }
 
     #[test]

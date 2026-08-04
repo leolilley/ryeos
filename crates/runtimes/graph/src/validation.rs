@@ -868,6 +868,7 @@ config:
   hooks:
     - id: obs
       event: graph_completed
+      result: discard
       action: {item_id: "tool:test/echo", ref_bindings: {}, params: {}}
   nodes:
     done:
@@ -896,6 +897,7 @@ config:
   hooks:
     - id: typo
       event: graph_finishd
+      result: discard
       action: {item_id: "tool:test/echo", ref_bindings: {}}
   nodes:
     done:
@@ -918,6 +920,7 @@ config:
   hooks:
     - id: invalid-root
       event: graph_started
+      result: discard
       action:
         item_id: "tool:test/echo"
         params: {value: "${result.value}"}
@@ -944,6 +947,7 @@ config:
   hooks:
     - id: bad
       event: graph_completed
+      result: discard
       when: something
       action: {item_id: "tool:test/echo", ref_bindings: {}}
   nodes:
@@ -2294,6 +2298,7 @@ config:
   hooks:
     - id: observe-start
       event: graph_started
+      result: discard
       action:
         item_id: "tool:test/noop"
         params: {value: "${inputs.missing}"}

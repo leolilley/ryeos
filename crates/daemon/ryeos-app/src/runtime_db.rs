@@ -348,8 +348,20 @@ impl HookDispatchStatus {
 #[derive(Debug, Clone)]
 pub enum HookDispatchReservation {
     Execute,
-    Replay(Value),
+    Replay(CompletedHookDispatch),
     PendingUnknown,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompletedHookDispatch {
+    pub dispatch_key: String,
+    pub chain_root_id: String,
+    pub occurrence_thread_id: String,
+    pub event: String,
+    pub hook_id: String,
+    pub request_hash: String,
+    pub response: Value,
+    pub response_hash: String,
 }
 
 #[derive(Debug, Clone)]
@@ -2960,6 +2972,33 @@ fn decode_completed_hook_response(
     Ok(response)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn decode_completed_hook_dispatch(
+    dispatch_key: &str,
+    chain_root_id: String,
+    occurrence_thread_id: String,
+    event: String,
+    hook_id: String,
+    request_hash: String,
+    response_json: Option<&[u8]>,
+    response_hash: Option<&str>,
+) -> Result<CompletedHookDispatch> {
+    let response = decode_completed_hook_response(dispatch_key, response_json, response_hash)?;
+    let response_hash = response_hash
+        .expect("completed response decoder requires a hash")
+        .to_string();
+    Ok(CompletedHookDispatch {
+        dispatch_key: dispatch_key.to_string(),
+        chain_root_id,
+        occurrence_thread_id,
+        event,
+        hook_id,
+        request_hash,
+        response,
+        response_hash,
+    })
+}
+
 fn read_launch_planning(
     conn: &Connection,
     sql: &str,
@@ -3274,20 +3313,51 @@ impl RuntimeDb {
             return Ok(HookDispatchReservation::Execute);
         }
 
-        let (request_hash, status, response_json, response_hash): (
+        let (
+            chain_root_id,
+            occurrence_thread_id,
+            event,
+            hook_id,
+            request_hash,
+            status,
+            response_json,
+            response_hash,
+        ): (
+            String,
+            String,
+            String,
+            String,
             String,
             String,
             Option<Vec<u8>>,
             Option<String>,
         ) = tx.query_row(
-            "SELECT request_hash, status, response_json, response_hash
+            "SELECT chain_root_id, caller_thread_id, event, hook_id,
+                    request_hash, status, response_json, response_hash
                FROM hook_dispatch_ledger WHERE dispatch_key=?1",
             params![seed.dispatch_key],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
         )?;
         if request_hash != seed.request_hash {
             bail!(
                 "hook dispatch key `{}` was reused with a different request hash",
+                seed.dispatch_key
+            );
+        }
+        if chain_root_id != seed.chain_root_id || event != seed.event || hook_id != seed.hook_id {
+            bail!(
+                "hook dispatch key `{}` has divergent stored identity columns",
                 seed.dispatch_key
             );
         }
@@ -3303,8 +3373,13 @@ impl RuntimeDb {
                 HookDispatchReservation::PendingUnknown
             }
             HookDispatchStatus::Completed => {
-                HookDispatchReservation::Replay(decode_completed_hook_response(
+                HookDispatchReservation::Replay(decode_completed_hook_dispatch(
                     &seed.dispatch_key,
+                    chain_root_id,
+                    occurrence_thread_id,
+                    event,
+                    hook_id,
+                    request_hash,
                     response_json.as_deref(),
                     response_hash.as_deref(),
                 )?)
@@ -3643,7 +3718,7 @@ impl RuntimeDb {
         dispatch_key: &str,
         request_hash: &str,
         response: &Value,
-    ) -> Result<()> {
+    ) -> Result<CompletedHookDispatch> {
         validate_sha256("dispatch_key", dispatch_key)?;
         validate_sha256("request_hash", request_hash)?;
         serde_json::from_value::<ryeos_runtime::callback_contract::CallbackDispatchResponse>(
@@ -3662,16 +3737,47 @@ impl RuntimeDb {
         let response_hash = lillux::sha256_hex(&response_json);
         let now = lillux::time::timestamp_millis() as i64;
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        type ExistingHookDispatch = (String, String, Option<Vec<u8>>, Option<String>);
+        type ExistingHookDispatch = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<Vec<u8>>,
+            Option<String>,
+        );
         let existing: Option<ExistingHookDispatch> = tx
             .query_row(
-                "SELECT request_hash, status, response_json, response_hash
+                "SELECT chain_root_id, caller_thread_id, event, hook_id,
+                        request_hash, status, response_json, response_hash
                    FROM hook_dispatch_ledger WHERE dispatch_key=?1",
                 params![dispatch_key],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
             )
             .optional()?;
-        let Some((stored_request_hash, status, stored_json, stored_hash)) = existing else {
+        let Some((
+            chain_root_id,
+            occurrence_thread_id,
+            event,
+            hook_id,
+            stored_request_hash,
+            status,
+            stored_json,
+            stored_hash,
+        )) = existing
+        else {
             bail!("hook dispatch `{dispatch_key}` was not reserved");
         };
         if stored_request_hash != request_hash {
@@ -3713,7 +3819,85 @@ impl RuntimeDb {
             }
         }
         tx.commit()?;
-        Ok(())
+        decode_completed_hook_dispatch(
+            dispatch_key,
+            chain_root_id,
+            occurrence_thread_id,
+            event,
+            hook_id,
+            stored_request_hash,
+            Some(&response_json),
+            Some(&response_hash),
+        )
+    }
+
+    pub fn completed_hook_dispatch(
+        &self,
+        dispatch_key: &str,
+        request_hash: &str,
+    ) -> Result<CompletedHookDispatch> {
+        validate_sha256("dispatch_key", dispatch_key)?;
+        validate_sha256("request_hash", request_hash)?;
+        type Stored = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<Vec<u8>>,
+            Option<String>,
+        );
+        let stored: Option<Stored> = self
+            .conn
+            .query_row(
+                "SELECT chain_root_id, caller_thread_id, event, hook_id,
+                        request_hash, status, response_json, response_hash
+                   FROM hook_dispatch_ledger WHERE dispatch_key=?1",
+                params![dispatch_key],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            chain_root_id,
+            occurrence_thread_id,
+            event,
+            hook_id,
+            stored_request_hash,
+            status,
+            response_json,
+            response_hash,
+        )) = stored
+        else {
+            bail!("hook dispatch `{dispatch_key}` was not reserved");
+        };
+        if stored_request_hash != request_hash {
+            bail!("hook dispatch `{dispatch_key}` request hash mismatch");
+        }
+        if HookDispatchStatus::parse(&status)? != HookDispatchStatus::Completed {
+            bail!("hook dispatch `{dispatch_key}` is not completed");
+        }
+        decode_completed_hook_dispatch(
+            dispatch_key,
+            chain_root_id,
+            occurrence_thread_id,
+            event,
+            hook_id,
+            stored_request_hash,
+            response_json.as_deref(),
+            response_hash.as_deref(),
+        )
     }
 
     pub fn open(path: &Path) -> Result<Self> {
@@ -4699,7 +4883,12 @@ impl RuntimeDb {
         Ok(links.into_iter().collect())
     }
 
-    pub fn delete_chain_runtime(
+    /// Delete operational state only after StateStore has proven that the
+    /// authoritative chain is terminal, unpinned, and can no longer resume.
+    /// Hook-dispatch rows must outlive every possible refire; making this
+    /// crate-private prevents offline/runtime callers from treating the ledger
+    /// as a disposable response cache.
+    pub(crate) fn delete_chain_runtime(
         &self,
         chain_root_id: &str,
         thread_ids: &[String],
@@ -8280,7 +8469,7 @@ mod tests {
         else {
             panic!("completed hook dispatch must replay");
         };
-        assert_eq!(replayed, response);
+        assert_eq!(replayed.response, response);
         db.complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &response)
             .unwrap();
     }
@@ -8352,7 +8541,7 @@ mod tests {
         else {
             panic!("successor segment must replay the chain-scoped response");
         };
-        assert_eq!(replayed, response);
+        assert_eq!(replayed.response, response);
     }
 
     #[test]
@@ -8409,7 +8598,7 @@ mod tests {
         else {
             panic!("completed dispatch must replay after response loss");
         };
-        assert_eq!(replayed, response);
+        assert_eq!(replayed.response, response);
         assert_eq!(invocations, 2);
     }
 

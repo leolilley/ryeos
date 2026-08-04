@@ -47,9 +47,10 @@ pub use command::{
 pub use compiled_template::{CompiledActionTemplate, CompiledJsonTemplate, CompiledTemplateError};
 pub use daemon_rpc::{DaemonRpcClient, RpcError, resolve_daemon_socket_path};
 pub use events::{
-    CognitionInAssembler, CognitionInAssembly, CognitionInChunk, MAX_RUNTIME_EVENT_BATCH_BYTES,
-    MAX_RUNTIME_EVENT_BATCH_ITEMS, MAX_RUNTIME_EVENT_PAYLOAD_BYTES, RuntimeEventType, StorageClass,
-    encode_cognition_in_payloads,
+    CognitionInAssembler, CognitionInAssembly, CognitionInChunk, HOOK_FAILURE_SCHEMA,
+    HOOK_OBSERVATION_SCHEMA, HookEvidenceDescriptor, HookFailedPayload, HookFailureClass,
+    HookObservationRecordedPayload, MAX_RUNTIME_EVENT_BATCH_BYTES, MAX_RUNTIME_EVENT_BATCH_ITEMS,
+    MAX_RUNTIME_EVENT_PAYLOAD_BYTES, RuntimeEventType, StorageClass, encode_cognition_in_payloads,
 };
 pub use expression::{
     CompilationLimits, CompiledExpression, CompiledTemplate, ErrorPhase, EvaluationContext,
@@ -64,7 +65,7 @@ pub use framing::{recv_frame, send_frame};
 pub use hooks_eval::{HookDispatcher, HookRunResult, run_hooks};
 pub use hooks_loader::{
     CompiledHook, CompiledHookCondition, HookCompilationError, HookContextSchema, HookDefinition,
-    HookLayer, HookSources, compile_hooks, load_configured_hook_sources,
+    HookLayer, HookResultMode, HookSources, compile_hooks, load_configured_hook_sources,
 };
 pub use lillux::crypto::SigningKey;
 pub use paths::AI_DIR;

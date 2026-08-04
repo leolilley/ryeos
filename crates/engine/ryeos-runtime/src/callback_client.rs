@@ -550,6 +550,20 @@ impl CallbackClient {
         }
     }
 
+    /// Authoritative: a missing callback is an error because a partial state
+    /// anchor must never be presented as durable restore evidence.
+    pub async fn publish_state_anchor(&self, request: Value) -> Result<Value> {
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback publish_state_anchor called without an inner UDS client (socket missing)"
+            )
+        })?;
+        client
+            .publish_state_anchor(&self.thread_id, request)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+
     /// Advisory: warn-and-continue OK when disconnected.
     pub async fn get_thread(&self) -> Result<Value> {
         match &self.inner {

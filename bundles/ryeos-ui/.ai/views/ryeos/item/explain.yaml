@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-06T12:24:56Z:d5a20c787bf2de23d761c7bad23962c9f01849176f42f4610c789e8d91aa20fd:fHZg7hV1DV1F9yqgVxQkXd7wMnCXFXmcXvrL/cPRreA0OSuPkN1etFLF0ks9EyUKJ4SX1Zkvr9KFUeKRfR5HBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:25Z:f46167abb1ca6d9c522d21be85583c5b5fd27afa24fde07e55c851dfb54db32c:hU6criXyqHyt297qx7D/VuzOQfa1L+IVxLfj0oMWx6qXBIyE6dzc1plugy3TG8VnsqGChwI4y9+4GuxBncoYDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: item-explain
 version: "1.0.0"
 description: >-
@@ -13,6 +13,16 @@ description: >-
 
 widget: sections
 title: Explain
+sources:
+  current:
+    ref: service:items/effective
+    params:
+      canonical_ref: "@facet:selection.item"
+  as_launched:
+    ref: service:items/effective
+    params:
+      canonical_ref: "@facet:selection.item"
+      thread_id: "@facet:selection.thread_id"
 
 sections:
   # Resolution: the whole effective-item response as one detail row. Primary is
@@ -21,10 +31,7 @@ sections:
   # requested ref equals the canonical ref except under alias expansion — that
   # drift shows in the Extends chain rows' alias hops.
   - title: Resolution
-    source:
-      ref: service:items/effective
-      params:
-        canonical_ref: "@facet:selection.item"
+    source_channel: current
     projection:
       primary: canonical_ref
       meta: source.path
@@ -43,11 +50,8 @@ sections:
   # content digest (the pinned bytes the daemon verified). Empty when the item
   # has no extends chain.
   - title: Extends chain
-    source:
-      ref: service:items/effective
-      params:
-        canonical_ref: "@facet:selection.item"
-      collection: provenance.ancestors
+    source_channel: current
+    collection: provenance.ancestors
     projection:
       primary: resolved_ref
       meta: raw_content_digest
@@ -64,21 +68,15 @@ sections:
   # view overlay reads by name. A map keyed by fact name — projected as one detail
   # row carrying the composed facts. Empty ({}) for kinds that declare none.
   - title: Policy facts
-    source:
-      ref: service:items/effective
-      params:
-        canonical_ref: "@facet:selection.item"
-      collection: policy_facts
+    source_channel: current
+    collection: policy_facts
     projection: {}
 
   # Diagnostics: resolution notes (extends-chain summary, shadowing) the daemon
   # emitted while composing this item. One row each; empty when clean.
   - title: Diagnostics
-    source:
-      ref: service:items/effective
-      params:
-        canonical_ref: "@facet:selection.item"
-      collection: diagnostics
+    source_channel: current
+    collection: diagnostics
     projection:
       primary: message
       meta: level
@@ -91,7 +89,7 @@ sections:
         default: neutral
 
   # ── Thread-scoped (as-launched) sections ────────────────────────────────
-  # When a thread is selected (selection.thread), the handler attaches an
+  # When a thread is selected (selection.thread_id), the handler attaches an
   # `as_launched` block: the digest the thread persisted AT LAUNCH, rendered as
   # truth. The sections above are the fresh "resolved now" — reading both side
   # by side IS the re-resolve comparison. Empty when no thread is selected (the
@@ -100,12 +98,8 @@ sections:
   # As launched: the launch-time root ref + effective trust class, toned by the
   # weakest-link trust the thread actually launched under.
   - title: As launched
-    source:
-      ref: service:items/effective
-      params:
-        canonical_ref: "@facet:selection.item"
-        thread_id: "@facet:selection.thread"
-      collection: as_launched.root
+    source_channel: as_launched
+    collection: as_launched.root
     projection:
       primary: resolved_ref
       meta: raw_content_digest
@@ -123,12 +117,8 @@ sections:
   # (edited, republished, or dropped from the chain) reads immediately. Meta is
   # the pinned launch digest; the full bytes are reconstructable from CAS by it.
   - title: As launched — extends chain
-    source:
-      ref: service:items/effective
-      params:
-        canonical_ref: "@facet:selection.item"
-        thread_id: "@facet:selection.thread"
-      collection: as_launched.ancestors
+    source_channel: as_launched
+    collection: as_launched.ancestors
     projection:
       primary: resolved_ref
       meta: raw_content_digest
@@ -141,6 +131,6 @@ sections:
 
 # Re-fetch whenever the selected item or thread changes (the explain affordance
 # writes selection.item before opening this lens; thread-scoped entry also
-# writes selection.thread).
+# writes selection.thread_id).
 refresh:
   on_facet: selection

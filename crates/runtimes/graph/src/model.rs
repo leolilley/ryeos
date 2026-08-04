@@ -633,6 +633,7 @@ pub(crate) struct DispatchObservation {
     pub(crate) item_id: String,
     pub(crate) child_thread_id: Option<String>,
     pub(crate) milestones: Vec<Value>,
+    pub(crate) state_anchors: Vec<Value>,
 }
 
 impl DispatchObservation {
@@ -644,6 +645,7 @@ impl DispatchObservation {
             item_id: item_id.into(),
             child_thread_id: Some(child_thread_id),
             milestones: Vec::new(),
+            state_anchors: Vec::new(),
         })
     }
 
@@ -657,13 +659,19 @@ impl DispatchObservation {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        if child_thread_id.is_none() && milestones.is_empty() {
+        let state_anchors = result
+            .get("state_anchors")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if child_thread_id.is_none() && milestones.is_empty() && state_anchors.is_empty() {
             None
         } else {
             Some(Self {
                 item_id: item_id.into(),
                 child_thread_id,
                 milestones,
+                state_anchors,
             })
         }
     }
@@ -682,6 +690,7 @@ pub struct FanoutReceiptSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn unknown_top_level_field_rejects() {
@@ -697,6 +706,28 @@ config:
             err.to_string().contains("cattegory"),
             "error should mention unknown field: {}",
             err
+        );
+    }
+
+    #[test]
+    fn dispatch_observation_carries_authoritative_state_anchor_requests_separately() {
+        let observation = DispatchObservation::from_success(
+            "tool:test",
+            None,
+            &json!({
+                "milestones": [{"kind": "domain.fact", "payload": {}}],
+                "state_anchors": [{
+                    "contract": "domain.restore.v1",
+                    "restore": {"value": 1}
+                }]
+            }),
+        )
+        .unwrap();
+        assert_eq!(observation.milestones.len(), 1);
+        assert_eq!(observation.state_anchors.len(), 1);
+        assert_eq!(
+            observation.state_anchors[0]["contract"],
+            "domain.restore.v1"
         );
     }
 

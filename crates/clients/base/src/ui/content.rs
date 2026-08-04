@@ -42,6 +42,7 @@ impl TimelineRole {
 /// time. Every view remains an addressable, overridable item; this is its
 /// composed value as the engine consumes it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ViewBinding {
     /// One of the closed widget primitives: rows | text | key_value |
     /// timeline | scene. Unknown widgets degrade (raw + provenance).
@@ -60,12 +61,13 @@ pub struct ViewBinding {
     pub title: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
-    /// The view's data source. Absent for sourceless views (e.g. a pure
-    /// input). The composer materializes `source: {}` for such views, so
-    /// an object without a non-empty `ref` is treated as absent here
-    /// rather than failing the whole binding.
-    #[serde(default, deserialize_with = "deserialize_optional_source")]
-    pub source: Option<SourceBinding>,
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Named, independently refreshed data channels. Sourceless views keep
+    /// this map empty; ordinary one-source widgets conventionally use
+    /// `sources.default` without granting that channel special semantics.
+    #[serde(default)]
+    pub sources: BTreeMap<String, SourceBinding>,
     /// Static content for sourceless views (e.g. the home brand panel).
     /// Open JSON — projected by renderers, never typed per-view.
     #[serde(default)]
@@ -141,26 +143,6 @@ pub struct ViewPositionPresentation {
     pub y: f32,
 }
 
-/// Treat an absent / ref-less / null `source` as no source. The view
-/// composer emits `source: {}` for sourceless views; that empty mapping is
-/// fabricated structure, not a binding, and must not fail the whole view.
-fn deserialize_optional_source<'de, D>(deserializer: D) -> Result<Option<SourceBinding>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = Value::deserialize(deserializer)?;
-    let has_ref = value
-        .get("ref")
-        .and_then(Value::as_str)
-        .is_some_and(|r| !r.is_empty());
-    if !has_ref {
-        return Ok(None);
-    }
-    serde_json::from_value(value)
-        .map(Some)
-        .map_err(serde::de::Error::custom)
-}
-
 impl ViewBinding {
     /// A visible error placeholder for a binding that failed to parse or
     /// validate — so the renderer shows *why* instead of "not embedded".
@@ -171,13 +153,33 @@ impl ViewBinding {
             ..Default::default()
         }
     }
+
+    pub fn source(&self, channel: &str) -> Option<&SourceBinding> {
+        self.sources.get(channel)
+    }
+
+    pub fn primary_source(&self) -> Option<(&str, &SourceBinding)> {
+        self.sources
+            .get_key_value("default")
+            .map(|(channel, source)| (channel.as_str(), source))
+            .or_else(|| {
+                (self.sources.len() == 1)
+                    .then(|| self.sources.first_key_value())
+                    .flatten()
+                    .map(|(channel, source)| (channel.as_str(), source))
+            })
+    }
 }
 
 /// Row-activation binding. The view names which affordance row activation
 /// fires; that affordance reads `{record.<field>}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SelectionBinding {
-    pub activate: String,
+    #[serde(default)]
+    pub change: Option<String>,
+    #[serde(default)]
+    pub activate: Option<String>,
 }
 
 /// A singular transient input buffer declared on a view binding. Not a
@@ -304,21 +306,6 @@ pub struct InputMentions {
     pub label: Option<String>,
 }
 
-/// The data-store key a view's `@`-mention source response lands under —
-/// derived identically by the fetch emitter and the reader, so the generic
-/// `FetchSource` path carries mentions with no bespoke effect.
-pub fn mention_source_key(view_ref: &str, input_id: &str) -> String {
-    format!("mentions\u{1f}{view_ref}\u{1f}{input_id}")
-}
-
-/// The data-store key a view's `completion` source response lands under —
-/// derived identically by the fetch emitter and the slash-completion readers,
-/// so the line-start `/` grammar rides the generic `FetchSource` path with no
-/// bespoke effect (the same shape mentions use).
-pub fn completion_source_key(view_ref: &str, input_id: &str) -> String {
-    format!("completion\u{1f}{view_ref}\u{1f}{input_id}")
-}
-
 /// The record array a `completion` source response projects to, pulled through
 /// the input's declared `collection`. Absent/mismatched collection → no
 /// records (fails closed), like mentions.
@@ -391,6 +378,7 @@ impl InputBlock {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceBinding {
     #[serde(rename = "ref")]
     pub item_ref: String,
@@ -403,26 +391,21 @@ pub struct SourceBinding {
     pub collection: Option<String>,
 }
 
-/// One section of a `sections` view: a titled group with its own source and
-/// single projection, fetched and projected independently of its siblings.
+/// One section of a `sections` view: a titled projection over one named source
+/// channel. Several sections may intentionally share one fetched response.
 /// Sections share the host view's `affordances`; `activate` names which one a
 /// row in this section fires (wired in a later increment).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SectionBinding {
     pub title: String,
-    pub source: SourceBinding,
+    pub source_channel: String,
+    #[serde(default)]
+    pub collection: Option<String>,
     #[serde(default)]
     pub projection: Value,
     #[serde(default)]
     pub activate: Option<String>,
-}
-
-/// The per-section source key for a `sections` view: the host key (tile id or
-/// dock key) plus the section index. Each section's source response lands
-/// under its own key so the resolver reads them back independently. Both the
-/// fetch emitter and the resolver derive section keys through this one helper.
-pub fn section_source_key(base: &str, index: usize) -> String {
-    format!("{base}#section{index}")
 }
 
 /// Flat field path lookup: `payload.delta` walks objects, never arrays.
@@ -850,9 +833,8 @@ pub fn expanded_detail(record: &Value, fields: &[String]) -> Vec<(String, String
 /// is rendered after collection selection.
 pub fn source_collection<'a>(binding: &ViewBinding, response: &'a Value) -> &'a [Value] {
     binding
-        .source
-        .as_ref()
-        .and_then(|s| s.collection.as_deref())
+        .primary_source()
+        .and_then(|(_, source)| source.collection.as_deref())
         .and_then(|path| field_path(response, path))
         .and_then(Value::as_array)
         .map(Vec::as_slice)
@@ -949,7 +931,7 @@ pub fn project_records(binding: &ViewBinding, response: &Value) -> Vec<Projected
 /// record — one row — so a sections view can carry a singular status line
 /// (e.g. node status) beside its list sections.
 pub fn project_section(section: &SectionBinding, response: &Value) -> Vec<ProjectedRecord> {
-    match section.source.collection.as_deref() {
+    match section.collection.as_deref() {
         // A `collection` path selects a sub-value of the response. An array is a
         // list source (one row per element); a single object is a detail source
         // (one row) — so a section can read a nested record (e.g. a thread's
@@ -1213,12 +1195,34 @@ fn visit_placeholders(template: &Value, f: &mut dyn FnMut(&str)) {
 /// already declares. One writer per source param.
 pub fn feeds_param_collision(binding: &ViewBinding) -> Option<String> {
     let feeds = binding.input.as_ref()?.feeds.as_ref()?;
-    let source = binding.source.as_ref()?;
-    let declares = source
-        .params
-        .as_object()
-        .is_some_and(|params| params.contains_key(&feeds.param));
+    let declares = binding.sources.values().any(|source| {
+        source
+            .params
+            .as_object()
+            .is_some_and(|params| params.contains_key(&feeds.param))
+    });
     declares.then(|| feeds.param.clone())
+}
+
+fn source_contract_error(binding: &ViewBinding) -> Option<String> {
+    for channel in binding.sources.keys() {
+        if channel.is_empty()
+            || channel.len() > 64
+            || channel.trim() != channel
+            || channel.chars().any(|ch| ch.is_control() || ch == '/')
+        {
+            return Some(format!("invalid source channel '{channel}'"));
+        }
+    }
+    for section in &binding.sections {
+        if !binding.sources.contains_key(&section.source_channel) {
+            return Some(format!(
+                "section '{}' references unknown source channel '{}'",
+                section.title, section.source_channel
+            ));
+        }
+    }
+    None
 }
 
 /// Semantic validation: a `target:` declaration is only meaningful on an
@@ -1408,6 +1412,8 @@ pub fn views_from_surface(effective_surface: Option<&Value>) -> BTreeMap<String,
                             "input feeds.param '{param}' collides with a declared source param"
                         ),
                     )
+                } else if let Some(reason) = source_contract_error(&binding) {
+                    ViewBinding::degraded(view_ref, reason)
                 } else if let Some(reason) = target_without_route_error(&binding) {
                     ViewBinding::degraded(view_ref, reason)
                 } else if let Some(reason) = refresh_keys_error(&binding) {
@@ -1432,7 +1438,7 @@ mod tests {
     fn threads_binding() -> ViewBinding {
         serde_json::from_value(json!({
             "widget": "rows",
-            "source": { "ref": "service:ui/ryeos-ui/threads/list", "params": {"limit": 200}, "collection": "threads" },
+            "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "params": {"limit": 200}, "collection": "threads" } },
             "projections": {
                 "primary": "item_ref",
                 "meta": "status",
@@ -1446,7 +1452,7 @@ mod tests {
     fn project_table_per_column_tone_is_independent_of_row_tone() {
         let binding: ViewBinding = serde_json::from_value(json!({
             "widget": "table",
-            "source": { "ref": "service:ui/ryeos-ui/threads/list", "collection": "threads" },
+            "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "collection": "threads" } },
             "projections": {
                 "columns": [
                     { "label": "thread", "field": "thread_id" },
@@ -1480,7 +1486,7 @@ mod tests {
     fn table_presentation_is_content_authored_and_preserves_raw_records() {
         let binding: ViewBinding = serde_json::from_value(json!({
             "widget": "table",
-            "source": { "ref": "service:example/list", "collection": "items" },
+            "sources": { "default": { "ref": "service:example/list", "collection": "items" } },
             "projections": {
                 "columns": [
                     { "label": "item", "field": "item_ref", "present": "leaf" },
@@ -1523,7 +1529,7 @@ mod tests {
     fn table_hierarchy_orders_children_and_folds_by_stable_id() {
         let binding: ViewBinding = serde_json::from_value(json!({
             "widget": "table",
-            "source": { "ref": "service:example/tree", "collection": "threads" },
+            "sources": { "default": { "ref": "service:example/tree", "collection": "threads" } },
             "projections": {
                 "hierarchy": { "id": "thread_id", "parent": "tree.parent_thread_id" },
                 "columns": [{ "label": "execution", "field": "item_ref" }]
@@ -1589,7 +1595,8 @@ mod tests {
     fn project_section_list_source_yields_one_row_per_record() {
         let section: SectionBinding = serde_json::from_value(json!({
             "title": "Threads",
-            "source": { "ref": "service:threads/list", "collection": "threads" },
+            "source_channel": "default",
+            "collection": "threads",
             "projection": { "primary": "thread_id", "meta": "status" }
         }))
         .unwrap();
@@ -1609,7 +1616,7 @@ mod tests {
         // No collection → the whole response is one record (e.g. node status).
         let section: SectionBinding = serde_json::from_value(json!({
             "title": "Node",
-            "source": { "ref": "service:node/status" },
+            "source_channel": "default",
             "projection": { "primary": "version", "meta": "site_id" }
         }))
         .unwrap();
@@ -1627,7 +1634,8 @@ mod tests {
         // response this way, without dumping the whole payload.
         let section: SectionBinding = serde_json::from_value(json!({
             "title": "Outcome",
-            "source": { "ref": "service:ui/ryeos-ui/thread/inspect", "collection": "result" },
+            "source_channel": "detail",
+            "collection": "result",
             "projection": { "primary": "outcome_code", "meta": "error" }
         }))
         .unwrap();
@@ -1647,7 +1655,7 @@ mod tests {
         // whole compacted response.
         let section: SectionBinding = serde_json::from_value(json!({
             "title": "Outcome",
-            "source": { "ref": "service:ui/ryeos-ui/thread/inspect", "collection": "result" },
+            "sources": { "default": { "ref": "service:ui/ryeos-ui/thread/inspect", "collection": "result" } },
             "projection": { "primary": "outcome_code", "meta": "error" }
         }))
         .unwrap();
@@ -1659,15 +1667,11 @@ mod tests {
     }
 
     #[test]
-    fn sourceless_view_with_empty_source_object_parses() {
-        // The view composer materializes `source: {}` for a view that
-        // declares no source (e.g. a pure input). It must parse to a
-        // binding with no source — NOT fail and vanish. This is the bug
-        // that hid the chat input behind "not embedded".
+    fn sourceless_view_with_empty_sources_map_parses() {
         let views = json!({
             "view:ryeos/input": {
                 "widget": "text",
-                "source": {},
+                "sources": {},
                 "projections": {},
                 "refresh": {},
                 "input": { "id": "line", "submit": "route" }
@@ -1678,7 +1682,10 @@ mod tests {
         let binding = out
             .get("view:ryeos/input")
             .expect("sourceless view must produce a binding, not be dropped");
-        assert!(binding.source.is_none(), "empty source object is no source");
+        assert!(
+            binding.sources.is_empty(),
+            "empty sources map is sourceless"
+        );
         assert!(
             binding.degraded.is_none(),
             "a sourceless view is not an error"
@@ -1881,7 +1888,7 @@ mod tests {
     fn timeline_event_kinds_with_default_degradation() {
         let binding: ViewBinding = serde_json::from_value(json!({
             "widget": "timeline",
-            "source": { "ref": "service:events/chain_replay", "collection": "events" },
+            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
             "projections": {
                 "event_kinds": { "message_delta": { "primary": "payload.delta" } },
                 "default": { "primary": "event_type", "meta": "ts" }
@@ -1902,7 +1909,7 @@ mod tests {
     fn timeline_roles_and_pair_keys_are_projected_from_content() {
         let binding: ViewBinding = serde_json::from_value(json!({
             "widget": "timeline",
-            "source": { "ref": "service:events/chain_replay", "collection": "events" },
+            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
             "projections": {
                 "event_kinds": {
                     "delta": { "primary": "payload.text", "role": "flow" },
@@ -1937,7 +1944,7 @@ mod tests {
     fn pair_roles_without_resolvable_key_degrade_to_line() {
         let binding: ViewBinding = serde_json::from_value(json!({
             "widget": "timeline",
-            "source": { "ref": "service:events/chain_replay", "collection": "events" },
+            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
             "projections": {
                 "event_kinds": {
                     "start": { "primary": "payload.name", "role": "pair_open", "pair_key": "payload.missing" }
@@ -1959,7 +1966,7 @@ mod tests {
     fn flow_role_without_projected_primary_is_empty_for_fold_skip() {
         let binding: ViewBinding = serde_json::from_value(json!({
             "widget": "timeline",
-            "source": { "ref": "service:events/chain_replay", "collection": "events" },
+            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
             "projections": {
                 "event_kinds": {
                     "message_delta": { "primary": "payload.delta", "role": "flow" }
@@ -1981,7 +1988,7 @@ mod tests {
     fn flow_role_uses_durable_content_projection() {
         let binding: ViewBinding = serde_json::from_value(json!({
             "widget": "timeline",
-            "source": { "ref": "service:events/chain_replay", "collection": "events" },
+            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
             "projections": {
                 "event_kinds": {
                     "message_delta": { "primary": "payload.content", "role": "flow" }
@@ -2046,7 +2053,10 @@ mod tests {
 
         // A bare (non-defaulting) reference still resolves to null when unset —
         // required params (e.g. inspect thread_id) keep suppressing the fetch.
-        let required = resolve_params(&json!({ "thread_id": "@facet:selection.thread" }), |_| None);
+        let required = resolve_params(
+            &json!({ "thread_id": "@facet:selection.thread_id" }),
+            |_| None,
+        );
         assert!(required["thread_id"].is_null());
     }
 
@@ -2054,7 +2064,7 @@ mod tests {
     fn missing_projection_degrades_to_raw() {
         let binding: ViewBinding = serde_json::from_value(json!({
             "widget": "rows",
-            "source": { "ref": "service:x", "collection": "items" },
+            "sources": { "default": { "ref": "service:x", "collection": "items" } },
             "projections": {}
         }))
         .unwrap();
@@ -2068,7 +2078,7 @@ mod tests {
     fn feeds_fields_declare_a_cyclable_live_filter() {
         let b: ViewBinding = serde_json::from_value(json!({
             "widget": "table",
-            "source": { "ref": "service:x", "params": {}, "collection": "rows" },
+            "sources": { "default": { "ref": "service:x", "params": {}, "collection": "rows" } },
             "input": { "id": "filter", "feeds": { "fields": [
                 { "param": "status", "label": "status" },
                 { "param": "requested_by", "label": "source" }
@@ -2089,7 +2099,7 @@ mod tests {
         // Single-field feeds keep working (param, no fields).
         let single: ViewBinding = serde_json::from_value(json!({
             "widget": "table",
-            "source": { "ref": "service:x", "params": {}, "collection": "rows" },
+            "sources": { "default": { "ref": "service:x", "params": {}, "collection": "rows" } },
             "input": { "id": "filter", "feeds": { "param": "status" } }
         }))
         .unwrap();
@@ -2102,7 +2112,7 @@ mod tests {
     fn parses_singular_input_block_with_three_submit_modes() {
         let feeds: ViewBinding = serde_json::from_value(json!({
             "widget": "rows",
-            "source": { "ref": "service:x", "params": {}, "collection": "items" },
+            "sources": { "default": { "ref": "service:x", "params": {}, "collection": "items" } },
             "input": { "id": "filter", "placeholder": "filter…", "feeds": { "param": "query", "debounce_ms": 120 } }
         }))
         .unwrap();
@@ -2282,12 +2292,12 @@ mod tests {
             "views": {
                 "view:filter/collide": {
                     "widget": "rows",
-                    "source": { "ref": "service:x", "params": { "query": "@facet:selection.q" }, "collection": "items" },
+                    "sources": { "default": { "ref": "service:x", "params": { "query": "@facet:selection.q" }, "collection": "items" } },
                     "input": { "id": "f", "feeds": { "param": "query" } }
                 },
                 "view:filter/ok": {
                     "widget": "rows",
-                    "source": { "ref": "service:x", "params": { "limit": 5 }, "collection": "items" },
+                    "sources": { "default": { "ref": "service:x", "params": { "limit": 5 }, "collection": "items" } },
                     "input": { "id": "f", "feeds": { "param": "query" } }
                 }
             }
@@ -2315,6 +2325,6 @@ mod tests {
             "affordances": [{ "id": "open", "invoke": { "plane": "ui", "facet": "active.thread", "value": "{record.thread_id}" } }]
         }))
         .unwrap();
-        assert_eq!(binding.selection.unwrap().activate, "open");
+        assert_eq!(binding.selection.unwrap().activate.as_deref(), Some("open"));
     }
 }

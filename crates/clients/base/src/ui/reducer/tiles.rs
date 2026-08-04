@@ -54,8 +54,9 @@ impl RyeOsCore {
     /// chat line) is input-only.
     fn lensable(&self, view_ref: &str) -> bool {
         self.views.get(view_ref).is_some_and(|binding| {
-            let input_only =
-                binding.input.is_some() && binding.source.is_none() && binding.sections.is_empty();
+            let input_only = binding.input.is_some()
+                && binding.sources.is_empty()
+                && binding.sections.is_empty();
             binding.widget != "scene" && !input_only
         })
     }
@@ -214,6 +215,7 @@ impl RyeOsCore {
         self.data.source_epoch.clear();
         self.data.source_stored_epoch.clear();
         self.data.source_floor.clear();
+        self.data.source_subject_fingerprint.clear();
         self.data.timeline_sources.clear();
         self.deferred_source_fetches.clear();
         self.pending_effects
@@ -241,7 +243,7 @@ impl RyeOsCore {
                 *cursor = index;
                 true
             }
-            ViewLocalState::None => false,
+            ViewLocalState::None | ViewLocalState::Field(_) => false,
         }
     }
 
@@ -264,7 +266,7 @@ impl RyeOsCore {
                     folds.remove(&section)
                 }
             }
-            ViewLocalState::None => false,
+            ViewLocalState::None | ViewLocalState::Field(_) => false,
         }
     }
 
@@ -289,20 +291,23 @@ impl RyeOsCore {
         // tile: opening a different view REPLACES the lens in place rather
         // than splitting a second tile. Breadth comes from swapping the
         // single lens, never from arranging panes.
-        if self.workspace.tiling.mode == crate::surface::TilingModeSpec::SingleLens
-            && !self.workspace.center_is_empty()
+        let replaced = (self.workspace.tiling.mode == crate::surface::TilingModeSpec::SingleLens
+            && !self.workspace.center_is_empty())
+        .then(|| {
+            self.workspace
+                .tiles
+                .get(&self.workspace.focused_tile)
+                .map(|tile| tile.instance_key.clone())
+        })
+        .flatten();
+        if let Some(instance_key) = replaced
             && let Some(tile_id) = self.workspace.replace_focused_view(view.clone())
         {
-            let key = tile_id.0.to_string();
-            self.data.sources.remove(&key);
-            self.data.source_errors.remove(&key);
-            self.data.source_epoch.remove(&key);
-            self.data.source_stored_epoch.remove(&key);
-            self.data.timeline_sources.remove(&key);
-            let section_prefix = format!("{key}#section");
-            self.deferred_source_fetches
-                .retain(|source, _| source != &key && !source.starts_with(&section_prefix));
-            self.push_motion(RyeOsMotionEventVm::FocusChanged { tile_id: key });
+            self.invalidate_view_sources(&instance_key);
+            let tile_id_text = tile_id.0.to_string();
+            self.push_motion(RyeOsMotionEventVm::FocusChanged {
+                tile_id: tile_id_text,
+            });
             self.bump_generation();
             let effects = self.effects_for_view(&view);
             // The lens swapped subjects: eviction alone would let an
@@ -324,6 +329,11 @@ impl RyeOsCore {
         let Some(frame) = self.workspace.pop_lens_frame() else {
             return Vec::new();
         };
+        let replaced_instance = self
+            .workspace
+            .tiles
+            .get(&self.workspace.focused_tile)
+            .map(|tile| tile.instance_key.clone());
         // Restore the captured facet context by re-appending any facet whose
         // current value differs — last-writer-wins over the seat log, so the
         // fold returns to the pre-drill value without rewriting history.
@@ -337,6 +347,9 @@ impl RyeOsCore {
         }
         // Restore the view into the focused center tile, and the breadcrumb
         // label of the level being returned to.
+        if let Some(instance_key) = &replaced_instance {
+            self.invalidate_view_sources(instance_key);
+        }
         self.workspace.replace_focused_view(frame.view.clone());
         self.workspace.lens_label = frame.label.clone();
         self.push_motion(RyeOsMotionEventVm::FocusChanged {
@@ -356,26 +369,31 @@ impl RyeOsCore {
     }
 
     pub(crate) fn close_tile_or_empty(&mut self, tile_id: TileId) -> bool {
-        let source_key = tile_id.0.to_string();
-        let section_prefix = format!("{source_key}#section");
+        let Some(instance_key) = self
+            .workspace
+            .tiles
+            .get(&tile_id)
+            .map(|tile| tile.instance_key.clone())
+        else {
+            return false;
+        };
+        let tile_id_text = tile_id.0.to_string();
         if self.workspace.tile_ids().len() <= 1 {
-            if self.workspace.center_is_empty() || !self.workspace.tiles.contains_key(&tile_id) {
+            if self.workspace.center_is_empty() {
                 return false;
             }
+            self.invalidate_view_sources(&instance_key);
             self.push_motion(RyeOsMotionEventVm::TileExit {
-                tile_id: source_key.clone(),
+                tile_id: tile_id_text,
             });
             self.workspace.reset_to_empty();
-            self.deferred_source_fetches
-                .retain(|key, _| key != &source_key && !key.starts_with(&section_prefix));
             return true;
         }
+        self.invalidate_view_sources(&instance_key);
         if self.workspace.close_tile(tile_id) {
             self.push_motion(RyeOsMotionEventVm::TileExit {
-                tile_id: source_key.clone(),
+                tile_id: tile_id_text,
             });
-            self.deferred_source_fetches
-                .retain(|key, _| key != &source_key && !key.starts_with(&section_prefix));
             self.push_motion(RyeOsMotionEventVm::FocusChanged {
                 tile_id: self.workspace.focused_tile.0.to_string(),
             });
@@ -450,14 +468,18 @@ mod tests {
                 "views": {
                     "view:ryeos/ryeos/status": {
                         "widget": "sections",
+                        "sources": {
+                            "threads": { "ref": "service:threads/list" },
+                            "bundles": { "ref": "service:bundle/list" }
+                        },
                         "affordances": [{
                             "id": "aim-input",
                             "label": "Aim",
                             "invoke": { "plane": "ui", "facet": "input.route", "merge": { "thread": "{record.thread_id}" } }
                         }],
                         "sections": [
-                            { "title": "Threads", "source": { "ref": "service:threads/list", "collection": "threads" }, "projection": { "primary": "thread_id" }, "activate": "aim-input" },
-                            { "title": "Bundles", "source": { "ref": "service:bundle/list", "collection": "bundles" }, "projection": { "primary": "name" } }
+                            { "title": "Threads", "source_channel": "threads", "collection": "threads", "projection": { "primary": "thread_id" }, "activate": "aim-input" },
+                            { "title": "Bundles", "source_channel": "bundles", "collection": "bundles", "projection": { "primary": "name" } }
                         ]
                     }
                 }
@@ -468,12 +490,14 @@ mod tests {
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
         let tile = core.workspace.focused_tile;
         let key = tile.0.to_string();
+        let instance_key = core.workspace.tiles[&tile].instance_key.clone();
         core.data.sources.insert(
-            crate::ui::content::section_source_key(&key, 0),
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), "threads")
+                .encode(),
             serde_json::json!({ "threads": [ { "thread_id": "T-ab" }, { "thread_id": "T-cd" } ]}),
         );
         core.data.sources.insert(
-            crate::ui::content::section_source_key(&key, 1),
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key, "bundles").encode(),
             serde_json::json!({ "bundles": [ { "name": "ryeos" } ]}),
         );
 
@@ -545,9 +569,13 @@ mod tests {
                 "views": {
                     "view:ryeos/ryeos/status": {
                         "widget": "sections",
+                        "sources": {
+                            "threads": { "ref": "service:threads/list" },
+                            "bundles": { "ref": "service:bundle/list" }
+                        },
                         "sections": [
-                            { "title": "Threads", "source": { "ref": "service:threads/list", "collection": "threads" }, "projection": { "primary": "thread_id" } },
-                            { "title": "Bundles", "source": { "ref": "service:bundle/list", "collection": "bundles" }, "projection": { "primary": "name" } }
+                            { "title": "Threads", "source_channel": "threads", "collection": "threads", "projection": { "primary": "thread_id" } },
+                            { "title": "Bundles", "source_channel": "bundles", "collection": "bundles", "projection": { "primary": "name" } }
                         ]
                     }
                 }
@@ -558,12 +586,14 @@ mod tests {
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
         let tile = core.workspace.focused_tile;
         let key = tile.0.to_string();
+        let instance_key = core.workspace.tiles[&tile].instance_key.clone();
         core.data.sources.insert(
-            crate::ui::content::section_source_key(&key, 0),
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), "threads")
+                .encode(),
             serde_json::json!({ "threads": [ { "thread_id": "T-ab" }, { "thread_id": "T-cd" } ]}),
         );
         core.data.sources.insert(
-            crate::ui::content::section_source_key(&key, 1),
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key, "bundles").encode(),
             serde_json::json!({ "bundles": [ { "name": "ryeos" } ]}),
         );
 
@@ -764,6 +794,7 @@ mod tests {
         // through the surface library — scene backdrops and the foot input
         // are not lenses and are skipped.
         let session = BrowserSession {
+            ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
             session_id: "s".to_string(),
             surface_ref: "surface:ryeos/ryeos/lens".to_string(),
             user_principal_id: Some(format!("fp:{}", "ab".repeat(32))),
@@ -773,10 +804,10 @@ mod tests {
                     { "group": "Lenses", "views": ["view:a", "view:scene", "view:input", "view:b"] }
                 ],
                 "views": {
-                    "view:a": { "widget": "rows", "source": { "ref": "service:x", "params": {}, "collection": "rows" } },
+                    "view:a": { "widget": "rows", "sources": { "default": { "ref": "service:x", "params": {}, "collection": "rows" } } },
                     "view:scene": { "widget": "scene" },
                     "view:input": { "widget": "text", "input": { "id": "line" } },
-                    "view:b": { "widget": "rows", "source": { "ref": "service:x", "params": {}, "collection": "rows" } }
+                    "view:b": { "widget": "rows", "sources": { "default": { "ref": "service:x", "params": {}, "collection": "rows" } } }
                 }
             })),
             project_path: Some("/tmp/p".to_string()),
@@ -915,6 +946,103 @@ mod tests {
             event,
             RyeOsMotionEventVm::TileExit { tile_id: closed } if closed == &tile_id.0.to_string()
         )));
+    }
+
+    #[test]
+    fn closing_one_duplicate_view_cleans_only_its_source_instance() {
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        let view_ref = "view:test/shared";
+        seed_view(&mut core, view_ref);
+
+        core.add_center_tile(ViewSpec::bound(view_ref));
+        let closing_tile = core.workspace.focused_tile;
+        let closing_instance = core.workspace.tiles[&closing_tile].instance_key.clone();
+        core.add_center_tile(ViewSpec::bound(view_ref));
+        let surviving_tile = core.workspace.focused_tile;
+        let surviving_instance = core.workspace.tiles[&surviving_tile].instance_key.clone();
+
+        let closing_keys = [
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(
+                closing_instance.clone(),
+                "default",
+            )
+            .encode(),
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(
+                closing_instance.clone(),
+                "section-3",
+            )
+            .encode(),
+            crate::ui::source_key::RyeOsSourceInstanceKey::mention(
+                closing_instance.clone(),
+                "query",
+            )
+            .encode(),
+            crate::ui::source_key::RyeOsSourceInstanceKey::completion(
+                closing_instance.clone(),
+                "query",
+            )
+            .encode(),
+        ];
+        let surviving_key = crate::ui::source_key::RyeOsSourceInstanceKey::named(
+            surviving_instance.clone(),
+            "default",
+        )
+        .encode();
+
+        for key in closing_keys.iter().chain(std::iter::once(&surviving_key)) {
+            core.data
+                .sources
+                .insert(key.clone(), serde_json::json!({ "key": key }));
+            core.data
+                .source_errors
+                .insert(key.clone(), "error".to_string());
+            core.data.source_epoch.insert(key.clone(), 4);
+            core.data.source_stored_epoch.insert(key.clone(), 3);
+            core.data.source_floor.insert(key.clone(), 2);
+        }
+        core.data.timeline_sources.insert(
+            closing_keys[0].clone(),
+            crate::ui::model::RyeOsTimelineSourceCache {
+                entries: Vec::new(),
+                indents: Vec::new(),
+                sources: Vec::new(),
+                arrivals: Vec::new(),
+                sections: Vec::new(),
+                collapsible: std::collections::BTreeSet::new(),
+            },
+        );
+        core.deferred_source_fetches.insert(
+            closing_keys[2].clone(),
+            crate::ui::model::DeferredSourceFetch {
+                source_ref: "service:test/source".to_string(),
+                params: serde_json::json!({}),
+            },
+        );
+
+        assert!(core.close_tile_or_empty(closing_tile));
+        assert!(core.workspace.tiles.contains_key(&surviving_tile));
+        for key in &closing_keys {
+            assert!(!core.data.sources.contains_key(key));
+            assert!(!core.data.source_errors.contains_key(key));
+            assert!(!core.data.source_epoch.contains_key(key));
+            assert!(!core.data.source_stored_epoch.contains_key(key));
+            assert!(!core.data.source_floor.contains_key(key));
+            assert!(!core.data.timeline_sources.contains_key(key));
+            assert!(!core.deferred_source_fetches.contains_key(key));
+        }
+        assert!(core.data.sources.contains_key(&surviving_key));
+        assert!(core.data.source_errors.contains_key(&surviving_key));
+        assert!(core.data.source_epoch.contains_key(&surviving_key));
+        assert!(core.data.source_stored_epoch.contains_key(&surviving_key));
+        assert!(core.data.source_floor.contains_key(&surviving_key));
+        assert!(core.pending_effects.values().all(|effect| {
+            !matches!(effect, RyeOsEffectKind::FetchSource { tile_id, .. }
+                if crate::ui::source_key::RyeOsSourceInstanceKey::decode(tile_id)
+                    .is_some_and(|key| key.belongs_to(&closing_instance)))
+        }));
+        assert!(core.pending_effects.values().any(|effect| {
+            matches!(effect, RyeOsEffectKind::FetchSource { tile_id, .. } if tile_id == &surviving_key)
+        }));
     }
 
     #[test]

@@ -17,3 +17,10 @@ pub mod text_surface;
 pub mod theme;
 pub mod ui;
 pub mod workspace;
+
+/// Exact signed UI binding contract understood by this client build.
+///
+/// Daemon, signed content, web, and terminal cut over together. There is no
+/// compatibility parser: a session advertising any other revision is refused
+/// before embedded view bindings are decoded or source effects are emitted.
+pub const UI_BINDING_CONTRACT_REVISION: &str = "ryeos.ui.binding.v2";

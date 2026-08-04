@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-13T10:38:44Z:19eb22ad51f0de5459fd81a17191e6101ff38c4f3d63bb6190fb629120525600:QEHiYrQIU6temEgTxvurZTjsS5eftTsqXTnOOHQZ/fsrt7x14DWsSJYuEC6zddap28MVYGV6v18xDa40KBaZAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:25Z:0995c74f3d72fbc8e5d6c99100550be405470086e40df12331b1bb5150f64f94:/htMFFn/5MxmQY/RENvN5LfzaaWLPBezfT1dISbPwkD/Ckb4K3LeUSft47Spla00/S7G6jr4YEdNR8BTyIoUDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-transcript
 title: Transcript
 version: "1.0.0"
@@ -8,11 +8,12 @@ description: >-
   artifacts, receipts, and raw event detail.
 
 widget: timeline
-source:
-  ref: service:events/chain_replay
-  params:
-    chain_root_id: "@facet:input.route.chain_root"
-  collection: events
+sources:
+  default:
+    ref: service:events/chain_replay
+    params:
+      chain_root_id: "@facet:input.route.chain_root"
+    collection: events
 projections:
   expand:
     fields:

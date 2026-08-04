@@ -18,9 +18,33 @@ use crate::expression::{
 pub struct HookDefinition {
     pub id: String,
     pub event: String,
+    pub result: HookResultMode,
     #[serde(default, skip_serializing_if = "ExpressionCondition::is_absent")]
     pub condition: ExpressionCondition,
     pub action: Value,
+}
+
+/// What a successful hook leaf result is allowed to mean.
+///
+/// This is required authoring data: there is deliberately no default because
+/// silently changing a hook between control and evidence would change both
+/// execution semantics and its durable dispatch identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookResultMode {
+    Discard,
+    Control,
+    Observation,
+}
+
+impl HookResultMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Discard => "discard",
+            Self::Control => "control",
+            Self::Observation => "observation",
+        }
+    }
 }
 
 /// Deterministic source precedence for runtime hooks. A source owns its layer;
@@ -189,6 +213,7 @@ pub struct CompiledHook {
     id: String,
     event: String,
     layer: HookLayer,
+    result: HookResultMode,
     condition: CompiledHookCondition,
     action: CompiledActionTemplate,
     references: ReferenceSet,
@@ -206,6 +231,10 @@ impl CompiledHook {
 
     pub fn layer(&self) -> HookLayer {
         self.layer
+    }
+
+    pub fn result_mode(&self) -> HookResultMode {
+        self.result
     }
 
     pub fn condition(&self) -> &CompiledHookCondition {
@@ -343,6 +372,7 @@ pub fn compile_hooks(
         let HookDefinition {
             id,
             event,
+            result,
             condition: source_condition,
             action: source_action,
         } = layered.definition;
@@ -361,6 +391,14 @@ pub fn compile_hooks(
         let schema = by_event.get(event.as_str()).copied().ok_or_else(|| {
             HookCompilationError::hook(index, &id, &event, "event has no HookContextSchema")
         })?;
+        if layered.layer.is_observer_only() && result == HookResultMode::Control {
+            return Err(HookCompilationError::hook(
+                index,
+                &id,
+                &event,
+                "infrastructure hooks cannot declare result `control`",
+            ));
+        }
         let condition_field = format!("hook[{index}] (id={id}).condition");
         let condition =
             compile_condition(source_condition, &condition_field, limits).map_err(|error| {
@@ -393,6 +431,7 @@ pub fn compile_hooks(
             id,
             event,
             layer: layered.layer,
+            result,
             condition,
             action,
             references,
@@ -587,22 +626,22 @@ mod tests {
             std::fs::create_dir_all(directory).unwrap();
         }
         let runtime_conditions = r#"
-builtin_hooks: [{id: builtin, event: after_step, action: {item_id: tool:test/noop, ref_bindings: {}}}]
-infra_hooks: [{id: infra, event: after_step, action: {item_id: tool:test/noop, ref_bindings: {}}}]
-context_hooks: [{id: context, event: after_step, action: {item_id: tool:test/noop, ref_bindings: {}}}]
+builtin_hooks: [{id: builtin, event: after_step, result: control, action: {item_id: tool:test/noop, ref_bindings: {}}}]
+infra_hooks: [{id: infra, event: after_step, result: discard, action: {item_id: tool:test/noop, ref_bindings: {}}}]
+context_hooks: [{id: context, event: after_step, result: control, action: {item_id: tool:test/noop, ref_bindings: {}}}]
 "#;
         std::fs::write(
             runtime_config.join("hook_conditions.yaml"),
             sign_and_trust(runtime_conditions, &trusted_keys),
         )
         .unwrap();
-        let project_config = "hooks: [{id: project, event: after_step, action: {item_id: 'tool:test/noop', ref_bindings: {}}}]\n";
+        let project_config = "hooks: [{id: project, event: after_step, result: control, action: {item_id: 'tool:test/noop', ref_bindings: {}}}]\n";
         std::fs::write(
             project_hooks.join("hooks.yaml"),
             sign_and_trust(project_config, &trusted_keys),
         )
         .unwrap();
-        let operator_config = "hooks: [{id: operator, event: after_step, action: {item_id: 'tool:test/noop', ref_bindings: {}}}]\n";
+        let operator_config = "hooks: [{id: operator, event: after_step, result: control, action: {item_id: 'tool:test/noop', ref_bindings: {}}}]\n";
         std::fs::write(
             operator_hooks.join("hooks.yaml"),
             sign_and_trust(operator_config, &trusted_keys),
@@ -626,6 +665,7 @@ context_hooks: [{id: context, event: after_step, action: {item_id: tool:test/noo
         let hook = |id: &str, event: &str| HookDefinition {
             id: id.to_string(),
             event: event.to_string(),
+            result: HookResultMode::Discard,
             condition: ExpressionCondition::Absent,
             action: serde_json::json!({"item_id": "tool:test/noop"}),
         };
@@ -649,6 +689,7 @@ context_hooks: [{id: context, event: after_step, action: {item_id: tool:test/noo
             operator: vec![HookDefinition {
                 id: "typo".to_string(),
                 event: "graph_finishd".to_string(),
+                result: HookResultMode::Discard,
                 condition: ExpressionCondition::Absent,
                 action: serde_json::json!({"item_id": "tool:test/noop"}),
             }],
@@ -681,9 +722,55 @@ context_hooks: [{id: context, event: after_step, action: {item_id: tool:test/noo
 
     #[test]
     fn hook_definition_deserializes() {
-        let yaml = "id: test\nevent: start\naction:\n  primary: execute\n";
+        let yaml = "id: test\nevent: start\nresult: observation\naction:\n  primary: execute\n";
         let hook: HookDefinition = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(hook.id, "test");
         assert_eq!(hook.event, "start");
+        assert_eq!(hook.result, HookResultMode::Observation);
+    }
+
+    #[test]
+    fn hook_result_mode_is_required_and_closed() {
+        let omitted = "id: test\nevent: start\naction: {}\n";
+        let unknown = "id: test\nevent: start\nresult: inspect\naction: {}\n";
+        assert!(serde_yaml::from_str::<HookDefinition>(omitted).is_err());
+        assert!(serde_yaml::from_str::<HookDefinition>(unknown).is_err());
+        for (wire, expected) in [
+            ("discard", HookResultMode::Discard),
+            ("control", HookResultMode::Control),
+            ("observation", HookResultMode::Observation),
+        ] {
+            let yaml = format!("id: test\nevent: start\nresult: {wire}\naction: {{}}\n");
+            assert_eq!(
+                serde_yaml::from_str::<HookDefinition>(&yaml)
+                    .unwrap()
+                    .result,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn infrastructure_hook_cannot_compile_as_control() {
+        let error = compile_hooks(
+            HookSources {
+                infrastructure: vec![HookDefinition {
+                    id: "infra-control".to_string(),
+                    event: "after_step".to_string(),
+                    result: HookResultMode::Control,
+                    condition: ExpressionCondition::Absent,
+                    action: serde_json::json!({"item_id": "tool:test/noop"}),
+                }],
+                ..HookSources::default()
+            },
+            &[HookContextSchema::new("after_step", ["turn"])],
+            &CompilationLimits::default(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot declare result `control`")
+        );
     }
 }

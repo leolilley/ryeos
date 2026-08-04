@@ -9,6 +9,7 @@ description = "RyeOS UI/browser session handlers and session event substrate"
 anyhow = { workspace = true }
 async-stream = { workspace = true }
 axum = { workspace = true, features = ["default"] }
+base64 = { workspace = true }
 lillux = { workspace = true }
 rand = { workspace = true }
 ryeos-api = { workspace = true }

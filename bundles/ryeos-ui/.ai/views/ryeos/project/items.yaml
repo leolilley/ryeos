@@ -1,16 +1,17 @@
-# ryeos:signed:2026-07-09T06:05:20Z:48ff46d70c895e925084203c05100c47b64a19430a1d4db00b498fb27f76810a:DYO1Xzd0cKk0lSdnjua1kAOE1lDi7AlqY1vWoDOrjCp7kS9vWzKyGXoEr8tzOJ9lJ1q1e8xogp/nWYbiNh5aDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:25Z:3f324e5e8756da022381c654514a0d18f2802e0b8109dbd8a355ab3adda8c6d7:ZQKTuaRKcifVnMkS4L/eUI91m3IPVa8D9LIINYu7vKGk/trwIi8Lp1cdYxb6B3c0WdL5cp+khlyDPIVuAP9dAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-items
 title: Items
 version: "1.0.0"
 description: Signed content visible from the active project
 
 widget: table
-source:
-  ref: service:ui/ryeos-ui/items/list
-  params:
-    limit: 500
-    project_path: ""
-  collection: items
+sources:
+  default:
+    ref: service:ui/ryeos-ui/items/list
+    params:
+      limit: 500
+      project_path: ""
+    collection: items
 projections:
   columns:
     - label: item

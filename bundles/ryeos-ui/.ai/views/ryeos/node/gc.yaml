@@ -1,11 +1,12 @@
-# ryeos:signed:2026-07-09T06:05:20Z:4cd1ad3bb6e2eafaf131eb3300623a875c10de65821983c35e679a86a617a8b9:LFZE7Z8qJTgwlZlm7sIES0iADPrmRJna/fV98FVCkG0S/rV94l17Dxv4T+5Q0GIG/KuSu12SkdshqqAX0IwJBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:25Z:1c99e62c0912046ab41df2a233044d6bc6458bfbd54fe73cfc5fb2ce4c844975:5hCN30mUCsi/QvEh5BkYXbyZPk8uYUkn91fVKtHpwf8boi3532UFKqcmREdlOpyBNNIMGDrTnBmmPGC1LAFFBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-gc
 title: Garbage Collection
 version: "1.0.0"
 description: Garbage collection state for the active project context
 
 widget: key_value
-source:
-  ref: service:ui/ryeos-ui/gc/status
-  params:
-    project_path: ""
+sources:
+  default:
+    ref: service:ui/ryeos-ui/gc/status
+    params:
+      project_path: ""

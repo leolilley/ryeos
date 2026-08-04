@@ -1,14 +1,15 @@
-# ryeos:signed:2026-07-09T06:05:19Z:916ce9e7c45d257619fecd44b4711029f001ed5d448cf511955a67d9114fab23:6ORcRsbJTXx8wMDK2vPo0JhWJ5P90Kl1ouc99xvIKn7+4vYFSYEXvxoZ+h7fu7ZB1x/60ViZ9IyZ5RVES01qCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:25Z:979110189570927efa2b8f1afe15da08fb4159383952ce86a4d717ba7676f118:Mx/Fim28XY9xidWOXaursRGnSzhR4JmF951S4aCt8q2Sfn6mF7mD6Dvi3z3AxMQgkybKohDB8AEpoZw+xVcBBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: commands-grammar
 title: Command Grammar
 version: "1.0.0"
 description: The node's command grammar (the spellbook) - what operator text can do
 
 widget: rows
-source:
-  ref: service:commands/list
-  params: {}
-  collection: commands
+sources:
+  default:
+    ref: service:commands/list
+    params: {}
+    collection: commands
 projections:
   primary: name
   meta: description

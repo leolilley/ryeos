@@ -1,0 +1,13 @@
+# ryeos:signed:2026-08-04T09:35:28Z:adfb85b1a64738d9a0d124a3d38d6f64607e56ccc7cc8f58274bc5b1dfaeec3e:LYvF6KN1ZMtDSDk20NnznX/nTjK/UipLN20Fa115rHDbbb/WwOGpfC5l7QAb61zyp09ABxY+jiAGaWcdBvZMCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/ryeos-ui/field/project
+path: /ui/api/ryeos-ui/field/project
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 10000
+  concurrent_max: 32
+response:
+  mode: json
+  source: "service:ui/ryeos-ui/field/project"

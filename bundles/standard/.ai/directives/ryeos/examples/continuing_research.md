@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-23T15:25:30Z:09b041ebec07bfb6ad3b4a8a9c6a1cbbf04cecfda31803769435b286de5f9318:WSkkHG/s4zM3aQd+/aquhmQElzlpbDyZXUqfQtEisoUUtmWlJaUMqdHGh/e2KZc3Vsb4L/qcJPC9C/oKTdWyCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-04T08:52:12Z:42fe721270050add2d7f28f063dd13bfe6d394640718ea58fced36d777b6336f:kh+SPoxngFSyu4A65IINI+DjPBeS3oFCymUSvYB2rCOH3sWStWKnnlYYsImyqBu1RNhIiidVkkWTOJhFZ83sAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Example long-running directive that self-continues at the context boundary and seeds the successor with a summary hook."
 version: "1.0.0"
@@ -18,6 +18,7 @@ requires:
 hooks:
   - id: summarize-before-continuing
     event: continuation
+    result: control
     action:
       item_id: directive:ryeos/examples/summarize_continuation
       thread: inline

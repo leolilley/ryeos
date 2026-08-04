@@ -13,3 +13,4 @@ toml = { workspace = true }
 unicode-width = "0.2"
 bitflags = { version = "2", features = ["serde"] }
 thiserror = { workspace = true }
+sha2 = { workspace = true }

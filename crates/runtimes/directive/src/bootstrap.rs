@@ -478,13 +478,16 @@ fn yaml_kind(v: &serde_yaml::Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_runtime::{ExpressionCondition, HookDefinition, HookLayer, HookSources};
+    use ryeos_runtime::{
+        ExpressionCondition, HookDefinition, HookLayer, HookResultMode, HookSources,
+    };
     use serde_json::json;
 
     fn hook(id: &str, event: &str, action: serde_json::Value) -> HookDefinition {
         HookDefinition {
             id: id.to_string(),
             event: event.to_string(),
+            result: HookResultMode::Control,
             condition: ExpressionCondition::Absent,
             action,
         }

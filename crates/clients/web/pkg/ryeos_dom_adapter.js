@@ -3,8 +3,10 @@ import { opticFrame, statusLine, ryeosHome, topStatusLine } from "/ui/assets/rye
 import { ryeosWorkspace, tileIdsForNode } from "/ui/assets/ryeos_components_workspace.js";
 import { applyWorkspaceMotion, captureWorkspaceMotion } from "/ui/assets/ryeos_motion.js";
 import { applyPresentationState, presentationState } from "/ui/assets/ryeos_presentation_state.js";
+import { beginFieldFrame, endFieldFrame } from "/ui/assets/ryeos_components_field.js";
 
 export function renderDom(root, vm, scene, dispatchUi, shell = {}) {
+  beginFieldFrame();
   root.className = "ryeos-app ryeos-os";
   // Surface-declared border treatment (thick | thin | hidden | none);
   // CSS maps it onto tiles, dock tiles, and panels.
@@ -32,6 +34,7 @@ export function renderDom(root, vm, scene, dispatchUi, shell = {}) {
   while (home.nextSibling) home.nextSibling.remove();
   root.append(...layers);
   applyWorkspaceMotion(root, motionSnapshot, currentTileIds, presentation.currentMotion);
+  endFieldFrame();
 }
 
 function activeOverlayState(vm) {

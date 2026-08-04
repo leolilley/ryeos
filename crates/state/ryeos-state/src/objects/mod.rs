@@ -25,6 +25,7 @@ pub mod project_snapshot;
 pub mod project_snapshot_policy;
 pub mod project_tree;
 pub mod source_manifest;
+pub mod state_manifest;
 pub mod thread_event;
 pub mod thread_snapshot;
 
@@ -56,6 +57,10 @@ pub use project_snapshot::ProjectSnapshot;
 pub use project_snapshot_policy::ProjectSnapshotPolicy;
 pub use project_tree::ProjectTree;
 pub use source_manifest::SourceManifest;
+pub use state_manifest::{
+    MAX_STATE_MANIFEST_OBJECTS, STATE_MANIFEST_KIND, STATE_MANIFEST_SCHEMA_VERSION, StateManifest,
+    StateManifestBlob,
+};
 pub use thread_event::{EventDurability, MAX_THREAD_EVENT_SERIALIZED_BYTES, ThreadEvent};
 pub use thread_snapshot::{
     CapturedEffectiveTrustClass, CapturedItemSpace, CapturedItemTrustClass,

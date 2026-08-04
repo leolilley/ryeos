@@ -5,7 +5,7 @@
 //! the `LayoutTree` renderers consume. Zero tiles means an empty center:
 //! the center renders nothing and the backdrop scene shows behind it.
 
-use crate::ids::TileId;
+use crate::ids::{RyeOsViewInstanceKey, TileId};
 use crate::layout::{LayoutTree, Rect, SplitAxis, layout_rects};
 use crate::surface::{ArrangeSpec, InsertSpec, SideSpec, TilingModeSpec, TilingSpec};
 use serde::{Deserialize, Serialize};
@@ -51,6 +51,78 @@ pub struct RowFlash {
     pub tone: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct FieldEventRefState {
+    pub chain_root_id: String,
+    pub chain_seq: u64,
+    pub event_hash: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum FieldCursorState {
+    #[default]
+    Live,
+    BraidCut {
+        anchor: FieldEventRefState,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldPlaybackState {
+    pub playing: bool,
+    #[serde(default)]
+    pub awaiting: Option<FieldEventRefState>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldExpansionState {
+    pub max_depth: u16,
+    pub max_entities: u32,
+    #[serde(default)]
+    pub continuation_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldFingerprintState {
+    pub id: String,
+    pub fact_kind: String,
+    pub fingerprint: String,
+    pub status: Option<String>,
+    pub label: Option<String>,
+    pub tone: Option<String>,
+    #[serde(default)]
+    pub traits: Value,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldChangeState {
+    pub id: String,
+    pub kind: String,
+    pub at_ms: u64,
+    pub tone: Option<String>,
+    pub prior_fingerprint: Option<String>,
+    pub fingerprint: Option<String>,
+    pub tombstone_label: Option<String>,
+    #[serde(default)]
+    pub tombstone_traits: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FieldLocalState {
+    pub selected: Option<String>,
+    pub collapsed_groups: BTreeSet<String>,
+    pub hidden_layers: BTreeSet<String>,
+    pub compare: Vec<String>,
+    pub cursor: FieldCursorState,
+    pub playback: FieldPlaybackState,
+    pub query: String,
+    pub search_match: Option<String>,
+    pub expansions: BTreeMap<String, FieldExpansionState>,
+    pub change_fingerprints: BTreeMap<String, FieldFingerprintState>,
+    pub changes: BTreeMap<String, FieldChangeState>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum ViewLocalState {
     GenericList {
@@ -75,6 +147,7 @@ pub enum ViewLocalState {
         #[serde(default)]
         changed_rows: BTreeMap<String, RowFlash>,
     },
+    Field(FieldLocalState),
     #[default]
     None,
 }
@@ -132,6 +205,7 @@ impl ViewSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TileState {
+    pub instance_key: RyeOsViewInstanceKey,
     pub view: ViewSpec,
     pub local: ViewLocalState,
 }
@@ -271,6 +345,7 @@ impl Workspace {
             tiles.insert(
                 id,
                 TileState {
+                    instance_key: RyeOsViewInstanceKey::workspace_tile(id),
                     local: view.initial_local_state(),
                     view,
                 },
@@ -382,6 +457,7 @@ impl Workspace {
         self.tiles.insert(
             id,
             TileState {
+                instance_key: RyeOsViewInstanceKey::workspace_tile(id),
                 local: view.initial_local_state(),
                 view,
             },
@@ -753,6 +829,30 @@ mod tests {
                 ..
             })
         ));
+        assert_eq!(
+            ws.tiles.get(&new_id).map(|tile| tile.instance_key.as_str()),
+            Some(format!("tile:{}", new_id.0).as_str())
+        );
+    }
+
+    #[test]
+    fn duplicate_view_refs_have_distinct_stable_instance_keys() {
+        let mut ws = Workspace::from_tiling(
+            TilingSpec::default(),
+            vec![bound("view:test/same"), bound("view:test/same")],
+        );
+        let ids = ws.tile_ids();
+        let first = ws.tiles.get(&ids[0]).unwrap().instance_key.clone();
+        let second = ws.tiles.get(&ids[1]).unwrap().instance_key.clone();
+        assert_ne!(first, second);
+
+        ws.focused_tile = ids[0];
+        ws.replace_focused_view(bound("view:test/replaced"));
+        assert_eq!(ws.tiles.get(&ids[0]).unwrap().instance_key, first);
+
+        assert!(ws.close_tile(ids[1]));
+        assert_eq!(ws.tiles.get(&ids[0]).unwrap().instance_key, first);
+        assert!(!ws.tiles.values().any(|tile| tile.instance_key == second));
     }
 
     #[test]

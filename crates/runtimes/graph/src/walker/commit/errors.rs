@@ -67,8 +67,22 @@ impl Walker {
             .await;
         }
         for observation in &effects.observations {
-            self.emit_dispatch_observation(current, step, observation)
-                .await;
+            if let Err(observation_error) = self
+                .emit_dispatch_observation(graph_run_id, current, step, observation)
+                .await
+            {
+                return self
+                    .commit_observation_failure(
+                        graph_run_id,
+                        step,
+                        state,
+                        suppressed_errors,
+                        guard,
+                        inputs,
+                        observation_error,
+                    )
+                    .await;
+            }
         }
 
         if let Some(cost) = cost {
@@ -257,8 +271,22 @@ impl Walker {
         .await;
 
         if let Some(observation) = &observation {
-            self.emit_dispatch_observation(current, step, observation)
-                .await;
+            if let Err(observation_error) = self
+                .emit_dispatch_observation(graph_run_id, current, step, observation)
+                .await
+            {
+                return self
+                    .commit_observation_failure(
+                        graph_run_id,
+                        step,
+                        state,
+                        suppressed_errors,
+                        guard,
+                        inputs,
+                        observation_error,
+                    )
+                    .await;
+            }
         }
 
         // A cost-bearing child that then errored (or whose assign

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-09T01:18:09Z:bac8ec5fd33b6458960cea96557a13e7da4237ec918a6c2f7ddd48237343a3b6:7yCm4QbBLpJjhZOLHLNPyHPuGrIFXvPZh4rk+JRWcTONh/niaMpLXGje/Ij38wU+Cml26VhsWER99yBfy0ScBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:26Z:44894f666d42c9ca72e1830ae3e81f77d14c56ab1669742548013ac0e006d43f:oo+4IFr9JVylc7lr0rYwsb8sRyAm6jaoatxO4IFxxXFrcP5NxlwL/GSE/+W8bBN3sp8gaUIOchNqtYO8sLXyAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-status
 version: "1.0.0"
 description: >-
@@ -7,6 +7,16 @@ description: >-
   read and act from: Enter on a thread aims the foot input at it.
 
 widget: sections
+sources:
+  threads:
+    ref: service:threads/list
+    params: {}
+  bundles:
+    ref: service:bundle/list
+    params: {}
+  node:
+    ref: service:node/status
+    params: {}
 affordances:
   - id: aim-input
     label: Aim input here
@@ -17,10 +27,8 @@ affordances:
         thread: "{record.thread_id}"
 sections:
   - title: Threads
-    source:
-      ref: service:threads/list
-      params: {}
-      collection: threads
+    source_channel: threads
+    collection: threads
     projection:
       primary: item_ref
       meta: status
@@ -35,17 +43,13 @@ sections:
         default: neutral
     activate: aim-input
   - title: Bundles
-    source:
-      ref: service:bundle/list
-      params: {}
-      collection: bundles
+    source_channel: bundles
+    collection: bundles
     projection:
       primary: name
       meta: version
   - title: Node
-    source:
-      ref: service:node/status
-      params: {}
+    source_channel: node
     projection:
       primary: version
       meta: site_id

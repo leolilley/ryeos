@@ -19,8 +19,9 @@ use crate::state_store::{
     ChildLineageAppendOutcome,
     FinalizeCreatedUnattachedOutcome as StoreFinalizeCreatedUnattachedOutcome,
     FinalizeIfNonterminalOutcome as StoreFinalizeIfNonterminalOutcome, FinalizeThreadRecord,
-    NewArtifactRecord, NewEventRecord, NewThreadRecord, PersistedEventRecord, StateStore,
-    ThreadArtifactRecord, ThreadDetail, ThreadEdgeRecord, ThreadListItem, ThreadResultRecord,
+    NewArtifactRecord, NewEventRecord, NewThreadRecord, PersistedEventRecord,
+    StateAnchorPublication, StateAnchorPublishParams, StateStore, ThreadArtifactRecord,
+    ThreadDetail, ThreadEdgeRecord, ThreadListItem, ThreadResultRecord,
 };
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{
@@ -53,7 +54,7 @@ pub use direct_execution::{
 };
 #[cfg(test)]
 use sealed_request::SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION;
-pub use sealed_request::SealedRootExecutionRequest;
+pub use sealed_request::{AdmittedProgramSubject, SealedRootExecutionRequest};
 
 use validation::{
     normalize_terminal_status, validate_kind, validate_launch_mode, validate_thread_id_format,
@@ -4861,6 +4862,18 @@ impl ThreadLifecycleService {
         )?;
         self.publish_records(std::slice::from_ref(&persisted));
         Ok(artifact)
+    }
+
+    /// Materialize one opaque restore closure and append its conforming anchor
+    /// milestone under a single state mutation guard. The runtime cannot forge
+    /// this event through the ordinary append lane.
+    pub fn publish_state_anchor(
+        &self,
+        params: &StateAnchorPublishParams,
+    ) -> Result<StateAnchorPublication> {
+        let publication = self.state_store.publish_state_anchor(params)?;
+        self.publish_records(std::slice::from_ref(&publication.event));
+        Ok(publication)
     }
 
     /// Append caller-supplied events to a running thread, then publish the

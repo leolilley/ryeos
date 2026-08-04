@@ -1,4 +1,5 @@
 import { el, textEl } from "/ui/assets/ryeos_components_primitives.js";
+import { fieldComponent } from "/ui/assets/ryeos_components_field.js";
 
 const atlasViewport = {
   panX: 0,
@@ -82,6 +83,7 @@ function dockTile(dockVm, dispatchUi) {
   if (!dockVm) return null;
   const edge = dockVm.edge || "bottom";
   const tile = el("aside", `ryeos-dock-tile ${edge}${dockVm.focused ? " focused" : ""}`);
+  tile.dataset.viewInstanceKey = dockVm.instance_key || "";
   tile.__dockSize = dockVm.size;
   tile.addEventListener("mousedown", (event) => {
     if (event.target.closest("button,input,select,textarea,a")) return;
@@ -101,7 +103,7 @@ function dockView(instanceVm, dispatchUi) {
   if (instanceVm.input) {
     body.append(inputDock(instanceVm.input, dispatchUi));
   } else {
-    body.append(view(instanceVm.view || {}, dispatchUi));
+    body.append(view(instanceVm.view || {}, instanceVm.instance_key || "", dispatchUi));
   }
   return body;
 }
@@ -182,6 +184,7 @@ function layoutNode(node, dispatchUi, motion = []) {
   }
   const tile = el("section", `ryeos-tile${node.focused ? " focused" : ""}`);
   if (node.chrome_hidden) tile.classList.add("chrome-hidden");
+  tile.dataset.viewInstanceKey = node.instance_key || "";
   tile.dataset.tileId = node.tile_id || "";
   const motionName = motionForTile(node, motion);
   if (motionName) tile.dataset.motion = motionName;
@@ -196,9 +199,9 @@ function layoutNode(node, dispatchUi, motion = []) {
   if (node.input) {
     tile.append(chrome, inputDock(node.input, dispatchUi));
   } else if (node.chrome_hidden) {
-    tile.append(view(node.view || {}, dispatchUi));
+    tile.append(view(node.view || {}, node.instance_key || "", dispatchUi));
   } else {
-    tile.append(chrome, view(node.view || {}, dispatchUi), viewFooter(node.view || {}));
+    tile.append(chrome, view(node.view || {}, node.instance_key || "", dispatchUi), viewFooter(node.view || {}));
   }
   return tile;
 }
@@ -212,9 +215,12 @@ function motionForTile(node, motion) {
   return "";
 }
 
-function view(viewVm, dispatchUi) {
+function view(viewVm, instanceKey, dispatchUi) {
   const body = el("div", "ryeos-tile-body");
   switch (viewVm.type) {
+    case "field":
+      body.append(fieldComponent(viewVm.field || {}, instanceKey, dispatchUi));
+      break;
     case "text":
       body.append(textView(viewVm));
       break;

@@ -29,6 +29,7 @@ use crate::state::get_ui_state;
 #[derive(Debug, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Response {
+    pub ui_binding_contract_revision: &'static str,
     pub session_id: String,
     pub surface_ref: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,6 +97,7 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
     });
 
     let response = Response {
+        ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION,
         session_id: session.session_id.clone(),
         surface_ref,
         effective_surface,

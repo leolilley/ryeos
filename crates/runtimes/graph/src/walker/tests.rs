@@ -2812,6 +2812,7 @@ config:
   hooks:
     - id: observe_retry
       event: graph_step_completed
+      result: discard
       condition: 'status == "retry"'
       action: {item_id: "tool:test/observe_retry", ref_bindings: {}}
   nodes:
@@ -2962,6 +2963,7 @@ config:
   hooks:
     - id: notify
       event: graph_completed
+      result: discard
       action: {item_id: "tool:test/notify", ref_bindings: {}, params: {}}
   nodes:
     done:
@@ -3112,8 +3114,8 @@ category: test
 config:
   start: done
   hooks:
-    - {id: first, event: graph_completed, action: {item_id: "tool:test/one", ref_bindings: {}}}
-    - {id: overflow, event: graph_completed, action: {item_id: "tool:test/two", ref_bindings: {}}}
+    - {id: first, event: graph_completed, result: discard, action: {item_id: "tool:test/one", ref_bindings: {}}}
+    - {id: overflow, event: graph_completed, result: discard, action: {item_id: "tool:test/two", ref_bindings: {}}}
   nodes:
     done: {node_type: return}
 "#,
@@ -3159,8 +3161,8 @@ category: test
 config:
   start: act
   hooks:
-    - {id: first, event: graph_started, action: {item_id: "tool:test/one", ref_bindings: {}}}
-    - {id: overflow, event: graph_started, action: {item_id: "tool:test/two", ref_bindings: {}}}
+    - {id: first, event: graph_started, result: discard, action: {item_id: "tool:test/one", ref_bindings: {}}}
+    - {id: overflow, event: graph_started, result: discard, action: {item_id: "tool:test/two", ref_bindings: {}}}
   nodes:
     act:
       action: {item_id: "tool:test/must-not-run", ref_bindings: {}}
@@ -3209,7 +3211,7 @@ category: test
 config:
   start: done
   hooks:
-    - {id: once, event: graph_started, action: {item_id: "tool:test/once", ref_bindings: {}}}
+    - {id: once, event: graph_started, result: discard, action: {item_id: "tool:test/once", ref_bindings: {}}}
   nodes:
     done: {node_type: return}
 "#,
