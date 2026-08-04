@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-03T06:49:18Z:91c1d8e436b9bc4fb08434e39c93eb337b39e65a5f86ac3d3b0cb5f275bf4bff:2HSsAOuP0tnYTRzC0XH3EYqGxeUZfWqXh1J9buyrlAr/WkOPUhbEmamf39QKEAIv/rAubLnxsOEt5sPtIjdOAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-03T10:15:15Z:115b0f7c315f38ca0b6c0cc977fe4b3624b9d46bea87bf9059c272333868f09c:4DqJ1IlJqrHqSdHkDxbVxFzN4GSFTrOrsKHDyQkPflRDsS0qg4y7GeZOANlU7UV1cxVfin9EpUYJq0lvaFHUDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/engine
 tags: [latency, profiling, observability, streaming, providers, caching]
-version: "1.1.0"
+version: "1.2.0"
 description: >
   How to build, measure, and interpret RyeOS latency without confusing launch,
   provider, reasoning, tool, and downstream delivery time.
@@ -38,13 +38,21 @@ scripts/populate-bundles.sh \
   --key .dev-keys/PUBLISHER_DEV.pem \
   --owner ryeos-dev \
   --bundle-set standard \
-  --latency-profiling
+  --build-profile latency-profiling \
+  --all
 scripts/pkg/install-local-direct.sh --trust-source-publishers
 ```
 
-Do not ship profiling binaries as an accidental release artifact. A runtime
-emits `latency_profiling_enabled`, and the daemon captures it as
-`runtime_child_observation_record`, so a benchmark can prove which build ran.
+The closed build profile is an artifact property, never runtime environment
+configuration. `ryeosd build-info --profile` reports the profile compiled into
+the daemon. Container artifacts additionally carry the matching
+`io.ryeos.build-profile` OCI label and verify the binary value while building.
+Official release qualification rejects any profile other than `release`.
+
+Do not ship profiling binaries as an accidental release artifact. A profiled
+runtime emits `latency_profiling_enabled`, and the daemon captures it as
+`runtime_child_observation_record`, so a benchmark proves both which artifact
+ran and that the directive runtime contains the expected instrumentation.
 
 ## Event semantics
 

@@ -84,6 +84,21 @@ else
   docker image inspect "$IMAGE_REF" >/dev/null
 fi
 
+IMAGE_BUILD_PROFILE="$(docker image inspect \
+  --format '{{ index .Config.Labels "io.ryeos.build-profile" }}' \
+  "$IMAGE_REF")"
+[[ "$IMAGE_BUILD_PROFILE" == release ]] || {
+  echo "release qualification requires io.ryeos.build-profile=release, observed: $IMAGE_BUILD_PROFILE" >&2
+  exit 1
+}
+BINARY_BUILD_PROFILE="$(docker run --rm \
+  --entrypoint /usr/local/bin/ryeosd \
+  "$IMAGE_REF" build-info --profile)"
+[[ "$BINARY_BUILD_PROFILE" == release ]] || {
+  echo "release qualification requires a release-profile ryeosd, observed: $BINARY_BUILD_PROFILE" >&2
+  exit 1
+}
+
 if [[ "$PID1_SMOKE" == true ]]; then
   docker build \
     --file "$ROOT/Dockerfile.container-attachment-test" \

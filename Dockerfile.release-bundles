@@ -17,7 +17,6 @@ ARG VERSION
 ARG SOURCE_DATE_EPOCH
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
-ARG RYEOS_LATENCY_PROFILING=0
 ENV RYEOS_VCS_REF=$VCS_REF
 ENV RYEOS_BUILD_DATE=$BUILD_DATE
 
@@ -39,6 +38,7 @@ RUN --mount=type=secret,id=publisher-key,required=true \
       --key /run/secrets/publisher-key \
       --owner ryeos-official \
       --bundle-set full \
+      --build-profile release \
       --all && \
     mkdir -p /out && \
     ./scripts/release/package-bundle-artifact.sh \

@@ -22,7 +22,7 @@ COPY . .
 # `--build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)`.
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
-ARG RYEOS_LATENCY_PROFILING=0
+ARG BUNDLE_BUILD_PROFILE=release
 ENV RYEOS_VCS_REF=$VCS_REF
 ENV RYEOS_BUILD_DATE=$BUILD_DATE
 
@@ -43,6 +43,7 @@ RUN --mount=type=secret,id=publisher-key \
       --key /run/secrets/publisher-key \
       --owner ryeos-official \
       --bundle-set standard \
+      --build-profile "$BUNDLE_BUILD_PROFILE" \
       --all && \
     mkdir -p /build/target/release && \
     cp /build/target-cache/release/ryeosd /build/target/release/ryeosd && \
@@ -81,12 +82,15 @@ EXPOSE 8000
 # Re-declared here: build-stage ARGs do not carry across FROM boundaries.
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
+ARG BUNDLE_BUILD_PROFILE=release
 RUN test "$(/usr/local/bin/ryeosd build-info --revision)" = "$VCS_REF"
+RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFILE"
 LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
 LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
 LABEL io.ryeos.image="standard"
 LABEL io.ryeos.bundle-protocol="1.0"
+LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["ryeos", "node", "status"]

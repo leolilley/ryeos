@@ -10,7 +10,7 @@
 # Idempotent. Safe to re-run.
 #
 # Usage:
-#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|central-host|standard|hosted-node|hosted-workflow] [--latency-profiling]
+#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|central-host|standard|hosted-node|hosted-workflow] [--build-profile release|latency-profiling]
 #
 # Bundle sets:
 #   full            core + standard + web + browser + ryeos-ui + hosted-node (default)
@@ -26,7 +26,6 @@
 #   CARGO              cargo binary (default: cargo from PATH)
 #   CARGO_TARGET_DIR   cargo target dir (default: .cargo/config target-dir or ./target)
 #   TRIPLE             host triple (default: x86_64-unknown-linux-gnu)
-#   RYEOS_LATENCY_PROFILING  1 enables the same mode as --latency-profiling
 
 set -euo pipefail
 
@@ -43,9 +42,9 @@ BUNDLE_SET="full"
 JOBS=""            # cargo -j N; empty = cargo default (all cores)
 CRATES_OVERRIDE="" # space-separated crate list; empty = bundle-set default
 POPULATE_ALL=0     # explicit opt-in to rebuild the whole bundle set
-# Release build with opt-in content-free latency telemetry. The environment
-# form lets Docker/Railway select the build without changing a Dockerfile RUN.
-LATENCY_PROFILING="${RYEOS_LATENCY_PROFILING:-0}"
+# The build profile is an explicit artifact property, not ambient process
+# configuration. Containers pass the same closed value through this CLI.
+BUILD_PROFILE="release"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -58,15 +57,15 @@ while [[ $# -gt 0 ]]; do
     # be built (e.g. from a prior populate). Use when iterating on one binary —
     # `--crates ryeos-core-tools` rebuilds core-tools without the full workspace.
     --crates) CRATES_OVERRIDE="$2"; shift 2 ;;
-    --latency-profiling) LATENCY_PROFILING=1; shift ;;
+    --build-profile) BUILD_PROFILE="$2"; shift 2 ;;
     --all) POPULATE_ALL=1; shift ;;
     *) ryeos_term_fail "unknown argument: $1"; exit 2 ;;
   esac
 done
 
-case "$LATENCY_PROFILING" in
-  0|1) ;;
-  *) ryeos_term_fail "RYEOS_LATENCY_PROFILING must be 0 or 1"; exit 2 ;;
+case "$BUILD_PROFILE" in
+  release|latency-profiling) ;;
+  *) ryeos_term_fail "invalid build profile: $BUILD_PROFILE (expected release or latency-profiling)"; exit 2 ;;
 esac
 
 # Refuse to build the whole workspace implicitly — that full release build is
@@ -263,7 +262,7 @@ fi
 build_args=()
 for p in "${pkgs[@]}"; do build_args+=(-p "$p"); done
 feature_args=()
-if [[ "$LATENCY_PROFILING" -eq 1 ]]; then
+if [[ "$BUILD_PROFILE" == latency-profiling ]]; then
   profiling_features=()
   for p in "${pkgs[@]}"; do
     case "$p" in
@@ -284,9 +283,7 @@ fi
 jobs_args=()
 [[ -n "$JOBS" ]] && jobs_args=(-j "$JOBS")
 
-build_flavour="release"
-[[ "$LATENCY_PROFILING" -eq 1 ]] && build_flavour="release + latency profiling"
-ryeos_term_begin PUBLISH "building $build_flavour binaries${JOBS:+ (jobs=$JOBS)}"
+ryeos_term_begin PUBLISH "building $BUILD_PROFILE binaries${JOBS:+ (jobs=$JOBS)}"
 ryeos_term_update "building release binaries" "${pkgs[*]}"
 ryeos_term_suspend
 "$CARGO" build --release "${jobs_args[@]}" "${build_args[@]}" "${feature_args[@]}"

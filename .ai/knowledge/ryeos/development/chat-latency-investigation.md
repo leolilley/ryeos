@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-08-03T05:25:49Z:b8d0c83bbb3d2f376bda3b0d6e4fdb7576d902c1c5ace55730f13ae325a13ae5:2dec9gUjDttXqt4fZbv0TqyBOoE1xiGJl2wlVyEoM3UMFstBGPMhwNykF2TNXUHM7ZDU/jJEeUHKGH8Yd7hODg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-03T10:15:05Z:979122a92d27b44d5171388ad26e7d67484ce9ab2237a64f7bf568cf65b61199:j4efZcI2z9qnDtEbws371fIdo1CCeZuxOIKJeLhexUm2jZMcMVm4f0Z33SqIrn5LL57MRsjcA+W5Pi3CwKxxCg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/development
 name: chat-latency-investigation
 title: Chat Latency Investigation Runbook
 description: Correlation rules, event semantics, prompt accounting, and decision gates for streamed directive latency investigations
 entry_type: runbook
-version: "1.4.0"
+version: "1.5.0"
 ```
 
 # Chat Latency Investigation Runbook
@@ -27,14 +27,23 @@ release binaries and enable the disabled-by-default feature through either:
   --key <publisher-key> \
   --owner <publisher> \
   --bundle-set <set> \
-  --latency-profiling \
+  --build-profile latency-profiling \
   --all
 ```
 
-or container build argument `RYEOS_LATENCY_PROFILING=1`. Never enable the mode
-on production while investigating a downstream workload. Every profiled
-directive process emits `latency_profiling_enabled`; absence of that record
-means detailed results must not be attributed to the profiling build.
+Container artifact builders select the same closed profile with build argument
+`BUNDLE_BUILD_PROFILE=latency-profiling`. This is an explicit build input, not a
+runtime environment setting. The resulting daemon must report
+`latency-profiling` from `ryeosd build-info --profile`, and the image must carry
+the matching `io.ryeos.build-profile` label. Official release qualification
+accepts only the `release` profile. Never deploy the profiling artifact to
+production while investigating a downstream workload. Every profiled directive
+process also emits `latency_profiling_enabled`; absence of that record means
+detailed results must not be attributed to the profiling build.
+
+Downstream projects consume a pinned profiling artifact. They do not select
+Cargo features, pass a RyeOS profiling environment variable, or acquire a
+project-controlled runtime switch.
 
 The feature adds measurements and a small number of advisory callback events,
 so it has observer cost. Compare ordinary and profiling artifacts on a bounded

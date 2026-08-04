@@ -195,16 +195,24 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
     let process_started_at = lillux::time::iso8601_now();
     let cli = Cli::parse();
 
-    if let Some(config::DaemonCommand::BuildInfo { revision, json }) = &cli.command {
+    if let Some(config::DaemonCommand::BuildInfo {
+        revision,
+        profile,
+        json,
+    }) = &cli.command
+    {
         let build = ryeos_app::build_info::get_for_version(env!("CARGO_PKG_VERSION"));
         if *revision {
             println!("{}", build.revision);
+        } else if *profile {
+            println!("{}", build.profile);
         } else if *json {
             println!("{}", serde_json::to_string(&build)?);
         } else {
             println!("version: {}", build.version);
             println!("revision: {}", build.revision);
             println!("build_date: {}", build.build_date);
+            println!("profile: {}", build.profile);
         }
         return Ok(());
     }
