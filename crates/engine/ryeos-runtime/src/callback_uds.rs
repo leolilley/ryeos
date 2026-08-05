@@ -594,13 +594,18 @@ mod tests {
             occurrence: HookDispatchOccurrence::GraphStepCompleted {
                 graph_run_id: "graph-run-7".to_string(),
                 definition_ref: "graph:test/workflow".to_string(),
-                definition_hash: "definition-hash".to_string(),
+                root_raw_content_digest: "a".repeat(64),
+                effective_definition_digest: "b".repeat(64),
                 step: 4,
                 node: "audit-node".to_string(),
             },
             hook_id: "audit".to_string(),
             layer: crate::hooks_loader::HookLayer::Infrastructure,
             result_mode: crate::hooks_loader::HookResultMode::Observation,
+            context_contract: ryeos_engine::hooks::HookContextContract {
+                schema: ryeos_engine::hooks::HOOK_CONTEXT_SCHEMA.to_string(),
+                allowed_roots: std::collections::BTreeSet::from(["state".to_string()]),
+            },
             context_hash: "sha256-context".to_string(),
         };
         let request = DispatchActionRequest {

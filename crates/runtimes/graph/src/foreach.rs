@@ -234,7 +234,7 @@ pub struct ForeachContext<'a> {
     pub current_node: &'a str,
     pub graph_run_id: &'a str,
     pub definition_ref: &'a str,
-    pub definition_hash: &'a str,
+    pub effective_definition_digest: &'a str,
     pub continue_on_error: bool,
     pub cancel_flag: Option<Arc<AtomicBool>>,
 }
@@ -246,7 +246,7 @@ pub struct ForeachContext<'a> {
 struct RetryEventCtx {
     graph_run_id: String,
     definition_ref: String,
-    definition_hash: String,
+    effective_definition_digest: String,
     node: String,
     step: u32,
 }
@@ -313,8 +313,8 @@ async fn dispatch_item_with_retry(
                             Value::String(ev.definition_ref.clone()),
                         ),
                         (
-                            "definition_hash".to_string(),
-                            Value::String(ev.definition_hash.clone()),
+                            "effective_definition_digest".to_string(),
+                            Value::String(ev.effective_definition_digest.clone()),
                         ),
                         ("node".to_string(), Value::String(ev.node.clone())),
                         (
@@ -395,14 +395,14 @@ pub async fn run_foreach_sequential(
         current_node,
         graph_run_id,
         definition_ref,
-        definition_hash,
+        effective_definition_digest,
         continue_on_error,
         cancel_flag,
     } = ctx;
     let retry_ev = RetryEventCtx {
         graph_run_id: graph_run_id.to_string(),
         definition_ref: definition_ref.to_string(),
-        definition_hash: definition_hash.to_string(),
+        effective_definition_digest: effective_definition_digest.to_string(),
         node: current_node.to_string(),
         step,
     };
@@ -885,14 +885,14 @@ pub async fn run_foreach_parallel(
         current_node,
         graph_run_id,
         definition_ref,
-        definition_hash,
+        effective_definition_digest,
         continue_on_error,
         cancel_flag,
     } = ctx;
     let retry_ev = RetryEventCtx {
         graph_run_id: graph_run_id.to_string(),
         definition_ref: definition_ref.to_string(),
-        definition_hash: definition_hash.to_string(),
+        effective_definition_digest: effective_definition_digest.to_string(),
         node: current_node.to_string(),
         step,
     };

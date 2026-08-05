@@ -304,7 +304,7 @@ staged_release_bins_for_set() {
     full|central-host|standard|hosted-workflow)
       printf '%s\n' ryeos-directive-runtime ryeos-graph-runtime \
         ryeos-knowledge-runtime ryeos-directive-launch-preparer \
-        rye-composer-extends-chain rye-composer-graph-permissions
+        rye-composer-extends-chain ryeos-graph-effective-validator
       ;;
   esac
   case "$BUNDLE_SET" in
@@ -367,7 +367,7 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET
     "$TARGET/release/ryeos-graph-runtime" \
     "$TARGET/release/ryeos-knowledge-runtime" \
     "$TARGET/release/rye-composer-extends-chain" \
-    "$TARGET/release/rye-composer-graph-permissions" \
+    "$TARGET/release/ryeos-graph-effective-validator" \
     "$STD_BIN/"
 fi
 

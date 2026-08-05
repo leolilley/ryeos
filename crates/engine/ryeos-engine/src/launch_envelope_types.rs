@@ -9,6 +9,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
+use crate::effective_program::FinalizedEffectiveProgram;
+use crate::resolution::EffectiveDefinitionDigest;
 use crate::resolution::ResolutionOutput;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -33,9 +35,13 @@ pub use ryeos_accounting::UsdNanos;
 /// and the runtime would have no way to tell which to trust. Now there
 /// is exactly one root snapshot — `resolution.root` — and every consumer
 /// reads `path` / `digest` / `kind` / `item_id` from there.
+pub const MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct LaunchEnvelope {
+    pub(crate) schema_version: u32,
     pub invocation_id: String,
     pub thread_id: String,
     pub roots: EnvelopeRoots,
@@ -48,7 +54,8 @@ pub struct LaunchEnvelope {
     /// never `null`. Runtimes consume this directly instead of
     /// re-walking the chain themselves *or* re-reading the root from
     /// disk.
-    pub resolution: ResolutionOutput,
+    pub(crate) resolution: ResolutionOutput,
+    pub(crate) effective_definition_digest: EffectiveDefinitionDigest,
     /// Pre-baked **inventory** of items the launching kind asked the
     /// daemon to resolve on its behalf. Keyed by inventoried kind
     /// (`"tool"`, `"knowledge"`, `"graph_node"`, …); each entry is a
@@ -79,6 +86,20 @@ pub struct LaunchEnvelope {
     /// prompt parameter; never accepted back from runtime fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accounting_scope: Option<EnvelopeAccountingScope>,
+}
+
+impl LaunchEnvelope {
+    pub fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    pub fn resolution(&self) -> &ResolutionOutput {
+        &self.resolution
+    }
+
+    pub fn effective_definition_digest(&self) -> &EffectiveDefinitionDigest {
+        &self.effective_definition_digest
+    }
 }
 
 /// Daemon-minted budget scope identities carried to the runtime.
@@ -122,7 +143,7 @@ pub struct LaunchEnvelopeBuilder {
     request: EnvelopeRequest,
     policy: EnvelopePolicy,
     callback: EnvelopeCallback,
-    resolution: ResolutionOutput,
+    effective_program: FinalizedEffectiveProgram,
     inventory: HashMap<String, Vec<ItemDescriptor>>,
     runtime_data: BTreeMap<String, Value>,
     financial_authority: Option<Value>,
@@ -138,7 +159,7 @@ impl LaunchEnvelopeBuilder {
         request: EnvelopeRequest,
         policy: EnvelopePolicy,
         callback: EnvelopeCallback,
-        resolution: ResolutionOutput,
+        effective_program: FinalizedEffectiveProgram,
     ) -> Self {
         Self {
             invocation_id,
@@ -147,7 +168,7 @@ impl LaunchEnvelopeBuilder {
             request,
             policy,
             callback,
-            resolution,
+            effective_program,
             inventory: HashMap::new(),
             runtime_data: BTreeMap::new(),
             financial_authority: None,
@@ -181,14 +202,17 @@ impl LaunchEnvelopeBuilder {
 
     /// Build the final `LaunchEnvelope`.
     pub fn build(self) -> LaunchEnvelope {
+        let (resolution, effective_definition_digest) = self.effective_program.into_parts();
         LaunchEnvelope {
+            schema_version: MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION,
             invocation_id: self.invocation_id,
             thread_id: self.thread_id,
             roots: self.roots,
             request: self.request,
             policy: self.policy,
             callback: self.callback,
-            resolution: self.resolution,
+            resolution,
+            effective_definition_digest,
             inventory: self.inventory,
             runtime_data: self.runtime_data,
             financial_authority: self.financial_authority,
@@ -567,6 +591,7 @@ mod tests {
     #[test]
     fn envelope_round_trip() {
         let envelope = LaunchEnvelope {
+            schema_version: MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION,
             invocation_id: "inv-abc".to_string(),
             thread_id: "T-test".to_string(),
             roots: EnvelopeRoots {
@@ -595,6 +620,10 @@ mod tests {
             runtime_data: BTreeMap::new(),
             financial_authority: None,
             accounting_scope: None,
+            effective_definition_digest: crate::resolution::EffectiveDefinitionDigest::parse(
+                "0".repeat(64),
+            )
+            .unwrap(),
             resolution: ResolutionOutput {
                 root: crate::resolution::ResolvedAncestor {
                     requested_id: "directive:my/agent".to_string(),
@@ -901,7 +930,7 @@ cost:
             EnvelopeRequest::simple(serde_json::json!({"key": "value"})),
             EnvelopePolicy::new(vec!["ryeos.execute.*".to_string()], HardLimits::default()),
             EnvelopeCallback::new(PathBuf::from("/tmp/ryeosd.sock"), "token-abc".to_string()),
-            resolution,
+            crate::effective_program::finalized_test_fixture(resolution).unwrap(),
         )
         .build();
 

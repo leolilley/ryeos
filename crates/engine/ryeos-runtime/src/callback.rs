@@ -74,29 +74,34 @@ pub enum HookDispatchOccurrence {
     GraphStarted {
         graph_run_id: String,
         definition_ref: String,
-        definition_hash: String,
+        root_raw_content_digest: String,
+        effective_definition_digest: String,
     },
     GraphStepCompleted {
         graph_run_id: String,
         definition_ref: String,
-        definition_hash: String,
+        root_raw_content_digest: String,
+        effective_definition_digest: String,
         step: u32,
         node: String,
     },
     GraphCompleted {
         graph_run_id: String,
         definition_ref: String,
-        definition_hash: String,
+        root_raw_content_digest: String,
+        effective_definition_digest: String,
         steps: u32,
     },
     DirectiveAfterStep {
         definition_ref: String,
-        definition_hash: String,
+        root_raw_content_digest: String,
+        effective_definition_digest: String,
         turn: u32,
     },
     DirectiveContinuation {
         definition_ref: String,
-        definition_hash: String,
+        root_raw_content_digest: String,
+        effective_definition_digest: String,
         turn: u32,
     },
 }
@@ -122,6 +127,7 @@ pub struct HookDispatchIdentity {
     pub hook_id: String,
     pub layer: crate::hooks_loader::HookLayer,
     pub result_mode: crate::hooks_loader::HookResultMode,
+    pub context_contract: ryeos_engine::hooks::HookContextContract,
     pub context_hash: String,
 }
 
@@ -862,7 +868,8 @@ mod tests {
         let occurrence = HookDispatchOccurrence::GraphStepCompleted {
             graph_run_id: "graph-run-1".to_string(),
             definition_ref: "graph:test/workflow".to_string(),
-            definition_hash: "definition-hash".to_string(),
+            root_raw_content_digest: "a".repeat(64),
+            effective_definition_digest: "b".repeat(64),
             step: 9,
             node: "work".to_string(),
         };
@@ -908,12 +915,17 @@ mod tests {
             hook_dispatch: Some(HookDispatchIdentity {
                 occurrence: HookDispatchOccurrence::DirectiveContinuation {
                     definition_ref: "directive:test/runner".to_string(),
-                    definition_hash: "definition-hash".to_string(),
+                    root_raw_content_digest: "a".repeat(64),
+                    effective_definition_digest: "b".repeat(64),
                     turn: 3,
                 },
                 hook_id: "continuation-audit".to_string(),
                 layer: crate::hooks_loader::HookLayer::Operator,
                 result_mode: crate::hooks_loader::HookResultMode::Control,
+                context_contract: ryeos_engine::hooks::HookContextContract {
+                    schema: ryeos_engine::hooks::HOOK_CONTEXT_SCHEMA.to_string(),
+                    allowed_roots: std::collections::BTreeSet::from(["event".to_string()]),
+                },
                 context_hash: "context-digest".to_string(),
             }),
         };

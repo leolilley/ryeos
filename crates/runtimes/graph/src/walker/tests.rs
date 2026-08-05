@@ -185,7 +185,7 @@ fn strict_resume_params(
     let mut checkpoint = json!({
         "schema_version": GRAPH_CHECKPOINT_SCHEMA_VERSION,
         "definition_ref": graph.definition_ref.clone(),
-        "definition_hash": graph.definition_hash.clone(),
+        "effective_definition_digest": graph.effective_definition_digest.clone(),
         "expression_language": EXPRESSION_LANGUAGE,
         "current_node": current_node,
         "step_count": step_count,
@@ -223,7 +223,7 @@ fn unchecked_resume_params(
 ) -> Value {
     let mut resume = json!({
         "definition_ref": graph.definition_ref.clone(),
-        "definition_hash": graph.definition_hash.clone(),
+        "effective_definition_digest": graph.effective_definition_digest.clone(),
         "expression_language": EXPRESSION_LANGUAGE,
         "current_node": current_node,
         "step_count": step_count,
@@ -2473,6 +2473,7 @@ fn step_outcome_terminal_captures_status() {
 /// `commit_step`.
 struct RecordingMockClient {
     dispatch_results: Mutex<Vec<Value>>,
+    dispatch_requests: Mutex<Vec<DispatchActionRequest>>,
     events: Mutex<Vec<(String, String, Value, String)>>,
     /// (thread_id, status) pairs from finalize_thread calls.
     finalizations: Mutex<Vec<(String, ryeos_runtime::ThreadTerminalStatus)>>,
@@ -2493,6 +2494,7 @@ impl RecordingMockClient {
     fn new(dispatch_results: Vec<Value>) -> Self {
         Self {
             dispatch_results: Mutex::new(dispatch_results),
+            dispatch_requests: Mutex::new(Vec::new()),
             events: Mutex::new(Vec::new()),
             finalizations: Mutex::new(Vec::new()),
             finalize_costs: Mutex::new(Vec::new()),
@@ -2511,6 +2513,10 @@ impl RecordingMockClient {
         *self.dispatch_count.lock().unwrap()
     }
 
+    fn recorded_dispatch_requests(&self) -> Vec<DispatchActionRequest> {
+        self.dispatch_requests.lock().unwrap().clone()
+    }
+
     fn recorded_follow_requests(&self) -> Vec<ryeos_runtime::callback::SpawnFollowChildRequest> {
         self.follow_requests.lock().unwrap().clone()
     }
@@ -2524,9 +2530,10 @@ impl RecordingMockClient {
 impl ryeos_runtime::callback::RuntimeCallbackAPI for RecordingMockClient {
     async fn dispatch_action(
         &self,
-        _request: DispatchActionRequest,
+        request: DispatchActionRequest,
     ) -> Result<Value, CallbackError> {
         *self.dispatch_count.lock().unwrap() += 1;
+        self.dispatch_requests.lock().unwrap().push(request);
         let mut results = self.dispatch_results.lock().unwrap();
         if results.is_empty() {
             Ok(json!({"thread": {}, "result": {}}))
@@ -2915,7 +2922,7 @@ config:
     params["resume_state"]
         .as_object_mut()
         .unwrap()
-        .remove("definition_hash");
+        .remove("effective_definition_digest");
     let (walker, recorder) = make_recording_walker(graph, vec![subprocess_success()], None);
 
     let result = walker.execute(params, Some("gr-outer".to_string())).await;
@@ -2987,6 +2994,64 @@ async fn graph_completed_hook_dispatches_through_callback() {
         w.take_warnings().is_empty(),
         "a successful hook records no warning"
     );
+}
+
+#[tokio::test]
+async fn observation_hook_dispatches_with_exact_identity_and_graph_settles_terminal() {
+    let graph = make_graph(
+        r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+  hooks:
+    - id: observe_completion
+      event: graph_completed
+      result: observation
+      action: {item_id: "tool:test/observe", ref_bindings: {}, params: {}}
+  nodes:
+    done: {node_type: return, output: {ok: true}}
+"#,
+    );
+    let (walker, recorder) = make_recording_walker(
+        graph,
+        vec![json!({
+            "kind": "graph.completed",
+            "payload": {"accepted": true}
+        })],
+        None,
+    );
+
+    let result = walker
+        .execute(json!({}), Some("gr-observation-hook".to_string()))
+        .await;
+    assert!(
+        result.success,
+        "observation hook must not prevent settlement"
+    );
+    let requests = recorder.recorded_dispatch_requests();
+    assert_eq!(requests.len(), 1);
+    let identity = requests[0]
+        .hook_dispatch
+        .as_ref()
+        .expect("hook dispatch carries exact admitted identity");
+    assert_eq!(identity.hook_id, "observe_completion");
+    assert_eq!(
+        identity.result_mode,
+        ryeos_runtime::HookResultMode::Observation
+    );
+    assert!(matches!(
+        identity.occurrence,
+        ryeos_runtime::callback::HookDispatchOccurrence::GraphCompleted { .. }
+    ));
+    assert_eq!(
+        recorder.recorded_finalizations(),
+        vec![(
+            "thread-test".to_string(),
+            ryeos_runtime::ThreadTerminalStatus::Completed
+        )]
+    );
+    assert!(walker.take_warnings().is_empty());
 }
 
 #[tokio::test]
@@ -3522,7 +3587,7 @@ fn completed_child_graph_result(definition_ref: &str, result: Value) -> Value {
         "success": true,
         "graph_id": definition_ref.trim_start_matches("graph:"),
         "definition_ref": definition_ref,
-        "definition_hash": "sha256:test-child",
+        "effective_definition_digest": "sha256:test-child",
         "graph_run_id": "gr-child",
         "status": GraphRunStatus::Completed,
         "steps": 1,
@@ -4372,7 +4437,7 @@ config:
     assert_eq!(result.definition_ref, "graph:test/test");
     assert_eq!(result.graph_run_id, "gr-fence-test");
     assert_eq!(
-        result.definition_hash,
+        result.effective_definition_digest,
         lillux::cas::sha256_hex(lillux::signature::strip_signature_lines(yaml).as_bytes())
     );
 
@@ -4394,8 +4459,8 @@ config:
                     Some(result.definition_ref.as_str())
                 );
                 assert_eq!(
-                    payload["definition_hash"].as_str(),
-                    Some(result.definition_hash.as_str())
+                    payload["effective_definition_digest"].as_str(),
+                    Some(result.effective_definition_digest.as_str())
                 );
             }
             _ => {}
@@ -4488,8 +4553,8 @@ config:
         Some(result.definition_ref.as_str())
     );
     assert_eq!(
-        receipt["definition_hash"].as_str(),
-        Some(result.definition_hash.as_str())
+        receipt["effective_definition_digest"].as_str(),
+        Some(result.effective_definition_digest.as_str())
     );
     assert_eq!(receipt["graph_run_id"].as_str(), Some("gr-fence-test"));
     assert_eq!(receipt["node"].as_str(), Some("step1"));
@@ -4779,8 +4844,8 @@ config:
         Some(result.definition_ref.as_str())
     );
     assert_eq!(
-        receipt["definition_hash"].as_str(),
-        Some(result.definition_hash.as_str())
+        receipt["effective_definition_digest"].as_str(),
+        Some(result.effective_definition_digest.as_str())
     );
     assert_eq!(receipt["graph_run_id"].as_str(), Some("gr-error-receipt"));
     assert_eq!(receipt["node_result_hash"], Value::Null);
@@ -4828,8 +4893,8 @@ config:
         Some(result.definition_ref.as_str())
     );
     assert_eq!(
-        receipt["definition_hash"].as_str(),
-        Some(result.definition_hash.as_str())
+        receipt["effective_definition_digest"].as_str(),
+        Some(result.effective_definition_digest.as_str())
     );
     assert_eq!(
         receipt["graph_run_id"].as_str(),

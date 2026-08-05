@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-02T10:32:26Z:0154d1cfd2fcd509ce7540b809522ac6764a7ad3e364391f73749d2be6fb149a:oHtlEBi7Nrx9IlMH+xyXBCBUQ91rszTERHvMaP3sQb/fwMknlx1BuI/Ta6n7tA7K0yy1KanE9sj0mYI0PaMTCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-05T07:04:40Z:773989f76980952d2b34186df24ad4133cb3034edc8ce1636db4c08bc701ea5e:dwS2H276o4gcBb/fLsyOwoTVGKD6J3PBcU8LNRqopOFDBkxGUnf4ZBYBHJpcvsSlzXFhA8Fiqz+Psn32EqyEBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.0.1"
@@ -145,6 +145,24 @@ Context merges through extends chains using
 `dict_merge_string_seq_root_last` — the child's context entries
 are appended after the parent's.
 
+### Hooks
+
+Directive frontmatter may declare `hooks` for `after_step` and `continuation`.
+Each hook has `id`, `event`, required `result`, optional `condition`, and
+`action`. `discard` and `observation` are observers; `control` is accepted only
+where the signed event and layer permit directive control.
+
+Authored hook inheritance is atomic. Omitting `hooks` inherits the nearest
+ancestor's complete list. `hooks: []` clears it. A declared non-empty list
+replaces it completely; hooks are not merged by ID. `hooks: null` and duplicate
+effective IDs fail composition/admission.
+
+After context rendering, the daemon captures authored hooks together with
+signed configured policy into the finalized effective program. Authored hooks
+use the directive's admitted caps; configured hooks use only their signed
+source's grants. The directive runtime compiles that captured plan and never
+loads hook policy from the live filesystem.
+
 ## Inheritance (Extends)
 
 Directives support single inheritance via `extends`:
@@ -161,6 +179,10 @@ and merges fields with declared strategies:
 | `body`         | `root_verbatim` — child replaces parent body |
 | `requires`     | `narrow_requires_capabilities` — `declared` child ⊆ parent (drop); `manifest` fails on widen |
 | `context`      | `dict_merge_string_seq_root_last` — child appended |
+| `model`        | nearest declaration, root last |
+| `limits`       | shallow mapping merge, root last |
+| `inputs`       | keyed merge by input name, root last |
+| `hooks`        | nearest complete list, root last |
 
 This means:
 - A child directive always overrides the prompt body
@@ -171,10 +193,13 @@ This means:
 
 1. **Resolve** — canonical ref → file path → parsed metadata
 2. **Compose** — extends chain resolved, fields merged
-3. **Launch** — directive-runtime subprocess spawned with:
+3. **Capture and finalize** — rendered context and the complete hook plan are
+   validated, mutable dependencies are rechecked, and one
+   `effective_definition_digest` is sealed
+4. **Launch** — directive-runtime subprocess spawned with:
    - Composed prompt body
    - Context blocks assembled into system/user positions
    - Input values interpolated
    - Permission caps set
-4. **Run** — LLM loop with tool dispatch (up to `limits.turns`)
-5. **Complete** — result captured, thread finalized
+5. **Run** — LLM loop with tool dispatch (up to `limits.turns`)
+6. **Complete** — result captured, thread finalized

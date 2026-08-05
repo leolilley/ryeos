@@ -11,7 +11,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ryeos_handler_protocol::{HandlerRequest, HandlerResponse};
+use ryeos_handler_protocol::{
+    HandlerRequest, HandlerRequestEnvelope, HandlerResponse, HandlerResponseEnvelope,
+};
 
 use crate::error::EngineError;
 use crate::handlers::VerifiedHandler;
@@ -91,7 +93,7 @@ pub(crate) fn run_handler_subprocess(
         }
     };
 
-    let request_json = serde_json::to_string(request)
+    let request_json = serde_json::to_string(&HandlerRequestEnvelope::new(request.clone()))
         .map_err(|e| EngineError::Internal(format!("encode handler request: {e}")))?;
 
     let req = lillux::exec::SubprocessRequest {
@@ -144,10 +146,17 @@ pub(crate) fn run_handler_subprocess(
         });
     }
 
-    ryeos_handler_protocol::from_json_str_strict(&output.stdout).map_err(|e| {
-        EngineError::HandlerProtocolViolation {
+    let envelope: HandlerResponseEnvelope =
+        ryeos_handler_protocol::from_json_str_strict(&output.stdout).map_err(|e| {
+            EngineError::HandlerProtocolViolation {
+                handler: canonical_ref.clone(),
+                detail: e.to_string(),
+            }
+        })?;
+    envelope
+        .into_response()
+        .map_err(|detail| EngineError::HandlerProtocolViolation {
             handler: canonical_ref,
-            detail: e.to_string(),
-        }
-    })
+            detail,
+        })
 }

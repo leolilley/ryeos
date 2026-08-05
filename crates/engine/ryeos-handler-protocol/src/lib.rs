@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 pub const HANDLER_PROTOCOL_JSON_MAX_DEPTH: usize = 32;
+pub const HANDLER_PROTOCOL_SCHEMA_VERSION: u32 = 2;
 
 // ── Request / Response envelope ──────────────────────────────────
 
@@ -34,6 +35,7 @@ pub enum HandlerRequest {
     ValidateComposerConfig(ValidateComposerConfigRequest),
     LaunchPrepare(LaunchPrepareRequest),
     ValidateLaunchPreparerConfig(ValidateLaunchPreparerConfigRequest),
+    EffectiveValidate(EffectiveValidateRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +70,65 @@ pub enum HandlerResponse {
     ValidateLaunchPreparerConfig {
         response: ValidateLaunchPreparerConfigResponse,
     },
+    EffectiveValidate {
+        response: EffectiveValidateResponse,
+    },
+}
+
+/// Mandatory versioned request envelope. Handler ABI v2 has no decoder for
+/// the unversioned v1 wire shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandlerRequestEnvelope {
+    pub schema_version: u32,
+    pub request: HandlerRequest,
+}
+
+impl HandlerRequestEnvelope {
+    pub fn new(request: HandlerRequest) -> Self {
+        Self {
+            schema_version: HANDLER_PROTOCOL_SCHEMA_VERSION,
+            request,
+        }
+    }
+
+    pub fn into_request(self) -> Result<HandlerRequest, String> {
+        if self.schema_version != HANDLER_PROTOCOL_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported handler request schema {}; expected {}",
+                self.schema_version, HANDLER_PROTOCOL_SCHEMA_VERSION
+            ));
+        }
+        Ok(self.request)
+    }
+}
+
+/// Mandatory versioned response envelope. The engine rejects every other
+/// schema before interpreting a handler result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandlerResponseEnvelope {
+    pub schema_version: u32,
+    pub response: HandlerResponse,
+}
+
+impl HandlerResponseEnvelope {
+    pub fn new(response: HandlerResponse) -> Self {
+        Self {
+            schema_version: HANDLER_PROTOCOL_SCHEMA_VERSION,
+            response,
+        }
+    }
+
+    pub fn into_response(self) -> Result<HandlerResponse, String> {
+        if self.schema_version != HANDLER_PROTOCOL_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported handler response schema {}; expected {}",
+                self.schema_version, HANDLER_PROTOCOL_SCHEMA_VERSION
+            ));
+        }
+        Ok(self.response)
+    }
 }
 
 // ── Parser ───────────────────────────────────────────────────────
@@ -159,7 +220,7 @@ pub struct ValidateComposerConfigRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ComposerFieldRequirement {
-    pub field: String,
+    pub path: Vec<String>,
     pub semantics: ComposerFieldSemantics,
 }
 
@@ -193,6 +254,27 @@ pub enum ResolutionStepNameWire {
     PipelineInit,
     ResolveExtendsChain,
     ResolveReferences,
+}
+
+// ── Effective-program semantic validation ──────────────────────
+
+/// Generic, path-free input to a kind-declared effective validator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectiveValidateRequest {
+    pub validator_config: Value,
+    pub canonical_ref: String,
+    pub composed: LaunchComposedViewWire,
+    /// Deepest ancestor first. These are provenance identities, not a second
+    /// executable payload channel.
+    pub ancestor_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EffectiveValidateResponse {
+    Valid { normalized: Value },
+    Invalid { code: String, message: String },
 }
 
 // ── Launch preparation ──────────────────────────────────────────
@@ -639,9 +721,44 @@ mod tests {
     }
 
     #[test]
+    fn handler_v2_envelopes_accept_only_the_current_schema() {
+        let request = HandlerRequest::Parse(ParseRequest {
+            parser_config: serde_json::json!({}),
+            content: String::new(),
+            source_path: None,
+        });
+        let encoded = serde_json::to_value(HandlerRequestEnvelope::new(request)).unwrap();
+        let decoded: HandlerRequestEnvelope = serde_json::from_value(encoded.clone()).unwrap();
+        assert!(decoded.into_request().is_ok());
+
+        let mut old_request = encoded;
+        old_request["schema_version"] = serde_json::json!(1);
+        let decoded: HandlerRequestEnvelope = serde_json::from_value(old_request).unwrap();
+        assert!(decoded.into_request().unwrap_err().contains("unsupported"));
+        assert!(
+            serde_json::from_value::<HandlerRequestEnvelope>(serde_json::json!({
+                "command": "parse",
+                "parser_config": {},
+                "content": ""
+            }))
+            .is_err()
+        );
+
+        let response = HandlerResponse::ValidateOk;
+        let encoded = serde_json::to_value(HandlerResponseEnvelope::new(response)).unwrap();
+        let decoded: HandlerResponseEnvelope = serde_json::from_value(encoded.clone()).unwrap();
+        assert!(decoded.into_response().is_ok());
+
+        let mut old_response = encoded;
+        old_response["schema_version"] = serde_json::json!(1);
+        let decoded: HandlerResponseEnvelope = serde_json::from_value(old_response).unwrap();
+        assert!(decoded.into_response().unwrap_err().contains("unsupported"));
+    }
+
+    #[test]
     fn composer_validation_round_trips_exact_field_requirements() {
         let requirements = vec![ComposerFieldRequirement {
-            field: "lifecycle_policy".into(),
+            path: vec!["lifecycle_policy".into()],
             semantics: ComposerFieldSemantics::InheritOrReplace,
         }];
         let request = HandlerRequest::ValidateComposerConfig(ValidateComposerConfigRequest {
@@ -649,6 +766,8 @@ mod tests {
             field_requirements: requirements.clone(),
         });
         let encoded = serde_json::to_string(&request).unwrap();
+        assert!(encoded.contains(r#""path":["lifecycle_policy"]"#));
+        assert!(!encoded.contains(r#""field""#));
         let decoded: HandlerRequest = serde_json::from_str(&encoded).unwrap();
         match decoded {
             HandlerRequest::ValidateComposerConfig(decoded) => {

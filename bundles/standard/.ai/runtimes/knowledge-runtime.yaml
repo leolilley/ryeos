@@ -1,9 +1,9 @@
-# ryeos:signed:2026-08-03T06:49:26Z:69a3136611dd79c4aa4020f5aa2cc5fc82e951d5e3534b518e6c7ba3a225c2da:YbjAwL8x+v/aHLrImkCTiEjCpGE0xFXxWxufAeU2aPNDiFBfeYrt+b/hjco5BlFzxQZgpJh7eVLRi/pLJH1XDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-05T07:04:40Z:71608cd7a574867d45ef541c6d9c9f4e0feb0fe6b917f552c959940579df4e23:SXMkpdQvxccQTX6c6n2T2vQ20eQvbijrVAQA2peTvEKugCvSOuRcATYIo2enZh+bwX9h3PkRkQtS1VUnkR3BCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: knowledge
 default: true
 binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-knowledge-runtime
-abi_version: "v2"
+abi_version: "v3"
 required_caps:
   - runtime.execute
 launch_contract:

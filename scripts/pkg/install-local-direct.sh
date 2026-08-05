@@ -136,7 +136,7 @@ bundle_payload_bins() {
                 ryeos-graph-runtime \
                 ryeos-knowledge-runtime \
                 rye-composer-extends-chain \
-                rye-composer-graph-permissions
+                ryeos-graph-effective-validator
             ;;
         ryeos-ui)
             printf '%s\n' ryeos-tui web
@@ -654,7 +654,7 @@ stale_bins=(
     rye-parser-yaml-header-document
     rye-parser-regex-kv
     rye-composer-extends-chain
-    rye-composer-graph-permissions
+    ryeos-graph-effective-validator
     rye-composer-identity
 )
 for b in "${stale_bins[@]}"; do

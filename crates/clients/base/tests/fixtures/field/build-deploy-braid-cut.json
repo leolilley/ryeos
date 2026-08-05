@@ -1,7 +1,7 @@
 {
-  "schema_version": "ryeos.ui.field.facts.v1",
+  "schema_version": "ryeos.ui.field.facts.v2",
   "source": "execution",
-  "subject": { "kind": "thread", "id": "T-build-root", "definition_ref": "graph:example/build-deploy", "definition_hash": "sha256:def-build-deploy-v1" },
+  "subject": { "kind": "thread", "id": "T-build-root", "definition_ref": "graph:example/build-deploy", "effective_definition_digest": "1111111111111111111111111111111111111111111111111111111111111111" },
   "revision": "event:build-root:12:hash-12",
   "cursor": {
     "mode": "braid_cut",

@@ -254,7 +254,7 @@ fn schema_3_checkpoint(
     let mut checkpoint = json!({
         "schema_version": GRAPH_CHECKPOINT_SCHEMA_VERSION,
         "definition_ref": definition.definition_ref.clone(),
-        "definition_hash": definition.definition_hash.clone(),
+        "effective_definition_digest": definition.effective_definition_digest.clone(),
         "expression_language": EXPRESSION_LANGUAGE,
         "graph_run_id": graph_run_id,
         "current_node": current_node,
@@ -787,7 +787,7 @@ config:
     let checkpoint = json!({
         "schema_version": GRAPH_CHECKPOINT_SCHEMA_VERSION,
         "definition_ref": definition.definition_ref.clone(),
-        "definition_hash": definition.definition_hash.clone(),
+        "effective_definition_digest": definition.effective_definition_digest.clone(),
         "expression_language": EXPRESSION_LANGUAGE,
         "graph_run_id": "gr-numeric-resume",
         "current_node": "increment",

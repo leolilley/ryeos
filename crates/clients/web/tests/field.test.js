@@ -100,6 +100,28 @@ test("semantic rank width keeps adjacent group bounds disjoint", () => {
   assert.ok(wide.x + wide.width < next.x, "group boxes must not overlap at deep ranks");
 });
 
+test("memberless groups reserve cumulative space after a wide preceding group", () => {
+  const field = vm();
+  field.groups = [
+    { id: "wide", label: "Wide", collapsed: false },
+    { id: "empty", label: "Empty", collapsed: false },
+    { id: "next", label: "Next", collapsed: false },
+  ];
+  field.entities = [
+    entity("wide:0", { group_id: "wide", rank: 0 }),
+    entity("wide:12", { group_id: "wide", rank: 12 }),
+    entity("next:0", { group_id: "next", rank: 0 }),
+  ];
+  field.relations = [];
+  field.traversal = field.entities.map((item) => item.id);
+  const layout = settleLayout(layoutField(field), 1);
+  const [wide, empty, next] = layout.groups;
+
+  assert.ok(wide.x + wide.width < empty.x, "empty group must follow the wide group box");
+  assert.ok(empty.x + empty.width < next.x, "following group must reserve the empty group slot");
+  assert.equal(hitTestGroup(layout, empty.x + 5, empty.y + 5)?.id, "empty");
+});
+
 test("accessibility traversal has one ordered semantic model and relation summaries", () => {
   const model = fieldAccessibilityModel(vm());
   assert.deepEqual(model.map((item) => item.id), ["a", "b", "c"]);
@@ -137,11 +159,7 @@ test("accessibility DOM uses one tab stop and identical selection/activation eve
     assert.match(host.children[0].textContent, /Group Work/);
 
     host.onfocus();
-    assert.deepEqual(events.at(-1), {
-      type: "set_field_selection",
-      instance_key: "tile:7",
-      entity_id: "a",
-    });
+    assert.equal(events.length, 0, "focus restore is silent for unchanged selection");
     host.onkeydown(keyEvent("Enter"));
     assert.deepEqual(events.slice(-2), [
       { type: "set_field_selection", instance_key: "tile:7", entity_id: "a" },
@@ -154,6 +172,28 @@ test("accessibility DOM uses one tab stop and identical selection/activation eve
       group_id: "work",
       collapsed: true,
     });
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
+test("accessibility focus initializes an absent selection exactly once", () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = { createElement: () => new FakeElement() };
+  try {
+    const host = new FakeElement();
+    const events = [];
+    const field = vm();
+    field.selected = null;
+    field.entities.forEach((item) => { item.selected = false; });
+    mountFieldAccessibility(host, field, "tile:8", (event) => events.push(event));
+
+    host.onfocus();
+    assert.deepEqual(events, [{
+      type: "set_field_selection",
+      instance_key: "tile:8",
+      entity_id: "a",
+    }]);
   } finally {
     globalThis.document = previousDocument;
   }
@@ -177,6 +217,34 @@ test("control replacement restores focus by stable semantic key", () => {
     globalThis.document.activeElement = null;
     assert.equal(restoreFieldFocusKey(root, key), true);
     assert.equal(focused, true);
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
+test("disabled replacement moves focus to the nearest enabled stable control", () => {
+  const previousDocument = globalThis.document;
+  let previousFocused = false;
+  const disabledReplacement = {
+    dataset: { focusKey: "field:tile:control:playback" },
+    disabled: true,
+    focus: () => assert.fail("disabled control must not receive restored focus"),
+  };
+  const previous = {
+    dataset: { focusKey: "field:tile:control:previous" },
+    disabled: false,
+    focus: () => { previousFocused = true; },
+  };
+  const root = {
+    querySelectorAll: () => [previous, disabledReplacement],
+  };
+  globalThis.document = { activeElement: null };
+  try {
+    assert.equal(
+      restoreFieldFocusKey(root, "field:tile:control:playback"),
+      true,
+    );
+    assert.equal(previousFocused, true);
   } finally {
     globalThis.document = previousDocument;
   }
@@ -281,6 +349,42 @@ test("reduced motion clears exited tombstones after the replacement layout", () 
     }];
     controller.update(after);
     assert.equal(controller.tombstones.size, 0);
+    controller.unmount();
+  } finally {
+    globalThis.matchMedia = previousMatchMedia;
+  }
+});
+
+test("selection reveal relayouts only when visible field membership changes", () => {
+  const previousMatchMedia = globalThis.matchMedia;
+  globalThis.matchMedia = (query) => ({ matches: query.includes("reduced-motion") });
+  try {
+    const canvas = { getContext: () => null, dataset: {} };
+    const controller = new FieldCanvasController(canvas, () => {}, "tile:reveal");
+    const before = vm();
+    before.groups[0].collapsed = true;
+    controller.update(before);
+    assert.deepEqual([...controller.layout.nodes.keys()], ["a"]);
+    assert.equal(controller.layoutCount, 1);
+
+    const after = structuredClone(before);
+    after.selected = "b";
+    after.entities[0].selected = false;
+    after.entities[1].selected = true;
+    controller.update(after);
+    assert.deepEqual([...controller.layout.nodes.keys()], ["b"]);
+    assert.equal(controller.layoutCount, 2);
+
+    const visible = vm();
+    visible.structural_revision = "visible";
+    controller.update(visible);
+    const count = controller.layoutCount;
+    const visibleSelection = structuredClone(visible);
+    visibleSelection.selected = "b";
+    visibleSelection.entities[0].selected = false;
+    visibleSelection.entities[1].selected = true;
+    controller.update(visibleSelection);
+    assert.equal(controller.layoutCount, count);
     controller.unmount();
   } finally {
     globalThis.matchMedia = previousMatchMedia;

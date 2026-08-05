@@ -116,29 +116,40 @@ pub fn validate_field_requirements(
     let cfg: ExtendsChainConfig =
         serde_json::from_value(config.clone()).map_err(|e| e.to_string())?;
     for requirement in requirements {
-        if requirement.field.is_empty() {
-            return Err("extends_chain composer field requirement must not be empty".to_string());
+        if requirement.path.is_empty() || requirement.path.iter().any(String::is_empty) {
+            return Err(
+                "extends_chain composer field requirement path must not be empty".to_string(),
+            );
         }
+        let field = &requirement.path[0];
         let rule = cfg
             .fields
             .iter()
-            .find(|rule| rule.name == requirement.field)
+            .find(|rule| rule.name == *field)
             .ok_or_else(|| {
                 format!(
-                    "extends_chain: field `{}` requires {:?} composition semantics but has no field rule",
-                    requirement.field, requirement.semantics
+                    "extends_chain: path `{}` requires {:?} composition semantics but its root has no field rule",
+                    requirement.path.join("."), requirement.semantics
                 )
             })?;
-        let supported = match requirement.semantics {
-            ComposerFieldSemantics::RootVerbatim => rule.strategy == ComposerStrategy::RootVerbatim,
-            ComposerFieldSemantics::InheritOrReplace => {
+        let supported = match (requirement.path.len(), requirement.semantics) {
+            (1, ComposerFieldSemantics::RootVerbatim) => {
+                rule.strategy == ComposerStrategy::RootVerbatim
+            }
+            (1, ComposerFieldSemantics::InheritOrReplace) => {
                 rule.strategy == ComposerStrategy::ReplaceRootLast
             }
+            (_, ComposerFieldSemantics::InheritOrReplace) => {
+                rule.strategy == ComposerStrategy::DictMergeRootLast
+            }
+            _ => false,
         };
         if !supported {
             return Err(format!(
-                "extends_chain: field `{}` uses strategy {:?}, which cannot provide {:?} composition semantics",
-                requirement.field, rule.strategy, requirement.semantics
+                "extends_chain: path `{}` is rooted in strategy {:?}, which cannot provide {:?} composition semantics",
+                requirement.path.join("."),
+                rule.strategy,
+                requirement.semantics
             ));
         }
     }
@@ -493,15 +504,15 @@ fn narrow_requires_capabilities(
     ancestor_parsed: &[&Value],
     root_parsed: &Value,
 ) -> Result<(), (ResolutionStepNameWire, String)> {
-    // Legacy authoring fails loudly — no silent ignore, no back-compat. Both
-    // sub-trees are strict-validated for root + ancestors before composition.
-    reject_legacy_permissions(root_parsed)?;
+    // Removed authoring fails loudly. Both sub-trees are strict-validated for
+    // root + ancestors before composition.
+    reject_removed_permissions_field(root_parsed)?;
     validate_requires_shape(root_parsed)?;
     if let Some(m) = manifest_value(root_parsed) {
         validate_manifest_shape(m)?;
     }
     for parent in ancestor_parsed {
-        reject_legacy_permissions(parent)?;
+        reject_removed_permissions_field(parent)?;
         validate_requires_shape(parent)?;
         if let Some(m) = manifest_value(parent) {
             validate_manifest_shape(m)?;
@@ -532,10 +543,10 @@ fn narrow_requires_capabilities(
     Ok(())
 }
 
-/// Reject a legacy top-level `permissions:` block. It is removed from the
-/// schema, but `composed_value_contract` ignores extra top-level keys, so an
-/// old item would otherwise silently lose its authority — fail it instead.
-pub(crate) fn reject_legacy_permissions(
+/// Reject the removed top-level `permissions:` block. The composed-value
+/// contract ignores unowned top-level keys, so explicit rejection prevents an
+/// unsupported authority declaration from being silently discarded.
+pub(crate) fn reject_removed_permissions_field(
     parsed: &Value,
 ) -> Result<(), (ResolutionStepNameWire, String)> {
     if parsed
@@ -553,7 +564,7 @@ pub(crate) fn reject_legacy_permissions(
     Ok(())
 }
 
-/// Validate the `requires` tree's known keys so typos and dropped legacy keys
+/// Validate the `requires` tree's closed key set so typos and removed keys
 /// (e.g. `callbacks`) fail loudly at compose time rather than minting nothing.
 pub(crate) fn validate_requires_shape(
     parsed: &Value,
@@ -607,34 +618,45 @@ pub(crate) fn declared_value(parsed: &Value) -> Option<&Value> {
         .filter(|v| !v.is_null())
 }
 
-/// Compose the `declared` list: child caps narrowed against the nearest
-/// ancestor declaring `declared` (drop semantics — an allowance, safe to trim);
-/// inherited verbatim when the child omits it.
+/// Compose the `declared` list by validating every direct inheritance edge in
+/// deepest-to-nearest-to-root order. Omission inherits; a declaration must be
+/// completely covered by the immediately effective parent and cannot recover
+/// authority discarded by an intermediate ancestor.
 fn compose_declared(
     root_parsed: &Value,
     ancestor_parsed: &[&Value],
 ) -> Result<Option<Value>, (ResolutionStepNameWire, String)> {
-    let child = declared_value(root_parsed);
-    let parent = ancestor_parsed.iter().find_map(|p| declared_value(p));
-    match (child, parent) {
-        (None, None) => Ok(None),
-        (None, Some(p)) => {
-            validate_declared_shape(p)?;
-            Ok(Some(p.clone()))
+    let mut effective: Option<Vec<String>> = None;
+    for source in ancestor_parsed
+        .iter()
+        .copied()
+        .chain(std::iter::once(root_parsed))
+    {
+        let Some(declared) = declared_value(source) else {
+            continue;
+        };
+        validate_declared_shape(declared)?;
+        let child = string_array(declared);
+        if let Some(parent) = effective.as_ref() {
+            let covered = narrow_capabilities(&child, parent);
+            if covered != child {
+                let missing = child
+                    .iter()
+                    .filter(|capability| !covered.contains(capability))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                return Err((
+                    ResolutionStepNameWire::PipelineInit,
+                    format!(
+                        "requires.capabilities.declared widens its direct parent: {}",
+                        missing.join(", ")
+                    ),
+                ));
+            }
         }
-        (Some(c), None) => {
-            validate_declared_shape(c)?;
-            Ok(Some(c.clone()))
-        }
-        (Some(c), Some(p)) => {
-            validate_declared_shape(c)?;
-            validate_declared_shape(p)?;
-            let narrowed = narrow_capabilities(&string_array(c), &string_array(p));
-            Ok(Some(Value::Array(
-                narrowed.into_iter().map(Value::String).collect(),
-            )))
-        }
+        effective = Some(child);
     }
+    Ok(effective.map(|caps| Value::Array(caps.into_iter().map(Value::String).collect())))
 }
 
 /// Strict shape check for `declared`: a list of cap strings (the cap encodes
@@ -932,36 +954,39 @@ fn validate_manifest_resources(
     Ok(())
 }
 
-/// Compose the `manifest` sub-tree: child must be a subset of the nearest
-/// ancestor declaring `manifest` (fail-on-widen — a hard requirement);
-/// inherited verbatim when the child omits it.
+/// Compose the `manifest` sub-tree while checking every direct inheritance
+/// edge. An omitted value inherits the immediately effective value.
 fn compose_manifest(
     root_parsed: &Value,
     ancestor_parsed: &[&Value],
 ) -> Result<Option<Value>, (ResolutionStepNameWire, String)> {
-    let child = capability_subtree(root_parsed, "manifest");
-    let parent = ancestor_parsed
+    let mut effective: Option<Map<String, Value>> = None;
+    for source in ancestor_parsed
         .iter()
-        .find_map(|p| capability_subtree(p, "manifest"));
-    match (child, parent) {
-        (None, None) => Ok(None),
-        (None, Some(p)) => Ok(Some(Value::Object(p.clone()))),
-        (Some(c), None) => Ok(Some(Value::Object(c.clone()))),
-        (Some(c), Some(p)) => {
-            let missing = manifest_missing(c, p);
+        .copied()
+        .chain(std::iter::once(root_parsed))
+    {
+        let Some(child) = capability_subtree(source, "manifest") else {
+            continue;
+        };
+        if let Some(parent) = effective.as_ref() {
+            let missing = manifest_missing(child, parent);
             if missing.is_empty() {
-                Ok(Some(Value::Object(c.clone())))
+                effective = Some(child.clone());
             } else {
-                Err((
+                return Err((
                     ResolutionStepNameWire::PipelineInit,
                     format!(
-                        "requires.capabilities.manifest.runtime_authority widens parent requirement: {}",
+                        "requires.capabilities.manifest.runtime_authority widens its direct parent: {}",
                         missing.join(", ")
                     ),
-                ))
+                ));
             }
+        } else {
+            effective = Some(child.clone());
         }
     }
+    Ok(effective.map(Value::Object))
 }
 
 fn manifest_missing(child: &Map<String, Value>, parent: &Map<String, Value>) -> Vec<String> {
@@ -1319,17 +1344,18 @@ enum ComposerStrategy {
     /// Compose the unified `requires.capabilities` tree, narrowing each sub-tree
     /// against the nearest ancestor that declares it, independently:
     ///
-    /// - `declared` (self-asserted action authority) narrows by **dropping** —
-    ///   a child keeps only the caps its parent also grants (an allowance, safe
-    ///   to trim).
+    /// - `declared` (self-asserted action authority) narrows by **failing** — a
+    ///   nearer document must explicitly stay within its direct parent's
+    ///   effective authority and cannot silently request a different program.
     /// - `manifest` (runtime authority) narrows by **failing** — a child that
     ///   widens beyond its parent's `(event_kind, op)` / `(namespace, op)` pairs
     ///   fails compose, because dropping a hard requirement would only defer the
     ///   failure to a callback authz error.
     ///
-    /// Also rejects legacy top-level `permissions:` and any unknown key under
-    /// `requires.capabilities` so old authoring fails loudly. The signed bundle
-    /// manifest remains the final upper bound for `manifest` at launch.
+    /// Also rejects the unsupported top-level `permissions:` field and any
+    /// unknown key under `requires.capabilities` so removed authoring cannot be
+    /// ignored. The signed bundle manifest remains the final upper bound for
+    /// `manifest` at launch.
     NarrowRequiresCapabilities,
 }
 
@@ -1397,7 +1423,7 @@ mod tests {
                     "derive_as": "body"
                 },
                 {
-                    "name": "permissions",
+                    "name": "capabilities",
                     "strategy": "narrow_against_parent_effective",
                     "expect_value_type": "mapping"
                 },
@@ -1428,7 +1454,7 @@ mod tests {
             "policy_facts": [
                 {
                     "name": "effective_caps",
-                    "path": ["permissions", "execute"],
+                    "path": ["capabilities", "execute"],
                     "expect": "array_of_strings"
                 }
             ]
@@ -1615,7 +1641,7 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err.0, ResolutionStepNameWire::PipelineInit));
         assert!(
-            err.1.contains("widens parent requirement") && err.1.contains("bundle_events.e.scan"),
+            err.1.contains("widens its direct parent") && err.1.contains("bundle_events.e.scan"),
             "got: {}",
             err.1
         );
@@ -1670,7 +1696,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.1.contains("widens parent requirement") && err.1.contains("bundle_events.f.append"),
+            err.1.contains("widens its direct parent") && err.1.contains("bundle_events.f.append"),
             "got: {}",
             err.1
         );
@@ -1780,7 +1806,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            error.1.contains("widens parent requirement")
+            error.1.contains("widens its direct parent")
                 && error.1.contains("project_snapshots.create"),
             "got: {}",
             error.1
@@ -1861,7 +1887,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.1.contains("widens parent requirement")
+            err.1.contains("widens its direct parent")
                 && err
                     .1
                     .contains("item_authoring.knowledge.runtime-authored/foo*"),
@@ -1906,29 +1932,27 @@ mod tests {
             ),
             "body": "b"
         });
-        // Ancestors nearest-first: [parent, grandparent].
+        // Resolver order is deepest-first: [grandparent, parent].
         let err = run(
             requires_config(),
             child,
             vec![
-                ancestor_input("parent", parent),
                 ancestor_input("grandparent", grandparent),
+                ancestor_input("parent", parent),
             ],
         )
         .unwrap_err();
         assert!(
-            err.1.contains("widens parent requirement") && err.1.contains("bundle_events.e.scan"),
+            err.1.contains("widens its direct parent") && err.1.contains("bundle_events.e.scan"),
             "got: {}",
             err.1
         );
     }
 
-    // ── declared sub-tree (drop semantics) ───────────────────────────
+    // ── declared sub-tree (fail-closed narrowing) ────────────────────
 
     #[test]
-    fn declared_child_narrowed_against_parent_silently_drops() {
-        // `declared` is an allowance, not a hard requirement — a child that
-        // names a cap the parent lacks is narrowed (dropped), NOT failed.
+    fn declared_child_widening_is_rejected() {
         let parent =
             json!({ "requires": declared_block(json!(["ryeos.execute.tool.read"])), "body": "" });
         let child = json!({
@@ -1936,16 +1960,13 @@ mod tests {
             "requires": declared_block(json!(["ryeos.execute.tool.read", "ryeos.execute.tool.bash"])),
             "body": "b"
         });
-        let view = run(
+        let error = run(
             requires_config(),
             child,
             vec![ancestor_input("parent", parent)],
         )
-        .unwrap();
-        assert_eq!(
-            declared_execute(&view),
-            vec!["ryeos.execute.tool.read".to_string()]
-        );
+        .unwrap_err();
+        assert!(error.1.contains("widens its direct parent"));
     }
 
     #[test]
@@ -2037,10 +2058,10 @@ mod tests {
         assert_eq!(requires_pairs(&view), vec!["be:e:append".to_string()]);
     }
 
-    // ── legacy rejection + strict shape (fail loud, no back-compat) ───
+    // ── removed-field rejection + strict shape ──────────────────────
 
     #[test]
-    fn legacy_top_level_permissions_rejected() {
+    fn removed_top_level_permissions_is_rejected() {
         let child = json!({ "permissions": ["ryeos.execute.tool.read"], "body": "b" });
         let err = run(requires_config(), child, vec![]).unwrap_err();
         assert!(
@@ -2052,7 +2073,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_callbacks_key_rejected() {
+    fn removed_callbacks_key_is_rejected() {
         let child = json!({
             "requires": { "capabilities": { "callbacks": {
                 "bundle_events": [{ "event_kind": "e", "operations": ["append"] }]
@@ -2070,8 +2091,8 @@ mod tests {
 
     #[test]
     fn declared_as_map_rejected() {
-        // `declared` is a flat list of cap strings — a verb-bucketed mapping
-        // (the legacy shape) fails loudly.
+        // `declared` is a flat list of cap strings; a verb-bucketed mapping
+        // fails loudly.
         let child = json!({
             "requires": { "capabilities": { "declared": { "execute": ["x"] } } },
             "body": "b"
@@ -2121,7 +2142,7 @@ mod tests {
         });
         let p_parsed = json!({
             "name": "parent",
-            "permissions": { "execute": ["ryeos.execute.tool.bash"] },
+            "capabilities": { "execute": ["ryeos.execute.tool.bash"] },
             "body": ""
         });
         let view = run(
@@ -2145,11 +2166,11 @@ mod tests {
         let r = json!({
             "name": "child",
             "extends": "parent",
-            "permissions": { "execute": ["ryeos.execute.tool.read"] },
+            "capabilities": { "execute": ["ryeos.execute.tool.read"] },
             "body": "body"
         });
         let p = json!({
-            "permissions": { "execute": ["ryeos.execute.tool.bash"] },
+            "capabilities": { "execute": ["ryeos.execute.tool.bash"] },
             "body": ""
         });
         let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
@@ -2356,7 +2377,7 @@ mod tests {
         validate_field_requirements(
             &replace,
             &[ComposerFieldRequirement {
-                field: "policy".into(),
+                path: vec!["policy".into()],
                 semantics: ComposerFieldSemantics::InheritOrReplace,
             }],
         )
@@ -2373,7 +2394,7 @@ mod tests {
         let error = validate_field_requirements(
             &deep_merge,
             &[ComposerFieldRequirement {
-                field: "policy".into(),
+                path: vec!["policy".into()],
                 semantics: ComposerFieldSemantics::InheritOrReplace,
             }],
         )
@@ -2560,6 +2581,96 @@ mod tests {
     }
 
     #[test]
+    fn graph_config_hooks_inherit_clear_and_replace_atomically() {
+        let cfg = json!({
+            "extends_field": "extends",
+            "fields": [
+                { "name": "config", "strategy": "dict_merge_root_last", "expect_value_type": "mapping" }
+            ]
+        });
+        let inherited_hooks = json!([
+            {"id": "parent", "event": "graph_started", "result": "discard", "action": {}}
+        ]);
+        let parent = json!({
+            "config": {"start": "parent", "nodes": {}, "hooks": inherited_hooks}
+        });
+
+        let omitted = run(
+            cfg.clone(),
+            json!({"extends": "parent", "config": {"start": "child"}}),
+            vec![ancestor_input("parent", parent.clone())],
+        )
+        .unwrap();
+        assert_eq!(
+            omitted.composed.pointer("/config/hooks"),
+            parent.pointer("/config/hooks")
+        );
+
+        let cleared = run(
+            cfg.clone(),
+            json!({"extends": "parent", "config": {"hooks": []}}),
+            vec![ancestor_input("parent", parent.clone())],
+        )
+        .unwrap();
+        assert_eq!(cleared.composed.pointer("/config/hooks"), Some(&json!([])));
+
+        let replacement = json!([
+            {"id": "child", "event": "graph_completed", "result": "observation", "action": {}}
+        ]);
+        let replaced = run(
+            cfg,
+            json!({"extends": "parent", "config": {"hooks": replacement.clone()}}),
+            vec![ancestor_input("parent", parent)],
+        )
+        .unwrap();
+        assert_eq!(
+            replaced.composed.pointer("/config/hooks"),
+            Some(&replacement)
+        );
+    }
+
+    #[test]
+    fn directive_hooks_inherit_clear_and_replace_atomically() {
+        let cfg = json!({
+            "extends_field": "extends",
+            "fields": [
+                { "name": "hooks", "strategy": "replace_root_last", "expect_value_type": "sequence" }
+            ]
+        });
+        let inherited = json!([
+            {"id": "parent", "event": "after_step", "result": "discard", "action": {}}
+        ]);
+        let parent = json!({"hooks": inherited});
+
+        let omitted = run(
+            cfg.clone(),
+            json!({"extends": "parent"}),
+            vec![ancestor_input("parent", parent.clone())],
+        )
+        .unwrap();
+        assert_eq!(omitted.composed.get("hooks"), parent.get("hooks"));
+
+        let cleared = run(
+            cfg.clone(),
+            json!({"extends": "parent", "hooks": []}),
+            vec![ancestor_input("parent", parent.clone())],
+        )
+        .unwrap();
+        assert_eq!(cleared.composed.get("hooks"), Some(&json!([])));
+
+        let replacement = json!([
+            {"id": "child", "event": "continuation", "result": "control", "action": {}}
+        ]);
+        let replaced = run(
+            cfg,
+            json!({"extends": "parent", "hooks": replacement.clone()}),
+            vec![ancestor_input("parent", parent)],
+        )
+        .unwrap();
+        assert_eq!(replaced.composed.get("hooks"), Some(&replacement));
+    }
+
+    #[test]
     fn dict_merge_string_seq_root_last_isolated() {
         let cfg = json!({
             "extends_field": "ext",
@@ -2659,287 +2770,95 @@ mod tests {
         assert!(policy_fact_string_seq(&view, "caps").is_empty());
     }
 
-    // ── NarrowAgainstParentEffective tests ─────────────────────────
-
     #[test]
-    fn child_cannot_exceed_parent() {
-        // Parent allows only read
-        let p = json!({
-            "name": "parent",
-            "permissions": { "execute": ["ryeos.execute.tool.ryeos.file-system.read"] },
+    fn declared_three_level_chain_cannot_recover_discarded_authority() {
+        let grandparent = json!({
+            "requires": declared_block(json!([
+                "ryeos.execute.tool.a",
+                "ryeos.execute.tool.b"
+            ])),
             "body": ""
         });
-        // Child requests write (not covered by parent)
-        let r = json!({
-            "name": "child",
-            "extends": "parent",
-            "permissions": { "execute": ["ryeos.execute.tool.ryeos.file-system.write"] },
-            "body": "body"
-        });
-        let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
-        // Narrowed to empty — parent doesn't cover write
-        assert!(policy_fact_string_seq(&view, "effective_caps").is_empty());
-    }
-
-    #[test]
-    fn child_subset_passes_through() {
-        // Parent allows wildcard
-        let p = json!({
-            "name": "parent",
-            "permissions": { "execute": ["ryeos.execute.tool.ryeos.file-system.*"] },
+        let parent = json!({
+            "extends": "grandparent",
+            "requires": declared_block(json!(["ryeos.execute.tool.a"])),
             "body": ""
         });
-        // Child requests specific tool within wildcard
-        let r = json!({
-            "name": "child",
+        let child = json!({
             "extends": "parent",
-            "permissions": { "execute": ["ryeos.execute.tool.ryeos.file-system.write"] },
-            "body": "body"
+            "requires": declared_block(json!(["ryeos.execute.tool.b"])),
+            "body": "child"
         });
-        let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
-        assert_eq!(
-            policy_fact_string_seq(&view, "effective_caps"),
-            vec!["ryeos.execute.tool.ryeos.file-system.write"]
-        );
-    }
 
-    #[test]
-    fn child_omits_permissions_inherits_parent() {
-        // Parent allows read
-        let p = json!({
-            "name": "parent",
-            "permissions": { "execute": ["ryeos.execute.tool.ryeos.file-system.read"] },
-            "body": ""
-        });
-        // Child does not declare permissions
-        let r = json!({
-            "name": "child",
-            "extends": "parent",
-            "body": "body"
-        });
-        let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
-        assert_eq!(
-            policy_fact_string_seq(&view, "effective_caps"),
-            vec!["ryeos.execute.tool.ryeos.file-system.read"]
-        );
-    }
-
-    #[test]
-    fn child_omits_verb_inherits_parent_verb() {
-        // Parent has execute and fetch
-        let p = json!({
-            "name": "parent",
-            "permissions": {
-                "execute": ["ryeos.execute.tool.x"],
-                "fetch": ["ryeos.fetch.tool.x"]
-            },
-            "body": ""
-        });
-        // Child declares only execute
-        let r = json!({
-            "name": "child",
-            "extends": "parent",
-            "permissions": { "execute": ["ryeos.execute.tool.x"] },
-            "body": "body"
-        });
-        let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
-        // Child keeps its execute
-        assert_eq!(
-            policy_fact_string_seq(&view, "effective_caps"),
-            vec!["ryeos.execute.tool.x"]
-        );
-        // Child inherits parent's fetch
-        let fetch_caps = view
-            .composed
-            .get("permissions")
-            .and_then(|p| p.get("fetch"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        assert_eq!(fetch_caps, vec!["ryeos.fetch.tool.x"]);
-    }
-
-    #[test]
-    fn wildcard_parent_covers_child_wildcard() {
-        let p = json!({
-            "name": "parent",
-            "permissions": { "execute": ["ryeos.execute.tool.*"] },
-            "body": ""
-        });
-        let r = json!({
-            "name": "child",
-            "extends": "parent",
-            "permissions": { "execute": ["ryeos.execute.tool.ryeos.*"] },
-            "body": "body"
-        });
-        let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
-        assert_eq!(
-            policy_fact_string_seq(&view, "effective_caps"),
-            vec!["ryeos.execute.tool.ryeos.*"]
-        );
-    }
-
-    #[test]
-    fn empty_child_caps_stay_empty() {
-        let p = json!({
-            "name": "parent",
-            "permissions": { "execute": ["ryeos.execute.tool.*"] },
-            "body": ""
-        });
-        let r = json!({
-            "name": "child",
-            "extends": "parent",
-            "permissions": { "execute": [] },
-            "body": "body"
-        });
-        let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
-        assert!(policy_fact_string_seq(&view, "effective_caps").is_empty());
-    }
-
-    #[test]
-    fn global_wildcard_covers_everything() {
-        let p = json!({
-            "name": "parent",
-            "permissions": { "execute": ["*"] },
-            "body": ""
-        });
-        let r = json!({
-            "name": "child",
-            "extends": "parent",
-            "permissions": { "execute": [
-                "ryeos.execute.tool.ryeos.file-system.write",
-                "ryeos.execute.service.bundle/install"
-            ]},
-            "body": "body"
-        });
-        let view = run(demo_config(), r, vec![ancestor_input("parent", p)]).unwrap();
-        assert_eq!(
-            policy_fact_string_seq(&view, "effective_caps"),
+        let error = run(
+            requires_config(),
+            child,
             vec![
-                "ryeos.execute.tool.ryeos.file-system.write",
-                "ryeos.execute.service.bundle/install"
-            ]
-        );
+                ancestor_input("grandparent", grandparent),
+                ancestor_input("parent", parent),
+            ],
+        )
+        .unwrap_err();
+        assert!(error.1.contains("widens its direct parent"));
+        assert!(error.1.contains("ryeos.execute.tool.b"));
     }
 
-    // ── 3-level (multilevel) narrowing tests ────────────────────────
-
     #[test]
-    fn three_level_chain_narrows_against_immediate_parent() {
-        // Grandparent: broad (ryeos.*)
-        let gp = json!({
-            "name": "grandparent",
-            "permissions": { "execute": ["ryeos.*"] },
+    fn declared_three_level_chain_accepts_direct_narrowing_at_every_edge() {
+        let grandparent = json!({
+            "requires": declared_block(json!([
+                "ryeos.execute.tool.a",
+                "ryeos.execute.tool.b"
+            ])),
             "body": ""
         });
-        // Parent: narrowed (ryeos.execute.tool.*)
-        let p = json!({
-            "name": "parent",
-            "permissions": { "execute": ["ryeos.execute.tool.*"] },
+        let parent = json!({
+            "extends": "grandparent",
+            "requires": declared_block(json!(["ryeos.execute.tool.a"])),
             "body": ""
         });
-        // Child: requests a specific tool — covered by parent's wildcard
-        let r = json!({
-            "name": "child",
+        let child = json!({
             "extends": "parent",
-            "permissions": { "execute": ["ryeos.execute.tool.ryeos.file-system.read"] },
-            "body": "body"
+            "requires": declared_block(json!(["ryeos.execute.tool.a"])),
+            "body": "child"
         });
-        // ancestors are nearest-first: [parent, grandparent]
+
         let view = run(
-            demo_config(),
-            r,
+            requires_config(),
+            child,
             vec![
-                ancestor_input("parent", p),
-                ancestor_input("grandparent", gp),
+                ancestor_input("grandparent", grandparent),
+                ancestor_input("parent", parent),
             ],
         )
         .unwrap();
-        // Child narrows against immediate parent (ryeos.execute.tool.*),
-        // which covers ryeos.execute.tool.ryeos.file-system.read — passes.
-        assert_eq!(
-            policy_fact_string_seq(&view, "effective_caps"),
-            vec!["ryeos.execute.tool.ryeos.file-system.read"]
-        );
+        assert_eq!(declared_execute(&view), vec!["ryeos.execute.tool.a"]);
     }
 
     #[test]
-    fn three_level_chain_child_omits_inherits_immediate_parent() {
-        // Grandparent: broad
-        let gp = json!({
-            "name": "grandparent",
-            "permissions": { "execute": ["ryeos.*"] },
+    fn declared_omission_inherits_through_each_deepest_first_edge() {
+        let grandparent = json!({
+            "requires": declared_block(json!([
+                "ryeos.execute.tool.a",
+                "ryeos.execute.tool.b"
+            ])),
             "body": ""
         });
-        // Parent: narrowed
-        let p = json!({
-            "name": "parent",
-            "permissions": { "execute": ["ryeos.execute.tool.read"] },
-            "body": ""
-        });
-        // Child: omits permissions — should inherit from immediate parent
-        let r = json!({
-            "name": "child",
-            "extends": "parent",
-            "body": "body"
-        });
-        // ancestors are nearest-first: [parent, grandparent]
-        let view = run(
-            demo_config(),
-            r,
-            vec![
-                ancestor_input("parent", p),
-                ancestor_input("grandparent", gp),
-            ],
-        )
-        .unwrap();
-        // Child inherits from immediate parent (parent), not grandparent
-        assert_eq!(
-            policy_fact_string_seq(&view, "effective_caps"),
-            vec!["ryeos.execute.tool.read"]
-        );
-    }
+        let parent = json!({"extends": "grandparent", "body": ""});
+        let child = json!({"extends": "parent", "body": "child"});
 
-    #[test]
-    fn three_level_chain_grandparent_only_child_narrows_against_grandparent() {
-        // Grandparent: narrow
-        let gp = json!({
-            "name": "grandparent",
-            "permissions": { "execute": ["ryeos.execute.tool.read"] },
-            "body": ""
-        });
-        // Parent: omits permissions (inherits from grandparent)
-        let p = json!({
-            "name": "parent",
-            "body": ""
-        });
-        // Child: requests broad — should narrow against parent's effective
-        // (which was inherited from grandparent: ryeos.execute.tool.read)
-        let r = json!({
-            "name": "child",
-            "extends": "parent",
-            "permissions": { "execute": ["ryeos.*"] },
-            "body": "body"
-        });
-        // ancestors are nearest-first: [parent, grandparent]
         let view = run(
-            demo_config(),
-            r,
+            requires_config(),
+            child,
             vec![
-                ancestor_input("parent", p),
-                ancestor_input("grandparent", gp),
+                ancestor_input("grandparent", grandparent),
+                ancestor_input("parent", parent),
             ],
         )
         .unwrap();
-        // Child's ryeos.* narrowed against parent's effective (inherited from gp: ryeos.execute.tool.read)
-        // ryeos.* is NOT covered by ryeos.execute.tool.read → empty
-        assert!(
-            policy_fact_string_seq(&view, "effective_caps").is_empty(),
-            "child broad cap should be narrowed to empty against grandparent's narrow cap inherited by parent"
+        assert_eq!(
+            declared_execute(&view),
+            vec!["ryeos.execute.tool.a", "ryeos.execute.tool.b"]
         );
     }
 }

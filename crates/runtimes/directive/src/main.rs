@@ -204,6 +204,19 @@ fn run_directive() -> Result<RuntimeResult> {
 }
 
 async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult> {
+    if envelope.schema_version()
+        != ryeos_engine::launch_envelope_types::MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION
+    {
+        anyhow::bail!("unsupported managed launch envelope schema");
+    }
+    let observed_effective_digest = envelope.resolution().effective_definition_digest()?;
+    if &observed_effective_digest != envelope.effective_definition_digest() {
+        anyhow::bail!(
+            "directive effective definition digest mismatch: envelope={}, observed={}",
+            envelope.effective_definition_digest(),
+            observed_effective_digest
+        );
+    }
     let project_root = envelope.roots.project_root.clone();
     // Callback identity + state-write anchor: the deliberate `state_root`
     // override when the launch carried one, otherwise the project root. The
@@ -273,7 +286,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
             project_root: &project_root,
             bundle_roots: &bundle_roots,
         },
-        &envelope.resolution.composed,
+        &envelope.resolution().composed,
         &envelope.policy.hard_limits,
         &verified_loader,
         &envelope.inventory,
@@ -524,8 +537,9 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
                 execution,
                 model_name,
                 thread_id: envelope.thread_id.clone(),
-                definition_ref: envelope.resolution.root.resolved_ref.clone(),
-                definition_hash: envelope.resolution.root.raw_content_digest.clone(),
+                definition_ref: envelope.resolution().root.resolved_ref.clone(),
+                root_raw_content_digest: envelope.resolution().root.raw_content_digest.clone(),
+                effective_definition_digest: envelope.effective_definition_digest().to_string(),
                 hooks,
                 outputs: bootstrap_output.config.outputs,
                 return_nudge: bootstrap_output.config.return_nudge,
@@ -538,7 +552,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
                 reasoning,
                 terminal_state_root: state_root.clone(),
                 terminal_source_path: envelope
-                    .resolution
+                    .resolution()
                     .root
                     .source_path
                     .to_string_lossy()
@@ -617,8 +631,9 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
             execution,
             model_name,
             thread_id: envelope.thread_id.clone(),
-            definition_ref: envelope.resolution.root.resolved_ref.clone(),
-            definition_hash: envelope.resolution.root.raw_content_digest.clone(),
+            definition_ref: envelope.resolution().root.resolved_ref.clone(),
+            root_raw_content_digest: envelope.resolution().root.raw_content_digest.clone(),
+            effective_definition_digest: envelope.effective_definition_digest().to_string(),
             hooks,
             outputs: bootstrap_output.config.outputs,
             return_nudge: bootstrap_output.config.return_nudge,
@@ -631,7 +646,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
             reasoning,
             terminal_state_root: state_root.clone(),
             terminal_source_path: envelope
-                .resolution
+                .resolution()
                 .root
                 .source_path
                 .to_string_lossy()

@@ -16,6 +16,7 @@ use ryeos_engine::boot_validation::{
     validate_boot, validate_protocol_builder, validate_runtime_launch_handlers,
 };
 use ryeos_engine::composers::ComposerRegistry;
+use ryeos_engine::effective_validators::EffectiveValidatorRegistry;
 use ryeos_engine::engine::Engine;
 use ryeos_engine::handlers::HandlerRegistry;
 use ryeos_engine::kind_registry::{KindRegistry, TerminatorDecl};
@@ -801,6 +802,7 @@ fn build_engine_for_roots_with_isolation(
         kinds,
         parser_dispatcher,
         composers,
+        effective_validators,
         protocol_registry,
         runtimes,
         launch_preparers,
@@ -814,6 +816,7 @@ fn build_engine_for_roots_with_isolation(
         .with_trust_store(trust_store)
         .with_node_trust_store(node_trust_store)
         .with_composers(composers)
+        .with_effective_validators(effective_validators)
         .with_protocols(protocol_registry)
         .with_runtimes(runtimes)
         .with_launch_preparers(launch_preparers)
@@ -896,6 +899,7 @@ struct NodeBundleAdmission {
     kinds: KindRegistry,
     parser_dispatcher: ParserDispatcher,
     composers: ComposerRegistry,
+    effective_validators: EffectiveValidatorRegistry,
     protocol_registry: ProtocolRegistry,
     runtimes: RuntimeRegistry,
     launch_preparers: LaunchPreparerRegistry,
@@ -963,6 +967,13 @@ fn build_node_bundle_admission(
         .context("failed to load protocol descriptors from bundle roots")?;
     let composers = ComposerRegistry::from_kinds(&kinds, &handler_registry)
         .context("failed to derive composer registry from kind schemas")?;
+    let effective_validators = EffectiveValidatorRegistry::from_kinds(
+        &kinds,
+        &handler_registry,
+        isolation.clone(),
+        bundle_roots,
+    )
+    .context("failed to bind effective validators from kind schemas")?;
 
     validate_terminator_refs(&kinds, &protocol_registry)
         .context("terminator→protocol ref validation failed")?;
@@ -1012,6 +1023,7 @@ fn build_node_bundle_admission(
         kinds,
         parser_dispatcher: ParserDispatcher::new(parser_tools, handler_registry.clone()),
         composers,
+        effective_validators,
         protocol_registry,
         runtimes,
         launch_preparers,

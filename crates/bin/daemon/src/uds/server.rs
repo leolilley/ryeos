@@ -1649,7 +1649,7 @@ mod tests {
         ttl: std::time::Duration,
         effective_caps: Vec<String>,
         provenance: TestProvenance,
-        root_content_digest: String,
+        root_raw_content_digest: String,
     ) -> ryeos_app::callback_token::CallbackCapability {
         bind_test_callback_owner(
             state,
@@ -1659,7 +1659,7 @@ mod tests {
                 ttl,
                 effective_caps,
                 provenance,
-                root_content_digest,
+                root_raw_content_digest,
             ),
         )
     }
@@ -1674,7 +1674,7 @@ mod tests {
         provenance: TestProvenance,
         effective_bundle_id: Option<String>,
         item_ref: Option<String>,
-        root_content_digest: String,
+        root_raw_content_digest: String,
         hard_limits: serde_json::Value,
         depth: u32,
     ) -> ryeos_app::callback_token::CallbackCapability {
@@ -1688,7 +1688,8 @@ mod tests {
                 provenance,
                 effective_bundle_id,
                 item_ref,
-                root_content_digest,
+                root_raw_content_digest.clone(),
+                root_raw_content_digest,
                 hard_limits,
                 depth,
             ),

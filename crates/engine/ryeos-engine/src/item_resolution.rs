@@ -584,6 +584,8 @@ mod tests {
                 methods: std::collections::BTreeMap::new(),
                 augmentation_methods: std::collections::BTreeMap::new(),
                 launch_augmentations: Vec::new(),
+                hooks: None,
+                effective_validator: None,
             }),
             extensions: extensions
                 .into_iter()

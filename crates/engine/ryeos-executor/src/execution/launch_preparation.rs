@@ -625,7 +625,7 @@ fn launch_config_snapshot_cache() -> &'static crate::resolved_config_cache::Snap
     CACHE.get_or_init(crate::resolved_config_cache::SnapshotCache::default)
 }
 
-fn load_launch_config_set_under_current_authority(
+pub(crate) fn load_launch_config_set_under_current_authority(
     declarations: &BTreeMap<String, ryeos_engine::runtime_registry::LaunchConfigInputDecl>,
     roots: &ResolutionRoots,
     parsers: &ParserDispatcher,

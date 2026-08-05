@@ -11,7 +11,6 @@ pub mod daemon_rpc;
 pub mod envelope;
 pub mod events;
 pub use ryeos_expression as expression;
-pub mod expression_condition;
 pub mod framing;
 pub mod hooks_eval;
 pub mod hooks_loader;
@@ -60,12 +59,12 @@ pub use expression::{
     compile_expression_for, compile_template, compile_template_for, evaluate, evaluate_bool,
     reject_removed_single_brace_interpolation, render_template,
 };
-pub use expression_condition::ExpressionCondition;
 pub use framing::{recv_frame, send_frame};
 pub use hooks_eval::{HookDispatcher, HookRunResult, run_hooks};
 pub use hooks_loader::{
-    CompiledHook, CompiledHookCondition, HookCompilationError, HookContextSchema, HookDefinition,
-    HookLayer, HookResultMode, HookSources, compile_hooks, load_configured_hook_sources,
+    CompiledHook, CompiledHookCondition, ExpressionCondition, HookCompilationError,
+    HookContextSchema, HookDefinition, HookLayer, HookResultMode, HookSources,
+    compile_effective_hook_plan, compile_hooks,
 };
 pub use lillux::crypto::SigningKey;
 pub use paths::AI_DIR;

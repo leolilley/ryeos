@@ -271,6 +271,12 @@ impl From<DispatchError> for BuildAndLaunchError {
     }
 }
 
+impl From<ryeos_engine::error::EngineError> for BuildAndLaunchError {
+    fn from(error: ryeos_engine::error::EngineError) -> Self {
+        Self::Internal(anyhow::anyhow!(error))
+    }
+}
+
 impl BuildAndLaunchError {
     /// Whether a launch failure is an infrastructure interruption that is safe
     /// to re-drive without changing the authored execution. Keep this deliberately
@@ -3093,66 +3099,25 @@ pub(crate) fn derive_effective_caps(
 }
 
 fn admitted_hook_dispatch_authorizations(
-    kind: &str,
-    composed: &Value,
-    raw_content: &str,
-    project_root: &Path,
-    bundle_roots: &[PathBuf],
-    node_trusted_keys_dir: &Path,
+    plan: &ryeos_engine::hooks::EffectiveHookPlan,
 ) -> Result<Vec<HookDispatchAuthorization>> {
-    let admitted_events: &[&str] = match kind {
-        "graph" => &["graph_started", "graph_step_completed", "graph_completed"],
-        "directive" => &["after_step", "continuation"],
-        _ => return Ok(Vec::new()),
-    };
-
-    let authored_value = match kind {
-        "graph" => composed.pointer("/config/hooks").cloned().or_else(|| {
-            serde_yaml::from_str::<Value>(raw_content)
-                .ok()
-                .and_then(|value| value.pointer("/config/hooks").cloned())
-        }),
-        "directive" => composed.get("hooks").cloned(),
-        _ => None,
-    };
-    let authored = authored_value
-        .filter(|value| !value.is_null())
-        .map(serde_json::from_value::<Vec<ryeos_runtime::HookDefinition>>)
-        .transpose()
-        .context("decode admitted authored hooks")?
-        .unwrap_or_default();
-
-    // Mirror the runtime's verified configured-hook loader before callback
-    // authority is minted. A later filesystem race can only make the runtime's
-    // view fail closed against this captured set; it cannot widen evidence
-    // provenance after launch.
-    let loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
-        project_root.to_path_buf(),
-        bundle_roots.to_vec(),
-        node_trusted_keys_dir,
-    )?;
-    let mut sources = ryeos_runtime::load_configured_hook_sources(&loader)?;
-    sources.authored = authored;
-    sources.retain_configured_events(admitted_events);
-
+    plan.validate().map_err(|error| anyhow::anyhow!(error))?;
     let mut authorizations = Vec::new();
-    for (layer, hooks) in [
-        (ryeos_runtime::HookLayer::Authored, sources.authored),
-        (ryeos_runtime::HookLayer::Builtin, sources.builtin),
-        (
-            ryeos_runtime::HookLayer::Infrastructure,
-            sources.infrastructure,
-        ),
-        (ryeos_runtime::HookLayer::Context, sources.context),
-        (ryeos_runtime::HookLayer::Operator, sources.operator),
-        (ryeos_runtime::HookLayer::Project, sources.project),
-    ] {
-        authorizations.extend(hooks.into_iter().map(|hook| HookDispatchAuthorization {
-            hook_id: hook.id,
-            event: hook.event,
-            layer,
-            result_mode: hook.result,
-        }));
+    for (layer, body) in plan.iter_layers() {
+        for hook in &body.hooks {
+            let contract = plan.event_contracts.get(&hook.event).ok_or_else(|| {
+                anyhow::anyhow!("hook `{}` has no captured event contract", hook.id)
+            })?;
+            authorizations.push(HookDispatchAuthorization {
+                owner_kind: plan.owner_kind.clone(),
+                hook_id: hook.id.clone(),
+                event: hook.event.clone(),
+                layer,
+                result_mode: hook.result,
+                context_contract: contract.context_contract.clone(),
+                dispatch_caps: body.dispatch_caps.clone(),
+            });
+        }
     }
     Ok(authorizations)
 }
@@ -3479,7 +3444,7 @@ impl LaunchHandoff {
 /// recompute it from reconstructed provenance instead of loading persisted
 /// runtime behavior.
 struct PreparedManagedLaunchAuthority {
-    resolution: ryeos_engine::resolution::ResolutionOutput,
+    effective_program: ryeos_engine::effective_program::FinalizedEffectiveProgram,
     prepared_launch: super::launch_preparation::PreparedRuntimeLaunch,
     effective_vault: HashMap<String, String>,
     effective_caps: Vec<String>,
@@ -4398,6 +4363,103 @@ async fn prepare_managed_launch_authority(
             &child_execute_cap,
         )?
     };
+
+    // Capture the complete hook policy after every declared augmentation and
+    // capability derivation, then lock/validate/finalize the exact resolution
+    // before any capsule, callback token, or runtime envelope can exist.
+    let effective_program = if admitted_capsule.is_some() {
+        let hooks = engine
+            .kinds
+            .get(&params.resolved.resolved_item.kind)
+            .and_then(|schema| schema.execution.as_ref())
+            .and_then(|execution| execution.hooks.as_ref())
+            .ok_or_else(|| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "recovered hook-capable launch has no signed kind hook contract"
+                ))
+            })?;
+        let plan_value = resolution
+            .composed
+            .derived
+            .get(&hooks.plan_derived)
+            .ok_or_else(|| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "recovered effective program has no captured `{}` plan",
+                    hooks.plan_derived
+                ))
+            })?;
+        let plan = ryeos_engine::hooks::EffectiveHookPlan::from_value(plan_value)
+            .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(error)))?;
+        super::effective_program_projection::validate_captured_hook_plan_pre_spawn(&plan)
+            .map_err(BuildAndLaunchError::from)?;
+        super::admitted_trust::validate_hook_plan_current_trust(engine, current_trust_store, &plan)
+            .map_err(BuildAndLaunchError::Internal)?;
+
+        let validation = engine
+            .effective_validators
+            .validate(&params.resolved.resolved_item.kind, &resolution)
+            .map_err(BuildAndLaunchError::from)?;
+        let candidate = ryeos_engine::effective_program::lock_validated_effective_program(
+            resolution, validation,
+        )
+        .map_err(BuildAndLaunchError::from)?;
+        let finalization_materialization = params
+            .resolved
+            .root_admission
+            .as_ref()
+            .map(|admission| admission.resolution_materialization_binding())
+            .transpose()
+            .map_err(BuildAndLaunchError::Internal)?;
+        let finalization_project = finalization_materialization
+            .as_ref()
+            .map(|binding| binding.authoritative_project_content())
+            .transpose()
+            .map_err(BuildAndLaunchError::Internal)?
+            .flatten()
+            .map(|(root, content)| {
+                (
+                    root,
+                    content as &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+                )
+            });
+        let finalization_proof = ryeos_engine::effective_program::prove_finalization_authority(
+            &candidate,
+            &[],
+            &engine_roots,
+            finalization_project,
+        )
+        .map_err(BuildAndLaunchError::from)?;
+        ryeos_engine::effective_program::finalize_effective_program(candidate, finalization_proof)
+            .map_err(BuildAndLaunchError::from)?
+    } else {
+        let request_snapshot = effective_request_snapshot.as_deref().ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "fresh hook capture has no effective request snapshot"
+            ))
+        })?;
+        let materialization = params
+            .resolved
+            .root_admission
+            .as_ref()
+            .ok_or_else(|| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "fresh hook capture has no root admission"
+                ))
+            })?
+            .resolution_materialization_binding()
+            .map_err(BuildAndLaunchError::Internal)?;
+        super::effective_program_projection::capture_and_finalize_fresh_effective_program(
+            engine,
+            &params.resolved.resolved_item.kind,
+            resolution,
+            &effective_caps,
+            &engine_roots,
+            &request_snapshot.parser_dispatcher,
+            &request_snapshot.trust_store,
+            Some(&materialization),
+        )
+        .map_err(BuildAndLaunchError::from)?
+    };
     let admitted_artifact_identity =
         ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
             runtime_ref: selected_runtime.canonical_ref.to_string(),
@@ -4643,7 +4705,7 @@ async fn prepare_managed_launch_authority(
         Some(metadata)
     };
     Ok(PreparedManagedLaunchAuthority {
-        resolution,
+        effective_program,
         prepared_launch,
         effective_vault,
         effective_caps,
@@ -4766,10 +4828,10 @@ pub async fn build_and_launch(
             })?;
     }
     let sealed_request =
-        ryeos_app::thread_lifecycle::SealedRootExecutionRequest::capture_with_resolution(
+        ryeos_app::thread_lifecycle::SealedRootExecutionRequest::capture_finalized(
             params.resolved,
             authority.selected_runtime.canonical_ref.to_string(),
-            authority.resolution.clone(),
+            &authority.effective_program,
         )?;
     authority
         .launch_metadata
@@ -4778,7 +4840,7 @@ pub async fn build_and_launch(
 
     let initial_events = launch_audit_records(
         params.resolved,
-        &authority.resolution,
+        authority.effective_program.resolution(),
         &authority.prepared_launch,
         &authority.augmentation_audits,
     )?;
@@ -5035,7 +5097,7 @@ async fn run_claimed_thread_row_inner(
         launch_handoff,
     } = params;
     let PreparedManagedLaunchAuthority {
-        resolution,
+        effective_program,
         prepared_launch,
         effective_vault,
         effective_caps,
@@ -5050,6 +5112,7 @@ async fn run_claimed_thread_row_inner(
         augmentation_audits,
         freshly_minted_accounting_scope,
     } = authority;
+    let resolution = effective_program.resolution();
     let post_publication_timer = launch_timings
         .as_ref()
         .map(|timings| timings.top_level("post_publication_launch_setup"));
@@ -5379,15 +5442,27 @@ async fn run_claimed_thread_row_inner(
         .state_root_override()
         .unwrap_or(project_path)
         .to_path_buf();
-    let hook_dispatch_authorizations = admitted_hook_dispatch_authorizations(
-        kind,
-        &resolution.composed.composed,
-        &resolution.root.raw_content,
-        project_path,
-        &bundle_roots,
-        &node_trusted_keys_dir,
-    )
-    .context("capture admitted hook dispatch identities")?;
+    let hook_contract = launching_kind_schema
+        .execution
+        .as_ref()
+        .and_then(|execution| execution.hooks.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("managed kind `{kind}` has no hook contract"))?;
+    let hook_plan = resolution
+        .composed
+        .derived
+        .get(&hook_contract.plan_derived)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "finalized program omitted captured `{}` hook plan",
+                hook_contract.plan_derived
+            )
+        })
+        .and_then(|value| {
+            ryeos_engine::hooks::EffectiveHookPlan::from_value(value)
+                .map_err(|error| anyhow::anyhow!(error))
+        })?;
+    let hook_dispatch_authorizations = admitted_hook_dispatch_authorizations(&hook_plan)
+        .context("project finalized hook plan into callback authority")?;
     let cap = state.callback_tokens.generate_with_context(
         &thread_id,
         token_project,
@@ -5399,6 +5474,7 @@ async fn run_claimed_thread_row_inner(
         effective_bundle_id_for_request(resolved),
         Some(resolved.item_ref.clone()),
         resolution.root.raw_content_digest.clone(),
+        effective_program.effective_definition_digest().to_string(),
         serde_json::to_value(&hard_limits).unwrap_or(Value::Null),
         current_depth,
     );
@@ -5733,7 +5809,7 @@ async fn run_claimed_thread_row_inner(
             socket_path: state.config.uds_path.clone(),
             token: cap.token.clone(),
         },
-        resolution,
+        effective_program,
     )
     .runtime_data(prepared_launch.runtime_data.clone())
     .inventory(inventory)
@@ -6290,7 +6366,7 @@ impl PreparedOperatorSuccessorLaunch {
     ) -> Result<Vec<ryeos_app::state_store::NewEventRecord>, BuildAndLaunchError> {
         launch_audit_records(
             &self.prepared.execution.resolved,
-            &self.prepared.authority.resolution,
+            self.prepared.authority.effective_program.resolution(),
             &self.prepared.authority.prepared_launch,
             &self.prepared.authority.augmentation_audits,
         )
@@ -6349,7 +6425,7 @@ impl PreparedFollowChildLaunch {
     ) -> Result<Vec<ryeos_app::state_store::NewEventRecord>, BuildAndLaunchError> {
         launch_audit_records(
             &self.execution.resolved,
-            &self.authority.resolution,
+            self.authority.effective_program.resolution(),
             &self.authority.prepared_launch,
             &self.authority.augmentation_audits,
         )
@@ -6376,6 +6452,7 @@ pub async fn prepare_follow_child_launch(
     state: &AppState,
     thread_id: &str,
     launch_metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    admitted_request: ResolvedExecutionRequest,
     provenance: ryeos_app::execution_provenance::ExecutionProvenance,
     parent_context: crate::dispatch::ParentExecutionContext,
 ) -> Result<PreparedFollowChildLaunch, BuildAndLaunchError> {
@@ -6383,6 +6460,7 @@ pub async fn prepare_follow_child_launch(
         state,
         thread_id,
         launch_metadata,
+        Some(admitted_request),
         provenance,
         parent_context,
         true,
@@ -6419,6 +6497,7 @@ pub async fn prepare_existing_follow_child_launch(
         state,
         thread_id,
         launch_metadata,
+        None,
         provenance,
         parent_context,
         false,
@@ -6430,6 +6509,7 @@ async fn prepare_follow_child_launch_inner(
     state: &AppState,
     thread_id: &str,
     launch_metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    fresh_admitted_request: Option<ResolvedExecutionRequest>,
     provenance: ryeos_app::execution_provenance::ExecutionProvenance,
     parent_context: crate::dispatch::ParentExecutionContext,
     capture_project_snapshot: bool,
@@ -6442,28 +6522,58 @@ async fn prepare_follow_child_launch_inner(
     // reconstruction first could consult the daemon's current engine or create
     // a second snapshot checkout, neither of which is the admitted child source.
     let engine = provenance.request_engine();
-    let sealed_request = launch_metadata
-        .sealed_root_request
-        .as_ref()
-        .ok_or_else(|| {
-            anyhow::anyhow!("follow-child launch metadata has no sealed root request")
-        })?;
-    if sealed_request.project_context() != &resume.project_context
-        || sealed_request.project_authority() != &resume.project_authority
-        || sealed_request.project_authority() != provenance.project_authority()
-    {
-        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-            "follow-child sealed, resume, and reconstructed project identities disagree"
-        )));
-    }
-    let admitted_request = sealed_request
-        .restore_for_reconstructed_provenance(
-            engine,
-            &ryeos_app::launch_metadata::daemon_thread_state_dir(&state.config.app_root, thread_id)
-                .join("launch-capsule"),
-            &provenance,
-        )
-        .context("restore follow-child sealed root request")?;
+    let (admitted_request, admitted_runtime_ref) = match fresh_admitted_request {
+        Some(request) => {
+            let request_authority = request
+                .root_admission
+                .as_ref()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("fresh follow child has no root admission authority")
+                })?
+                .project_authority();
+            if request_authority != &resume.project_authority
+                || request_authority != provenance.project_authority()
+            {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "fresh follow-child admission, resume, and reconstructed project identities disagree"
+                )));
+            }
+            let runtime_ref = resume.runtime_ref.clone().ok_or_else(|| {
+                anyhow::anyhow!("fresh follow-child resume has no admitted runtime ref")
+            })?;
+            (request, runtime_ref)
+        }
+        None => {
+            let sealed_request = launch_metadata
+                .sealed_root_request
+                .as_ref()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "existing follow-child launch metadata has no finalized sealed root request"
+                    )
+                })?;
+            if sealed_request.project_context() != &resume.project_context
+                || sealed_request.project_authority() != &resume.project_authority
+                || sealed_request.project_authority() != provenance.project_authority()
+            {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "follow-child sealed, resume, and reconstructed project identities disagree"
+                )));
+            }
+            let request = sealed_request
+                .restore_for_reconstructed_provenance(
+                    engine,
+                    &ryeos_app::launch_metadata::daemon_thread_state_dir(
+                        &state.config.app_root,
+                        thread_id,
+                    )
+                    .join("launch-capsule"),
+                    &provenance,
+                )
+                .context("restore follow-child sealed root request")?;
+            (request, sealed_request.runtime_ref().to_string())
+        }
+    };
     let mut operational_resume = resume.clone();
     operational_resume.project_context = admitted_request.plan_context.project_context.clone();
     if admitted_request.kind != operational_resume.kind
@@ -6480,11 +6590,7 @@ async fn prepare_follow_child_launch_inner(
         || admitted_request.plan_context.execution_hints != operational_resume.execution_hints
         || operational_resume.executor_ref.as_deref()
             != Some(admitted_request.executor_ref.as_str())
-        || operational_resume.runtime_ref.as_deref()
-            != launch_metadata
-                .sealed_root_request
-                .as_ref()
-                .map(|sealed| sealed.runtime_ref())
+        || operational_resume.runtime_ref.as_deref() != Some(admitted_runtime_ref.as_str())
     {
         return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
             "follow-child launch envelope does not match its sealed root request for {}",
@@ -6557,10 +6663,10 @@ async fn prepare_follow_child_launch_inner(
         // augmented resolution so a retry/relaunch receives the same runtime
         // envelope instead of reusing the parent's pre-augmentation view.
         let augmented_sealed_request =
-            ryeos_app::thread_lifecycle::SealedRootExecutionRequest::capture_with_resolution(
+            ryeos_app::thread_lifecycle::SealedRootExecutionRequest::capture_finalized(
                 &execution.resolved,
                 authority.selected_runtime.canonical_ref.to_string(),
-                authority.resolution.clone(),
+                &authority.effective_program,
             )?;
         prepared.set_sealed_root_request(augmented_sealed_request);
         (prepared, prepared_resume)
@@ -6588,7 +6694,7 @@ impl PreparedMachineSuccessorLaunch {
     ) -> Result<Vec<ryeos_app::state_store::NewEventRecord>, BuildAndLaunchError> {
         launch_audit_records(
             &self.prepared.execution.resolved,
-            &self.prepared.authority.resolution,
+            self.prepared.authority.effective_program.resolution(),
             &self.prepared.authority.prepared_launch,
             &self.prepared.authority.augmentation_audits,
         )

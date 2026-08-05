@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-28T12:15:02Z:c2f3ef591184a824abf361a3227cc2bd78b3faa68105750de75e33c69f20e504:ieJVG380nFBja3XgMv/EWkBjjRK95JZMrCOysv0gAUhNpkelvecfxgXxAGJANFYtItc6Y6ozBXCuNvpiv1ZOAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-05T07:04:40Z:dcfaccdb78231087acdcd898213bebb70d67eff0327294f02027165f34a7a8b5:4icx9OwX9eyGmSlzzcXYv+R1X9e8dV62tcApd3+ck5BWUJz5+qmZ50ECsNTazs5aYa/Ydp5bpraOhugfXXgAAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/directive"
 version: "1.0.0"
 location:
@@ -37,6 +37,20 @@ execution:
         system: 4000
         before: 2000
         after: 2000
+  hooks:
+    authored_path: [hooks]
+    plan_derived: effective_hook_plan
+    events:
+      after_step:
+        context_contract:
+          schema: ryeos.hooks.context.v1
+          allowed_roots: [turn]
+        allowed_results: [discard, observation, control]
+      continuation:
+        context_contract:
+          schema: ryeos.hooks.context.v1
+          allowed_roots: [event]
+        allowed_results: [discard, observation, control]
 formats:
   - extensions: [".md"]
     parser: parser:ryeos/core/markdown/directive
@@ -76,6 +90,9 @@ composer_config:
       strategy: keyed_seq_merge_root_last
       key: name
       expect_value_type: sequence
+    - name: hooks
+      strategy: replace_root_last
+      expect_value_type: sequence
   policy_facts:
     - name: effective_caps
       path: [requires, capabilities, declared]
@@ -100,6 +117,9 @@ composed_value_contract:
       type: single
       prim: mapping
     inputs:
+      type: single
+      prim: sequence
+    hooks:
       type: single
       prim: sequence
     # Unified capability requirements (`capabilities.declared` self-asserted

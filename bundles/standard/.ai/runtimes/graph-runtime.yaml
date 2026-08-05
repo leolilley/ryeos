@@ -1,9 +1,9 @@
-# ryeos:signed:2026-08-03T06:49:26Z:252d899f8bfc29fcfe1bac1c71d6fec1b51c9036a55bfd1830f950f46bce2500:+1o4x6FuHVT8xxBRmsmS2yafEEqlBHXO7lsoZrIF6X8Za2xGLCtgpWMKuuJzDfIWAVihdkt/zvpP1thiY05LAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-05T07:04:40Z:39f82062deb26e95ceda394e2bee8d9a5ad31779af313b90a44c92b085f098ec:Dh8eq8N5IXrL4booajucu5CqvN2fkw04YUb028ogU1jt79nld+EXUeS8Ic7684LYWtDj1MXqzFYD32r80nFkCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: graph
 default: true
 binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-graph-runtime
-abi_version: "v2"
+abi_version: "v3"
 required_caps:
   - runtime.execute
 launch_contract:

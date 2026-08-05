@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-04T08:52:12Z:6e7d2a66a4aca5c3fa6780afee3a0c07cc75824b24b4e6f7c860496506de6f21:88WbJu+YHMd+zIUC7Q8hniYxdqc15zkeeq/5WVjWcjFxtj+AqKB5TcfBcBZ/pywcEne8mLUfW34pkpBpEeBJCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-05T08:21:19Z:23bbe6edf52a0926dfc765674697a99bf700718306a4a9fe553b72f51f80dc10:QzDnsQuemROlh0k1D/HdqVdVP/YLMhHn/7JzuCuHXNUa39zeXrCaIhvgegf1lQ169DEnpE4qr6NgqJf+XYUdCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, authoring, retry, hooks, resilience]
@@ -97,16 +97,25 @@ Contract:
 
 - `result` is required. Use `discard` for an observer whose leaf value carries
   no meaning, or `observation` when the leaf publishes a bounded namespaced
-  `{kind, payload}` evidence record. `control` is reserved for runtimes that
-  explicitly consume hook control; graph routing never does.
+  `{kind, payload}` evidence record. Graph routing never consumes hook control,
+  so `result: control` is rejected before spawn in every graph hook layer.
 - Hooks are **observers**: a hook cannot redirect the walk — routing stays the
-  walker's job. Any control value a hook returns is ignored.
+  walker's job.
 - A hook action is a real dispatch on the same callback path a node action uses:
-  its `effective_caps` are enforced at the callback boundary, its cost accrues to
-  the run, and it is visible in the braid. A hook can only invoke items the graph
-  is authorized for.
-- A failing hook (its child errors, or its condition/action evaluation fails) is
-  recorded as a warning, not a graph failure — an observer never sinks the run.
+  its captured source grants are enforced at the callback boundary, its cost
+  accrues to the run, and it is visible in the braid. Authored hooks use the
+  graph's admitted effective caps. Configured hooks use only the grants declared
+  by their own signed policy source; they cannot borrow graph authority.
+- An ordinary hook child error or condition/action evaluation failure is
+  recorded as a routing-inert warning, not a graph failure.
+- A callback can return a structurally valid dispatch envelope whose
+  `result: observation` value violates the observation schema. The daemon
+  records that outcome durably as routing-inert `hook_failed` evidence with
+  failure class `observation_invalid`; independently, the runtime normalizes
+  the same value and classifies the malformed evidence as an integrity
+  failure. The event cannot steer routing, but the integrity failure
+  invalidates terminal authority and therefore prevents successful
+  settlement.
 - Hook cost is checked, attributed by lifecycle event, included in the graph
   rollup, and persisted in advancing checkpoints. Accounting failures and
   integrity-typed callback/child failures invalidate terminal authority and
@@ -120,3 +129,44 @@ Contract:
   after run accounting has already become invalid.
 - A hook whose `event` is none of the three fire points fails graph loading.
   Unknown event names never survive into execution as inert configuration.
+
+### Capture and inheritance
+
+Authored `config.hooks` follows the graph's shallow config rule: omitting the
+key inherits the nearest complete list, `hooks: []` clears it, and declaring a
+list replaces it atomically. Hooks are not merged by ID. Mandatory policy lives
+in separately signed configured layers and cannot be cleared by authored
+content.
+
+Every hook-capable launch captures one `ryeos.hooks.effective.v1` plan after
+composition and before any callback token, capsule, or runtime exists. It
+contains authored, builtin, infrastructure, context, operator, and project
+layers plus their exact event contracts, source evidence, and per-source
+dispatch grants. The runtime compiles this admitted plan and never reloads hook
+policy from disk.
+
+Configured hooks declare an explicit target pair:
+
+```yaml
+hooks:
+  - id: observe_graph
+    target: {kind: graph, event: graph_step_completed}
+    result: observation
+    action: {item_id: tool:ops/record-step}
+```
+
+Unknown kind/event pairs, duplicate effective IDs, invalid result modes,
+malformed grants, wrong source space/trust, or a captured-plan/composed-hook
+mismatch fail admission. Infrastructure hooks are observer-only. A hook
+callback must match the exact captured owner kind, event, ID, layer, result
+mode, context contract, root raw-content digest, and effective-definition
+digest before the idempotency ledger is consulted.
+
+The ledger distinguishes a known post-reservation dispatch failure from a
+crash-ambiguous outcome. A returned dispatcher error or malformed callback
+response is completed with a canonical integrity-failure response, replays
+byte-identically, and yields `hook_failed` evidence for observation hooks. A
+process loss after reservation with no known result remains pending forever:
+it cannot be retried without violating at-most-once execution and therefore
+fails closed as an unknown outcome. A ledger row may be deleted only after its
+chain can no longer resume.

@@ -13,10 +13,15 @@ use crate::execution_provenance::ExecutionProvenance;
 /// cannot author a new provenance label for durable hook evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookDispatchAuthorization {
+    pub owner_kind: String,
     pub hook_id: String,
     pub event: String,
-    pub layer: ryeos_runtime::hooks_loader::HookLayer,
-    pub result_mode: ryeos_runtime::hooks_loader::HookResultMode,
+    pub layer: ryeos_engine::hooks::HookLayer,
+    pub result_mode: ryeos_engine::hooks::HookResultMode,
+    pub context_contract: ryeos_engine::hooks::HookContextContract,
+    /// Exact source-owned authority for this hook. Callback child dispatches
+    /// are bounded by this set rather than the launching root's capabilities.
+    pub dispatch_caps: Vec<String>,
 }
 
 /// Default TTL for callback tokens when no explicit duration is requested.
@@ -56,7 +61,9 @@ pub struct CallbackCapability {
     /// Verified raw-content digest of `item_ref`, captured at launch. Callback
     /// hook identity must match this value; resolving live during a callback
     /// would reintroduce a source-mutation race.
-    pub root_content_digest: String,
+    pub root_raw_content_digest: String,
+    /// Exact effective executable identity captured with the token.
+    pub effective_definition_digest: String,
     /// Exact hook identities captured from the verified definition and
     /// configured hook roots before the runtime starts. Empty is deny-all for
     /// hook dispatch while remaining valid for ordinary callbacks.
@@ -114,7 +121,7 @@ impl CallbackCapabilityStore {
         ttl: Duration,
         effective_caps: Vec<String>,
         provenance: ExecutionProvenance,
-        root_content_digest: String,
+        root_raw_content_digest: String,
     ) -> CallbackCapability {
         self.generate_with_context(
             thread_id,
@@ -124,7 +131,8 @@ impl CallbackCapabilityStore {
             provenance,
             None,
             None,
-            root_content_digest,
+            root_raw_content_digest.clone(),
+            root_raw_content_digest,
             Value::Null,
             0,
         )
@@ -142,7 +150,8 @@ impl CallbackCapabilityStore {
         provenance: ExecutionProvenance,
         effective_bundle_id: Option<String>,
         item_ref: Option<String>,
-        root_content_digest: String,
+        root_raw_content_digest: String,
+        effective_definition_digest: String,
         hard_limits: Value,
         depth: u32,
     ) -> CallbackCapability {
@@ -169,7 +178,8 @@ impl CallbackCapabilityStore {
             provenance,
             effective_bundle_id,
             item_ref,
-            root_content_digest,
+            root_raw_content_digest,
+            effective_definition_digest,
             hook_dispatch_authorizations: Vec::new(),
             hard_limits,
             depth,
@@ -539,6 +549,7 @@ mod tests {
             None,
             None,
             "0".repeat(64),
+            "0".repeat(64),
             serde_json::Value::Null,
             0,
         );
@@ -605,6 +616,7 @@ mod tests {
             Some("bundle-123".to_string()),
             Some("directive:team/parent".to_string()),
             "1".repeat(64),
+            "1".repeat(64),
             hard_limits.clone(),
             4,
         );
@@ -617,7 +629,7 @@ mod tests {
         assert_eq!(validated.depth, 4);
         assert_eq!(validated.effective_bundle_id.as_deref(), Some("bundle-123"));
         assert_eq!(validated.item_ref.as_deref(), Some("directive:team/parent"));
-        assert_eq!(validated.root_content_digest, "1".repeat(64));
+        assert_eq!(validated.root_raw_content_digest, "1".repeat(64));
     }
 
     #[test]
@@ -834,7 +846,8 @@ mod tests {
             .unwrap(),
             effective_bundle_id: None,
             item_ref: None,
-            root_content_digest: "0".repeat(64),
+            root_raw_content_digest: "0".repeat(64),
+            effective_definition_digest: "0".repeat(64),
             hook_dispatch_authorizations: Vec::new(),
             hard_limits: serde_json::Value::Null,
             depth: 0,

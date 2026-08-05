@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-03T06:49:24Z:0e4c93fd84e8858b4b228501ae44933d963cdc13685b869fa998cc585dd7af3c:3wdN7mYmnvCdYlMIFHWZ0uaaRY6IHjNlnVzXS63dgqsjbDjyeEA5YE5+m8gvb5wwsQpGqfW2flQETHfhT1YeBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-05T07:04:40Z:1e279ab24b90ee66519f16b152874955e564d436d63e679c0e4f034a8d881bb0:yh2PqdXnK2ELBz0aO8xTgbIINGHlk3jcK4afylM8rM9pVTGUQSEv2nKEz0/axiGj9GrMZX5XcudhGWDaYsJ2DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [runtime, directive-runtime, graph-runtime, knowledge-runtime, llm]
@@ -29,8 +29,9 @@ The directive runtime handles the simplest workflow type: a single
 LLM thread with a prompt + tool loop.
 
 ### How it works
-1. Receives a `LaunchEnvelope` containing the composed directive
-   (prompt body, context blocks, parameters, permissions)
+1. Receives a `LaunchEnvelope` containing the finalized composed directive,
+   its captured effective hook plan, and required
+   `effective_definition_digest`
 2. Assembles the system prompt from context blocks at their declared
    positions (`system`, `user`)
 3. Enters an LLM loop:
@@ -64,8 +65,10 @@ The graph runtime handles DAG-based workflows defined in YAML.
 It performs graph traversal natively in Rust.
 
 ### How it works
-1. Receives a `LaunchEnvelope` containing the graph YAML definition
-2. Validates the graph (reachability, cycle detection)
+1. Receives a `LaunchEnvelope` containing the finalized composed graph,
+   captured effective hook plan, and required effective-definition digest
+2. Recomputes the digest and strictly decodes the admitted composed graph;
+   semantic validation has already succeeded before launch
 3. Walks nodes according to edges and conditions
 4. Persists state at each step (CAS snapshots)
 5. Supports resume from persisted state after interruption
@@ -121,7 +124,9 @@ the same kind can be registered but are not yet selected automatically.
 
 ## ABI Version
 
-All runtime declarations use binary ABI version `v2`. The signed protocol
+All runtime declarations use binary ABI version `v3`. Managed directive and
+graph binaries must accept only the finalized envelope schema and compare its
+effective digest before their first executable step. The signed protocol
 selected for an invocation independently versions its wire:
 `runtime` carries `LaunchEnvelope`/`RuntimeResult`, while
 `method_runtime` carries `MethodCallEnvelope`/`MethodCallResult`. A breaking

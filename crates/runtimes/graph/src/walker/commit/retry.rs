@@ -55,7 +55,7 @@ impl Walker {
             node: current.to_string(),
             step,
             definition_ref: self.graph.definition_ref.clone(),
-            definition_hash: self.graph.definition_hash.clone(),
+            effective_definition_digest: self.graph.effective_definition_digest.clone(),
             result_hash: None,
             cache_hit: false,
             elapsed_ms,

@@ -265,7 +265,7 @@ pub struct StateAnchorPublishParams {
     pub thread_id: String,
     pub graph_run_id: String,
     pub definition_ref: String,
-    pub definition_hash: String,
+    pub effective_definition_digest: String,
     pub node: String,
     pub step: u32,
     pub contract: String,
@@ -823,16 +823,18 @@ pub struct ThreadListEnrichment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GraphRunListIdentity {
     pub definition_ref: String,
-    pub definition_hash: String,
+    pub effective_definition_digest: String,
     pub graph_run_id: String,
     pub node: String,
     pub step: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct AdmittedProgramEvidence {
-    pub admitted_capsule_hash: String,
+    pub admitted_launch_capsule_hash: String,
     pub subject: crate::thread_lifecycle::AdmittedProgramSubject,
+    pub effective_definition_digest: ryeos_engine::resolution::EffectiveDefinitionDigest,
+    pub resolution: ryeos_engine::resolution::ResolutionOutput,
 }
 
 #[derive(Debug, Default)]
@@ -2366,13 +2368,13 @@ fn validate_state_anchor_request(params: &StateAnchorPublishParams) -> Result<()
             bail!("state-anchor {label} must be a bounded, trimmed, control-free string");
         }
     }
-    if !lillux::valid_hash(&params.definition_hash)
+    if !lillux::valid_hash(&params.effective_definition_digest)
         || params
-            .definition_hash
+            .effective_definition_digest
             .bytes()
             .any(|byte| byte.is_ascii_uppercase())
     {
-        bail!("state-anchor definition_hash must be a canonical SHA-256 hash");
+        bail!("state-anchor effective_definition_digest must be a canonical SHA-256 hash");
     }
     if !params.restore.is_object() {
         bail!("state-anchor restore contract must be an object");
@@ -7007,25 +7009,28 @@ impl StateStore {
             .context("store canonical state manifest")?;
         let state_digest = format!("sha256:{manifest_hash}");
         let manifest_ref = format!("cas:{manifest_hash}");
+        let event_payload = ryeos_state::objects::StateAnchorMilestoneV2 {
+            kind: "state_anchor".to_string(),
+            payload: ryeos_state::objects::StateAnchorPayloadV2 {
+                schema_version: ryeos_state::objects::STATE_ANCHOR_SCHEMA_VERSION,
+                label: params.anchor.label.clone(),
+                state_digest: state_digest.clone(),
+                manifest_ref: manifest_ref.clone(),
+                runtime: params.anchor.runtime.clone(),
+                metadata: params.anchor.metadata.clone(),
+            },
+            graph_run_id: params.graph_run_id.clone(),
+            definition_ref: params.definition_ref.clone(),
+            effective_definition_digest: params.effective_definition_digest.clone(),
+            node: params.node.clone(),
+            step: params.step,
+        }
+        .to_value()
+        .context("encode current state-anchor milestone")?;
         let event = NewEventRecord {
             event_type: ryeos_state::event_types::MILESTONE.to_string(),
             storage_class: "indexed".to_string(),
-            payload: json!({
-                "kind": "state_anchor",
-                "payload": {
-                    "schema_version": 1,
-                    "label": params.anchor.label,
-                    "state_digest": state_digest.clone(),
-                    "manifest_ref": manifest_ref.clone(),
-                    "runtime": params.anchor.runtime,
-                    "metadata": params.anchor.metadata,
-                },
-                "graph_run_id": params.graph_run_id,
-                "definition_ref": params.definition_ref,
-                "definition_hash": params.definition_hash,
-                "node": params.node,
-                "step": params.step,
-            }),
+            payload: event_payload,
         };
         let persisted = append_events_locked(
             &g,
@@ -7400,7 +7405,9 @@ impl StateStore {
             let Some(definition_ref) = payload.get("definition_ref").and_then(Value::as_str) else {
                 continue;
             };
-            let Some(definition_hash) = payload.get("definition_hash").and_then(Value::as_str)
+            let Some(effective_definition_digest) = payload
+                .get("effective_definition_digest")
+                .and_then(Value::as_str)
             else {
                 continue;
             };
@@ -7418,7 +7425,7 @@ impl StateStore {
                 thread_id,
                 GraphRunListIdentity {
                     definition_ref: definition_ref.to_string(),
-                    definition_hash: definition_hash.to_string(),
+                    effective_definition_digest: effective_definition_digest.to_string(),
                     graph_run_id: graph_run_id.to_string(),
                     node: node.to_string(),
                     step,
@@ -7836,15 +7843,25 @@ impl StateStore {
             return Ok(None);
         };
         let capsule = load_admitted_launch_capsule(&self.state_authority, &capsule_hash)?;
+        capsule.validate()?;
         let request: crate::thread_lifecycle::SealedRootExecutionRequest =
-            serde_json::from_value(capsule.exact_program)
-                .context("decode exact admitted root program")?;
+            serde_json::from_value(capsule.sealed_invocation.clone())
+                .context("decode admitted sealed invocation")?;
+        if request.admitted_program_value()? != capsule.exact_program
+            || request.admitted_program_hash()? != capsule.exact_program_hash
+        {
+            bail!("admitted sealed invocation contradicts its exact program projection");
+        }
         let subject = request
             .admitted_program_subject()
             .context("verify exact admitted root subject")?;
+        let resolution = request.admitted_effective_resolution()?.clone();
+        let effective_definition_digest = request.effective_definition_digest().clone();
         Ok(Some(AdmittedProgramEvidence {
-            admitted_capsule_hash: capsule_hash,
+            admitted_launch_capsule_hash: capsule_hash,
             subject,
+            effective_definition_digest,
+            resolution,
         }))
     }
 
@@ -10283,6 +10300,37 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn state_anchor_publish_wire_contract_requires_effective_definition_digest() {
+        let mut request = json!({
+            "thread_id": "T-root",
+            "graph_run_id": "G-test",
+            "definition_ref": "graph:test/solve",
+            "effective_definition_digest": "d".repeat(64),
+            "node": "solve",
+            "step": 3,
+            "contract": "domain.restore.v1",
+            "restore": {"contract": "domain.restore.v1"},
+            "restore_digest": format!("sha256:{}", "a".repeat(64)),
+            "objects": [],
+            "anchor": {
+                "label": "checkpoint",
+                "runtime": {},
+                "metadata": {}
+            }
+        });
+        let parsed: StateAnchorPublishParams =
+            serde_json::from_value(request.clone()).expect("current state-anchor request");
+        assert_eq!(parsed.effective_definition_digest, "d".repeat(64));
+
+        request
+            .as_object_mut()
+            .unwrap()
+            .remove("effective_definition_digest");
+        request["definition_hash"] = json!("d".repeat(64));
+        assert!(serde_json::from_value::<StateAnchorPublishParams>(request).is_err());
+    }
+
+    #[test]
     fn immutable_execution_schema_mismatch_gets_the_explicit_cutover_command() {
         let mismatch = anyhow::Error::new(ryeos_state::IncompatibleCurrentObjectSchema::new(
             "thread snapshot",
@@ -11367,13 +11415,18 @@ mod tests {
             occurrence: ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
                 graph_run_id: "G-hook-evidence".to_string(),
                 definition_ref: "graph:test/hook-evidence".to_string(),
-                definition_hash: "d".repeat(64),
+                root_raw_content_digest: "r".repeat(64),
+                effective_definition_digest: "d".repeat(64),
                 step: 3,
                 node: "observe".to_string(),
             },
             hook_id: hook_id.to_string(),
             layer: ryeos_runtime::hooks_loader::HookLayer::Infrastructure,
             result_mode: ryeos_runtime::hooks_loader::HookResultMode::Observation,
+            context_contract: ryeos_engine::hooks::HookContextContract {
+                schema: ryeos_engine::hooks::HOOK_CONTEXT_SCHEMA.to_string(),
+                allowed_roots: std::collections::BTreeSet::from(["state".to_string()]),
+            },
             context_hash: "c".repeat(64),
         }
     }
@@ -11457,6 +11510,162 @@ mod tests {
         );
         assert_eq!(first_payload.occurrence_thread_id, thread_id);
         assert_eq!(first.payload, duplicate.payload);
+    }
+
+    #[test]
+    fn known_post_reservation_dispatch_failure_completes_and_replays_durable_integrity_evidence() {
+        let store = test_store();
+        let thread_id = "T-hook-known-failure";
+        running_in_process_test_root(&store, thread_id);
+        let identity = hook_observation_identity("hook:system/known-failure");
+        let seed = runtime_db::NewHookDispatch {
+            seed_version: runtime_db::HOOK_DISPATCH_SEED_VERSION,
+            dispatch_key: "9".repeat(64),
+            chain_root_id: thread_id.to_string(),
+            caller_thread_id: thread_id.to_string(),
+            event: identity.occurrence.event().to_string(),
+            hook_id: identity.hook_id.clone(),
+            request_hash: "8".repeat(64),
+        };
+        assert!(matches!(
+            store.reserve_hook_dispatch(&seed).unwrap(),
+            runtime_db::HookDispatchReservation::Execute
+        ));
+        let response =
+            serde_json::to_value(ryeos_runtime::callback_contract::CallbackDispatchResponse {
+                thread: Value::Null,
+                result: ryeos_runtime::envelope::hook_dispatch_integrity_failure(
+                    "child dispatcher refused the admitted request",
+                ),
+            })
+            .unwrap();
+        store
+            .complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &response)
+            .unwrap();
+        let persisted = store
+            .append_completed_hook_outcome(
+                thread_id,
+                &identity,
+                &seed.dispatch_key,
+                &seed.request_hash,
+            )
+            .unwrap();
+        assert_eq!(persisted.event_type, ryeos_state::event_types::HOOK_FAILED);
+        let failure: ryeos_runtime::HookFailedPayload =
+            serde_json::from_value(persisted.payload).unwrap();
+        assert_eq!(
+            failure.failure_class,
+            ryeos_runtime::HookFailureClass::DispatchEnvelopeIntegrity
+        );
+
+        let runtime_db::HookDispatchReservation::Replay(replayed) =
+            store.reserve_hook_dispatch(&seed).unwrap()
+        else {
+            panic!("known failure must complete rather than remain pending");
+        };
+        assert_eq!(replayed.response, response);
+    }
+
+    #[test]
+    fn terminal_occurrence_evidence_appends_to_the_live_successor() {
+        let store = test_store();
+        let predecessor = "T-hook-predecessor";
+        let successor = "T-hook-successor";
+        store
+            .create_thread_for_test(&thread_record(predecessor, predecessor))
+            .expect("create predecessor");
+        store
+            .mark_thread_running(predecessor, None)
+            .expect("start predecessor");
+        let mut successor_record = thread_record(successor, predecessor);
+        successor_record.upstream_thread_id = Some(predecessor.to_string());
+        store
+            .create_thread_for_test(&successor_record)
+            .expect("create successor");
+        store
+            .mark_thread_running(successor, None)
+            .expect("start successor");
+        store
+            .finalize_thread(
+                predecessor,
+                &FinalizeThreadRecord {
+                    status: ThreadStatus::Continued.as_str().to_string(),
+                    outcome_code: Some(ThreadStatus::Continued.as_str().to_string()),
+                    result_json: None,
+                    error_json: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    managed_envelope: None,
+                    result_project_snapshot_hash: None,
+                },
+            )
+            .expect("settle predecessor as continued");
+
+        let identity = ryeos_runtime::callback::HookDispatchIdentity {
+            occurrence: ryeos_runtime::callback::HookDispatchOccurrence::GraphCompleted {
+                graph_run_id: "G-terminal-evidence".to_string(),
+                definition_ref: "graph:test/terminal-evidence".to_string(),
+                root_raw_content_digest: "r".repeat(64),
+                effective_definition_digest: "d".repeat(64),
+                steps: 4,
+            },
+            hook_id: "hook:system/terminal-evidence".to_string(),
+            layer: ryeos_runtime::HookLayer::Infrastructure,
+            result_mode: ryeos_runtime::HookResultMode::Observation,
+            context_contract: ryeos_engine::hooks::HookContextContract {
+                schema: ryeos_engine::hooks::HOOK_CONTEXT_SCHEMA.to_string(),
+                allowed_roots: std::collections::BTreeSet::from(["state".to_string()]),
+            },
+            context_hash: "c".repeat(64),
+        };
+        let seed = runtime_db::NewHookDispatch {
+            seed_version: runtime_db::HOOK_DISPATCH_SEED_VERSION,
+            dispatch_key: "e".repeat(64),
+            chain_root_id: predecessor.to_string(),
+            caller_thread_id: predecessor.to_string(),
+            event: identity.occurrence.event().to_string(),
+            hook_id: identity.hook_id.clone(),
+            request_hash: "f".repeat(64),
+        };
+        assert!(matches!(
+            store.reserve_hook_dispatch(&seed).unwrap(),
+            runtime_db::HookDispatchReservation::Execute
+        ));
+        store
+            .complete_hook_dispatch(
+                &seed.dispatch_key,
+                &seed.request_hash,
+                &json!({
+                    "thread": {"id": "T-hook-child", "status": "completed"},
+                    "result": {"kind": "solve.completed", "payload": {"ok": true}}
+                }),
+            )
+            .expect("complete terminal observation");
+
+        let persisted = store
+            .append_completed_hook_outcome(
+                successor,
+                &identity,
+                &seed.dispatch_key,
+                &seed.request_hash,
+            )
+            .expect("append terminal evidence to successor");
+        assert_eq!(persisted.thread_id, successor);
+        let payload: ryeos_runtime::HookObservationRecordedPayload =
+            serde_json::from_value(persisted.payload).expect("decode terminal evidence");
+        assert_eq!(payload.occurrence_thread_id, predecessor);
+        assert!(
+            store
+                .append_completed_hook_outcome(
+                    predecessor,
+                    &identity,
+                    &seed.dispatch_key,
+                    &seed.request_hash,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("requires a running caller")
+        );
     }
 
     fn in_process_launch_metadata() -> crate::launch_metadata::RuntimeLaunchMetadata {

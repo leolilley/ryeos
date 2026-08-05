@@ -38,7 +38,9 @@ use ryeos_app::launch_metadata::{
 use ryeos_app::runtime_db::{NewFollowWaiter, follow_child_spec_hash, follow_phase};
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::{NewEventRecord, NewThreadRecord};
-use ryeos_app::thread_lifecycle::{SealedRootExecutionRequest, new_thread_id};
+use ryeos_app::thread_lifecycle::{
+    ResolvedExecutionRequest, SealedRootExecutionRequest, new_thread_id,
+};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
 use ryeos_runtime::authorizer::{AuthorizationPolicy, canonical_cap};
@@ -48,6 +50,18 @@ use ryeos_runtime::authorizer::{AuthorizationPolicy, canonical_cap};
 /// from the autonomous-segment continuation depth (that bounds one execution
 /// segment-cutting itself); this bounds how deep follow nesting may go.
 const MAX_FOLLOW_NESTING_DEPTH: usize = 8;
+
+/// Fresh child authority stays in memory until the complete effective program
+/// has been captured, validated, and finalized. Only the `Persisted` arm is a
+/// durable capsule, and that arm is necessarily finalized-only.
+#[derive(Clone)]
+enum AdmittedFollowChildRequest {
+    Fresh {
+        request: ResolvedExecutionRequest,
+        runtime_ref: String,
+    },
+    Persisted(SealedRootExecutionRequest),
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -415,7 +429,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             &admission_provenance,
         )?;
 
-    let (resolved_children, persisted_child_slots) = admit_follow_child_requests(
+    let (admitted_children, persisted_child_slots) = admit_follow_child_requests(
         state,
         &children,
         &canonical_children,
@@ -424,7 +438,6 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         resolution_engine,
         &child_plan_context,
         &child_project_binding,
-        &parent_thread_id,
         &parent.current_site_id,
         &parent.origin_site_id,
         &thread_auth.acting_principal,
@@ -448,8 +461,8 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     }
 
     // The waiter phase says whether the parent suspension committed; it does not
-    // say which child roots committed before a crash. Reserve every stable slot
-    // first, then classify each slot from its own durable row.
+    // say which child roots committed before a crash. Reuse durable slot IDs and
+    // allocate fresh IDs in memory, then classify each child from its own row.
     let window_key = params
         .launch_window_width
         .map(|_| format!("follow:{follow_key}"));
@@ -458,13 +471,11 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         width,
     });
 
-    // Reserve the exact stable identities before launch authority is prepared.
+    // Select the exact stable identities before launch authority is prepared.
     // Augmentations, checkpoint paths, audit, metadata, and the eventual root
     // commit must all name the same child ID.
     let mut reserved_child_ids = std::collections::BTreeMap::new();
-    for (item_index, (child, sealed_root_request)) in
-        children.iter().zip(resolved_children.iter()).enumerate()
-    {
+    for (item_index, child) in children.iter().enumerate() {
         let spec_hash = &spec_hashes[item_index];
         let child_thread_id = match state
             .state_store
@@ -481,15 +492,6 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             }
             None if !re_drive => {
                 let child_id = new_thread_id();
-                state.state_store.set_follow_child(
-                    &follow_key,
-                    item_index as u32,
-                    &child.item_ref,
-                    spec_hash,
-                    &child_id,
-                    &child_id,
-                    sealed_root_request,
-                )?;
                 child_id
             }
             None => {
@@ -596,7 +598,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         &authority_indices,
         &existing_created_indices,
         &persisted_launch_metadata,
-        &resolved_children,
+        &admitted_children,
         &reserved_child_ids,
         child_snapshot_hash.as_deref(),
         &child_project_authority,
@@ -612,6 +614,37 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         resolution_engine,
     )
     .await?;
+
+    // Publish each fresh durable slot only after its metadata contains the
+    // finalized sealed request produced by the complete authority pass. A
+    // crash before this point leaves no child identity to recover; a crash
+    // after it re-drives from exact finalized authority.
+    for item_index in fresh_indices.iter().copied() {
+        let child = &children[item_index];
+        let child_id = reserved_child_ids.get(&item_index).ok_or_else(|| {
+            anyhow::anyhow!("follow: missing fresh child ID at index {item_index}")
+        })?;
+        let metadata = prepared_follow_children
+            .child_metadata
+            .get(&item_index)
+            .ok_or_else(|| {
+                anyhow::anyhow!("follow: missing finalized child metadata at index {item_index}")
+            })?;
+        let sealed = metadata.sealed_root_request.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "follow: fresh child metadata has no finalized sealed request at index {item_index}"
+            )
+        })?;
+        state.state_store.set_follow_child(
+            &follow_key,
+            item_index as u32,
+            &child.item_ref,
+            &spec_hashes[item_index],
+            child_id,
+            child_id,
+            sealed,
+        )?;
+    }
 
     // 2. Child root row (created, NOT launched) + seeded launch identity. A follow
     //    child is a FRESH ROOT: its own chain root, no upstream braid. The root
@@ -968,13 +1001,12 @@ fn admit_follow_child_requests(
     resolution_engine: &std::sync::Arc<ryeos_engine::engine::Engine>,
     child_plan_context: &ryeos_engine::contracts::PlanContext,
     child_project_binding: &ryeos_app::thread_lifecycle::AdmittedProjectBinding,
-    parent_thread_id: &str,
     parent_current_site_id: &str,
     parent_origin_site_id: &str,
     acting_principal: &str,
     child_project_context: &ProjectContext,
 ) -> Result<(
-    Vec<SealedRootExecutionRequest>,
+    Vec<AdmittedFollowChildRequest>,
     std::collections::BTreeMap<usize, ryeos_app::runtime_db::FollowWaiterChild>,
 )> {
     let mut resolved_children = Vec::with_capacity(children.len());
@@ -984,16 +1016,16 @@ fn admit_follow_child_requests(
     {
         let item_index = u32::try_from(item_index).context("follow: too many children")?;
         let persisted_slot = state.state_store.get_follow_child(follow_key, item_index)?;
-        let sealed_root_request = if let Some(slot) = persisted_slot.as_ref() {
+        let admitted = if let Some(slot) = persisted_slot.as_ref() {
             if slot.item_ref != child.item_ref || slot.spec_hash != spec_hashes[item_index as usize]
             {
                 bail!("follow: persisted child conflicts at index {item_index}");
             }
-            slot.sealed_root_request.clone()
+            AdmittedFollowChildRequest::Persisted(slot.sealed_root_request.clone())
         } else {
-            // A new slot captures the complete verified request before any root
-            // row is created. Re-drives consume this value from the slot and do
-            // not reinterpret mutable item, kind, runtime, or policy source.
+            // Fresh admission is intentionally in-memory. The durable slot is
+            // written only after generic preparation captures the complete
+            // hook plan and constructs a FinalizedEffectiveProgram.
             let child_runtime = resolution_engine
                 .runtimes
                 .resolve_for_launch(None, &child_ref.kind)
@@ -1033,32 +1065,26 @@ fn admit_follow_child_requests(
                 "detached".to_string(),
                 child.parameters.clone(),
             )?;
-            SealedRootExecutionRequest::capture(&child_execution, child_runtime_ref)?
-        };
-        let capsule_root = ryeos_app::launch_metadata::daemon_thread_state_dir(
-            &state.config.app_root,
-            parent_thread_id,
-        )
-        .join("admission-capsules")
-        .join(format!("follow-{item_index}"));
-        if persisted_slot.is_none() {
-            let restored = sealed_root_request.restore(resolution_engine, &capsule_root)?;
-            if restored.item_ref != child.item_ref
-                || restored.ref_bindings != child.ref_bindings
-                || restored.parameters != child.parameters
-                || restored.launch_mode != "detached"
-                || restored.current_site_id != parent_current_site_id
-                || restored.origin_site_id != parent_origin_site_id
-                || restored.requested_by.as_deref() != Some(acting_principal)
-                || restored.plan_context.project_context != *child_project_context
+            if child_execution.item_ref != child.item_ref
+                || child_execution.ref_bindings != child.ref_bindings
+                || child_execution.parameters != child.parameters
+                || child_execution.launch_mode != "detached"
+                || child_execution.current_site_id != parent_current_site_id
+                || child_execution.origin_site_id != parent_origin_site_id
+                || child_execution.requested_by.as_deref() != Some(acting_principal)
+                || child_execution.plan_context.project_context != *child_project_context
             {
-                bail!("follow: sealed child authority conflicts at index {item_index}");
+                bail!("follow: fresh child admission conflicts at index {item_index}");
             }
-        }
+            AdmittedFollowChildRequest::Fresh {
+                request: child_execution,
+                runtime_ref: child_runtime_ref,
+            }
+        };
         if let Some(slot) = persisted_slot {
             persisted_child_slots.insert(item_index as usize, slot);
         }
-        resolved_children.push(sealed_root_request);
+        resolved_children.push(admitted);
     }
     Ok((resolved_children, persisted_child_slots))
 }
@@ -1076,7 +1102,7 @@ async fn prepare_follow_children(
     authority_indices: &std::collections::BTreeSet<usize>,
     existing_created_indices: &std::collections::BTreeSet<usize>,
     persisted_launch_metadata: &std::collections::BTreeMap<usize, RuntimeLaunchMetadata>,
-    resolved_children: &[SealedRootExecutionRequest],
+    admitted_children: &[AdmittedFollowChildRequest],
     reserved_child_ids: &std::collections::BTreeMap<usize, String>,
     child_snapshot_hash: Option<&str>,
     child_project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
@@ -1108,6 +1134,7 @@ async fn prepare_follow_children(
             continue;
         }
         let existing_row = existing_created_indices.contains(&item_index);
+        let mut fresh_request = None;
         let meta = if existing_row {
             persisted_launch_metadata
                 .get(&item_index)
@@ -1118,27 +1145,45 @@ async fn prepare_follow_children(
                     )
                 })?
         } else {
-            let sealed_root_request = resolved_children.get(item_index).ok_or_else(|| {
-                anyhow::anyhow!("follow: missing sealed child authority at index {item_index}")
+            let admitted = admitted_children.get(item_index).ok_or_else(|| {
+                anyhow::anyhow!("follow: missing child admission at index {item_index}")
             })?;
-            let capsule_root = ryeos_app::launch_metadata::daemon_thread_state_dir(
-                &state.config.app_root,
-                parent_thread_id,
-            )
-            .join("admission-capsules")
-            .join(format!("follow-{item_index}"));
-            let child_execution = sealed_root_request.restore(resolution_engine, &capsule_root)?;
-            let (seed_project_context, project_authority) =
-                durable_follow_child_seed_project_identity(
-                    sealed_root_request,
+            let (child_execution, runtime_ref, finalized_sealed) = match admitted {
+                AdmittedFollowChildRequest::Fresh {
+                    request,
+                    runtime_ref,
+                } => {
+                    fresh_request = Some(request.clone());
+                    (request.clone(), runtime_ref.clone(), None)
+                }
+                AdmittedFollowChildRequest::Persisted(sealed) => {
+                    let capsule_root = ryeos_app::launch_metadata::daemon_thread_state_dir(
+                        &state.config.app_root,
+                        parent_thread_id,
+                    )
+                    .join("admission-capsules")
+                    .join(format!("follow-{item_index}"));
+                    (
+                        sealed.restore(resolution_engine, &capsule_root)?,
+                        sealed.runtime_ref().to_string(),
+                        Some(sealed.clone()),
+                    )
+                }
+            };
+            let (seed_project_context, project_authority) = match finalized_sealed.as_ref() {
+                Some(sealed) => durable_follow_child_seed_project_identity(
+                    sealed,
                     child_project_authority,
                     child_project_context,
-                )
-                .with_context(|| {
-                    format!(
-                        "follow: sealed child project authority conflicts at index {item_index}"
-                    )
-                })?;
+                ),
+                None => Ok((
+                    child_project_context.clone(),
+                    child_project_authority.clone(),
+                )),
+            }
+            .with_context(|| {
+                format!("follow: sealed child project authority conflicts at index {item_index}")
+            })?;
             let stable_project_identity = match &project_authority {
                 ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => None,
                 ryeos_state::objects::ExecutionProjectAuthority::LiveProject { .. }
@@ -1187,9 +1232,11 @@ async fn prepare_follow_children(
                             .collect(),
                     ),
                     executor_ref: Some(child_execution.executor_ref.clone()),
-                    runtime_ref: Some(sealed_root_request.runtime_ref().to_string()),
-                })
-                .with_sealed_root_request(sealed_root_request.clone());
+                    runtime_ref: Some(runtime_ref),
+                });
+            if let Some(sealed) = finalized_sealed {
+                meta.set_sealed_root_request(sealed);
+            }
             meta.follow_parent_context = Some(persisted_parent_context.clone());
             meta.follow_launch_window = expected_launch_window.cloned();
             meta
@@ -1234,7 +1281,11 @@ async fn prepare_follow_children(
         if launch_provenance.project_authority() != child_project_authority {
             bail!("follow: child launch provenance differs from sealed child authority");
         }
-        let prepared = if existing_row {
+        let prepared = if existing_row
+            || matches!(
+                admitted_children.get(item_index),
+                Some(AdmittedFollowChildRequest::Persisted(_))
+            ) {
             crate::execution::launch::prepare_existing_follow_child_launch(
                 state,
                 child_thread_id,
@@ -1248,6 +1299,9 @@ async fn prepare_follow_children(
                 state,
                 child_thread_id,
                 &meta,
+                fresh_request.take().ok_or_else(|| {
+                    anyhow::anyhow!("follow: fresh child admission vanished at index {item_index}")
+                })?,
                 launch_provenance,
                 launch_parent_context.clone(),
             )

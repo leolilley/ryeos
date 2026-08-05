@@ -75,7 +75,8 @@ fn state_after_serial_tool_result(
     index: usize,
     turn: u32,
     definition_ref: &str,
-    definition_hash: &str,
+    root_raw_content_digest: &str,
+    effective_definition_digest: &str,
 ) -> State {
     let next_index = index + 1;
     if next_index < pending.len() {
@@ -87,7 +88,8 @@ fn state_after_serial_tool_result(
         State::FiringHooks {
             occurrence: ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
                 definition_ref: definition_ref.to_string(),
-                definition_hash: definition_hash.to_string(),
+                root_raw_content_digest: root_raw_content_digest.to_string(),
+                effective_definition_digest: effective_definition_digest.to_string(),
                 turn,
             },
             context: json!({"turn": turn}),
@@ -201,7 +203,8 @@ pub struct Runner {
     model_name: String,
     thread_id: String,
     definition_ref: String,
-    definition_hash: String,
+    root_raw_content_digest: String,
+    effective_definition_digest: String,
     initial_turn: u32,
     hooks: Vec<ryeos_runtime::CompiledHook>,
     /// Declared directive outputs — used to validate `directive_return`
@@ -640,7 +643,8 @@ pub struct RunnerConfig {
     pub model_name: String,
     pub thread_id: String,
     pub definition_ref: String,
-    pub definition_hash: String,
+    pub root_raw_content_digest: String,
+    pub effective_definition_digest: String,
     pub hooks: Vec<ryeos_runtime::CompiledHook>,
     pub outputs: Option<Vec<OutputSpec>>,
     pub return_nudge: ReturnNudge,
@@ -668,7 +672,8 @@ impl Runner {
             model_name,
             thread_id,
             definition_ref,
-            definition_hash,
+            root_raw_content_digest,
+            effective_definition_digest,
             hooks,
             outputs,
             return_nudge,
@@ -707,7 +712,8 @@ impl Runner {
             model_name,
             thread_id,
             definition_ref,
-            definition_hash,
+            root_raw_content_digest,
+            effective_definition_digest,
             initial_turn: 0,
             hooks,
             directive_outputs: outputs,
@@ -2322,7 +2328,8 @@ impl Runner {
                                 index,
                                 turn,
                                 &self.definition_ref,
-                                &self.definition_hash,
+                                &self.root_raw_content_digest,
+                                &self.effective_definition_digest,
                             )
                         } else {
                             // Permission check deferred to the dispatcher,
@@ -2374,7 +2381,8 @@ impl Runner {
                         index,
                         turn,
                         &self.definition_ref,
-                        &self.definition_hash,
+                        &self.root_raw_content_digest,
+                        &self.effective_definition_digest,
                     )
                 }
 
@@ -2568,7 +2576,10 @@ impl Runner {
                         occurrence:
                             ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
                                 definition_ref: self.definition_ref.clone(),
-                                definition_hash: self.definition_hash.clone(),
+                                root_raw_content_digest: self.root_raw_content_digest.clone(),
+                                effective_definition_digest: self
+                                    .effective_definition_digest
+                                    .clone(),
                                 turn,
                             },
                         context: json!({"turn": turn}),
@@ -2880,7 +2891,8 @@ impl Runner {
                             State::FiringHooks {
                                 occurrence: ryeos_runtime::callback::HookDispatchOccurrence::DirectiveContinuation {
                                     definition_ref: self.definition_ref.clone(),
-                                    definition_hash: self.definition_hash.clone(),
+                                    root_raw_content_digest: self.root_raw_content_digest.clone(),
+                                    effective_definition_digest: self.effective_definition_digest.clone(),
                                     turn,
                                 },
                                 context: self.continuation_hook_context(live_context, threshold),
@@ -4273,7 +4285,14 @@ mod tests {
                 arguments: json!({}),
             },
         ];
-        match state_after_serial_tool_result(pending, 0, 4, "directive:test", "hash") {
+        match state_after_serial_tool_result(
+            pending,
+            0,
+            4,
+            "directive:test",
+            "root-hash",
+            "effective-hash",
+        ) {
             State::DispatchingTools { pending, index } => {
                 assert_eq!(index, 1);
                 assert_eq!(pending[index].id.as_deref(), Some("second"));
@@ -4370,7 +4389,8 @@ mod tests {
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
             definition_ref: "directive:test/fixture".to_string(),
-            definition_hash: "definition-hash".to_string(),
+            root_raw_content_digest: "root-raw-content-digest".to_string(),
+            effective_definition_digest: "effective-definition-digest".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
@@ -4447,7 +4467,8 @@ mod tests {
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
             definition_ref: "directive:test/fixture".to_string(),
-            definition_hash: "definition-hash".to_string(),
+            root_raw_content_digest: "root-raw-content-digest".to_string(),
+            effective_definition_digest: "effective-definition-digest".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
@@ -4506,7 +4527,8 @@ mod tests {
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
             definition_ref: "directive:test/fixture".to_string(),
-            definition_hash: "definition-hash".to_string(),
+            root_raw_content_digest: "root-raw-content-digest".to_string(),
+            effective_definition_digest: "effective-definition-digest".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
@@ -4563,7 +4585,8 @@ mod tests {
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
             definition_ref: "directive:test/fixture".to_string(),
-            definition_hash: "definition-hash".to_string(),
+            root_raw_content_digest: "root-raw-content-digest".to_string(),
+            effective_definition_digest: "effective-definition-digest".to_string(),
             hooks: vec![],
             outputs,
             return_nudge: ReturnNudge::default(),
@@ -4632,7 +4655,8 @@ mod tests {
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
             definition_ref: "directive:test/fixture".to_string(),
-            definition_hash: "definition-hash".to_string(),
+            root_raw_content_digest: "root-raw-content-digest".to_string(),
+            effective_definition_digest: "effective-definition-digest".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
@@ -4803,7 +4827,8 @@ mod tests {
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
             definition_ref: "directive:test/fixture".to_string(),
-            definition_hash: "definition-hash".to_string(),
+            root_raw_content_digest: "root-raw-content-digest".to_string(),
+            effective_definition_digest: "effective-definition-digest".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
@@ -4875,7 +4900,8 @@ mod tests {
             model_name: "claude-haiku-4-5".to_string(),
             thread_id: "T-test".to_string(),
             definition_ref: "directive:test/fixture".to_string(),
-            definition_hash: "definition-hash".to_string(),
+            root_raw_content_digest: "root-raw-content-digest".to_string(),
+            effective_definition_digest: "effective-definition-digest".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
@@ -4944,7 +4970,8 @@ mod tests {
             model_name: "unknown-model".to_string(),
             thread_id: "T-test".to_string(),
             definition_ref: "directive:test/fixture".to_string(),
-            definition_hash: "definition-hash".to_string(),
+            root_raw_content_digest: "root-raw-content-digest".to_string(),
+            effective_definition_digest: "effective-definition-digest".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
@@ -4997,7 +5024,8 @@ mod tests {
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
             definition_ref: "directive:test/fixture".to_string(),
-            definition_hash: "definition-hash".to_string(),
+            root_raw_content_digest: "root-raw-content-digest".to_string(),
+            effective_definition_digest: "effective-definition-digest".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
@@ -5743,7 +5771,8 @@ mod tests {
             model_name: "model".to_string(),
             thread_id: "T-test".to_string(),
             definition_ref: "directive:test/fixture".to_string(),
-            definition_hash: "definition-hash".to_string(),
+            root_raw_content_digest: "root-raw-content-digest".to_string(),
+            effective_definition_digest: "effective-definition-digest".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),

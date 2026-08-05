@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 ryeos-handler-protocol = { workspace = true }
 ryeos-directive-core = { workspace = true }
+ryeos-engine = { workspace = true }
+ryeos-graph-definition = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
@@ -31,16 +33,16 @@ name = "rye-composer-extends-chain"
 path = "src/bin/composer_extends_chain.rs"
 
 [[bin]]
-name = "rye-composer-graph-permissions"
-path = "src/bin/composer_graph_permissions.rs"
-
-[[bin]]
 name = "rye-composer-identity"
 path = "src/bin/composer_identity.rs"
 
 [[bin]]
 name = "ryeos-directive-launch-preparer"
 path = "src/bin/directive_launch_preparer.rs"
+
+[[bin]]
+name = "ryeos-graph-effective-validator"
+path = "src/bin/graph_effective_validator.rs"
 
 [lib]
 path = "src/lib.rs"

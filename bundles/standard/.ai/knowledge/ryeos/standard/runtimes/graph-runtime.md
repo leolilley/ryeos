@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-26T23:29:56Z:e9cefe07cbdd4e2f4a6ebcc0b7735439ae2f0ef04f25207bf85dd38efbce1bd2:cIpVrdmFHgu1D+ocltd7X+mS0i8iF6Tifa5x6XFN6lrPxBRxrPTJH727W0qzFb7QWymH4Uvox7yJyjgrWEhLDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-05T07:04:40Z:b7654ec6cf80cb7c1ae486fd9f9892b106dd5b5a3b49fd0b148fb444dd8de291:iZIfLJSUjxeF+WxQwjnoNTb1Bk5vL0kO3mcqeHcPXdoWh1TKvvbVnQtwiqiestTzaNQt8Wh+0Y2Wzot9nGFWDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/runtimes
 tags: [runtime, graph, dag, callbacks, execution-model, checkpoint, durability, continuation, fence]
@@ -167,20 +167,24 @@ capabilities, and lineage facts.
 ## Resume is fail-closed
 
 The last successfully written checkpoint is the authoritative resume cursor. It
-pins the signed `definition_ref`, `definition_hash`, and
-`expression_language: "rye-expr/1"` that produced its state. On resume every one
-of those must match the resolved graph exactly; the current node must exist in
-that graph; step, retry, accounting, and any pending-follow snapshot must be
-internally consistent. Any drift, an older schema, an unknown or missing field,
-or an explicit `null` where a value must be omitted fails closed with
+pins `definition_ref`, `effective_definition_digest`, the admitted launch
+capsule where required, and `expression_language: "rye-expr/1"`. The effective
+digest commits to the ordered source contributors, composed graph, captured
+hook plan, policy facts, source-space/trust, and signers; it is not the root
+file hash. On resume these coordinates must match the exact sealed program; the
+current node must exist in its composed graph; step, retry, accounting, and any
+pending-follow snapshot must be internally consistent. Any drift, an older
+schema, an unknown or missing field, or an explicit `null` where a value must be omitted fails closed with
 `restart_required_after_expression_language_cutover` rather than being migrated
 or silently cold-started.
 
 Two things follow directly:
 
-- **Editing a signed graph changes its hash**, so any in-flight run keyed to the
-  old hash can no longer resume into it — this is why a live graph must not be
-  edited or re-signed mid-run.
+- **Changing effective behavior changes its digest.** A source edit, ancestor
+  change, trust/signer change, or configured-hook-policy change creates a new
+  effective program for future launches. An existing run recovers from its
+  sealed resolution and never re-resolves live source or hook policy. Current
+  signer revocation still blocks recovery.
 - **Event replay is not a state-reconstruction fallback.** Receipts, runtime
   events, transcripts, and artifacts are durable observability; they do not
   advance resumable state without a later successful checkpoint write. Only the

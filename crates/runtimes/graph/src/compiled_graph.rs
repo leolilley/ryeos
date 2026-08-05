@@ -1,13 +1,15 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
+#[cfg(test)]
 use ryeos_runtime::events::RuntimeEventType;
 use ryeos_runtime::{
     CompilationLimits, CompiledActionTemplate, CompiledExpression, CompiledHook,
-    CompiledJsonTemplate, CompiledTemplate, ExpressionCondition, HookContextSchema, HookSources,
-    Reference, ReferenceSegment, ReferenceSet, compile_condition_for, compile_hooks,
-    compile_template_for,
+    CompiledJsonTemplate, CompiledTemplate, ExpressionCondition, Reference, ReferenceSegment,
+    ReferenceSet, compile_condition_for, compile_template_for,
 };
+#[cfg(test)]
+use ryeos_runtime::{HookContextSchema, HookSources, compile_hooks};
 
 use crate::model::{EdgeSpec, GraphConfig, GraphNode, NodeType};
 
@@ -18,7 +20,33 @@ pub(crate) struct CompiledGraph {
 }
 
 impl CompiledGraph {
+    #[cfg(test)]
     pub(crate) fn compile(config: &GraphConfig, mut hook_sources: HookSources) -> Result<Self> {
+        hook_sources.retain_configured_events(&[
+            RuntimeEventType::GraphStarted.as_str(),
+            RuntimeEventType::GraphStepCompleted.as_str(),
+            RuntimeEventType::GraphCompleted.as_str(),
+        ]);
+        Self::compile_with(config, |limits| {
+            compile_hooks(hook_sources, &graph_hook_context_schemas(), limits)
+                .context("compile graph hooks")
+        })
+    }
+
+    pub(crate) fn compile_effective(
+        config: &GraphConfig,
+        plan: &ryeos_engine::hooks::EffectiveHookPlan,
+    ) -> Result<Self> {
+        Self::compile_with(config, |limits| {
+            ryeos_runtime::compile_effective_hook_plan(plan, limits)
+                .context("compile captured effective graph hooks")
+        })
+    }
+
+    fn compile_with(
+        config: &GraphConfig,
+        compile_admitted_hooks: impl FnOnce(&CompilationLimits) -> Result<Vec<CompiledHook>>,
+    ) -> Result<Self> {
         let limits = CompilationLimits::default();
         if let Some(state) = config.state.as_ref() {
             crate::evaluation::validate_runtime_value(state, "config.state")
@@ -44,13 +72,7 @@ impl CompiledGraph {
             nodes.insert(name.clone(), compiled);
         }
 
-        hook_sources.retain_configured_events(&[
-            RuntimeEventType::GraphStarted.as_str(),
-            RuntimeEventType::GraphStepCompleted.as_str(),
-            RuntimeEventType::GraphCompleted.as_str(),
-        ]);
-        let hooks = compile_hooks(hook_sources, &graph_hook_context_schemas(), &limits)
-            .context("compile graph hooks")?;
+        let hooks = compile_admitted_hooks(&limits)?;
         for (index, hook) in hooks.iter().enumerate() {
             let field = format!("hook[{index}] (id={})", hook.id());
             for reference in hook.references().iter() {
@@ -79,6 +101,7 @@ impl CompiledGraph {
     }
 }
 
+#[cfg(test)]
 fn graph_hook_context_schemas() -> [HookContextSchema; 3] {
     [
         HookContextSchema::new(
@@ -454,9 +477,8 @@ fn validate_iteration_variable(node_name: &str, node: &GraphNode) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_runtime::{
-        ExpressionCondition, HookDefinition, HookLayer, HookResultMode, HookSources,
-    };
+    use ryeos_engine::hooks::ExpressionCondition;
+    use ryeos_runtime::{HookDefinition, HookLayer, HookResultMode, HookSources};
     use serde_json::json;
 
     fn hook(id: &str) -> HookDefinition {

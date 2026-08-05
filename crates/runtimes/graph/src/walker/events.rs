@@ -39,7 +39,7 @@ impl Walker {
                 json!({
                     "graph_run_id": graph_run_id,
                     "definition_ref": &self.graph.definition_ref,
-                    "definition_hash": &self.graph.definition_hash,
+                    "effective_definition_digest": &self.graph.effective_definition_digest,
                     "node": current,
                     "node_ref": node_ref(&self.graph.definition_ref, current),
                     "step": step,
@@ -60,7 +60,7 @@ impl Walker {
         let mut payload = json!({
             "graph_run_id": graph_run_id,
             "definition_ref": &self.graph.definition_ref,
-            "definition_hash": &self.graph.definition_hash,
+            "effective_definition_digest": &self.graph.effective_definition_digest,
             "node": current,
             "node_ref": node_ref(&self.graph.definition_ref, current),
             "step": step,
@@ -95,7 +95,7 @@ impl Walker {
                 json!({
                     "graph_run_id": graph_run_id,
                     "definition_ref": &self.graph.definition_ref,
-                    "definition_hash": &self.graph.definition_hash,
+                    "effective_definition_digest": &self.graph.effective_definition_digest,
                     "node": current,
                     "node_ref": node_ref(&self.graph.definition_ref, current),
                     "step": step,
@@ -126,7 +126,7 @@ impl Walker {
                     "call_id": graph_call_id(graph_run_id, step, current),
                     "graph_run_id": graph_run_id,
                     "definition_ref": &self.graph.definition_ref,
-                    "definition_hash": &self.graph.definition_hash,
+                    "effective_definition_digest": &self.graph.effective_definition_digest,
                     "node": current,
                     "node_ref": node_ref(&self.graph.definition_ref, current),
                     "step": step,
@@ -154,7 +154,7 @@ impl Walker {
                     "call_id": graph_call_id(graph_run_id, step, current),
                     "graph_run_id": graph_run_id,
                     "definition_ref": &self.graph.definition_ref,
-                    "definition_hash": &self.graph.definition_hash,
+                    "effective_definition_digest": &self.graph.effective_definition_digest,
                     "node": current,
                     "node_ref": node_ref(&self.graph.definition_ref, current),
                     "step": step,
@@ -177,7 +177,7 @@ impl Walker {
         let mut payload = json!({
             "graph_run_id": graph_run_id,
             "definition_ref": &self.graph.definition_ref,
-            "definition_hash": &self.graph.definition_hash,
+            "effective_definition_digest": &self.graph.effective_definition_digest,
             "node": current,
             "node_ref": node_ref(&self.graph.definition_ref, current),
             "step": step,
@@ -208,7 +208,7 @@ impl Walker {
                     json!({
                         "graph_run_id": graph_run_id,
                         "definition_ref": &self.graph.definition_ref,
-                        "definition_hash": &self.graph.definition_hash,
+                        "effective_definition_digest": &self.graph.effective_definition_digest,
                         "node": current,
                         "node_ref": node_ref(&self.graph.definition_ref, current),
                         "step": step,

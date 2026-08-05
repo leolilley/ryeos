@@ -16,7 +16,7 @@ use crate::state_store::{PersistedEventRecord, ThreadArtifactRecord};
 pub struct GraphExecutionTrace {
     pub thread_id: String,
     pub definition_ref: Option<String>,
-    pub definition_hash: Option<String>,
+    pub effective_definition_digest: Option<String>,
     pub graph_run_id: Option<String>,
     pub nodes: Vec<GraphExecutionNodeTrace>,
 }
@@ -68,10 +68,10 @@ pub fn build_graph_execution_trace(
     thread_id: impl Into<String>,
     events: &[PersistedEventRecord],
     artifacts: &[ThreadArtifactRecord],
-) -> GraphExecutionTrace {
+) -> anyhow::Result<GraphExecutionTrace> {
     let thread_id = thread_id.into();
     let mut definition_ref = None;
-    let mut definition_hash = None;
+    let mut effective_definition_digest = None;
     let mut graph_run_id = None;
     let mut nodes: BTreeMap<String, NodeAccumulator> = BTreeMap::new();
 
@@ -79,9 +79,9 @@ pub fn build_graph_execution_trace(
         capture_graph_identity(
             &event.payload,
             &mut definition_ref,
-            &mut definition_hash,
+            &mut effective_definition_digest,
             &mut graph_run_id,
-        );
+        )?;
 
         let Some((node_ref, node)) =
             node_identity_from_payload(&event.payload, definition_ref.as_deref())
@@ -127,9 +127,9 @@ pub fn build_graph_execution_trace(
         capture_graph_identity(
             metadata,
             &mut definition_ref,
-            &mut definition_hash,
+            &mut effective_definition_digest,
             &mut graph_run_id,
-        );
+        )?;
 
         let Some((node_ref, node)) =
             node_identity_from_payload(metadata, definition_ref.as_deref())
@@ -175,13 +175,13 @@ pub fn build_graph_execution_trace(
         });
     }
 
-    GraphExecutionTrace {
+    Ok(GraphExecutionTrace {
         thread_id,
         definition_ref,
-        definition_hash,
+        effective_definition_digest,
         graph_run_id,
         nodes: nodes.into_values().map(NodeAccumulator::finish).collect(),
-    }
+    })
 }
 
 impl NodeAccumulator {
@@ -200,18 +200,59 @@ impl NodeAccumulator {
 fn capture_graph_identity(
     payload: &Value,
     definition_ref: &mut Option<String>,
-    definition_hash: &mut Option<String>,
+    effective_definition_digest: &mut Option<String>,
     graph_run_id: &mut Option<String>,
-) {
-    capture_first(definition_ref, payload.get("definition_ref"));
-    capture_first(definition_hash, payload.get("definition_hash"));
-    capture_first(graph_run_id, payload.get("graph_run_id"));
+) -> anyhow::Result<()> {
+    capture_exact(
+        definition_ref,
+        payload.get("definition_ref"),
+        "definition_ref",
+    )?;
+    capture_exact(
+        effective_definition_digest,
+        payload.get("effective_definition_digest"),
+        "effective_definition_digest",
+    )?;
+    capture_exact(graph_run_id, payload.get("graph_run_id"), "graph_run_id")?;
+    Ok(())
 }
 
-fn capture_first(slot: &mut Option<String>, value: Option<&Value>) {
-    if slot.is_none() {
-        *slot = value.and_then(Value::as_str).map(String::from);
+fn capture_exact(
+    slot: &mut Option<String>,
+    value: Option<&Value>,
+    field: &str,
+) -> anyhow::Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let value = value
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("graph execution `{field}` must be a string"))?;
+    match field {
+        "definition_ref" => {
+            let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(value)
+                .map_err(|error| anyhow::anyhow!("invalid graph definition_ref: {error}"))?;
+            if canonical.kind != "graph" {
+                anyhow::bail!("graph execution definition_ref must identify a graph");
+            }
+        }
+        "effective_definition_digest" => {
+            ryeos_engine::resolution::EffectiveDefinitionDigest::parse(value.to_string())
+                .map_err(|error| anyhow::anyhow!("invalid graph effective digest: {error}"))?;
+        }
+        "graph_run_id" if value.is_empty() || value.trim() != value || value.len() > 256 => {
+            anyhow::bail!("graph execution graph_run_id must be non-empty, trimmed, and bounded");
+        }
+        _ => {}
     }
+    match slot {
+        Some(existing) if existing != value => anyhow::bail!(
+            "graph execution identity divergence for `{field}`: `{existing}` != `{value}`"
+        ),
+        Some(_) => {}
+        None => *slot = Some(value.to_string()),
+    }
+    Ok(())
 }
 
 fn node_identity_from_payload(
@@ -267,7 +308,7 @@ mod tests {
                 "graph_started",
                 json!({
                     "definition_ref": "graph:flow",
-                    "definition_hash": "defhash",
+                    "effective_definition_digest": "d".repeat(64),
                     "graph_run_id": "gr-1",
                 }),
             ),
@@ -276,7 +317,7 @@ mod tests {
                 "graph_step_started",
                 json!({
                     "definition_ref": "graph:flow",
-                    "definition_hash": "defhash",
+                    "effective_definition_digest": "d".repeat(64),
                     "graph_run_id": "gr-1",
                     "node": "greet",
                     "node_ref": "graph:flow#node:greet",
@@ -288,7 +329,7 @@ mod tests {
                 "tool_call_result",
                 json!({
                     "definition_ref": "graph:flow",
-                    "definition_hash": "defhash",
+                    "effective_definition_digest": "d".repeat(64),
                     "graph_run_id": "gr-1",
                     "node": "greet",
                     "node_ref": "graph:flow#node:greet",
@@ -301,7 +342,7 @@ mod tests {
             10,
             json!({
                 "definition_ref": "graph:flow",
-                "definition_hash": "defhash",
+                "effective_definition_digest": "d".repeat(64),
                 "graph_run_id": "gr-1",
                 "node": "greet",
                 "step": 0,
@@ -309,10 +350,13 @@ mod tests {
             }),
         )];
 
-        let trace = build_graph_execution_trace("T-test", &events, &artifacts);
+        let trace = build_graph_execution_trace("T-test", &events, &artifacts).unwrap();
 
         assert_eq!(trace.definition_ref.as_deref(), Some("graph:flow"));
-        assert_eq!(trace.definition_hash.as_deref(), Some("defhash"));
+        assert_eq!(
+            trace.effective_definition_digest.as_deref(),
+            Some("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
+        );
         assert_eq!(trace.graph_run_id.as_deref(), Some("gr-1"));
         assert_eq!(trace.nodes.len(), 1);
         let node = &trace.nodes[0];
@@ -335,7 +379,7 @@ mod tests {
             1,
             json!({
                 "definition_ref": "graph:denied",
-                "definition_hash": "deniedhash",
+                "effective_definition_digest": "e".repeat(64),
                 "graph_run_id": "gr-denied",
                 "node": "greet",
                 "step": 0,
@@ -344,7 +388,7 @@ mod tests {
             }),
         )];
 
-        let trace = build_graph_execution_trace("T-denied", &[], &artifacts);
+        let trace = build_graph_execution_trace("T-denied", &[], &artifacts).unwrap();
 
         assert_eq!(trace.definition_ref.as_deref(), Some("graph:denied"));
         assert_eq!(trace.nodes.len(), 1);
@@ -366,9 +410,42 @@ mod tests {
             metadata: None,
         }];
 
-        let trace = build_graph_execution_trace("T-test", &[], &artifacts);
+        let trace = build_graph_execution_trace("T-test", &[], &artifacts).unwrap();
 
         assert!(trace.nodes.is_empty());
         assert_eq!(trace.definition_ref, None);
+    }
+
+    #[test]
+    fn refuses_effective_definition_digest_divergence() {
+        let events = vec![
+            event(
+                1,
+                "graph_started",
+                json!({
+                    "definition_ref": "graph:flow",
+                    "effective_definition_digest": "a".repeat(64),
+                    "graph_run_id": "gr-1",
+                }),
+            ),
+            event(
+                2,
+                "graph_step_started",
+                json!({
+                    "definition_ref": "graph:flow",
+                    "effective_definition_digest": "b".repeat(64),
+                    "graph_run_id": "gr-1",
+                    "node": "greet",
+                    "step": 0,
+                }),
+            ),
+        ];
+
+        let error = build_graph_execution_trace("T-test", &events, &[]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("identity divergence for `effective_definition_digest`")
+        );
     }
 }

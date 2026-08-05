@@ -15,6 +15,7 @@ members = [
     "crates/runtimes/directive",
     "crates/engine/ryeos-accounting",
     "crates/engine/ryeos-expression",
+    "crates/engine/ryeos-graph-definition",
     "crates/engine/ryeos-engine",
     "crates/engine/ryeos-executor",
     "crates/runtimes/graph",
@@ -67,6 +68,7 @@ ryeos-cli = { path = "crates/bin/cli" }
 ryeos-client-base = { path = "crates/clients/base" }
 ryeos-directive-core = { path = "crates/runtimes/directive-core" }
 ryeos-expression = { path = "crates/engine/ryeos-expression" }
+ryeos-graph-definition = { path = "crates/engine/ryeos-graph-definition" }
 ryeos-engine = { path = "crates/engine/ryeos-engine" }
 ryeos-executor = { path = "crates/engine/ryeos-executor" }
 ryeos-handler-protocol = { path = "crates/engine/ryeos-handler-protocol" }

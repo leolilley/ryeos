@@ -1254,36 +1254,60 @@ pub fn target_without_route_error(binding: &ViewBinding) -> Option<String> {
 /// single hint kind or a list of hint kinds.
 pub const REFRESH_KEYS: &[&str] = &["on_facet", "on_hint"];
 
-/// Returns a degradation reason when a `refresh:` rule names a key outside the
-/// known set — a typo (e.g. `on_face`) that would otherwise silently never
-/// refresh. Surfaced as the same class of binding error the parser produces, so
-/// the tile shows the mistake instead of quietly not updating.
+/// Returns a degradation reason when a `refresh:` rule is not the closed
+/// mapping grammar. Shape, keys, and values all fail visibly; an authored
+/// scalar or malformed trigger must never become a silently inert liveness
+/// policy.
 pub fn refresh_keys_error(binding: &ViewBinding) -> Option<String> {
-    let invalid_keys = |refresh: &Value| {
-        refresh
-            .as_object()
-            .into_iter()
-            .flat_map(|object| object.keys())
+    let rule_error = |scope: &str, refresh: &Value| {
+        if refresh.is_null() {
+            return None;
+        }
+        let Some(object) = refresh.as_object() else {
+            return Some(format!("invalid {scope} refresh: expected a mapping"));
+        };
+        let unknown = object
+            .keys()
             .filter(|key| !REFRESH_KEYS.contains(&key.as_str()))
             .cloned()
-            .collect::<Vec<_>>()
-    };
-    let unknown = invalid_keys(&binding.refresh);
-    if !unknown.is_empty() {
-        return Some(format!(
-            "invalid view binding: unknown refresh key(s) {}; expected one of: {}",
-            unknown.join(", "),
-            REFRESH_KEYS.join(", ")
-        ));
-    }
-    for (channel, source) in &binding.sources {
-        let unknown = invalid_keys(&source.refresh);
+            .collect::<Vec<_>>();
         if !unknown.is_empty() {
             return Some(format!(
-                "invalid source '{channel}' refresh key(s) {}; expected one of: {}",
+                "invalid {scope} refresh key(s) {}; expected one of: {}",
                 unknown.join(", "),
                 REFRESH_KEYS.join(", ")
             ));
+        }
+        if object
+            .get("on_facet")
+            .is_some_and(|value| value.as_str().is_none_or(str::is_empty))
+        {
+            return Some(format!(
+                "invalid {scope} refresh.on_facet: expected a non-empty string"
+            ));
+        }
+        if let Some(value) = object.get("on_hint") {
+            let valid = value.as_str().is_some_and(|value| !value.is_empty())
+                || value.as_array().is_some_and(|values| {
+                    !values.is_empty()
+                        && values
+                            .iter()
+                            .all(|value| value.as_str().is_some_and(|value| !value.is_empty()))
+                });
+            if !valid {
+                return Some(format!(
+                    "invalid {scope} refresh.on_hint: expected a non-empty string or list of non-empty strings"
+                ));
+            }
+        }
+        None
+    };
+    if let Some(error) = rule_error("view binding", &binding.refresh) {
+        return Some(error);
+    }
+    for (channel, source) in &binding.sources {
+        if let Some(error) = rule_error(&format!("source '{channel}'"), &source.refresh) {
+            return Some(error);
         }
     }
     None
@@ -1349,36 +1373,38 @@ pub fn resolve_affordance_invoke(
         return None;
     }
     let invoke = affordance.get("invoke")?;
-    // A producer knowing the placeholder namespace is not enough: the
-    // selected record must actually contain every declared value. Treat an
-    // unresolved path as a non-activation so a null selection never erases a
-    // previously valid facet and strands its dependent source unfetched.
-    for field in ["value", "merge", "args"] {
-        if invoke
-            .get(field)
-            .is_some_and(|template| has_unresolved_placeholder(template, payload))
-        {
-            return None;
-        }
-    }
     match invoke.get("plane").and_then(Value::as_str)? {
-        "ui" => Some(AffordanceInvoke::Ui {
-            facet: invoke.get("facet").and_then(Value::as_str)?.to_string(),
-            value: invoke
-                .get("value")
-                .map(|value| substitute_payload(value, payload)),
-            merge: invoke
-                .get("merge")
-                .map(|merge| substitute_payload(merge, payload)),
-            open_view: invoke
-                .get("open_view")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            drill: invoke
-                .get("drill")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        }),
+        "ui" => {
+            // Facet writes are local state replacement/merge operations. A
+            // missing runtime value must refuse the activation so it cannot
+            // erase valid routing state with null. Service arguments differ:
+            // their signed service schema owns required-vs-optional fields.
+            for field in ["value", "merge"] {
+                if invoke
+                    .get(field)
+                    .is_some_and(|template| has_unresolved_placeholder(template, payload))
+                {
+                    return None;
+                }
+            }
+            Some(AffordanceInvoke::Ui {
+                facet: invoke.get("facet").and_then(Value::as_str)?.to_string(),
+                value: invoke
+                    .get("value")
+                    .map(|value| substitute_payload(value, payload)),
+                merge: invoke
+                    .get("merge")
+                    .map(|merge| substitute_payload(merge, payload)),
+                open_view: invoke
+                    .get("open_view")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                drill: invoke
+                    .get("drill")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            })
+        }
         "rye" => {
             // A `ref:` selects the service-invocation form (args → `/execute`
             // parameters); otherwise it's grammar-token dispatch.
@@ -1838,6 +1864,53 @@ mod tests {
             "a typo'd refresh key degrades visibly, not silently: {:?}",
             b.degraded
         );
+    }
+
+    #[test]
+    fn malformed_refresh_shapes_and_values_degrade_visibly() {
+        for (refresh, expected) in [
+            (json!("thread"), "expected a mapping"),
+            (json!({"on_facet": []}), "refresh.on_facet"),
+            (json!({"on_hint": []}), "refresh.on_hint"),
+            (json!({"on_hint": ["thread", 7]}), "refresh.on_hint"),
+        ] {
+            let surface = json!({
+                "views": {
+                    "view:ryeos/bad-refresh": {
+                        "widget": "text",
+                        "refresh": refresh
+                    }
+                }
+            });
+            let binding = views_from_surface(Some(&surface))
+                .remove("view:ryeos/bad-refresh")
+                .unwrap();
+            assert!(
+                binding
+                    .degraded
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains(expected)),
+                "malformed refresh must degrade visibly: {:?}",
+                binding.degraded
+            );
+        }
+
+        let source_surface = json!({
+            "views": {
+                "view:ryeos/bad-source-refresh": {
+                    "widget": "text",
+                    "sources": {
+                        "default": {"ref": "service:test", "refresh": true}
+                    }
+                }
+            }
+        });
+        let binding = views_from_surface(Some(&source_surface))
+            .remove("view:ryeos/bad-source-refresh")
+            .unwrap();
+        assert!(binding.degraded.as_deref().is_some_and(|reason| {
+            reason.contains("source 'default'") && reason.contains("expected a mapping")
+        }));
     }
 
     #[test]
@@ -2340,6 +2413,34 @@ mod tests {
             AffordanceInvoke::Service {
                 item_ref: "service:commands/submit".into(),
                 args: json!({ "thread_id": "T-7", "command_type": "cancel" }),
+                notice: None,
+            }
+        );
+    }
+
+    #[test]
+    fn service_affordance_preserves_missing_optional_arguments_as_null() {
+        let affordance = json!({
+            "invoke": {
+                "plane": "rye",
+                "ref": "service:test/watch-child",
+                "args": {
+                    "thread_id": "{record.thread_id}",
+                    "child_thread_id": "{record.child_thread_id}"
+                }
+            }
+        });
+        let invoke = resolve_affordance_invoke(
+            &affordance,
+            Producer::Selection,
+            &Payload::Selection(&json!({"thread_id": "T-parent"})),
+        )
+        .expect("the signed service schema decides whether a null argument is optional");
+        assert_eq!(
+            invoke,
+            AffordanceInvoke::Service {
+                item_ref: "service:test/watch-child".into(),
+                args: json!({"thread_id": "T-parent", "child_thread_id": null}),
                 notice: None,
             }
         );

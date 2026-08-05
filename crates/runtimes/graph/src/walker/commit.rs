@@ -111,8 +111,8 @@ impl Walker {
                 json!(&self.graph.definition_ref),
             );
             object.insert(
-                "definition_hash".to_string(),
-                json!(&self.graph.definition_hash),
+                "effective_definition_digest".to_string(),
+                json!(&self.graph.effective_definition_digest),
             );
             object.insert("node".to_string(), json!(node));
             object.insert("step".to_string(), json!(step));
@@ -199,7 +199,7 @@ impl Walker {
                     json!({
                         "graph_run_id": graph_run_id,
                         "definition_ref": &self.graph.definition_ref,
-                        "definition_hash": &self.graph.definition_hash,
+                        "effective_definition_digest": &self.graph.effective_definition_digest,
                         "node": node,
                         "node_ref": node_ref(&self.graph.definition_ref, node),
                         "step": step,
@@ -301,7 +301,7 @@ impl Walker {
             success,
             graph_id: self.graph.graph_id.clone(),
             definition_ref: self.graph.definition_ref.clone(),
-            definition_hash: self.graph.definition_hash.clone(),
+            effective_definition_digest: self.graph.effective_definition_digest.clone(),
             graph_run_id: graph_run_id.to_string(),
             status,
             steps,
@@ -332,7 +332,7 @@ impl Walker {
                     json!({
                         "graph_id": &self.graph.graph_id,
                         "definition_ref": &self.graph.definition_ref,
-                        "definition_hash": &self.graph.definition_hash,
+                        "effective_definition_digest": &self.graph.effective_definition_digest,
                         "graph_run_id": graph_run_id,
                         "status": status.as_str(),
                         "steps": steps,

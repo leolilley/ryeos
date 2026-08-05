@@ -27,7 +27,7 @@ struct DefinitionRequest {
     #[serde(default)]
     definition_ref: Option<String>,
     #[serde(default)]
-    definition_hash: Option<String>,
+    effective_definition_digest: Option<String>,
 }
 
 pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
@@ -56,16 +56,16 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
                 .map(|identity| identity.definition_ref.clone())
         })
         .unwrap_or_else(|| thread.thread.item_ref.clone());
-    let expected_hash = request.definition_hash.clone().or_else(|| {
+    let expected_digest = request.effective_definition_digest.clone().or_else(|| {
         run_identity
             .as_ref()
-            .map(|identity| identity.definition_hash.clone())
+            .map(|identity| identity.effective_definition_digest.clone())
     });
     let subject = FieldFactSubject {
         kind: "thread".to_string(),
         id: request.thread_id.clone(),
         definition_ref: Some(expected_ref.clone()),
-        definition_hash: expected_hash.clone(),
+        effective_definition_digest: expected_digest.clone(),
     };
     let mut builder = FieldFactsBuilder::new("definition", SERVICE_REF, subject);
 
@@ -79,7 +79,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
                 &mut builder,
                 &request.thread_id,
                 &expected_ref,
-                expected_hash.as_deref(),
+                expected_digest.as_deref(),
                 "admitted_program_unavailable",
                 "thread has no CAS-rooted admitted program",
             )?;
@@ -90,7 +90,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
                 &mut builder,
                 &request.thread_id,
                 &expected_ref,
-                expected_hash.as_deref(),
+                expected_digest.as_deref(),
                 "admitted_program_invalid",
                 format!("exact admitted program failed verification: {error:#}"),
             )?;
@@ -103,7 +103,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             &mut builder,
             &request.thread_id,
             &expected_ref,
-            expected_hash.as_deref(),
+            expected_digest.as_deref(),
             "definition_ref_mismatch",
             format!(
                 "admitted definition ref `{}` does not match asserted `{expected_ref}`",
@@ -112,25 +112,24 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         )?;
         return serde_json::to_value(builder.finish()?).map_err(Into::into);
     }
-    if expected_hash
+    if expected_digest
         .as_deref()
-        .is_some_and(|hash| hash != evidence.subject.raw_content_digest)
+        .is_some_and(|digest| digest != evidence.effective_definition_digest.as_str())
     {
         add_definition_shell(
             &mut builder,
             &request.thread_id,
             &expected_ref,
-            expected_hash.as_deref(),
-            "definition_hash_mismatch",
-            "admitted definition hash does not match the execution assertion",
+            expected_digest.as_deref(),
+            "effective_definition_digest_mismatch",
+            "admitted effective definition digest does not match the execution assertion",
         )?;
         return serde_json::to_value(builder.finish()?).map_err(Into::into);
     }
 
-    let topology = match super::ui_graph_topology::build_exact_graph_topology(
+    let topology = match super::ui_graph_topology::build_effective_graph_topology(
         &evidence.subject.canonical_ref,
-        &evidence.subject.raw_content,
-        &evidence.subject.source_extension,
+        &evidence.resolution.composed.composed,
     ) {
         Ok(topology) => topology,
         Err(error) => {
@@ -138,7 +137,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
                 &mut builder,
                 &request.thread_id,
                 &expected_ref,
-                Some(&evidence.subject.raw_content_digest),
+                Some(evidence.effective_definition_digest.as_str()),
                 "definition_parse_failed",
                 format!("exact admitted definition could not be parsed: {error:#}"),
             )?;
@@ -153,11 +152,11 @@ fn add_definition_shell(
     builder: &mut FieldFactsBuilder,
     thread_id: &str,
     definition_ref: &str,
-    definition_hash: Option<&str>,
+    effective_definition_digest: Option<&str>,
     warning_code: &str,
     message: impl Into<String>,
 ) -> Result<()> {
-    let id = definition_hash.map_or_else(
+    let id = effective_definition_digest.map_or_else(
         || format!("definition:{definition_ref}@unknown:{thread_id}"),
         |hash| format!("definition:{definition_ref}@{hash}"),
     );
@@ -172,9 +171,9 @@ fn add_definition_shell(
         parent_id: None,
         status: Some("unavailable".to_string()),
         canonical_ref: Some(definition_ref.to_string()),
-        source_content_hash: None,
-        definition_hash: definition_hash.map(str::to_string),
-        admitted_capsule_hash: None,
+        source_content_digest: None,
+        effective_definition_digest: effective_definition_digest.map(str::to_string),
+        admitted_launch_capsule_hash: None,
         event_ref: None,
         artifact_ref: None,
         attributes: json!({"exact_source_available": false}),
@@ -192,52 +191,128 @@ fn add_exact_definition(
     evidence: &ryeos_app::state_store::AdmittedProgramEvidence,
     topology: super::ui_graph_topology::TopologyGraph,
 ) -> Result<()> {
-    let definition_id = format!(
-        "definition:{}@{}",
-        evidence.subject.canonical_ref, evidence.subject.raw_content_digest
-    );
-    let provenance_evidence = vec![
+    let digest = evidence.effective_definition_digest.as_str();
+    let ids = add_effective_definition_core(
+        builder,
+        &evidence.subject.canonical_ref,
+        digest,
+        &evidence.resolution,
+        topology,
+    )?;
+    let definition_id = ids
+        .get(&evidence.subject.canonical_ref)
+        .expect("effective definition core always returns its root identity")
+        .clone();
+    let admitted_evidence = vec![
         FieldEvidenceRef::Thread {
             thread_id: thread_id.to_string(),
         },
         FieldEvidenceRef::AdmittedLaunchCapsule {
-            content_hash: evidence.admitted_capsule_hash.clone(),
-        },
-        FieldEvidenceRef::Item {
-            canonical_ref: evidence.subject.canonical_ref.clone(),
-            source_content_hash: evidence.subject.source_content_hash.clone(),
+            content_hash: evidence.admitted_launch_capsule_hash.clone(),
         },
     ];
+    let capsule_id = format!("launch-capsule:{}", evidence.admitted_launch_capsule_hash);
+    builder.add_entity(FieldFactEntity {
+        id: capsule_id.clone(),
+        kind: "launch_capsule".to_string(),
+        label: format!("capsule {}", &evidence.admitted_launch_capsule_hash[..12]),
+        parent_id: None,
+        status: Some("verified".to_string()),
+        canonical_ref: None,
+        source_content_digest: None,
+        effective_definition_digest: None,
+        admitted_launch_capsule_hash: Some(evidence.admitted_launch_capsule_hash.clone()),
+        event_ref: None,
+        artifact_ref: None,
+        attributes: json!({}),
+        provenance: builder.provenance(admitted_evidence.clone()),
+    })?;
+    builder.add_relation(FieldFactRelation {
+        id: format!("capsule-admits:{capsule_id}:{definition_id}"),
+        kind: "admits_definition".to_string(),
+        source_id: capsule_id,
+        target_id: definition_id.clone(),
+        status: None,
+        directed: true,
+        attributes: json!({}),
+        provenance: builder.provenance(admitted_evidence),
+    })?;
+    Ok(())
+}
+
+pub(crate) fn add_current_effective_definition(
+    builder: &mut FieldFactsBuilder,
+    canonical_ref: &str,
+    effective_definition_digest: &str,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    topology: super::ui_graph_topology::TopologyGraph,
+) -> Result<BTreeMap<String, String>> {
+    add_effective_definition_core(
+        builder,
+        canonical_ref,
+        effective_definition_digest,
+        resolution,
+        topology,
+    )
+}
+
+fn add_effective_definition_core(
+    builder: &mut FieldFactsBuilder,
+    canonical_ref: &str,
+    digest: &str,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    topology: super::ui_graph_topology::TopologyGraph,
+) -> Result<BTreeMap<String, String>> {
+    let family_id = format!("definition-family:{canonical_ref}");
+    let definition_id = format!("definition:{canonical_ref}@{digest}");
+    let label = super::ui_graph_topology::label_for_bare_id(
+        canonical_ref
+            .split_once(':')
+            .map_or(canonical_ref, |(_, bare)| bare),
+    );
+    builder.add_entity(FieldFactEntity {
+        id: family_id.clone(),
+        kind: "definition_family".to_string(),
+        label: label.clone(),
+        parent_id: None,
+        status: None,
+        canonical_ref: Some(canonical_ref.to_string()),
+        source_content_digest: None,
+        effective_definition_digest: None,
+        admitted_launch_capsule_hash: None,
+        event_ref: None,
+        artifact_ref: None,
+        attributes: json!({}),
+        provenance: builder.provenance(Vec::new()),
+    })?;
     builder.add_entity(FieldFactEntity {
         id: definition_id.clone(),
         kind: "graph_definition".to_string(),
-        label: super::ui_graph_topology::label_for_bare_id(
-            evidence
-                .subject
-                .canonical_ref
-                .split_once(':')
-                .map_or(&evidence.subject.canonical_ref, |(_, bare)| bare),
-        ),
-        parent_id: None,
+        label,
+        parent_id: Some(family_id.clone()),
         status: Some("available".to_string()),
-        canonical_ref: Some(evidence.subject.canonical_ref.clone()),
-        source_content_hash: Some(evidence.subject.source_content_hash.clone()),
-        definition_hash: Some(evidence.subject.raw_content_digest.clone()),
-        admitted_capsule_hash: Some(evidence.admitted_capsule_hash.clone()),
+        canonical_ref: Some(canonical_ref.to_string()),
+        source_content_digest: None,
+        effective_definition_digest: Some(digest.to_string()),
+        admitted_launch_capsule_hash: None,
         event_ref: None,
         artifact_ref: None,
-        attributes: json!({
-            "exact_source_available": true,
-            "source_extension": evidence.subject.source_extension,
-            "parser_ref": evidence.subject.parser_ref,
-        }),
-        provenance: builder.provenance(provenance_evidence.clone()),
+        attributes: json!({"effective": true}),
+        provenance: builder.provenance(Vec::new()),
     })?;
+    builder.add_relation(FieldFactRelation {
+        id: format!("definition-version:{family_id}:{definition_id}"),
+        kind: "has_effective_version".to_string(),
+        source_id: family_id,
+        target_id: definition_id.clone(),
+        status: None,
+        directed: true,
+        attributes: json!({}),
+        provenance: builder.provenance(Vec::new()),
+    })?;
+    add_definition_sources(builder, &definition_id, resolution)?;
 
-    let mut ids = BTreeMap::from([(
-        evidence.subject.canonical_ref.clone(),
-        definition_id.clone(),
-    )]);
+    let mut ids = BTreeMap::from([(canonical_ref.to_string(), definition_id.clone())]);
     for node in topology
         .nodes
         .iter()
@@ -246,27 +321,24 @@ fn add_exact_definition(
         let Some((_, node_name)) = node.id.split_once("#node:") else {
             continue;
         };
-        let id = format!(
-            "graph-node:{}@{}#{}",
-            evidence.subject.canonical_ref, evidence.subject.raw_content_digest, node_name
-        );
+        let id = format!("graph-node:{}@{}#{}", canonical_ref, digest, node_name);
         builder.add_entity(FieldFactEntity {
             id: id.clone(),
             kind: "graph_node".to_string(),
             label: node.label.clone(),
             parent_id: Some(definition_id.clone()),
             status: Some(if node.missing { "missing" } else { "declared" }.to_string()),
-            canonical_ref: Some(evidence.subject.canonical_ref.clone()),
-            source_content_hash: Some(evidence.subject.source_content_hash.clone()),
-            definition_hash: Some(evidence.subject.raw_content_digest.clone()),
-            admitted_capsule_hash: Some(evidence.admitted_capsule_hash.clone()),
+            canonical_ref: Some(canonical_ref.to_string()),
+            source_content_digest: None,
+            effective_definition_digest: Some(digest.to_string()),
+            admitted_launch_capsule_hash: None,
             event_ref: None,
             artifact_ref: None,
             attributes: json!({
                 "virtual": node.virtual_,
                 "missing": node.missing,
             }),
-            provenance: builder.provenance(provenance_evidence.clone()),
+            provenance: builder.provenance(Vec::new()),
         })?;
         ids.insert(node.id.clone(), id);
     }
@@ -294,8 +366,152 @@ fn add_exact_definition(
                 "confidence": edge.confidence,
                 "source_field": edge.source.and_then(|source| source.field),
             }),
-            provenance: builder.provenance(provenance_evidence.clone()),
+            provenance: builder.provenance(Vec::new()),
         })?;
+    }
+    Ok(ids)
+}
+
+fn add_definition_sources(
+    builder: &mut FieldFactsBuilder,
+    definition_id: &str,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+) -> Result<()> {
+    let contributors = std::iter::once(("root", 0usize, &resolution.root))
+        .chain(
+            resolution
+                .ancestors
+                .iter()
+                .enumerate()
+                .map(|(ordinal, source)| ("ancestor", ordinal, source)),
+        )
+        .chain(
+            resolution
+                .referenced_items
+                .iter()
+                .enumerate()
+                .map(|(ordinal, source)| ("reference", ordinal, source)),
+        );
+    for (role, ordinal, source) in contributors {
+        let source_id = format!(
+            "source-version:{}@{}",
+            source.resolved_ref, source.source_content_digest
+        );
+        let source_evidence = vec![FieldEvidenceRef::Item {
+            canonical_ref: source.resolved_ref.clone(),
+            source_content_digest: source.source_content_digest.clone(),
+        }];
+        builder.add_entity(FieldFactEntity {
+            id: source_id.clone(),
+            kind: "source_version".to_string(),
+            label: super::ui_graph_topology::label_for_bare_id(
+                source
+                    .resolved_ref
+                    .split_once(':')
+                    .map_or(&source.resolved_ref, |(_, bare)| bare),
+            ),
+            parent_id: None,
+            status: None,
+            canonical_ref: Some(source.resolved_ref.clone()),
+            source_content_digest: Some(source.source_content_digest.clone()),
+            effective_definition_digest: None,
+            admitted_launch_capsule_hash: None,
+            event_ref: None,
+            artifact_ref: None,
+            attributes: json!({
+                "root_raw_content_digest": source.raw_content_digest,
+                "signer_fingerprint": source.signer_fingerprint,
+            }),
+            provenance: builder.provenance(source_evidence.clone()),
+        })?;
+        let space = source.source_space.as_str();
+        let trust = serde_json::to_value(source.trust_class)?;
+        let trust_id = trust
+            .as_str()
+            .expect("resolution trust class serializes as a string");
+        let added_by = source.added_by.to_string();
+        builder.add_relation(FieldFactRelation {
+            id: format!(
+                "source-contributes:{definition_id}:{source_id}:{role}:{ordinal}:{space}:{trust_id}:{added_by}"
+            ),
+            kind: "source_contributes".to_string(),
+            source_id,
+            target_id: definition_id.to_string(),
+            status: None,
+            directed: true,
+            attributes: json!({
+                "role": role,
+                "ordinal": ordinal,
+                "source_space": space,
+                "trust_class": trust,
+                "added_by": added_by,
+            }),
+            provenance: builder.provenance(source_evidence),
+        })?;
+    }
+
+    let plan = resolution
+        .composed
+        .derived
+        .get("effective_hook_plan")
+        .map(ryeos_engine::hooks::EffectiveHookPlan::from_value)
+        .transpose()?;
+    if let Some(plan) = plan {
+        for source in &plan.sources {
+            let source_id = format!(
+                "policy-source:{}@{}#{}",
+                source.canonical_ref, source.source_raw_content_digest, source.signer_fingerprint
+            );
+            builder.add_entity(FieldFactEntity {
+                id: source_id.clone(),
+                kind: "policy_source".to_string(),
+                label: super::ui_graph_topology::label_for_bare_id(
+                    source
+                        .canonical_ref
+                        .split_once(':')
+                        .map_or(&source.canonical_ref, |(_, bare)| bare),
+                ),
+                parent_id: None,
+                status: None,
+                canonical_ref: Some(source.canonical_ref.clone()),
+                source_content_digest: None,
+                effective_definition_digest: None,
+                admitted_launch_capsule_hash: None,
+                event_ref: None,
+                artifact_ref: None,
+                attributes: json!({
+                    "source_raw_content_digest": source.source_raw_content_digest,
+                    "signer_fingerprint": source.signer_fingerprint,
+                }),
+                provenance: builder.provenance(Vec::new()),
+            })?;
+            let layer = source.layer.as_str();
+            let body = plan.layer(source.layer);
+            let source_space = source.source_space.as_str();
+            let trust_class = serde_json::to_value(source.trust_class)?;
+            let trust_id = trust_class
+                .as_str()
+                .expect("hook-source trust class serializes as a string");
+            let dispatch_caps_digest =
+                lillux::sha256_hex(lillux::canonical_json(&json!(body.dispatch_caps))?.as_bytes());
+            builder.add_relation(FieldFactRelation {
+                id: format!(
+                    "policy-contributes:{definition_id}:{source_id}:{layer}:{source_space}:{trust_id}:{dispatch_caps_digest}"
+                ),
+                kind: "policy_contributes".to_string(),
+                source_id,
+                target_id: definition_id.to_string(),
+                status: None,
+                directed: true,
+                attributes: json!({
+                    "layer": layer,
+                    "source_space": source_space,
+                    "trust_class": trust_class,
+                    "dispatch_caps": body.dispatch_caps,
+                }),
+                provenance: builder.provenance(Vec::new()),
+            })?;
+        }
     }
     Ok(())
 }
@@ -321,7 +537,7 @@ mod tests {
                 kind: "thread".to_string(),
                 id: "T-test".to_string(),
                 definition_ref: Some("graph:test/build".to_string()),
-                definition_hash: Some("a".repeat(64)),
+                effective_definition_digest: Some("a".repeat(64)),
             },
         );
         add_definition_shell(
@@ -341,26 +557,67 @@ mod tests {
     }
 
     #[test]
-    fn exact_definition_uses_raw_digest_identity_and_shared_graph_structure() {
+    fn exact_definition_uses_effective_digest_and_shared_graph_structure() {
         let raw = "config:\n  nodes:\n    start:\n      next:\n        to: done\n    done: {}\n";
+        let ancestor_raw = "config:\n  nodes:\n    inherited:\n      next:\n        to: start\n";
         let raw_digest = lillux::sha256_hex(raw.as_bytes());
+        let source_content_digest = lillux::sha256_hex(raw.as_bytes());
+        let composed: Value = serde_yaml::from_str(
+            "config:\n  start: inherited\n  nodes:\n    inherited:\n      next:\n        to: start\n    start:\n      next:\n        to: done\n    done: {}\n",
+        )
+        .unwrap();
+        let resolution = ryeos_engine::resolution::ResolutionOutput {
+            root: ryeos_engine::resolution::ResolvedAncestor {
+                requested_id: "graph:test/build".to_string(),
+                resolved_ref: "graph:test/build".to_string(),
+                source_path: std::path::PathBuf::from("/sealed/build.yaml"),
+                source_space: ryeos_engine::contracts::ItemSpace::Bundle,
+                trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
+                signer_fingerprint: Some("f".repeat(64)),
+                alias_resolution: None,
+                added_by: ryeos_engine::resolution::ResolutionStepName::PipelineInit,
+                raw_content: raw.to_string(),
+                source_content_digest: source_content_digest.clone(),
+                raw_content_digest: raw_digest.clone(),
+            },
+            ancestors: vec![ryeos_engine::resolution::ResolvedAncestor {
+                requested_id: "graph:test/base".to_string(),
+                resolved_ref: "graph:test/base".to_string(),
+                source_path: std::path::PathBuf::from("/sealed/base.yaml"),
+                source_space: ryeos_engine::contracts::ItemSpace::Bundle,
+                trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
+                signer_fingerprint: Some("e".repeat(64)),
+                alias_resolution: None,
+                added_by: ryeos_engine::resolution::ResolutionStepName::ResolveExtendsChain,
+                raw_content: ancestor_raw.to_string(),
+                source_content_digest: lillux::sha256_hex(ancestor_raw.as_bytes()),
+                raw_content_digest: lillux::sha256_hex(ancestor_raw.as_bytes()),
+            }],
+            references_edges: Vec::new(),
+            referenced_items: Vec::new(),
+            step_outputs: std::collections::HashMap::new(),
+            effective_trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
+            composed: ryeos_engine::resolution::KindComposedView::identity(composed.clone()),
+        };
+        let effective_definition_digest = resolution.effective_definition_digest().unwrap();
         let evidence = ryeos_app::state_store::AdmittedProgramEvidence {
-            admitted_capsule_hash: "c".repeat(64),
+            admitted_launch_capsule_hash: "c".repeat(64),
             subject: ryeos_app::thread_lifecycle::AdmittedProgramSubject {
                 canonical_ref: "graph:test/build".to_string(),
                 kind: "graph".to_string(),
                 source_content: raw.to_string(),
-                source_content_hash: lillux::sha256_hex(raw.as_bytes()),
+                source_content_digest,
                 raw_content: raw.to_string(),
                 raw_content_digest: raw_digest.clone(),
                 source_extension: "yaml".to_string(),
                 parser_ref: "parser:test/yaml".to_string(),
             },
+            effective_definition_digest: effective_definition_digest.clone(),
+            resolution: resolution.clone(),
         };
-        let topology = super::super::ui_graph_topology::build_exact_graph_topology(
+        let topology = super::super::ui_graph_topology::build_effective_graph_topology(
             "graph:test/build",
-            raw,
-            "yaml",
+            &composed,
         )
         .unwrap();
         let mut builder = FieldFactsBuilder::new(
@@ -370,19 +627,31 @@ mod tests {
                 kind: "thread".to_string(),
                 id: "T-test".to_string(),
                 definition_ref: Some("graph:test/build".to_string()),
-                definition_hash: Some(raw_digest.clone()),
+                effective_definition_digest: Some(effective_definition_digest.as_str().to_string()),
             },
         );
         add_exact_definition(&mut builder, "T-test", &evidence, topology).unwrap();
         let facts = builder.finish().unwrap();
-        assert!(
-            facts
-                .entities
-                .iter()
-                .any(|entity| { entity.id == format!("definition:graph:test/build@{raw_digest}") })
-        );
         assert!(facts.entities.iter().any(|entity| {
-            entity.id == format!("graph-node:graph:test/build@{raw_digest}#start")
+            entity.id
+                == format!(
+                    "definition:graph:test/build@{}",
+                    effective_definition_digest.as_str()
+                )
+        }));
+        assert!(facts.entities.iter().any(|entity| {
+            entity.id
+                == format!(
+                    "graph-node:graph:test/build@{}#inherited",
+                    effective_definition_digest.as_str()
+                )
+        }));
+        assert!(facts.entities.iter().any(|entity| {
+            entity.id
+                == format!(
+                    "graph-node:graph:test/build@{}#start",
+                    effective_definition_digest.as_str()
+                )
         }));
         assert!(
             facts
@@ -391,5 +660,89 @@ mod tests {
                 .any(|relation| relation.kind == "flows_to")
         );
         assert!(facts.warnings.is_empty());
+
+        let contributions = facts
+            .relations
+            .iter()
+            .filter(|relation| relation.kind == "source_contributes")
+            .map(|relation| {
+                (
+                    relation.attributes["role"].as_str().unwrap(),
+                    relation.attributes["ordinal"].as_u64().unwrap(),
+                    relation.source_id.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(contributions.len(), 2);
+        assert!(contributions.iter().any(|(role, ordinal, source)| {
+            *role == "root"
+                && *ordinal == 0
+                && source.starts_with("source-version:graph:test/build@")
+        }));
+        assert!(contributions.iter().any(|(role, ordinal, source)| {
+            *role == "ancestor"
+                && *ordinal == 0
+                && source.starts_with("source-version:graph:test/base@")
+        }));
+
+        let current_topology = super::super::ui_graph_topology::build_effective_graph_topology(
+            "graph:test/build",
+            &composed,
+        )
+        .unwrap();
+        let mut current_builder = FieldFactsBuilder::new(
+            "project",
+            "service:ui/ryeos-ui/field/project",
+            FieldFactSubject {
+                kind: "project".to_string(),
+                id: "project:test".to_string(),
+                definition_ref: None,
+                effective_definition_digest: None,
+            },
+        );
+        add_current_effective_definition(
+            &mut current_builder,
+            "graph:test/build",
+            effective_definition_digest.as_str(),
+            &resolution,
+            current_topology,
+        )
+        .unwrap();
+        let current = current_builder.finish().unwrap();
+        let normalize_core = |entity: &FieldFactEntity| {
+            let mut value = serde_json::to_value(entity).unwrap();
+            value.as_object_mut().unwrap().remove("provenance");
+            value
+        };
+        let admitted_core = facts
+            .entities
+            .iter()
+            .filter(|entity| {
+                matches!(
+                    entity.kind.as_str(),
+                    "definition_family" | "graph_definition" | "graph_node"
+                )
+            })
+            .map(|entity| (entity.id.clone(), normalize_core(entity)))
+            .collect::<BTreeMap<_, _>>();
+        let current_core = current
+            .entities
+            .iter()
+            .filter(|entity| {
+                matches!(
+                    entity.kind.as_str(),
+                    "definition_family" | "graph_definition" | "graph_node"
+                )
+            })
+            .map(|entity| (entity.id.clone(), normalize_core(entity)))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(current_core, admitted_core);
+
+        let mut edited = resolution.clone();
+        edited.composed.composed["config"]["nodes"]["done"]["output"] = json!("edited");
+        assert_ne!(
+            edited.effective_definition_digest().unwrap(),
+            effective_definition_digest
+        );
     }
 }

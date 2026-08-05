@@ -434,6 +434,7 @@ mod tests {
         use std::collections::HashMap;
 
         LaunchEnvelope {
+            schema_version: crate::launch_envelope_types::MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION,
             invocation_id: "inv-test".to_string(),
             thread_id: "T-test-thread".to_string(),
             roots: EnvelopeRoots {
@@ -483,6 +484,10 @@ mod tests {
             runtime_data: BTreeMap::new(),
             financial_authority: None,
             accounting_scope: None,
+            effective_definition_digest: crate::resolution::EffectiveDefinitionDigest::parse(
+                "0".repeat(64),
+            )
+            .unwrap(),
         }
     }
 

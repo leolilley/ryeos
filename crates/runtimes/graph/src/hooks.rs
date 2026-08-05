@@ -239,7 +239,8 @@ mod tests {
                 HookDispatchOccurrence::GraphStarted {
                     graph_run_id: "run-1".to_string(),
                     definition_ref: "graph:test/fixture".to_string(),
-                    definition_hash: "definition-hash".to_string(),
+                    root_raw_content_digest: "a".repeat(64),
+                    effective_definition_digest: "definition-hash".to_string(),
                 },
                 &ctx,
             )

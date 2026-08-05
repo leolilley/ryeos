@@ -222,6 +222,42 @@ pub(crate) fn validate_managed_current_trust(
     Ok(())
 }
 
+pub(crate) fn validate_hook_plan_current_trust(
+    engine: &ryeos_engine::engine::Engine,
+    project_trust: &TrustStore,
+    plan: &ryeos_engine::hooks::EffectiveHookPlan,
+) -> Result<()> {
+    let policy = CurrentTrust::from_current_policy(engine, project_trust);
+    validate_hook_plan_trust(&policy, plan)
+}
+
+fn validate_hook_plan_trust(
+    policy: &CurrentTrust<'_>,
+    plan: &ryeos_engine::hooks::EffectiveHookPlan,
+) -> Result<()> {
+    plan.validate().map_err(|error| anyhow!(error))?;
+    for source in &plan.sources {
+        if !lillux::valid_hash(&source.source_raw_content_digest)
+            || source
+                .source_raw_content_digest
+                .bytes()
+                .any(|byte| byte.is_ascii_uppercase())
+        {
+            bail!(
+                "admitted hook source `{}` carries an invalid raw-content digest",
+                source.canonical_ref
+            );
+        }
+        policy.validate(
+            &format!("admitted hook source `{}`", source.canonical_ref),
+            source.source_space,
+            source.trust_class,
+            Some(&source.signer_fingerprint),
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_direct_current_trust(
     engine: &ryeos_engine::engine::Engine,
     project_trust: &TrustStore,
@@ -323,7 +359,12 @@ fn validate_plan_authority(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_engine::hooks::{
+        EFFECTIVE_HOOK_PLAN_SCHEMA, EffectiveHookLayer, EffectiveHookPlan, HOOK_CONTEXT_SCHEMA,
+        HookContextContract, HookEventContract, HookLayer, HookResultMode, HookSourceEvidence,
+    };
     use ryeos_engine::trust::TrustedSigner;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn signer(seed: u8) -> (String, TrustedSigner) {
         let key = lillux::crypto::SigningKey::from_bytes(&[seed; 32]);
@@ -445,5 +486,48 @@ mod tests {
         let error = validate_plan_authority(&policy(&node, &project), &authority).unwrap_err();
         assert!(error.to_string().contains("no longer node-trusted"));
         assert!(error.to_string().contains("runtime:test/direct"));
+    }
+
+    #[test]
+    fn captured_hook_source_signer_revocation_blocks_recovery() {
+        let (fingerprint, trusted_signer) = signer(46);
+        let empty = EffectiveHookLayer::empty();
+        let plan = EffectiveHookPlan {
+            schema: EFFECTIVE_HOOK_PLAN_SCHEMA.to_string(),
+            owner_kind: "graph".to_string(),
+            event_contracts: BTreeMap::from([(
+                "graph_completed".to_string(),
+                HookEventContract {
+                    context_contract: HookContextContract {
+                        schema: HOOK_CONTEXT_SCHEMA.to_string(),
+                        allowed_roots: BTreeSet::from(["event".to_string()]),
+                    },
+                    allowed_results: BTreeSet::from([HookResultMode::Observation]),
+                },
+            )]),
+            authored: empty.clone(),
+            builtin: empty.clone(),
+            infrastructure: empty.clone(),
+            context: empty.clone(),
+            operator: empty.clone(),
+            project: empty,
+            sources: vec![HookSourceEvidence {
+                layer: HookLayer::Operator,
+                canonical_ref: "config:ryeos-runtime/hooks/operator".to_string(),
+                source_space: ItemSpace::Node,
+                trust_class: TrustClass::TrustedNode,
+                signer_fingerprint: fingerprint.clone(),
+                source_raw_content_digest: "a".repeat(64),
+            }],
+        };
+
+        let admitted_node = TrustStore::from_signers(vec![trusted_signer]);
+        let project = TrustStore::empty();
+        validate_hook_plan_trust(&policy(&admitted_node, &project), &plan).unwrap();
+
+        let revoked_node = TrustStore::empty();
+        let error = validate_hook_plan_trust(&policy(&revoked_node, &project), &plan).unwrap_err();
+        assert!(error.to_string().contains("no longer node-trusted"));
+        assert!(error.to_string().contains("hooks/operator"));
     }
 }

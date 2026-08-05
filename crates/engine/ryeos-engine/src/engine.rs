@@ -14,6 +14,7 @@ use crate::contracts::{
     EngineContext, ExecutionCompletion, ExecutionHints, ExecutionPlan, PlanContext, ProjectContext,
     ResolvedItem, SubjectResolutionAuthority, VerifiedItem,
 };
+use crate::effective_validators::EffectiveValidatorRegistry;
 use crate::error::EngineError;
 use crate::item_resolution::{ResolutionRoot, ResolutionRoots};
 use crate::kind_registry::KindRegistry;
@@ -832,6 +833,9 @@ pub struct Engine {
     /// runtime construction sites).
     pub composers: ComposerRegistry,
 
+    /// Boot-bound semantic validators for complete effective programs.
+    pub effective_validators: EffectiveValidatorRegistry,
+
     /// Catalog of verified `kind: runtime` items, scanned at engine
     /// init via `RuntimeRegistry::build_from_bundles`. Empty by
     /// default so test sites that construct an engine directly without
@@ -998,6 +1002,7 @@ impl Engine {
             trust_store: TrustStore::empty(),
             node_trust_store: TrustStore::empty(),
             composers: ComposerRegistry::new(),
+            effective_validators: EffectiveValidatorRegistry::default(),
             runtimes: RuntimeRegistry::default(),
             launch_preparers: LaunchPreparerRegistry::default(),
             protocols: ProtocolRegistry::empty(),
@@ -1636,6 +1641,14 @@ impl Engine {
     /// can never diverge.
     pub fn with_composers(mut self, composers: ComposerRegistry) -> Self {
         self.composers = composers;
+        self
+    }
+
+    pub fn with_effective_validators(
+        mut self,
+        effective_validators: EffectiveValidatorRegistry,
+    ) -> Self {
+        self.effective_validators = effective_validators;
         self
     }
 

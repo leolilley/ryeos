@@ -287,7 +287,7 @@ impl Walker {
             }
         } else if node.is_cacheable() {
             let cache_key = match compute_cache_key(
-                &self.graph.definition_hash,
+                &self.graph.effective_definition_digest,
                 &self.graph.graph_id,
                 current,
                 &rendered_action,

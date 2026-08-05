@@ -1538,7 +1538,7 @@ mod tests {
             "success": true,
             "graph_id": "test/child",
             "definition_ref": "graph:test/child",
-            "definition_hash": "sha256:test-child",
+            "effective_definition_digest": "sha256:test-child",
             "graph_run_id": "gr-child",
             "status": GraphRunStatus::Completed,
             "steps": 1,

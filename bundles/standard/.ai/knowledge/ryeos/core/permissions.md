@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-24T04:51:58Z:51d5a8484a83838fb425ac18295140c864c9c706f860f5338bf609f62acc1f78:uTUyqrOTS/iqHBByaBWw3rmpeT04O03hOTZ/JreSs4AkUwo0k1c13Gg0D5MfMUKaIOVvCn6M2+9p8G6tGl1sCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-05T07:04:40Z:fca75df76195002defa82d172e5b8f0bd07df4ae09dd076b91a3417218a2c4ec:XAPaciTewNcE7mg4+UeRFPf9VSlFwTLa+3KjXwRysMw3JmBmWwVPg0mnpAAsSrz8/uJkdVCtDaAstoIhaFXfAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -170,9 +170,11 @@ launched.
 
 ### 3. Thread Launch → Effective Caps
 
-The engine composition pipeline (kind handlers like `extends-chain` and
-`graph-permissions`) lifts `requires.capabilities.declared` declarations into
-`effective_caps` — the composed capability set for the launched item.
+The engine composition pipeline uses each kind's signed generic composer rules
+to lift `requires.capabilities.declared` into `effective_caps` — the composed
+capability set for the launched item. Across an `extends` chain, every direct
+child may only narrow the already-narrowed parent; authority discarded by an
+intermediate document cannot be recovered by the root.
 This is what the item is allowed to dispatch back to the daemon.
 
 ### 4. Effective Caps → Callback Tokens
@@ -181,6 +183,12 @@ When the daemon mints a callback token for the subprocess, the
 `effective_caps` are copied onto the token. When the child process
 calls back, the daemon enforces these caps before dispatch. The child
 cannot escalate beyond what the parent allowed.
+
+Hook callbacks are narrower. Authored hooks use the launching item's admitted
+caps. Configured hook layers use only the dispatch grants declared by their own
+signed config source. Callback preflight selects the exact captured hook before
+capability evaluation, so an operator or project hook cannot borrow a
+privileged bundle program's authority.
 
 ### 5. Effective Caps → Resume
 
@@ -207,10 +215,12 @@ This means:
 
 ## Trust Fold-Back
 
-Through extends chains, permissions can only **narrow**, never expand.
-A child directive's permissions must be a subset of its parent's
-effective permissions. This is enforced by the
-`narrow_against_parent_effective` merge strategy.
+Executable `requires.capabilities` authority can only **narrow**, never expand,
+through graph and directive extends chains. Every deepest-first inheritance
+edge is validated independently by `narrow_requires_capabilities`, so a root
+cannot recover authority discarded by an intermediate ancestor. Other kinds
+can declare the generic `narrow_against_parent_effective` strategy for their
+own mapping-shaped capability surfaces.
 
 The source space matters for trust level: a bundle-signed binary
 reached through a project-tier descriptor is capped at TrustedProject,
@@ -223,8 +233,8 @@ authorized:
 
 - Empty `effective_caps` on a callback token → deny-all at dispatch
 - Empty principal scopes → no thread launch
-- `require_all(&[])` → trivially satisfied (but composing to empty
-  effective_caps from an empty permissions declaration means deny-all)
+- `require_all(&[])` → trivially satisfied (but an empty composed
+  `requires.capabilities.declared` set still means deny-all)
 
 ## No Declared Caps = Safe
 

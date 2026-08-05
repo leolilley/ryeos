@@ -319,6 +319,233 @@ impl ResolutionOutput {
             policy_facts: self.composed.policy_facts.clone(),
         }
     }
+
+    /// Exact identity of the admitted effective executable definition.
+    ///
+    /// This commits to ordered definition contributors, lateral references,
+    /// trust/signer/source-space evidence, and the complete composed view. It
+    /// deliberately excludes paths, resolver diagnostics, invocation data,
+    /// timestamps, raw payload bytes, and whole signature envelopes.
+    pub fn effective_definition_digest(
+        &self,
+    ) -> Result<EffectiveDefinitionDigest, EffectiveDefinitionDigestError> {
+        let mut referenced_items = self
+            .referenced_items
+            .iter()
+            .map(EffectiveContributorV1::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        referenced_items.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
+
+        let mut reference_edges = self
+            .references_edges
+            .iter()
+            .map(EffectiveReferenceEdgeV1::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        reference_edges.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
+
+        let seed = EffectiveDefinitionSeedV1 {
+            schema: "ryeos.effective_definition.v1",
+            root: EffectiveContributorV1::try_from(&self.root)?,
+            ancestors: self
+                .ancestors
+                .iter()
+                .map(EffectiveContributorV1::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
+            referenced_items,
+            reference_edges,
+            effective_trust_class: self.effective_trust_class,
+            composed: &self.composed,
+        };
+        let value = serde_json::to_value(seed).map_err(|error| {
+            EffectiveDefinitionDigestError(format!("serialize effective-definition seed: {error}"))
+        })?;
+        let canonical = lillux::cas::canonical_json(&value).map_err(|error| {
+            EffectiveDefinitionDigestError(format!(
+                "canonicalize effective-definition seed: {error}"
+            ))
+        })?;
+        EffectiveDefinitionDigest::parse(lillux::cas::sha256_hex(canonical.as_bytes()))
+    }
+}
+
+/// Canonical lower-case SHA-256 digest used for exact executable identity.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EffectiveDefinitionDigest(String);
+
+impl EffectiveDefinitionDigest {
+    pub fn parse(value: String) -> Result<Self, EffectiveDefinitionDigestError> {
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(EffectiveDefinitionDigestError(
+                "effective definition digest must be 64 lower-case hex characters".to_string(),
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for EffectiveDefinitionDigest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveDefinitionDigestError(pub String);
+
+impl std::fmt::Display for EffectiveDefinitionDigestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for EffectiveDefinitionDigestError {}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct EffectiveDefinitionSeedV1<'a> {
+    schema: &'static str,
+    root: EffectiveContributorV1,
+    ancestors: Vec<EffectiveContributorV1>,
+    referenced_items: Vec<EffectiveContributorV1>,
+    reference_edges: Vec<EffectiveReferenceEdgeV1>,
+    effective_trust_class: TrustClass,
+    composed: &'a KindComposedView,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct EffectiveContributorV1 {
+    canonical_ref: String,
+    root_raw_content_digest: String,
+    source_space: crate::contracts::ItemSpace,
+    trust_class: TrustClass,
+    signer_fingerprint: Option<String>,
+    added_by: ResolutionStepName,
+}
+
+impl EffectiveContributorV1 {
+    fn sort_key(&self) -> (&str, &str, &str, &str, &str, &str) {
+        (
+            &self.canonical_ref,
+            &self.root_raw_content_digest,
+            self.source_space.as_str(),
+            trust_class_name(self.trust_class),
+            self.signer_fingerprint.as_deref().unwrap_or(""),
+            resolution_step_name(self.added_by),
+        )
+    }
+}
+
+impl TryFrom<&ResolvedAncestor> for EffectiveContributorV1 {
+    type Error = EffectiveDefinitionDigestError;
+
+    fn try_from(value: &ResolvedAncestor) -> Result<Self, Self::Error> {
+        require_canonical_ref("canonical ref", &value.resolved_ref)?;
+        require_lower_sha256("root raw content digest", &value.raw_content_digest)?;
+        if matches!(
+            value.trust_class,
+            TrustClass::TrustedBundle | TrustClass::TrustedProject | TrustClass::TrustedNode
+        ) {
+            let signer = value.signer_fingerprint.as_deref().ok_or_else(|| {
+                EffectiveDefinitionDigestError(format!(
+                    "trusted contributor `{}` has no signer fingerprint",
+                    value.resolved_ref
+                ))
+            })?;
+            require_lower_sha256("signer fingerprint", signer)?;
+        } else if let Some(signer) = value.signer_fingerprint.as_deref() {
+            require_lower_sha256("signer fingerprint", signer)?;
+        }
+        Ok(Self {
+            canonical_ref: value.resolved_ref.clone(),
+            root_raw_content_digest: value.raw_content_digest.clone(),
+            source_space: value.source_space,
+            trust_class: value.trust_class,
+            signer_fingerprint: value.signer_fingerprint.clone(),
+            added_by: value.added_by,
+        })
+    }
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct EffectiveReferenceEdgeV1 {
+    from_ref: String,
+    to_ref: String,
+    to_source_space: crate::contracts::ItemSpace,
+    trust_class: TrustClass,
+    added_by: ResolutionStepName,
+}
+
+impl EffectiveReferenceEdgeV1 {
+    fn sort_key(&self) -> (&str, &str, &str, &str, &str) {
+        (
+            &self.from_ref,
+            &self.to_ref,
+            self.to_source_space.as_str(),
+            trust_class_name(self.trust_class),
+            resolution_step_name(self.added_by),
+        )
+    }
+}
+
+impl TryFrom<&ResolutionEdge> for EffectiveReferenceEdgeV1 {
+    type Error = EffectiveDefinitionDigestError;
+
+    fn try_from(value: &ResolutionEdge) -> Result<Self, Self::Error> {
+        require_canonical_ref("reference edge source", &value.from_ref)?;
+        require_canonical_ref("reference edge target", &value.to_ref)?;
+        Ok(Self {
+            from_ref: value.from_ref.clone(),
+            to_ref: value.to_ref.clone(),
+            to_source_space: value.to_source_space,
+            trust_class: value.trust_class,
+            added_by: value.added_by,
+        })
+    }
+}
+
+fn require_canonical_ref(label: &str, value: &str) -> Result<(), EffectiveDefinitionDigestError> {
+    crate::canonical_ref::CanonicalRef::parse(value)
+        .map(|_| ())
+        .map_err(|error| {
+            EffectiveDefinitionDigestError(format!(
+                "effective-definition seed {label} `{value}` is not canonical: {error}"
+            ))
+        })
+}
+
+fn require_lower_sha256(label: &str, value: &str) -> Result<(), EffectiveDefinitionDigestError> {
+    EffectiveDefinitionDigest::parse(value.to_string())
+        .map(|_| ())
+        .map_err(|_| EffectiveDefinitionDigestError(format!("invalid {label}: `{value}`")))
+}
+
+fn trust_class_name(value: TrustClass) -> &'static str {
+    match value {
+        TrustClass::TrustedBundle => "trusted_bundle",
+        TrustClass::TrustedProject => "trusted_project",
+        TrustClass::TrustedNode => "trusted_node",
+        TrustClass::UntrustedProject => "untrusted_project",
+        TrustClass::Unsigned => "unsigned",
+    }
+}
+
+fn resolution_step_name(value: ResolutionStepName) -> &'static str {
+    match value {
+        ResolutionStepName::PipelineInit => "pipeline_init",
+        ResolutionStepName::ResolveExtendsChain => "resolve_extends_chain",
+        ResolutionStepName::ResolveReferences => "resolve_references",
+    }
 }
 
 /// One node (root or extends ancestor) in an as-launched digest: the
@@ -658,6 +885,62 @@ mod tests {
         }
     }
 
+    fn effective_digest_fixture() -> ResolutionOutput {
+        let contributor = |resolved_ref: &str, digest_byte: char, added_by: ResolutionStepName| {
+            ResolvedAncestor {
+                requested_id: resolved_ref.to_string(),
+                resolved_ref: resolved_ref.to_string(),
+                source_path: PathBuf::from(format!("/diagnostic/{digest_byte}")),
+                source_space: ItemSpace::Bundle,
+                trust_class: TrustClass::TrustedBundle,
+                signer_fingerprint: Some("f".repeat(64)),
+                alias_resolution: None,
+                added_by,
+                raw_content: format!("body-{digest_byte}"),
+                source_content_digest: digest_byte.to_string().repeat(64),
+                raw_content_digest: digest_byte.to_string().repeat(64),
+            }
+        };
+        let root = contributor("graph:test/root", 'a', ResolutionStepName::PipelineInit);
+        let ancestor = contributor(
+            "graph:test/base",
+            'b',
+            ResolutionStepName::ResolveExtendsChain,
+        );
+        let reference = contributor(
+            "tool:test/audit",
+            'c',
+            ResolutionStepName::ResolveReferences,
+        );
+        ResolutionOutput {
+            root,
+            ancestors: vec![ancestor],
+            references_edges: vec![ResolutionEdge {
+                from_ref: "graph:test/root".to_string(),
+                from_source_path: PathBuf::from("/diagnostic/root"),
+                to_ref: "tool:test/audit".to_string(),
+                to_source_path: PathBuf::from("/diagnostic/audit"),
+                to_source_space: ItemSpace::Bundle,
+                trust_class: TrustClass::TrustedBundle,
+                added_by: ResolutionStepName::ResolveReferences,
+            }],
+            referenced_items: vec![reference],
+            step_outputs: HashMap::new(),
+            effective_trust_class: TrustClass::TrustedBundle,
+            composed: KindComposedView {
+                composed: serde_json::json!({"config": {"start": "a", "nodes": {"a": {}}}}),
+                derived: HashMap::from([
+                    ("z".to_string(), serde_json::json!({"b": 2, "a": 1})),
+                    ("a".to_string(), serde_json::json!(true)),
+                ]),
+                policy_facts: HashMap::from([
+                    ("effective_caps".to_string(), serde_json::json!(["cap:a"])),
+                    ("other".to_string(), serde_json::json!({"y": 2, "x": 1})),
+                ]),
+            },
+        }
+    }
+
     #[test]
     fn effective_trust_picks_weakest_in_chain() {
         let chain = vec![
@@ -686,6 +969,79 @@ mod tests {
             effective_trust(TrustClass::Unsigned, &chain),
             TrustClass::Unsigned
         );
+    }
+
+    #[test]
+    fn effective_definition_digest_is_canonical_and_ignores_diagnostics() {
+        let original = effective_digest_fixture();
+        let mut reordered = original.clone();
+        reordered.composed.derived = HashMap::from([
+            ("a".to_string(), serde_json::json!(true)),
+            ("z".to_string(), serde_json::json!({"a": 1, "b": 2})),
+        ]);
+        reordered.composed.policy_facts = HashMap::from([
+            ("other".to_string(), serde_json::json!({"x": 1, "y": 2})),
+            ("effective_caps".to_string(), serde_json::json!(["cap:a"])),
+        ]);
+        reordered.root.source_path = PathBuf::from("/different/location");
+        reordered.root.raw_content = "different signature-stripped bytes".to_string();
+        reordered.root.source_content_digest = "9".repeat(64);
+        reordered.root.requested_id = "@diagnostic-alias".to_string();
+        reordered.step_outputs.insert(
+            "pipeline_init".to_string(),
+            serde_json::json!({"trace": true}),
+        );
+
+        assert_eq!(
+            original.effective_definition_digest().unwrap(),
+            reordered.effective_definition_digest().unwrap()
+        );
+    }
+
+    #[test]
+    fn effective_definition_digest_commits_to_behavior_and_provenance() {
+        let original = effective_digest_fixture();
+        let expected = original.effective_definition_digest().unwrap();
+
+        let mut cases = Vec::new();
+        let mut changed = original.clone();
+        changed.root.raw_content_digest = "d".repeat(64);
+        cases.push(changed);
+        let mut changed = original.clone();
+        changed.root.source_space = ItemSpace::Project;
+        cases.push(changed);
+        let mut changed = original.clone();
+        changed.root.trust_class = TrustClass::TrustedProject;
+        cases.push(changed);
+        let mut changed = original.clone();
+        changed.root.signer_fingerprint = Some("e".repeat(64));
+        cases.push(changed);
+        let mut changed = original.clone();
+        changed.composed.composed["config"]["start"] = serde_json::json!("b");
+        cases.push(changed);
+        let mut changed = original.clone();
+        changed
+            .composed
+            .derived
+            .insert("a".to_string(), serde_json::json!(false));
+        cases.push(changed);
+        let mut changed = original.clone();
+        changed.references_edges[0].to_source_space = ItemSpace::Project;
+        cases.push(changed);
+
+        for changed in cases {
+            assert_ne!(expected, changed.effective_definition_digest().unwrap());
+        }
+    }
+
+    #[test]
+    fn effective_definition_digest_rejects_noncanonical_provenance_edges() {
+        let mut resolution = effective_digest_fixture();
+        resolution.references_edges[0].to_ref = "not-a-canonical-ref".to_string();
+
+        let error = resolution.effective_definition_digest().unwrap_err();
+        assert!(error.to_string().contains("reference edge target"));
+        assert!(error.to_string().contains("not canonical"));
     }
 
     #[test]

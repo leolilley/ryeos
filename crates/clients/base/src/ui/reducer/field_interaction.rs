@@ -229,30 +229,31 @@ impl RyeOsCore {
             }
             None => None,
         };
-        let reveal = (!field.search.query.trim().is_empty())
-            .then(|| {
-                entity_id.as_deref().and_then(|entity_id| {
-                    field.entities.iter().find(|entity| entity.id == entity_id)
-                })
-            })
-            .flatten()
-            .map(|entity| {
-                let mut groups = Vec::new();
-                let mut current = entity.group_id.as_deref();
-                let mut seen = std::collections::BTreeSet::new();
-                while let Some(group_id) = current {
-                    if !seen.insert(group_id.to_string()) {
-                        break;
-                    }
-                    groups.push(group_id.to_string());
-                    current = field
-                        .groups
-                        .iter()
-                        .find(|group| group.id == group_id)
-                        .and_then(|group| group.parent_id.as_deref());
+        let reveal = (!field.search.query.trim().is_empty()
+            && field.search.active_match.as_deref() == entity_id.as_deref())
+        .then(|| {
+            entity_id
+                .as_deref()
+                .and_then(|entity_id| field.entities.iter().find(|entity| entity.id == entity_id))
+        })
+        .flatten()
+        .map(|entity| {
+            let mut groups = Vec::new();
+            let mut current = entity.group_id.as_deref();
+            let mut seen = std::collections::BTreeSet::new();
+            while let Some(group_id) = current {
+                if !seen.insert(group_id.to_string()) {
+                    break;
                 }
-                (groups, entity.layer_ids.clone())
-            });
+                groups.push(group_id.to_string());
+                current = field
+                    .groups
+                    .iter()
+                    .find(|group| group.id == group_id)
+                    .and_then(|group| group.parent_id.as_deref());
+            }
+            (groups, entity.layer_ids.clone())
+        });
         let Some(local) = self.field_local_mut(&instance_key) else {
             return Vec::new();
         };
@@ -485,6 +486,20 @@ impl RyeOsCore {
         let Some(key) = RyeOsSourceInstanceKey::decode(source_key) else {
             return;
         };
+        let RyeOsSourceChannel::Named(channel) = &key.channel else {
+            return;
+        };
+        let Some((view_ref, _)) =
+            super::view_model::field_vm_for_instance(self, &key.view_instance)
+        else {
+            return;
+        };
+        if !cursor_channels(self.views.get(&view_ref))
+            .iter()
+            .any(|candidate| candidate == channel)
+        {
+            return;
+        }
         let Some(local) = self.field_local_mut(&key.view_instance) else {
             return;
         };
@@ -502,6 +517,18 @@ impl RyeOsCore {
         };
         let prefix = format!("{channel}\0");
         local.expansions.retain(|key, _| !key.starts_with(&prefix));
+    }
+
+    /// A facet transition retargets the field at a different subject. Replay
+    /// anchors belong to the prior subject's braid and must be discarded
+    /// before the replacement request is resolved; otherwise the first fetch
+    /// for the new subject carries an unrelated braid cut and fails.
+    pub(crate) fn reset_field_replay_for_subject(&mut self, instance_key: &RyeOsViewInstanceKey) {
+        let Some(local) = self.field_local_mut(instance_key) else {
+            return;
+        };
+        local.cursor = FieldCursorState::Live;
+        local.playback = Default::default();
     }
 
     /// Diff the complete projected field after one named source is accepted.
@@ -832,6 +859,31 @@ mod tests {
             .and_then(|source| source.subject_fingerprint.clone())
             .unwrap();
 
+        {
+            let local = core.field_local_mut(&instance_key).unwrap();
+            local.cursor = FieldCursorState::BraidCut {
+                anchor: FieldEventRefState {
+                    chain_root_id: "chain:T-two".to_string(),
+                    chain_seq: 7,
+                    event_hash: "event:T-two:7".to_string(),
+                },
+            };
+            local.playback.playing = true;
+            local.playback.awaiting = Some(FieldEventRefState {
+                chain_root_id: "chain:T-two".to_string(),
+                chain_seq: 8,
+                event_hash: "event:T-two:8".to_string(),
+            });
+            local.expansions.insert(
+                "execution\0run:two".to_string(),
+                FieldExpansionState {
+                    max_depth: 2,
+                    max_entities: 32,
+                    continuation_token: Some("next:T-two".to_string()),
+                },
+            );
+        }
+
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::MoveFieldSelection {
                 instance_key: instance_key.clone(),
@@ -843,8 +895,14 @@ mod tests {
             "T-one"
         );
         assert!(effects.iter().any(|effect| {
-            matches!(&effect.kind, RyeOsEffectKind::FetchSource { params, .. } if params["thread_id"] == "T-one")
+            matches!(&effect.kind, RyeOsEffectKind::FetchSource { params, .. }
+                if params["thread_id"] == "T-one"
+                && params["cursor"]["mode"] == "live")
         }));
+        let local = core.field_local_mut(&instance_key).unwrap();
+        assert_eq!(local.cursor, FieldCursorState::Live);
+        assert_eq!(local.playback, Default::default());
+        assert!(local.expansions.is_empty());
         assert!(
             !core.data.field_sources.contains_key(&execution_key),
             "a subject change must evict the parsed document before the replacement settles"
@@ -1089,6 +1147,19 @@ mod tests {
         assert_eq!(local.selected.as_deref(), Some("run:two"));
         assert!(!local.collapsed_groups.contains("runs"));
         assert!(!local.hidden_layers.contains("live"));
+
+        let local = core.field_local_mut(&instance_key).unwrap();
+        local.collapsed_groups.insert("runs".to_string());
+        local.hidden_layers.insert("live".to_string());
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::SetFieldSelection {
+                instance_key: instance_key.clone(),
+                entity_id: Some("run:one".to_string()),
+            },
+        });
+        let local = core.field_local_mut(&instance_key).unwrap();
+        assert!(local.collapsed_groups.contains("runs"));
+        assert!(local.hidden_layers.contains("live"));
     }
 
     #[test]
@@ -1153,6 +1224,24 @@ mod tests {
                 playing: true,
             },
         });
+        let unrelated =
+            core.refresh_source_channel(instance_key.clone(), "view:test/field", "project");
+        core.dispatch(RyeOsEvent::EffectResult {
+            result: RyeOsEffectResult {
+                id: unrelated[0].id,
+                ok: false,
+                kind: RyeOsEffectResultKind::SourceData,
+                data: None,
+                error: Some("unrelated fixture failure".to_string()),
+            },
+        });
+        assert!(
+            core.field_local_mut(&instance_key)
+                .unwrap()
+                .playback
+                .playing
+        );
+
         let next = core.advance_field_playback().into_iter().next().unwrap();
         assert!(
             core.field_local_mut(&instance_key)

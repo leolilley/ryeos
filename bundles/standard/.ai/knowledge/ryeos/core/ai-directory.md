@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T02:18:47Z:b5fff22bd8716b64813c3b6a72c6b3ef4acaebc33e0fec28d5e5e054216c2192:w9pm3niJ7rfdTmhP1PuTs6qMAjtkVuoj4Dq/DuVmdpxdCGpNHtJ59rRzb6AwRJss/73hbOqO3JBRS1VzqzVBCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-05T07:04:40Z:41d19203c7ebec256a423d835d1151bba1646b23b86c85c7a44e2c548951bca1:xD52su/ZmcKSmQ7DPfzN2PTR0vPnFpdHCOEf6/3EbJ2U4nrdlN7591ooq5Ig6E9uQUf6edTiQU4mmcdWSzHiCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, directory, layout, filesystem]
@@ -58,6 +58,7 @@ kinds, composers, runtime binaries, model routing, and workflow services:
 .ai/
 ├── config/ryeos-runtime/
 │   ├── execution.yaml
+│   ├── hooks/base.yaml                  # trusted-bundle hook policy layers
 │   ├── model_routing.yaml
 │   └── model-providers/
 │       ├── anthropic.yaml
@@ -66,7 +67,7 @@ kinds, composers, runtime binaries, model routing, and workflow services:
 ├── directives/
 ├── handlers/ryeos/core/
 │   ├── extends-chain.yaml
-│   └── graph-permissions.yaml
+│   └── graph-effective-validator.yaml
 ├── knowledge/ryeos/standard/
 ├── node/
 │   ├── aliases/                         # thread/events/commands/compose aliases

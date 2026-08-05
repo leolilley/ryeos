@@ -29,13 +29,17 @@ pub fn validate_field_requirements(
     requirements: &[ComposerFieldRequirement],
 ) -> Result<(), String> {
     for requirement in requirements {
-        if requirement.field.is_empty() {
-            return Err("identity composer field requirement must not be empty".to_string());
+        if requirement.path.len() != 1 || requirement.path[0].is_empty() {
+            return Err(
+                "identity composer field requirement must contain one non-empty path segment"
+                    .to_string(),
+            );
         }
         if requirement.semantics != ComposerFieldSemantics::RootVerbatim {
             return Err(format!(
-                "identity composer cannot provide {:?} semantics for field `{}`; it only preserves root fields verbatim",
-                requirement.semantics, requirement.field
+                "identity composer cannot provide {:?} semantics for path `{}`; it only preserves root fields verbatim",
+                requirement.semantics,
+                requirement.path.join(".")
             ));
         }
     }
@@ -145,12 +149,12 @@ mod tests {
     #[test]
     fn exact_field_requirements_are_root_only() {
         validate_field_requirements(&[ComposerFieldRequirement {
-            field: "policy".into(),
+            path: vec!["policy".into()],
             semantics: ComposerFieldSemantics::RootVerbatim,
         }])
         .unwrap();
         let error = validate_field_requirements(&[ComposerFieldRequirement {
-            field: "policy".into(),
+            path: vec!["policy".into()],
             semantics: ComposerFieldSemantics::InheritOrReplace,
         }])
         .unwrap_err();

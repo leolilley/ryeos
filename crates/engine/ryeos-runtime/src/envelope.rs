@@ -106,6 +106,9 @@ impl std::fmt::Display for HookDispatchFailure {
 }
 
 pub const HOOK_INTEGRITY_FAILURE_CODE: &str = "hook_child_integrity_failed";
+pub const HOOK_DISPATCH_INTEGRITY_FAILURE_SCHEMA: &str = "ryeos.hook.dispatch-integrity-failure.v1";
+const HOOK_DISPATCH_INTEGRITY_FAILURE_FIELD: &str = "_ryeos_hook_dispatch_integrity_failure";
+const MAX_HOOK_DISPATCH_INTEGRITY_MESSAGE_BYTES: usize = 8 * 1024;
 pub const MAX_HOOK_OBSERVATION_ACTION_BYTES: usize = 64 * 1024;
 pub const MAX_HOOK_OBSERVATION_BYTES: usize = 192 * 1024;
 pub const MAX_HOOK_OBSERVATION_JSON_DEPTH: usize = 32;
@@ -120,6 +123,23 @@ impl HookDispatchOutput {
             failure: None,
         }
     }
+}
+
+/// Canonical ledger-completable carrier for a dispatcher error whose outcome
+/// is known after reservation. The executor stores and replays this exact
+/// callback result; runtimes reject it as integrity-typed, while a genuinely
+/// crash-ambiguous pending reservation remains non-replayable.
+pub fn hook_dispatch_integrity_failure(message: &str) -> serde_json::Value {
+    let mut end = message.len().min(MAX_HOOK_DISPATCH_INTEGRITY_MESSAGE_BYTES);
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    serde_json::json!({
+        HOOK_DISPATCH_INTEGRITY_FAILURE_FIELD: {
+            "schema_version": HOOK_DISPATCH_INTEGRITY_FAILURE_SCHEMA,
+            "message": &message[..end],
+        }
+    })
 }
 
 fn hook_child_failure(message: impl Into<String>) -> String {
@@ -250,6 +270,41 @@ pub fn normalize_hook_dispatch_result(
     let Some(object) = value.as_object() else {
         return Ok(HookDispatchOutput::bare(value));
     };
+
+    if object.contains_key(HOOK_DISPATCH_INTEGRITY_FAILURE_FIELD) {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct FailureCarrier {
+            schema_version: String,
+            message: String,
+        }
+        if object.len() != 1 {
+            return Err(hook_child_failure(
+                "malformed daemon hook dispatch integrity failure carrier",
+            ));
+        }
+        let carrier: FailureCarrier = serde_json::from_value(
+            object
+                .get(HOOK_DISPATCH_INTEGRITY_FAILURE_FIELD)
+                .cloned()
+                .expect("field presence checked"),
+        )
+        .map_err(|error| {
+            hook_child_failure(format!(
+                "malformed daemon hook dispatch integrity failure carrier: {error}"
+            ))
+        })?;
+        if carrier.schema_version != HOOK_DISPATCH_INTEGRITY_FAILURE_SCHEMA {
+            return Err(hook_child_failure(format!(
+                "unsupported daemon hook dispatch integrity failure schema `{}`",
+                carrier.schema_version
+            )));
+        }
+        return Err(hook_child_failure(format!(
+            "daemon hook dispatch failed after reservation: {}",
+            carrier.message
+        )));
+    }
 
     if object.contains_key("success") || object.contains_key("status") {
         let envelope: ManagedNativeEnvelope = serde_json::from_value(value).map_err(|error| {
@@ -503,6 +558,23 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("observation action params"));
         assert!(error.contains("maximum"));
+    }
+
+    #[test]
+    fn known_post_reservation_failure_is_a_bounded_replayable_integrity_carrier() {
+        let message = format!("dispatch failed: {}é", "x".repeat(16 * 1024));
+        let carrier = hook_dispatch_integrity_failure(&message);
+        let error = normalize_hook_dispatch_result(carrier.clone()).unwrap_err();
+        assert!(error.contains("daemon hook dispatch failed after reservation"));
+        assert!(serde_json::to_vec(&carrier).unwrap().len() < 9 * 1024);
+
+        let mut malformed = carrier;
+        malformed[HOOK_DISPATCH_INTEGRITY_FAILURE_FIELD]["extra"] = json!(true);
+        assert!(
+            normalize_hook_dispatch_result(malformed)
+                .unwrap_err()
+                .contains("malformed daemon hook dispatch integrity failure carrier")
+        );
     }
 
     #[test]

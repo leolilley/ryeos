@@ -13,7 +13,7 @@
         "metadata": {
           "cache_hit": false,
           "cost": null,
-          "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+          "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
           "definition_ref": "graph:arc/controller_candidate",
           "elapsed_ms": 7872,
           "error": null,
@@ -34,7 +34,7 @@
         },
         "uri": ""
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "id": "artifact:T-3f0385ad-8fa5-ef97-3829-b155d5963e34:1",
       "kind": "receipt",
       "label": "graph_node_receipt",
@@ -96,7 +96,7 @@
         "metadata": {
           "cache_hit": false,
           "cost": null,
-          "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+          "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
           "definition_ref": "graph:arc/controller_candidate",
           "elapsed_ms": 8894,
           "error": null,
@@ -117,7 +117,7 @@
         },
         "uri": ""
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "id": "artifact:T-a13f49f1-8e89-502c-9875-416156215693:1",
       "kind": "receipt",
       "label": "graph_node_receipt",
@@ -179,7 +179,7 @@
         "metadata": {
           "cache_hit": false,
           "cost": null,
-          "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+          "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
           "definition_ref": "graph:arc/controller_portfolio",
           "elapsed_ms": 1,
           "error": null,
@@ -195,7 +195,7 @@
         },
         "uri": ""
       },
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "id": "artifact:T-b106c366-e2ea-d9e7-bff2-f66b91d5a22c:1",
       "kind": "receipt",
       "label": "graph_node_receipt",
@@ -222,7 +222,7 @@
         "metadata": {
           "cache_hit": false,
           "cost": null,
-          "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+          "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
           "definition_ref": "graph:arc/controller_portfolio",
           "elapsed_ms": 5806,
           "error": null,
@@ -238,7 +238,7 @@
         },
         "uri": ""
       },
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "id": "artifact:T-b106c366-e2ea-d9e7-bff2-f66b91d5a22c:2",
       "kind": "receipt",
       "label": "graph_node_receipt",
@@ -298,7 +298,7 @@
         },
         "timestamp": "2026-08-04T14:42:57Z"
       },
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 10,
@@ -525,7 +525,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+        "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
         "definition_ref": "graph:arc/controller_portfolio",
         "event_type": "graph_step_started",
         "graph_run_id": "gr-7d6fb97c6e9a",
@@ -538,7 +538,7 @@
         },
         "timestamp": "2026-08-04T14:43:20Z"
       },
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 17,
@@ -598,7 +598,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+        "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
         "definition_ref": "graph:arc/controller_portfolio",
         "event_type": "graph_step_completed",
         "graph_run_id": "gr-7d6fb97c6e9a",
@@ -612,7 +612,7 @@
         },
         "timestamp": "2026-08-04T14:43:20Z"
       },
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 19,
@@ -674,7 +674,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+        "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
         "definition_ref": "graph:arc/controller_portfolio",
         "event_type": "graph_branch_taken",
         "graph_run_id": "gr-7d6fb97c6e9a",
@@ -689,7 +689,7 @@
         },
         "timestamp": "2026-08-04T14:43:20Z"
       },
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 20,
@@ -716,7 +716,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+        "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
         "definition_ref": "graph:arc/controller_portfolio",
         "event_type": "graph_step_started",
         "graph_run_id": "gr-7d6fb97c6e9a",
@@ -729,7 +729,7 @@
         },
         "timestamp": "2026-08-04T14:43:26Z"
       },
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 21,
@@ -756,7 +756,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+        "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
         "definition_ref": "graph:arc/controller_portfolio",
         "event_type": "tool_call_start",
         "graph_run_id": "gr-7d6fb97c6e9a",
@@ -770,7 +770,7 @@
         },
         "timestamp": "2026-08-04T14:43:26Z"
       },
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 22,
@@ -797,7 +797,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+        "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
         "definition_ref": "graph:arc/controller_portfolio",
         "event_type": "tool_call_result",
         "graph_run_id": "gr-7d6fb97c6e9a",
@@ -812,7 +812,7 @@
         },
         "timestamp": "2026-08-04T14:43:26Z"
       },
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 23,
@@ -851,7 +851,7 @@
         },
         "timestamp": "2026-08-04T14:43:27Z"
       },
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 24,
@@ -911,7 +911,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+        "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
         "definition_ref": "graph:arc/controller_portfolio",
         "event_type": "graph_step_completed",
         "graph_run_id": "gr-7d6fb97c6e9a",
@@ -925,7 +925,7 @@
         },
         "timestamp": "2026-08-04T14:43:27Z"
       },
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 26,
@@ -986,7 +986,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+        "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
         "definition_ref": "graph:arc/controller_portfolio",
         "event_type": "graph_step_started",
         "graph_run_id": "gr-7d6fb97c6e9a",
@@ -999,7 +999,7 @@
         },
         "timestamp": "2026-08-04T14:43:33Z"
       },
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 28,
@@ -1026,7 +1026,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+        "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
         "definition_ref": "graph:arc/controller_portfolio",
         "event_type": "graph_step_completed",
         "graph_run_id": "gr-7d6fb97c6e9a",
@@ -1040,7 +1040,7 @@
         },
         "timestamp": "2026-08-04T14:43:33Z"
       },
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 29,
@@ -1101,7 +1101,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+        "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
         "definition_ref": "graph:arc/controller_portfolio",
         "event_type": "graph_completed",
         "graph_id": "arc/controller_portfolio",
@@ -1113,7 +1113,7 @@
         },
         "timestamp": "2026-08-04T14:43:33Z"
       },
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 30,
@@ -1306,7 +1306,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+        "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
         "definition_ref": "graph:arc/controller_portfolio",
         "event_type": "graph_started",
         "graph_id": "arc/controller_portfolio",
@@ -1317,7 +1317,7 @@
         },
         "timestamp": "2026-08-04T14:42:44Z"
       },
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 6,
@@ -1344,7 +1344,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+        "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
         "definition_ref": "graph:arc/controller_portfolio",
         "event_type": "graph_step_started",
         "graph_run_id": "gr-7d6fb97c6e9a",
@@ -1357,7 +1357,7 @@
         },
         "timestamp": "2026-08-04T14:42:44Z"
       },
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 7,
@@ -1384,7 +1384,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+        "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
         "definition_ref": "graph:arc/controller_portfolio",
         "event_type": "graph_follow_suspended",
         "graph_run_id": "gr-7d6fb97c6e9a",
@@ -1398,7 +1398,7 @@
         },
         "timestamp": "2026-08-04T14:42:44Z"
       },
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 8,
@@ -1436,7 +1436,7 @@
         },
         "timestamp": "2026-08-04T14:42:57Z"
       },
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 9,
@@ -1563,7 +1563,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+        "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
         "definition_ref": "graph:arc/controller_candidate",
         "event_type": "graph_started",
         "graph_id": "arc/controller_candidate",
@@ -1579,7 +1579,7 @@
         },
         "timestamp": "2026-08-04T14:42:59Z"
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-3f0385ad-8fa5-ef97-3829-b155d5963e34",
         "chain_seq": 10,
@@ -1606,7 +1606,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+        "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
         "definition_ref": "graph:arc/controller_candidate",
         "event_type": "graph_step_started",
         "graph_run_id": "gr-20a0c50f8ca5",
@@ -1624,7 +1624,7 @@
         },
         "timestamp": "2026-08-04T14:43:07Z"
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-3f0385ad-8fa5-ef97-3829-b155d5963e34",
         "chain_seq": 11,
@@ -1651,7 +1651,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+        "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
         "definition_ref": "graph:arc/controller_candidate",
         "event_type": "tool_call_start",
         "graph_run_id": "gr-20a0c50f8ca5",
@@ -1670,7 +1670,7 @@
         },
         "timestamp": "2026-08-04T14:43:08Z"
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-3f0385ad-8fa5-ef97-3829-b155d5963e34",
         "chain_seq": 12,
@@ -1697,7 +1697,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+        "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
         "definition_ref": "graph:arc/controller_candidate",
         "event_type": "tool_call_result",
         "graph_run_id": "gr-20a0c50f8ca5",
@@ -1717,7 +1717,7 @@
         },
         "timestamp": "2026-08-04T14:43:08Z"
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-3f0385ad-8fa5-ef97-3829-b155d5963e34",
         "chain_seq": 13,
@@ -1761,7 +1761,7 @@
         },
         "timestamp": "2026-08-04T14:43:08Z"
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-3f0385ad-8fa5-ef97-3829-b155d5963e34",
         "chain_seq": 14,
@@ -1826,7 +1826,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+        "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
         "definition_ref": "graph:arc/controller_candidate",
         "event_type": "graph_step_completed",
         "graph_run_id": "gr-20a0c50f8ca5",
@@ -1845,7 +1845,7 @@
         },
         "timestamp": "2026-08-04T14:43:08Z"
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-3f0385ad-8fa5-ef97-3829-b155d5963e34",
         "chain_seq": 16,
@@ -1911,7 +1911,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+        "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
         "definition_ref": "graph:arc/controller_candidate",
         "event_type": "graph_step_started",
         "graph_run_id": "gr-20a0c50f8ca5",
@@ -1929,7 +1929,7 @@
         },
         "timestamp": "2026-08-04T14:43:16Z"
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-3f0385ad-8fa5-ef97-3829-b155d5963e34",
         "chain_seq": 18,
@@ -1956,7 +1956,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+        "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
         "definition_ref": "graph:arc/controller_candidate",
         "event_type": "graph_step_completed",
         "graph_run_id": "gr-20a0c50f8ca5",
@@ -1975,7 +1975,7 @@
         },
         "timestamp": "2026-08-04T14:43:16Z"
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-3f0385ad-8fa5-ef97-3829-b155d5963e34",
         "chain_seq": 19,
@@ -2042,7 +2042,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+        "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
         "definition_ref": "graph:arc/controller_candidate",
         "event_type": "graph_completed",
         "graph_id": "arc/controller_candidate",
@@ -2059,7 +2059,7 @@
         },
         "timestamp": "2026-08-04T14:43:16Z"
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-3f0385ad-8fa5-ef97-3829-b155d5963e34",
         "chain_seq": 20,
@@ -2467,7 +2467,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+        "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
         "definition_ref": "graph:arc/controller_candidate",
         "event_type": "graph_started",
         "graph_id": "arc/controller_candidate",
@@ -2483,7 +2483,7 @@
         },
         "timestamp": "2026-08-04T14:42:59Z"
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-a13f49f1-8e89-502c-9875-416156215693",
         "chain_seq": 10,
@@ -2510,7 +2510,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+        "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
         "definition_ref": "graph:arc/controller_candidate",
         "event_type": "graph_step_started",
         "graph_run_id": "gr-bb4c0ec3ff78",
@@ -2528,7 +2528,7 @@
         },
         "timestamp": "2026-08-04T14:43:09Z"
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-a13f49f1-8e89-502c-9875-416156215693",
         "chain_seq": 11,
@@ -2555,7 +2555,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+        "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
         "definition_ref": "graph:arc/controller_candidate",
         "event_type": "tool_call_start",
         "graph_run_id": "gr-bb4c0ec3ff78",
@@ -2574,7 +2574,7 @@
         },
         "timestamp": "2026-08-04T14:43:09Z"
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-a13f49f1-8e89-502c-9875-416156215693",
         "chain_seq": 12,
@@ -2601,7 +2601,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+        "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
         "definition_ref": "graph:arc/controller_candidate",
         "event_type": "tool_call_result",
         "graph_run_id": "gr-bb4c0ec3ff78",
@@ -2621,7 +2621,7 @@
         },
         "timestamp": "2026-08-04T14:43:09Z"
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-a13f49f1-8e89-502c-9875-416156215693",
         "chain_seq": 13,
@@ -2665,7 +2665,7 @@
         },
         "timestamp": "2026-08-04T14:43:09Z"
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-a13f49f1-8e89-502c-9875-416156215693",
         "chain_seq": 14,
@@ -2730,7 +2730,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+        "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
         "definition_ref": "graph:arc/controller_candidate",
         "event_type": "graph_step_completed",
         "graph_run_id": "gr-bb4c0ec3ff78",
@@ -2749,7 +2749,7 @@
         },
         "timestamp": "2026-08-04T14:43:09Z"
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-a13f49f1-8e89-502c-9875-416156215693",
         "chain_seq": 16,
@@ -2815,7 +2815,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+        "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
         "definition_ref": "graph:arc/controller_candidate",
         "event_type": "graph_step_started",
         "graph_run_id": "gr-bb4c0ec3ff78",
@@ -2833,7 +2833,7 @@
         },
         "timestamp": "2026-08-04T14:43:17Z"
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-a13f49f1-8e89-502c-9875-416156215693",
         "chain_seq": 18,
@@ -2860,7 +2860,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+        "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
         "definition_ref": "graph:arc/controller_candidate",
         "event_type": "graph_step_completed",
         "graph_run_id": "gr-bb4c0ec3ff78",
@@ -2879,7 +2879,7 @@
         },
         "timestamp": "2026-08-04T14:43:17Z"
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-a13f49f1-8e89-502c-9875-416156215693",
         "chain_seq": 19,
@@ -2946,7 +2946,7 @@
     },
     {
       "attributes": {
-        "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+        "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
         "definition_ref": "graph:arc/controller_candidate",
         "event_type": "graph_completed",
         "graph_id": "arc/controller_candidate",
@@ -2963,7 +2963,7 @@
         },
         "timestamp": "2026-08-04T14:43:17Z"
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-a13f49f1-8e89-502c-9875-416156215693",
         "chain_seq": 20,
@@ -3578,7 +3578,7 @@
         }
       },
       "canonical_ref": "graph:arc/controller_portfolio",
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 6,
@@ -3650,7 +3650,7 @@
         }
       },
       "canonical_ref": "graph:arc/controller_candidate",
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-3f0385ad-8fa5-ef97-3829-b155d5963e34",
         "chain_seq": 10,
@@ -3762,7 +3762,7 @@
         }
       },
       "canonical_ref": "graph:arc/controller_candidate",
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-a13f49f1-8e89-502c-9875-416156215693",
         "chain_seq": 10,
@@ -3869,7 +3869,7 @@
         }
       },
       "canonical_ref": "graph:arc/controller_portfolio",
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 17,
@@ -3998,7 +3998,7 @@
           "id": "arc-candidate-result",
           "layer": "authored",
           "occurrence": {
-            "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+            "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
             "definition_ref": "graph:arc/controller_candidate",
             "graph_run_id": "gr-bb4c0ec3ff78",
             "kind": "graph_step_completed",
@@ -5643,7 +5643,7 @@
           "id": "T-a13f49f1-8e89-502c-9875-416156215693"
         }
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-a13f49f1-8e89-502c-9875-416156215693",
         "chain_seq": 17,
@@ -5664,7 +5664,7 @@
             "kind": "hook_observation",
             "observation_id": "hook-observation:0c4418543d6363b5ec04f1bfb2fb212b17f03191fe5ffc33c135753f3a20644e",
             "occurrence": {
-              "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+              "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
               "definition_ref": "graph:arc/controller_candidate",
               "graph_run_id": "gr-bb4c0ec3ff78",
               "kind": "graph_step_completed",
@@ -5702,7 +5702,7 @@
           "id": "arc-candidate-result",
           "layer": "authored",
           "occurrence": {
-            "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+            "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
             "definition_ref": "graph:arc/controller_candidate",
             "graph_run_id": "gr-20a0c50f8ca5",
             "kind": "graph_step_completed",
@@ -7055,7 +7055,7 @@
           "id": "T-3f0385ad-8fa5-ef97-3829-b155d5963e34"
         }
       },
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-3f0385ad-8fa5-ef97-3829-b155d5963e34",
         "chain_seq": 17,
@@ -7076,7 +7076,7 @@
             "kind": "hook_observation",
             "observation_id": "hook-observation:f1c2ebab849339b8953a0a12396981a2229064e2b3c4eb411827339f5a222692",
             "occurrence": {
-              "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+              "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
               "definition_ref": "graph:arc/controller_candidate",
               "graph_run_id": "gr-20a0c50f8ca5",
               "kind": "graph_step_completed",
@@ -7114,7 +7114,7 @@
           "id": "arc-portfolio-decision",
           "layer": "authored",
           "occurrence": {
-            "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+            "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
             "definition_ref": "graph:arc/controller_portfolio",
             "graph_run_id": "gr-7d6fb97c6e9a",
             "kind": "graph_step_completed",
@@ -7141,7 +7141,7 @@
           "id": "T-b106c366-e2ea-d9e7-bff2-f66b91d5a22c"
         }
       },
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 27,
@@ -7162,7 +7162,7 @@
             "kind": "hook_observation",
             "observation_id": "hook-observation:fac9a0bf7283231d4247d70ec849b5627aefc46807d992ea8a8befef8a2e8489",
             "occurrence": {
-              "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+              "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
               "definition_ref": "graph:arc/controller_portfolio",
               "graph_run_id": "gr-7d6fb97c6e9a",
               "kind": "graph_step_completed",
@@ -7198,7 +7198,7 @@
         }
       },
       "canonical_ref": "graph:arc/controller_portfolio",
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 7,
@@ -7266,7 +7266,7 @@
         }
       },
       "canonical_ref": "graph:arc/controller_candidate",
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-3f0385ad-8fa5-ef97-3829-b155d5963e34",
         "chain_seq": 11,
@@ -7350,7 +7350,7 @@
         }
       },
       "canonical_ref": "graph:arc/controller_candidate",
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-3f0385ad-8fa5-ef97-3829-b155d5963e34",
         "chain_seq": 18,
@@ -7402,7 +7402,7 @@
         }
       },
       "canonical_ref": "graph:arc/controller_candidate",
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-a13f49f1-8e89-502c-9875-416156215693",
         "chain_seq": 11,
@@ -7486,7 +7486,7 @@
         }
       },
       "canonical_ref": "graph:arc/controller_candidate",
-      "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+      "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
       "event_ref": {
         "chain_root_id": "T-a13f49f1-8e89-502c-9875-416156215693",
         "chain_seq": 18,
@@ -7533,7 +7533,7 @@
         }
       },
       "canonical_ref": "graph:arc/controller_portfolio",
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 17,
@@ -7588,7 +7588,7 @@
         }
       },
       "canonical_ref": "graph:arc/controller_portfolio",
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 21,
@@ -7667,7 +7667,7 @@
         }
       },
       "canonical_ref": "graph:arc/controller_portfolio",
-      "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+      "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
       "event_ref": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "chain_seq": 28,
@@ -7792,7 +7792,7 @@
         "metadata": null,
         "outcome_code": "success",
         "result": {
-          "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+          "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
           "definition_ref": "graph:arc/controller_candidate",
           "graph_id": "arc/controller_candidate",
           "graph_run_id": "gr-20a0c50f8ca5",
@@ -7918,7 +7918,7 @@
         "metadata": null,
         "outcome_code": "success",
         "result": {
-          "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+          "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
           "definition_ref": "graph:arc/controller_candidate",
           "graph_id": "arc/controller_candidate",
           "graph_run_id": "gr-bb4c0ec3ff78",
@@ -8199,7 +8199,7 @@
         "metadata": null,
         "outcome_code": "success",
         "result": {
-          "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+          "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
           "definition_ref": "graph:arc/controller_portfolio",
           "graph_id": "arc/controller_portfolio",
           "graph_run_id": "gr-7d6fb97c6e9a",
@@ -8436,7 +8436,7 @@
       "status": "completed"
     },
     {
-      "admitted_capsule_hash": "a31717c0e538a6144d875f188222ec0c7b11359b9fbc5659d298a424493eea42",
+      "admitted_launch_capsule_hash": "a31717c0e538a6144d875f188222ec0c7b11359b9fbc5659d298a424493eea42",
       "attributes": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "created_at": "2026-08-04T14:42:42Z",
@@ -8473,7 +8473,7 @@
       "status": "continued"
     },
     {
-      "admitted_capsule_hash": "bc42b9874e1f0425b0329fd7c9205595d15e3f517ae257fc3ee15a44c244c594",
+      "admitted_launch_capsule_hash": "bc42b9874e1f0425b0329fd7c9205595d15e3f517ae257fc3ee15a44c244c594",
       "attributes": {
         "chain_root_id": "T-21a55ee5-8709-8c73-082f-6805cc2ad3aa",
         "created_at": "2026-08-04T14:43:05Z",
@@ -8511,7 +8511,7 @@
       "status": "completed"
     },
     {
-      "admitted_capsule_hash": "529e5e479641cf10f9aec02c05eb6c18908305df3bff2ac15b90a9c314393c76",
+      "admitted_launch_capsule_hash": "529e5e479641cf10f9aec02c05eb6c18908305df3bff2ac15b90a9c314393c76",
       "attributes": {
         "chain_root_id": "T-3f0385ad-8fa5-ef97-3829-b155d5963e34",
         "created_at": "2026-08-04T14:42:57Z",
@@ -8554,7 +8554,7 @@
       "status": "completed"
     },
     {
-      "admitted_capsule_hash": "d42339c8d5e4fb44bcc86b08d293e95c30dc0ae5b385f15a7fc8a2e96e00c308",
+      "admitted_launch_capsule_hash": "d42339c8d5e4fb44bcc86b08d293e95c30dc0ae5b385f15a7fc8a2e96e00c308",
       "attributes": {
         "chain_root_id": "T-a13f49f1-8e89-502c-9875-416156215693",
         "created_at": "2026-08-04T14:42:57Z",
@@ -8597,7 +8597,7 @@
       "status": "completed"
     },
     {
-      "admitted_capsule_hash": "818bcf1bc277d7afc69fbbb8d0df4ae2c5e5a4fc6bc61864cc7a15890add69eb",
+      "admitted_launch_capsule_hash": "818bcf1bc277d7afc69fbbb8d0df4ae2c5e5a4fc6bc61864cc7a15890add69eb",
       "attributes": {
         "chain_root_id": "T-ac76dd34-6f42-bf98-0d17-a6c5bdd3881b",
         "created_at": "2026-08-04T14:43:05Z",
@@ -8635,7 +8635,7 @@
       "status": "completed"
     },
     {
-      "admitted_capsule_hash": "d7bfb73a37c54e3ae615c5a738b3e49367cca8da4cc1bf015672e1d071453d0e",
+      "admitted_launch_capsule_hash": "d7bfb73a37c54e3ae615c5a738b3e49367cca8da4cc1bf015672e1d071453d0e",
       "attributes": {
         "chain_root_id": "T-b0c1a469-5133-95ef-bcd5-3ae49434d9b5",
         "created_at": "2026-08-04T14:43:25Z",
@@ -8673,7 +8673,7 @@
       "status": "completed"
     },
     {
-      "admitted_capsule_hash": "a31717c0e538a6144d875f188222ec0c7b11359b9fbc5659d298a424493eea42",
+      "admitted_launch_capsule_hash": "a31717c0e538a6144d875f188222ec0c7b11359b9fbc5659d298a424493eea42",
       "attributes": {
         "chain_root_id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",
         "created_at": "2026-08-04T14:42:57Z",
@@ -12612,7 +12612,7 @@
             "kind": "hook_observation",
             "observation_id": "hook-observation:0c4418543d6363b5ec04f1bfb2fb212b17f03191fe5ffc33c135753f3a20644e",
             "occurrence": {
-              "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+              "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
               "definition_ref": "graph:arc/controller_candidate",
               "graph_run_id": "gr-bb4c0ec3ff78",
               "kind": "graph_step_completed",
@@ -12652,7 +12652,7 @@
             "kind": "hook_observation",
             "observation_id": "hook-observation:f1c2ebab849339b8953a0a12396981a2229064e2b3c4eb411827339f5a222692",
             "occurrence": {
-              "definition_hash": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
+              "effective_definition_digest": "333666d46638214556145479a22d6455e83f77b526beeb9d8633aaa2e1651f7b",
               "definition_ref": "graph:arc/controller_candidate",
               "graph_run_id": "gr-20a0c50f8ca5",
               "kind": "graph_step_completed",
@@ -12692,7 +12692,7 @@
             "kind": "hook_observation",
             "observation_id": "hook-observation:fac9a0bf7283231d4247d70ec849b5627aefc46807d992ea8a8befef8a2e8489",
             "occurrence": {
-              "definition_hash": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
+              "effective_definition_digest": "4334a30ef4934e1bc529617afb993d2f18ef0055e2f9a6ec7a96d7e464c824d0",
               "definition_ref": "graph:arc/controller_portfolio",
               "graph_run_id": "gr-7d6fb97c6e9a",
               "kind": "graph_step_completed",
@@ -13911,7 +13911,7 @@
     }
   ],
   "revision": "e4c30aa7cac93a5c31c2401da751804304e1a24b050e14748eff1d3732e140c1",
-  "schema_version": "ryeos.ui.field.facts.v1",
+  "schema_version": "ryeos.ui.field.facts.v2",
   "source": "execution",
   "subject": {
     "id": "T-0ee13dfd-056c-d442-2c29-ee63b26a48a0",

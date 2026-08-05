@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-04T08:52:12Z:02f20547012c801759541916ce9aefb632859dc02736faebe1f4b561d27a4cf8:Ntja3qkolvAkpTtH5Wx+UIaPc2CLFrdTNY0K/wKnmdBTdKGXX2yp9R3BPMMDjZMfTp2SSOrOcpmcnR9eOKTHDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-05T07:04:40Z:0447c3bfc35804d2c252bc77ae1b96d126dafa7eef8a336e3e6af3fcf78cc26d:5QqpJhU9cTyoViaZmi+lBynO6GOFhV/N+BBRyLTiCH6RmirVybU42F4thdA7JBKB2cOJ5tnW3bdIPIwfYzrmDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, graphs, dag, state-machine]
 version: "1.0.0"
@@ -48,6 +48,28 @@ config:
       node_type: return
       output: "${state.context}"
 ```
+
+## Inheritance and the executable graph
+
+Graphs may `extend` another graph. Every child still declares its own
+`version` and `category`. The generic extends-chain composer processes the
+deepest ancestor first and applies these rules:
+
+- omitted `config` keys inherit;
+- a declared `config` key replaces that complete inherited value;
+- `nodes` and `hooks` are never recursively or ID-wise merged;
+- `requires.capabilities` can only narrow at each direct parent/child edge;
+- `hooks: []` explicitly clears the inherited authored hook list.
+
+This shallow rule makes graph reuse predictable: a child may inherit a whole
+topology and change `max_steps`, but declaring `nodes` supplies the complete
+effective node mapping. After composition, the signed graph validator proves
+that `start`, every edge and error target, expressions, retry policy, hooks,
+and capability facts are coherent.
+
+The result in `LaunchEnvelope.resolution.composed.composed` is the executable
+graph. The runtime never reconstructs behavior from the root file or reopens
+ancestor paths. Root and ancestor bytes remain visible provenance.
 
 ## Nodes
 
@@ -208,17 +230,23 @@ Fire points are `graph_started`, `graph_step_completed` (after every node,
 with typed `ok`, `error`, or `retry` status), and `graph_completed`.
 Each event exposes an exact root schema; unknown hook events and references to
 roots outside that event fail graph loading.
-Every hook declares its successful leaf policy: `discard`, `control`, or
-`observation`. Graph hooks use `discard` for side-effect observers or
-`observation` for a bounded namespaced `{kind, payload}` record; their return
-value never redirects the graph.
-Hooks are **observers**: a hook action is a real dispatch (its `effective_caps`
-are enforced, its cost accrues to the run, it shows in the braid) but it cannot
+Every graph hook declares either `discard` for a side-effect observer or
+`observation` for a bounded namespaced `{kind, payload}` record. `control` is
+rejected for graph hooks at admission; a hook return value never redirects the
+graph.
+Hooks are **observers**: a hook action is a real dispatch, its cost accrues to
+the run, and it shows in the braid, but it cannot
 redirect the walk — routing stays the walker's job. Ordinary condition/action
 evaluation or child-dispatch failures are warnings; accounting or integrity
 failures invalidate terminal authority and fail closed. Node-level resilience
 is the node `retry:` block, not a hook action. See `retry-and-hooks.md` for the
 full contract.
+
+Before launch, authored hooks and signed builtin, infrastructure, context,
+operator, and project policy are normalized into one captured effective hook
+plan. Authored hooks use the graph's admitted capabilities. A configured hook
+uses only the dispatch grants declared by its own signed source. The runtime
+does not read hook configuration from the filesystem.
 
 ## Execution and durability
 
@@ -245,14 +273,16 @@ The observable guarantees an author can rely on:
 ### State persistence
 
 The last successfully written versioned checkpoint is the authoritative resume
-cursor. It records graph definition ref/hash, `expression_language:
+cursor. It records graph definition ref, `effective_definition_digest`,
+`expression_language:
 "rye-expr/1"`, current node, state, retry count, accounting, and suppressed
 errors. Resume requires that identity-bearing local checkpoint and the exact
 definition; event replay is not a state reconstruction fallback. An older
 schema or identity/language mismatch fails with
 `restart_required_after_expression_language_cutover` and requires a new run.
-Editing (and re-signing) a graph changes its hash, so a live run cannot be
-edited mid-flight and later resumed — start a new run instead.
+Changing any effective contributor, composed behavior, trust/signer evidence,
+or captured hook policy changes the digest, so a live run cannot resume into
+that different program — start a new run instead.
 
 Receipts, runtime events, transcripts, and artifacts remain durable
 observability, but do not advance resumable state without a later successful
@@ -264,9 +294,11 @@ ordering, the cache fence, segment continuation, and cooperative control — see
 
 ## Permissions
 
-Graph permissions are lifted by the `graph-permissions` composer
-into `policy_facts.effective_caps`. Each node action is checked
-against these capabilities before execution.
+The signed generic composition rules project
+`requires.capabilities.declared` into `policy_facts.effective_caps` and narrow
+it across every inheritance edge. The graph validator proves parity between
+the composed declaration and the policy fact. Each node action is checked
+against the resulting admitted authority before execution.
 
 ## Thread Integration
 
