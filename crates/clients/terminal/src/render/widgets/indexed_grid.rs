@@ -22,7 +22,22 @@ pub fn draw_indexed_grid(
     let y = rect.y as usize;
     let width = rect.w as usize;
     let height = rect.h as usize;
-    surface.draw_text(x, y, &truncate(title, width), style_muted());
+    let cell_width = if grid.width as usize <= width / 2 {
+        2
+    } else {
+        1
+    };
+    let visible_columns = (width / cell_width).min(grid.width as usize);
+    let visible_rows = height.saturating_sub(1).min(grid.height as usize);
+    let extent = if visible_columns < grid.width as usize || visible_rows < grid.height as usize {
+        format!(
+            "{title} · {visible_columns}x{visible_rows} of {}x{}",
+            grid.width, grid.height
+        )
+    } else {
+        title.to_string()
+    };
+    surface.draw_text(x, y, &truncate(&extent, width), style_muted());
     if height <= 1 {
         return;
     }
@@ -32,18 +47,11 @@ pub fn draw_indexed_grid(
         .map(|entry| (entry.index, entry.glyph.as_str()))
         .collect::<BTreeMap<_, _>>();
     let changed = grid.changed.iter().copied().collect::<BTreeSet<_>>();
-    let cell_width = if grid.width as usize <= width / 2 {
-        2
-    } else {
-        1
-    };
-    let visible_columns = (width / cell_width).min(grid.width as usize);
-    let visible_rows = (height - 1).min(grid.height as usize);
     for row in 0..visible_rows {
         for column in 0..visible_columns {
             let index = row * grid.width as usize + column;
             let glyph = palette
-                .get(&grid.cells[index])
+                .get(grid.cells.get(index).unwrap_or(&u16::MAX))
                 .and_then(|glyph| glyph.chars().next())
                 .unwrap_or('?')
                 .to_string();

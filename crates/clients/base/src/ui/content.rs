@@ -81,7 +81,7 @@ pub struct ViewBinding {
     /// (an inline event detail written by an inspect intent) without a round
     /// trip. Reuses the `@facet:` grammar: when the facet resolves to a value
     /// it becomes the view's response; when it is absent the view falls back
-    /// to its `source` fetch. Mechanism, not a view ref — the engine names no
+    /// to its named source fetch. Mechanism, not a view ref — the engine names no
     /// view, only a fold path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub facet: Option<String>,
@@ -389,6 +389,10 @@ pub struct SourceBinding {
     /// text).
     #[serde(default)]
     pub collection: Option<String>,
+    /// Per-channel liveness policy. When present it overrides the containing
+    /// view's refresh rule for this source only.
+    #[serde(default)]
+    pub refresh: Value,
 }
 
 /// One section of a `sections` view: a titled projection over one named source
@@ -1205,6 +1209,9 @@ pub fn feeds_param_collision(binding: &ViewBinding) -> Option<String> {
 }
 
 fn source_contract_error(binding: &ViewBinding) -> Option<String> {
+    if binding.widget == "field" && binding.sources.is_empty() {
+        return Some("field views require at least one named source".to_string());
+    }
     for channel in binding.sources.keys() {
         if channel.is_empty()
             || channel.len() > 64
@@ -1252,21 +1259,34 @@ pub const REFRESH_KEYS: &[&str] = &["on_facet", "on_hint"];
 /// refresh. Surfaced as the same class of binding error the parser produces, so
 /// the tile shows the mistake instead of quietly not updating.
 pub fn refresh_keys_error(binding: &ViewBinding) -> Option<String> {
-    let unknown: Vec<&str> = binding
-        .refresh
-        .as_object()?
-        .keys()
-        .map(String::as_str)
-        .filter(|key| !REFRESH_KEYS.contains(key))
-        .collect();
-    if unknown.is_empty() {
-        return None;
+    let invalid_keys = |refresh: &Value| {
+        refresh
+            .as_object()
+            .into_iter()
+            .flat_map(|object| object.keys())
+            .filter(|key| !REFRESH_KEYS.contains(&key.as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let unknown = invalid_keys(&binding.refresh);
+    if !unknown.is_empty() {
+        return Some(format!(
+            "invalid view binding: unknown refresh key(s) {}; expected one of: {}",
+            unknown.join(", "),
+            REFRESH_KEYS.join(", ")
+        ));
     }
-    Some(format!(
-        "invalid view binding: unknown refresh key(s) {}; expected one of: {}",
-        unknown.join(", "),
-        REFRESH_KEYS.join(", ")
-    ))
+    for (channel, source) in &binding.sources {
+        let unknown = invalid_keys(&source.refresh);
+        if !unknown.is_empty() {
+            return Some(format!(
+                "invalid source '{channel}' refresh key(s) {}; expected one of: {}",
+                unknown.join(", "),
+                REFRESH_KEYS.join(", ")
+            ));
+        }
+    }
+    None
 }
 
 /// A parsed affordance invocation — the closed grammar bound producers can
@@ -1329,6 +1349,18 @@ pub fn resolve_affordance_invoke(
         return None;
     }
     let invoke = affordance.get("invoke")?;
+    // A producer knowing the placeholder namespace is not enough: the
+    // selected record must actually contain every declared value. Treat an
+    // unresolved path as a non-activation so a null selection never erases a
+    // previously valid facet and strands its dependent source unfetched.
+    for field in ["value", "merge", "args"] {
+        if invoke
+            .get(field)
+            .is_some_and(|template| has_unresolved_placeholder(template, payload))
+        {
+            return None;
+        }
+    }
     match invoke.get("plane").and_then(Value::as_str)? {
         "ui" => Some(AffordanceInvoke::Ui {
             facet: invoke.get("facet").and_then(Value::as_str)?.to_string(),
@@ -1385,6 +1417,14 @@ pub fn resolve_affordance_invoke(
         }
         _ => None,
     }
+}
+
+fn has_unresolved_placeholder(template: &Value, payload: &Payload) -> bool {
+    let mut unresolved = false;
+    visit_placeholders(template, &mut |placeholder| {
+        unresolved |= payload.resolve(placeholder).is_null();
+    });
+    unresolved
 }
 
 /// Index of resolved view bindings by ref, parsed from the effective
@@ -1824,6 +1864,51 @@ mod tests {
     }
 
     #[test]
+    fn named_source_refresh_override_parses_and_validates() {
+        let surface = json!({
+            "views": {
+                "view:test/field": {
+                    "widget": "field",
+                    "sources": {
+                        "execution": {
+                            "ref": "service:test/execution",
+                            "refresh": {"on_hint": ["thread", "activity"]}
+                        }
+                    },
+                    "projections": {"schema_version": "ryeos.ui.field.projection.v1"}
+                }
+            }
+        });
+        let views = views_from_surface(Some(&surface));
+        let binding = &views["view:test/field"];
+        assert!(binding.degraded.is_none());
+        assert_eq!(
+            binding.sources["execution"].refresh,
+            json!({"on_hint": ["thread", "activity"]})
+        );
+    }
+
+    #[test]
+    fn field_without_a_named_source_degrades_at_binding_time() {
+        let surface = json!({
+            "views": {
+                "view:test/field": {
+                    "widget": "field",
+                    "sources": {},
+                    "projections": {"schema_version": "ryeos.ui.field.projection.v1"}
+                }
+            }
+        });
+        let views = views_from_surface(Some(&surface));
+        assert!(
+            views["view:test/field"]
+                .degraded
+                .as_deref()
+                .is_some_and(|reason| reason.contains("at least one named source"))
+        );
+    }
+
+    #[test]
     fn expand_fields_parse_from_projection_content() {
         let binding: ViewBinding = serde_json::from_value(json!({
             "widget": "table",
@@ -2179,6 +2264,26 @@ mod tests {
                 open_view: None,
                 drill: false,
             }
+        );
+    }
+
+    #[test]
+    fn missing_runtime_placeholder_value_refuses_the_invoke() {
+        let affordance = json!({
+            "invoke": {
+                "plane": "ui",
+                "facet": "selection",
+                "value": {"thread_id": "{record.thread_id}"}
+            }
+        });
+        assert!(
+            resolve_affordance_invoke(
+                &affordance,
+                Producer::Selection,
+                &Payload::Selection(&json!({"status": "running"})),
+            )
+            .is_none(),
+            "a missing selection field must not erase the target facet with null"
         );
     }
 

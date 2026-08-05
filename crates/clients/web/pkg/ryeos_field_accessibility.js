@@ -1,3 +1,5 @@
+import { canCompareEntity } from "./ryeos_field_canvas.js";
+
 export function fieldAccessibilityModel(vm) {
   const byId = new Map((vm.entities || []).map((entity) => [entity.id, entity]));
   const groups = new Map((vm.groups || []).map((group) => [group.id, group]));
@@ -31,7 +33,7 @@ export function fieldAccessibilityModel(vm) {
       neighbors: (neighbors.get(entity.id) || []).sort().join("; "),
       selectIntent: entity.select_intent || null,
       activateIntent: entity.activate_intent || null,
-      compare: (entity.preview_ids || []).length > 0,
+      compare: canCompareEntity(vm, entity.id),
     };
   });
 }
@@ -150,7 +152,7 @@ function entityLevel(entity, byId) {
 
 function safeId(value) {
   return [...String(value)].map((character) => (
-    /[a-zA-Z0-9_-]/.test(character)
+    /[a-zA-Z0-9-]/.test(character)
       ? character
       : `_${character.codePointAt(0).toString(16)}_`
   )).join("");

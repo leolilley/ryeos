@@ -17,12 +17,12 @@
   },
   "truncated": false,
   "entities": [
-    { "id": "thread:T-build-root", "kind": "thread", "label": "build root", "status": "running", "attributes": { "thread": { "id": "T-build-root", "facets": { "environment": "staging" } } }, "provenance": { "evidence": [{ "kind": "thread", "thread_id": "T-build-root" }] } },
-    { "id": "thread:T-deploy-follow", "kind": "thread", "label": "deploy follow", "status": "outside_cut", "attributes": { "thread": { "id": "T-deploy-follow", "facets": { "environment": "staging" } } }, "provenance": { "evidence": [{ "kind": "event", "chain_root_id": "T-build-root", "chain_seq": 12, "event_hash": "hash-12" }] } },
-    { "id": "thread:T-build-continuation", "kind": "thread", "label": "build continuation", "status": "outside_cut", "attributes": { "thread": { "id": "T-build-continuation", "facets": { "environment": "staging" } } }, "provenance": { "evidence": [{ "kind": "event", "chain_root_id": "T-build-root", "chain_seq": 15, "event_hash": "hash-15" }] } }
+    { "id": "thread:T-build-root", "kind": "thread", "label": "build root", "status": "running", "attributes": { "thread": { "id": "T-build-root", "facets": { "environment": "staging" } } }, "provenance": { "source_ref": "service:fixture/field/execution", "source_revision": "event:build-root:12:hash-12", "evidence": [{ "kind": "thread", "thread_id": "T-build-root" }] } },
+    { "id": "thread:T-deploy-follow", "kind": "thread", "label": "deploy follow", "status": "outside_cut", "attributes": { "thread": { "id": "T-deploy-follow", "facets": { "environment": "staging" } } }, "provenance": { "source_ref": "service:fixture/field/execution", "source_revision": "event:build-root:12:hash-12", "evidence": [{ "kind": "event", "chain_root_id": "T-build-root", "chain_seq": 12, "event_hash": "hash-12" }] } },
+    { "id": "thread:T-build-continuation", "kind": "thread", "label": "build continuation", "status": "outside_cut", "attributes": { "thread": { "id": "T-build-continuation", "facets": { "environment": "staging" } } }, "provenance": { "source_ref": "service:fixture/field/execution", "source_revision": "event:build-root:12:hash-12", "evidence": [{ "kind": "event", "chain_root_id": "T-build-root", "chain_seq": 15, "event_hash": "hash-15" }] } }
   ],
   "relations": [
-    { "id": "follow:root:deploy", "kind": "followed", "source_id": "thread:T-build-root", "target_id": "thread:T-deploy-follow", "directed": true, "event_ref": { "chain_root_id": "T-build-root", "chain_seq": 12, "event_hash": "hash-12" } }
+    { "id": "follow:root:deploy", "kind": "followed", "source_id": "thread:T-build-root", "target_id": "thread:T-deploy-follow", "directed": true, "attributes": {}, "provenance": { "source_ref": "service:fixture/field/execution", "source_revision": "event:build-root:12:hash-12", "evidence": [{ "kind": "event", "chain_root_id": "T-build-root", "chain_seq": 12, "event_hash": "hash-12" }] } }
   ],
   "previews": [],
   "metrics": [],

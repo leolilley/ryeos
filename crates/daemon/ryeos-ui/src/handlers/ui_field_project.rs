@@ -39,10 +39,10 @@ struct ProjectRequest {
 }
 
 pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
+    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
     let request = serde_json::from_value::<ProjectRequest>(params).map_err(|error| {
         HandlerError::BadRequest(format!("invalid field project request: {error}"))
     })?;
-    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
     // Unlike the existing operator topology endpoint, field/project has no
     // project-path parameter. Its authority comes only from the admitted UI
     // session. Project-authored view data can never select a host path.
@@ -77,7 +77,11 @@ fn project_facts(
         definition_hash: None,
     };
     let mut builder = FieldFactsBuilder::new("project", SERVICE_REF, subject);
-    let identities = collect_item_identities(&topology.nodes)?;
+    let (identities, identity_warnings) = collect_item_identities(&topology.nodes);
+    for warning in identity_warnings {
+        builder.mark_truncated();
+        builder.warn("item_read_omitted", warning);
+    }
     let mut field_ids = BTreeMap::new();
 
     for node in &topology.nodes {
@@ -268,8 +272,11 @@ fn project_facts(
     builder.finish()
 }
 
-fn collect_item_identities(nodes: &[TopologyNode]) -> Result<BTreeMap<String, ItemIdentity>> {
+fn collect_item_identities(
+    nodes: &[TopologyNode],
+) -> (BTreeMap<String, ItemIdentity>, Vec<String>) {
     let mut identities = BTreeMap::new();
+    let mut warnings = Vec::new();
     for node in nodes {
         if node.virtual_ || node.missing {
             continue;
@@ -277,8 +284,16 @@ fn collect_item_identities(nodes: &[TopologyNode]) -> Result<BTreeMap<String, It
         let Some(path) = node.path.as_deref() else {
             continue;
         };
-        let source = std::fs::read(path)
-            .with_context(|| format!("read resolved topology item `{}`", node.ref_))?;
+        let source = match std::fs::read(path) {
+            Ok(source) => source,
+            Err(error) => {
+                warnings.push(format!(
+                    "resolved topology item `{}` could not be read: {error}",
+                    node.ref_
+                ));
+                continue;
+            }
+        };
         let source_content_hash = lillux::sha256_hex(&source);
         let definition_hash = (node.kind == "graph")
             .then(|| super::ui_graph_topology::read_item_body(std::path::Path::new(path)))
@@ -298,7 +313,7 @@ fn collect_item_identities(nodes: &[TopologyNode]) -> Result<BTreeMap<String, It
             },
         );
     }
-    Ok(identities)
+    (identities, warnings)
 }
 
 fn item_evidence_for_topology_id(

@@ -89,6 +89,7 @@ impl RyeOsCore {
             source_key.to_string(),
             error.unwrap_or("source request failed").to_string(),
         );
+        self.stop_field_playback_for_source(source_key);
     }
 
     /// Effect batches resolve concurrently, so an older shared-dataset

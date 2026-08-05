@@ -229,10 +229,43 @@ impl RyeOsCore {
             }
             None => None,
         };
+        let reveal = (!field.search.query.trim().is_empty())
+            .then(|| {
+                entity_id.as_deref().and_then(|entity_id| {
+                    field.entities.iter().find(|entity| entity.id == entity_id)
+                })
+            })
+            .flatten()
+            .map(|entity| {
+                let mut groups = Vec::new();
+                let mut current = entity.group_id.as_deref();
+                let mut seen = std::collections::BTreeSet::new();
+                while let Some(group_id) = current {
+                    if !seen.insert(group_id.to_string()) {
+                        break;
+                    }
+                    groups.push(group_id.to_string());
+                    current = field
+                        .groups
+                        .iter()
+                        .find(|group| group.id == group_id)
+                        .and_then(|group| group.parent_id.as_deref());
+                }
+                (groups, entity.layer_ids.clone())
+            });
         let Some(local) = self.field_local_mut(&instance_key) else {
             return Vec::new();
         };
-        if local.selected == entity_id {
+        let mut revealed = false;
+        if let Some((groups, layers)) = reveal {
+            for group in groups {
+                revealed |= local.collapsed_groups.remove(&group);
+            }
+            for layer in layers {
+                revealed |= local.hidden_layers.remove(&layer);
+            }
+        }
+        if local.selected == entity_id && !revealed {
             return Vec::new();
         }
         local.selected = entity_id;
@@ -350,6 +383,9 @@ impl RyeOsCore {
                 return Vec::new();
             }
         } else {
+            if !local.expansions.contains_key(&key) && local.expansions.len() >= 16 {
+                return Vec::new();
+            }
             local.expansions.entry(key).or_insert(FieldExpansionState {
                 max_depth: 2,
                 max_entities: 250,
@@ -399,8 +435,12 @@ impl RyeOsCore {
         let RyeOsSourceChannel::Named(channel) = key.channel else {
             return;
         };
-        let Ok(document) = field::parse_field_document(response) else {
-            return;
+        let document = match field::parse_field_document(response) {
+            Ok(document) => document,
+            Err(_) => {
+                self.stop_field_playback_for_source(source_key);
+                return;
+            }
         };
         let Some(local) = self.field_local_mut(&key.view_instance) else {
             return;
@@ -418,6 +458,14 @@ impl RyeOsCore {
         };
         if settled {
             local.playback.awaiting = None;
+            if document.truncated
+                || document
+                    .replay
+                    .as_ref()
+                    .is_none_or(|replay| replay.next.is_none())
+            {
+                local.playback.playing = false;
+            }
         }
         for expansion in &document.expansions {
             let Some(root_id) = expansion.get("root_id").and_then(Value::as_str) else {
@@ -431,6 +479,29 @@ impl RyeOsCore {
                     .map(str::to_string);
             }
         }
+    }
+
+    pub(crate) fn stop_field_playback_for_source(&mut self, source_key: &str) {
+        let Some(key) = RyeOsSourceInstanceKey::decode(source_key) else {
+            return;
+        };
+        let Some(local) = self.field_local_mut(&key.view_instance) else {
+            return;
+        };
+        local.playback.playing = false;
+        local.playback.awaiting = None;
+    }
+
+    pub(crate) fn clear_field_expansions_for_channel(
+        &mut self,
+        instance_key: &RyeOsViewInstanceKey,
+        channel: &str,
+    ) {
+        let Some(local) = self.field_local_mut(instance_key) else {
+            return;
+        };
+        let prefix = format!("{channel}\0");
+        local.expansions.retain(|key, _| !key.starts_with(&prefix));
     }
 
     /// Diff the complete projected field after one named source is accepted.
@@ -726,6 +797,26 @@ mod tests {
         assert!(!effects.iter().any(|effect| {
             matches!(&effect.kind, RyeOsEffectKind::FetchSource { source_ref, .. } if source_ref == "service:project")
         }));
+        let first_execution = effects
+            .iter()
+            .find(|effect| {
+                matches!(&effect.kind, RyeOsEffectKind::FetchSource { source_ref, .. } if source_ref == "service:execution")
+            })
+            .unwrap()
+            .clone();
+        core.dispatch(RyeOsEvent::EffectResult {
+            result: RyeOsEffectResult {
+                id: first_execution.id,
+                ok: true,
+                kind: RyeOsEffectResultKind::SourceData,
+                data: Some(facts("execution")),
+                error: None,
+            },
+        });
+        let execution_key =
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), "execution")
+                .encode();
+        assert!(core.data.field_sources.contains_key(&execution_key));
         let (_, selected_vm) =
             super::super::view_model::field_vm_for_instance(&core, &instance_key).unwrap();
         let project_subject = selected_vm
@@ -754,6 +845,10 @@ mod tests {
         assert!(effects.iter().any(|effect| {
             matches!(&effect.kind, RyeOsEffectKind::FetchSource { params, .. } if params["thread_id"] == "T-one")
         }));
+        assert!(
+            !core.data.field_sources.contains_key(&execution_key),
+            "a subject change must evict the parsed document before the replacement settles"
+        );
         let (_, moved_vm) =
             super::super::view_model::field_vm_for_instance(&core, &instance_key).unwrap();
         assert_eq!(
@@ -951,5 +1046,132 @@ mod tests {
             core.seat.fold().get("selection").unwrap()["thread_id"],
             "T-two"
         );
+    }
+
+    #[test]
+    fn search_navigation_reveals_the_matched_group_and_layer() {
+        let mut core = core();
+        let project = core
+            .initial_effects()
+            .into_iter()
+            .find(|effect| {
+                matches!(&effect.kind, RyeOsEffectKind::FetchSource { source_ref, .. } if source_ref == "service:project")
+            })
+            .unwrap();
+        core.dispatch(RyeOsEvent::EffectResult {
+            result: RyeOsEffectResult {
+                id: project.id,
+                ok: true,
+                kind: RyeOsEffectResultKind::SourceData,
+                data: Some(facts("project")),
+                error: None,
+            },
+        });
+        let instance_key = core
+            .workspace
+            .tiles
+            .values()
+            .next()
+            .unwrap()
+            .instance_key
+            .clone();
+        let local = core.field_local_mut(&instance_key).unwrap();
+        local.collapsed_groups.insert("runs".to_string());
+        local.hidden_layers.insert("live".to_string());
+
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::SetFieldQuery {
+                instance_key: instance_key.clone(),
+                query: "two".to_string(),
+            },
+        });
+        let local = core.field_local_mut(&instance_key).unwrap();
+        assert_eq!(local.selected.as_deref(), Some("run:two"));
+        assert!(!local.collapsed_groups.contains("runs"));
+        assert!(!local.hidden_layers.contains("live"));
+    }
+
+    #[test]
+    fn playback_stops_and_clears_awaiting_when_the_next_fetch_fails() {
+        let mut core = core();
+        let project = core
+            .initial_effects()
+            .into_iter()
+            .find(|effect| {
+                matches!(&effect.kind, RyeOsEffectKind::FetchSource { source_ref, .. } if source_ref == "service:project")
+            })
+            .unwrap();
+        core.dispatch(RyeOsEvent::EffectResult {
+            result: RyeOsEffectResult {
+                id: project.id,
+                ok: true,
+                kind: RyeOsEffectResultKind::SourceData,
+                data: Some(facts("project")),
+                error: None,
+            },
+        });
+        let instance_key = core
+            .workspace
+            .tiles
+            .values()
+            .next()
+            .unwrap()
+            .instance_key
+            .clone();
+        let execution = core
+            .dispatch(RyeOsEvent::Ui {
+                event: RyeOsUiEvent::SetFieldSelection {
+                    instance_key: instance_key.clone(),
+                    entity_id: Some("run:one".to_string()),
+                },
+            })
+            .into_iter()
+            .find(|effect| {
+                matches!(&effect.kind, RyeOsEffectKind::FetchSource { source_ref, .. } if source_ref == "service:execution")
+            })
+            .unwrap();
+        let mut replay = facts("execution");
+        replay["subject"] = serde_json::json!({"kind": "thread", "id": "T-one"});
+        replay["replay"] = serde_json::json!({
+            "capability": "adjacent_event_refs",
+            "previous": null,
+            "next": {"chain_root_id": "T-one", "chain_seq": 2, "event_hash": "hash-2"},
+            "live_head": {"chain_root_id": "T-one", "chain_seq": 3, "event_hash": "hash-3"}
+        });
+        core.dispatch(RyeOsEvent::EffectResult {
+            result: RyeOsEffectResult {
+                id: execution.id,
+                ok: true,
+                kind: RyeOsEffectResultKind::SourceData,
+                data: Some(replay),
+                error: None,
+            },
+        });
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::SetFieldPlayback {
+                instance_key: instance_key.clone(),
+                playing: true,
+            },
+        });
+        let next = core.advance_field_playback().into_iter().next().unwrap();
+        assert!(
+            core.field_local_mut(&instance_key)
+                .unwrap()
+                .playback
+                .awaiting
+                .is_some()
+        );
+        core.dispatch(RyeOsEvent::EffectResult {
+            result: RyeOsEffectResult {
+                id: next.id,
+                ok: false,
+                kind: RyeOsEffectResultKind::SourceData,
+                data: None,
+                error: Some("fixture failure".to_string()),
+            },
+        });
+        let playback = &core.field_local_mut(&instance_key).unwrap().playback;
+        assert!(!playback.playing);
+        assert!(playback.awaiting.is_none());
     }
 }

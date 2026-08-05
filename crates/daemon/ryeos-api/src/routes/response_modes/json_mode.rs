@@ -283,6 +283,10 @@ fn query_value_to_json(value: &str) -> serde_json::Value {
         serde_json::Value::Bool(false)
     } else if let Ok(n) = value.parse::<u64>() {
         serde_json::Value::Number(n.into())
+    } else if (value.starts_with('{') && value.ends_with('}'))
+        || (value.starts_with('[') && value.ends_with(']'))
+    {
+        serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.to_string()))
     } else {
         serde_json::Value::String(value.to_string())
     }
@@ -594,6 +598,18 @@ mod tests {
         assert_eq!(value["query"], "ryeos/core");
         assert_eq!(value["limit"], 25);
         assert_eq!(value["include_shadowed"], true);
+    }
+
+    #[test]
+    fn query_params_to_json_accepts_bounded_service_structures() {
+        let value = query_params_to_json(Some(
+            "cursor=%7B%22mode%22%3A%22live%22%7D&expansions=%5B%7B%22root_id%22%3A%22run%3A1%22%2C%22max_depth%22%3A2%7D%5D",
+        ));
+        assert_eq!(value["cursor"], serde_json::json!({"mode": "live"}));
+        assert_eq!(
+            value["expansions"],
+            serde_json::json!([{"root_id": "run:1", "max_depth": 2}])
+        );
     }
 
     #[test]

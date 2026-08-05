@@ -304,6 +304,7 @@ impl RyeOsCore {
             && let Some(tile_id) = self.workspace.replace_focused_view(view.clone())
         {
             self.invalidate_view_sources(&instance_key);
+            self.normalize_field_local_states();
             let tile_id_text = tile_id.0.to_string();
             self.push_motion(RyeOsMotionEventVm::FocusChanged {
                 tile_id: tile_id_text,
@@ -351,6 +352,7 @@ impl RyeOsCore {
             self.invalidate_view_sources(instance_key);
         }
         self.workspace.replace_focused_view(frame.view.clone());
+        self.normalize_field_local_states();
         self.workspace.lens_label = frame.label.clone();
         self.push_motion(RyeOsMotionEventVm::FocusChanged {
             tile_id: self.workspace.focused_tile.0.to_string(),
@@ -430,6 +432,7 @@ impl RyeOsCore {
 
     pub(crate) fn add_center_tile(&mut self, view: ViewSpec) -> Vec<RyeOsEffect> {
         let tile_id = self.add_tile_motions(view);
+        self.normalize_field_local_states();
         let Some(view) = self
             .workspace
             .tiles
@@ -457,6 +460,30 @@ fn arrange_axis_vm(arrange: ArrangeSpec) -> RyeOsSplitAxisVm {
 mod tests {
     use super::*;
     use crate::ui::reducer::test_support::*;
+
+    #[test]
+    fn field_view_added_mid_session_gets_field_local_state_before_fetch() {
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/field",
+            serde_json::json!({
+                "widget": "field",
+                "sources": {"default": {"ref": "service:test/field"}},
+                "projections": {"schema_version": "ryeos.ui.field.projection.v1"}
+            }),
+        );
+        core.add_center_tile(ViewSpec::bound("view:test/field"));
+        let tile = core
+            .workspace
+            .tiles
+            .get(&core.workspace.focused_tile)
+            .unwrap();
+        assert!(matches!(
+            tile.local,
+            crate::workspace::ViewLocalState::Field(_)
+        ));
+    }
 
     #[test]
     fn sections_flat_cursor_selects_a_row_and_resolves_its_section_activation() {

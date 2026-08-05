@@ -2908,13 +2908,30 @@ pub(crate) fn intent_for_focused_row(core: &RyeOsCore) -> Option<RyeOsUiIntent> 
     if let Some(instance_key) = focused_view_instance_key(core)
         && let Some((_view_ref, field)) = field_vm_for_instance(core, &instance_key)
         && let Some(selected) = field.selected.as_deref()
-        && let Some(intent) = field
+    {
+        if let Some(intent) = field
             .entities
             .iter()
             .find(|entity| entity.id == selected)
             .and_then(|entity| entity.activate_intent.clone())
-    {
-        return Some(intent);
+        {
+            return Some(intent);
+        }
+        // The terminal has no pointer hit target for connector strokes. When
+        // the selected entity has exactly one actionable adjacent relation,
+        // Enter reaches that same relation intent exposed as a detail button
+        // on the web surface. Multiple actions remain explicit instead of
+        // choosing an arbitrary edge.
+        let mut adjacent = field.relations.iter().filter_map(|relation| {
+            (relation.source_id == selected || relation.target_id == selected)
+                .then(|| relation.activate_intent.clone())
+                .flatten()
+        });
+        if let Some(intent) = adjacent.next()
+            && adjacent.next().is_none()
+        {
+            return Some(intent);
+        }
     }
     // Feed lens: activation acts on the entry under the point (e.g. enter a
     // forked subthread, inspect an error terminal), not a row.

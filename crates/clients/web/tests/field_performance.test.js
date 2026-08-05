@@ -6,8 +6,8 @@ import { performance } from "node:perf_hooks";
 import {
   hitTest,
   layoutField,
-  rebindFieldLayout,
 } from "../pkg/ryeos_field_layout.js";
+import { FieldCanvasController } from "../pkg/ryeos_field_canvas.js";
 
 const ITERATIONS = 50;
 const COLD_LAYOUT_P95_MS = 120;
@@ -63,7 +63,7 @@ function p95(samples) {
   return [...samples].sort((left, right) => left - right)[Math.ceil(samples.length * 0.95) - 1];
 }
 
-test("fixed 1000/3000 field meets deterministic renderer performance gates", () => {
+test("fixed 1000/3000 field meets deterministic renderer performance gates", (t) => {
   const vm = performanceVm();
   layoutField(vm); // JIT and module warm-up is outside the recorded gate.
 
@@ -77,7 +77,12 @@ test("fixed 1000/3000 field meets deterministic renderer performance gates", () 
   updated.entities[0].selected = false;
   updated.entities[999].selected = true;
   updated.entities[500].status = "running";
-  const dataUpdates = measure(() => rebindFieldLayout(layout, updated));
+  const canvas = { getContext: () => null, dataset: {} };
+  const controller = new FieldCanvasController(canvas, () => {}, "perf");
+  controller.vm = vm;
+  controller.layout = layout;
+  controller.structuralRevision = vm.structural_revision;
+  const dataUpdates = measure(() => controller.update(updated));
   const hit = layout.nodes.get("entity:500");
   const hitTests = measure(() => {
     assert.ok(hitTest(layout, hit.x, hit.y), "a populated field point remains hittable");
@@ -88,12 +93,15 @@ test("fixed 1000/3000 field meets deterministic renderer performance gates", () 
     positions,
     "data-only updates preserve the existing geometry",
   );
+  assert.equal(controller.layoutCount, 0, "data-only updates trigger zero full relayouts");
   const measurements = {
     runner: `${process.version} ${process.platform}/${process.arch}; ${os.cpus()[0]?.model || "unknown CPU"}`,
     coldLayoutP95Ms: p95(cold),
     dataUpdateP95Ms: p95(dataUpdates),
     hitTestP95Ms: p95(hitTests),
+    rawSamplesMs: { cold, dataUpdates, hitTests },
   };
+  t.diagnostic(JSON.stringify(measurements));
   assert.ok(
     measurements.coldLayoutP95Ms <= COLD_LAYOUT_P95_MS,
     `cold layout p95 ${measurements.coldLayoutP95Ms.toFixed(2)}ms exceeds ${COLD_LAYOUT_P95_MS}ms on ${measurements.runner}`,
@@ -106,4 +114,5 @@ test("fixed 1000/3000 field meets deterministic renderer performance gates", () 
     measurements.hitTestP95Ms <= HIT_TEST_P95_MS,
     `hit test p95 ${measurements.hitTestP95Ms.toFixed(2)}ms exceeds ${HIT_TEST_P95_MS}ms on ${measurements.runner}`,
   );
+  controller.unmount();
 });

@@ -28,6 +28,8 @@ const MAX_SCAN: usize = 2_000;
 const MAX_FACET_FILTERS: usize = 16;
 const MAX_FACET_KEY_BYTES: usize = 128;
 const MAX_FACET_VALUE_BYTES: usize = 512;
+const MAX_THREAD_FACETS: usize = 32;
+const MAX_THREAD_FACET_VALUE_BYTES: usize = 512;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -169,6 +171,27 @@ fn add_run_summary(
     row: &ryeos_app::thread_lifecycle::ThreadListView,
     graph_run: Option<&GraphRunListIdentity>,
 ) -> Result<()> {
+    let (facets, oversized_facets, facet_limit_exceeded) = bounded_thread_facets(&row.facets);
+    for _ in 0..oversized_facets {
+        builder.mark_truncated();
+        builder.warn(
+            "facet_value_omitted",
+            format!(
+                "thread `{}` has an oversized facet value",
+                row.item.thread_id
+            ),
+        );
+    }
+    if facet_limit_exceeded {
+        builder.mark_truncated();
+        builder.warn(
+            "facet_limit",
+            format!(
+                "thread `{}` exceeds {MAX_THREAD_FACETS} facets",
+                row.item.thread_id
+            ),
+        );
+    }
     let summary_id = format!("run_summary:{}", row.item.thread_id);
     let thread_id = format!("thread:{}", row.item.thread_id);
     let evidence = vec![FieldEvidenceRef::Thread {
@@ -189,7 +212,7 @@ fn add_run_summary(
         attributes: json!({
             "thread": {
                 "id": row.item.thread_id,
-                "facets": row.facets,
+                "facets": facets,
             },
             "chain_root_id": row.item.chain_root_id,
             "thread_kind": row.item.kind,
@@ -246,6 +269,21 @@ fn add_run_summary(
         })?;
     }
     Ok(())
+}
+
+fn bounded_thread_facets(
+    source: &BTreeMap<String, String>,
+) -> (BTreeMap<String, String>, usize, bool) {
+    let mut facets = BTreeMap::new();
+    let mut oversized = 0usize;
+    for (key, value) in source.iter().take(MAX_THREAD_FACETS) {
+        if value.len() <= MAX_THREAD_FACET_VALUE_BYTES {
+            facets.insert(key.clone(), value.clone());
+        } else {
+            oversized += 1;
+        }
+    }
+    (facets, oversized, source.len() > MAX_THREAD_FACETS)
 }
 
 fn normalize_facet_filters(facets: BTreeMap<String, Value>) -> Result<BTreeMap<String, String>> {
@@ -311,6 +349,26 @@ mod tests {
         assert!(!filters.contains_key("unset"));
         assert!(
             normalize_facet_filters(BTreeMap::from([("nested".to_string(), json!({}))])).is_err()
+        );
+    }
+
+    #[test]
+    fn run_summary_facets_are_bounded_before_serialization() {
+        let mut source = (0..MAX_THREAD_FACETS + 4)
+            .map(|index| (format!("facet-{index:02}"), "value".to_string()))
+            .collect::<BTreeMap<_, _>>();
+        source.insert(
+            "facet-00".to_string(),
+            "x".repeat(MAX_THREAD_FACET_VALUE_BYTES + 1),
+        );
+        let (bounded, oversized, over_limit) = bounded_thread_facets(&source);
+        assert_eq!(bounded.len(), MAX_THREAD_FACETS - 1);
+        assert_eq!(oversized, 1);
+        assert!(over_limit);
+        assert!(
+            bounded
+                .values()
+                .all(|value| value.len() <= MAX_THREAD_FACET_VALUE_BYTES)
         );
     }
 }

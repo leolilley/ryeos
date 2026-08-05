@@ -687,6 +687,7 @@ impl RyeOsCore {
                     None
                 };
                 let key = super::model::dock_view_instance_key(edge);
+                self.normalize_field_local_states();
                 self.bump_generation();
                 shown_view
                     .map(|view_ref| self.emit_fetch_source_for_instance(key, &view_ref))

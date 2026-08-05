@@ -183,13 +183,21 @@ impl RyeOsCore {
     /// reference the facet explicitly.
     pub fn effects_for_facet(&mut self, facet: &str) -> Vec<RyeOsEffect> {
         let subscribed_channels = |binding: &super::content::ViewBinding| {
-            let refreshes_all =
-                binding.refresh.get("on_facet").and_then(|v| v.as_str()) == Some(facet);
             binding
                 .sources
                 .iter()
                 .filter(|(_, source)| {
-                    refreshes_all
+                    let refresh = if source.refresh.is_null()
+                        || source
+                            .refresh
+                            .as_object()
+                            .is_some_and(|value| value.is_empty())
+                    {
+                        &binding.refresh
+                    } else {
+                        &source.refresh
+                    };
+                    refresh.get("on_facet").and_then(|v| v.as_str()) == Some(facet)
                         || serde_json::to_string(&source.params)
                             .unwrap_or_default()
                             .contains(&format!("@facet:{facet}"))
@@ -230,6 +238,7 @@ impl RyeOsCore {
                 channels
                     .into_iter()
                     .flat_map(|channel| {
+                        self.clear_field_expansions_for_channel(&instance_key, &channel);
                         self.refresh_source_channel(instance_key.clone(), &view_ref, &channel)
                     })
                     .collect::<Vec<_>>()

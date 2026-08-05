@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-06T12:24:55Z:7eb471ee6733e2fd07b6ea69a9955412a11f5ea0cf39100b92e69bf1a60c2655:MMVShH5kaikDXWLK69f0b99J3qjfjmyhyZIKPfzLXyAK4kR5VCp+wGrNKx3suHAPUUCnERocZLXKEaaT0DxgCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-04T23:37:21Z:90aea575721e7cf5c4909e0f1ea982f37ddbf532cb0bf14b56fdbbc72bf838af:LSNmnmQyYIySPL6byL+sbctyUSpyunJSfRdhGBRnIuVINdaPCVUd7qFpS4cmsdOip6vscX0KwR1xgpWy5WalDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "frame-v1"
@@ -31,11 +31,13 @@ block below), and a view's `completion` source drives the suggestion rows.
 ## View binding schema (`view:` items)
 
 ```yaml
-widget: rows | key_value | text | timeline | scene
-source:
-  ref: <service ref>          # substrate services; never session-gated wrappers
-  params: { ... }             # values may use "@facet:<key>[.path]" (explicit references)
-  collection: <field path>    # records array for rows/timeline
+widget: rows | table | sections | key_value | text | timeline | scene | field
+sources:
+  default:                    # channel name; multi-source views use additional named channels
+    ref: <service ref>        # substrate services; never session-gated wrappers
+    params: { ... }           # values may use "@facet:<key>[.path]" (explicit references)
+    collection: <field path>  # records array for rows/timeline
+    refresh: { on_hint: <kind> | on_facet: <key> } # optional per-channel override
 projections:
   primary: <field path>
   meta: <field path>
@@ -49,7 +51,7 @@ input:                        # OPTIONAL, SINGULAR: one transient view-local buf
   id: <id>                    # unique within the view (instance keying)
   placeholder: <string>
   target_label: <string>      # OPTIONAL author label for the prompt's target strip; else derived
-  feeds: { param: <name>, debounce_ms: <int> }  # OPTIONAL: buffer -> this view's own source param
+  feeds: { param: <name>, debounce_ms: <int> }  # OPTIONAL: buffer -> this view's default source param
   completion: { ref: <service ref>, collection: <path> }  # OPTIONAL suggestion source
   submit: <affordance_id> | route   # OPTIONAL Enter behaviour (see "Input" below)
 affordances:
@@ -63,7 +65,7 @@ affordances:
       #   {record.<field>} -- from selection (row activation)
       #   {value}          -- from an input submit (the buffer text; no {input} alias)
       #   @facet:<key>      -- facet reads (unchanged)
-refresh: { on_hint: <kind> | on_facet: <key> }
+refresh: { on_hint: <kind> | on_facet: <key> } # default for channels without their own refresh
 ```
 
 ### Selection (row activation)

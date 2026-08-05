@@ -311,9 +311,12 @@ pub const MAX_OPEN_COMMAND_CONTENT_BYTES: usize = 4 * 1024 * 1024;
 /// This remains below the callback UDS frame budget and prevents the ledger
 /// from becoming an unbounded response store.
 pub const MAX_HOOK_DISPATCH_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+/// Exact dispatch-identity seed admitted by this runtime-store epoch.
+pub const HOOK_DISPATCH_SEED_VERSION: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct NewHookDispatch {
+    pub seed_version: u32,
     pub dispatch_key: String,
     pub chain_root_id: String,
     pub caller_thread_id: String,
@@ -798,6 +801,7 @@ CREATE INDEX IF NOT EXISTS idx_thread_commands_thread_status
 
 CREATE TABLE IF NOT EXISTS hook_dispatch_ledger (
     dispatch_key TEXT PRIMARY KEY,
+    seed_version INTEGER NOT NULL CHECK (seed_version = 2),
     chain_root_id TEXT NOT NULL,
     caller_thread_id TEXT NOT NULL,
     event TEXT NOT NULL,
@@ -986,7 +990,11 @@ const PREDECESSOR_RUNTIME_APP_ID: i32 = 0x5259_4541;
 const RUNTIME_OPERATOR_APP_ID_PREFIX: u32 = 0x5259_0000;
 const RUNTIME_OPERATOR_APP_ID_MASK: u32 = 0xffff_ff00;
 const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 1;
+// Epoch 2 is the clean v2 hook-dispatch activation barrier. An epoch-1 store
+// may contain resumable v1-keyed occurrences and is deliberately refused by
+// ordinary open; the explicit runtime-history reset is permitted only after
+// admission has stopped and resumable work has been drained/terminalized.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 2;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -1171,6 +1179,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         name: "dispatch_key",
                         col_type: "TEXT",
                         pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "seed_version",
+                        col_type: "INTEGER",
+                        pk: false,
                         not_null: true,
                     },
                     sqlite_schema::ColumnSpec {
@@ -2858,6 +2872,12 @@ fn validate_sha256(field: &str, value: &str) -> Result<()> {
 }
 
 fn validate_new_hook_dispatch(seed: &NewHookDispatch) -> Result<()> {
+    if seed.seed_version != HOOK_DISPATCH_SEED_VERSION {
+        bail!(
+            "hook dispatch seed version {} is not the active version {HOOK_DISPATCH_SEED_VERSION}",
+            seed.seed_version
+        );
+    }
     validate_sha256("dispatch_key", &seed.dispatch_key)?;
     validate_sha256("request_hash", &seed.request_hash)?;
     for (field, value, limit) in [
@@ -3294,11 +3314,12 @@ impl RuntimeDb {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO hook_dispatch_ledger(
-                dispatch_key, chain_root_id, caller_thread_id, event, hook_id,
+                dispatch_key, seed_version, chain_root_id, caller_thread_id, event, hook_id,
                 request_hash, status, created_at_ms
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 seed.dispatch_key,
+                seed.seed_version,
                 seed.chain_root_id,
                 seed.caller_thread_id,
                 seed.event,
@@ -3314,6 +3335,7 @@ impl RuntimeDb {
         }
 
         let (
+            seed_version,
             chain_root_id,
             occurrence_thread_id,
             event,
@@ -3323,6 +3345,7 @@ impl RuntimeDb {
             response_json,
             response_hash,
         ): (
+            u32,
             String,
             String,
             String,
@@ -3332,7 +3355,7 @@ impl RuntimeDb {
             Option<Vec<u8>>,
             Option<String>,
         ) = tx.query_row(
-            "SELECT chain_root_id, caller_thread_id, event, hook_id,
+            "SELECT seed_version, chain_root_id, caller_thread_id, event, hook_id,
                     request_hash, status, response_json, response_hash
                FROM hook_dispatch_ledger WHERE dispatch_key=?1",
             params![seed.dispatch_key],
@@ -3346,9 +3369,17 @@ impl RuntimeDb {
                     row.get(5)?,
                     row.get(6)?,
                     row.get(7)?,
+                    row.get(8)?,
                 ))
             },
         )?;
+        if seed_version != seed.seed_version {
+            bail!(
+                "hook dispatch key `{}` belongs to seed version {seed_version}, expected {}",
+                seed.dispatch_key,
+                seed.seed_version
+            );
+        }
         if request_hash != seed.request_hash {
             bail!(
                 "hook dispatch key `{}` was reused with a different request hash",
@@ -7884,6 +7915,32 @@ mod tests {
     }
 
     #[test]
+    fn v1_hook_dispatch_epoch_refuses_ordinary_open_and_requires_explicit_reset() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.db");
+        drop(RuntimeDb::open(&path).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "application_id", RUNTIME_OPERATOR_APP_ID_PREFIX | 1)
+            .unwrap();
+        drop(conn);
+
+        let error = RuntimeDb::open(&path)
+            .err()
+            .expect("v1 hook dispatch authority must not open under v2");
+        let message = format!("{error:#}");
+        assert!(message.contains("stored schema_epoch=1"));
+        assert!(requires_execution_schema_cutover(&error), "{message}");
+        assert!(
+            message.contains("explicit no-backcompat reset"),
+            "{message}"
+        );
+
+        let inspection = RuntimeDb::open_for_explicit_history_reset(&path)
+            .expect("a proven predecessor is reset-eligible, never migrated");
+        assert!(inspection.requires_explicit_history_reset());
+    }
+
+    #[test]
     fn unowned_database_is_never_classified_as_a_predecessor() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
@@ -8433,6 +8490,7 @@ mod tests {
 
     fn hook_seed() -> NewHookDispatch {
         NewHookDispatch {
+            seed_version: HOOK_DISPATCH_SEED_VERSION,
             dispatch_key: "a".repeat(64),
             chain_root_id: "T-root".into(),
             caller_thread_id: "T-caller".into(),
@@ -8472,6 +8530,15 @@ mod tests {
         assert_eq!(replayed.response, response);
         db.complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &response)
             .unwrap();
+    }
+
+    #[test]
+    fn hook_dispatch_reservation_rejects_a_non_current_seed_version() {
+        let (_tmp, db) = fresh_db();
+        let mut seed = hook_seed();
+        seed.seed_version = HOOK_DISPATCH_SEED_VERSION - 1;
+        let error = db.reserve_hook_dispatch(&seed).unwrap_err();
+        assert!(error.to_string().contains("not the active version"));
     }
 
     #[test]
@@ -9668,9 +9735,9 @@ mod tests {
                      (thread_id, command_type, status, created_at)
                      VALUES ('T-root', 'cancel', 'pending', '2026-07-15T00:00:00Z');
                  INSERT INTO hook_dispatch_ledger
-                     (dispatch_key, chain_root_id, caller_thread_id, event, hook_id,
+                     (dispatch_key, seed_version, chain_root_id, caller_thread_id, event, hook_id,
                       request_hash, status, created_at_ms)
-                     VALUES ('dispatch-1', 'T-root', 'T-root', 'completed', 'hook-1',
+                     VALUES ('dispatch-1', 2, 'T-root', 'T-root', 'completed', 'hook-1',
                              'request-1', 'pending', 1);
                  INSERT INTO thread_launch_claim
                      (thread_id, claim_id, claimed_at_ms, lease_expires_at_ms, claimed_by)

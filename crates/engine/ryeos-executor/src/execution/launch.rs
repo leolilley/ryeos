@@ -23,7 +23,9 @@ use super::limits::{
 };
 use super::thread_meta::ThreadMeta;
 use crate::dispatch_error::DispatchError;
-use ryeos_app::callback_token::{effective_bundle_id_for_request, launch_token_ttl};
+use ryeos_app::callback_token::{
+    HookDispatchAuthorization, effective_bundle_id_for_request, launch_token_ttl,
+};
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::{ResolvedExecutionRequest, ThreadFinalizeParams};
 use ryeos_app::vault::VaultReadError;
@@ -3090,6 +3092,71 @@ pub(crate) fn derive_effective_caps(
     composed.policy_fact_string_seq(POLICY_FACT_EFFECTIVE_CAPS)
 }
 
+fn admitted_hook_dispatch_authorizations(
+    kind: &str,
+    composed: &Value,
+    raw_content: &str,
+    project_root: &Path,
+    bundle_roots: &[PathBuf],
+    node_trusted_keys_dir: &Path,
+) -> Result<Vec<HookDispatchAuthorization>> {
+    let admitted_events: &[&str] = match kind {
+        "graph" => &["graph_started", "graph_step_completed", "graph_completed"],
+        "directive" => &["after_step", "continuation"],
+        _ => return Ok(Vec::new()),
+    };
+
+    let authored_value = match kind {
+        "graph" => composed.pointer("/config/hooks").cloned().or_else(|| {
+            serde_yaml::from_str::<Value>(raw_content)
+                .ok()
+                .and_then(|value| value.pointer("/config/hooks").cloned())
+        }),
+        "directive" => composed.get("hooks").cloned(),
+        _ => None,
+    };
+    let authored = authored_value
+        .filter(|value| !value.is_null())
+        .map(serde_json::from_value::<Vec<ryeos_runtime::HookDefinition>>)
+        .transpose()
+        .context("decode admitted authored hooks")?
+        .unwrap_or_default();
+
+    // Mirror the runtime's verified configured-hook loader before callback
+    // authority is minted. A later filesystem race can only make the runtime's
+    // view fail closed against this captured set; it cannot widen evidence
+    // provenance after launch.
+    let loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
+        project_root.to_path_buf(),
+        bundle_roots.to_vec(),
+        node_trusted_keys_dir,
+    )?;
+    let mut sources = ryeos_runtime::load_configured_hook_sources(&loader)?;
+    sources.authored = authored;
+    sources.retain_configured_events(admitted_events);
+
+    let mut authorizations = Vec::new();
+    for (layer, hooks) in [
+        (ryeos_runtime::HookLayer::Authored, sources.authored),
+        (ryeos_runtime::HookLayer::Builtin, sources.builtin),
+        (
+            ryeos_runtime::HookLayer::Infrastructure,
+            sources.infrastructure,
+        ),
+        (ryeos_runtime::HookLayer::Context, sources.context),
+        (ryeos_runtime::HookLayer::Operator, sources.operator),
+        (ryeos_runtime::HookLayer::Project, sources.project),
+    ] {
+        authorizations.extend(hooks.into_iter().map(|hook| HookDispatchAuthorization {
+            hook_id: hook.id,
+            event: hook.event,
+            layer,
+            result_mode: hook.result,
+        }));
+    }
+    Ok(authorizations)
+}
+
 /// How a managed runtime launch should treat checkpoint state. One axis (distinct
 /// from `reconcile::ResumeKind`, which is the dispatch route). Encoding the three
 /// legal cases as an enum makes the illegal "both machine-continuation AND
@@ -5312,6 +5379,15 @@ async fn run_claimed_thread_row_inner(
         .state_root_override()
         .unwrap_or(project_path)
         .to_path_buf();
+    let hook_dispatch_authorizations = admitted_hook_dispatch_authorizations(
+        kind,
+        &resolution.composed.composed,
+        &resolution.root.raw_content,
+        project_path,
+        &bundle_roots,
+        &node_trusted_keys_dir,
+    )
+    .context("capture admitted hook dispatch identities")?;
     let cap = state.callback_tokens.generate_with_context(
         &thread_id,
         token_project,
@@ -5326,6 +5402,14 @@ async fn run_claimed_thread_row_inner(
         serde_json::to_value(&hard_limits).unwrap_or(Value::Null),
         current_depth,
     );
+    if !state
+        .callback_tokens
+        .set_hook_dispatch_authorizations(&cap.token, hook_dispatch_authorizations)
+    {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "callback capability disappeared before hook authorization binding"
+        )));
+    }
     lifecycle_owner.track_callback_token(cap.token.clone());
     if !state
         .callback_tokens

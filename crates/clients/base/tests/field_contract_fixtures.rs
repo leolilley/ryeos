@@ -17,6 +17,14 @@ fn generic_truth_fixtures_are_well_formed_and_domain_neutral() {
     let live: Value = serde_json::from_str(LIVE).expect("live fixture JSON");
     let cut: Value = serde_json::from_str(BRAID_CUT).expect("cut fixture JSON");
 
+    let parsed_live = parse_field_document(&live).expect("live fixture satisfies the wire schema");
+    let parsed_cut =
+        parse_field_document(&cut).expect("braid-cut fixture satisfies the wire schema");
+    assert_eq!(parsed_live.entities.len(), 11);
+    assert_eq!(parsed_live.relations.len(), 8);
+    assert_eq!(parsed_cut.entities.len(), 3);
+    assert_eq!(parsed_cut.relations.len(), 1);
+
     for fixture in [&live, &cut] {
         assert_eq!(fixture["schema_version"], "ryeos.ui.field.facts.v1");
         let encoded = serde_json::to_string(fixture).unwrap().to_lowercase();
@@ -70,6 +78,74 @@ fn real_project_fixture_uses_the_same_generic_contract() {
             .entities
             .iter()
             .all(|entity| !entity.provenance.evidence.is_empty())
+    );
+}
+
+#[test]
+fn real_project_fixture_exercises_occurrence_scoped_compound_joins() {
+    let fixture: Value = serde_json::from_str(REAL_PROJECT).expect("real field fixture JSON");
+    let parsed = parse_field_document(&fixture).expect("real field fixture parses generically");
+    let parsed_result = Ok(parsed);
+    let binding: ViewBinding = serde_json::from_value(json!({
+        "widget": "field",
+        "sources": {"execution": {"ref": "service:fixture/field/execution"}},
+        "projections": {
+            "schema_version": FIELD_PROJECTION_SCHEMA,
+            "derived_relations": [{
+                "id": "admitted-controller",
+                "left": {
+                    "match": {
+                        "source": "execution",
+                        "kind": "hook_observation",
+                        "attributes.observation.kind": "arc.portfolio_decision"
+                    },
+                    "keys": [
+                        "attributes.hook.occurrence.graph_run_id",
+                        "attributes.observation.payload.selected_candidate_key"
+                    ]
+                },
+                "right": {
+                    "match": {"source": "execution", "kind": "thread"},
+                    "keys": [
+                        "attributes.thread.facets.portfolio",
+                        "attributes.thread.facets.candidate_key"
+                    ]
+                },
+                "relation": {"kind": "admitted", "directed": true}
+            }]
+        }
+    }))
+    .unwrap();
+    let vm = project_field(
+        "field:portfolio",
+        "Portfolio",
+        "view:fixture/portfolio",
+        &binding,
+        &[FieldSourceInput {
+            channel: "execution",
+            source_ref: "service:fixture/field/execution",
+            subject_fingerprint: Some("thread:portfolio"),
+            response: Some(&fixture),
+            parsed: Some(&parsed_result),
+            error: None,
+            refreshing: false,
+        }],
+        None,
+    );
+    let admitted = vm
+        .relations
+        .iter()
+        .filter(|relation| relation.kind == "admitted")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        admitted.len(),
+        1,
+        "the compound key must select one candidate"
+    );
+    assert!(admitted[0].source_id.starts_with("hook-observation:"));
+    assert_eq!(
+        admitted[0].target_id,
+        "thread:T-a13f49f1-8e89-502c-9875-416156215693"
     );
 }
 

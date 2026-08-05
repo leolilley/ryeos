@@ -2,6 +2,8 @@
 // Semantic rank/lane/group drive placement; stable IDs break every tie.
 
 const GROUP_WIDTH = 520;
+const RANK_SPACING = 210;
+const GROUP_RIGHT_GUTTER = 300;
 const GROUP_HEADER_HEIGHT = 26;
 const LARGE_FIELD_ENTITY_COUNT = 240;
 const LARGE_FIELD_RELATION_COUNT = 720;
@@ -127,6 +129,26 @@ function placeField(vm, prepared, components, previous) {
     ));
   }
 
+  // A group's column is as wide as its deepest semantic rank. Fixed-width
+  // origins make rank >= 2 escape into the next group and destroy compound
+  // boundaries, so later groups start after the actual occupied span.
+  const maximumRankByGroup = new Map();
+  for (const key of buckets.keys()) {
+    const [groupText, rankText] = key.split("\0");
+    const group = Number(groupText);
+    const rank = Number(rankText);
+    maximumRankByGroup.set(group, Math.max(maximumRankByGroup.get(group) ?? 0, rank));
+  }
+  const groupOrigins = new Map();
+  let nextGroupOrigin = 0;
+  for (const group of [...maximumRankByGroup.keys()].sort((left, right) => left - right)) {
+    groupOrigins.set(group, nextGroupOrigin);
+    nextGroupOrigin += Math.max(
+      GROUP_WIDTH,
+      (maximumRankByGroup.get(group) || 0) * RANK_SPACING + GROUP_RIGHT_GUTTER,
+    );
+  }
+
   const nodes = new Map();
   const incoming = incomingSources(relations);
   for (const [key, entities] of [...buckets.entries()].sort(([left], [right]) => (
@@ -137,7 +159,7 @@ function placeField(vm, prepared, components, previous) {
     const rank = Number(rankText);
     const lane = Number(laneText);
     entities.forEach((entity, index) => {
-      const targetX = 120 + group * GROUP_WIDTH + rank * 210;
+      const targetX = 120 + (groupOrigins.get(group) || 0) + rank * RANK_SPACING;
       const targetY = 90 + lane * 150 + index * 86;
       const seed = seedPosition(entity, previous, incoming, targetX, targetY);
       nodes.set(entity.id, {
@@ -175,6 +197,10 @@ function visibleEntities(vm) {
   const hidden = new Set((vm.layers || []).filter((layer) => !layer.visible).map((layer) => layer.id));
   const collapsed = new Set((vm.groups || []).filter((group) => group.collapsed).map((group) => group.id));
   return (vm.entities || []).filter((entity) => {
+    // Selection is an explicit reveal carrier (not only a color change). This
+    // keeps a search match reachable while the shared reducer publishes the
+    // corresponding layer/group reveal state.
+    if (entity.selected) return true;
     if (entity.group_id && collapsed.has(entity.group_id)) return false;
     if (!(entity.layer_ids || []).length) return true;
     return entity.layer_ids.some((layer) => !hidden.has(layer));

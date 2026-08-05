@@ -11385,6 +11385,7 @@ mod tests {
         running_in_process_test_root(&store, thread_id);
         let identity = hook_observation_identity("hook:system/evidence");
         let seed = runtime_db::NewHookDispatch {
+            seed_version: runtime_db::HOOK_DISPATCH_SEED_VERSION,
             dispatch_key: "a".repeat(64),
             chain_root_id: thread_id.to_string(),
             caller_thread_id: thread_id.to_string(),

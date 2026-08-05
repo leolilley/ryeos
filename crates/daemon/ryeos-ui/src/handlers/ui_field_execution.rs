@@ -35,6 +35,7 @@ const MAX_DETAIL_THREADS: usize = 128;
 const MAX_THREAD_FACETS: usize = 32;
 const MAX_THREAD_FACET_VALUE_BYTES: usize = 512;
 const MAX_INLINE_RESULT_BYTES: usize = 192 * 1024;
+const MAX_MANIFEST_VERIFICATIONS: usize = 64;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -133,6 +134,7 @@ struct ExecutionAssembler {
     observations: BTreeMap<String, ObservationFact>,
     hook_failures: BTreeMap<String, HookFailureFact>,
     current_graph: BTreeMap<String, (String, String, String)>,
+    manifest_verifications: BTreeMap<String, (FieldManifestVerification, Option<String>)>,
 }
 
 pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
@@ -173,10 +175,23 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         return serde_json::to_value(document).map_err(Into::into);
     };
 
+    // Materialize enough source-owned candidates for bounded neighborhood
+    // expansion before the generic field layer applies its fact/page bounds.
+    // The hard source caps remain authoritative.
+    let expansion_depth = expansions
+        .iter()
+        .map(|request| usize::from(request.max_depth))
+        .max()
+        .unwrap_or_default();
+    let expansion_nodes = expansions
+        .iter()
+        .map(|request| usize::try_from(request.max_entities).unwrap_or(usize::MAX))
+        .max()
+        .unwrap_or_default();
     let tree = state.threads.execution_tree(
         thread_id,
-        request.max_depth.clamp(1, MAX_DEPTH),
-        request.max_nodes.clamp(1, MAX_NODES),
+        request.max_depth.max(expansion_depth).clamp(1, MAX_DEPTH),
+        request.max_nodes.max(expansion_nodes).clamp(1, MAX_NODES),
     )?;
     let subject = FieldFactSubject {
         kind: "thread".to_string(),
@@ -432,6 +447,7 @@ impl ExecutionAssembler {
             observations: BTreeMap::new(),
             hook_failures: BTreeMap::new(),
             current_graph: BTreeMap::new(),
+            manifest_verifications: BTreeMap::new(),
         }
     }
 
@@ -609,6 +625,9 @@ impl ExecutionAssembler {
                 definition_ref,
                 definition_hash,
             )?;
+            if event.event_type == ryeos_state::event_types::GRAPH_COMPLETED {
+                self.current_graph.remove(&event.thread_id);
+            }
         }
 
         if event.event_type == ryeos_state::event_types::MILESTONE
@@ -616,7 +635,7 @@ impl ExecutionAssembler {
         {
             let payload = event.payload.get("payload").cloned().unwrap_or(Value::Null);
             let (conformance, verification, verification_error) =
-                anchor_status_with_verifier(&payload, &event, cas);
+                self.anchor_status_cached(&payload, &event, cas);
             let attrs = attributes.as_object_mut().expect("checked object");
             attrs.insert("anchor_conformance".to_string(), json!(conformance));
             attrs.insert("manifest_verification".to_string(), json!(verification));
@@ -729,8 +748,19 @@ impl ExecutionAssembler {
         match event.event_type.as_str() {
             ryeos_state::event_types::HOOK_OBSERVATION_RECORDED => {
                 let payload: ryeos_runtime::HookObservationRecordedPayload =
-                    serde_json::from_value(event.payload.clone())
-                        .context("decode durable hook observation")?;
+                    match serde_json::from_value(event.payload.clone()) {
+                        Ok(payload) => payload,
+                        Err(error) => {
+                            self.builder.warn(
+                                "malformed_hook_observation",
+                                format!(
+                                    "durable hook observation at {}:{} was not projected: {error}",
+                                    event_ref.chain_root_id, event_ref.chain_seq
+                                ),
+                            );
+                            return Ok(());
+                        }
+                    };
                 self.record_hook_occurrence(
                     &payload.occurrence_thread_id,
                     &payload.hook.occurrence,
@@ -758,8 +788,19 @@ impl ExecutionAssembler {
             }
             ryeos_state::event_types::HOOK_FAILED => {
                 let payload: ryeos_runtime::HookFailedPayload =
-                    serde_json::from_value(event.payload.clone())
-                        .context("decode durable hook failure")?;
+                    match serde_json::from_value(event.payload.clone()) {
+                        Ok(payload) => payload,
+                        Err(error) => {
+                            self.builder.warn(
+                                "malformed_hook_failure",
+                                format!(
+                                    "durable hook failure at {}:{} was not projected: {error}",
+                                    event_ref.chain_root_id, event_ref.chain_seq
+                                ),
+                            );
+                            return Ok(());
+                        }
+                    };
                 self.record_hook_occurrence(
                     &payload.occurrence_thread_id,
                     &payload.hook.occurrence,
@@ -845,6 +886,46 @@ impl ExecutionAssembler {
             _ => {}
         }
         Ok(())
+    }
+
+    fn anchor_status_cached(
+        &mut self,
+        payload: &Value,
+        event: &PersistedEventRecord,
+        cas: Option<&lillux::CasStore>,
+    ) -> (
+        FieldAnchorConformance,
+        FieldManifestVerification,
+        Option<String>,
+    ) {
+        let (conformance, _, _) = anchor_status_with_verifier(payload, event, None);
+        if conformance != FieldAnchorConformance::ContractV1 || cas.is_none() {
+            return anchor_status_with_verifier(payload, event, None);
+        }
+        let manifest_ref = payload
+            .get("manifest_ref")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let cache_key = format!(
+            "{manifest_ref}\0{}\0{}",
+            event.chain_root_id, event.thread_id
+        );
+        if let Some((verification, error)) = self.manifest_verifications.get(&cache_key) {
+            return (conformance, *verification, error.clone());
+        }
+        if self.manifest_verifications.len() >= MAX_MANIFEST_VERIFICATIONS {
+            return (
+                conformance,
+                FieldManifestVerification::NotChecked,
+                Some(format!(
+                    "document verification limit of {MAX_MANIFEST_VERIFICATIONS} manifests reached"
+                )),
+            );
+        }
+        let (_, verification, error) = anchor_status_with_verifier(payload, event, cas);
+        self.manifest_verifications
+            .insert(cache_key, (verification, error.clone()));
+        (conformance, verification, error)
     }
 
     fn record_graph_event(
@@ -1611,6 +1692,7 @@ fn bounded_event_attributes(event: &PersistedEventRecord) -> Result<Value> {
         "target_node_ref",
         "attempt",
         "attempts",
+        "iteration",
         "delay_ms",
         "total",
         "parallel",
@@ -1640,7 +1722,12 @@ fn bounded_event_attributes(event: &PersistedEventRecord) -> Result<Value> {
     let value = Value::Object(attributes);
     let bytes = lillux::canonical_json(&value)?.len();
     if bytes > MAX_FIELD_FACT_ATTRIBUTE_BYTES {
-        bail!("bounded event attributes exceed the field attribute limit");
+        return Ok(json!({
+            "event_type": event.event_type,
+            "timestamp": event.ts,
+            "payload_omitted": true,
+            "payload_omitted_reason": "field_attribute_limit",
+        }));
     }
     Ok(value)
 }
@@ -2140,6 +2227,42 @@ mod tests {
         assert!(error.unwrap().contains("restore blob is missing"));
     }
 
+    #[test]
+    fn manifest_verification_is_memoized_and_capped_per_document() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas = lillux::CasStore::new(temp.path().join("cas"));
+        let mut assembler = assembler();
+        let mut final_status = None;
+        for index in 0..=MAX_MANIFEST_VERIFICATIONS {
+            let digest = format!("{index:064x}");
+            let payload = json!({
+                "schema_version": 1,
+                "label": "state",
+                "state_digest": format!("sha256:{digest}"),
+                "manifest_ref": format!("cas:{digest}"),
+                "runtime": {"kind": "opaque"},
+                "metadata": {}
+            });
+            final_status = Some(assembler.anchor_status_cached(
+                &payload,
+                &event(
+                    index as i64 + 1,
+                    ryeos_state::event_types::MILESTONE,
+                    json!({}),
+                ),
+                Some(&cas),
+            ));
+        }
+        assert_eq!(
+            assembler.manifest_verifications.len(),
+            MAX_MANIFEST_VERIFICATIONS
+        );
+        assert_eq!(
+            final_status.unwrap().1,
+            FieldManifestVerification::NotChecked
+        );
+    }
+
     fn observation_payload(response_hash: &str) -> ryeos_runtime::HookObservationRecordedPayload {
         ryeos_runtime::HookObservationRecordedPayload {
             schema_version: ryeos_runtime::HOOK_OBSERVATION_SCHEMA.to_string(),
@@ -2216,6 +2339,33 @@ mod tests {
             ))
             .expect_err("same observation identity with changed bytes must fail");
         assert!(error.to_string().contains("divergent durable duplicates"));
+    }
+
+    #[test]
+    fn malformed_hook_event_degrades_without_losing_the_document() {
+        let mut assembler = assembler();
+        assembler
+            .add_event(event(
+                1,
+                ryeos_state::event_types::HOOK_OBSERVATION_RECORDED,
+                json!({"schema_version": "not-the-hook-schema"}),
+            ))
+            .unwrap();
+        let facts = assembler.finish().unwrap();
+        assert!(facts.entities.iter().any(|entity| {
+            entity.kind == "event"
+                && entity.attributes["event_type"]
+                    == ryeos_state::event_types::HOOK_OBSERVATION_RECORDED
+        }));
+        assert!(facts.warnings.iter().any(|warning| {
+            warning.get("code").and_then(Value::as_str) == Some("malformed_hook_observation")
+        }));
+        assert!(
+            facts
+                .entities
+                .iter()
+                .all(|entity| entity.kind != "hook_observation")
+        );
     }
 
     #[test]

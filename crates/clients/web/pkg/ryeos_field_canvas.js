@@ -7,7 +7,7 @@ import {
   layoutFieldChunked,
   rebindFieldLayout,
   settleLayout,
-} from "/ui/assets/ryeos_field_layout.js";
+} from "./ryeos_field_layout.js";
 
 const TONES = {
   good: "#8ec07c",
@@ -112,6 +112,7 @@ export class FieldCanvasController {
       isStale: () => this.unmounted || token !== this.layoutGeneration,
     }).then(commit).catch((error) => {
       if (!(error instanceof StaleFieldLayoutError)) {
+        this.structuralRevision = null;
         // A renderer failure must stay visible without poisoning shared state.
         this.canvas.dataset.layoutError = String(error?.message || error);
       }
@@ -123,6 +124,7 @@ export class FieldCanvasController {
     if (preference("(prefers-reduced-motion: reduce)")) {
       settleLayout(this.layout, 1);
       this.draw();
+      this.tombstones.clear();
       return;
     }
     let remaining = this.tombstones.size ? 22 : 12;
@@ -228,10 +230,18 @@ export class FieldCanvasController {
     this.canvas.onpointercancel = end;
     this.canvas.onwheel = (event) => {
       event.preventDefault();
-      this.viewport.zoom = Math.max(
+      const rect = this.canvas.getBoundingClientRect();
+      const screenX = event.clientX - rect.left;
+      const screenY = event.clientY - rect.top;
+      const fieldX = (screenX - this.viewport.x) / this.viewport.zoom;
+      const fieldY = (screenY - this.viewport.y) / this.viewport.zoom;
+      const zoom = Math.max(
         0.25,
         Math.min(3.5, this.viewport.zoom * Math.exp(-event.deltaY * 0.001)),
       );
+      this.viewport.zoom = zoom;
+      this.viewport.x = screenX - fieldX * zoom;
+      this.viewport.y = screenY - fieldY * zoom;
       this.draw();
     };
   }

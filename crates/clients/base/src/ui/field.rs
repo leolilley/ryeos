@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::ui::content::ViewBinding;
+use crate::ui::content::{Payload, Producer, ViewBinding, resolve_affordance_invoke};
 use crate::ui::event::RyeOsUiIntent;
 use crate::ui::view_model::{RyeOsRowDetailVm, RyeOsTone};
 use crate::workspace::{FieldFingerprintState, FieldLocalState};
@@ -27,6 +27,7 @@ pub const MAX_FIELD_METRICS: usize = 1_024;
 pub const MAX_FIELD_EXPANSIONS: usize = 16;
 pub const MAX_FIELD_WARNINGS: usize = 256;
 pub const MAX_FIELD_PREVIEW_BYTES: usize = 1024 * 1024;
+pub const MAX_FIELD_SEARCH_MATCHES: usize = 512;
 pub const MAX_GRID_AXIS: u32 = 512;
 pub const MAX_GRID_CELLS: usize = 262_144;
 pub const MAX_GRID_PALETTE: usize = 256;
@@ -560,14 +561,12 @@ fn default_true() -> bool {
 
 #[derive(Clone)]
 struct MergedEntity {
-    source: String,
     owner: String,
     raw: FieldFactEntity,
 }
 
 #[derive(Clone)]
 struct MergedRelation {
-    source: String,
     owner: String,
     raw: FieldFactRelation,
 }
@@ -584,7 +583,7 @@ pub fn parse_field_document(value: &Value) -> Result<FieldFactsDocument, String>
         ));
     }
     validate_json_shape(value, 0, &mut 0)?;
-    let document: FieldFactsDocument = serde_json::from_value(value.clone())
+    let mut document: FieldFactsDocument = serde_json::from_value(value.clone())
         .map_err(|error| format!("invalid field facts: {error}"))?;
     if document.schema_version != FIELD_FACTS_SCHEMA {
         return Err(format!(
@@ -618,19 +617,38 @@ pub fn parse_field_document(value: &Value) -> Result<FieldFactsDocument, String>
         validate_attributes(&relation.attributes)?;
     }
     let mut preview_ids = BTreeSet::new();
-    for preview in &document.previews {
-        if serde_json::to_vec(preview)
-            .map_err(|error| error.to_string())?
-            .len()
-            > MAX_FIELD_PREVIEW_BYTES
-        {
-            return Err("field preview exceeds the inline byte limit".to_string());
-        }
-        let projected = project_preview(preview)?;
-        if !preview_ids.insert(projected.id) {
-            return Err("field document contains a duplicate preview ID".to_string());
+    let mut valid_previews = Vec::with_capacity(document.previews.len());
+    for preview in std::mem::take(&mut document.previews) {
+        let validation = serde_json::to_vec(&preview)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| {
+                if bytes.len() > MAX_FIELD_PREVIEW_BYTES {
+                    Err("field preview exceeds the inline byte limit".to_string())
+                } else {
+                    project_preview(&preview).map(|projected| projected.id)
+                }
+            })
+            .and_then(|id| {
+                if preview_ids.insert(id) {
+                    Ok(())
+                } else {
+                    Err("field document contains a duplicate preview ID".to_string())
+                }
+            });
+        match validation {
+            Ok(()) => valid_previews.push(preview),
+            Err(error) => {
+                document.truncated = true;
+                if document.warnings.len() < MAX_FIELD_WARNINGS {
+                    document.warnings.push(json!({
+                        "code": "preview_omitted",
+                        "message": error,
+                    }));
+                }
+            }
         }
     }
+    document.previews = valid_previews;
     let mut expansion_roots = BTreeSet::new();
     for expansion in &document.expansions {
         let expansion: FieldExpansionResult = serde_json::from_value(expansion.clone())
@@ -816,7 +834,6 @@ pub fn project_field(
         for entity in &document.entities {
             provenance.insert(entity.provenance.source_ref.clone());
             let candidate = MergedEntity {
-                source: document.source.clone(),
                 owner: channel.clone(),
                 raw: entity.clone(),
             };
@@ -828,7 +845,6 @@ pub fn project_field(
         for relation in &document.relations {
             provenance.insert(relation.provenance.source_ref.clone());
             let candidate = MergedRelation {
-                source: document.source.clone(),
                 owner: channel.clone(),
                 raw: relation.clone(),
             };
@@ -860,9 +876,12 @@ pub fn project_field(
     let collided_entities = entity_candidates
         .iter()
         .filter(|(_, candidates)| {
-            candidates
-                .first()
-                .is_some_and(|first| candidates.iter().skip(1).any(|item| item.raw != first.raw))
+            candidates.first().is_some_and(|first| {
+                candidates
+                    .iter()
+                    .skip(1)
+                    .any(|item| !same_entity_fact(&item.raw, &first.raw))
+            })
         })
         .map(|(id, _)| id.clone())
         .collect::<BTreeSet<_>>();
@@ -904,9 +923,12 @@ pub fn project_field(
     let collided_relations = relation_candidates
         .iter()
         .filter(|(_, candidates)| {
-            candidates
-                .first()
-                .is_some_and(|first| candidates.iter().skip(1).any(|item| item.raw != first.raw))
+            candidates.first().is_some_and(|first| {
+                candidates
+                    .iter()
+                    .skip(1)
+                    .any(|item| !same_relation_fact(&item.raw, &first.raw))
+            })
         })
         .map(|(id, _)| id.clone())
         .collect::<BTreeSet<_>>();
@@ -1052,7 +1074,10 @@ pub fn project_field(
             }
             Some(project_relation(
                 relation,
+                &merged_entities,
                 &projection,
+                binding,
+                view_ref,
                 &local,
                 &mut warnings,
             ))
@@ -1061,6 +1086,8 @@ pub fn project_field(
     relations.extend(project_derived_relations(
         &merged_entities,
         &projection,
+        binding,
+        view_ref,
         &local,
         &mut warnings,
     ));
@@ -1102,7 +1129,7 @@ pub fn project_field(
         entity.selected = selected.as_deref() == Some(entity.id.as_str());
     }
     let query = local.query.trim().to_ascii_lowercase();
-    let match_ids = if query.is_empty() {
+    let all_match_ids = if query.is_empty() {
         Vec::new()
     } else {
         entities
@@ -1111,6 +1138,11 @@ pub fn project_field(
             .map(|entity| entity.id.clone())
             .collect::<Vec<_>>()
     };
+    let search_truncated = all_match_ids.len() > MAX_FIELD_SEARCH_MATCHES;
+    let match_ids = all_match_ids
+        .into_iter()
+        .take(MAX_FIELD_SEARCH_MATCHES)
+        .collect::<Vec<_>>();
     let active_match = local
         .search_match
         .clone()
@@ -1150,8 +1182,8 @@ pub fn project_field(
     metrics.sort_by(|left, right| left.id.cmp(&right.id));
     let data_revision = hash_value(&json!({
         "sources": source_status.iter().map(|source| (&source.name, &source.revision)).collect::<Vec<_>>(),
-        "entities": entities,
-        "relations": relations,
+        "entities": entities.iter().map(data_entity).collect::<Vec<_>>(),
+        "relations": relations.iter().map(data_relation).collect::<Vec<_>>(),
         "previews": previews,
         "metrics": metrics,
         "expansions": expansions,
@@ -1210,7 +1242,7 @@ pub fn project_field(
             query: local.query,
             match_ids,
             active_match,
-            truncated: false,
+            truncated: search_truncated,
         },
         expansions,
         changes: local
@@ -1346,7 +1378,7 @@ pub(crate) fn apply_field_local_state(
     field.selected = selected;
 
     let query = local.query.trim().to_ascii_lowercase();
-    let match_ids = if query.is_empty() {
+    let all_match_ids = if query.is_empty() {
         Vec::new()
     } else {
         field
@@ -1356,6 +1388,11 @@ pub(crate) fn apply_field_local_state(
             .map(|entity| entity.id.clone())
             .collect::<Vec<_>>()
     };
+    let search_truncated = all_match_ids.len() > MAX_FIELD_SEARCH_MATCHES;
+    let match_ids = all_match_ids
+        .into_iter()
+        .take(MAX_FIELD_SEARCH_MATCHES)
+        .collect::<Vec<_>>();
     let active_match = local
         .search_match
         .clone()
@@ -1365,7 +1402,7 @@ pub(crate) fn apply_field_local_state(
         query: local.query.clone(),
         match_ids,
         active_match,
-        truncated: false,
+        truncated: search_truncated,
     };
 
     let mut compare = local
@@ -1434,8 +1471,8 @@ pub(crate) fn apply_field_local_state(
     }));
     field.data_revision = hash_value(&json!({
         "sources": field.sources.iter().map(|source| (&source.name, &source.revision)).collect::<Vec<_>>(),
-        "entities": field.entities,
-        "relations": field.relations,
+        "entities": field.entities.iter().map(data_entity).collect::<Vec<_>>(),
+        "relations": field.relations.iter().map(data_relation).collect::<Vec<_>>(),
         "previews": field.previews,
         "metrics": field.metrics,
         "expansions": field.expansions,
@@ -1627,7 +1664,7 @@ fn project_entity(
     let raw_value = serde_json::to_value(&entity.raw).unwrap_or(Value::Null);
     let mut set = BTreeMap::new();
     for rule in &projection.entity_rules {
-        if matches_record(&entity.source, &raw_value, &rule.matches) {
+        if matches_record(&entity.owner, &raw_value, &rule.matches) {
             set.extend(rule.set.clone());
         }
     }
@@ -1659,26 +1696,20 @@ fn project_entity(
         ),
     };
     let selected = local.selected.as_deref() == Some(entity.raw.id.as_str());
-    let select_intent = binding.selection.as_ref().and_then(|selection| {
-        selection
-            .change
-            .as_ref()
-            .map(|affordance_id| RyeOsUiIntent::InvokeAffordance {
-                view_ref: view_ref.to_string(),
-                affordance_id: affordance_id.clone(),
-                record: raw_value.clone(),
-            })
-    });
-    let activate_intent = binding.selection.as_ref().and_then(|selection| {
-        selection
-            .activate
-            .as_ref()
-            .map(|affordance_id| RyeOsUiIntent::InvokeAffordance {
-                view_ref: view_ref.to_string(),
-                affordance_id: affordance_id.clone(),
-                record: raw_value.clone(),
-            })
-    });
+    let select_intent = binding
+        .selection
+        .as_ref()
+        .and_then(|selection| selection.change.as_deref())
+        .and_then(|affordance_id| {
+            validated_affordance_intent(binding, view_ref, affordance_id, &raw_value)
+        });
+    let activate_intent = binding
+        .selection
+        .as_ref()
+        .and_then(|selection| selection.activate.as_deref())
+        .and_then(|affordance_id| {
+            validated_affordance_intent(binding, view_ref, affordance_id, &raw_value)
+        });
     let label =
         resolved_string(set.get("label"), &raw_value).unwrap_or_else(|| entity.raw.label.clone());
     let secondary = resolved_string(set.get("secondary"), &raw_value);
@@ -1699,7 +1730,7 @@ fn project_entity(
         status: entity.raw.status.clone(),
         tone,
         traits,
-        badges: Vec::new(),
+        badges: project_badges(set.get("badges"), &raw_value, warnings),
         preview_ids: Vec::new(),
         selected,
         selectable: true,
@@ -1717,17 +1748,30 @@ fn project_entity(
 
 fn project_relation(
     relation: &MergedRelation,
+    entities: &BTreeMap<String, MergedEntity>,
     projection: &FieldProjection,
+    binding: &ViewBinding,
+    view_ref: &str,
     local: &FieldLocalState,
     warnings: &mut Vec<String>,
 ) -> RyeOsFieldRelationVm {
     let raw_value = serde_json::to_value(&relation.raw).unwrap_or(Value::Null);
     let mut set = BTreeMap::new();
     for rule in &projection.relation_rules {
-        if matches_record(&relation.source, &raw_value, &rule.matches) {
+        if matches_record(&relation.owner, &raw_value, &rule.matches) {
             set.extend(rule.set.clone());
         }
     }
+    let activate_intent = relation_activate_intent(
+        &set,
+        &raw_value,
+        &relation.raw.source_id,
+        &relation.raw.target_id,
+        entities,
+        local.selected.as_deref(),
+        binding,
+        view_ref,
+    );
     RyeOsFieldRelationVm {
         id: relation.raw.id.clone(),
         kind: relation.raw.kind.clone(),
@@ -1755,7 +1799,7 @@ fn project_relation(
         selected: local.selected.as_ref().is_some_and(|selected| {
             selected == &relation.raw.source_id || selected == &relation.raw.target_id
         }),
-        activate_intent: None,
+        activate_intent,
         accessibility_label: format!(
             "{} from {} to {}",
             relation.raw.kind, relation.raw.source_id, relation.raw.target_id
@@ -1766,6 +1810,8 @@ fn project_relation(
 fn project_derived_relations(
     entities: &BTreeMap<String, MergedEntity>,
     projection: &FieldProjection,
+    binding: &ViewBinding,
+    view_ref: &str,
     local: &FieldLocalState,
     warnings: &mut Vec<String>,
 ) -> Vec<RyeOsFieldRelationVm> {
@@ -1800,8 +1846,32 @@ fn project_derived_relations(
                 .unwrap_or("related")
                 .to_string();
             let id = format!("derived:{}:{}:{}", derived.id, source_id, target_id);
+            let relation_record = json!({
+                "id": id,
+                "kind": kind,
+                "source_id": source_id,
+                "target_id": target_id,
+                "directed": derived
+                    .relation
+                    .get("directed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+            });
+            let activate_intent = relation_activate_intent(
+                &derived.relation,
+                &relation_record,
+                &source_id,
+                &target_id,
+                entities,
+                local.selected.as_deref(),
+                binding,
+                view_ref,
+            );
             out.push(RyeOsFieldRelationVm {
-                id,
+                id: relation_record["id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
                 kind: kind.clone(),
                 source_id: source_id.clone(),
                 target_id: target_id.clone(),
@@ -1836,12 +1906,56 @@ fn project_derived_relations(
                     .selected
                     .as_ref()
                     .is_some_and(|selected| selected == &source_id || selected == &target_id),
-                activate_intent: None,
+                activate_intent,
                 accessibility_label: format!("{kind} from {source_id} to {target_id}"),
             });
         }
     }
     out
+}
+
+fn relation_activate_intent(
+    set: &BTreeMap<String, Value>,
+    relation_raw: &Value,
+    source_id: &str,
+    target_id: &str,
+    entities: &BTreeMap<String, MergedEntity>,
+    selected: Option<&str>,
+    binding: &ViewBinding,
+    view_ref: &str,
+) -> Option<RyeOsUiIntent> {
+    if let Some(affordance_id) = resolved_string(set.get("activate"), relation_raw) {
+        return validated_affordance_intent(binding, view_ref, &affordance_id, relation_raw);
+    }
+    let affordance_id = binding
+        .selection
+        .as_ref()
+        .and_then(|selection| selection.activate.as_deref())?;
+    let neighbor_id = match selected {
+        Some(id) if id == target_id => source_id,
+        _ => target_id,
+    };
+    let neighbor = entities.get(neighbor_id)?;
+    let record = serde_json::to_value(&neighbor.raw).ok()?;
+    validated_affordance_intent(binding, view_ref, affordance_id, &record)
+}
+
+fn validated_affordance_intent(
+    binding: &ViewBinding,
+    view_ref: &str,
+    affordance_id: &str,
+    record: &Value,
+) -> Option<RyeOsUiIntent> {
+    let affordance = binding
+        .affordances
+        .iter()
+        .find(|affordance| affordance.get("id").and_then(Value::as_str) == Some(affordance_id))?;
+    resolve_affordance_invoke(affordance, Producer::Selection, &Payload::Selection(record))?;
+    Some(RyeOsUiIntent::InvokeAffordance {
+        view_ref: view_ref.to_string(),
+        affordance_id: affordance_id.to_string(),
+        record: record.clone(),
+    })
 }
 
 fn join_index(
@@ -1851,7 +1965,7 @@ fn join_index(
     let mut index = BTreeMap::<Vec<String>, Vec<String>>::new();
     for entity in entities.values() {
         let raw = serde_json::to_value(&entity.raw).unwrap_or(Value::Null);
-        if !matches_record(&entity.source, &raw, &side.matches) {
+        if !matches_record(&entity.owner, &raw, &side.matches) {
             continue;
         }
         let values = side
@@ -1921,6 +2035,37 @@ fn resolved_string_list(value: Option<&Value>, record: &Value) -> Vec<String> {
     }
 }
 
+fn project_badges(
+    value: Option<&Value>,
+    record: &Value,
+    warnings: &mut Vec<String>,
+) -> Vec<RyeOsFieldBadgeVm> {
+    let Some(values) = value.map(|value| match value {
+        Value::Array(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    }) else {
+        return Vec::new();
+    };
+    values
+        .iter()
+        .take(8)
+        .filter_map(|value| match value {
+            Value::Object(object) => {
+                let label = resolved_string(object.get("label"), record)?;
+                let tone = parse_tone(
+                    resolved_string(object.get("tone"), record).as_deref(),
+                    warnings,
+                );
+                Some(RyeOsFieldBadgeVm { label, tone })
+            }
+            value => resolved_string(Some(value), record).map(|label| RyeOsFieldBadgeVm {
+                label,
+                tone: RyeOsTone::Neutral,
+            }),
+        })
+        .collect()
+}
+
 fn resolved_i64(value: Option<&Value>, record: &Value) -> Option<i64> {
     match value? {
         Value::Number(value) => value.as_i64(),
@@ -1954,6 +2099,22 @@ fn value_string(value: &Value) -> Option<String> {
 
 fn namespaced_collision_id(owner: &str, id: &str) -> String {
     format!("source:{owner}::{id}")
+}
+
+fn fact_without_provenance(value: &impl Serialize) -> Value {
+    let mut value = serde_json::to_value(value).unwrap_or(Value::Null);
+    if let Some(object) = value.as_object_mut() {
+        object.remove("provenance");
+    }
+    value
+}
+
+fn same_entity_fact(left: &FieldFactEntity, right: &FieldFactEntity) -> bool {
+    fact_without_provenance(left) == fact_without_provenance(right)
+}
+
+fn same_relation_fact(left: &FieldFactRelation, right: &FieldFactRelation) -> bool {
+    fact_without_provenance(left) == fact_without_provenance(right)
 }
 
 fn scalar_details(attributes: &Value) -> Vec<RyeOsRowDetailVm> {
@@ -2395,6 +2556,22 @@ fn structural_relation(relation: &RyeOsFieldRelationVm) -> Value {
     })
 }
 
+fn data_entity(entity: &RyeOsFieldEntityVm) -> Value {
+    let mut value = serde_json::to_value(entity).unwrap_or(Value::Null);
+    if let Some(object) = value.as_object_mut() {
+        object.remove("selected");
+    }
+    value
+}
+
+fn data_relation(relation: &RyeOsFieldRelationVm) -> Value {
+    let mut value = serde_json::to_value(relation).unwrap_or(Value::Null);
+    if let Some(object) = value.as_object_mut() {
+        object.remove("selected");
+    }
+    value
+}
+
 fn hash_value(value: &Value) -> String {
     let bytes = serde_json::to_vec(value).unwrap_or_default();
     let digest = Sha256::digest(bytes);
@@ -2404,7 +2581,11 @@ fn hash_value(value: &Value) -> String {
 fn compact_value(value: &Value) -> String {
     let mut text = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
     if text.len() > 512 {
-        text.truncate(509);
+        let mut boundary = 509;
+        while !text.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        text.truncate(boundary);
         text.push_str("...");
     }
     text
@@ -2581,6 +2762,90 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn malformed_preview_is_omitted_without_losing_valid_facts() {
+        let mut value = document("execution", "step:a");
+        value["previews"] = json!([
+            {"id": "bad", "kind": "unknown_preview", "entity_id": "step:a"}
+        ]);
+        let parsed = parse_field_document(&value).expect("bad preview degrades locally");
+        assert_eq!(parsed.entities.len(), 1);
+        assert!(parsed.previews.is_empty());
+        assert!(parsed.truncated);
+        assert!(parsed.warnings.iter().any(|warning| {
+            warning.get("code").and_then(Value::as_str) == Some("preview_omitted")
+        }));
+    }
+
+    #[test]
+    fn compact_value_truncates_only_at_utf8_boundaries() {
+        let value = Value::String(format!("{}ééé", "x".repeat(508)));
+        let compact = compact_value(&value);
+        assert!(compact.ends_with("..."));
+        assert!(compact.is_char_boundary(compact.len()));
+        assert!(compact.len() <= 512);
+    }
+
+    #[test]
+    fn projected_relations_carry_the_shared_activation_intent() {
+        let mut value = document("execution", "step:a");
+        let mut second = value["entities"][0].clone();
+        second["id"] = json!("step:b");
+        second["label"] = json!("step:b");
+        value["entities"].as_array_mut().unwrap().push(second);
+        value["relations"] = json!([{
+            "id": "flow:a:b",
+            "kind": "flows_to",
+            "source_id": "step:a",
+            "target_id": "step:b",
+            "directed": true,
+            "attributes": {},
+            "provenance": {
+                "source_ref": "service:execution",
+                "source_revision": "revision:execution",
+                "evidence": []
+            }
+        }]);
+        let parsed = parse_field_document(&value).unwrap();
+        let parsed_result = Ok(parsed);
+        let binding: ViewBinding = serde_json::from_value(json!({
+            "widget": "field",
+            "sources": {"execution": {"ref": "service:execution"}},
+            "selection": {"activate": "inspect"},
+            "affordances": [{
+                "id": "inspect",
+                "invoke": {"plane": "ui", "facet": "selection.relation", "value": "{record.id}"}
+            }],
+            "projections": {"schema_version": FIELD_PROJECTION_SCHEMA}
+        }))
+        .unwrap();
+        let vm = project_field(
+            "field:test",
+            "Test",
+            "view:test",
+            &binding,
+            &[FieldSourceInput {
+                channel: "execution",
+                source_ref: "service:execution",
+                subject_fingerprint: None,
+                response: Some(&value),
+                parsed: Some(&parsed_result),
+                error: None,
+                refreshing: false,
+            }],
+            None,
+        );
+        let intent = vm.relations[0]
+            .activate_intent
+            .as_ref()
+            .expect("relation action is renderer reachable");
+        assert!(matches!(
+            intent,
+            RyeOsUiIntent::InvokeAffordance { affordance_id, record, .. }
+                if affordance_id == "inspect" && record["id"] == "step:b"
+        ));
     }
 
     #[test]

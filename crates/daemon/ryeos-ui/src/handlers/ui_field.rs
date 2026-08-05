@@ -241,6 +241,13 @@ pub struct FieldFactsDocument {
     pub metrics: Vec<Value>,
     pub expansions: Vec<Value>,
     pub warnings: Vec<Value>,
+    /// Full source-owned candidate set retained only until the handler has
+    /// applied expansion requests. These fields never cross the wire; the
+    /// bounded public vectors above remain the complete v1 schema.
+    #[serde(skip)]
+    expansion_entities: Vec<FieldFactEntity>,
+    #[serde(skip)]
+    expansion_relations: Vec<FieldFactRelation>,
 }
 
 pub struct FieldFactsBuilder {
@@ -371,6 +378,16 @@ impl FieldFactsBuilder {
             metrics,
             expansions,
         } = self;
+        let expansion_entities = entities.values().cloned().collect::<Vec<_>>();
+        let expansion_relations = relations.values().cloned().collect::<Vec<_>>();
+        let expansion_reservoir_revision = lillux::sha256_hex(
+            lillux::canonical_json(&serde_json::json!({
+                "entities": &expansion_entities,
+                "relations": &expansion_relations,
+            }))
+            .context("canonicalize field expansion reservoir")?
+            .as_bytes(),
+        );
         let entity_ids = entities
             .keys()
             .take(MAX_FIELD_FACT_ENTITIES)
@@ -422,6 +439,7 @@ impl FieldFactsBuilder {
                 "previews": &previews,
                 "metrics": &metrics,
                 "expansions": &expansions,
+                "expansion_reservoir_revision": &expansion_reservoir_revision,
             });
             let canonical = lillux::canonical_json(&revision_input)
                 .context("canonicalize field source revision")?;
@@ -448,6 +466,8 @@ impl FieldFactsBuilder {
                 metrics: metrics.clone(),
                 expansions: expansions.clone(),
                 warnings: warnings.clone(),
+                expansion_entities: expansion_entities.clone(),
+                expansion_relations: expansion_relations.clone(),
             };
             let document_value = serde_json::to_value(&document)
                 .context("serialize bounded field facts document")?;
@@ -585,6 +605,7 @@ pub fn apply_bounded_expansions(
             u32::try_from(end).unwrap_or(u32::MAX),
         ));
     }
+    materialize_expansion_facts(&mut document, &mut pending, &adjacency)?;
     let revision_projection = pending
         .iter()
         .map(|(_, result, _)| result)
@@ -640,12 +661,21 @@ pub fn apply_bounded_expansions(
 }
 
 fn expansion_adjacency(document: &FieldFactsDocument) -> BTreeMap<String, BTreeSet<String>> {
-    let mut adjacency = document
-        .entities
+    let entities = if document.expansion_entities.is_empty() {
+        &document.entities
+    } else {
+        &document.expansion_entities
+    };
+    let relations = if document.expansion_relations.is_empty() {
+        &document.relations
+    } else {
+        &document.expansion_relations
+    };
+    let mut adjacency = entities
         .iter()
         .map(|entity| (entity.id.clone(), BTreeSet::new()))
         .collect::<BTreeMap<_, _>>();
-    for relation in &document.relations {
+    for relation in relations {
         if adjacency.contains_key(&relation.source_id)
             && adjacency.contains_key(&relation.target_id)
         {
@@ -660,6 +690,171 @@ fn expansion_adjacency(document: &FieldFactsDocument) -> BTreeMap<String, BTreeS
         }
     }
     adjacency
+}
+
+fn materialize_expansion_facts(
+    document: &mut FieldFactsDocument,
+    pending: &mut [(&FieldExpansionRequest, FieldExpansionResult, u32)],
+    adjacency: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<()> {
+    let reservoir_entities = if document.expansion_entities.is_empty() {
+        document.entities.clone()
+    } else {
+        document.expansion_entities.clone()
+    };
+    let reservoir_relations = if document.expansion_relations.is_empty() {
+        document.relations.clone()
+    } else {
+        document.expansion_relations.clone()
+    };
+    let entity_by_id = reservoir_entities
+        .iter()
+        .map(|entity| (entity.id.clone(), entity.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let reservoir_ids = entity_by_id.keys().cloned().collect::<BTreeSet<_>>();
+
+    // Expansion facts take priority over unrelated base facts at the fixed
+    // wire cap. This is what makes an expansion able to page into the source's
+    // retained candidate set even when the ordinary base document is full.
+    let mut desired = BTreeSet::new();
+    for (request, result, next_offset) in pending.iter_mut() {
+        let traversal = expansion_traversal(
+            &request.root_id,
+            request.max_depth.clamp(1, MAX_EXPANSION_DEPTH),
+            adjacency,
+        );
+        let requested_end = usize::try_from(*next_offset)
+            .unwrap_or(usize::MAX)
+            .min(traversal.len());
+        let mut accepted_end = 0usize;
+        for (index, (id, _)) in traversal.iter().take(requested_end).enumerate() {
+            if desired.contains(id) || desired.len() < MAX_FIELD_FACT_ENTITIES {
+                desired.insert(id.clone());
+                accepted_end = index + 1;
+            } else {
+                break;
+            }
+        }
+        *next_offset = u32::try_from(accepted_end).unwrap_or(u32::MAX);
+        result.entity_count = *next_offset;
+        result.applied_depth = traversal[..accepted_end]
+            .iter()
+            .map(|(_, depth)| *depth)
+            .max()
+            .unwrap_or_default();
+        result.truncated = accepted_end < traversal.len();
+    }
+
+    let original_ids = document
+        .entities
+        .iter()
+        .map(|entity| entity.id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut final_ids = desired.clone();
+    for entity in &document.entities {
+        if final_ids.len() >= MAX_FIELD_FACT_ENTITIES {
+            break;
+        }
+        final_ids.insert(entity.id.clone());
+    }
+    document.entities = final_ids
+        .iter()
+        .filter_map(|id| entity_by_id.get(id).cloned())
+        .collect();
+
+    let mut relation_by_id = document
+        .relations
+        .iter()
+        .cloned()
+        .map(|relation| (relation.id.clone(), relation))
+        .collect::<BTreeMap<_, _>>();
+    for relation in reservoir_relations {
+        if final_ids.contains(&relation.source_id) && final_ids.contains(&relation.target_id) {
+            relation_by_id
+                .entry(relation.id.clone())
+                .or_insert(relation);
+        }
+    }
+    document.relations = relation_by_id
+        .into_values()
+        .filter(|relation| {
+            (!reservoir_ids.contains(&relation.source_id)
+                || final_ids.contains(&relation.source_id))
+                && (!reservoir_ids.contains(&relation.target_id)
+                    || final_ids.contains(&relation.target_id))
+        })
+        .take(MAX_FIELD_FACT_RELATIONS)
+        .collect();
+
+    let base_trimmed = original_ids.iter().any(|id| !final_ids.contains(id));
+    let mut wire_trimmed = false;
+    // Leave room for continuation tokens and the final expansion metadata.
+    let target_bytes = MAX_FIELD_FACT_DOCUMENT_BYTES.saturating_sub(64 * 1024);
+    while serialized_field_document_bytes(document)? > target_bytes {
+        wire_trimmed = true;
+        if document.relations.pop().is_some() {
+            continue;
+        }
+        if let Some(index) = document
+            .entities
+            .iter()
+            .rposition(|entity| !desired.contains(&entity.id))
+        {
+            document.entities.remove(index);
+            continue;
+        }
+        if document.entities.pop().is_none() {
+            bail!("expanded field response chrome exceeds the document byte limit");
+        }
+    }
+    let retained_ids = document
+        .entities
+        .iter()
+        .map(|entity| entity.id.clone())
+        .collect::<BTreeSet<_>>();
+    document.relations.retain(|relation| {
+        (!reservoir_ids.contains(&relation.source_id) || retained_ids.contains(&relation.source_id))
+            && (!reservoir_ids.contains(&relation.target_id)
+                || retained_ids.contains(&relation.target_id))
+    });
+    for (request, result, next_offset) in pending.iter_mut() {
+        let traversal = expansion_traversal(
+            &request.root_id,
+            request.max_depth.clamp(1, MAX_EXPANSION_DEPTH),
+            adjacency,
+        );
+        let requested_end = usize::try_from(*next_offset)
+            .unwrap_or(usize::MAX)
+            .min(traversal.len());
+        let accepted_end = traversal
+            .iter()
+            .take(requested_end)
+            .take_while(|(id, _)| retained_ids.contains(id))
+            .count();
+        *next_offset = u32::try_from(accepted_end).unwrap_or(u32::MAX);
+        result.entity_count = *next_offset;
+        result.applied_depth = traversal[..accepted_end]
+            .iter()
+            .map(|(_, depth)| *depth)
+            .max()
+            .unwrap_or_default();
+        result.truncated = accepted_end < traversal.len();
+    }
+    if base_trimmed || wire_trimmed {
+        document.truncated = true;
+        document.warnings.push(serde_json::json!({
+            "code": "expansion_bound",
+            "message": "bounded expansion prioritized requested neighborhood facts at the fixed field wire limit",
+        }));
+    }
+    Ok(())
+}
+
+fn serialized_field_document_bytes(document: &FieldFactsDocument) -> Result<usize> {
+    let value = serde_json::to_value(document).context("serialize expanded field document")?;
+    Ok(lillux::canonical_json(&value)
+        .context("canonicalize expanded field document")?
+        .len())
 }
 
 fn expansion_traversal(
@@ -955,6 +1150,71 @@ mod tests {
                 "service:test",
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn expansion_materializes_facts_outside_the_base_document() {
+        let subject = FieldFactSubject {
+            kind: "project".to_string(),
+            id: "project:test".to_string(),
+            definition_ref: None,
+            definition_hash: None,
+        };
+        let mut builder = FieldFactsBuilder::new("project", "service:test", subject);
+        for index in 0..=MAX_FIELD_FACT_ENTITIES {
+            let id = format!("item:{index:04}");
+            builder.add_entity(entity(&id, &id)).unwrap();
+        }
+        builder
+            .add_relation(FieldFactRelation {
+                id: "edge:outside-base".to_string(),
+                kind: "contains".to_string(),
+                source_id: "item:0000".to_string(),
+                target_id: format!("item:{MAX_FIELD_FACT_ENTITIES:04}"),
+                status: None,
+                directed: true,
+                attributes: serde_json::json!({}),
+                provenance: FieldProvenance::pending("service:test", Vec::new()),
+            })
+            .unwrap();
+        let base = builder.finish().unwrap();
+        assert!(
+            !base
+                .entities
+                .iter()
+                .any(|entity| { entity.id == format!("item:{MAX_FIELD_FACT_ENTITIES:04}") })
+        );
+
+        let expanded = apply_bounded_expansions(
+            base,
+            &[FieldExpansionRequest {
+                root_id: "item:0000".to_string(),
+                max_depth: 4,
+                max_entities: 2,
+                continuation_token: None,
+            }],
+            &crate::state::UiState::new(),
+            "service:test",
+        )
+        .unwrap();
+        assert!(
+            expanded
+                .entities
+                .iter()
+                .any(|entity| { entity.id == format!("item:{MAX_FIELD_FACT_ENTITIES:04}") })
+        );
+        assert!(
+            expanded
+                .relations
+                .iter()
+                .any(|relation| relation.id == "edge:outside-base")
+        );
+        assert!(
+            expanded
+                .entities
+                .iter()
+                .all(|entity| { entity.provenance.source_revision == expanded.revision })
         );
     }
 

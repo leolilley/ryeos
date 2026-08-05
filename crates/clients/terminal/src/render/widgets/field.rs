@@ -232,7 +232,7 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
     };
     let list_width = width.saturating_sub(grid_width + usize::from(grid_width > 0));
     let footer_lines = 1
-        + usize::from(!field.warnings.is_empty())
+        + field.warnings.len().min(3)
         + usize::from(selected_entity.is_some())
         + usize::from(!field.provenance.is_empty());
     let available = bottom.saturating_sub(y + footer_lines);
@@ -325,7 +325,7 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
                 rect.x + list_width as u16 + 1,
                 body_start_y as u16,
                 grid_width as u16,
-                (bottom.saturating_sub(body_start_y)) as u16,
+                available as u16,
             ),
             &preview.label,
             grid,
@@ -341,7 +341,7 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
             .find(|item| item.source == entity.source && item.root_id == entity.id);
         let change = field.changes.iter().find(|change| change.id == entity.id);
         let detail = format!(
-            "{} · source {} · compare {}/2{}{}",
+            "{} · source {} · compare {}/2{}{}{}",
             entity.id,
             entity.source,
             field.compare.len(),
@@ -355,13 +355,17 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
             change
                 .map(|item| format!(" · {:?}", item.kind).to_ascii_lowercase())
                 .unwrap_or_default(),
+            relation_summary(field, &entity.id),
         );
         surface.draw_text(rect.x as usize, y, &truncate(&detail, width), style_muted());
         y += 1;
     }
 
-    if y < bottom && !field.warnings.is_empty() {
-        let text = format!("! {}", field.warnings[0]);
+    for message in field.warnings.iter().take(3) {
+        if y >= bottom {
+            break;
+        }
+        let text = format!("! {message}");
         surface.draw_text(
             rect.x as usize,
             y,
@@ -380,6 +384,28 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
     if y < bottom {
         let hints = "/ search · n/N matches · [/] replay · p play · l live · ←/→ group · space compare · e expand";
         surface.draw_text(rect.x as usize, y, &truncate(hints, width), style_muted());
+    }
+}
+
+fn relation_summary(field: &RyeOsFieldVm, entity_id: &str) -> String {
+    let labels = field
+        .relations
+        .iter()
+        .filter_map(|relation| {
+            if relation.source_id == entity_id {
+                Some(format!("{} → {}", relation.kind, relation.target_id))
+            } else if relation.target_id == entity_id {
+                Some(format!("{} ← {}", relation.kind, relation.source_id))
+            } else {
+                None
+            }
+        })
+        .take(3)
+        .collect::<Vec<_>>();
+    if labels.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", labels.join("; "))
     }
 }
 

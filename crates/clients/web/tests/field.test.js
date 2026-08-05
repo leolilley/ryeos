@@ -6,7 +6,16 @@ import {
   fieldPreferenceModel,
   mountFieldAccessibility,
 } from "../pkg/ryeos_field_accessibility.js";
-import { comparableGrids } from "../pkg/ryeos_grid_canvas.js";
+import {
+  comparableGrids,
+  drawIndexedGrid,
+  indexedGridAccessibilityLabel,
+} from "../pkg/ryeos_grid_canvas.js";
+import { FieldCanvasController } from "../pkg/ryeos_field_canvas.js";
+import {
+  captureFieldFocusKey,
+  restoreFieldFocusKey,
+} from "../pkg/ryeos_components_field.js";
 import {
   StaleFieldLayoutError,
   hitTest,
@@ -73,6 +82,24 @@ test("compound layout is deterministic, condenses cycles, and retains prior coor
   assert.equal(hitTestGroup(retained, group.x + 5, group.y + 5)?.id, "work");
 });
 
+test("semantic rank width keeps adjacent group bounds disjoint", () => {
+  const field = vm();
+  field.groups = [
+    { id: "wide", label: "Wide", collapsed: false },
+    { id: "next", label: "Next", collapsed: false },
+  ];
+  field.entities = [
+    entity("wide:0", { group_id: "wide", rank: 0 }),
+    entity("wide:12", { group_id: "wide", rank: 12 }),
+    entity("next:0", { group_id: "next", rank: 0 }),
+  ];
+  field.relations = [];
+  field.traversal = field.entities.map((item) => item.id);
+  settleLayout((field.layout = layoutField(field)), 1);
+  const [wide, next] = field.layout.groups;
+  assert.ok(wide.x + wide.width < next.x, "group boxes must not overlap at deep ranks");
+});
+
 test("accessibility traversal has one ordered semantic model and relation summaries", () => {
   const model = fieldAccessibilityModel(vm());
   assert.deepEqual(model.map((item) => item.id), ["a", "b", "c"]);
@@ -132,6 +159,29 @@ test("accessibility DOM uses one tab stop and identical selection/activation eve
   }
 });
 
+test("control replacement restores focus by stable semantic key", () => {
+  const previousDocument = globalThis.document;
+  const oldControl = { dataset: { focusKey: "field:tile:control:next" } };
+  let focused = false;
+  const newControl = {
+    dataset: { focusKey: oldControl.dataset.focusKey },
+    focus: () => { focused = true; },
+  };
+  const root = {
+    contains: (node) => node === oldControl,
+    querySelectorAll: () => [newControl],
+  };
+  globalThis.document = { activeElement: oldControl };
+  try {
+    const key = captureFieldFocusKey(root);
+    globalThis.document.activeElement = null;
+    assert.equal(restoreFieldFocusKey(root, key), true);
+    assert.equal(focused, true);
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
 test("large layouts yield between phases and reject stale work", async () => {
   const field = vm();
   field.entities = Array.from({ length: 241 }, (_, index) => entity(`entity:${index}`));
@@ -169,6 +219,93 @@ test("grid comparison requires key, kind, dimensions, and palette meaning", () =
   const differentPalette = structuredClone(left);
   differentPalette.grid.palette[0].glyph = "x";
   assert.equal(comparableGrids(left, differentPalette), false);
+});
+
+test("indexed grids draw palette glyphs as a non-color carrier", () => {
+  const glyphs = [];
+  const context = {
+    fillRect: () => {},
+    strokeRect: () => {},
+    fillText: (glyph) => glyphs.push(glyph),
+  };
+  const canvas = { getContext: () => context };
+  assert.equal(drawIndexedGrid(canvas, {
+    grid: {
+      width: 2,
+      height: 1,
+      cells: [0, 1],
+      palette: [
+        { index: 0, color: "#000000", glyph: "." },
+        { index: 1, color: "#ffffff", glyph: "X" },
+      ],
+    },
+  }, { scale: 10 }), true);
+  assert.deepEqual(glyphs, [".", "X"]);
+  assert.equal(
+    indexedGridAccessibilityLabel({
+      label: "Board",
+      grid: {
+        width: 2,
+        height: 1,
+        cells: [0, 1],
+        palette: [
+          { index: 0, glyph: "." },
+          { index: 1, glyph: "X" },
+        ],
+      },
+    }),
+    "Board; 2 by 1 indexed grid; cells . X",
+  );
+});
+
+test("reduced motion clears exited tombstones after the replacement layout", () => {
+  const previousMatchMedia = globalThis.matchMedia;
+  globalThis.matchMedia = (query) => ({ matches: query.includes("reduced-motion") });
+  try {
+    const canvas = { getContext: () => null, dataset: {} };
+    const controller = new FieldCanvasController(canvas, () => {}, "tile:1");
+    const before = vm();
+    controller.vm = before;
+    controller.layout = layoutField(before);
+    controller.structuralRevision = before.structural_revision;
+    const after = structuredClone(before);
+    after.structural_revision = "two";
+    after.entities = after.entities.filter((item) => item.id !== "b");
+    after.relations = after.relations.filter(
+      (relation) => relation.source_id !== "b" && relation.target_id !== "b",
+    );
+    after.changes = [{
+      id: "b",
+      kind: "exited",
+      tombstone: { label: "b", traits: { shape: "rect" } },
+    }];
+    controller.update(after);
+    assert.equal(controller.tombstones.size, 0);
+    controller.unmount();
+  } finally {
+    globalThis.matchMedia = previousMatchMedia;
+  }
+});
+
+test("wheel zoom keeps the pointer's field coordinate anchored", () => {
+  const canvas = {
+    getContext: () => null,
+    getBoundingClientRect: () => ({ left: 10, top: 20, width: 600, height: 400 }),
+    dataset: {},
+  };
+  const controller = new FieldCanvasController(canvas, () => {}, "tile:zoom");
+  const event = {
+    clientX: 250,
+    clientY: 180,
+    deltaY: -240,
+    preventDefault: () => {},
+  };
+  const before = controller.fieldPoint(event);
+  canvas.onwheel(event);
+  const after = controller.fieldPoint(event);
+  assert.ok(Math.abs(before.x - after.x) < 1e-9);
+  assert.ok(Math.abs(before.y - after.y) < 1e-9);
+  controller.unmount();
 });
 
 class FakeElement {

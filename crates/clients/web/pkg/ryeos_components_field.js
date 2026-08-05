@@ -1,9 +1,9 @@
-import { FieldCanvasController, canCompareEntity } from "/ui/assets/ryeos_field_canvas.js";
+import { FieldCanvasController, canCompareEntity } from "./ryeos_field_canvas.js";
 import {
   fieldPreferenceModel,
   mountFieldAccessibility,
-} from "/ui/assets/ryeos_field_accessibility.js";
-import { drawIndexedGrid } from "/ui/assets/ryeos_grid_canvas.js";
+} from "./ryeos_field_accessibility.js";
+import { drawIndexedGrid, indexedGridAccessibilityLabel } from "./ryeos_grid_canvas.js";
 
 const controllers = new Map();
 let frameSeen = new Set();
@@ -57,6 +57,7 @@ class FieldComponentController {
     this.search.type = "search";
     this.search.placeholder = "Search field";
     this.search.setAttribute("aria-label", "Search field entities");
+    this.search.dataset.focusKey = `field:${instanceKey}:search`;
     this.search.addEventListener("input", () => this.dispatch({
       type: "set_field_query", query: this.search.value,
     }));
@@ -76,6 +77,7 @@ class FieldComponentController {
     this.canvas.className = "ryeos-field-canvas";
     this.canvas.setAttribute("aria-hidden", "true");
     this.accessibility = document.createElement("div");
+    this.accessibility.dataset.focusKey = `field:${instanceKey}:entities`;
     this.detail = document.createElement("aside");
     this.detail.className = "ryeos-field-detail";
     this.canvasController = new FieldCanvasController(this.canvas, dispatchUi, instanceKey);
@@ -92,6 +94,7 @@ class FieldComponentController {
   }
 
   update(vm) {
+    const focusKey = captureFieldFocusKey(this.root);
     this.vm = vm;
     this.root.dataset.fieldId = vm.id || "";
     this.root.dataset.revision = vm.revision || "";
@@ -111,7 +114,11 @@ class FieldComponentController {
     this.renderDetail();
     this.canvasController.update(vm);
     this.canvasController.resize();
+    if (this.canvas.width <= 1 && globalThis.requestAnimationFrame) {
+      requestAnimationFrame(() => this.canvasController.resize());
+    }
     mountFieldAccessibility(this.accessibility, vm, this.instanceKey, this.dispatchUi);
+    restoreFieldFocusKey(this.root, focusKey);
   }
 
   dispatch(event) {
@@ -124,16 +131,16 @@ class FieldComponentController {
     this.controls.append(
       button("◀", "Previous event", !vm.replay?.previous, () => this.dispatch({
         type: "step_field_cursor", direction: "previous",
-      })),
+      }), `${this.instanceKey}:control:previous`),
       button(vm.replay?.playing ? "Pause" : "Play", "Play or pause replay", !vm.replay?.playing && !vm.replay?.next, () => this.dispatch({
         type: "set_field_playback", playing: !vm.replay?.playing,
-      })),
+      }), `${this.instanceKey}:control:playback`),
       button("▶", "Next event", !vm.replay?.next, () => this.dispatch({
         type: "step_field_cursor", direction: "next",
-      })),
+      }), `${this.instanceKey}:control:next`),
       button("Live", "Return to live head", vm.replay?.mode === "live", () => this.dispatch({
         type: "step_field_cursor", direction: "live",
-      })),
+      }), `${this.instanceKey}:control:live`),
     );
     for (const group of vm.groups || []) {
       this.controls.append(button(
@@ -145,6 +152,7 @@ class FieldComponentController {
           group_id: group.id,
           collapsed: !group.collapsed,
         }),
+        `${this.instanceKey}:group:${group.id}`,
       ));
     }
     for (const layer of vm.layers || []) {
@@ -155,6 +163,7 @@ class FieldComponentController {
         () => this.dispatch({
           type: "set_field_layer_visible", layer_id: layer.id, visible: !layer.visible,
         }),
+        `${this.instanceKey}:layer:${layer.id}`,
       ));
     }
     const selected = (vm.entities || []).find((entity) => entity.id === vm.selected);
@@ -164,6 +173,7 @@ class FieldComponentController {
         "Toggle selected preview comparison",
         !canCompareEntity(vm, selected.id),
         () => this.dispatch({ type: "toggle_field_compare", entity_id: selected.id }),
+        `${this.instanceKey}:control:compare`,
       ));
       const expansion = (vm.expansions || []).find(
         (item) => item.source === selected.source && item.root_id === selected.id,
@@ -177,19 +187,26 @@ class FieldComponentController {
           source: selected.source,
           root_id: selected.id,
         }),
+        `${this.instanceKey}:control:expand`,
       ));
-      if (expansion) this.controls.append(button("Clear", "Clear bounded expansion", false, () => this.dispatch({
-        type: "clear_field_expansion", source: selected.source, root_id: selected.id,
-      })));
+      if (expansion) this.controls.append(button(
+        "Clear",
+        "Clear bounded expansion",
+        false,
+        () => this.dispatch({
+          type: "clear_field_expansion", source: selected.source, root_id: selected.id,
+        }),
+        `${this.instanceKey}:control:clear-expansion`,
+      ));
     }
     if ((vm.search?.match_ids || []).length) {
       this.controls.append(
         button("↑", "Previous search match", false, () => this.dispatch({
           type: "move_field_search_match", delta: -1,
-        })),
+        }), `${this.instanceKey}:search:previous`),
         button("↓", "Next search match", false, () => this.dispatch({
           type: "move_field_search_match", delta: 1,
-        })),
+        }), `${this.instanceKey}:search:next`),
       );
     }
   }
@@ -207,6 +224,7 @@ class FieldComponentController {
           type: "set_field_cursor",
           cursor: { mode: "braid_cut", anchor: entry.event },
         }),
+        `${this.instanceKey}:rail:${entry.event?.chain_root_id ?? ""}:${entry.event?.chain_seq ?? ""}`,
       );
       node.className = "ryeos-field-rail-event";
       node.dataset.chainSeq = String(entry.event?.chain_seq ?? "");
@@ -221,7 +239,8 @@ class FieldComponentController {
     this.detail.replaceChildren();
     const selected = (vm.entities || []).find((entity) => entity.id === vm.selected);
     if (!selected) {
-      this.detail.hidden = true;
+      this.renderWarnings();
+      this.detail.hidden = !(vm.warnings || []).length;
       return;
     }
     this.detail.hidden = false;
@@ -230,6 +249,20 @@ class FieldComponentController {
     const meta = document.createElement("small");
     meta.textContent = [selected.kind, selected.status, selected.source].filter(Boolean).join(" · ");
     this.detail.append(heading, meta);
+    for (const relation of (vm.relations || []).filter(
+      (item) => item.source_id === selected.id || item.target_id === selected.id,
+    )) {
+      const neighbor = relation.source_id === selected.id ? relation.target_id : relation.source_id;
+      const connector = button(
+        relation.label || `${relation.kind} ${neighbor}`,
+        relation.accessibility_label || `${relation.kind} ${neighbor}`,
+        !relation.activate_intent,
+        () => this.dispatchUi({ type: "activate", intent: relation.activate_intent }),
+        `${this.instanceKey}:relation:${relation.id}`,
+      );
+      connector.className = "ryeos-field-relation";
+      this.detail.append(connector);
+    }
     const previewIds = new Set([...(selected.preview_ids || []), ...(vm.compare || []).flatMap((id) =>
       (vm.entities || []).find((entity) => entity.id === id)?.preview_ids || [])]);
     for (const preview of (vm.previews || []).filter((item) => previewIds.has(item.id))) {
@@ -237,7 +270,10 @@ class FieldComponentController {
       const caption = document.createElement("figcaption");
       caption.textContent = preview.label || preview.id;
       const canvas = document.createElement("canvas");
-      canvas.setAttribute("aria-label", caption.textContent);
+      canvas.setAttribute(
+        "aria-label",
+        indexedGridAccessibilityLabel(preview, caption.textContent),
+      );
       drawIndexedGrid(canvas, preview, { scale: 9 });
       canvas.title = "Shift-click to add this artifact to comparison";
       canvas.addEventListener("click", (event) => {
@@ -254,10 +290,14 @@ class FieldComponentController {
       status.textContent = change.kind.replaceAll("_", " ");
       this.detail.append(status);
     }
-    if ((vm.warnings || []).length) {
+    this.renderWarnings();
+  }
+
+  renderWarnings() {
+    for (const message of this.vm?.warnings || []) {
       const warning = document.createElement("small");
       warning.className = "ryeos-field-warning";
-      warning.textContent = vm.warnings[0];
+      warning.textContent = message;
       this.detail.append(warning);
     }
   }
@@ -269,12 +309,26 @@ class FieldComponentController {
   }
 }
 
-function button(label, title, disabled, activate) {
+export function captureFieldFocusKey(root, active = document.activeElement) {
+  return active && root.contains(active) ? active.dataset?.focusKey || null : null;
+}
+
+export function restoreFieldFocusKey(root, focusKey) {
+  if (!focusKey) return false;
+  const target = [...root.querySelectorAll("[data-focus-key]")]
+    .find((node) => node.dataset?.focusKey === focusKey);
+  if (!target || target === document.activeElement) return !!target;
+  target.focus?.({ preventScroll: true });
+  return true;
+}
+
+function button(label, title, disabled, activate, focusKey = null) {
   const node = document.createElement("button");
   node.type = "button";
   node.textContent = label;
   node.title = title;
   node.disabled = !!disabled;
+  if (focusKey) node.dataset.focusKey = `field:${focusKey}`;
   node.addEventListener("click", activate);
   return node;
 }
