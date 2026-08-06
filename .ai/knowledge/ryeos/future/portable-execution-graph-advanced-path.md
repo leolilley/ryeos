@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-08T10:54:41Z:29394740d401f585efc51de1c65361acdb675b31b5ad10c7602aeb010e621e21:xnlRV3MljwjsalZx/v7GdUANHLVJkSyH/+bQ7WW5IyBK2APsyYDVjRv07zbng148gKUe8BSpPIfougkfF95rBQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-08-06T00:58:12Z:739d602ca40eec0d68c6d18bd9a57da10060f3dff7b38d51ee02143b27e4f2eb:iHVyTiuSUvveHICc/m1+Jdkt/0zlTuqcn3ht1/lgW1ALY62FWG0CTtG6K0zc0O0LLRXqx/JOLuFbayI00PknAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [future, portable-execution, execution-graph, architecture]
 version: "0.1.0"
@@ -21,17 +21,20 @@ portable execution graph projection.
 
 Current stable bridge:
 
-- `definition_ref`: conceptual authored definition ref, currently
-  `graph:{graph_id}`.
-- `definition_hash`: SHA-256 of the signature-stripped authored YAML bytes.
+- `definition_ref`: canonical admitted definition ref.
+- `root_raw_content_digest`: SHA-256 of the signature-stripped root source
+  bytes; this is source provenance, not effective execution identity.
+- `effective_definition_digest`: canonical identity of the complete admitted
+  resolution, including ordered ancestors, referenced contributors, composed
+  behavior, derived effective hook plan, policy facts, and trust provenance.
 - `graph_run_id`: invocation/run instance identity.
 - `node_ref`: `{definition_ref}#node:{node_name}` on node-scoped runtime
   events.
 - `node_result_hash`: canonical JSON hash of a successful action node result.
 - `graph_node_receipt` artifacts: daemon-compatible artifact wrappers whose
   `metadata` contains the node receipt payload and optional `node_result_hash`.
-- Runtime events and node receipts: realized consequences linked back to
-  definition identity.
+- Runtime events and node receipts: realized consequences linked back to the
+  effective definition identity and its root-source provenance.
 
 Current regression proof:
 
@@ -39,20 +42,24 @@ Current regression proof:
   callback boundary.
 - The daemon graph action E2E proves successful graph execution persists
   `graph_node_receipt` artifacts and runtime events carrying `definition_ref`,
-  `definition_hash`, `graph_run_id`, and `node_ref`.
+  `root_raw_content_digest`, `effective_definition_digest`, `graph_run_id`,
+  and `node_ref`.
 - The same E2E proves denied callback dispatch persists an error receipt and
   failure-path runtime events. The failed tool dispatch event uses
   `tool_call_result.status = "dispatch_failed"`; the graph step completion event
   uses `graph_step_completed.status = "error"`.
-- `ryeos_app::graph_execution_projection::build_graph_execution_trace` now
-  provides an internal, pure read-model primitive that groups persisted graph
-  runtime events and `graph_node_receipt` artifacts by `node_ref`.
-- This is still evidence for the identity bridge, not a public portable
-  execution graph projection API.
+- The generic field services project current definitions, project topology,
+  run summaries, and braid-bounded execution facts. They join occurrences to
+  effective graph nodes only when admitted identity agrees and degrade a
+  malformed individual event without discarding the complete field document.
+- This is an implemented operator read model, not yet a portable export or
+  cross-node verification API.
 
-`definition_hash` is exact document identity after signature-line stripping. It
-is not semantic YAML canonicalization and is not by itself a trust,
-authorization, safety, or policy decision.
+`root_raw_content_digest` identifies exact root bytes after signature-line
+stripping. `effective_definition_digest` identifies admitted behavior. Neither
+digest alone grants trust, authorization, safety, or policy authority; those
+come from the verified resolution, captured effective program, and sealed
+launch evidence.
 
 ## Deferred advanced model
 
@@ -112,7 +119,7 @@ Specifically deferred:
 - no CAS/ref architecture changes;
 - no public graph event string renames;
 - no `ui.graph.topology` rename;
-- no semantic YAML canonicalization for `definition_hash`;
+- no conflation of root-source digest with effective-definition identity;
 - no trust or authorization semantics derived from hashes alone;
 - no universal execution model across all executable kinds until graph runtime
   identity is stable and tested.
@@ -122,7 +129,7 @@ Specifically deferred:
 The system first needs stable identity breadcrumbs emitted by execution:
 
 ```text
-definition_ref + definition_hash
+definition_ref + root_raw_content_digest + effective_definition_digest
   -> graph_run_id
   -> node_ref
   -> runtime event payloads
@@ -139,9 +146,10 @@ new query surface.
 
 Consider the advanced projection when one or more of these becomes concrete:
 
-- consumers need cross-run querying/export by `definition_hash` or
-  `definition_ref`;
-- RyeOS UI needs runtime trace projection rather than static `.ai` topology;
+- consumers need portable cross-node export by `effective_definition_digest`
+  or `definition_ref`;
+- RyeOS UI needs projection beyond the current living-field project/run/
+  execution views;
 - replay, resume, or audit workflows require an attestable closure from signed
   capability to consequence;
 - admission/trust policy needs to reason over capability, invocation, and
@@ -172,17 +180,20 @@ Both views are useful, but they answer different questions:
 
 ## Current implementation target
 
-For now, implementation should stay limited to:
+The implemented foundation should remain anchored on:
 
-- pinning `definition_ref` and `definition_hash` semantics;
+- pinning `definition_ref`, `root_raw_content_digest`, and
+  `effective_definition_digest` to their distinct semantics;
 - using canonical JSON for `node_result_hash`;
 - ensuring node-scoped events carry `node_ref`;
-- ensuring runtime events and node receipts carry definition identity;
+- ensuring runtime events and node receipts carry effective definition
+  identity and root-source provenance;
 - publishing action-node error receipts if the existing receipt shape supports
   it;
-- maintaining the internal graph execution trace projection as a helper over
-  already-persisted events and artifacts, without promoting it to a route/API;
-- documenting topology internals as a projection without changing public API.
+- maintaining the generic field services as bounded read models over existing
+  chain history, artifacts, and exact admitted definitions;
+- keeping any future portable export layered over those facts rather than
+  introducing a second execution-history substrate.
 
 This is enough to make future projection possible without prematurely adding a
 new execution graph API.

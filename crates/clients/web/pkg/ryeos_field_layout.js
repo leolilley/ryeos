@@ -51,7 +51,7 @@ export function settleLayout(layout, amount = 1) {
       layout.nodes.get(edge.relation.target_id),
     );
   }
-  layout.groups = groupBounds(layout.groupDefinitions, layout.nodes);
+  layout.groups = groupBounds(layout.groupDefinitions, layout.nodes, layout.groupOrigins);
   return layout;
 }
 
@@ -75,6 +75,14 @@ export function hitTestGroup(layout, x, y) {
 export function fieldLayoutIsLarge(vm) {
   return (vm.entities || []).length >= LARGE_FIELD_ENTITY_COUNT
     || (vm.relations || []).length >= LARGE_FIELD_RELATION_COUNT;
+}
+
+// Selection can reveal an entity hidden by a collapsed group or invisible
+// layer without changing the shared structural revision. Track only actual
+// layout membership so that reveal transitions relayout while ordinary
+// visible-to-visible selection preserves spatial memory.
+export function fieldLayoutMembershipKey(vm) {
+  return JSON.stringify(visibleEntities(vm).map((entity) => entity.id));
 }
 
 // Rebind data-only VM changes onto existing geometry. Structural revisions are
@@ -133,6 +141,7 @@ function placeField(vm, prepared, components, previous) {
   // origins make rank >= 2 escape into the next group and destroy compound
   // boundaries, so later groups start after the actual occupied span.
   const maximumRankByGroup = new Map();
+  groupDefinitions.forEach((_, index) => maximumRankByGroup.set(index, 0));
   for (const key of buckets.keys()) {
     const [groupText, rankText] = key.split("\0");
     const group = Number(groupText);
@@ -179,7 +188,7 @@ function placeField(vm, prepared, components, previous) {
     relation,
     points: routeEdge(nodes.get(relation.source_id), nodes.get(relation.target_id)),
   }));
-  const groups = groupBounds(groupDefinitions, nodes);
+  const groups = groupBounds(groupDefinitions, nodes, groupOrigins);
   const width = Math.max(
     640,
     ...[...nodes.values()].map((node) => node.targetX + node.width + 100),
@@ -190,7 +199,7 @@ function placeField(vm, prepared, components, previous) {
     ...[...nodes.values()].map((node) => node.targetY + node.height + 100),
     ...groups.map((group) => group.y + group.height + 40),
   );
-  return { nodes, edges, groups, groupDefinitions, width, height };
+  return { nodes, edges, groups, groupDefinitions, groupOrigins, width, height };
 }
 
 function visibleEntities(vm) {
@@ -322,7 +331,7 @@ function routeEdge(source, target) {
   ];
 }
 
-function groupBounds(groups, nodes) {
+function groupBounds(groups, nodes, groupOrigins = new Map()) {
   return groups.map((group, index) => {
     const members = [...nodes.values()].filter((node) => node.entity.group_id === group.id);
     if (!members.length) {
@@ -330,7 +339,7 @@ function groupBounds(groups, nodes) {
         id: group.id,
         label: group.label,
         collapsed: !!group.collapsed,
-        x: 20 + index * GROUP_WIDTH,
+        x: 20 + (groupOrigins.get(index) ?? index * GROUP_WIDTH),
         y: 20,
         width: 200,
         height: GROUP_HEADER_HEIGHT + 12,

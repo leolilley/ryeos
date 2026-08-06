@@ -59,12 +59,13 @@ use transitions::resolve_next_on_error;
 /// Marker for the one exact current graph checkpoint contract. Reader and
 /// writer evolve together under this marker; missing fields, unknown fields,
 /// and structural drift are rejected rather than migrated. The contract pins
-/// the signed graph definition and expression language, and no alternate or
-/// legacy checkpoint versions are accepted.
+/// the signed graph definition and expression language, and no alternate
+/// checkpoint version is accepted.
 ///
-/// v3: accounting money is exact fixed-point USD nanos serialized as
-/// canonical decimal strings; JSON-number money does not decode.
-pub(crate) const GRAPH_CHECKPOINT_SCHEMA_VERSION: u32 = 3;
+/// v4: executable identity is the effective-definition digest assembled from
+/// the complete admitted program; root-only definition identity does not
+/// decode.
+pub(crate) const GRAPH_CHECKPOINT_SCHEMA_VERSION: u32 = 4;
 pub(crate) const EXPRESSION_LANGUAGE: &str = "rye-expr/1";
 
 /// Follow-resume field keys for the checkpoint / resume-state payload. Shared by
@@ -371,7 +372,7 @@ impl Walker {
             success: false,
             graph_id: self.graph.graph_id.clone(),
             definition_ref: self.graph.definition_ref.clone(),
-            definition_hash: self.graph.definition_hash.clone(),
+            effective_definition_digest: self.graph.effective_definition_digest.clone(),
             graph_run_id,
             status: GraphRunStatus::Error,
             steps: 0,
@@ -438,7 +439,7 @@ impl Walker {
             success: result.errors.is_empty(),
             graph_id: self.graph.graph_id.clone(),
             definition_ref: self.graph.definition_ref.clone(),
-            definition_hash: self.graph.definition_hash.clone(),
+            effective_definition_digest: self.graph.effective_definition_digest.clone(),
             graph_run_id: String::new(),
             status: if result.errors.is_empty() {
                 GraphRunStatus::Valid
@@ -504,47 +505,6 @@ impl Walker {
                 )[..12]
             )
         });
-
-        let validation = analyze_graph(&self.graph);
-        if !validation.errors.is_empty() {
-            let result = GraphResult {
-                success: false,
-                graph_id: self.graph.graph_id.clone(),
-                definition_ref: self.graph.definition_ref.clone(),
-                definition_hash: self.graph.definition_hash.clone(),
-                graph_run_id,
-                status: GraphRunStatus::Invalid,
-                steps: 0,
-                state: json!({}),
-                result: None,
-                errors_suppressed: None,
-                errors: None,
-                error: Some(validation.errors.join("; ")),
-                cost: None,
-                node_costs: Vec::new(),
-                hook_costs: Vec::new(),
-            };
-            let completion = TerminalCompletion {
-                status: ThreadTerminalStatus::Failed,
-                outcome_code: Some(ThreadTerminalStatus::Failed.as_str().to_string()),
-                result: Some(
-                    serde_json::to_value(&result)
-                        .expect("GraphResult is an infallibly serializable runtime DTO"),
-                ),
-                error: Some(json!(validation.errors.join("; "))),
-                cost: None,
-                outputs: Value::Null,
-                warnings: self.warnings.lock().unwrap().snapshot(),
-            };
-            let r = self.client.finalize_thread(completion).await;
-            match r {
-                Ok(_) => guard.finalized = true,
-                Err(error) => {
-                    self.record_callback_warning("finalize_thread", Err(anyhow::anyhow!(error)))
-                }
-            }
-            return result;
-        }
 
         // D16: the daemon enforces capabilities at the callback boundary.
         // The walker does NOT self-police. The daemon enforces caps at the
@@ -738,7 +698,7 @@ impl Walker {
                     json!({
                         "graph_id": &self.graph.graph_id,
                         "definition_ref": &self.graph.definition_ref,
-                        "definition_hash": &self.graph.definition_hash,
+                        "effective_definition_digest": &self.graph.effective_definition_digest,
                         "graph_run_id": &graph_run_id,
                     }),
                 )
@@ -980,7 +940,7 @@ impl Walker {
             success: false,
             graph_id: self.graph.graph_id.clone(),
             definition_ref: self.graph.definition_ref.clone(),
-            definition_hash: self.graph.definition_hash.clone(),
+            effective_definition_digest: self.graph.effective_definition_digest.clone(),
             graph_run_id: graph_run_id.clone(),
             status: GraphRunStatus::Continued,
             steps: step,
@@ -1327,7 +1287,7 @@ impl Walker {
                             json!({
                                 "graph_run_id": graph_run_id,
                                 "definition_ref": &self.graph.definition_ref,
-                                "definition_hash": &self.graph.definition_hash,
+                                "effective_definition_digest": &self.graph.effective_definition_digest,
                                 "node": current,
                                 "node_ref": node_ref(&self.graph.definition_ref, current),
                                 "step": step,
@@ -1356,7 +1316,7 @@ impl Walker {
                             current_node: current,
                             graph_run_id,
                             definition_ref: &self.graph.definition_ref,
-                            definition_hash: &self.graph.definition_hash,
+                            effective_definition_digest: &self.graph.effective_definition_digest,
                             continue_on_error,
                             cancel_flag: self.cancel_flag.clone(),
                         },
@@ -1381,7 +1341,7 @@ impl Walker {
                             current_node: current,
                             graph_run_id,
                             definition_ref: &self.graph.definition_ref,
-                            definition_hash: &self.graph.definition_hash,
+                            effective_definition_digest: &self.graph.effective_definition_digest,
                             continue_on_error,
                             cancel_flag: self.cancel_flag.clone(),
                         },
@@ -1616,22 +1576,42 @@ impl Walker {
         occurrence: ryeos_runtime::callback::HookDispatchOccurrence,
         context: Value,
     ) {
-        let (event, step) = match &occurrence {
-            ryeos_runtime::callback::HookDispatchOccurrence::GraphStarted { .. } => {
-                (RuntimeEventType::GraphStarted, None)
-            }
-            ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
-                step, ..
-            } => (RuntimeEventType::GraphStepCompleted, Some(*step)),
-            ryeos_runtime::callback::HookDispatchOccurrence::GraphCompleted { steps, .. } => {
-                (RuntimeEventType::GraphCompleted, Some(*steps))
-            }
-            _ => {
-                self.reject_run_history(format!(
-                    "non-graph hook occurrence `{}` reached graph runtime",
-                    occurrence.event()
-                ));
-                return;
+        let (event, step) = if occurrence.owner_kind != "graph" {
+            self.reject_run_history(format!(
+                "non-graph hook occurrence `{}/{}` reached graph runtime",
+                occurrence.owner_kind,
+                occurrence.event(),
+            ));
+            return;
+        } else {
+            match occurrence.event() {
+                "graph_started" => (RuntimeEventType::GraphStarted, None),
+                "graph_step_completed" => {
+                    let Some(step) = occurrence.counter_coordinate("step") else {
+                        self.reject_run_history(
+                            "graph_step_completed hook occurrence has no counter `step`"
+                                .to_string(),
+                        );
+                        return;
+                    };
+                    (RuntimeEventType::GraphStepCompleted, Some(step))
+                }
+                "graph_completed" => {
+                    let Some(steps) = occurrence.counter_coordinate("steps") else {
+                        self.reject_run_history(
+                            "graph_completed hook occurrence has no counter `steps`".to_string(),
+                        );
+                        return;
+                    };
+                    (RuntimeEventType::GraphCompleted, Some(steps))
+                }
+                _ => {
+                    self.reject_run_history(format!(
+                        "unknown graph hook occurrence `{}` reached graph runtime",
+                        occurrence.event()
+                    ));
+                    return;
+                }
             }
         };
         match crate::hooks::run_graph_hooks(
@@ -1674,11 +1654,14 @@ impl Walker {
         &self,
         graph_run_id: &str,
     ) -> ryeos_runtime::callback::HookDispatchOccurrence {
-        ryeos_runtime::callback::HookDispatchOccurrence::GraphStarted {
-            graph_run_id: graph_run_id.to_string(),
-            definition_ref: self.graph.definition_ref.clone(),
-            definition_hash: self.graph.definition_hash.clone(),
-        }
+        ryeos_runtime::callback::HookDispatchOccurrence::new(
+            "graph",
+            "graph_started",
+            self.graph.definition_ref.clone(),
+            self.graph.root_raw_content_digest.clone(),
+            self.graph.effective_definition_digest.clone(),
+        )
+        .with_text_coordinate("graph_run_id", graph_run_id)
     }
 
     fn graph_step_completed_hook_occurrence(
@@ -1687,13 +1670,16 @@ impl Walker {
         step: u32,
         node: &str,
     ) -> ryeos_runtime::callback::HookDispatchOccurrence {
-        ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
-            graph_run_id: graph_run_id.to_string(),
-            definition_ref: self.graph.definition_ref.clone(),
-            definition_hash: self.graph.definition_hash.clone(),
-            step,
-            node: node.to_string(),
-        }
+        ryeos_runtime::callback::HookDispatchOccurrence::new(
+            "graph",
+            "graph_step_completed",
+            self.graph.definition_ref.clone(),
+            self.graph.root_raw_content_digest.clone(),
+            self.graph.effective_definition_digest.clone(),
+        )
+        .with_text_coordinate("graph_run_id", graph_run_id)
+        .with_counter_coordinate("step", step)
+        .with_text_coordinate("node", node)
     }
 
     fn graph_completed_hook_occurrence(
@@ -1701,12 +1687,15 @@ impl Walker {
         graph_run_id: &str,
         steps: u32,
     ) -> ryeos_runtime::callback::HookDispatchOccurrence {
-        ryeos_runtime::callback::HookDispatchOccurrence::GraphCompleted {
-            graph_run_id: graph_run_id.to_string(),
-            definition_ref: self.graph.definition_ref.clone(),
-            definition_hash: self.graph.definition_hash.clone(),
-            steps,
-        }
+        ryeos_runtime::callback::HookDispatchOccurrence::new(
+            "graph",
+            "graph_completed",
+            self.graph.definition_ref.clone(),
+            self.graph.root_raw_content_digest.clone(),
+            self.graph.effective_definition_digest.clone(),
+        )
+        .with_text_coordinate("graph_run_id", graph_run_id)
+        .with_counter_coordinate("steps", steps)
     }
 
     /// Build the hook context for a `graph_step_completed` fire point. Carries
@@ -1751,18 +1740,19 @@ fn hash_json_value(value: &Value) -> Result<String, lillux::cas::CanonicalJsonEr
 }
 
 fn compute_cache_key(
-    definition_hash: &str,
+    effective_definition_digest: &str,
     graph_id: &str,
     node_name: &str,
     action: &Value,
 ) -> Result<String, lillux::cas::CanonicalJsonError> {
     // Length-prefix each identity component so concatenation cannot alias.
-    // The definition hash prevents a changed graph from reusing an entry, and
+    // The effective definition digest prevents changed executable behavior
+    // from reusing an entry, and
     // canonical JSON gives object-key ordering one deterministic identity.
     let mut hasher = Sha256::new();
     let canonical_action = lillux::cas::canonical_json(action)?;
     for component in [
-        definition_hash.as_bytes(),
+        effective_definition_digest.as_bytes(),
         graph_id.as_bytes(),
         node_name.as_bytes(),
         canonical_action.as_bytes(),

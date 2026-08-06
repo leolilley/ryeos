@@ -10,6 +10,7 @@ fn main() {
         HandlerRequest::Parse(_)
         | HandlerRequest::ValidateParserConfig(_)
         | HandlerRequest::Compose(_)
-        | HandlerRequest::ValidateComposerConfig(_) => directive_launch::wrong_request(),
+        | HandlerRequest::ValidateComposerConfig(_)
+        | HandlerRequest::EffectiveValidate(_) => directive_launch::wrong_request(),
     }));
 }

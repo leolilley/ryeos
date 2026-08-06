@@ -307,6 +307,28 @@ impl LaunchConfigDependencyProof {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn node_dependency_proof_test_fixture(
+    root_index: usize,
+    root: &crate::item_resolution::ResolutionRoot,
+    logical_path: &str,
+) -> Result<LaunchConfigDependencyProof, EngineError> {
+    let absolute_path = root.ai_root.join(logical_path);
+    let state = observe_dependency_state(&absolute_path, &[])?;
+    Ok(LaunchConfigDependencyProof {
+        trust_identity: "test-trust-identity".to_string(),
+        dependencies: vec![LaunchConfigDependency {
+            root_index,
+            root_label: root.label.clone(),
+            root_space: root.space,
+            logical_path: logical_path.to_string(),
+            absolute_path,
+            state,
+            catalog_extensions: Vec::new(),
+        }],
+    })
+}
+
 fn observe_dependency_state(
     path: &Path,
     catalog_extensions: &[String],

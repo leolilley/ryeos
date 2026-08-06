@@ -970,12 +970,16 @@ fn typed_object_edges(value: &Value) -> Result<Vec<ObjectEdge>, String> {
             if value.get("event_type").and_then(Value::as_str) == Some("milestone")
                 && value.pointer("/payload/kind").and_then(Value::as_str) == Some("state_anchor")
             {
-                let manifest_ref = value
-                    .pointer("/payload/payload/manifest_ref")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        "state_anchor milestone is missing string manifest_ref".to_string()
-                    })?;
+                let anchor = crate::objects::StateAnchorMilestoneV2::from_value(
+                    value
+                        .get("payload")
+                        .cloned()
+                        .ok_or_else(|| "state_anchor milestone is missing payload".to_string())?,
+                )
+                .map_err(|error| {
+                    format!("state_anchor milestone violates the current contract: {error:#}")
+                })?;
+                let manifest_ref = anchor.payload.manifest_ref;
                 let manifest_hash = manifest_ref.strip_prefix("cas:").ok_or_else(|| {
                     "state_anchor manifest_ref must use the cas:<hash> form".to_string()
                 })?;
@@ -1641,13 +1645,32 @@ mod tests {
             "prev_thread_event_hash": null,
             "payload": {
                 "kind": "state_anchor",
-                "payload": {"manifest_ref": format!("cas:{manifest_hash}")}
+                "payload": {
+                    "schema_version": 2,
+                    "label": "checkpoint",
+                    "state_digest": format!("sha256:{manifest_hash}"),
+                    "manifest_ref": format!("cas:{manifest_hash}"),
+                    "runtime": {},
+                    "metadata": {}
+                },
+                "graph_run_id": "G-test",
+                "definition_ref": "graph:test/solve",
+                "effective_definition_digest": h("de"),
+                "node": "solve",
+                "step": 3
             }
         });
         let edges = typed_object_edges(&event).unwrap();
         assert!(edges.iter().any(|edge| {
             edge.hash == manifest_hash && edge.expected == ExpectedObject::Kind("state_manifest")
         }));
+        let mut predecessor = event;
+        predecessor["payload"]["payload"]["schema_version"] = json!(1);
+        assert!(
+            typed_object_edges(&predecessor)
+                .unwrap_err()
+                .contains("current contract")
+        );
 
         let restore_hash = h("bd");
         let input_hash = h("ce");

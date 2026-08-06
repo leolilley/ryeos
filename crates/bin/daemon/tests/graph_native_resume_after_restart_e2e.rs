@@ -55,9 +55,9 @@ fn graph_checkpoint_roundtrips_next_cursor_through_writer() {
     // step count for that node, plus the graph state at the time
     // `graph_step_completed` was appended for the just-completed node.
     let payload = serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 4,
         "definition_ref": "graph:test/e2e",
-        "definition_hash": "sha256:e2e-definition",
+        "effective_definition_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         "expression_language": "rye-expr/1",
         "graph_run_id": "gr-e2e-1",
         "current_node": "step3",

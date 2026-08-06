@@ -236,11 +236,14 @@ mod tests {
                 "T-test",
                 "/tmp",
                 &[],
-                HookDispatchOccurrence::GraphStarted {
-                    graph_run_id: "run-1".to_string(),
-                    definition_ref: "graph:test/fixture".to_string(),
-                    definition_hash: "definition-hash".to_string(),
-                },
+                HookDispatchOccurrence::new(
+                    "graph",
+                    "graph_started",
+                    "graph:test/fixture",
+                    "a".repeat(64),
+                    "definition-hash",
+                )
+                .with_text_coordinate("graph_run_id", "run-1"),
                 &ctx,
             )
             .await

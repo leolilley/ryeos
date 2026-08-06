@@ -591,16 +591,23 @@ mod tests {
     #[test]
     fn dispatch_action_serializes_typed_hook_identity() {
         let identity = HookDispatchIdentity {
-            occurrence: HookDispatchOccurrence::GraphStepCompleted {
-                graph_run_id: "graph-run-7".to_string(),
-                definition_ref: "graph:test/workflow".to_string(),
-                definition_hash: "definition-hash".to_string(),
-                step: 4,
-                node: "audit-node".to_string(),
-            },
+            occurrence: HookDispatchOccurrence::new(
+                "graph",
+                "graph_step_completed",
+                "graph:test/workflow",
+                "a".repeat(64),
+                "b".repeat(64),
+            )
+            .with_text_coordinate("graph_run_id", "graph-run-7")
+            .with_counter_coordinate("step", 4)
+            .with_text_coordinate("node", "audit-node"),
             hook_id: "audit".to_string(),
             layer: crate::hooks_loader::HookLayer::Infrastructure,
             result_mode: crate::hooks_loader::HookResultMode::Observation,
+            context_contract: ryeos_engine::hooks::HookContextContract {
+                schema: ryeos_engine::hooks::HOOK_CONTEXT_SCHEMA.to_string(),
+                allowed_roots: std::collections::BTreeSet::from(["state".to_string()]),
+            },
             context_hash: "sha256-context".to_string(),
         };
         let request = DispatchActionRequest {

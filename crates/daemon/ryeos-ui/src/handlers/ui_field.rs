@@ -10,8 +10,9 @@ use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
-pub const FIELD_FACTS_SCHEMA: &str = "ryeos.ui.field.facts.v1";
+pub const FIELD_FACTS_SCHEMA: &str = "ryeos.ui.field.facts.v2";
 pub const MAX_FIELD_FACT_ENTITIES: usize = 5_000;
 pub const MAX_FIELD_FACT_RELATIONS: usize = 12_000;
 pub const MAX_FIELD_FACT_ATTRIBUTE_BYTES: usize = 256 * 1024;
@@ -28,7 +29,7 @@ pub struct FieldFactSubject {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub definition_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub definition_hash: Option<String>,
+    pub effective_definition_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,7 +107,7 @@ pub struct FieldReplay {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldAnchorConformance {
-    ContractV1,
+    ContractV2,
     Malformed,
 }
 
@@ -141,7 +142,7 @@ pub struct FieldArtifactRef {
 pub enum FieldEvidenceRef {
     Item {
         canonical_ref: String,
-        source_content_hash: String,
+        source_content_digest: String,
     },
     Event {
         event: FieldEventRef,
@@ -197,11 +198,11 @@ pub struct FieldFactEntity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub canonical_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_content_hash: Option<String>,
+    pub source_content_digest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub definition_hash: Option<String>,
+    pub effective_definition_digest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub admitted_capsule_hash: Option<String>,
+    pub admitted_launch_capsule_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_ref: Option<FieldEventRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -378,41 +379,34 @@ impl FieldFactsBuilder {
             metrics,
             expansions,
         } = self;
-        let expansion_entities = entities.values().cloned().collect::<Vec<_>>();
-        let expansion_relations = relations.values().cloned().collect::<Vec<_>>();
-        let expansion_reservoir_revision = lillux::sha256_hex(
-            lillux::canonical_json(&serde_json::json!({
-                "entities": &expansion_entities,
-                "relations": &expansion_relations,
-            }))
-            .context("canonicalize field expansion reservoir")?
-            .as_bytes(),
-        );
-        let entity_ids = entities
-            .keys()
-            .take(MAX_FIELD_FACT_ENTITIES)
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        if entity_ids.len() != entities.len() {
+        // Consume the sorted maps into the hidden expansion reservoir once.
+        // The public base vectors are bounded clones; non-expanding clients no
+        // longer pay for cloning the full, potentially multi-MiB reservoir.
+        let expansion_entities = entities.into_values().collect::<Vec<_>>();
+        let expansion_relations = relations.into_values().collect::<Vec<_>>();
+        let expansion_reservoir_revision =
+            expansion_reservoir_revision(&expansion_entities, &expansion_relations)?;
+        if expansion_entities.len() > MAX_FIELD_FACT_ENTITIES {
             truncated = true;
             warnings.push(serde_json::json!({
                 "code": "entity_limit",
                 "message": format!("field source exceeded {MAX_FIELD_FACT_ENTITIES} entities"),
             }));
         }
-        let entities = entities
-            .into_iter()
-            .filter_map(|(id, entity)| entity_ids.contains(&id).then_some(entity))
+        let entities = expansion_entities
+            .iter()
+            .take(MAX_FIELD_FACT_ENTITIES)
+            .cloned()
             .collect::<Vec<_>>();
         // Named sources intentionally cross-link: a run summary may point at a
         // definition entity owned by the project or historical-definition
         // channel. Preserve such relations and let the shared merge layer
         // resolve the endpoint (or surface a missing-endpoint warning).
-        let eligible_relations = relations.into_values().collect::<Vec<_>>();
-        let relation_count = eligible_relations.len();
-        let relations = eligible_relations
-            .into_iter()
+        let relation_count = expansion_relations.len();
+        let relations = expansion_relations
+            .iter()
             .take(MAX_FIELD_FACT_RELATIONS)
+            .cloned()
             .collect::<Vec<_>>();
         if relations.len() != relation_count {
             truncated = true;
@@ -452,7 +446,7 @@ impl FieldFactsBuilder {
             for relation in &mut stamped_relations {
                 relation.provenance.source_revision.clone_from(&revision);
             }
-            let document = FieldFactsDocument {
+            let mut document = FieldFactsDocument {
                 schema_version: FIELD_FACTS_SCHEMA.to_string(),
                 source: source.clone(),
                 subject: subject.clone(),
@@ -466,8 +460,11 @@ impl FieldFactsBuilder {
                 metrics: metrics.clone(),
                 expansions: expansions.clone(),
                 warnings: warnings.clone(),
-                expansion_entities: expansion_entities.clone(),
-                expansion_relations: expansion_relations.clone(),
+                // These fields are serde-skipped and do not participate in
+                // the wire-size check. Move the reservoir into the one final
+                // document only after the bounded public shape fits.
+                expansion_entities: Vec::new(),
+                expansion_relations: Vec::new(),
             };
             let document_value = serde_json::to_value(&document)
                 .context("serialize bounded field facts document")?;
@@ -475,6 +472,8 @@ impl FieldFactsBuilder {
                 .context("canonicalize bounded field facts document")?
                 .len();
             if bytes <= MAX_FIELD_FACT_DOCUMENT_BYTES {
+                document.expansion_entities = expansion_entities;
+                document.expansion_relations = expansion_relations;
                 return Ok(document);
             }
 
@@ -513,6 +512,38 @@ impl FieldFactsBuilder {
             }
         }
     }
+}
+
+fn expansion_reservoir_revision(
+    entities: &[FieldFactEntity],
+    relations: &[FieldFactRelation],
+) -> Result<String> {
+    // Stream the exact canonical JSON object formerly materialized as one
+    // large Value/String. This preserves revision identity byte-for-byte while
+    // bounding peak memory to one fact's canonical form.
+    let mut hasher = Sha256::new();
+    hasher.update(b"{\"entities\":[");
+    for (index, entity) in entities.iter().enumerate() {
+        if index > 0 {
+            hasher.update(b",");
+        }
+        let value = serde_json::to_value(entity).context("serialize field expansion entity")?;
+        let canonical =
+            lillux::canonical_json(&value).context("canonicalize field expansion entity")?;
+        hasher.update(canonical.as_bytes());
+    }
+    hasher.update(b"],\"relations\":[");
+    for (index, relation) in relations.iter().enumerate() {
+        if index > 0 {
+            hasher.update(b",");
+        }
+        let value = serde_json::to_value(relation).context("serialize field expansion relation")?;
+        let canonical =
+            lillux::canonical_json(&value).context("canonicalize field expansion relation")?;
+        hasher.update(canonical.as_bytes());
+    }
+    hasher.update(b"]}");
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// Apply bounded, deterministic neighborhood expansion metadata to a source
@@ -603,12 +634,13 @@ pub fn apply_bounded_expansions(
                 continuation_token: None,
             },
             u32::try_from(end).unwrap_or(u32::MAX),
+            start,
         ));
     }
     materialize_expansion_facts(&mut document, &mut pending, &adjacency)?;
     let revision_projection = pending
         .iter()
-        .map(|(_, result, _)| result)
+        .map(|(_, result, _, _)| result)
         .collect::<Vec<_>>();
     let response_revision = lillux::sha256_hex(
         lillux::canonical_json(&serde_json::json!({
@@ -619,8 +651,9 @@ pub fn apply_bounded_expansions(
         .as_bytes(),
     );
     let mut results = Vec::new();
-    for (request, mut result, next_offset) in pending {
-        if result.truncated {
+    let mut stalled = false;
+    for (request, mut result, next_offset, start_offset) in pending {
+        if result.truncated && next_offset > start_offset {
             result.continuation_token = Some(encode_expansion_token(
                 ui_state,
                 &FieldExpansionTokenClaims {
@@ -636,8 +669,19 @@ pub fn apply_bounded_expansions(
                     next_offset,
                 },
             )?);
+        } else if result.truncated {
+            // Shared entity/wire bounds can prevent one of several expansion
+            // roots from advancing. Emitting the unchanged (or regressed)
+            // offset would let a well-behaved client loop forever.
+            stalled = true;
         }
         results.push(result);
+    }
+    if stalled {
+        document.warnings.push(serde_json::json!({
+            "code": "expansion_no_progress",
+            "message": "bounded expansion could not advance this root under the shared response limit",
+        }));
     }
     document.revision = response_revision.clone();
     document.expansions = results
@@ -694,7 +738,7 @@ fn expansion_adjacency(document: &FieldFactsDocument) -> BTreeMap<String, BTreeS
 
 fn materialize_expansion_facts(
     document: &mut FieldFactsDocument,
-    pending: &mut [(&FieldExpansionRequest, FieldExpansionResult, u32)],
+    pending: &mut [(&FieldExpansionRequest, FieldExpansionResult, u32, u32)],
     adjacency: &BTreeMap<String, BTreeSet<String>>,
 ) -> Result<()> {
     let reservoir_entities = if document.expansion_entities.is_empty() {
@@ -717,7 +761,7 @@ fn materialize_expansion_facts(
     // wire cap. This is what makes an expansion able to page into the source's
     // retained candidate set even when the ordinary base document is full.
     let mut desired = BTreeSet::new();
-    for (request, result, next_offset) in pending.iter_mut() {
+    for (request, result, next_offset, _) in pending.iter_mut() {
         let traversal = expansion_traversal(
             &request.root_id,
             request.max_depth.clamp(1, MAX_EXPANSION_DEPTH),
@@ -787,26 +831,9 @@ fn materialize_expansion_facts(
         .collect();
 
     let base_trimmed = original_ids.iter().any(|id| !final_ids.contains(id));
-    let mut wire_trimmed = false;
     // Leave room for continuation tokens and the final expansion metadata.
     let target_bytes = MAX_FIELD_FACT_DOCUMENT_BYTES.saturating_sub(64 * 1024);
-    while serialized_field_document_bytes(document)? > target_bytes {
-        wire_trimmed = true;
-        if document.relations.pop().is_some() {
-            continue;
-        }
-        if let Some(index) = document
-            .entities
-            .iter()
-            .rposition(|entity| !desired.contains(&entity.id))
-        {
-            document.entities.remove(index);
-            continue;
-        }
-        if document.entities.pop().is_none() {
-            bail!("expanded field response chrome exceeds the document byte limit");
-        }
-    }
+    let wire_trimmed = trim_expanded_document_to_bytes(document, target_bytes, &desired)?;
     let retained_ids = document
         .entities
         .iter()
@@ -817,7 +844,7 @@ fn materialize_expansion_facts(
             && (!reservoir_ids.contains(&relation.target_id)
                 || retained_ids.contains(&relation.target_id))
     });
-    for (request, result, next_offset) in pending.iter_mut() {
+    for (request, result, next_offset, _) in pending.iter_mut() {
         let traversal = expansion_traversal(
             &request.root_id,
             request.max_depth.clamp(1, MAX_EXPANSION_DEPTH),
@@ -855,6 +882,85 @@ fn serialized_field_document_bytes(document: &FieldFactsDocument) -> Result<usiz
     Ok(lillux::canonical_json(&value)
         .context("canonicalize expanded field document")?
         .len())
+}
+
+fn trim_expanded_document_to_bytes(
+    document: &mut FieldFactsDocument,
+    target_bytes: usize,
+    desired: &BTreeSet<String>,
+) -> Result<bool> {
+    if serialized_field_document_bytes(document)? <= target_bytes {
+        return Ok(false);
+    }
+
+    // Preserve the prior deterministic policy exactly: remove relations from
+    // the end first. Binary-search the largest retained prefix so a response
+    // with thousands of relations needs O(log n), not O(n), full-document
+    // canonicalizations.
+    let relations = document.relations.clone();
+    let mut low = 0usize;
+    let mut high = relations.len();
+    while low < high {
+        let keep = low + (high - low).div_ceil(2);
+        document.relations = relations[..keep].to_vec();
+        if serialized_field_document_bytes(document)? <= target_bytes {
+            low = keep;
+        } else {
+            high = keep - 1;
+        }
+    }
+    document.relations = relations[..low].to_vec();
+    if serialized_field_document_bytes(document)? <= target_bytes {
+        return Ok(true);
+    }
+
+    // The old loop reached entities only after every relation was removed. It
+    // removed the last non-requested entity repeatedly, then popped requested
+    // entities from the end. Encode that exact removal order once and binary
+    // search the minimum removed prefix.
+    let entities = document.entities.clone();
+    let mut removal_order = entities
+        .iter()
+        .enumerate()
+        .rev()
+        .filter_map(|(index, entity)| (!desired.contains(&entity.id)).then_some(index))
+        .collect::<Vec<_>>();
+    removal_order.extend(
+        entities
+            .iter()
+            .enumerate()
+            .rev()
+            .filter_map(|(index, entity)| desired.contains(&entity.id).then_some(index)),
+    );
+    let mut removal_rank = vec![usize::MAX; entities.len()];
+    for (rank, index) in removal_order.into_iter().enumerate() {
+        removal_rank[index] = rank;
+    }
+    let set_removed = |document: &mut FieldFactsDocument, count: usize| {
+        document.entities = entities
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| removal_rank[*index] >= count)
+            .map(|(_, entity)| entity.clone())
+            .collect();
+    };
+
+    let mut low = 0usize;
+    let mut high = entities.len();
+    while low < high {
+        let removed = low + (high - low) / 2;
+        set_removed(document, removed);
+        if serialized_field_document_bytes(document)? <= target_bytes {
+            high = removed;
+        } else {
+            low = removed + 1;
+        }
+    }
+    set_removed(document, low);
+    if serialized_field_document_bytes(document)? > target_bytes {
+        bail!("expanded field response chrome exceeds the document byte limit");
+    }
+    Ok(true)
 }
 
 fn expansion_traversal(
@@ -920,6 +1026,29 @@ fn validate_stable_id(label: &str, id: &str) -> Result<()> {
     if id.trim() != id || id.is_empty() || id.len() > 1024 || id.chars().any(char::is_control) {
         bail!("{label} has an invalid stable ID");
     }
+    validate_shell_digest_slot(label, id)?;
+    Ok(())
+}
+
+fn validate_shell_digest_slot(label: &str, id: &str) -> Result<()> {
+    const DIGEST_SHELLS: [&str; 4] = ["item:", "source-version:", "definition:", "graph-node:"];
+    if !DIGEST_SHELLS.iter().any(|prefix| id.starts_with(prefix)) {
+        return Ok(());
+    }
+    let Some((_, suffix)) = id.rsplit_once('@') else {
+        return Ok(());
+    };
+    let digest = suffix.split('#').next().unwrap_or(suffix);
+    if digest.starts_with("unknown:") {
+        return Ok(());
+    }
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("{label} has a non-canonical digest identity slot");
+    }
     Ok(())
 }
 
@@ -948,9 +1077,9 @@ mod tests {
             parent_id: None,
             status: None,
             canonical_ref: None,
-            source_content_hash: None,
-            definition_hash: None,
-            admitted_capsule_hash: None,
+            source_content_digest: None,
+            effective_definition_digest: None,
+            admitted_launch_capsule_hash: None,
             event_ref: None,
             artifact_ref: None,
             attributes: serde_json::json!({}),
@@ -959,12 +1088,32 @@ mod tests {
     }
 
     #[test]
+    fn stable_shell_ids_require_lowercase_sha256_digest_slots() {
+        let digest = "a".repeat(64);
+        validate_stable_id(
+            "field entity",
+            &format!("graph-node:graph:test/build@{digest}#start"),
+        )
+        .unwrap();
+        assert!(
+            validate_stable_id("field entity", "definition:graph:test/build@not-a-digest").is_err()
+        );
+        assert!(
+            validate_stable_id(
+                "field entity",
+                &format!("source-version:graph:test/build@{}", "A".repeat(64))
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn facts_are_stably_sorted_revisioned_and_collision_closed() {
         let subject = FieldFactSubject {
             kind: "project".to_string(),
             id: "project:test".to_string(),
             definition_ref: None,
-            definition_hash: None,
+            effective_definition_digest: None,
         };
         let mut left = FieldFactsBuilder::new("project", "service:test", subject.clone());
         left.add_entity(entity("item:z", "z")).unwrap();
@@ -990,11 +1139,39 @@ mod tests {
                 kind: "project".to_string(),
                 id: "project:test".to_string(),
                 definition_ref: None,
-                definition_hash: None,
+                effective_definition_digest: None,
             },
         );
         divergent.add_entity(entity("item:a", "a")).unwrap();
         assert!(divergent.add_entity(entity("item:a", "changed")).is_err());
+    }
+
+    #[test]
+    fn streamed_expansion_reservoir_revision_matches_canonical_document_identity() {
+        let entities = vec![entity("item:a", "a"), entity("item:b", "b")];
+        let relations = vec![FieldFactRelation {
+            id: "edge:a-b".to_string(),
+            kind: "contains".to_string(),
+            source_id: "item:a".to_string(),
+            target_id: "item:b".to_string(),
+            status: None,
+            directed: true,
+            attributes: serde_json::json!({"rank": 1}),
+            provenance: FieldProvenance::pending("service:test", Vec::new()),
+        }];
+        let expected = lillux::sha256_hex(
+            lillux::canonical_json(&serde_json::json!({
+                "entities": &entities,
+                "relations": &relations,
+            }))
+            .unwrap()
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            expansion_reservoir_revision(&entities, &relations).unwrap(),
+            expected
+        );
     }
 
     #[test]
@@ -1003,7 +1180,7 @@ mod tests {
             kind: "thread".to_string(),
             id: "T-test".to_string(),
             definition_ref: None,
-            definition_hash: None,
+            effective_definition_digest: None,
         };
         let live = FieldFactsBuilder::new("execution", "service:test", subject.clone())
             .finish()
@@ -1037,7 +1214,7 @@ mod tests {
             kind: "project".to_string(),
             id: "project:test".to_string(),
             definition_ref: None,
-            definition_hash: None,
+            effective_definition_digest: None,
         };
         let build = || {
             let mut builder = FieldFactsBuilder::new("project", "service:test", subject.clone());
@@ -1065,12 +1242,67 @@ mod tests {
     }
 
     #[test]
+    fn expanded_wire_trim_preserves_relation_and_requested_entity_priority() {
+        let subject = FieldFactSubject {
+            kind: "project".to_string(),
+            id: "project:test".to_string(),
+            definition_ref: None,
+            effective_definition_digest: None,
+        };
+        let mut builder = FieldFactsBuilder::new("project", "service:test", subject);
+        for index in 0..4 {
+            let mut fact = entity(&format!("item:{index}"), &format!("item {index}"));
+            fact.attributes = serde_json::json!({"payload": "x".repeat(1024)});
+            builder.add_entity(fact).unwrap();
+            builder
+                .add_relation(FieldFactRelation {
+                    id: format!("edge:{index}"),
+                    kind: "contains".to_string(),
+                    source_id: "item:0".to_string(),
+                    target_id: format!("item:{index}"),
+                    status: None,
+                    directed: true,
+                    attributes: serde_json::json!({"payload": "r".repeat(256)}),
+                    provenance: FieldProvenance::pending("service:test", Vec::new()),
+                })
+                .unwrap();
+        }
+        let document = builder.finish().unwrap();
+
+        let mut expected_relations = document.clone();
+        expected_relations.relations.truncate(2);
+        let relation_target = serialized_field_document_bytes(&expected_relations).unwrap();
+        let mut relation_trimmed = document.clone();
+        assert!(
+            trim_expanded_document_to_bytes(
+                &mut relation_trimmed,
+                relation_target,
+                &BTreeSet::new(),
+            )
+            .unwrap()
+        );
+        assert_eq!(relation_trimmed.relations, expected_relations.relations);
+        assert_eq!(relation_trimmed.entities, expected_relations.entities);
+
+        let mut entity_source = document;
+        entity_source.relations.clear();
+        let desired = BTreeSet::from(["item:3".to_string()]);
+        let mut expected_entities = entity_source.clone();
+        expected_entities.entities.remove(2);
+        let entity_target = serialized_field_document_bytes(&expected_entities).unwrap();
+        assert!(
+            trim_expanded_document_to_bytes(&mut entity_source, entity_target, &desired).unwrap()
+        );
+        assert_eq!(entity_source.entities, expected_entities.entities);
+    }
+
+    #[test]
     fn expansion_tokens_are_deterministic_bounded_and_fail_closed() {
         let subject = FieldFactSubject {
             kind: "project".to_string(),
             id: "project:test".to_string(),
             definition_ref: None,
-            definition_hash: None,
+            effective_definition_digest: None,
         };
         let mut builder = FieldFactsBuilder::new("project", "service:test", subject);
         for index in 0..6 {
@@ -1154,12 +1386,78 @@ mod tests {
     }
 
     #[test]
+    fn expansion_does_not_issue_a_continuation_when_the_shared_budget_cannot_advance() {
+        let subject = FieldFactSubject {
+            kind: "project".to_string(),
+            id: "project:test".to_string(),
+            definition_ref: None,
+            effective_definition_digest: None,
+        };
+        let mut builder = FieldFactsBuilder::new("project", "service:test", subject);
+        let mut requests = Vec::new();
+        for group in 0..6 {
+            let root_id = format!("item:000-root-{group}");
+            builder.add_entity(entity(&root_id, &root_id)).unwrap();
+            requests.push(FieldExpansionRequest {
+                root_id: root_id.clone(),
+                max_depth: 1,
+                max_entities: MAX_EXPANSION_ENTITIES,
+                continuation_token: None,
+            });
+            for index in 0..1_000 {
+                let child_id = format!("item:100-child-{group}-{index:04}");
+                builder.add_entity(entity(&child_id, &child_id)).unwrap();
+                builder
+                    .add_relation(FieldFactRelation {
+                        id: format!("edge:{group}-{index:04}"),
+                        kind: "contains".to_string(),
+                        source_id: root_id.clone(),
+                        target_id: child_id,
+                        status: None,
+                        directed: true,
+                        attributes: serde_json::json!({}),
+                        provenance: FieldProvenance::pending("service:test", Vec::new()),
+                    })
+                    .unwrap();
+            }
+        }
+
+        let expanded = apply_bounded_expansions(
+            builder.finish().unwrap(),
+            &requests,
+            &crate::state::UiState::new(),
+            "service:test",
+        )
+        .unwrap();
+        let results = expanded
+            .expansions
+            .iter()
+            .cloned()
+            .map(serde_json::from_value::<FieldExpansionResult>)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(results.len(), 6);
+        assert!(results[..5].iter().all(|result| {
+            result.entity_count == MAX_EXPANSION_ENTITIES
+                && result.truncated
+                && result.continuation_token.is_some()
+        }));
+        assert_eq!(results[5].entity_count, 0);
+        assert!(results[5].truncated);
+        assert!(results[5].continuation_token.is_none());
+        assert!(expanded.warnings.iter().any(|warning| {
+            warning.get("code").and_then(Value::as_str) == Some("expansion_no_progress")
+        }));
+    }
+
+    #[test]
     fn expansion_materializes_facts_outside_the_base_document() {
         let subject = FieldFactSubject {
             kind: "project".to_string(),
             id: "project:test".to_string(),
             definition_ref: None,
-            definition_hash: None,
+            effective_definition_digest: None,
         };
         let mut builder = FieldFactsBuilder::new("project", "service:test", subject);
         for index in 0..=MAX_FIELD_FACT_ENTITIES {
@@ -1224,7 +1522,7 @@ mod tests {
             kind: "project".to_string(),
             id: "project:test".to_string(),
             definition_ref: None,
-            definition_hash: None,
+            effective_definition_digest: None,
         };
         let build = |extra: bool| {
             let mut builder = FieldFactsBuilder::new("project", "service:test", subject.clone());

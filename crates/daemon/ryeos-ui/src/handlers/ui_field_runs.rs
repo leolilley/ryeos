@@ -41,7 +41,7 @@ struct RunsRequest {
     #[serde(default)]
     definition_ref: Option<String>,
     #[serde(default)]
-    definition_hash: Option<String>,
+    effective_definition_digest: Option<String>,
     #[serde(default)]
     facets: BTreeMap<String, Value>,
 }
@@ -100,14 +100,14 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             kind: "item".to_string(),
             id: definition_ref.clone(),
             definition_ref: Some(definition_ref.clone()),
-            definition_hash: request.definition_hash.clone(),
+            effective_definition_digest: request.effective_definition_digest.clone(),
         }
     } else {
         FieldFactSubject {
             kind: "project".to_string(),
             id: project_subject,
             definition_ref: None,
-            definition_hash: None,
+            effective_definition_digest: None,
         }
     };
     let mut builder = FieldFactsBuilder::new("runs", SERVICE_REF, subject);
@@ -118,7 +118,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             graph_runs.get(&row.item.thread_id),
             request.item_ref.as_deref(),
             request.definition_ref.as_deref(),
-            request.definition_hash.as_deref(),
+            request.effective_definition_digest.as_deref(),
             &facets,
         )
     }) {
@@ -145,7 +145,7 @@ fn run_matches(
     graph_run: Option<&GraphRunListIdentity>,
     item_ref: Option<&str>,
     definition_ref: Option<&str>,
-    definition_hash: Option<&str>,
+    effective_definition_digest: Option<&str>,
     facets: &BTreeMap<String, String>,
 ) -> bool {
     if item_ref.is_some_and(|expected| row.item.item_ref != expected) {
@@ -156,8 +156,8 @@ fn run_matches(
     }) {
         return false;
     }
-    if definition_hash.is_some_and(|expected| {
-        graph_run.is_none_or(|identity| identity.definition_hash != expected)
+    if effective_definition_digest.is_some_and(|expected| {
+        graph_run.is_none_or(|identity| identity.effective_definition_digest != expected)
     }) {
         return false;
     }
@@ -204,9 +204,10 @@ fn add_run_summary(
         parent_id: None,
         status: Some(row.item.status.clone()),
         canonical_ref: Some(row.item.item_ref.clone()),
-        source_content_hash: None,
-        definition_hash: graph_run.map(|identity| identity.definition_hash.clone()),
-        admitted_capsule_hash: row.item.admitted_launch_capsule_hash.clone(),
+        source_content_digest: None,
+        effective_definition_digest: graph_run
+            .map(|identity| identity.effective_definition_digest.clone()),
+        admitted_launch_capsule_hash: row.item.admitted_launch_capsule_hash.clone(),
         event_ref: None,
         artifact_ref: None,
         attributes: json!({
@@ -241,11 +242,11 @@ fn add_run_summary(
     if let Some(identity) = graph_run {
         let definition_id = format!(
             "definition:{}@{}",
-            identity.definition_ref, identity.definition_hash
+            identity.definition_ref, identity.effective_definition_digest
         );
         let node_id = format!(
             "graph-node:{}@{}#{}",
-            identity.definition_ref, identity.definition_hash, identity.node
+            identity.definition_ref, identity.effective_definition_digest, identity.node
         );
         builder.add_relation(FieldFactRelation {
             id: format!("executes-definition:{summary_id}:{definition_id}"),

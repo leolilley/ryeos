@@ -50,8 +50,10 @@ pub fn draw_indexed_grid(
     for row in 0..visible_rows {
         for column in 0..visible_columns {
             let index = row * grid.width as usize + column;
-            let glyph = palette
-                .get(grid.cells.get(index).unwrap_or(&u16::MAX))
+            let glyph = grid
+                .cells
+                .get(index)
+                .and_then(|cell| palette.get(cell))
                 .and_then(|glyph| glyph.chars().next())
                 .unwrap_or('?')
                 .to_string();

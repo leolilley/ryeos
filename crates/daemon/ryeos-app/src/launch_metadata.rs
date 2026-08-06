@@ -62,7 +62,7 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
 // shape require a new epoch so startup rejects the old store before nested
 // deserialization can reinterpret (or partially decode) that authority.
 // v15 carries the pinned COW base/current project-authority pair.
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 15;
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 16;
 
 /// Per-thread daemon-owned state directory.
 ///

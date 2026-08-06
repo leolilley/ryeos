@@ -235,6 +235,7 @@ impl RyeOsCore {
                 // a new route). Fence only subscribed named channels before
                 // resolving their new parameters; unrelated evidence stays
                 // mounted and keeps its accepted revision.
+                self.reset_field_replay_for_subject(&instance_key);
                 channels
                     .into_iter()
                     .flat_map(|channel| {

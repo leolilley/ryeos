@@ -137,7 +137,7 @@ metadata:
         r#"kind: runtime
 serves: pin_fake_kind
 binary_ref: {binary_ref}
-abi_version: "v2"
+abi_version: "v3"
 required_caps:
   - runtime.execute
 launch_contract:

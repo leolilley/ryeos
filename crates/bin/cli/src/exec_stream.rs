@@ -320,7 +320,7 @@ mod tests {
             "ok": true,
             "cost": { "tokens": 812 },
             "items": [1, 2, 3],
-            "definition_hash": "1154fd1bf7f56dfe623e3ec8c0a6b5f12c561fad7a4398a4c40a328fcec67ac8"
+            "effective_definition_digest": "1154fd1bf7f56dfe623e3ec8c0a6b5f12c561fad7a4398a4c40a328fcec67ac8"
         });
         let s = payload_summary(&p);
         assert!(s.contains("call_id=gr-eb7d9e3da2bc:30:aim"));
@@ -332,7 +332,7 @@ mod tests {
         );
         assert!(!s.contains("items="), "arrays are skipped");
         // The long hash is present but truncated with an ellipsis.
-        assert!(s.contains("definition_hash=1154"));
+        assert!(s.contains("effective_definition_digest=1154"));
         assert!(s.contains('…'), "long values are elided");
         assert!(!s.contains("c40a328fcec67ac8"), "no untruncated tail");
     }

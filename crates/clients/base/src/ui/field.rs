@@ -15,9 +15,9 @@ use crate::ui::event::RyeOsUiIntent;
 use crate::ui::view_model::{RyeOsRowDetailVm, RyeOsTone};
 use crate::workspace::{FieldFingerprintState, FieldLocalState};
 
-pub const FIELD_FACTS_SCHEMA: &str = "ryeos.ui.field.facts.v1";
+pub const FIELD_FACTS_SCHEMA: &str = "ryeos.ui.field.facts.v2";
 pub const FIELD_PROJECTION_SCHEMA: &str = "ryeos.ui.field.projection.v1";
-pub const FIELD_VM_SCHEMA: &str = "ryeos.ui.field.vm.v1";
+pub const FIELD_VM_SCHEMA: &str = "ryeos.ui.field.vm.v2";
 pub const MAX_FIELD_FACT_ENTITIES: usize = 5_000;
 pub const MAX_FIELD_FACT_RELATIONS: usize = 12_000;
 pub const MAX_FIELD_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
@@ -40,7 +40,7 @@ pub struct FieldFactSubject {
     #[serde(default)]
     pub definition_ref: Option<String>,
     #[serde(default)]
-    pub definition_hash: Option<String>,
+    pub effective_definition_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -96,11 +96,11 @@ pub struct FieldFactEntity {
     #[serde(default)]
     pub canonical_ref: Option<String>,
     #[serde(default)]
-    pub source_content_hash: Option<String>,
+    pub source_content_digest: Option<String>,
     #[serde(default)]
-    pub definition_hash: Option<String>,
+    pub effective_definition_digest: Option<String>,
     #[serde(default)]
-    pub admitted_capsule_hash: Option<String>,
+    pub admitted_launch_capsule_hash: Option<String>,
     #[serde(default)]
     pub event_ref: Option<FieldEventRef>,
     #[serde(default)]
@@ -304,7 +304,7 @@ pub struct RyeOsFieldSubjectVm {
     pub kind: String,
     pub id: String,
     pub definition_ref: Option<String>,
-    pub definition_hash: Option<String>,
+    pub effective_definition_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -638,7 +638,6 @@ pub fn parse_field_document(value: &Value) -> Result<FieldFactsDocument, String>
         match validation {
             Ok(()) => valid_previews.push(preview),
             Err(error) => {
-                document.truncated = true;
                 if document.warnings.len() < MAX_FIELD_WARNINGS {
                     document.warnings.push(json!({
                         "code": "preview_omitted",
@@ -697,6 +696,29 @@ fn validate_json_shape(value: &Value, depth: usize, count: &mut usize) -> Result
 fn validate_id(id: &str) -> Result<(), String> {
     if id.is_empty() || id.len() > 1024 || id.trim() != id || id.chars().any(char::is_control) {
         return Err("field fact contains invalid stable ID".to_string());
+    }
+    validate_shell_digest_slot(id)?;
+    Ok(())
+}
+
+fn validate_shell_digest_slot(id: &str) -> Result<(), String> {
+    const DIGEST_SHELLS: [&str; 4] = ["item:", "source-version:", "definition:", "graph-node:"];
+    if !DIGEST_SHELLS.iter().any(|prefix| id.starts_with(prefix)) {
+        return Ok(());
+    }
+    let Some((_, suffix)) = id.rsplit_once('@') else {
+        return Ok(());
+    };
+    let digest = suffix.split('#').next().unwrap_or(suffix);
+    if digest.starts_with("unknown:") {
+        return Ok(());
+    }
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("field fact has a non-canonical digest identity slot".to_string());
     }
     Ok(())
 }
@@ -826,7 +848,7 @@ pub fn project_field(
             kind: document.subject.kind.clone(),
             id: document.subject.id.clone(),
             definition_ref: document.subject.definition_ref.clone(),
-            definition_hash: document.subject.definition_hash.clone(),
+            effective_definition_digest: document.subject.effective_definition_digest.clone(),
         });
         for warning in &document.warnings {
             warnings.push(compact_value(warning));
@@ -2658,6 +2680,14 @@ mod tests {
         })
     }
 
+    #[test]
+    fn predecessor_field_facts_schema_is_rejected() {
+        let mut value = document("project", "step:one");
+        value["schema_version"] = json!("ryeos.ui.field.facts.v1");
+        let error = parse_field_document(&value).unwrap_err();
+        assert!(error.contains("unsupported field facts schema"));
+    }
+
     fn binding() -> ViewBinding {
         serde_json::from_value(json!({
             "widget": "field",
@@ -2773,7 +2803,7 @@ mod tests {
         let parsed = parse_field_document(&value).expect("bad preview degrades locally");
         assert_eq!(parsed.entities.len(), 1);
         assert!(parsed.previews.is_empty());
-        assert!(parsed.truncated);
+        assert!(!parsed.truncated);
         assert!(parsed.warnings.iter().any(|warning| {
             warning.get("code").and_then(Value::as_str) == Some("preview_omitted")
         }));
@@ -2894,6 +2924,49 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|warning| warning.contains("source-namespaced"))
+        );
+    }
+
+    #[test]
+    fn identical_cross_source_facts_converge_despite_distinct_provenance() {
+        let project = document("project", "definition:graph:test/build@same");
+        let execution = document("execution", "definition:graph:test/build@same");
+        let binding = binding();
+        let field = project_field(
+            "field:test",
+            "Test",
+            "view:test",
+            &binding,
+            &[
+                FieldSourceInput {
+                    channel: "project",
+                    source_ref: "service:project",
+                    subject_fingerprint: None,
+                    response: Some(&project),
+                    parsed: None,
+                    error: None,
+                    refreshing: false,
+                },
+                FieldSourceInput {
+                    channel: "execution",
+                    source_ref: "service:execution",
+                    subject_fingerprint: None,
+                    response: Some(&execution),
+                    parsed: None,
+                    error: None,
+                    refreshing: false,
+                },
+            ],
+            None,
+        );
+
+        assert_eq!(field.entities.len(), 1);
+        assert_eq!(field.entities[0].id, "definition:graph:test/build@same");
+        assert!(
+            field
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains("source-namespaced"))
         );
     }
 

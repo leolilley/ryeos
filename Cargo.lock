@@ -2706,6 +2706,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-graph-definition"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ryeos-bundle",
+ "ryeos-engine",
+ "ryeos-expression",
+ "ryeos-runtime",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ryeos-graph-runtime"
 version = "0.1.0"
 dependencies = [
@@ -2718,6 +2731,7 @@ dependencies = [
  "regex",
  "ryeos-bundle",
  "ryeos-engine",
+ "ryeos-graph-definition",
  "ryeos-runtime",
  "ryeos-tracing",
  "serde",
@@ -2739,6 +2753,8 @@ dependencies = [
  "base64",
  "regex",
  "ryeos-directive-core",
+ "ryeos-engine",
+ "ryeos-graph-definition",
  "ryeos-handler-protocol",
  "serde",
  "serde_json",

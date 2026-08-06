@@ -2144,6 +2144,7 @@ pub(crate) async fn dispatch_method(
         None,
         Some(method_subject.item_ref.clone()),
         history_subject.resolved.raw_content_digest.clone(),
+        None,
         serde_json::Value::Null,
         0,
     );
@@ -7471,6 +7472,8 @@ requires:
             methods,
             augmentation_methods: BTreeMap::new(),
             launch_augmentations: Vec::new(),
+            hooks: None,
+            effective_validator: None,
         }
     }
 

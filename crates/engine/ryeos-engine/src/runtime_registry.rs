@@ -35,7 +35,7 @@ use crate::trust::TrustStore;
 ///
 /// Bump when the LaunchEnvelope, callback ABI, or any other
 /// daemon↔runtime contract surface changes incompatibly.
-pub const SUPPORTED_RUNTIME_ABI_VERSION: &str = "v2";
+pub const SUPPORTED_RUNTIME_ABI_VERSION: &str = "v3";
 
 const MAX_LAUNCH_BINDINGS: usize = 32;
 const MAX_LAUNCH_RUNTIME_DATA_KEYS: usize = 32;
@@ -68,7 +68,7 @@ pub struct RuntimeYaml {
     pub default: Option<bool>,
     /// Binary reference. May contain `{host_triple}` placeholder.
     pub binary_ref: String,
-    /// ABI contract version, e.g. `"v2"`.
+    /// ABI contract version, e.g. `"v3"`.
     pub abi_version: String,
     #[serde(default)]
     pub required_caps: Vec<String>,
@@ -1224,7 +1224,7 @@ mod tests {
         "kind: runtime\n",
         "serves: test_kind\n",
         "binary_ref: bin/test-triple/test\n",
-        "abi_version: v2\n",
+        "abi_version: v3\n",
         "launch_contract:\n",
         "  primary_allowed_kinds: [test_kind]\n",
         "  primary_allowed_spaces: [bundle]\n",
@@ -1404,7 +1404,7 @@ mod tests {
         let yaml = minimal_yaml();
         assert!(
             validate_runtime_yaml(&test_path(), &yaml).is_ok(),
-            "v1 abi_version should be accepted"
+            "the supported runtime ABI should be accepted"
         );
     }
 
@@ -1527,7 +1527,7 @@ mod tests {
             EngineError::AbiVersionMismatch {
                 expected, found, ..
             } => {
-                assert_eq!(expected, "v2");
+                assert_eq!(expected, SUPPORTED_RUNTIME_ABI_VERSION);
                 assert_eq!(found, "v999");
             }
             other => panic!("wrong error variant: {other:?}"),

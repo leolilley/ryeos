@@ -25,6 +25,7 @@ pub mod project_snapshot;
 pub mod project_snapshot_policy;
 pub mod project_tree;
 pub mod source_manifest;
+pub mod state_anchor;
 pub mod state_manifest;
 pub mod thread_event;
 pub mod thread_snapshot;
@@ -57,6 +58,7 @@ pub use project_snapshot::ProjectSnapshot;
 pub use project_snapshot_policy::ProjectSnapshotPolicy;
 pub use project_tree::ProjectTree;
 pub use source_manifest::SourceManifest;
+pub use state_anchor::{STATE_ANCHOR_SCHEMA_VERSION, StateAnchorMilestoneV2, StateAnchorPayloadV2};
 pub use state_manifest::{
     MAX_STATE_MANIFEST_OBJECTS, STATE_MANIFEST_KIND, STATE_MANIFEST_SCHEMA_VERSION, StateManifest,
     StateManifestBlob,

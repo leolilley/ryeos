@@ -8,7 +8,7 @@
 //!     `HandlerRegistry` (see `handlers::registry`). Their canonical
 //!     refs are `handler:ryeos/core/<name>` (e.g.
 //!     `handler:ryeos/core/extends-chain`,
-//!     `handler:ryeos/core/identity`, `handler:ryeos/core/graph-permissions`).
+//!     `handler:ryeos/core/identity`, `handler:ryeos/core/extends-chain`).
 //!   * Kind schemas declare `composer: handler:ryeos/core/<name>`
 //!     (REQUIRED on every kind — there is no silent "no composer"
 //!     path) and an optional `composer_config:` blob the handler
@@ -269,6 +269,12 @@ impl ComposerRegistry {
 
         match resp {
             HandlerResponse::ComposeOk(success) => {
+                validate_declared_capability_narrowing(
+                    kind,
+                    root_parsed,
+                    ancestor_parsed,
+                    &success.composed,
+                )?;
                 validate_composed_field_requirements(
                     kind,
                     &bound.field_requirements,
@@ -295,18 +301,103 @@ impl ComposerRegistry {
     }
 }
 
+/// Independent engine-side defense for the common execution-capability
+/// contract. A trusted composer remains responsible for producing the value,
+/// but cannot admit a direct-edge widening or publish a value other than the
+/// nearest valid declaration.
+fn validate_declared_capability_narrowing(
+    kind: &str,
+    root: &Value,
+    ancestors: &[Value],
+    composed: &Value,
+) -> Result<(), ResolutionError> {
+    let mut effective: Option<Vec<String>> = None;
+    for source in ancestors.iter().chain(std::iter::once(root)) {
+        let Some(declared) = source
+            .get("requires")
+            .and_then(|value| value.get("capabilities"))
+            .and_then(|value| value.get("declared"))
+            .filter(|value| !value.is_null())
+        else {
+            continue;
+        };
+        let child = declared
+            .as_array()
+            .ok_or_else(|| invalid_capability_definition(kind, "declared must be a list"))?
+            .iter()
+            .map(|value| {
+                value.as_str().map(String::from).ok_or_else(|| {
+                    invalid_capability_definition(kind, "declared must contain only strings")
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(parent) = effective.as_ref()
+            && let Some(widened) = child.iter().find(|child| {
+                !parent
+                    .iter()
+                    .any(|parent| capability_pattern_covers(parent, child))
+            })
+        {
+            return Err(invalid_capability_definition(
+                kind,
+                &format!("declared widens its direct parent with `{widened}`"),
+            ));
+        }
+        effective = Some(child);
+    }
+
+    let actual = composed
+        .get("requires")
+        .and_then(|value| value.get("capabilities"))
+        .and_then(|value| value.get("declared"))
+        .filter(|value| !value.is_null());
+    let expected = effective
+        .as_ref()
+        .map(|caps| caps.iter().cloned().map(Value::String).collect::<Vec<_>>())
+        .map(Value::Array);
+    if actual != expected.as_ref() {
+        return Err(ResolutionError::StepFailed {
+            step: ResolutionStepName::PipelineInit,
+            class: ResolutionFailureClass::InternalInvariant,
+            reason: format!(
+                "composer for kind `{kind}` changed the effective requires.capabilities.declared value"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn invalid_capability_definition(kind: &str, reason: &str) -> ResolutionError {
+    ResolutionError::StepFailed {
+        step: ResolutionStepName::PipelineInit,
+        class: ResolutionFailureClass::InvalidDefinition,
+        reason: format!("kind `{kind}` has invalid requires.capabilities.{reason}"),
+    }
+}
+
+fn capability_pattern_covers(parent: &str, child: &str) -> bool {
+    if parent == child {
+        return true;
+    }
+    let mut pattern = String::from("^");
+    for character in parent.chars() {
+        match character {
+            '*' => pattern.push_str(".*"),
+            '?' => pattern.push('.'),
+            other => pattern.push_str(&regex::escape(&other.to_string())),
+        }
+    }
+    pattern.push('$');
+    regex::Regex::new(&pattern)
+        .map(|pattern| pattern.is_match(child))
+        .unwrap_or(false)
+}
+
 /// Derive exact-value composer requirements from one verified kind schema.
 ///
 /// The contract is entirely schema-shaped: no kind name, item ref, composer
 /// handler, or handler-private strategy appears here.
 pub(crate) fn field_requirements_for_schema(schema: &KindSchema) -> Vec<ComposerFieldRequirement> {
-    let Some(declaration) = schema
-        .execution
-        .as_ref()
-        .and_then(|execution| execution.history_policy.as_ref())
-    else {
-        return Vec::new();
-    };
     let semantics = if schema
         .resolution
         .iter()
@@ -316,10 +407,36 @@ pub(crate) fn field_requirements_for_schema(schema: &KindSchema) -> Vec<Composer
     } else {
         ComposerFieldSemantics::RootVerbatim
     };
-    vec![ComposerFieldRequirement {
-        field: declaration.composed_path.clone(),
-        semantics,
-    }]
+    let mut requirements = Vec::new();
+    if let Some(declaration) = schema
+        .execution
+        .as_ref()
+        .and_then(|execution| execution.history_policy.as_ref())
+    {
+        requirements.push(ComposerFieldRequirement {
+            path: vec![declaration.composed_path.clone()],
+            semantics,
+        });
+    }
+    if let Some(declaration) = schema
+        .execution
+        .as_ref()
+        .and_then(|execution| execution.hooks.as_ref())
+    {
+        requirements.push(ComposerFieldRequirement {
+            path: declaration.authored_path.clone(),
+            semantics: if schema
+                .resolution
+                .iter()
+                .any(|step| matches!(step, ResolutionStepDecl::ResolveExtendsChain { .. }))
+            {
+                ComposerFieldSemantics::InheritOrReplace
+            } else {
+                ComposerFieldSemantics::RootVerbatim
+            },
+        });
+    }
+    requirements
 }
 
 /// Defense in depth after every compose: verify the handler actually emitted
@@ -335,29 +452,34 @@ fn validate_composed_field_requirements(
 ) -> Result<(), ResolutionError> {
     for requirement in requirements {
         let expected = match requirement.semantics {
-            ComposerFieldSemantics::RootVerbatim => root.get(&requirement.field),
-            ComposerFieldSemantics::InheritOrReplace => {
-                root.get(&requirement.field).or_else(|| {
+            ComposerFieldSemantics::RootVerbatim => value_at_path(root, &requirement.path),
+            ComposerFieldSemantics::InheritOrReplace => value_at_path(root, &requirement.path)
+                .or_else(|| {
                     ancestors
                         .iter()
                         .rev()
-                        .find_map(|ancestor| ancestor.get(&requirement.field))
-                })
-            }
+                        .find_map(|ancestor| value_at_path(ancestor, &requirement.path))
+                }),
         };
-        let actual = composed.get(&requirement.field);
+        let actual = value_at_path(composed, &requirement.path);
         if actual != expected {
             return Err(ResolutionError::StepFailed {
                 step: ResolutionStepName::PipelineInit,
                 class: ResolutionFailureClass::InternalInvariant,
                 reason: format!(
-                    "composer for kind `{kind}` violated {:?} semantics for exact-value field `{}`",
-                    requirement.semantics, requirement.field
+                    "composer for kind `{kind}` violated {:?} semantics for exact-value path `{}`",
+                    requirement.semantics,
+                    requirement.path.join(".")
                 ),
             });
         }
     }
     Ok(())
+}
+
+fn value_at_path<'a>(value: &'a Value, path: &[String]) -> Option<&'a Value> {
+    path.iter()
+        .try_fold(value, |current, segment| current.get(segment))
 }
 
 impl Default for ComposerRegistry {
@@ -457,6 +579,32 @@ mod tests {
         (sk, ts)
     }
 
+    #[test]
+    fn engine_rejects_direct_edge_capability_widening() {
+        let ancestors = vec![json!({
+            "requires": {"capabilities": {"declared": ["ryeos.execute.tool.read"]}}
+        })];
+        let root = json!({
+            "requires": {"capabilities": {"declared": ["ryeos.execute.tool.write"]}}
+        });
+        let error = validate_declared_capability_narrowing("synthetic", &root, &ancestors, &root)
+            .unwrap_err();
+        assert!(error.to_string().contains("widens its direct parent"));
+    }
+
+    #[test]
+    fn engine_rejects_composer_capability_projection_divergence() {
+        let root = json!({
+            "requires": {"capabilities": {"declared": ["ryeos.execute.tool.read"]}}
+        });
+        let composed = json!({
+            "requires": {"capabilities": {"declared": ["ryeos.execute.tool.write"]}}
+        });
+        let error =
+            validate_declared_capability_narrowing("synthetic", &root, &[], &composed).unwrap_err();
+        assert!(error.to_string().contains("changed the effective"));
+    }
+
     fn write_kind(
         root: &std::path::Path,
         kind: &str,
@@ -513,8 +661,8 @@ composer: {composer}
         write_kind(
             &root,
             "gamma",
-            "handler:ryeos/core/graph-permissions",
-            None,
+            "handler:ryeos/core/extends-chain",
+            Some(cfg),
             &sk,
         );
         let kinds = KindRegistry::load_base(&[root], &ts).unwrap();
@@ -529,14 +677,10 @@ composer: {composer}
         assert_eq!(names, vec!["alpha", "beta", "gamma"]);
     }
 
-    /// R-E guardrail: adding graph_permissions composer MUST NOT break
-    /// the extends_chain composer's effective_caps policy-fact
-    /// projection. This pins that directive-style kinds using
-    /// extends_chain still produce effective_caps via policy_facts —
-    /// after migration, the projection happens in the subprocess
-    /// composer binary and is decoded back into the engine view.
+    /// The generic extends-chain composer projects effective capabilities
+    /// directly from the composed value; no kind-specific composer participates.
     #[test]
-    fn extends_chain_effective_caps_projection_unchanged_after_graph_permissions() {
+    fn extends_chain_projects_effective_caps() {
         let root = tempdir();
         let (sk, ts) = signing_key_with_trust();
         let cfg = r#"
@@ -605,7 +749,7 @@ composer: {composer}
     #[test]
     fn exact_value_guard_rejects_partial_merge_and_preserves_null() {
         let requirements = vec![ComposerFieldRequirement {
-            field: "policy".into(),
+            path: vec!["policy".into()],
             semantics: ComposerFieldSemantics::InheritOrReplace,
         }];
         let root = json!({"other": true});

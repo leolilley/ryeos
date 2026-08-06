@@ -1396,6 +1396,29 @@ mod tests {
     }
 
     #[test]
+    fn schema_8_inventory_contains_capsule_identity_but_no_definition_identity() {
+        let value = child_snapshot().to_value();
+        let fields = value.as_object().expect("thread snapshot is an object");
+        assert_eq!(
+            fields.get("schema"),
+            Some(&serde_json::json!(THREAD_SNAPSHOT_SCHEMA_VERSION))
+        );
+        assert!(fields.contains_key("admitted_launch_capsule_hash"));
+        for excluded in [
+            "definition_hash",
+            "effective_definition_digest",
+            "root_raw_content_digest",
+            "sealed_invocation",
+            "exact_program",
+        ] {
+            assert!(
+                !fields.contains_key(excluded),
+                "thread snapshot unexpectedly embeds `{excluded}`"
+            );
+        }
+    }
+
+    #[test]
     fn current_decoder_rejects_predecessor_epoch_before_nested_authority_decode() {
         let mut value = child_snapshot().to_value();
         let object = value.as_object_mut().unwrap();

@@ -53,7 +53,7 @@ async fn field_sources_use_the_authenticated_ui_read_lane() {
     )
     .await
     .expect("field project source");
-    assert_eq!(project["schema_version"], "ryeos.ui.field.facts.v1");
+    assert_eq!(project["schema_version"], "ryeos.ui.field.facts.v2");
     assert_eq!(project["source"], "project");
     assert!(project["entities"].is_array());
     assert!(
@@ -72,7 +72,7 @@ async fn field_sources_use_the_authenticated_ui_read_lane() {
     )
     .await
     .expect("field runs source");
-    assert_eq!(runs["schema_version"], "ryeos.ui.field.facts.v1");
+    assert_eq!(runs["schema_version"], "ryeos.ui.field.facts.v2");
     assert_eq!(runs["source"], "runs");
     assert!(runs["entities"].is_array());
 
@@ -83,7 +83,7 @@ async fn field_sources_use_the_authenticated_ui_read_lane() {
     )
     .await
     .expect("unselected field execution source");
-    assert_eq!(execution["schema_version"], "ryeos.ui.field.facts.v1");
+    assert_eq!(execution["schema_version"], "ryeos.ui.field.facts.v2");
     assert_eq!(execution["source"], "execution");
     assert_eq!(execution["subject"]["kind"], "none");
 }

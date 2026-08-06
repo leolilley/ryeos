@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-21T00:24:30Z:ef5b881098dbed27abf8b43b6c7b9729257586932e36121d8df900351c1a1f68:sxCzUwoL++DaPqV5cNj1khhqsXqfN05/e29SnJ0O7ldR5gxpgeAwCTwmBPwpnH/moKqTiyIQSxA+dyosBqA6Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-05T10:09:41Z:d9420a9a3d4702ee9ea87e274b56972dcbdf9b70d9e624e863743a3cbbd41285:6NcZTSUFaS94In6jjLCz2MAGz5aWHHPBVcmtwIBTQBWtSI/3YJPZYe0ulnfYon+zNL1lTxEf04zFFvJXCghgCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/services
 tags: [service, trace, replay, branch, provenance, state-anchor]
-version: "1.1.0"
+version: "1.2.0"
 description: Programmable trace service reference.
 ---
 
@@ -57,7 +57,7 @@ events.
 ## State anchors
 
 A branchable domain state is represented as a normal durable `milestone` event
-using the nested milestone shape:
+using the exact current state-anchor contract:
 
 ```json
 {
@@ -65,7 +65,7 @@ using the nested milestone shape:
   "payload": {
     "kind": "state_anchor",
     "payload": {
-      "schema_version": 1,
+      "schema_version": 2,
       "label": "arc.sim_state",
       "state_digest": "sha256:...",
       "manifest_ref": "cas:...",
@@ -75,15 +75,22 @@ using the nested milestone shape:
       },
       "metadata": {}
     },
-    "node": "optional graph node",
-    "step": "optional graph step"
+    "graph_run_id": "G-run",
+    "definition_ref": "graph:project/solve",
+    "effective_definition_digest": "64-lowercase-hex-digest",
+    "node": "solve",
+    "step": 7
   }
 }
 ```
 
-The domain owns canonicalization. RyeOS treats `state_digest` equality as a
-domain claim unless the domain also publishes and verifies the manifest or
-object behind `manifest_ref`.
+The daemon canonicalizes the restore contract, stores the complete state
+manifest closure in CAS, and authors the indexed event. `state_digest` must be
+the SHA-256 commitment to the exact manifest named by `manifest_ref`.
+`effective_definition_digest` binds the anchor to the complete admitted
+program that produced it. Every reader parses the complete milestone through
+this same contract; a different schema or a partial identity is refused rather
+than projected as branchable evidence.
 
 ## `trace.branch`
 

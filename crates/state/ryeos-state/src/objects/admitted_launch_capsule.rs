@@ -6,7 +6,7 @@ use super::{
     ExecutionRecoveryAuthority, validate_trimmed_control_free,
 };
 
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 9;
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 10;
 
 fn deserialize_required_nullable<'de, D, T>(
     deserializer: D,

@@ -1440,7 +1440,7 @@ fn build_protocol_launch_env(
     caller_scopes: Vec<String>,
     provenance: ExecutionProvenance,
     item_ref: &str,
-    root_content_digest: String,
+    root_raw_content_digest: String,
     // Bundle identity for the token, derived once from the resolved canonical
     // ref by the caller via `effective_bundle_id_for_request` so it matches the
     // identity the runtime-cap minter used. `item_ref` stays the requested ref
@@ -1488,7 +1488,8 @@ fn build_protocol_launch_env(
                     provenance,
                     effective_bundle_id,
                     Some(item_ref.to_string()),
-                    root_content_digest,
+                    root_raw_content_digest.clone(),
+                    None,
                     serde_json::Value::Null,
                     0,
                 )
@@ -1633,7 +1634,12 @@ fn admitted_root_launch_metadata(
         Some(runtime_ref) => runtime_ref.clone(),
         None => prepared_plan.runtime_ref()?.to_owned(),
     };
-    let sealed = SealedRootExecutionRequest::capture(&params.resolved, runtime_ref.clone())?;
+    let finalized_program = finalize_direct_effective_program(params)?;
+    let sealed = SealedRootExecutionRequest::capture_finalized(
+        &params.resolved,
+        runtime_ref.clone(),
+        &finalized_program,
+    )?;
     let stable_project_identity = match &project_authority {
         ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => None,
         _ => Some(
@@ -1714,6 +1720,62 @@ fn admitted_root_launch_metadata(
         .with_sealed_root_request(sealed);
     metadata.validate()?;
     Ok(metadata)
+}
+
+/// Finalize the exact resolution used by non-managed/direct execution before
+/// it becomes restart authority. Hook-capable kinds are deliberately excluded:
+/// their configured policy must be captured by the managed-launch finalizer,
+/// never bypassed by this direct protocol path.
+fn finalize_direct_effective_program(
+    params: &ExecutionParams,
+) -> Result<ryeos_engine::effective_program::FinalizedEffectiveProgram> {
+    let admission = params.resolved.root_admission.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("cannot finalize a direct root execution without root admission")
+    })?;
+    let engine = admission.request_engine();
+    if engine
+        .kinds
+        .get(&params.resolved.kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .and_then(|execution| execution.hooks.as_ref())
+        .is_some()
+    {
+        anyhow::bail!(
+            "hook-capable kind `{}` must use managed effective-program finalization",
+            params.resolved.kind
+        );
+    }
+
+    let resolution = admission.resolution_output().clone();
+    let validation = engine
+        .effective_validators
+        .validate(&params.resolved.kind, &resolution)?;
+    let candidate =
+        ryeos_engine::effective_program::lock_validated_effective_program(resolution, validation)?;
+    let materialization = admission.resolution_materialization_binding()?;
+    let project = materialization
+        .authoritative_project_content()?
+        .map(|(root, content)| {
+            (
+                root,
+                content as &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+            )
+        });
+    let roots = engine.resolution_roots(match params.provenance.project_authority() {
+        ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => None,
+        ryeos_state::objects::ExecutionProjectAuthority::LiveProject { .. }
+        | ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. } => {
+            Some(params.provenance.original_project_path().to_path_buf())
+        }
+    });
+    let proof = ryeos_engine::effective_program::prove_finalization_authority(
+        &candidate,
+        &[],
+        &roots,
+        project,
+    )?;
+    ryeos_engine::effective_program::finalize_effective_program(candidate, proof)
+        .map_err(Into::into)
 }
 
 fn recovered_direct_protocol(

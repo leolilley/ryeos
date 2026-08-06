@@ -764,6 +764,24 @@ pub struct ThreadHistoryPolicyDecl {
     pub composed_path: String,
 }
 
+/// Signed, kind-owned hook admission contract.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionHooksDecl {
+    pub authored_path: Vec<String>,
+    pub plan_derived: String,
+    pub events: BTreeMap<String, crate::hooks::HookEventContract>,
+}
+
+/// Optional signed semantic validator for the complete effective value.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectiveValidatorDecl {
+    pub handler: String,
+    #[serde(default)]
+    pub config: Value,
+}
+
 /// Execution configuration for a kind (resolution pipeline + aliases).
 /// Only kinds with an execution block can be executed.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -809,6 +827,14 @@ pub struct ExecutionSchema {
     /// cannot author an override; the node default still applies.
     #[serde(default)]
     pub history_policy: Option<ThreadHistoryPolicyDecl>,
+    /// Complete hook/event contract. Hook-capable kinds must produce one
+    /// captured plan in the declared derived slot before finalization.
+    #[serde(default)]
+    pub hooks: Option<ExecutionHooksDecl>,
+    /// Optional kind-specific semantic validator over the complete composed
+    /// effective program.
+    #[serde(default)]
+    pub effective_validator: Option<EffectiveValidatorDecl>,
     /// Kind-level method dispatch: the route shared by all methods plus
     /// the default method invoked when `/execute` omits `call.method`.
     /// Present iff `methods` is non-empty (enforced at load time).
@@ -2028,6 +2054,39 @@ fn parse_execution_schema(
         None => None,
     };
 
+    let hooks =
+        match execution_value.get("hooks") {
+            Some(value) => {
+                let declaration = serde_yaml::from_value::<ExecutionHooksDecl>(value.clone())
+                    .map_err(|error| EngineError::SchemaLoaderError {
+                        reason: format!("{display}: invalid execution.hooks declaration: {error}"),
+                    })?;
+                validate_execution_hooks_decl(&declaration, display)?;
+                Some(declaration)
+            }
+            None => None,
+        };
+
+    let effective_validator = match execution_value.get("effective_validator") {
+        Some(value) => {
+            let declaration = serde_yaml::from_value::<EffectiveValidatorDecl>(value.clone())
+                .map_err(|error| EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: invalid execution.effective_validator declaration: {error}"
+                    ),
+                })?;
+            if declaration.handler.trim().is_empty() {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: execution.effective_validator.handler must not be empty"
+                    ),
+                });
+            }
+            Some(declaration)
+        }
+        None => None,
+    };
+
     // Parse method_dispatch (route + default method).
     let method_dispatch = if let Some(md_value) = execution_value.get("method_dispatch") {
         Some(
@@ -2221,11 +2280,57 @@ fn parse_execution_schema(
         delegate,
         thread_profile,
         history_policy,
+        hooks,
+        effective_validator,
         method_dispatch,
         methods,
         augmentation_methods,
         launch_augmentations,
     }))
+}
+
+fn validate_execution_hooks_decl(
+    declaration: &ExecutionHooksDecl,
+    display: &str,
+) -> Result<(), EngineError> {
+    if declaration.authored_path.is_empty()
+        || declaration.authored_path.iter().any(|part| {
+            part.is_empty()
+                || !part.chars().all(|character| {
+                    character == '_' || character == '-' || character.is_ascii_alphanumeric()
+                })
+        })
+        || declaration.plan_derived.is_empty()
+        || declaration.events.is_empty()
+    {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: execution.hooks requires a non-empty authored_path, plan_derived, and events map"
+            ),
+        });
+    }
+    if declaration.plan_derived != crate::hooks::EFFECTIVE_HOOK_PLAN_DERIVED_KEY {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: execution.hooks.plan_derived must be `{}`",
+                crate::hooks::EFFECTIVE_HOOK_PLAN_DERIVED_KEY
+            ),
+        });
+    }
+    for (event, contract) in &declaration.events {
+        if event.is_empty()
+            || contract.context_contract.schema != crate::hooks::HOOK_CONTEXT_SCHEMA
+            || contract.context_contract.allowed_roots.is_empty()
+            || contract.allowed_results.is_empty()
+        {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: execution.hooks event `{event}` has an invalid context/result contract"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_history_policy_decl(

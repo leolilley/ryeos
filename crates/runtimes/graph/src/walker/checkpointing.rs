@@ -8,7 +8,7 @@ use super::{EXPRESSION_LANGUAGE, GRAPH_CHECKPOINT_SCHEMA_VERSION, Walker, follow
 
 struct CheckpointCursor<'a> {
     definition_ref: &'a str,
-    definition_hash: &'a str,
+    effective_definition_digest: &'a str,
     graph_run_id: &'a str,
     next_node: &'a str,
     next_step: u32,
@@ -23,7 +23,7 @@ struct CheckpointCursor<'a> {
 fn checkpoint_payload(cursor: CheckpointCursor<'_>) -> Value {
     let CheckpointCursor {
         definition_ref,
-        definition_hash,
+        effective_definition_digest,
         graph_run_id,
         next_node,
         next_step,
@@ -36,7 +36,7 @@ fn checkpoint_payload(cursor: CheckpointCursor<'_>) -> Value {
     json!({
         "schema_version": GRAPH_CHECKPOINT_SCHEMA_VERSION,
         "definition_ref": definition_ref,
-        "definition_hash": definition_hash,
+        "effective_definition_digest": effective_definition_digest,
         "expression_language": EXPRESSION_LANGUAGE,
         "graph_run_id": graph_run_id,
         "current_node": next_node,
@@ -205,7 +205,7 @@ impl Walker {
         let payload = follow_checkpoint_payload(
             CheckpointCursor {
                 definition_ref: &self.graph.definition_ref,
-                definition_hash: &self.graph.definition_hash,
+                effective_definition_digest: &self.graph.effective_definition_digest,
                 graph_run_id,
                 next_node: follow_node,
                 next_step: step,
@@ -249,7 +249,7 @@ impl Walker {
         };
         let payload = checkpoint_payload(CheckpointCursor {
             definition_ref: &self.graph.definition_ref,
-            definition_hash: &self.graph.definition_hash,
+            effective_definition_digest: &self.graph.effective_definition_digest,
             graph_run_id,
             next_node,
             next_step,
@@ -294,7 +294,7 @@ mod tests {
         let state = json!({"answer": 42});
         let payload = checkpoint_payload(CheckpointCursor {
             definition_ref: "graph:test/example",
-            definition_hash: "sha256:test-definition",
+            effective_definition_digest: "sha256:test-definition",
             graph_run_id: "run-1",
             next_node: "retrying",
             next_step: 4,
@@ -307,7 +307,10 @@ mod tests {
 
         assert_eq!(payload["schema_version"], GRAPH_CHECKPOINT_SCHEMA_VERSION);
         assert_eq!(payload["definition_ref"], "graph:test/example");
-        assert_eq!(payload["definition_hash"], "sha256:test-definition");
+        assert_eq!(
+            payload["effective_definition_digest"],
+            "sha256:test-definition"
+        );
         assert_eq!(payload["expression_language"], EXPRESSION_LANGUAGE);
         assert_eq!(payload["current_node"], "retrying");
         assert_eq!(payload["step_count"], 4);
@@ -323,7 +326,7 @@ mod tests {
         let payload = follow_checkpoint_payload(
             CheckpointCursor {
                 definition_ref: "graph:test/example",
-                definition_hash: "sha256:test-definition",
+                effective_definition_digest: "sha256:test-definition",
                 graph_run_id: "run-2",
                 next_node: "wait-for-child",
                 next_step: 7,
@@ -374,7 +377,7 @@ mod tests {
 
         let payload = checkpoint_payload(CheckpointCursor {
             definition_ref: "graph:test/example",
-            definition_hash: "sha256:test-definition",
+            effective_definition_digest: "sha256:test-definition",
             graph_run_id: "run-large",
             next_node: "next",
             next_step: 2,

@@ -692,7 +692,7 @@ hooks:
         assert_eq!(hooks.len(), 1);
         assert!(matches!(
             &hooks[0].condition,
-            ryeos_runtime::ExpressionCondition::Expression(source) if source == "turn >= 2"
+            ryeos_engine::hooks::ExpressionCondition::Expression(source) if source == "turn >= 2"
         ));
 
         let error = serde_yaml::from_str::<DirectiveHeader>(

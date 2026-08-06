@@ -20,7 +20,8 @@ pub use corpus::{
 };
 pub use decl::ResolutionStepDecl;
 pub use types::{
-    AliasHop, AsLaunchedResolutionDigest, KindComposedView, ResolutionDigestNode, ResolutionEdge,
+    AliasHop, AsLaunchedResolutionDigest, EffectiveDefinitionDigest,
+    EffectiveDefinitionDigestError, KindComposedView, ResolutionDigestNode, ResolutionEdge,
     ResolutionError, ResolutionFailureClass, ResolutionOutput, ResolutionProvenance,
     ResolutionProvenanceEdge, ResolutionProvenanceNode, ResolutionStepName, ResolvedAncestor,
     TrustClass, effective_trust,

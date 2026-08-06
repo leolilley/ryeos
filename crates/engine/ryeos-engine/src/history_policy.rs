@@ -767,6 +767,8 @@ mod tests {
                 methods: Default::default(),
                 augmentation_methods: Default::default(),
                 launch_augmentations: Vec::new(),
+                hooks: None,
+                effective_validator: None,
             }),
             composed_value_contract: crate::contracts::ValueShape::any_mapping(),
             composer: "handler:identity".to_string(),

@@ -75,14 +75,21 @@ fn event_ref(event: &PersistedEventRecord) -> Result<EventRef, HandlerError> {
     })
 }
 
-fn state_anchor_payload(event: &PersistedEventRecord) -> Option<Value> {
+fn state_anchor_payload(event: &PersistedEventRecord) -> Option<Result<Value, String>> {
     if event.event_type != "milestone" {
         return None;
     }
     if event.payload.get("kind").and_then(Value::as_str) != Some("state_anchor") {
         return None;
     }
-    event.payload.get("payload").cloned()
+    let anchor =
+        match ryeos_state::objects::StateAnchorMilestoneV2::from_value(event.payload.clone()) {
+            Ok(anchor) => anchor,
+            Err(error) => return Some(Err(error.to_string())),
+        };
+    serde_json::to_value(anchor.payload)
+        .map_err(|error| error.to_string())
+        .into()
 }
 
 pub async fn handle(
@@ -139,9 +146,21 @@ pub async fn handle(
 
     let mut events = Vec::with_capacity(result.events.len());
     let mut state_anchors = Vec::new();
+    let mut warnings = Vec::new();
     for raw_event in result.events {
         let reference = event_ref(&raw_event)?;
-        let anchor = state_anchor_payload(&raw_event);
+        let anchor = match state_anchor_payload(&raw_event) {
+            Some(Ok(anchor)) => Some(anchor),
+            Some(Err(error)) => {
+                warnings.push(json!({
+                    "code": "malformed_state_anchor",
+                    "event_ref": reference,
+                    "message": error,
+                }));
+                None
+            }
+            None => None,
+        };
         if let Some(anchor_value) = anchor.clone() {
             state_anchors.push(StateAnchor {
                 event_ref: reference.clone(),
@@ -164,6 +183,7 @@ pub async fn handle(
         },
         "events": events,
         "state_anchors": state_anchors,
+        "warnings": warnings,
         "next_cursor": result.next_cursor,
     }))
 }
@@ -209,18 +229,56 @@ mod tests {
             json!({
                 "kind": "state_anchor",
                 "payload": {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "label": "arc.sim_state",
-                    "state_digest": "sha256:test"
+                    "state_digest": format!("sha256:{}", "b".repeat(64)),
+                    "manifest_ref": format!("cas:{}", "b".repeat(64)),
+                    "runtime": {"kind": "tool", "item_ref": "tool:test/restore"},
+                    "metadata": {}
                 },
+                "graph_run_id": "G-test",
+                "definition_ref": "graph:test/solve",
+                "effective_definition_digest": "d".repeat(64),
                 "node": "n1",
                 "step": 3
             }),
         );
 
-        let anchor = state_anchor_payload(&event).expect("state anchor");
+        let anchor = state_anchor_payload(&event)
+            .expect("current state-anchor contract")
+            .expect("state anchor");
         assert_eq!(anchor["label"], "arc.sim_state");
         assert_eq!(anchor.get("node"), None);
+    }
+
+    #[test]
+    fn predecessor_state_anchor_contract_is_reported_for_degraded_projection() {
+        let event = persisted_event(
+            "milestone",
+            json!({
+                "kind": "state_anchor",
+                "payload": {
+                    "schema_version": 1,
+                    "label": "old",
+                    "state_digest": format!("sha256:{}", "b".repeat(64)),
+                    "manifest_ref": format!("cas:{}", "b".repeat(64)),
+                    "runtime": {},
+                    "metadata": {}
+                },
+                "graph_run_id": "G-test",
+                "definition_ref": "graph:test/solve",
+                "effective_definition_digest": "d".repeat(64),
+                "node": "n1",
+                "step": 3
+            }),
+        );
+        assert!(
+            state_anchor_payload(&event)
+                .expect("state-anchor event")
+                .unwrap_err()
+                .to_string()
+                .contains("stored schema=1")
+        );
     }
 
     #[test]

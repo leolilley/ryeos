@@ -37,7 +37,7 @@ use ryeos_app::launch_metadata::{
     FollowLaunchWindow, PersistedParentExecutionContext, ResumeContext, RuntimeLaunchMetadata,
 };
 use ryeos_app::state::AppState;
-use ryeos_app::thread_lifecycle::{SealedRootExecutionRequest, new_thread_id};
+use ryeos_app::thread_lifecycle::new_thread_id;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
 use ryeos_runtime::events::RuntimeEventType;
@@ -411,9 +411,6 @@ pub async fn spawn_detached_child(
         "detached".to_string(),
         child_parameters.clone(),
     )?;
-    let sealed_root_request =
-        SealedRootExecutionRequest::capture(&child_execution, child_runtime_ref.clone())?;
-
     // Build the complete immutable launch identity and authoritative generic
     // launch authority before minting any observable row. Parent delegation
     // authority is kept separate from the child's own composed capabilities.
@@ -473,8 +470,7 @@ pub async fn spawn_detached_child(
             ),
             executor_ref: Some(child_executor_ref.clone()),
             runtime_ref: Some(child_runtime_ref.clone()),
-        })
-        .with_sealed_root_request(sealed_root_request);
+        });
     let launch_parent_context = crate::dispatch::ParentExecutionContext {
         parent_thread_id: cap.thread_id.clone(),
         hard_limits: cap.hard_limits.clone(),
@@ -492,6 +488,7 @@ pub async fn spawn_detached_child(
         state,
         &child_thread_id,
         &meta,
+        child_execution,
         child_provenance,
         launch_parent_context,
     )

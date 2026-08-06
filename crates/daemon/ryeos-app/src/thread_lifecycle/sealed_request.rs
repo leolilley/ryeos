@@ -124,7 +124,7 @@ where
 /// v7 seals subject-resolution authority independently for the project
 /// binding, admitted resolution closure, resolved root item, and the complete
 /// typed executor route selected at admission.
-pub(super) const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 7;
+pub(super) const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -190,7 +190,7 @@ pub struct AdmittedProgramSubject {
     pub canonical_ref: String,
     pub kind: String,
     pub source_content: String,
-    pub source_content_hash: String,
+    pub source_content_digest: String,
     pub raw_content: String,
     pub raw_content_digest: String,
     pub source_extension: String,
@@ -422,7 +422,7 @@ impl SealedResolvedItem {
             canonical_ref: self.canonical_ref.clone(),
             kind: self.kind.clone(),
             source_content,
-            source_content_hash: self.content_hash.clone(),
+            source_content_digest: self.content_hash.clone(),
             raw_content,
             raw_content_digest: self.raw_content_digest.clone(),
             source_extension: self.source_format.extension.clone(),
@@ -558,6 +558,7 @@ pub struct SealedRootExecutionRequest {
     verified_pinned_version: Option<PinnedVersion>,
     #[serde(deserialize_with = "deserialize_exact_resolution")]
     resolution_output: ryeos_engine::resolution::ResolutionOutput,
+    effective_definition_digest: ryeos_engine::resolution::EffectiveDefinitionDigest,
     planning_principal: SealedPrincipal,
     project_context: ProjectContext,
     project_authority: ryeos_state::objects::ExecutionProjectAuthority,
@@ -570,20 +571,24 @@ pub struct SealedRootExecutionRequest {
 }
 
 impl SealedRootExecutionRequest {
-    pub fn capture(request: &ResolvedExecutionRequest, runtime_ref: String) -> Result<Self> {
-        let resolution_output = request
-            .root_admission
-            .as_ref()
-            .ok_or_else(|| anyhow!("cannot seal a root execution request without root admission"))?
-            .resolution_output()
-            .clone();
-        Self::capture_with_resolution(request, runtime_ref, resolution_output)
+    pub fn capture_finalized(
+        request: &ResolvedExecutionRequest,
+        runtime_ref: String,
+        program: &ryeos_engine::effective_program::FinalizedEffectiveProgram,
+    ) -> Result<Self> {
+        Self::capture_with_effective_parts(
+            request,
+            runtime_ref,
+            program.resolution().clone(),
+            program.effective_definition_digest().clone(),
+        )
     }
 
-    pub fn capture_with_resolution(
+    fn capture_with_effective_parts(
         request: &ResolvedExecutionRequest,
         runtime_ref: String,
         resolution_output: ryeos_engine::resolution::ResolutionOutput,
+        effective_definition_digest: ryeos_engine::resolution::EffectiveDefinitionDigest,
     ) -> Result<Self> {
         let admission = request.root_admission.as_ref().ok_or_else(|| {
             anyhow!("cannot seal a root execution request without root admission")
@@ -642,6 +647,14 @@ impl SealedRootExecutionRequest {
                 verified.resolved.raw_content_digest
             );
         }
+        let observed_effective_digest = resolution_output.effective_definition_digest()?;
+        if observed_effective_digest != effective_definition_digest {
+            bail!(
+                "sealed effective definition digest does not match its resolution: expected={}, observed={}",
+                effective_definition_digest,
+                observed_effective_digest
+            );
+        }
         if verified.resolved.subject_resolution_authority
             != *admission.resolution_closure.subject_authority()
         {
@@ -674,6 +687,7 @@ impl SealedRootExecutionRequest {
             verified_trust_class: verified.trust_class,
             verified_pinned_version: verified.pinned_version.clone(),
             resolution_output,
+            effective_definition_digest,
             planning_principal: SealedPrincipal::from(&admission.plan_context.requested_by),
             project_context: admission.plan_context.project_context.clone(),
             project_authority: admission.project_authority().clone(),
@@ -715,6 +729,29 @@ impl SealedRootExecutionRequest {
             bail!("sealed resolution root differs from its admitted subject");
         }
         self.verified_subject.exact_subject()
+    }
+
+    pub fn effective_definition_digest(
+        &self,
+    ) -> &ryeos_engine::resolution::EffectiveDefinitionDigest {
+        &self.effective_definition_digest
+    }
+
+    /// Verify and expose the immutable effective resolution for sanitized
+    /// definition projection. This never re-resolves current content.
+    pub fn admitted_effective_resolution(
+        &self,
+    ) -> Result<&ryeos_engine::resolution::ResolutionOutput> {
+        self.admitted_program_subject()?;
+        let observed = self.resolution_output.effective_definition_digest()?;
+        if observed != self.effective_definition_digest {
+            bail!(
+                "sealed effective definition digest mismatch: persisted={}, observed={}",
+                self.effective_definition_digest,
+                observed
+            );
+        }
+        Ok(&self.resolution_output)
     }
 
     pub fn project_context(&self) -> &ProjectContext {
@@ -862,7 +899,7 @@ impl SealedRootExecutionRequest {
                     ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig,
             },
         };
-        Self {
+        let mut fixture = Self {
             schema_version: SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION,
             kind: "graph_run".to_string(),
             item_ref: canonical_item_ref.clone(),
@@ -940,6 +977,9 @@ impl SealedRootExecutionRequest {
                 effective_trust_class: ResolutionTrustClass::Unsigned,
                 composed: ryeos_engine::resolution::KindComposedView::identity(json!({})),
             },
+            effective_definition_digest:
+                ryeos_engine::resolution::EffectiveDefinitionDigest::parse("0".repeat(64))
+                    .expect("valid synthetic digest"),
             planning_principal: SealedPrincipal::Local {
                 fingerprint: "session:test".to_string(),
                 scopes: Vec::new(),
@@ -954,7 +994,12 @@ impl SealedRootExecutionRequest {
             validate_only: false,
             resolved_history_policy,
             captured_history_policy,
-        }
+        };
+        fixture.effective_definition_digest = fixture
+            .resolution_output
+            .effective_definition_digest()
+            .expect("synthetic resolution has a canonical effective digest");
+        fixture
     }
 
     /// Current-shape synthetic authority with a caller-selected project pair.
@@ -991,6 +1036,14 @@ impl SealedRootExecutionRequest {
         }
         if self.validate_only {
             bail!("persisted root execution request cannot be validate-only");
+        }
+        let observed_effective_digest = self.resolution_output.effective_definition_digest()?;
+        if observed_effective_digest != self.effective_definition_digest {
+            bail!(
+                "sealed effective definition digest mismatch: persisted={}, observed={}",
+                self.effective_definition_digest,
+                observed_effective_digest
+            );
         }
         self.project_authority
             .validate()
@@ -1531,7 +1584,7 @@ mod authority_tests {
         assert_eq!(subject.canonical_ref, "graph:test/storage-fixture");
         assert_eq!(subject.source_content, "{}");
         assert_eq!(subject.raw_content, "{}");
-        assert_eq!(subject.source_content_hash, lillux::sha256_hex(b"{}"));
+        assert_eq!(subject.source_content_digest, lillux::sha256_hex(b"{}"));
         assert_eq!(subject.raw_content_digest, lillux::sha256_hex(b"{}"));
 
         let mut source_tampered = request.clone();
@@ -1543,6 +1596,42 @@ mod authority_tests {
         body_tampered.verified_subject.raw_content_digest = "f".repeat(64);
         body_tampered.resolution_output.root.raw_content_digest = "f".repeat(64);
         assert!(body_tampered.admitted_program_subject().is_err());
+    }
+
+    #[test]
+    fn storage_fixture_retains_one_self_consistent_effective_program_identity() {
+        let request = SealedRootExecutionRequest::storage_test_fixture();
+        let observed = request
+            .resolution_output
+            .effective_definition_digest()
+            .unwrap();
+        assert_eq!(request.effective_definition_digest(), &observed);
+        assert_eq!(
+            request
+                .admitted_effective_resolution()
+                .unwrap()
+                .effective_definition_digest()
+                .unwrap(),
+            observed
+        );
+
+        let exact_program = request.admitted_program_value().unwrap();
+        assert_eq!(
+            exact_program["effective_definition_digest"],
+            serde_json::to_value(&observed).unwrap()
+        );
+        assert_eq!(
+            request.admitted_program_hash().unwrap(),
+            lillux::sha256_hex(lillux::canonical_json(&exact_program).unwrap().as_bytes())
+        );
+
+        let round_trip: SealedRootExecutionRequest =
+            serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
+        assert_eq!(
+            round_trip.effective_definition_digest(),
+            request.effective_definition_digest()
+        );
+        assert_eq!(round_trip.admitted_program_value().unwrap(), exact_program);
     }
 
     #[test]

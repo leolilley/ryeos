@@ -312,7 +312,7 @@ pub const MAX_OPEN_COMMAND_CONTENT_BYTES: usize = 4 * 1024 * 1024;
 /// from becoming an unbounded response store.
 pub const MAX_HOOK_DISPATCH_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// Exact dispatch-identity seed admitted by this runtime-store epoch.
-pub const HOOK_DISPATCH_SEED_VERSION: u32 = 2;
+pub const HOOK_DISPATCH_SEED_VERSION: u32 = 3;
 
 #[derive(Debug, Clone)]
 pub struct NewHookDispatch {
@@ -801,7 +801,7 @@ CREATE INDEX IF NOT EXISTS idx_thread_commands_thread_status
 
 CREATE TABLE IF NOT EXISTS hook_dispatch_ledger (
     dispatch_key TEXT PRIMARY KEY,
-    seed_version INTEGER NOT NULL CHECK (seed_version = 2),
+    seed_version INTEGER NOT NULL CHECK (seed_version = 3),
     chain_root_id TEXT NOT NULL,
     caller_thread_id TEXT NOT NULL,
     event TEXT NOT NULL,
@@ -990,11 +990,11 @@ const PREDECESSOR_RUNTIME_APP_ID: i32 = 0x5259_4541;
 const RUNTIME_OPERATOR_APP_ID_PREFIX: u32 = 0x5259_0000;
 const RUNTIME_OPERATOR_APP_ID_MASK: u32 = 0xffff_ff00;
 const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
-// Epoch 2 is the clean v2 hook-dispatch activation barrier. An epoch-1 store
-// may contain resumable v1-keyed occurrences and is deliberately refused by
+// Epoch 3 is the clean effective-program/hook-dispatch activation barrier. An
+// older store may contain resumable occurrences under superseded identity and is deliberately refused by
 // ordinary open; the explicit runtime-history reset is permitted only after
 // admission has stopped and resumable work has been drained/terminalized.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 2;
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 3;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

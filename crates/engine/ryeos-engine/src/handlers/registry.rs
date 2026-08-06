@@ -482,6 +482,43 @@ fn validate_handler_descriptor(path: &Path, desc: &HandlerDescriptor) -> Result<
 mod tests {
     use super::*;
 
+    fn descriptor_with_abi(abi_version: &str) -> (PathBuf, HandlerDescriptor) {
+        let name = "test-handler";
+        (
+            PathBuf::from(format!("/bundle/.ai/handlers/test/{name}.yaml")),
+            HandlerDescriptor {
+                kind: "handler".to_owned(),
+                name: name.to_owned(),
+                category: "test".to_owned(),
+                abi_version: abi_version.to_owned(),
+                binary_ref: format!("bin/{}/{name}", env!("RYEOS_ENGINE_HOST_TRIPLE")),
+                serves: HandlerServes::Parser,
+                required_caps: Vec::new(),
+                description: String::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn accepts_handler_with_supported_abi_version() {
+        let (path, descriptor) = descriptor_with_abi(SUPPORTED_HANDLER_ABI_VERSION);
+        validate_handler_descriptor(&path, &descriptor).unwrap();
+    }
+
+    #[test]
+    fn refuses_handler_with_unsupported_abi_version() {
+        let (path, descriptor) = descriptor_with_abi("v1");
+        let error = validate_handler_descriptor(&path, &descriptor).unwrap_err();
+        assert!(matches!(
+            error,
+            HandlerError::AbiVersionMismatch {
+                ref expected,
+                ref found,
+                ..
+            } if expected == SUPPORTED_HANDLER_ABI_VERSION && found == "v1"
+        ));
+    }
+
     #[test]
     fn empty_registry_has_fingerprint() {
         let reg = HandlerRegistry::empty();

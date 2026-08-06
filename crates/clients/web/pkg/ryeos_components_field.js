@@ -315,8 +315,21 @@ export function captureFieldFocusKey(root, active = document.activeElement) {
 
 export function restoreFieldFocusKey(root, focusKey) {
   if (!focusKey) return false;
-  const target = [...root.querySelectorAll("[data-focus-key]")]
-    .find((node) => node.dataset?.focusKey === focusKey);
+  const controls = [...root.querySelectorAll("[data-focus-key]")];
+  const index = controls.findIndex((node) => node.dataset?.focusKey === focusKey);
+  let target = index >= 0 ? controls[index] : null;
+  if (target?.disabled) {
+    // Reaching the replay head can disable and replace the focused Play/Next
+    // button. Keep keyboard focus in the same semantic control region by
+    // choosing the nearest enabled stable-key control.
+    target = controls
+      .map((node, candidateIndex) => ({ node, candidateIndex }))
+      .filter(({ node }) => !node.disabled)
+      .sort((left, right) => (
+        Math.abs(left.candidateIndex - index) - Math.abs(right.candidateIndex - index)
+        || left.candidateIndex - right.candidateIndex
+      ))[0]?.node || null;
+  }
   if (!target || target === document.activeElement) return !!target;
   target.focus?.({ preventScroll: true });
   return true;

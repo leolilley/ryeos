@@ -993,7 +993,7 @@ mod tests {
     /// Build a composer registry from `kinds` using the live handler
     /// registry — necessary because every kind schema written by these
     /// tests now declares `composer: handler:ryeos/core/identity` (or
-    /// extends-chain / graph-permissions) which only resolves through
+    /// extends-chain) which only resolves through
     /// the live registry.
     fn composers_from(kinds: &KindRegistry) -> ComposerRegistry {
         ComposerRegistry::from_kinds(kinds, &live_handler_registry()).unwrap()
@@ -1886,7 +1886,7 @@ composed_value_contract:
         assert_eq!(
             requirements,
             vec![ComposerFieldRequirement {
-                field: "lifecycle_policy".into(),
+                path: vec!["lifecycle_policy".into()],
                 semantics: ComposerFieldSemantics::InheritOrReplace,
             }]
         );

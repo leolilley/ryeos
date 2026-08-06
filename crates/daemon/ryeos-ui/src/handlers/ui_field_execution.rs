@@ -83,7 +83,7 @@ struct GraphRunFact {
     thread_id: String,
     graph_run_id: String,
     definition_ref: String,
-    definition_hash: String,
+    effective_definition_digest: String,
     status: Option<String>,
     evidence: Vec<FieldEventRef>,
 }
@@ -92,7 +92,7 @@ struct GraphRunFact {
 struct OccurrenceFact {
     key: OccurrenceKey,
     definition_ref: String,
-    definition_hash: String,
+    effective_definition_digest: String,
     node: String,
     status: Option<String>,
     evidence: Vec<FieldEventRef>,
@@ -162,7 +162,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
                 kind: "none".to_string(),
                 id: "unselected".to_string(),
                 definition_ref: None,
-                definition_hash: None,
+                effective_definition_digest: None,
             },
         );
         let mut document = builder.finish()?;
@@ -197,7 +197,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         kind: "thread".to_string(),
         id: thread_id.to_string(),
         definition_ref: None,
-        definition_hash: None,
+        effective_definition_digest: None,
     };
     let mut assembler = ExecutionAssembler::new(subject);
     let cas_read = match state.acquire_cas_read() {
@@ -537,9 +537,9 @@ impl ExecutionAssembler {
                     .map(|parent| format!("thread:{parent}")),
                 status,
                 canonical_ref: Some(row.thread.item.item_ref.clone()),
-                source_content_hash: None,
-                definition_hash: None,
-                admitted_capsule_hash: row.thread.item.admitted_launch_capsule_hash.clone(),
+                source_content_digest: None,
+                effective_definition_digest: None,
+                admitted_launch_capsule_hash: row.thread.item.admitted_launch_capsule_hash.clone(),
                 event_ref: None,
                 artifact_ref: None,
                 attributes: json!({
@@ -608,14 +608,34 @@ impl ExecutionAssembler {
             .expect("event attributes are an object")
             .insert("thread".to_string(), thread_context);
 
-        let graph_identity = event_graph_identity(&event, self.current_graph.get(&event.thread_id));
-        if let Some((graph_run_id, definition_ref, definition_hash)) = graph_identity.as_ref() {
+        let graph_identity =
+            match event_graph_identity(&event, self.current_graph.get(&event.thread_id)) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    let message = format!(
+                        "event {} in chain {} has malformed graph identity: {error:#}",
+                        event.chain_seq, event.chain_root_id
+                    );
+                    self.builder.warn("malformed_graph_identity", &message);
+                    attributes
+                        .as_object_mut()
+                        .expect("event attributes are an object")
+                        .insert("graph_identity_error".to_string(), json!(message));
+                    if event.event_type == ryeos_state::event_types::GRAPH_COMPLETED {
+                        self.current_graph.remove(&event.thread_id);
+                    }
+                    None
+                }
+            };
+        if let Some((graph_run_id, definition_ref, effective_definition_digest)) =
+            graph_identity.as_ref()
+        {
             self.current_graph.insert(
                 event.thread_id.clone(),
                 (
                     graph_run_id.clone(),
                     definition_ref.clone(),
-                    definition_hash.clone(),
+                    effective_definition_digest.clone(),
                 ),
             );
             self.record_graph_event(
@@ -623,7 +643,7 @@ impl ExecutionAssembler {
                 &event_ref,
                 graph_run_id,
                 definition_ref,
-                definition_hash,
+                effective_definition_digest,
             )?;
             if event.event_type == ryeos_state::event_types::GRAPH_COMPLETED {
                 self.current_graph.remove(&event.thread_id);
@@ -635,14 +655,14 @@ impl ExecutionAssembler {
         {
             let payload = event.payload.get("payload").cloned().unwrap_or(Value::Null);
             let (conformance, verification, verification_error) =
-                self.anchor_status_cached(&payload, &event, cas);
+                self.anchor_status_cached(&event, cas);
             let attrs = attributes.as_object_mut().expect("checked object");
             attrs.insert("anchor_conformance".to_string(), json!(conformance));
             attrs.insert("manifest_verification".to_string(), json!(verification));
             if let Some(error) = verification_error.as_deref() {
                 attrs.insert("manifest_verification_error".to_string(), json!(error));
             }
-            if conformance == FieldAnchorConformance::ContractV1 {
+            if conformance == FieldAnchorConformance::ContractV2 {
                 let anchor_id = format!(
                     "anchor:{}:{}:{}",
                     event_ref.chain_root_id, event_ref.chain_seq, event_ref.event_hash
@@ -658,9 +678,11 @@ impl ExecutionAssembler {
                     parent_id: None,
                     status: Some("recorded".to_string()),
                     canonical_ref: None,
-                    source_content_hash: None,
-                    definition_hash: graph_identity.as_ref().map(|identity| identity.2.clone()),
-                    admitted_capsule_hash: None,
+                    source_content_digest: None,
+                    effective_definition_digest: graph_identity
+                        .as_ref()
+                        .map(|identity| identity.2.clone()),
+                    admitted_launch_capsule_hash: None,
                     event_ref: Some(event_ref.clone()),
                     artifact_ref: None,
                     attributes: json!({
@@ -700,9 +722,9 @@ impl ExecutionAssembler {
                 .and_then(Value::as_str)
                 .map(str::to_string),
             canonical_ref: None,
-            source_content_hash: None,
-            definition_hash: graph_identity.as_ref().map(|identity| identity.2.clone()),
-            admitted_capsule_hash: None,
+            source_content_digest: None,
+            effective_definition_digest: graph_identity.as_ref().map(|identity| identity.2.clone()),
+            admitted_launch_capsule_hash: None,
             event_ref: Some(event_ref.clone()),
             artifact_ref: None,
             attributes,
@@ -855,7 +877,10 @@ impl ExecutionAssembler {
                 }
             }
             ryeos_state::event_types::GRAPH_BRANCH_TAKEN => {
-                if let (Some((graph_run_id, definition_ref, definition_hash)), Some(target)) = (
+                if let (
+                    Some((graph_run_id, definition_ref, effective_definition_digest)),
+                    Some(target),
+                ) = (
                     graph_identity.as_ref(),
                     event.payload.get("target").and_then(Value::as_str),
                 ) && let Some(step) = bounded_u32(&event.payload, "step")
@@ -867,8 +892,9 @@ impl ExecutionAssembler {
                         attempt: bounded_u32(&event.payload, "attempt").unwrap_or(0),
                         iteration: bounded_u32(&event.payload, "iteration").unwrap_or(0),
                     };
-                    let target_id =
-                        format!("graph-node:{definition_ref}@{definition_hash}#{target}");
+                    let target_id = format!(
+                        "graph-node:{definition_ref}@{effective_definition_digest}#{target}"
+                    );
                     self.builder.add_relation(FieldFactRelation {
                         id: format!("branch-taken:{}:{target_id}", occurrence.id()),
                         kind: "branch_taken".to_string(),
@@ -890,7 +916,6 @@ impl ExecutionAssembler {
 
     fn anchor_status_cached(
         &mut self,
-        payload: &Value,
         event: &PersistedEventRecord,
         cas: Option<&lillux::CasStore>,
     ) -> (
@@ -898,14 +923,14 @@ impl ExecutionAssembler {
         FieldManifestVerification,
         Option<String>,
     ) {
-        let (conformance, _, _) = anchor_status_with_verifier(payload, event, None);
-        if conformance != FieldAnchorConformance::ContractV1 || cas.is_none() {
-            return anchor_status_with_verifier(payload, event, None);
+        let (conformance, _, _) = anchor_status_with_verifier(event, None);
+        if conformance != FieldAnchorConformance::ContractV2 || cas.is_none() {
+            return anchor_status_with_verifier(event, None);
         }
-        let manifest_ref = payload
-            .get("manifest_ref")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+        let anchor =
+            ryeos_state::objects::StateAnchorMilestoneV2::from_value(event.payload.clone())
+                .expect("conforming state anchor was parsed above");
+        let manifest_ref = anchor.payload.manifest_ref;
         let cache_key = format!(
             "{manifest_ref}\0{}\0{}",
             event.chain_root_id, event.thread_id
@@ -922,7 +947,7 @@ impl ExecutionAssembler {
                 )),
             );
         }
-        let (_, verification, error) = anchor_status_with_verifier(payload, event, cas);
+        let (_, verification, error) = anchor_status_with_verifier(event, cas);
         self.manifest_verifications
             .insert(cache_key, (verification, error.clone()));
         (conformance, verification, error)
@@ -934,7 +959,7 @@ impl ExecutionAssembler {
         event_ref: &FieldEventRef,
         graph_run_id: &str,
         definition_ref: &str,
-        definition_hash: &str,
+        effective_definition_digest: &str,
     ) -> Result<()> {
         let run_key = (event.thread_id.clone(), graph_run_id.to_string());
         let run = self
@@ -944,11 +969,13 @@ impl ExecutionAssembler {
                 thread_id: event.thread_id.clone(),
                 graph_run_id: graph_run_id.to_string(),
                 definition_ref: definition_ref.to_string(),
-                definition_hash: definition_hash.to_string(),
+                effective_definition_digest: effective_definition_digest.to_string(),
                 status: Some("running".to_string()),
                 evidence: Vec::new(),
             });
-        if run.definition_ref != definition_ref || run.definition_hash != definition_hash {
+        if run.definition_ref != definition_ref
+            || run.effective_definition_digest != effective_definition_digest
+        {
             bail!("graph run `{graph_run_id}` has divergent definition identity");
         }
         if event.event_type == ryeos_state::event_types::GRAPH_COMPLETED {
@@ -980,14 +1007,14 @@ impl ExecutionAssembler {
             .or_insert_with(|| OccurrenceFact {
                 key,
                 definition_ref: definition_ref.to_string(),
-                definition_hash: definition_hash.to_string(),
+                effective_definition_digest: effective_definition_digest.to_string(),
                 node: node.to_string(),
                 status: None,
                 evidence: Vec::new(),
             });
         if occurrence.node != node
             || occurrence.definition_ref != definition_ref
-            || occurrence.definition_hash != definition_hash
+            || occurrence.effective_definition_digest != effective_definition_digest
         {
             bail!(
                 "graph occurrence `{}` has divergent identity",
@@ -1016,46 +1043,33 @@ impl ExecutionAssembler {
         event_ref: &FieldEventRef,
         step_status: Option<&str>,
     ) -> Result<()> {
-        use ryeos_runtime::callback::HookDispatchOccurrence;
-
-        let (graph_run_id, definition_ref, definition_hash, terminal_status) = match occurrence {
-            HookDispatchOccurrence::GraphStarted {
-                graph_run_id,
-                definition_ref,
-                definition_hash,
-            } => (graph_run_id, definition_ref, definition_hash, None),
-            HookDispatchOccurrence::GraphStepCompleted {
-                graph_run_id,
-                definition_ref,
-                definition_hash,
-                ..
-            } => (graph_run_id, definition_ref, definition_hash, None),
-            HookDispatchOccurrence::GraphCompleted {
-                graph_run_id,
-                definition_ref,
-                definition_hash,
-                ..
-            } => (
-                graph_run_id,
-                definition_ref,
-                definition_hash,
-                Some("completed"),
-            ),
-            HookDispatchOccurrence::DirectiveAfterStep { .. }
-            | HookDispatchOccurrence::DirectiveContinuation { .. } => return Ok(()),
+        if occurrence.owner_kind != "graph" {
+            return Ok(());
+        }
+        let terminal_status = match occurrence.event() {
+            "graph_started" | "graph_step_completed" => None,
+            "graph_completed" => Some("completed"),
+            _ => return Ok(()),
         };
+        let graph_run_id = occurrence
+            .text_coordinate("graph_run_id")
+            .ok_or_else(|| anyhow::anyhow!("graph hook occurrence has no text `graph_run_id`"))?;
+        let definition_ref = &occurrence.definition_ref;
+        let effective_definition_digest = &occurrence.effective_definition_digest;
         let run = self
             .graph_runs
-            .entry((occurrence_thread_id.to_string(), graph_run_id.clone()))
+            .entry((occurrence_thread_id.to_string(), graph_run_id.to_string()))
             .or_insert_with(|| GraphRunFact {
                 thread_id: occurrence_thread_id.to_string(),
-                graph_run_id: graph_run_id.clone(),
+                graph_run_id: graph_run_id.to_string(),
                 definition_ref: definition_ref.clone(),
-                definition_hash: definition_hash.clone(),
+                effective_definition_digest: effective_definition_digest.clone(),
                 status: Some("running".to_string()),
                 evidence: Vec::new(),
             });
-        if run.definition_ref != *definition_ref || run.definition_hash != *definition_hash {
+        if run.definition_ref != *definition_ref
+            || run.effective_definition_digest != *effective_definition_digest
+        {
             bail!("hook graph run `{graph_run_id}` has divergent definition identity");
         }
         if let Some(status) = terminal_status {
@@ -1063,13 +1077,19 @@ impl ExecutionAssembler {
         }
         push_evidence(&mut run.evidence, event_ref.clone());
 
-        let HookDispatchOccurrence::GraphStepCompleted { step, node, .. } = occurrence else {
+        if occurrence.event() != "graph_step_completed" {
             return Ok(());
-        };
+        }
+        let step = occurrence
+            .counter_coordinate("step")
+            .ok_or_else(|| anyhow::anyhow!("graph step hook occurrence has no counter `step`"))?;
+        let node = occurrence
+            .text_coordinate("node")
+            .ok_or_else(|| anyhow::anyhow!("graph step hook occurrence has no text `node`"))?;
         let key = OccurrenceKey {
             thread_id: occurrence_thread_id.to_string(),
-            graph_run_id: graph_run_id.clone(),
-            step: *step,
+            graph_run_id: graph_run_id.to_string(),
+            step,
             attempt: 0,
             iteration: 0,
         };
@@ -1079,14 +1099,14 @@ impl ExecutionAssembler {
             .or_insert_with(|| OccurrenceFact {
                 key,
                 definition_ref: definition_ref.clone(),
-                definition_hash: definition_hash.clone(),
-                node: node.clone(),
+                effective_definition_digest: effective_definition_digest.clone(),
+                node: node.to_string(),
                 status: step_status.map(str::to_string),
                 evidence: Vec::new(),
             });
-        if fact.node != *node
+        if fact.node != node
             || fact.definition_ref != *definition_ref
-            || fact.definition_hash != *definition_hash
+            || fact.effective_definition_digest != *effective_definition_digest
         {
             bail!("hook occurrence `{}` has divergent identity", fact.key.id());
         }
@@ -1128,12 +1148,12 @@ impl ExecutionAssembler {
             parent_id: Some(format!("thread:{thread_id}")),
             status: None,
             canonical_ref: None,
-            source_content_hash: artifact.content_hash.clone(),
-            definition_hash: metadata
-                .get("definition_hash")
+            source_content_digest: artifact.content_hash.clone(),
+            effective_definition_digest: metadata
+                .get("effective_definition_digest")
                 .and_then(Value::as_str)
                 .map(str::to_string),
-            admitted_capsule_hash: None,
+            admitted_launch_capsule_hash: None,
             event_ref: None,
             artifact_ref: Some(FieldArtifactRef {
                 thread_id: thread_id.to_string(),
@@ -1190,9 +1210,9 @@ impl ExecutionAssembler {
             parent_id: Some(format!("thread:{thread_id}")),
             status: Some(status.to_string()),
             canonical_ref: None,
-            source_content_hash: None,
-            definition_hash: None,
-            admitted_capsule_hash: None,
+            source_content_digest: None,
+            effective_definition_digest: None,
+            admitted_launch_capsule_hash: None,
             event_ref: None,
             artifact_ref: None,
             attributes: json!({
@@ -1230,8 +1250,10 @@ impl ExecutionAssembler {
     fn emit_graph_facts(&mut self) -> Result<()> {
         for run in self.graph_runs.values() {
             let id = format!("graph-run:{}:{}", run.thread_id, run.graph_run_id);
-            let definition_id =
-                format!("definition:{}@{}", run.definition_ref, run.definition_hash);
+            let definition_id = format!(
+                "definition:{}@{}",
+                run.definition_ref, run.effective_definition_digest
+            );
             self.builder.add_entity(FieldFactEntity {
                 id: id.clone(),
                 kind: "graph_run".to_string(),
@@ -1239,9 +1261,9 @@ impl ExecutionAssembler {
                 parent_id: Some(format!("thread:{}", run.thread_id)),
                 status: run.status.clone(),
                 canonical_ref: Some(run.definition_ref.clone()),
-                source_content_hash: None,
-                definition_hash: Some(run.definition_hash.clone()),
-                admitted_capsule_hash: None,
+                source_content_digest: None,
+                effective_definition_digest: Some(run.effective_definition_digest.clone()),
+                admitted_launch_capsule_hash: None,
                 event_ref: run.evidence.first().cloned(),
                 artifact_ref: None,
                 attributes: json!({
@@ -1269,7 +1291,7 @@ impl ExecutionAssembler {
             );
             let node_id = format!(
                 "graph-node:{}@{}#{}",
-                occurrence.definition_ref, occurrence.definition_hash, occurrence.node
+                occurrence.definition_ref, occurrence.effective_definition_digest, occurrence.node
             );
             self.builder.add_entity(FieldFactEntity {
                 id: id.clone(),
@@ -1278,9 +1300,9 @@ impl ExecutionAssembler {
                 parent_id: Some(run_id.clone()),
                 status: occurrence.status.clone(),
                 canonical_ref: Some(occurrence.definition_ref.clone()),
-                source_content_hash: None,
-                definition_hash: Some(occurrence.definition_hash.clone()),
-                admitted_capsule_hash: None,
+                source_content_digest: None,
+                effective_definition_digest: Some(occurrence.effective_definition_digest.clone()),
+                admitted_launch_capsule_hash: None,
                 event_ref: occurrence.evidence.first().cloned(),
                 artifact_ref: None,
                 attributes: json!({
@@ -1350,9 +1372,11 @@ impl ExecutionAssembler {
                 parent_id: Some(format!("thread:{}", payload.occurrence_thread_id)),
                 status: Some("recorded".to_string()),
                 canonical_ref: None,
-                source_content_hash: None,
-                definition_hash: occurrence_definition_hash(&payload.hook.occurrence),
-                admitted_capsule_hash: None,
+                source_content_digest: None,
+                effective_definition_digest: occurrence_effective_definition_digest(
+                    &payload.hook.occurrence,
+                ),
+                admitted_launch_capsule_hash: None,
                 event_ref: Some(event.clone()),
                 artifact_ref: None,
                 attributes: json!({
@@ -1400,9 +1424,11 @@ impl ExecutionAssembler {
                 parent_id: Some(format!("thread:{}", payload.occurrence_thread_id)),
                 status: Some("failed".to_string()),
                 canonical_ref: None,
-                source_content_hash: None,
-                definition_hash: occurrence_definition_hash(&payload.hook.occurrence),
-                admitted_capsule_hash: None,
+                source_content_digest: None,
+                effective_definition_digest: occurrence_effective_definition_digest(
+                    &payload.hook.occurrence,
+                ),
+                admitted_launch_capsule_hash: None,
                 event_ref: failure.event_refs.first().cloned(),
                 artifact_ref: None,
                 attributes: json!({
@@ -1575,68 +1601,89 @@ fn event_id_from_payload(value: &Value) -> Option<String> {
 fn event_graph_identity(
     event: &PersistedEventRecord,
     current: Option<&(String, String, String)>,
-) -> Option<(String, String, String)> {
+) -> Result<Option<(String, String, String)>> {
     let may_inherit_context = matches!(
         event.event_type.as_str(),
         ryeos_state::event_types::MILESTONE | ryeos_state::event_types::CHILD_THREAD_SPAWNED
     );
-    let graph_run_id = event
-        .payload
-        .get("graph_run_id")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| may_inherit_context.then(|| current.map(|identity| identity.0.clone()))?)?;
-    let definition_ref = event
-        .payload
-        .get("definition_ref")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| may_inherit_context.then(|| current.map(|identity| identity.1.clone()))?)?;
-    let definition_hash = event
-        .payload
-        .get("definition_hash")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| may_inherit_context.then(|| current.map(|identity| identity.2.clone()))?)?;
-    Some((graph_run_id, definition_ref, definition_hash))
+    let authored = [
+        "graph_run_id",
+        "definition_ref",
+        "effective_definition_digest",
+    ]
+    .map(|field| {
+        event
+            .payload
+            .get(field)
+            .map(|value| {
+                value.as_str().map(str::to_string).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "graph event `{}` field `{field}` must be a string",
+                        event.event_type
+                    )
+                })
+            })
+            .transpose()
+    });
+    let [graph_run_id, definition_ref, effective_definition_digest] = authored;
+    let graph_run_id = graph_run_id?;
+    let definition_ref = definition_ref?;
+    let effective_definition_digest = effective_definition_digest?;
+    if graph_run_id.is_none() && definition_ref.is_none() && effective_definition_digest.is_none() {
+        return Ok(may_inherit_context.then(|| current.cloned()).flatten());
+    }
+    let inherited = may_inherit_context.then_some(current).flatten();
+    let graph_run_id = graph_run_id
+        .or_else(|| inherited.map(|identity| identity.0.clone()))
+        .ok_or_else(|| anyhow::anyhow!("graph event has partial identity: missing graph_run_id"))?;
+    let definition_ref = definition_ref
+        .or_else(|| inherited.map(|identity| identity.1.clone()))
+        .ok_or_else(|| {
+            anyhow::anyhow!("graph event has partial identity: missing definition_ref")
+        })?;
+    let effective_definition_digest = effective_definition_digest
+        .or_else(|| inherited.map(|identity| identity.2.clone()))
+        .ok_or_else(|| {
+            anyhow::anyhow!("graph event has partial identity: missing effective_definition_digest")
+        })?;
+    if graph_run_id.is_empty() || graph_run_id.trim() != graph_run_id || graph_run_id.len() > 256 {
+        bail!("graph event graph_run_id must be non-empty, trimmed, and bounded");
+    }
+    let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(&definition_ref)
+        .map_err(|error| anyhow::anyhow!("graph event definition_ref is invalid: {error}"))?;
+    if canonical.kind != "graph" {
+        bail!("graph event definition_ref must identify a graph");
+    }
+    ryeos_engine::resolution::EffectiveDefinitionDigest::parse(effective_definition_digest.clone())
+        .map_err(|error| anyhow::anyhow!("graph event effective digest is invalid: {error}"))?;
+    Ok(Some((
+        graph_run_id,
+        definition_ref,
+        effective_definition_digest,
+    )))
 }
 
 fn occurrence_key_from_hook(
     thread_id: &str,
     occurrence: &ryeos_runtime::callback::HookDispatchOccurrence,
 ) -> Option<OccurrenceKey> {
-    match occurrence {
-        ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
-            graph_run_id,
-            step,
-            ..
-        } => Some(OccurrenceKey {
+    if occurrence.owner_kind == "graph" && occurrence.event() == "graph_step_completed" {
+        Some(OccurrenceKey {
             thread_id: thread_id.to_string(),
-            graph_run_id: graph_run_id.clone(),
-            step: *step,
+            graph_run_id: occurrence.text_coordinate("graph_run_id")?.to_string(),
+            step: occurrence.counter_coordinate("step")?,
             attempt: 0,
             iteration: 0,
-        }),
-        _ => None,
+        })
+    } else {
+        None
     }
 }
 
-fn occurrence_definition_hash(
+fn occurrence_effective_definition_digest(
     occurrence: &ryeos_runtime::callback::HookDispatchOccurrence,
 ) -> Option<String> {
-    match occurrence {
-        ryeos_runtime::callback::HookDispatchOccurrence::GraphStarted {
-            definition_hash, ..
-        }
-        | ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
-            definition_hash,
-            ..
-        }
-        | ryeos_runtime::callback::HookDispatchOccurrence::GraphCompleted {
-            definition_hash, ..
-        } => Some(definition_hash.clone()),
-        _ => None,
-    }
+    (occurrence.owner_kind == "graph").then(|| occurrence.effective_definition_digest.clone())
 }
 
 fn bounded_u32(value: &Value, key: &str) -> Option<u32> {
@@ -1683,7 +1730,7 @@ fn bounded_event_attributes(event: &PersistedEventRecord) -> Result<Value> {
         "graph_id",
         "graph_run_id",
         "definition_ref",
-        "definition_hash",
+        "effective_definition_digest",
         "node",
         "node_ref",
         "step",
@@ -1733,7 +1780,7 @@ fn bounded_event_attributes(event: &PersistedEventRecord) -> Result<Value> {
 }
 
 #[cfg(test)]
-fn anchor_status(payload: &Value) -> (FieldAnchorConformance, FieldManifestVerification) {
+fn anchor_status(payload: Value) -> (FieldAnchorConformance, FieldManifestVerification) {
     let event = PersistedEventRecord {
         event_id: 0,
         event_hash: None,
@@ -1746,14 +1793,13 @@ fn anchor_status(payload: &Value) -> (FieldAnchorConformance, FieldManifestVerif
         ts: String::new(),
         prev_chain_event_hash: None,
         prev_thread_event_hash: None,
-        payload: Value::Null,
+        payload,
     };
-    let (conformance, verification, _) = anchor_status_with_verifier(payload, &event, None);
+    let (conformance, verification, _) = anchor_status_with_verifier(&event, None);
     (conformance, verification)
 }
 
 fn anchor_status_with_verifier(
-    payload: &Value,
     event: &PersistedEventRecord,
     cas: Option<&lillux::CasStore>,
 ) -> (
@@ -1761,45 +1807,27 @@ fn anchor_status_with_verifier(
     FieldManifestVerification,
     Option<String>,
 ) {
-    let Some(object) = payload.as_object() else {
-        return (
-            FieldAnchorConformance::Malformed,
-            FieldManifestVerification::NotProvided,
-            None,
-        );
-    };
-    let manifest = object.get("manifest_ref");
-    let mut verification = match manifest {
+    let nested_manifest = event
+        .payload
+        .get("payload")
+        .and_then(|payload| payload.get("manifest_ref"));
+    let mut verification = match nested_manifest {
         None | Some(Value::Null) => FieldManifestVerification::NotProvided,
         Some(_) => FieldManifestVerification::NotChecked,
     };
-    let valid = object
-        .get("schema_version")
-        .is_some_and(|value| !value.is_null())
-        && object
-            .get("label")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.is_empty())
-        && object
-            .get("state_digest")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.is_empty())
-        && object
-            .get("manifest_ref")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.is_empty())
-        && object.get("runtime").is_some_and(|value| !value.is_null())
-        && object.get("metadata").is_some_and(Value::is_object);
-    let conformance = if valid {
-        FieldAnchorConformance::ContractV1
-    } else {
-        FieldAnchorConformance::Malformed
-    };
+    let anchor =
+        match ryeos_state::objects::StateAnchorMilestoneV2::from_value(event.payload.clone()) {
+            Ok(anchor) => anchor,
+            Err(_) => {
+                return (FieldAnchorConformance::Malformed, verification, None);
+            }
+        };
+    let conformance = FieldAnchorConformance::ContractV2;
+    let payload = serde_json::to_value(&anchor.payload)
+        .expect("validated state-anchor payload must serialize");
     let mut verification_error = None;
-    if conformance == FieldAnchorConformance::ContractV1
-        && let Some(cas) = cas
-    {
-        match verify_state_manifest(payload, event, cas) {
+    if let Some(cas) = cas {
+        match verify_state_manifest(&payload, event, cas) {
             Ok(()) => verification = FieldManifestVerification::Verified,
             Err(error) => {
                 verification = FieldManifestVerification::Failed;
@@ -1948,12 +1976,28 @@ mod tests {
         }
     }
 
+    fn state_anchor_event(chain_seq: i64, payload: Value) -> PersistedEventRecord {
+        event(
+            chain_seq,
+            ryeos_state::event_types::MILESTONE,
+            json!({
+                "kind": "state_anchor",
+                "payload": payload,
+                "graph_run_id": "G-test",
+                "definition_ref": "graph:test/solve",
+                "effective_definition_digest": "d".repeat(64),
+                "node": "solve",
+                "step": 3,
+            }),
+        )
+    }
+
     fn assembler() -> ExecutionAssembler {
         let mut assembler = ExecutionAssembler::new(FieldFactSubject {
             kind: "thread".to_string(),
             id: "T-root".to_string(),
             definition_ref: None,
-            definition_hash: None,
+            effective_definition_digest: None,
         });
         assembler
             .thread_facets
@@ -2034,7 +2078,7 @@ mod tests {
             let mut payload = json!({
                 "graph_run_id": "G-1",
                 "definition_ref": "graph:test/build",
-                "definition_hash": "d".repeat(64),
+                "effective_definition_digest": "d".repeat(64),
                 "node": "repeat",
                 "step": step,
                 "status": "ok",
@@ -2068,7 +2112,7 @@ mod tests {
                 json!({
                     "graph_run_id": "G-partial",
                     "definition_ref": "graph:test/partial",
-                    "definition_hash": "d".repeat(64),
+                    "effective_definition_digest": "d".repeat(64),
                     "node": "unfinished",
                     "step": 7,
                 }),
@@ -2090,6 +2134,57 @@ mod tests {
     }
 
     #[test]
+    fn malformed_or_partial_graph_identity_degrades_to_identityless_events() {
+        let mut malformed = assembler();
+        malformed
+            .add_event(event(
+                1,
+                ryeos_state::event_types::GRAPH_STEP_STARTED,
+                json!({
+                    "graph_run_id": "G-invalid",
+                    "definition_ref": "graph:test/invalid",
+                    "effective_definition_digest": "not-a-digest",
+                    "node": "start",
+                    "step": 0,
+                }),
+            ))
+            .unwrap();
+        let malformed = malformed.finish().unwrap();
+        assert!(malformed.entities.iter().any(|entity| {
+            entity.kind == "event"
+                && entity.effective_definition_digest.is_none()
+                && entity.attributes.get("graph_identity_error").is_some()
+        }));
+        assert!(malformed.warnings.iter().any(|warning| {
+            warning["code"] == "malformed_graph_identity"
+                && warning["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("effective digest is invalid"))
+        }));
+
+        let mut partial = assembler();
+        partial
+            .add_event(event(
+                1,
+                ryeos_state::event_types::GRAPH_STEP_STARTED,
+                json!({
+                    "graph_run_id": "G-partial",
+                    "definition_ref": "graph:test/partial",
+                    "node": "start",
+                    "step": 0,
+                }),
+            ))
+            .unwrap();
+        let partial = partial.finish().unwrap();
+        assert!(partial.warnings.iter().any(|warning| {
+            warning["code"] == "malformed_graph_identity"
+                && warning["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("partial identity"))
+        }));
+    }
+
+    #[test]
     fn ordinary_event_projection_is_allowlisted_and_does_not_leak_ambient_values() {
         let mut assembler = assembler();
         assembler
@@ -2099,7 +2194,7 @@ mod tests {
                 json!({
                     "graph_run_id": "G-redaction",
                     "definition_ref": "graph:test/redaction",
-                    "definition_hash": "d".repeat(64),
+                    "effective_definition_digest": "d".repeat(64),
                     "node": "safe",
                     "step": 1,
                     "api_key": "never-project-this-value",
@@ -2117,24 +2212,53 @@ mod tests {
     #[test]
     fn anchor_contract_and_manifest_status_are_independent() {
         assert_eq!(
-            anchor_status(&json!({
-                "schema_version": 1,
-                "label": "state",
-                "state_digest": "sha256:test",
-                "manifest_ref": "cas:test",
-                "runtime": {"kind": "test"},
-                "metadata": {"domain.kind": "opaque"}
-            })),
+            anchor_status(
+                state_anchor_event(
+                    1,
+                    json!({
+                        "schema_version": 2,
+                        "label": "state",
+                        "state_digest": format!("sha256:{}", "a".repeat(64)),
+                        "manifest_ref": format!("cas:{}", "a".repeat(64)),
+                        "runtime": {"kind": "test"},
+                        "metadata": {"domain.kind": "opaque"}
+                    })
+                )
+                .payload
+            ),
             (
-                FieldAnchorConformance::ContractV1,
+                FieldAnchorConformance::ContractV2,
                 FieldManifestVerification::NotChecked
             )
         );
         assert_eq!(
-            anchor_status(&json!({"label": "state"})),
+            anchor_status(json!({
+                "kind": "state_anchor",
+                "payload": {"label": "state"}
+            })),
             (
                 FieldAnchorConformance::Malformed,
                 FieldManifestVerification::NotProvided
+            )
+        );
+
+        let mut predecessor = state_anchor_event(
+            1,
+            json!({
+                "schema_version": 2,
+                "label": "state",
+                "state_digest": format!("sha256:{}", "a".repeat(64)),
+                "manifest_ref": format!("cas:{}", "a".repeat(64)),
+                "runtime": {},
+                "metadata": {}
+            }),
+        );
+        predecessor.payload["payload"]["schema_version"] = json!(1);
+        assert_eq!(
+            anchor_status(predecessor.payload),
+            (
+                FieldAnchorConformance::Malformed,
+                FieldManifestVerification::NotChecked
             )
         );
     }
@@ -2167,29 +2291,33 @@ mod tests {
         .unwrap();
         let manifest_hash = cas.store_object(&manifest.to_value()).unwrap();
         let payload = json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "label": "state",
             "state_digest": format!("sha256:{manifest_hash}"),
             "manifest_ref": format!("cas:{manifest_hash}"),
             "runtime": {"kind": "opaque"},
             "metadata": {}
         });
-        let anchor_event = event(1, ryeos_state::event_types::MILESTONE, json!({}));
+        let anchor_event = state_anchor_event(1, payload);
         assert_eq!(
-            anchor_status_with_verifier(&payload, &anchor_event, Some(&cas)),
+            anchor_status_with_verifier(&anchor_event, Some(&cas)),
             (
-                FieldAnchorConformance::ContractV1,
+                FieldAnchorConformance::ContractV2,
                 FieldManifestVerification::Verified,
                 None
             )
         );
 
-        let mut fabricated = payload;
-        fabricated["state_digest"] = json!(format!("sha256:{}", "f".repeat(64)));
-        let (_, verification, error) =
-            anchor_status_with_verifier(&fabricated, &anchor_event, Some(&cas));
-        assert_eq!(verification, FieldManifestVerification::Failed);
-        assert!(error.unwrap().contains("does not commit"));
+        let mut fabricated = anchor_event;
+        fabricated.payload["payload"]["state_digest"] = json!(format!("sha256:{}", "f".repeat(64)));
+        assert_eq!(
+            anchor_status_with_verifier(&fabricated, Some(&cas)),
+            (
+                FieldAnchorConformance::Malformed,
+                FieldManifestVerification::NotChecked,
+                None
+            )
+        );
     }
 
     #[test]
@@ -2212,17 +2340,17 @@ mod tests {
         .unwrap();
         let manifest_hash = cas.store_object(&manifest.to_value()).unwrap();
         let payload = json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "label": "state",
             "state_digest": format!("sha256:{manifest_hash}"),
             "manifest_ref": format!("cas:{manifest_hash}"),
             "runtime": {"kind": "opaque"},
             "metadata": {}
         });
-        let anchor_event = event(1, ryeos_state::event_types::MILESTONE, json!({}));
+        let anchor_event = state_anchor_event(1, payload);
         let (conformance, verification, error) =
-            anchor_status_with_verifier(&payload, &anchor_event, Some(&cas));
-        assert_eq!(conformance, FieldAnchorConformance::ContractV1);
+            anchor_status_with_verifier(&anchor_event, Some(&cas));
+        assert_eq!(conformance, FieldAnchorConformance::ContractV2);
         assert_eq!(verification, FieldManifestVerification::Failed);
         assert!(error.unwrap().contains("restore blob is missing"));
     }
@@ -2236,22 +2364,15 @@ mod tests {
         for index in 0..=MAX_MANIFEST_VERIFICATIONS {
             let digest = format!("{index:064x}");
             let payload = json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "label": "state",
                 "state_digest": format!("sha256:{digest}"),
                 "manifest_ref": format!("cas:{digest}"),
                 "runtime": {"kind": "opaque"},
                 "metadata": {}
             });
-            final_status = Some(assembler.anchor_status_cached(
-                &payload,
-                &event(
-                    index as i64 + 1,
-                    ryeos_state::event_types::MILESTONE,
-                    json!({}),
-                ),
-                Some(&cas),
-            ));
+            let anchor_event = state_anchor_event(index as i64 + 1, payload);
+            final_status = Some(assembler.anchor_status_cached(&anchor_event, Some(&cas)));
         }
         assert_eq!(
             assembler.manifest_verifications.len(),
@@ -2273,13 +2394,16 @@ mod tests {
                 id: "hook:system/evidence".to_string(),
                 layer: ryeos_runtime::hooks_loader::HookLayer::Infrastructure,
                 event: "graph_step_completed".to_string(),
-                occurrence: ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
-                    graph_run_id: "G-1".to_string(),
-                    definition_ref: "graph:test/build".to_string(),
-                    definition_hash: "d".repeat(64),
-                    step: 4,
-                    node: "build".to_string(),
-                },
+                occurrence: ryeos_runtime::callback::HookDispatchOccurrence::new(
+                    "graph",
+                    "graph_step_completed",
+                    "graph:test/build",
+                    "r".repeat(64),
+                    "d".repeat(64),
+                )
+                .with_text_coordinate("graph_run_id", "G-1")
+                .with_counter_coordinate("step", 4)
+                .with_text_coordinate("node", "build"),
             },
             context_hash: "c".repeat(64),
             response_hash: response_hash.to_string(),

@@ -277,28 +277,18 @@ pub struct ConditionalEdge {
     pub to: String,
 }
 
-/// Top-level graph YAML shape. Two consumers parse this document:
+/// Strict executable shape of the graph's finalized composed value.
 ///
-/// 1. The graph runtime (this crate) parses it as the strict typed
-///    `GraphFile` for walker execution.
-/// 2. The daemon-side `graph_permissions` composer parses the same
-///    YAML into a generic JSON `Value` to lift
-///    `requires.capabilities.declared` into `effective_caps` on the
-///    callback token.
-///
-/// `requires` therefore lives in two parsing paths. We keep it on the
-/// typed shape (rather than dropping `deny_unknown_fields`) so that:
-///   - the runtime is the strict gatekeeper: malformed entries
-///     (unknown keys, bad operations) hard-error here before the
-///     composer's more permissive read ever sees them.
-///   - the declared list is propagated to
-///     `GraphDefinition.declared_permissions` and surfaced by callers
-///     (logged at launch in `main.rs`), making it live and verifying the
-///     runtime received the same declared cap-set the daemon composed
-///     for the callback token.
+/// The generic composer and graph effective validator run before launch. The
+/// runtime parses that same admitted composed value and checks its effective
+/// digest and captured hook plan before executing it. `requires` remains on
+/// the strict runtime shape so malformed or divergent capability declarations
+/// fail before the first graph step.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GraphFile {
+    #[serde(default)]
+    extends: Option<String>,
     version: String,
     category: String,
     #[serde(default)]
@@ -308,8 +298,8 @@ struct GraphFile {
     /// Unified capability requirements (`requires.capabilities`): `declared`
     /// (self-asserted action authority, composed into effective_caps) and
     /// `manifest` (runtime callback authority minted from the signed manifest).
-    /// `deny_unknown_fields` makes a legacy top-level `permissions:` fail to
-    /// parse — there is no back-compat path.
+    /// `deny_unknown_fields` makes the removed top-level `permissions:` fail
+    /// to parse.
     #[serde(default)]
     requires: Option<ryeos_bundle::runtime_authority::RuntimeRequires>,
 }
@@ -329,17 +319,17 @@ pub struct GraphDefinition {
     /// This is not a trust decision by itself; it is the exact identity
     /// that runtime events, receipts, and later trace projections can
     /// use to connect consequence back to capability.
-    pub definition_hash: String,
+    pub root_raw_content_digest: String,
+    pub effective_definition_digest: String,
     pub file_path: Option<String>,
     pub config: GraphConfig,
     /// Immutable execution sidecar compiled once from the strict source shape.
     /// The walker never parses expressions or scans templates at runtime.
     pub(crate) compiled: crate::compiled_graph::CompiledGraph,
-    /// Self-asserted action authority the graph declares for itself
-    /// (`requires.capabilities.declared`). The daemon's
-    /// `graph_permissions` composer reads the same path to populate
-    /// `effective_caps` on the callback token; the runtime side keeps it
-    /// visible for traceability + parity checks (see `main.rs` launch log).
+    /// Self-asserted action authority in the finalized composed graph
+    /// (`requires.capabilities.declared`). Launch admission narrows this
+    /// against the manifest and binds the result into callback authority; the
+    /// runtime keeps the declaration visible for traceability and parity.
     pub declared_permissions: Vec<String>,
     /// Structured runtime capability requirements declared by the graph
     /// (`requires.capabilities`). The daemon is the authority: it mints the
@@ -350,66 +340,44 @@ pub struct GraphDefinition {
 }
 
 impl GraphDefinition {
-    #[cfg(test)]
-    pub fn from_yaml(raw: &str, file_path: Option<&str>) -> anyhow::Result<Self> {
-        Self::from_yaml_with_hook_sources(raw, file_path, ryeos_runtime::HookSources::default())
-    }
-
-    #[cfg(test)]
-    pub fn from_yaml_with_hook_sources(
-        raw: &str,
+    /// Construct only from the exact finalized resolution shipped in the
+    /// managed envelope. Composed content is executable; root bytes remain
+    /// provenance evidence.
+    pub fn from_effective_resolution(
+        resolution: &ryeos_engine::resolution::ResolutionOutput,
+        expected_digest: &ryeos_engine::resolution::EffectiveDefinitionDigest,
         file_path: Option<&str>,
-        hook_sources: ryeos_runtime::HookSources,
     ) -> anyhow::Result<Self> {
-        Self::from_yaml_with_identity(raw, file_path, hook_sources, None)
-    }
-
-    /// Build the runtime definition from the exact bytes and canonical item
-    /// identity carried by a verified launch envelope.
-    pub fn from_verified_yaml_with_hook_sources(
-        raw: &str,
-        file_path: Option<&str>,
-        resolved_ref: &str,
-        expected_digest: &str,
-        hook_sources: ryeos_runtime::HookSources,
-    ) -> anyhow::Result<Self> {
-        Self::from_yaml_with_identity(
-            raw,
-            file_path,
-            hook_sources,
-            Some((resolved_ref, expected_digest)),
-        )
-    }
-
-    fn from_yaml_with_identity(
-        raw: &str,
-        file_path: Option<&str>,
-        mut hook_sources: ryeos_runtime::HookSources,
-        verified_identity: Option<(&str, &str)>,
-    ) -> anyhow::Result<Self> {
-        // Verified launch envelopes already carry the exact, envelope-aware
-        // signature-stripped bytes whose digest was checked by the engine.
-        // Never run the generic line stripper over them again: authored YAML
-        // scalar content may legitimately contain `ryeos:signed:`.
-        let definition_content: std::borrow::Cow<'_, str> = if verified_identity.is_some() {
-            std::borrow::Cow::Borrowed(raw)
-        } else {
-            std::borrow::Cow::Owned(lillux::signature::strip_signature_lines(raw))
-        };
-        let definition_hash = lillux::cas::sha256_hex(definition_content.as_bytes());
-        if let Some((_, expected_digest)) = verified_identity
-            && definition_hash != expected_digest
-        {
+        let observed = resolution.effective_definition_digest()?;
+        if &observed != expected_digest {
             anyhow::bail!(
-                "verified graph content digest mismatch: envelope={expected_digest}, runtime={definition_hash}"
+                "effective graph digest mismatch: envelope={expected_digest}, runtime={observed}"
             );
         }
-        let mut file: GraphFile = serde_yaml::from_str(definition_content.as_ref())?;
+        ryeos_graph_definition::validate_effective_graph(&resolution.composed)?;
+        let mut file: GraphFile = serde_json::from_value(resolution.composed.composed.clone())?;
+        validate_extends_provenance(
+            file.extends.as_deref(),
+            resolution
+                .ancestors
+                .iter()
+                .map(|ancestor| ancestor.requested_id.as_str()),
+        )?;
+        let plan_value = resolution
+            .composed
+            .derived
+            .get(ryeos_engine::hooks::EFFECTIVE_HOOK_PLAN_DERIVED_KEY)
+            .ok_or_else(|| anyhow::anyhow!("effective graph has no captured hook plan"))?;
+        let plan = ryeos_engine::hooks::EffectiveHookPlan::from_value(plan_value)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        if plan.authored.hooks != file.config.hooks {
+            anyhow::bail!("effective graph authored hooks differ from captured hook plan");
+        }
         let runtime_capability_requirements = match file.requires {
             Some(requires) => {
                 let caps = requires.capabilities;
                 ryeos_bundle::runtime_authority::validate_runtime_capability_requirements(&caps)
-                    .map_err(|e| anyhow::anyhow!("invalid `requires.capabilities`: {e}"))?;
+                    .map_err(|error| anyhow::anyhow!("invalid `requires.capabilities`: {error}"))?;
                 Some(caps)
             }
             None => None,
@@ -418,55 +386,224 @@ impl GraphDefinition {
             .as_ref()
             .map(|caps| caps.declared.clone())
             .unwrap_or_default();
-        hook_sources.authored = std::mem::take(&mut file.config.hooks);
-        let compiled = crate::compiled_graph::CompiledGraph::compile(&file.config, hook_sources)?;
-        let (graph_id, definition_ref) = if let Some((resolved_ref, _)) = verified_identity {
-            let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(resolved_ref)
-                .map_err(|error| {
-                    anyhow::anyhow!("invalid resolved graph ref `{resolved_ref}`: {error}")
-                })?;
-            if canonical.kind != "graph" {
-                anyhow::bail!(
-                    "resolved graph definition must have kind `graph`, got `{}`",
-                    canonical.kind
-                );
-            }
-            (canonical.bare_id, resolved_ref.to_string())
-        } else if let Some(fp) = file_path {
-            let stem = std::path::Path::new(fp)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown");
-            // Empty category is a legitimate value for top-level graphs;
-            // joining "/{stem}" produced ids like "/flow" which then
-            // broke `write_knowledge_transcript` because Path::join with
-            // an absolute-looking second segment replaces the base path
-            // entirely (writing to /flow/... and getting EACCES).
-            if file.category.is_empty() {
-                (stem.to_string(), format!("graph:{stem}"))
-            } else {
-                let graph_id = format!("{}/{}", file.category, stem);
-                let definition_ref = format!("graph:{graph_id}");
-                (graph_id, definition_ref)
-            }
-        } else if file.category.is_empty() {
-            ("unknown".to_string(), "graph:unknown".to_string())
-        } else {
-            let graph_id = file.category;
-            let definition_ref = format!("graph:{graph_id}");
-            (graph_id, definition_ref)
-        };
+        let compiled =
+            crate::compiled_graph::CompiledGraph::compile_effective(&file.config, &plan)?;
+        // The captured, admitted plan is the only executable hook authority.
+        // Do not retain a second raw authored copy in the live runtime model.
+        file.config.hooks.clear();
+        let canonical =
+            ryeos_engine::canonical_ref::CanonicalRef::parse(&resolution.root.resolved_ref)
+                .map_err(|error| anyhow::anyhow!("invalid resolved graph ref: {error}"))?;
+        if canonical.kind != "graph" {
+            anyhow::bail!("effective graph root has kind `{}`", canonical.kind);
+        }
+        // `category` is required and strictly decoded as authored metadata,
+        // but canonical execution identity comes from the admitted root ref.
+        let _ = &file.category;
         Ok(Self {
             version: file.version,
-            definition_ref,
-            definition_hash,
-            graph_id,
+            graph_id: canonical.bare_id,
+            definition_ref: resolution.root.resolved_ref.clone(),
+            root_raw_content_digest: resolution.root.raw_content_digest.clone(),
+            effective_definition_digest: expected_digest.to_string(),
             file_path: file_path.map(String::from),
             config: file.config,
             compiled,
             declared_permissions,
             runtime_capability_requirements,
         })
+    }
+
+    #[cfg(test)]
+    pub fn from_yaml(raw: &str, file_path: Option<&str>) -> anyhow::Result<Self> {
+        Self::from_yaml_effective_fixture(raw, file_path)
+    }
+
+    /// Test adapter into the production effective-resolution constructor. No
+    /// test-only graph compiler or alternate runtime parser exists.
+    #[cfg(test)]
+    pub fn from_yaml_effective_fixture(raw: &str, file_path: Option<&str>) -> anyhow::Result<Self> {
+        Self::from_yaml_effective_fixture_with_hook_sources(
+            raw,
+            file_path,
+            ryeos_runtime::HookSources::default(),
+        )
+    }
+
+    #[cfg(test)]
+    pub fn from_yaml_effective_fixture_with_hook_sources(
+        raw: &str,
+        file_path: Option<&str>,
+        mut hook_sources: ryeos_runtime::HookSources,
+    ) -> anyhow::Result<Self> {
+        use ryeos_engine::hooks::{
+            EFFECTIVE_HOOK_PLAN_DERIVED_KEY, EFFECTIVE_HOOK_PLAN_SCHEMA, EffectiveHookLayer,
+            EffectiveHookPlan, HOOK_CONTEXT_SCHEMA, HookContextContract, HookEventContract,
+            HookLayer, HookResultMode, HookSourceEvidence,
+        };
+        use ryeos_engine::resolution::{
+            KindComposedView, ResolutionOutput, ResolutionStepName, ResolvedAncestor, TrustClass,
+        };
+        use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+        let raw = lillux::signature::strip_signature_lines(raw);
+        let composed: Value = serde_yaml::from_str(&raw)?;
+        let file: GraphFile = serde_json::from_value(composed.clone())?;
+        hook_sources.authored = file.config.hooks.clone();
+        let event_contract = |roots: &[&str]| HookEventContract {
+            context_contract: HookContextContract {
+                schema: HOOK_CONTEXT_SCHEMA.to_string(),
+                allowed_roots: roots.iter().map(|root| root.to_string()).collect(),
+            },
+            allowed_results: BTreeSet::from([HookResultMode::Discard, HookResultMode::Observation]),
+        };
+        let event_contracts = BTreeMap::from([
+            (
+                "graph_started".to_string(),
+                event_contract(&["event", "graph_id", "graph_run_id", "state", "inputs"]),
+            ),
+            (
+                "graph_step_completed".to_string(),
+                event_contract(&[
+                    "event",
+                    "graph_id",
+                    "graph_run_id",
+                    "node",
+                    "step",
+                    "status",
+                    "state",
+                    "error",
+                ]),
+            ),
+            (
+                "graph_completed".to_string(),
+                event_contract(&[
+                    "event",
+                    "graph_id",
+                    "graph_run_id",
+                    "status",
+                    "settled",
+                    "steps",
+                    "success",
+                    "state",
+                    "inputs",
+                ]),
+            ),
+        ]);
+        let layer = |hooks| EffectiveHookLayer {
+            hooks,
+            dispatch_caps: Vec::new(),
+        };
+        let configured_layers = [
+            (HookLayer::Builtin, &hook_sources.builtin),
+            (HookLayer::Infrastructure, &hook_sources.infrastructure),
+            (HookLayer::Context, &hook_sources.context),
+            (HookLayer::Operator, &hook_sources.operator),
+            (HookLayer::Project, &hook_sources.project),
+        ];
+        let sources = configured_layers
+            .iter()
+            .filter(|(_, hooks)| !hooks.is_empty())
+            .map(|(layer, _)| HookSourceEvidence {
+                layer: *layer,
+                canonical_ref: format!("config:test/{}", layer.as_str()),
+                source_space: ryeos_engine::contracts::ItemSpace::Bundle,
+                trust_class: TrustClass::TrustedBundle,
+                signer_fingerprint: "e".repeat(64),
+                source_raw_content_digest: lillux::cas::sha256_hex(layer.as_str().as_bytes()),
+            })
+            .collect();
+        let plan = EffectiveHookPlan {
+            schema: EFFECTIVE_HOOK_PLAN_SCHEMA.to_string(),
+            owner_kind: "graph".to_string(),
+            event_contracts,
+            authored: EffectiveHookLayer {
+                hooks: hook_sources.authored,
+                dispatch_caps: file
+                    .requires
+                    .as_ref()
+                    .map(|requires| requires.capabilities.declared.clone())
+                    .unwrap_or_default(),
+            },
+            builtin: layer(hook_sources.builtin),
+            infrastructure: layer(hook_sources.infrastructure),
+            context: layer(hook_sources.context),
+            operator: layer(hook_sources.operator),
+            project: layer(hook_sources.project),
+            sources,
+        };
+        let graph_id = file_path
+            .and_then(|path| std::path::Path::new(path).file_stem())
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("fixture");
+        let bare_id = if file.category.is_empty() {
+            graph_id.to_string()
+        } else {
+            format!("{}/{graph_id}", file.category)
+        };
+        let definition_ref = format!("graph:{bare_id}");
+        let raw_content_digest = lillux::cas::sha256_hex(raw.as_bytes());
+        let effective_caps = file
+            .requires
+            .as_ref()
+            .map(|requires| requires.capabilities.declared.clone())
+            .unwrap_or_default();
+        let resolution = ResolutionOutput {
+            root: ResolvedAncestor {
+                requested_id: definition_ref.clone(),
+                resolved_ref: definition_ref,
+                source_path: file_path.unwrap_or("fixture.yaml").into(),
+                source_space: ryeos_engine::contracts::ItemSpace::Bundle,
+                trust_class: TrustClass::TrustedBundle,
+                signer_fingerprint: Some("f".repeat(64)),
+                alias_resolution: None,
+                added_by: ResolutionStepName::PipelineInit,
+                raw_content: raw,
+                source_content_digest: raw_content_digest.clone(),
+                raw_content_digest,
+            },
+            ancestors: Vec::new(),
+            references_edges: Vec::new(),
+            referenced_items: Vec::new(),
+            step_outputs: HashMap::new(),
+            effective_trust_class: TrustClass::TrustedBundle,
+            composed: KindComposedView {
+                composed,
+                derived: HashMap::from([(
+                    EFFECTIVE_HOOK_PLAN_DERIVED_KEY.to_string(),
+                    plan.to_value().map_err(|error| anyhow::anyhow!(error))?,
+                )]),
+                policy_facts: HashMap::from([(
+                    "effective_caps".to_string(),
+                    serde_json::to_value(effective_caps)?,
+                )]),
+            },
+        };
+        let digest = resolution.effective_definition_digest()?;
+        Self::from_effective_resolution(&resolution, &digest, file_path)
+    }
+}
+
+fn validate_extends_provenance<'a>(
+    declared: Option<&str>,
+    mut ancestor_requested_ids: impl DoubleEndedIterator<Item = &'a str>,
+) -> anyhow::Result<()> {
+    // Extends resolution is deepest-first, so the final admitted ancestor is
+    // the root's immediate parent. `requested_id` deliberately preserves the
+    // exact authored spelling, including aliases.
+    match (declared, ancestor_requested_ids.next_back()) {
+        (None, None) => Ok(()),
+        (Some(_), None) => {
+            anyhow::bail!("effective graph declares `extends` but has no admitted ancestor")
+        }
+        (None, Some(_)) => {
+            anyhow::bail!("effective graph has admitted ancestors but declares no `extends`")
+        }
+        (Some(declared), Some(parent)) if declared == parent => Ok(()),
+        (Some(declared), Some(parent)) => anyhow::bail!(
+            "effective graph `extends` provenance mismatch: composed={declared}, admitted={}",
+            parent
+        ),
     }
 }
 
@@ -548,7 +685,7 @@ pub struct GraphResult {
     pub success: bool,
     pub graph_id: String,
     pub definition_ref: String,
-    pub definition_hash: String,
+    pub effective_definition_digest: String,
     pub graph_run_id: String,
     pub status: GraphRunStatus,
     pub steps: u32,
@@ -610,7 +747,7 @@ pub struct NodeReceipt {
     pub node: String,
     pub step: u32,
     pub definition_ref: String,
-    pub definition_hash: String,
+    pub effective_definition_digest: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result_hash: Option<String>,
     pub cache_hit: bool,
@@ -690,7 +827,152 @@ pub struct FanoutReceiptSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_engine::contracts::ItemSpace;
+    use ryeos_engine::hooks::{
+        EFFECTIVE_HOOK_PLAN_SCHEMA, EffectiveHookLayer, EffectiveHookPlan, HOOK_CONTEXT_SCHEMA,
+        HookContextContract, HookEventContract, HookResultMode,
+    };
+    use ryeos_engine::resolution::{
+        KindComposedView, ResolutionOutput, ResolutionStepName, ResolvedAncestor, TrustClass,
+    };
     use serde_json::json;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::PathBuf;
+
+    fn resolution_node(
+        requested_id: &str,
+        resolved_ref: &str,
+        digest_byte: char,
+        added_by: ResolutionStepName,
+    ) -> ResolvedAncestor {
+        ResolvedAncestor {
+            requested_id: requested_id.to_string(),
+            resolved_ref: resolved_ref.to_string(),
+            source_path: PathBuf::from(format!("/diagnostic/{digest_byte}.yaml")),
+            source_space: ItemSpace::Bundle,
+            trust_class: TrustClass::TrustedBundle,
+            signer_fingerprint: Some("f".repeat(64)),
+            alias_resolution: None,
+            added_by,
+            raw_content: format!("source:{digest_byte}"),
+            source_content_digest: digest_byte.to_string().repeat(64),
+            raw_content_digest: digest_byte.to_string().repeat(64),
+        }
+    }
+
+    fn empty_graph_plan() -> EffectiveHookPlan {
+        let empty = EffectiveHookLayer::empty();
+        EffectiveHookPlan {
+            schema: EFFECTIVE_HOOK_PLAN_SCHEMA.to_string(),
+            owner_kind: "graph".to_string(),
+            event_contracts: BTreeMap::from([(
+                "graph_started".to_string(),
+                HookEventContract {
+                    context_contract: HookContextContract {
+                        schema: HOOK_CONTEXT_SCHEMA.to_string(),
+                        allowed_roots: BTreeSet::from(["event".to_string()]),
+                    },
+                    allowed_results: BTreeSet::from([
+                        HookResultMode::Discard,
+                        HookResultMode::Observation,
+                    ]),
+                },
+            )]),
+            authored: empty.clone(),
+            builtin: empty.clone(),
+            infrastructure: empty.clone(),
+            context: empty.clone(),
+            operator: empty.clone(),
+            project: empty,
+            sources: Vec::new(),
+        }
+    }
+
+    fn inherited_effective_resolution() -> ResolutionOutput {
+        let plan = empty_graph_plan();
+        ResolutionOutput {
+            root: resolution_node(
+                "graph:test/effective",
+                "graph:test/effective",
+                'a',
+                ResolutionStepName::PipelineInit,
+            ),
+            ancestors: vec![resolution_node(
+                "graph:test/base",
+                "graph:test/base",
+                'b',
+                ResolutionStepName::ResolveExtendsChain,
+            )],
+            references_edges: Vec::new(),
+            referenced_items: Vec::new(),
+            step_outputs: HashMap::new(),
+            effective_trust_class: TrustClass::TrustedBundle,
+            composed: KindComposedView {
+                composed: json!({
+                    "version": "1.0.0",
+                    "category": "test",
+                    "extends": "graph:test/base",
+                    "config": {
+                        "start": "inherited",
+                        "nodes": {
+                            "inherited": {
+                                "next": {"type": "unconditional", "to": "finish"}
+                            },
+                            "finish": {"node_type": "return", "output": "done"}
+                        }
+                    }
+                }),
+                derived: HashMap::from([(
+                    "effective_hook_plan".to_string(),
+                    plan.to_value().unwrap(),
+                )]),
+                policy_facts: HashMap::from([("effective_caps".to_string(), json!([]))]),
+            },
+        }
+    }
+
+    #[test]
+    fn runtime_constructs_from_the_complete_admitted_effective_resolution() {
+        let resolution = inherited_effective_resolution();
+        let digest = resolution.effective_definition_digest().unwrap();
+        let graph = GraphDefinition::from_effective_resolution(
+            &resolution,
+            &digest,
+            Some("/diagnostic/root.yaml"),
+        )
+        .unwrap();
+
+        assert!(graph.config.nodes.contains_key("inherited"));
+        assert_eq!(graph.definition_ref, "graph:test/effective");
+        assert_eq!(graph.root_raw_content_digest, "a".repeat(64));
+        assert_eq!(graph.effective_definition_digest, digest.to_string());
+
+        let wrong =
+            ryeos_engine::resolution::EffectiveDefinitionDigest::parse("0".repeat(64)).unwrap();
+        let error =
+            GraphDefinition::from_effective_resolution(&resolution, &wrong, None).unwrap_err();
+        assert!(error.to_string().contains("digest mismatch"));
+    }
+
+    #[test]
+    fn effective_extends_matches_immediate_admitted_parent() {
+        validate_extends_provenance(
+            Some("@base"),
+            ["graph:test/grandparent", "@base"].into_iter(),
+        )
+        .unwrap();
+        validate_extends_provenance(None, std::iter::empty()).unwrap();
+    }
+
+    #[test]
+    fn effective_extends_rejects_missing_or_divergent_provenance() {
+        assert!(validate_extends_provenance(Some("graph:test/base"), std::iter::empty()).is_err());
+        assert!(validate_extends_provenance(None, ["graph:test/base"].into_iter()).is_err());
+        assert!(
+            validate_extends_provenance(Some("graph:test/other"), ["graph:test/base"].into_iter(),)
+                .is_err()
+        );
+    }
 
     #[test]
     fn unknown_top_level_field_rejects() {
@@ -760,9 +1042,8 @@ category: test
         assert!(GraphDefinition::from_yaml(yaml, Some("test.yaml")).is_err());
     }
 
-    /// `requires.capabilities.declared` propagates to `declared_permissions` —
-    /// the same path the `graph_permissions` composer lifts into
-    /// `effective_caps`, so the runtime can log/verify parity.
+    /// `requires.capabilities.declared` propagates to `declared_permissions`
+    /// from the same finalized composed value used by launch admission.
     #[test]
     fn declared_execute_propagates_to_definition() {
         let yaml = r#"
@@ -786,10 +1067,9 @@ requires:
         );
     }
 
-    /// No back-compat: a legacy top-level `permissions:` block fails the strict
-    /// `deny_unknown_fields` parse rather than being silently ignored.
+    /// The removed top-level `permissions:` block fails strict decoding.
     #[test]
-    fn legacy_top_level_permissions_rejected() {
+    fn removed_top_level_permissions_rejected() {
         let yaml = r#"
 version: "1.0.0"
 category: test
@@ -899,93 +1179,46 @@ requires:
     }
 
     #[test]
-    fn definition_identity_uses_signature_stripped_body() {
+    fn root_source_identity_uses_signature_stripped_body() {
         let yaml = r#"<!-- ryeos:signed:old -->
 version: "1.0.0"
 category: test
 config:
   start: a
+  nodes:
+    a: {node_type: return}
 "#;
         let def = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap();
         let cleaned = lillux::signature::strip_signature_lines(yaml);
         assert_eq!(def.definition_ref, "graph:test/test");
         assert_eq!(
-            def.definition_hash,
+            def.root_raw_content_digest,
             lillux::cas::sha256_hex(cleaned.as_bytes())
         );
     }
 
     #[test]
-    fn verified_definition_uses_envelope_ref_and_digest() {
-        let yaml = r#"
-version: "1.0.0"
-category: self_asserted
-config:
-  start: a
-"#;
-        let digest = lillux::cas::sha256_hex(yaml.as_bytes());
-        let definition = GraphDefinition::from_verified_yaml_with_hook_sources(
-            yaml,
-            Some("/diagnostic/wrong-name.yaml"),
-            "graph:canonical/identity",
-            &digest,
-            ryeos_runtime::HookSources::default(),
-        )
-        .unwrap();
-
-        assert_eq!(definition.graph_id, "canonical/identity");
-        assert_eq!(definition.definition_ref, "graph:canonical/identity");
-        assert_eq!(definition.definition_hash, digest);
-    }
-
-    #[test]
-    fn verified_definition_preserves_authored_signature_marker_text() {
+    fn effective_fixture_preserves_authored_signature_marker_text() {
         let yaml = r#"
 version: "1.0.0"
 category: self_asserted
 description: "literal ryeos:signed: marker"
 config:
   start: a
+  nodes:
+    a: {node_type: return}
 "#;
-        let digest = lillux::cas::sha256_hex(yaml.as_bytes());
-        let definition = GraphDefinition::from_verified_yaml_with_hook_sources(
-            yaml,
-            Some("/diagnostic/wrong-name.yaml"),
-            "graph:canonical/identity",
-            &digest,
-            ryeos_runtime::HookSources::default(),
-        )
-        .unwrap();
-
-        assert_eq!(definition.definition_hash, digest);
+        GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap();
     }
 
     #[test]
-    fn verified_definition_rejects_digest_mismatch() {
-        let yaml = r#"
-version: "1.0.0"
-category: test
-config:
-  start: a
-"#;
-        let error = GraphDefinition::from_verified_yaml_with_hook_sources(
-            yaml,
-            Some("test.yaml"),
-            "graph:test/item",
-            &"0".repeat(64),
-            ryeos_runtime::HookSources::default(),
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("content digest mismatch"));
-    }
-
-    #[test]
-    fn definition_hash_ignores_signature_line_changes_but_not_body() {
+    fn effective_definition_digest_ignores_signature_line_changes_but_not_body() {
         let body = r#"version: "1.0.0"
 category: test
 config:
   start: a
+  nodes:
+    a: {node_type: return, output: original}
 "#;
 
         let signed_a = format!("<!-- ryeos:signed:old -->\n{body}");
@@ -993,7 +1226,9 @@ config:
         let changed_body = r#"version: "1.0.0"
 category: test
 config:
-  start: b
+  start: a
+  nodes:
+    a: {node_type: return, output: changed}
 "#;
         let signed_changed = format!("<!-- ryeos:signed:new -->\n{changed_body}");
 
@@ -1001,8 +1236,11 @@ config:
         let b = GraphDefinition::from_yaml(&signed_b, Some("test.yaml")).unwrap();
         let changed = GraphDefinition::from_yaml(&signed_changed, Some("test.yaml")).unwrap();
 
-        assert_eq!(a.definition_hash, b.definition_hash);
-        assert_ne!(a.definition_hash, changed.definition_hash);
+        assert_eq!(a.effective_definition_digest, b.effective_definition_digest);
+        assert_ne!(
+            a.effective_definition_digest,
+            changed.effective_definition_digest
+        );
     }
 
     #[test]

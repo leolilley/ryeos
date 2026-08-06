@@ -1,6 +1,7 @@
 import {
   StaleFieldLayoutError,
   fieldLayoutIsLarge,
+  fieldLayoutMembershipKey,
   hitTest,
   hitTestGroup,
   layoutField,
@@ -45,8 +46,9 @@ export class FieldCanvasController {
   update(vm) {
     this.vm = vm;
     this.captureExited(vm);
-    if (this.structuralRevision !== vm.structural_revision) {
-      this.structuralRevision = vm.structural_revision;
+    const layoutRevision = `${vm.structural_revision || ""}\0${fieldLayoutMembershipKey(vm)}`;
+    if (this.structuralRevision !== layoutRevision) {
+      this.structuralRevision = layoutRevision;
       this.scheduleLayout(vm);
       return;
     }

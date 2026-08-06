@@ -59,14 +59,10 @@ struct ResolvedLaunch {
     /// needs no source root of its own: the composed definition arrives in
     /// the envelope and children resolve daemon-side from token provenance.
     state_root: std::path::PathBuf,
-    project_root: std::path::PathBuf,
     node_trusted_keys_dir: std::path::PathBuf,
-    /// Exact graph bytes that the daemon resolved and verified. Runtimes must
-    /// never reopen `source_path`: it is diagnostic provenance and the live
-    /// file may change after verification.
-    graph_raw_content: String,
+    /// Diagnostic source label only. Executable bytes come exclusively from
+    /// the finalized composed resolution carried by the launch envelope.
     graph_source_label: String,
-    graph_resolved_ref: String,
     thread_id: String,
     graph_run_id: Option<String>,
     inputs: Value,
@@ -78,6 +74,8 @@ struct ResolvedLaunch {
     target_digest: Option<String>,
     bundle_roots: Vec<std::path::PathBuf>,
     invocation_id: Option<String>,
+    resolution: ryeos_engine::resolution::ResolutionOutput,
+    effective_definition_digest: ryeos_engine::resolution::EffectiveDefinitionDigest,
 }
 
 /// Static validation report for a graph: `{valid, errors, warnings, …}`.
@@ -145,22 +143,10 @@ fn main() -> anyhow::Result<()> {
 
     let resolved = resolve_from_envelope(&stdin_data, &cli)?;
 
-    let loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
-        resolved.project_root.clone(),
-        resolved.bundle_roots.clone(),
-        &resolved.node_trusted_keys_dir,
-    )?;
-    let hook_sources = ryeos_runtime::load_configured_hook_sources(&loader)?;
-    let target_digest = resolved
-        .target_digest
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("launch envelope omitted graph content digest"))?;
-    let graph = model::GraphDefinition::from_verified_yaml_with_hook_sources(
-        &resolved.graph_raw_content,
+    let graph = model::GraphDefinition::from_effective_resolution(
+        &resolved.resolution,
+        &resolved.effective_definition_digest,
         Some(&resolved.graph_source_label),
-        &resolved.graph_resolved_ref,
-        target_digest,
-        hook_sources,
     )?;
 
     tracing::info!(
@@ -180,7 +166,7 @@ fn main() -> anyhow::Result<()> {
     let checkpoint = CheckpointWriter::from_env();
 
     // rye-expr/1 resume is local-checkpoint-only. The checkpoint pins the
-    // definition hash and language; event replay cannot prove either or
+    // effective definition digest and language; event replay cannot prove either or
     // reconstruct candidate state and is therefore not a resume source.
     let thread_auth_token = std::env::var("RYEOSD_THREAD_AUTH_TOKEN")
         .expect("RYEOSD_THREAD_AUTH_TOKEN must be set by daemon");
@@ -372,6 +358,11 @@ fn main() -> anyhow::Result<()> {
 fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<ResolvedLaunch> {
     let envelope: ryeos_runtime::envelope::LaunchEnvelope =
         serde_json::from_slice(stdin_data).map_err(|e| anyhow::anyhow!("invalid envelope: {e}"))?;
+    if envelope.schema_version()
+        != ryeos_engine::launch_envelope_types::MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION
+    {
+        anyhow::bail!("unsupported managed launch envelope schema");
+    }
     if !envelope.runtime_data.is_empty() {
         anyhow::bail!(
             "graph launch runtime_data must be empty; received keys: {:?}",
@@ -379,18 +370,19 @@ fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<Resolve
         );
     }
 
+    let target_digest = envelope.resolution().root.raw_content_digest.clone();
+    let resolution = envelope.resolution().clone();
+    let effective_definition_digest = envelope.effective_definition_digest().clone();
+
     Ok(ResolvedLaunch {
         state_root: envelope.roots.state_root().to_path_buf(),
-        project_root: envelope.roots.project_root.clone(),
         node_trusted_keys_dir: envelope.roots.node_trusted_keys_dir.clone(),
-        graph_raw_content: envelope.resolution.root.raw_content.clone(),
         graph_source_label: envelope
-            .resolution
+            .resolution()
             .root
             .source_path
             .to_string_lossy()
             .into_owned(),
-        graph_resolved_ref: envelope.resolution.root.resolved_ref.clone(),
         thread_id: envelope.thread_id.clone(),
         graph_run_id: cli.graph_run_id.clone(),
         inputs: envelope.request.inputs.clone(),
@@ -399,9 +391,11 @@ fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<Resolve
         depth: envelope.request.depth,
         hard_limits: serde_json::to_value(&envelope.policy.hard_limits).unwrap_or(json!({})),
         callback: Some(envelope.callback),
-        target_digest: Some(envelope.resolution.root.raw_content_digest.clone()),
+        target_digest: Some(target_digest),
         bundle_roots: envelope.roots.bundle_roots.clone(),
         invocation_id: Some(envelope.invocation_id.clone()),
+        resolution,
+        effective_definition_digest,
     })
 }
 

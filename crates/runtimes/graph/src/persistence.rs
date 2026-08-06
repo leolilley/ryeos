@@ -13,7 +13,7 @@ pub async fn write_node_receipt(
         "node": receipt.node,
         "step": receipt.step,
         "definition_ref": receipt.definition_ref,
-        "definition_hash": receipt.definition_hash,
+        "effective_definition_digest": receipt.effective_definition_digest,
         "graph_run_id": graph_run_id,
         "node_result_hash": receipt.result_hash,
         "cache_hit": receipt.cache_hit,
@@ -160,7 +160,7 @@ mod tests {
             node: "step1".to_string(),
             step: 1,
             definition_ref: "graph:test".to_string(),
-            definition_hash: "def123".to_string(),
+            effective_definition_digest: "def123".to_string(),
             result_hash: Some("abc123".to_string()),
             cache_hit: false,
             elapsed_ms: 142,
@@ -175,7 +175,7 @@ mod tests {
         assert_eq!(output["cache_hit"], false);
         assert_eq!(output["elapsed_ms"], 142);
         assert_eq!(output["definition_ref"], "graph:test");
-        assert_eq!(output["definition_hash"], "def123");
+        assert_eq!(output["effective_definition_digest"], "def123");
         assert_eq!(output["node_result_hash"], "abc123");
         assert!(output.get("timestamp").is_some());
 
@@ -192,7 +192,7 @@ mod tests {
             node: "step1".to_string(),
             step: 0,
             definition_ref: "graph:test".to_string(),
-            definition_hash: "def123".to_string(),
+            effective_definition_digest: "def123".to_string(),
             result_hash: None,
             cache_hit: false,
             elapsed_ms: 5,
@@ -208,7 +208,7 @@ mod tests {
 
         assert_eq!(output["graph_run_id"], "gr-err");
         assert_eq!(output["definition_ref"], "graph:test");
-        assert_eq!(output["definition_hash"], "def123");
+        assert_eq!(output["effective_definition_digest"], "def123");
         assert_eq!(output["node_result_hash"], Value::Null);
         assert_eq!(output["error"], "boom");
 
@@ -227,7 +227,7 @@ mod tests {
             node: "reason".to_string(),
             step: 1,
             definition_ref: "graph:test".to_string(),
-            definition_hash: "def123".to_string(),
+            effective_definition_digest: "def123".to_string(),
             result_hash: Some("h".to_string()),
             cache_hit: false,
             elapsed_ms: 12,
