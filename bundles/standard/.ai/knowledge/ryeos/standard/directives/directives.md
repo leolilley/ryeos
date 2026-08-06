@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-05T07:04:40Z:773989f76980952d2b34186df24ad4133cb3034edc8ce1636db4c08bc701ea5e:dwS2H276o4gcBb/fLsyOwoTVGKD6J3PBcU8LNRqopOFDBkxGUnf4ZBYBHJpcvsSlzXFhA8Fiqz+Psn32EqyEBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-06T00:58:12Z:01c99c3dcc8aedb18cec7fb0ad555402858c43609b408811dc112a7aa307468e:xgY3pjUzEM3Fs3gH+phgbBmUDlEDjLMB6M+azNmqR3om+nzNupLX2iI3ALrXYiJacZo7CfXxhmX8gqwTykkpCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.0.1"
@@ -106,9 +106,11 @@ Rules:
   vault / item authoring / project snapshots) the daemon mints only as the
   signed bundle manifest backs it; not self-grantable.
 
-`declared` **narrows** through extends chains — a child can only reduce the
-parent's declared set, never expand it. `manifest` is stricter: a child that
-widens beyond the parent fails compose.
+`declared` and `manifest` inherit independently through extends chains. When a
+child declares either subtree, that complete declaration replaces the inherited
+subtree and must be covered by the immediately effective parent; any widening
+fails composition. Omission inherits, while an explicit empty declaration
+removes that subtree's authority.
 
 ### Limits
 - `limits.turns` — max LLM round-trips
@@ -177,7 +179,7 @@ and merges fields with declared strategies:
 | Field          | Strategy                          |
 |----------------|-----------------------------------|
 | `body`         | `root_verbatim` — child replaces parent body |
-| `requires`     | `narrow_requires_capabilities` — `declared` child ⊆ parent (drop); `manifest` fails on widen |
+| `requires`     | `narrow_requires_capabilities` — each declared subtree atomically replaces its inherited value and fails on widen |
 | `context`      | `dict_merge_string_seq_root_last` — child appended |
 | `model`        | nearest declaration, root last |
 | `limits`       | shallow mapping merge, root last |

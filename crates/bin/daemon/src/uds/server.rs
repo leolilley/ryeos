@@ -1689,7 +1689,7 @@ mod tests {
                 effective_bundle_id,
                 item_ref,
                 root_raw_content_digest.clone(),
-                root_raw_content_digest,
+                Some(root_raw_content_digest),
                 hard_limits,
                 depth,
             ),

@@ -1035,6 +1035,26 @@ mod tests {
     }
 
     #[test]
+    fn effective_definition_digest_commits_to_ordered_ancestor_chain() {
+        let mut first = effective_digest_fixture();
+        let mut second_ancestor = first.ancestors[0].clone();
+        second_ancestor.requested_id = "graph:test/middle".to_string();
+        second_ancestor.resolved_ref = "graph:test/middle".to_string();
+        second_ancestor.raw_content_digest = "e".repeat(64);
+        second_ancestor.source_content_digest = "e".repeat(64);
+        first.ancestors.push(second_ancestor);
+
+        let mut permuted = first.clone();
+        permuted.ancestors.swap(0, 1);
+
+        assert_ne!(
+            first.effective_definition_digest().unwrap(),
+            permuted.effective_definition_digest().unwrap(),
+            "ancestor order is executable identity"
+        );
+    }
+
+    #[test]
     fn effective_definition_digest_rejects_noncanonical_provenance_edges() {
         let mut resolution = effective_digest_fixture();
         resolution.references_edges[0].to_ref = "not-a-canonical-ref".to_string();

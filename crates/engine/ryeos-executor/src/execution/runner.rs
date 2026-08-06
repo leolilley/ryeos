@@ -1489,7 +1489,7 @@ fn build_protocol_launch_env(
                     effective_bundle_id,
                     Some(item_ref.to_string()),
                     root_raw_content_digest.clone(),
-                    root_raw_content_digest,
+                    None,
                     serde_json::Value::Null,
                     0,
                 )

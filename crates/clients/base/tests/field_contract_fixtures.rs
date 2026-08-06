@@ -149,7 +149,7 @@ fn real_project_fixture_exercises_occurrence_scoped_compound_joins() {
                         "attributes.observation.kind": "arc.portfolio_decision"
                     },
                     "keys": [
-                        "attributes.hook.occurrence.graph_run_id",
+                        "attributes.hook.occurrence.coordinates.graph_run_id",
                         "attributes.observation.payload.selected_candidate_key"
                     ]
                 },

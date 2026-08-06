@@ -11,6 +11,7 @@ use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{PlanContext, SubjectResolutionAuthority};
 use ryeos_engine::effective_program::FinalizedEffectiveProgram;
 use ryeos_engine::hooks::{EffectiveHookPlan, HookLayer};
+use ryeos_engine::launch_config::{LaunchConfigProofStatus, LaunchConfigSnapshotSet};
 use ryeos_engine::resolution::{EffectiveDefinitionDigest, ResolutionOutput};
 
 use crate::dispatch_error::DispatchError;
@@ -25,6 +26,222 @@ pub struct EffectiveProgramProjection {
     pub resolution: ResolutionOutput,
 }
 
+/// Bounded projection storage supplied by a read-side caller. Implementations
+/// are caches only: a hit is considered only after current resolution and
+/// mutable configuration authority have been re-established.
+pub trait EffectiveProgramProjectionCache {
+    fn get(&self, key: &str) -> Option<EffectiveProgramProjection>;
+    fn insert(&self, key: String, projection: EffectiveProgramProjection);
+}
+
+/// Request-scoped projection context. Expensive immutable request authority
+/// and hook-source snapshots are captured once and reused across every graph
+/// in one project-field read.
+pub struct EffectiveProgramProjectionSession<'a> {
+    engine: &'a ryeos_engine::engine::Engine,
+    plan_context: PlanContext,
+    project_root: Option<PathBuf>,
+    roots: ryeos_engine::item_resolution::ResolutionRoots,
+    request_snapshot: ryeos_engine::engine::EffectiveRequestSnapshot,
+    hook_snapshots: LaunchConfigSnapshotSet,
+}
+
+impl<'a> EffectiveProgramProjectionSession<'a> {
+    pub fn new(
+        engine: &'a ryeos_engine::engine::Engine,
+        plan_context: &PlanContext,
+        project_root: Option<&Path>,
+    ) -> Result<Self, DispatchError> {
+        validate_projection_authority(plan_context, project_root)?;
+        let roots = engine.resolution_roots(project_root.map(PathBuf::from));
+        let request_snapshot = engine
+            .effective_request_snapshot(project_root, &plan_context.subject_resolution_authority)
+            .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+        let hook_snapshots = load_current_hook_snapshots(
+            engine,
+            &roots,
+            &request_snapshot.parser_dispatcher,
+            &request_snapshot.trust_store,
+        )?;
+        Ok(Self {
+            engine,
+            plan_context: plan_context.clone(),
+            project_root: project_root.map(PathBuf::from),
+            roots,
+            request_snapshot,
+            hook_snapshots,
+        })
+    }
+
+    pub fn prepare(
+        &mut self,
+        canonical_ref: &CanonicalRef,
+        cache: Option<&dyn EffectiveProgramProjectionCache>,
+    ) -> Result<EffectiveProgramProjection, DispatchError> {
+        let mut mutable_authority_races = 0usize;
+        loop {
+            self.refresh_hook_snapshots_if_needed()?;
+            let prepared = self.resolve_projection_input(canonical_ref)?;
+            let cache_key =
+                projection_cache_key(&prepared, &self.request_snapshot, &self.hook_snapshots)?;
+            if let Some(projection) = cache.and_then(|cache| cache.get(&cache_key)) {
+                return Ok(projection);
+            }
+
+            match capture_and_finalize_with_hook_snapshots(
+                self.engine,
+                &prepared.kind,
+                prepared.resolution,
+                &prepared.effective_caps,
+                &self.roots,
+                &self.request_snapshot.trust_store,
+                None,
+                &self.hook_snapshots,
+            ) {
+                Err(DispatchError::LaunchPreparationFailed { code, .. })
+                    if code == "effective_program_authority_changed"
+                        && mutable_authority_races
+                            < ryeos_app::resolution_cache::MAX_MUTABLE_AUTHORITY_RACE_RETRIES =>
+                {
+                    mutable_authority_races = mutable_authority_races.saturating_add(1);
+                    self.hook_snapshots = load_current_hook_snapshots(
+                        self.engine,
+                        &self.roots,
+                        &self.request_snapshot.parser_dispatcher,
+                        &self.request_snapshot.trust_store,
+                    )?;
+                    tracing::warn!(
+                        attempt = mutable_authority_races,
+                        max_retries = ryeos_app::resolution_cache::MAX_MUTABLE_AUTHORITY_RACE_RETRIES,
+                        canonical_ref = %canonical_ref,
+                        "retrying projected effective-program capture after concurrent authority edit"
+                    );
+                }
+                Ok(effective_program) => {
+                    let effective_definition_digest =
+                        effective_program.effective_definition_digest().clone();
+                    let (resolution, _) = effective_program.into_parts();
+                    let projection = EffectiveProgramProjection {
+                        canonical_ref: canonical_ref.to_string(),
+                        kind: prepared.kind,
+                        root_source_content_digest: prepared.root_source_content_digest,
+                        root_raw_content_digest: prepared.root_raw_content_digest,
+                        effective_definition_digest,
+                        resolution,
+                    };
+                    if let Some(cache) = cache {
+                        cache.insert(cache_key, projection.clone());
+                    }
+                    return Ok(projection);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn refresh_hook_snapshots_if_needed(&mut self) -> Result<(), DispatchError> {
+        match self
+            .hook_snapshots
+            .dependency_proof
+            .revalidate_under_authority_status(&self.engine.launch_config_roots(&self.roots), None)
+        {
+            LaunchConfigProofStatus::Current => Ok(()),
+            LaunchConfigProofStatus::MutableAuthorityChanged => {
+                self.hook_snapshots = load_current_hook_snapshots(
+                    self.engine,
+                    &self.roots,
+                    &self.request_snapshot.parser_dispatcher,
+                    &self.request_snapshot.trust_store,
+                )?;
+                Ok(())
+            }
+            LaunchConfigProofStatus::ImmutableAuthorityMismatch => Err(DispatchError::Internal(
+                anyhow::anyhow!("projection hook-source proof mismatched immutable authority"),
+            )),
+        }
+    }
+
+    fn resolve_projection_input(
+        &self,
+        canonical_ref: &CanonicalRef,
+    ) -> Result<PreparedProjectionInput, DispatchError> {
+        let resolved = self
+            .engine
+            .resolve(&self.plan_context, canonical_ref)
+            .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+        let root_source_content_digest = resolved.content_hash.clone();
+        let root_raw_content_digest = resolved.raw_content_digest.clone();
+        let kind = resolved.kind.clone();
+        let attestation = self
+            .engine
+            .verify_attested(&self.plan_context, resolved.clone())
+            .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+        let closure = self
+            .engine
+            .resolve_verified_resolution_closure(
+                &self.plan_context,
+                &attestation,
+                self.project_root.clone(),
+            )
+            .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+        let (resolution, _, _) = closure.into_parts();
+
+        super::launch::enforce_effective_trust(
+            resolution.effective_trust_class,
+            &canonical_ref.to_string(),
+            &kind,
+        )
+        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+        let execution = self
+            .engine
+            .kinds
+            .get(&kind)
+            .and_then(|schema| schema.execution())
+            .ok_or_else(|| {
+                DispatchError::Internal(anyhow::anyhow!(
+                    "effective-program projection kind `{kind}` is not executable"
+                ))
+            })?;
+        if !execution.launch_augmentations.is_empty() {
+            return Err(DispatchError::Internal(anyhow::anyhow!(
+                "effective-program projection refuses kind `{kind}` because it declares launch-only augmentation"
+            )));
+        }
+
+        let declared_caps = super::launch::derive_effective_caps(&resolution.composed);
+        ryeos_bundle::runtime_authority::reject_disallowed_composed_grants(&declared_caps)
+            .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+        let runtime_caps = crate::dispatch::mint_runtime_capability_caps(
+            resolution.composed.composed.get("requires"),
+            &resolved,
+            resolution.effective_trust_class,
+            self.engine,
+        )
+        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+        let effective_caps = declared_caps
+            .into_iter()
+            .chain(runtime_caps)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        Ok(PreparedProjectionInput {
+            kind,
+            root_source_content_digest,
+            root_raw_content_digest,
+            resolution,
+            effective_caps,
+        })
+    }
+}
+
+struct PreparedProjectionInput {
+    kind: String,
+    root_source_content_digest: String,
+    root_raw_content_digest: String,
+    resolution: ResolutionOutput,
+    effective_caps: Vec<String>,
+}
+
 /// Resolve, compose, capture, validate, and finalize one current graph through
 /// the same authority path used by fresh managed launch. The returned value is
 /// evidence only and cannot be converted into launch authority.
@@ -34,6 +251,14 @@ pub fn prepare_effective_program_projection(
     project_root: Option<&Path>,
     canonical_ref: &CanonicalRef,
 ) -> Result<EffectiveProgramProjection, DispatchError> {
+    let mut session = EffectiveProgramProjectionSession::new(engine, plan_context, project_root)?;
+    session.prepare(canonical_ref, None)
+}
+
+fn validate_projection_authority(
+    plan_context: &PlanContext,
+    project_root: Option<&Path>,
+) -> Result<(), DispatchError> {
     plan_context
         .subject_resolution_authority
         .validate_for_materialized_root(project_root)
@@ -47,96 +272,147 @@ pub fn prepare_effective_program_projection(
         )));
     }
 
-    let resolved = engine
-        .resolve(plan_context, canonical_ref)
-        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
-    let root_source_content_digest = resolved.content_hash.clone();
-    let root_raw_content_digest = resolved.raw_content_digest.clone();
-    let kind = resolved.kind.clone();
-    let attestation = engine
-        .verify_attested(plan_context, resolved.clone())
-        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
-    let closure = engine
-        .resolve_verified_resolution_closure(
-            plan_context,
-            &attestation,
-            project_root.map(PathBuf::from),
-        )
-        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
-    let (resolution, _, _) = closure.into_parts();
+    Ok(())
+}
 
-    super::launch::enforce_effective_trust(
-        resolution.effective_trust_class,
-        &canonical_ref.to_string(),
-        &kind,
-    )
-    .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
-    let execution = engine
-        .kinds
-        .get(&kind)
-        .and_then(|schema| schema.execution())
-        .ok_or_else(|| {
-            DispatchError::Internal(anyhow::anyhow!(
-                "effective-program projection kind `{kind}` is not executable"
-            ))
-        })?;
-    if !execution.launch_augmentations.is_empty() {
-        return Err(DispatchError::Internal(anyhow::anyhow!(
-            "effective-program projection refuses kind `{kind}` because it declares launch-only augmentation"
-        )));
-    }
-
-    let declared_caps = super::launch::derive_effective_caps(&resolution.composed);
-    ryeos_bundle::runtime_authority::reject_disallowed_composed_grants(&declared_caps)
-        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
-    let runtime_caps = crate::dispatch::mint_runtime_capability_caps(
-        resolution.composed.composed.get("requires"),
-        &resolved,
-        resolution.effective_trust_class,
+fn load_current_hook_snapshots(
+    engine: &ryeos_engine::engine::Engine,
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    parsers: &ryeos_engine::parsers::ParserDispatcher,
+    trust_store: &ryeos_engine::trust::TrustStore,
+) -> Result<LaunchConfigSnapshotSet, DispatchError> {
+    let config_roots = engine.launch_config_roots(roots);
+    super::launch_preparation::load_launch_config_set_under_current_authority(
+        &ryeos_engine::hooks::hook_source_declarations(),
+        &config_roots,
+        parsers,
         engine,
-    )
-    .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
-    let effective_caps = declared_caps
-        .into_iter()
-        .chain(runtime_caps)
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let roots = engine.resolution_roots(project_root.map(PathBuf::from));
-    let request_snapshot = engine
-        .effective_request_snapshot(project_root, &plan_context.subject_resolution_authority)
-        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
-    let effective_program = capture_and_finalize_fresh_effective_program(
-        engine,
-        &kind,
-        resolution,
-        &effective_caps,
-        &roots,
-        &request_snapshot.parser_dispatcher,
-        &request_snapshot.trust_store,
+        trust_store,
         None,
-    )?;
-    let effective_definition_digest = effective_program.effective_definition_digest().clone();
-    let (resolution, _) = effective_program.into_parts();
-    Ok(EffectiveProgramProjection {
-        canonical_ref: canonical_ref.to_string(),
-        kind,
-        root_source_content_digest,
-        root_raw_content_digest,
-        effective_definition_digest,
-        resolution,
+    )
+}
+
+fn projection_cache_key(
+    prepared: &PreparedProjectionInput,
+    request_snapshot: &ryeos_engine::engine::EffectiveRequestSnapshot,
+    hook_snapshots: &LaunchConfigSnapshotSet,
+) -> Result<String, DispatchError> {
+    #[derive(serde::Serialize)]
+    struct Seed<'a> {
+        schema: &'static str,
+        engine_generation: &'a str,
+        registry_fingerprint: &'a str,
+        effective_trust_identity: &'a str,
+        kind: &'a str,
+        resolution: &'a ResolutionOutput,
+        effective_caps: &'a [String],
+        hook_snapshots: &'a std::collections::BTreeMap<
+            String,
+            ryeos_handler_protocol::LaunchConfigSnapshotWire,
+        >,
+        hook_dependency_proof_digest: String,
+    }
+    let value = serde_json::to_value(Seed {
+        schema: "ryeos.effective_program_projection_cache.v1",
+        engine_generation: &request_snapshot.request_engine_generation_identity,
+        registry_fingerprint: &request_snapshot.registry_fingerprint,
+        effective_trust_identity: &request_snapshot.effective_trust_identity,
+        kind: &prepared.kind,
+        resolution: &prepared.resolution,
+        effective_caps: &prepared.effective_caps,
+        hook_snapshots: &hook_snapshots.snapshots,
+        hook_dependency_proof_digest: hook_snapshots
+            .dependency_proof
+            .identity_digest()
+            .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?,
     })
+    .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+    let canonical = lillux::cas::canonical_json(&value)
+        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+    Ok(lillux::cas::sha256_hex(canonical.as_bytes()))
 }
 
 pub(crate) fn capture_and_finalize_fresh_effective_program(
     engine: &ryeos_engine::engine::Engine,
     kind: &str,
-    mut resolution: ResolutionOutput,
+    resolution: ResolutionOutput,
     effective_caps: &[String],
     roots: &ryeos_engine::item_resolution::ResolutionRoots,
     parsers: &ryeos_engine::parsers::ParserDispatcher,
     trust_store: &ryeos_engine::trust::TrustStore,
     materialization: Option<&ryeos_app::resolution_cache::ResolutionMaterializationBinding>,
+) -> Result<FinalizedEffectiveProgram, DispatchError> {
+    let mut mutable_authority_races = 0usize;
+    loop {
+        match capture_and_finalize_fresh_effective_program_once(
+            engine,
+            kind,
+            resolution.clone(),
+            effective_caps,
+            roots,
+            parsers,
+            trust_store,
+            materialization,
+        ) {
+            Err(DispatchError::LaunchPreparationFailed { code, .. })
+                if code == "effective_program_authority_changed"
+                    && mutable_authority_races
+                        < ryeos_app::resolution_cache::MAX_MUTABLE_AUTHORITY_RACE_RETRIES =>
+            {
+                mutable_authority_races = mutable_authority_races.saturating_add(1);
+                tracing::warn!(
+                    attempt = mutable_authority_races,
+                    max_retries = ryeos_app::resolution_cache::MAX_MUTABLE_AUTHORITY_RACE_RETRIES,
+                    kind,
+                    "retrying effective-program capture after concurrent authority edit"
+                );
+            }
+            result => return result,
+        }
+    }
+}
+
+fn capture_and_finalize_fresh_effective_program_once(
+    engine: &ryeos_engine::engine::Engine,
+    kind: &str,
+    resolution: ResolutionOutput,
+    effective_caps: &[String],
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    parsers: &ryeos_engine::parsers::ParserDispatcher,
+    trust_store: &ryeos_engine::trust::TrustStore,
+    materialization: Option<&ryeos_app::resolution_cache::ResolutionMaterializationBinding>,
+) -> Result<FinalizedEffectiveProgram, DispatchError> {
+    let config_roots = engine.launch_config_roots(roots);
+    let snapshots = super::launch_preparation::load_launch_config_set_under_current_authority(
+        &ryeos_engine::hooks::hook_source_declarations(),
+        &config_roots,
+        parsers,
+        engine,
+        trust_store,
+        materialization,
+    )?;
+    capture_and_finalize_with_hook_snapshots(
+        engine,
+        kind,
+        resolution,
+        effective_caps,
+        roots,
+        trust_store,
+        materialization,
+        &snapshots,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_and_finalize_with_hook_snapshots(
+    engine: &ryeos_engine::engine::Engine,
+    kind: &str,
+    mut resolution: ResolutionOutput,
+    effective_caps: &[String],
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    trust_store: &ryeos_engine::trust::TrustStore,
+    materialization: Option<&ryeos_app::resolution_cache::ResolutionMaterializationBinding>,
+    snapshots: &LaunchConfigSnapshotSet,
 ) -> Result<FinalizedEffectiveProgram, DispatchError> {
     let hook_contract = engine
         .kinds
@@ -149,14 +425,6 @@ pub(crate) fn capture_and_finalize_fresh_effective_program(
             ))
         })?;
     let config_roots = engine.launch_config_roots(roots);
-    let snapshots = super::launch_preparation::load_launch_config_set_under_current_authority(
-        &ryeos_engine::hooks::hook_source_declarations(),
-        &config_roots,
-        parsers,
-        engine,
-        trust_store,
-        materialization,
-    )?;
     let authored =
         value_at_composed_path(&resolution.composed.composed, &hook_contract.authored_path);
     let known_event_contracts = engine
@@ -221,11 +489,22 @@ pub(crate) fn capture_and_finalize_fresh_effective_program(
         });
     let proof = ryeos_engine::effective_program::prove_finalization_authority(
         &candidate,
-        &[snapshots.dependency_proof],
+        std::slice::from_ref(&snapshots.dependency_proof),
         &config_roots,
         project,
     )
-    .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+    .map_err(|error| match error {
+        ryeos_engine::error::EngineError::MutableEffectiveProgramAuthorityChanged => {
+            DispatchError::LaunchPreparationFailed {
+                code: "effective_program_authority_changed".to_string(),
+                message: error.to_string(),
+                classification: "unavailable".to_string(),
+                binding: None,
+                details: Box::default(),
+            }
+        }
+        error => DispatchError::Internal(anyhow::anyhow!(error)),
+    })?;
     ryeos_engine::effective_program::finalize_effective_program(candidate, proof)
         .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))
 }

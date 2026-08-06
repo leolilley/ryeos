@@ -2144,7 +2144,7 @@ pub(crate) async fn dispatch_method(
         None,
         Some(method_subject.item_ref.clone()),
         history_subject.resolved.raw_content_digest.clone(),
-        history_subject.resolved.raw_content_digest.clone(),
+        None,
         serde_json::Value::Null,
         0,
     );

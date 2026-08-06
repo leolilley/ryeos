@@ -82,7 +82,7 @@ impl EffectiveValidationSuccess {
 
     /// Kinds with no declared semantic validator still pass through the same
     /// engine gate using a fixed, explicit validation result.
-    pub fn no_declared_validator() -> Self {
+    pub(crate) fn no_declared_validator() -> Self {
         Self {
             normalized_digest: lillux::cas::sha256_hex(b"ryeos.no_declared_effective_validator.v1"),
         }
@@ -117,9 +117,7 @@ pub fn prove_finalization_authority(
         match proof.revalidate_under_authority_status(roots, project) {
             LaunchConfigProofStatus::Current => identities.push(proof.identity_digest()?),
             LaunchConfigProofStatus::MutableAuthorityChanged => {
-                return Err(EngineError::Internal(
-                    "mutable effective-program authority changed during finalization".to_string(),
-                ));
+                return Err(EngineError::MutableEffectiveProgramAuthorityChanged);
             }
             LaunchConfigProofStatus::ImmutableAuthorityMismatch => {
                 return Err(EngineError::Internal(

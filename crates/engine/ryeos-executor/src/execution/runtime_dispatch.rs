@@ -68,7 +68,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             &params.action,
             callback_root_item_ref,
             &cap.root_raw_content_digest,
-            &cap.effective_definition_digest,
+            cap.effective_definition_digest.as_deref(),
             &cap.hook_dispatch_authorizations,
             state,
         )?
@@ -127,7 +127,7 @@ fn validate_hook_dispatch_preflight<'a>(
     action: &ryeos_runtime::callback::ActionPayload,
     callback_root_item_ref: &str,
     callback_root_raw_content_digest: &str,
-    callback_effective_definition_digest: &str,
+    callback_effective_definition_digest: Option<&str>,
     admitted_hooks: &'a [ryeos_app::callback_token::HookDispatchAuthorization],
     state: &AppState,
 ) -> Result<&'a ryeos_app::callback_token::HookDispatchAuthorization> {
@@ -178,20 +178,8 @@ fn select_hook_admission<'a>(
     )))
 }
 
-fn hook_occurrence_event(
-    occurrence: &ryeos_runtime::callback::HookDispatchOccurrence,
-) -> &'static str {
-    match occurrence {
-        ryeos_runtime::callback::HookDispatchOccurrence::GraphStarted { .. } => "graph_started",
-        ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted { .. } => {
-            "graph_step_completed"
-        }
-        ryeos_runtime::callback::HookDispatchOccurrence::GraphCompleted { .. } => "graph_completed",
-        ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep { .. } => "after_step",
-        ryeos_runtime::callback::HookDispatchOccurrence::DirectiveContinuation { .. } => {
-            "continuation"
-        }
-    }
+fn hook_occurrence_event(occurrence: &ryeos_runtime::callback::HookDispatchOccurrence) -> &str {
+    occurrence.event()
 }
 
 fn validate_hook_result_policy(
@@ -219,7 +207,7 @@ fn validate_hook_identity_authority(
     action: &ryeos_runtime::callback::ActionPayload,
     callback_root_item_ref: &str,
     callback_root_raw_content_digest: &str,
-    callback_effective_definition_digest: &str,
+    callback_effective_definition_digest: Option<&str>,
     authorization: &ryeos_app::callback_token::HookDispatchAuthorization,
 ) -> Result<ryeos_engine::canonical_ref::CanonicalRef> {
     let canonical_sha256 = |value: &str| {
@@ -238,84 +226,20 @@ fn validate_hook_identity_authority(
             "hook_id must contain between 1 and 4096 UTF-8 bytes",
         ));
     }
-    let (coordinates, expected_definition_kind, definition_ref) = match &hook.occurrence {
-        ryeos_runtime::callback::HookDispatchOccurrence::GraphStarted {
-            graph_run_id,
-            definition_ref,
-            root_raw_content_digest,
-            effective_definition_digest,
-        }
-        | ryeos_runtime::callback::HookDispatchOccurrence::GraphCompleted {
-            graph_run_id,
-            definition_ref,
-            root_raw_content_digest,
-            effective_definition_digest,
-            ..
-        } => (
-            vec![
-                ("graph_run_id", graph_run_id.as_str()),
-                ("definition_ref", definition_ref.as_str()),
-                ("root_raw_content_digest", root_raw_content_digest.as_str()),
-                (
-                    "effective_definition_digest",
-                    effective_definition_digest.as_str(),
-                ),
-            ],
-            "graph",
-            definition_ref.as_str(),
+    let occurrence = &hook.occurrence;
+    let coordinates = [
+        ("owner_kind", occurrence.owner_kind.as_str()),
+        ("event", occurrence.event.as_str()),
+        ("definition_ref", occurrence.definition_ref.as_str()),
+        (
+            "root_raw_content_digest",
+            occurrence.root_raw_content_digest.as_str(),
         ),
-        ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
-            graph_run_id,
-            definition_ref,
-            root_raw_content_digest,
-            effective_definition_digest,
-            node,
-            ..
-        } => (
-            vec![
-                ("graph_run_id", graph_run_id.as_str()),
-                ("definition_ref", definition_ref.as_str()),
-                ("root_raw_content_digest", root_raw_content_digest.as_str()),
-                (
-                    "effective_definition_digest",
-                    effective_definition_digest.as_str(),
-                ),
-                ("node", node.as_str()),
-            ],
-            "graph",
-            definition_ref.as_str(),
+        (
+            "effective_definition_digest",
+            occurrence.effective_definition_digest.as_str(),
         ),
-        ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
-            definition_ref,
-            root_raw_content_digest,
-            effective_definition_digest,
-            turn,
-        }
-        | ryeos_runtime::callback::HookDispatchOccurrence::DirectiveContinuation {
-            definition_ref,
-            root_raw_content_digest,
-            effective_definition_digest,
-            turn,
-        } => {
-            if *turn == 0 {
-                return Err(hook_integrity(
-                    "directive hook turn must be greater than zero",
-                ));
-            }
-            (
-                vec![
-                    ("definition_ref", definition_ref.as_str()),
-                    ("root_raw_content_digest", root_raw_content_digest.as_str()),
-                    (
-                        "effective_definition_digest",
-                        effective_definition_digest.as_str(),
-                    ),
-                ],
-                "directive",
-                definition_ref.as_str(),
-            )
-        }
-    };
+    ];
     for (field, value) in coordinates {
         if value.is_empty() || value.len() > 4 * 1024 {
             return Err(hook_integrity(format!(
@@ -332,12 +256,32 @@ fn validate_hook_identity_authority(
             )));
         }
     }
-    let canonical_definition = ryeos_engine::canonical_ref::CanonicalRef::parse(definition_ref)
-        .map_err(|error| hook_integrity(format!("invalid hook definition_ref: {error}")))?;
-    if canonical_definition.kind != expected_definition_kind {
+    if occurrence.coordinates.len() > 64 {
+        return Err(hook_integrity(
+            "hook occurrence has more than 64 scalar coordinates",
+        ));
+    }
+    for (key, value) in &occurrence.coordinates {
+        if key.is_empty() || key.len() > 256 {
+            return Err(hook_integrity(
+                "hook occurrence coordinate names must contain between 1 and 256 UTF-8 bytes",
+            ));
+        }
+        if let ryeos_runtime::callback::HookDispatchCoordinate::Text(value) = value
+            && (value.is_empty() || value.len() > 4 * 1024)
+        {
+            return Err(hook_integrity(format!(
+                "hook occurrence coordinate `{key}` must contain between 1 and 4096 UTF-8 bytes"
+            )));
+        }
+    }
+    let canonical_definition =
+        ryeos_engine::canonical_ref::CanonicalRef::parse(&occurrence.definition_ref)
+            .map_err(|error| hook_integrity(format!("invalid hook definition_ref: {error}")))?;
+    if canonical_definition.kind != occurrence.owner_kind {
         return Err(hook_integrity(format!(
-            "hook definition_ref kind must be `{expected_definition_kind}`, got `{}`",
-            canonical_definition.kind
+            "hook definition_ref kind must be `{}`, got `{}`",
+            occurrence.owner_kind, canonical_definition.kind
         )));
     }
     let canonical_callback_root =
@@ -345,13 +289,20 @@ fn validate_hook_identity_authority(
             .map_err(|error| hook_integrity(format!("invalid callback root item ref: {error}")))?;
     if canonical_callback_root != canonical_definition {
         return Err(hook_integrity(format!(
-            "hook definition_ref `{definition_ref}` does not match callback root `{callback_root_item_ref}`"
+            "hook definition_ref `{}` does not match callback root `{callback_root_item_ref}`",
+            occurrence.definition_ref,
         )));
     }
-    if authorization.owner_kind != expected_definition_kind {
+    if authorization.owner_kind != occurrence.owner_kind {
         return Err(hook_integrity(format!(
-            "hook authorization owner kind `{}` does not match occurrence kind `{expected_definition_kind}`",
-            authorization.owner_kind
+            "hook authorization owner kind `{}` does not match occurrence kind `{}`",
+            authorization.owner_kind, occurrence.owner_kind,
+        )));
+    }
+    if authorization.event != occurrence.event {
+        return Err(hook_integrity(format!(
+            "hook authorization event `{}` does not match occurrence event `{}`",
+            authorization.event, occurrence.event,
         )));
     }
     if hook.context_contract != authorization.context_contract {
@@ -365,44 +316,21 @@ fn validate_hook_identity_authority(
             "callback capability root raw-content digest is not a canonical lowercase SHA-256 digest",
         ));
     }
+    let callback_effective_definition_digest =
+        callback_effective_definition_digest.ok_or_else(|| {
+            hook_integrity("callback capability has no admitted effective-definition identity")
+        })?;
     if !canonical_sha256(callback_effective_definition_digest) {
         return Err(hook_integrity(
             "callback capability effective definition digest is not a canonical lowercase SHA-256 digest",
         ));
     }
-    let (occurrence_root_digest, occurrence_effective_digest) = match &hook.occurrence {
-        ryeos_runtime::callback::HookDispatchOccurrence::GraphStarted {
-            root_raw_content_digest,
-            effective_definition_digest,
-            ..
-        }
-        | ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
-            root_raw_content_digest,
-            effective_definition_digest,
-            ..
-        }
-        | ryeos_runtime::callback::HookDispatchOccurrence::GraphCompleted {
-            root_raw_content_digest,
-            effective_definition_digest,
-            ..
-        }
-        | ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
-            root_raw_content_digest,
-            effective_definition_digest,
-            ..
-        }
-        | ryeos_runtime::callback::HookDispatchOccurrence::DirectiveContinuation {
-            root_raw_content_digest,
-            effective_definition_digest,
-            ..
-        } => (root_raw_content_digest, effective_definition_digest),
-    };
-    if occurrence_root_digest != callback_root_raw_content_digest {
+    if occurrence.root_raw_content_digest != callback_root_raw_content_digest {
         return Err(hook_integrity(
             "hook root_raw_content_digest does not match launch-captured root raw-content digest",
         ));
     }
-    if occurrence_effective_digest != callback_effective_definition_digest {
+    if occurrence.effective_definition_digest != callback_effective_definition_digest {
         return Err(hook_integrity(
             "hook effective_definition_digest does not match launch-captured effective definition digest",
         ));
@@ -776,7 +704,13 @@ fn hook_dispatch_ledger_seed(
     let dispatch_identity = serde_json::json!({
         "schema": "ryeos.hook_dispatch.v3",
         "chain_root_id": chain_root_id,
-        "hook_dispatch": identity,
+        "hook_dispatch": {
+            "occurrence": &identity.occurrence,
+            "hook_id": &identity.hook_id,
+            "layer": identity.layer,
+            "result_mode": identity.result_mode,
+            "context_contract": &identity.context_contract,
+        },
         "dispatch_caps": effective_caps,
         "callback_root_item_ref": callback_root_item_ref,
     });
@@ -917,6 +851,30 @@ mod tests {
         }
     }
 
+    fn test_graph_step_occurrence() -> ryeos_runtime::callback::HookDispatchOccurrence {
+        ryeos_runtime::callback::HookDispatchOccurrence::new(
+            "graph",
+            "graph_step_completed",
+            "graph:test/fixture",
+            "d".repeat(64),
+            "e".repeat(64),
+        )
+        .with_text_coordinate("graph_run_id", "run-1")
+        .with_counter_coordinate("step", 3)
+        .with_text_coordinate("node", "audit")
+    }
+
+    fn test_directive_occurrence(event: &str) -> ryeos_runtime::callback::HookDispatchOccurrence {
+        ryeos_runtime::callback::HookDispatchOccurrence::new(
+            "directive",
+            event,
+            "directive:test/fixture",
+            "a".repeat(64),
+            "b".repeat(64),
+        )
+        .with_counter_coordinate("turn", 1)
+    }
+
     #[test]
     fn callback_capability_maps_to_parent_execution_context_without_kind_checks() {
         let (project, provenance) = live_provenance();
@@ -933,7 +891,7 @@ mod tests {
             effective_bundle_id: None,
             item_ref: Some("graph:team/parent".to_string()),
             root_raw_content_digest: "0".repeat(64),
-            effective_definition_digest: "1".repeat(64),
+            effective_definition_digest: Some("1".repeat(64)),
             hook_dispatch_authorizations: Vec::new(),
             hard_limits: serde_json::json!({"turns": 6, "tokens": 1000}),
             depth: 4,
@@ -952,14 +910,7 @@ mod tests {
     #[test]
     fn hook_ledger_key_is_chain_occurrence_scoped_and_request_hash_binds_action() {
         let identity = ryeos_runtime::callback::HookDispatchIdentity {
-            occurrence: ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
-                graph_run_id: "run-1".to_string(),
-                definition_ref: "graph:test/fixture".to_string(),
-                root_raw_content_digest: "d".repeat(64),
-                effective_definition_digest: "e".repeat(64),
-                step: 3,
-                node: "audit".to_string(),
-            },
+            occurrence: test_graph_step_occurrence(),
             hook_id: "audit-hook".to_string(),
             layer: ryeos_runtime::hooks_loader::HookLayer::Operator,
             result_mode: ryeos_runtime::hooks_loader::HookResultMode::Control,
@@ -1006,11 +957,11 @@ mod tests {
         assert_eq!(request_a, request_b);
         assert_eq!(
             seed_a.dispatch_key,
-            "69e81a5eff4c2c02eefcae3806bfe55bef8554a9d92e5ad7f22ae0ddbdec4e7e"
+            "e6e8222a29ca454c492dcce28a3bad0a8ea85b983f19d0f0e21908176d2445d6"
         );
         assert_eq!(
             request_a,
-            "b01e4f3f19c9199ce5d7fa6d9c3718bd36a0834ec382f301198808013d16877b"
+            "83b2f7a909d64356d2b61615745568f97f1e4f88c60d04fbdbdb02e64157ba96"
         );
 
         let mut changed_action = action;
@@ -1050,7 +1001,7 @@ mod tests {
         let mut changed_context = identity.clone();
         changed_context.context_hash = "e".repeat(64);
         let (context_seed, context_request) = seed_for(&changed_context, "T-root");
-        assert_ne!(seed_a.dispatch_key, context_seed.dispatch_key);
+        assert_eq!(seed_a.dispatch_key, context_seed.dispatch_key);
         assert_ne!(changed_request, context_request);
 
         let mut changed_layer = identity.clone();
@@ -1072,12 +1023,10 @@ mod tests {
             seed_for(&changed_hook, "T-root").0.dispatch_key
         );
         let mut changed_occurrence = identity.clone();
-        let ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted { step, .. } =
-            &mut changed_occurrence.occurrence
-        else {
-            unreachable!()
-        };
-        *step += 1;
+        changed_occurrence.occurrence = changed_occurrence
+            .occurrence
+            .clone()
+            .with_counter_coordinate("step", 4);
         assert_ne!(
             seed_a.dispatch_key,
             seed_for(&changed_occurrence, "T-root").0.dispatch_key
@@ -1091,12 +1040,7 @@ mod tests {
     #[test]
     fn hook_identity_must_match_launch_captured_root_authority() {
         let hook = ryeos_runtime::callback::HookDispatchIdentity {
-            occurrence: ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
-                definition_ref: "directive:test/fixture".to_string(),
-                root_raw_content_digest: "a".repeat(64),
-                effective_definition_digest: "b".repeat(64),
-                turn: 1,
-            },
+            occurrence: test_directive_occurrence("after_step"),
             hook_id: "audit".to_string(),
             layer: ryeos_runtime::hooks_loader::HookLayer::Operator,
             result_mode: ryeos_runtime::hooks_loader::HookResultMode::Discard,
@@ -1125,7 +1069,7 @@ mod tests {
                 &action,
                 "directive:test/fixture",
                 &"a".repeat(64),
-                &"b".repeat(64),
+                Some(&"b".repeat(64)),
                 &authorization,
             )
             .is_ok()
@@ -1136,7 +1080,7 @@ mod tests {
                 &action,
                 "directive:test/other",
                 &"a".repeat(64),
-                &"b".repeat(64),
+                Some(&"b".repeat(64)),
                 &authorization,
             )
             .is_err()
@@ -1147,7 +1091,7 @@ mod tests {
                 &action,
                 "directive:test/fixture",
                 &"d".repeat(64),
-                &"b".repeat(64),
+                Some(&"b".repeat(64)),
                 &authorization,
             )
             .is_err()
@@ -1158,7 +1102,7 @@ mod tests {
                 &action,
                 "directive:test/fixture",
                 &"a".repeat(64),
-                &"d".repeat(64),
+                Some(&"d".repeat(64)),
                 &authorization,
             )
             .is_err()
@@ -1168,12 +1112,7 @@ mod tests {
     #[test]
     fn hook_identity_must_exist_in_the_launch_captured_hook_set() {
         let hook = ryeos_runtime::callback::HookDispatchIdentity {
-            occurrence: ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
-                definition_ref: "directive:test/fixture".to_string(),
-                root_raw_content_digest: "a".repeat(64),
-                effective_definition_digest: "b".repeat(64),
-                turn: 1,
-            },
+            occurrence: test_directive_occurrence("after_step"),
             hook_id: "audit".to_string(),
             layer: ryeos_runtime::hooks_loader::HookLayer::Operator,
             result_mode: ryeos_runtime::hooks_loader::HookResultMode::Observation,
@@ -1198,25 +1137,14 @@ mod tests {
         forged.result_mode = ryeos_runtime::hooks_loader::HookResultMode::Discard;
         assert!(select_hook_admission(&forged, std::slice::from_ref(&admitted)).is_err());
         forged = hook.clone();
-        forged.occurrence =
-            ryeos_runtime::callback::HookDispatchOccurrence::DirectiveContinuation {
-                definition_ref: "directive:test/fixture".to_string(),
-                root_raw_content_digest: "a".repeat(64),
-                effective_definition_digest: "b".repeat(64),
-                turn: 1,
-            };
+        forged.occurrence = test_directive_occurrence("continuation");
         assert!(select_hook_admission(&forged, &[admitted]).is_err());
     }
 
     #[test]
     fn hook_dispatch_uses_only_the_selected_source_grants() {
         let hook = ryeos_runtime::callback::HookDispatchIdentity {
-            occurrence: ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
-                definition_ref: "directive:test/fixture".to_string(),
-                root_raw_content_digest: "a".repeat(64),
-                effective_definition_digest: "b".repeat(64),
-                turn: 1,
-            },
+            occurrence: test_directive_occurrence("after_step"),
             hook_id: "audit".to_string(),
             layer: ryeos_runtime::hooks_loader::HookLayer::Operator,
             result_mode: ryeos_runtime::hooks_loader::HookResultMode::Observation,
@@ -1247,12 +1175,7 @@ mod tests {
     #[test]
     fn hook_result_policy_is_rechecked_at_the_daemon_boundary() {
         let mut hook = ryeos_runtime::callback::HookDispatchIdentity {
-            occurrence: ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
-                definition_ref: "directive:test/fixture".to_string(),
-                root_raw_content_digest: "a".repeat(64),
-                effective_definition_digest: "b".repeat(64),
-                turn: 1,
-            },
+            occurrence: test_directive_occurrence("after_step"),
             hook_id: "audit".to_string(),
             layer: ryeos_runtime::hooks_loader::HookLayer::Infrastructure,
             result_mode: ryeos_runtime::hooks_loader::HookResultMode::Control,

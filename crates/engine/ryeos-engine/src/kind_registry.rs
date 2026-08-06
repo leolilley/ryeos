@@ -2309,6 +2309,14 @@ fn validate_execution_hooks_decl(
             ),
         });
     }
+    if declaration.plan_derived != crate::hooks::EFFECTIVE_HOOK_PLAN_DERIVED_KEY {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: execution.hooks.plan_derived must be `{}`",
+                crate::hooks::EFFECTIVE_HOOK_PLAN_DERIVED_KEY
+            ),
+        });
+    }
     for (event, contract) in &declaration.events {
         if event.is_empty()
             || contract.context_contract.schema != crate::hooks::HOOK_CONTEXT_SCHEMA

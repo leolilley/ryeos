@@ -11412,14 +11412,16 @@ mod tests {
 
     fn hook_observation_identity(hook_id: &str) -> ryeos_runtime::callback::HookDispatchIdentity {
         ryeos_runtime::callback::HookDispatchIdentity {
-            occurrence: ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
-                graph_run_id: "G-hook-evidence".to_string(),
-                definition_ref: "graph:test/hook-evidence".to_string(),
-                root_raw_content_digest: "r".repeat(64),
-                effective_definition_digest: "d".repeat(64),
-                step: 3,
-                node: "observe".to_string(),
-            },
+            occurrence: ryeos_runtime::callback::HookDispatchOccurrence::new(
+                "graph",
+                "graph_step_completed",
+                "graph:test/hook-evidence",
+                "r".repeat(64),
+                "d".repeat(64),
+            )
+            .with_text_coordinate("graph_run_id", "G-hook-evidence")
+            .with_counter_coordinate("step", 3)
+            .with_text_coordinate("node", "observe"),
             hook_id: hook_id.to_string(),
             layer: ryeos_runtime::hooks_loader::HookLayer::Infrastructure,
             result_mode: ryeos_runtime::hooks_loader::HookResultMode::Observation,
@@ -11602,13 +11604,15 @@ mod tests {
             .expect("settle predecessor as continued");
 
         let identity = ryeos_runtime::callback::HookDispatchIdentity {
-            occurrence: ryeos_runtime::callback::HookDispatchOccurrence::GraphCompleted {
-                graph_run_id: "G-terminal-evidence".to_string(),
-                definition_ref: "graph:test/terminal-evidence".to_string(),
-                root_raw_content_digest: "r".repeat(64),
-                effective_definition_digest: "d".repeat(64),
-                steps: 4,
-            },
+            occurrence: ryeos_runtime::callback::HookDispatchOccurrence::new(
+                "graph",
+                "graph_completed",
+                "graph:test/terminal-evidence",
+                "r".repeat(64),
+                "d".repeat(64),
+            )
+            .with_text_coordinate("graph_run_id", "G-terminal-evidence")
+            .with_counter_coordinate("steps", 4),
             hook_id: "hook:system/terminal-evidence".to_string(),
             layer: ryeos_runtime::HookLayer::Infrastructure,
             result_mode: ryeos_runtime::HookResultMode::Observation,

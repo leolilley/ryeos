@@ -269,6 +269,12 @@ impl ComposerRegistry {
 
         match resp {
             HandlerResponse::ComposeOk(success) => {
+                validate_declared_capability_narrowing(
+                    kind,
+                    root_parsed,
+                    ancestor_parsed,
+                    &success.composed,
+                )?;
                 validate_composed_field_requirements(
                     kind,
                     &bound.field_requirements,
@@ -293,6 +299,98 @@ impl ComposerRegistry {
             }),
         }
     }
+}
+
+/// Independent engine-side defense for the common execution-capability
+/// contract. A trusted composer remains responsible for producing the value,
+/// but cannot admit a direct-edge widening or publish a value other than the
+/// nearest valid declaration.
+fn validate_declared_capability_narrowing(
+    kind: &str,
+    root: &Value,
+    ancestors: &[Value],
+    composed: &Value,
+) -> Result<(), ResolutionError> {
+    let mut effective: Option<Vec<String>> = None;
+    for source in ancestors.iter().chain(std::iter::once(root)) {
+        let Some(declared) = source
+            .get("requires")
+            .and_then(|value| value.get("capabilities"))
+            .and_then(|value| value.get("declared"))
+            .filter(|value| !value.is_null())
+        else {
+            continue;
+        };
+        let child = declared
+            .as_array()
+            .ok_or_else(|| invalid_capability_definition(kind, "declared must be a list"))?
+            .iter()
+            .map(|value| {
+                value.as_str().map(String::from).ok_or_else(|| {
+                    invalid_capability_definition(kind, "declared must contain only strings")
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(parent) = effective.as_ref()
+            && let Some(widened) = child.iter().find(|child| {
+                !parent
+                    .iter()
+                    .any(|parent| capability_pattern_covers(parent, child))
+            })
+        {
+            return Err(invalid_capability_definition(
+                kind,
+                &format!("declared widens its direct parent with `{widened}`"),
+            ));
+        }
+        effective = Some(child);
+    }
+
+    let actual = composed
+        .get("requires")
+        .and_then(|value| value.get("capabilities"))
+        .and_then(|value| value.get("declared"))
+        .filter(|value| !value.is_null());
+    let expected = effective
+        .as_ref()
+        .map(|caps| caps.iter().cloned().map(Value::String).collect::<Vec<_>>())
+        .map(Value::Array);
+    if actual != expected.as_ref() {
+        return Err(ResolutionError::StepFailed {
+            step: ResolutionStepName::PipelineInit,
+            class: ResolutionFailureClass::InternalInvariant,
+            reason: format!(
+                "composer for kind `{kind}` changed the effective requires.capabilities.declared value"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn invalid_capability_definition(kind: &str, reason: &str) -> ResolutionError {
+    ResolutionError::StepFailed {
+        step: ResolutionStepName::PipelineInit,
+        class: ResolutionFailureClass::InvalidDefinition,
+        reason: format!("kind `{kind}` has invalid requires.capabilities.{reason}"),
+    }
+}
+
+fn capability_pattern_covers(parent: &str, child: &str) -> bool {
+    if parent == child {
+        return true;
+    }
+    let mut pattern = String::from("^");
+    for character in parent.chars() {
+        match character {
+            '*' => pattern.push_str(".*"),
+            '?' => pattern.push('.'),
+            other => pattern.push_str(&regex::escape(&other.to_string())),
+        }
+    }
+    pattern.push('$');
+    regex::Regex::new(&pattern)
+        .map(|pattern| pattern.is_match(child))
+        .unwrap_or(false)
 }
 
 /// Derive exact-value composer requirements from one verified kind schema.
@@ -479,6 +577,32 @@ mod tests {
             label: None,
         }]);
         (sk, ts)
+    }
+
+    #[test]
+    fn engine_rejects_direct_edge_capability_widening() {
+        let ancestors = vec![json!({
+            "requires": {"capabilities": {"declared": ["ryeos.execute.tool.read"]}}
+        })];
+        let root = json!({
+            "requires": {"capabilities": {"declared": ["ryeos.execute.tool.write"]}}
+        });
+        let error = validate_declared_capability_narrowing("synthetic", &root, &ancestors, &root)
+            .unwrap_err();
+        assert!(error.to_string().contains("widens its direct parent"));
+    }
+
+    #[test]
+    fn engine_rejects_composer_capability_projection_divergence() {
+        let root = json!({
+            "requires": {"capabilities": {"declared": ["ryeos.execute.tool.read"]}}
+        });
+        let composed = json!({
+            "requires": {"capabilities": {"declared": ["ryeos.execute.tool.write"]}}
+        });
+        let error =
+            validate_declared_capability_narrowing("synthetic", &root, &[], &composed).unwrap_err();
+        assert!(error.to_string().contains("changed the effective"));
     }
 
     fn write_kind(

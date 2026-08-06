@@ -12,6 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 
 pub const EFFECTIVE_HOOK_PLAN_SCHEMA: &str = "ryeos.hooks.effective.v1";
+pub const EFFECTIVE_HOOK_PLAN_DERIVED_KEY: &str = "effective_hook_plan";
 pub const HOOK_CONTEXT_SCHEMA: &str = "ryeos.hooks.context.v1";
 pub const MAX_EFFECTIVE_HOOKS: usize = 256;
 pub const MAX_HOOK_DISPATCH_CAPS: usize = 256;
@@ -368,7 +369,7 @@ impl EffectiveHookPlan {
                         hook.event
                     )));
                 }
-                validate_layer_result(&self.owner_kind, layer, hook.result, &hook.id)?;
+                validate_layer_result(layer, hook.result, &hook.id)?;
             }
         }
         if hook_count > MAX_EFFECTIVE_HOOKS {
@@ -693,9 +694,7 @@ fn layer_from_wire(
                     hook.target.event
                 ))));
             }
-            if let Err(error) =
-                validate_layer_result(&hook.target.kind, layer, hook.result, &hook.id)
-            {
+            if let Err(error) = validate_layer_result(layer, hook.result, &hook.id) {
                 return Some(Err(error));
             }
             (hook.target.kind == owner_kind).then_some(Ok(HookDefinition {
@@ -781,17 +780,10 @@ fn source_evidence(
 }
 
 fn validate_layer_result(
-    owner_kind: &str,
     layer: HookLayer,
     result: HookResultMode,
     hook_id: &str,
 ) -> Result<(), HookPlanError> {
-    if owner_kind == "graph" && result == HookResultMode::Control {
-        return Err(HookPlanError(format!(
-            "graph hook `{hook_id}` cannot declare control in the {} layer",
-            layer.as_str()
-        )));
-    }
     if layer.is_observer_only() && result == HookResultMode::Control {
         return Err(HookPlanError(format!(
             "infrastructure hook `{hook_id}` cannot declare control"
@@ -989,6 +981,55 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("unknown event")
+        );
+    }
+
+    #[test]
+    fn signed_event_contract_is_authoritative_for_graph_control_hooks() {
+        let mut events = known_events();
+        events.get_mut("graph").unwrap().insert(
+            "graph_controlled".to_string(),
+            event_contract(&[
+                HookResultMode::Discard,
+                HookResultMode::Observation,
+                HookResultMode::Control,
+            ]),
+        );
+        let authored = serde_json::json!([{
+            "id": "admit-control",
+            "event": "graph_controlled",
+            "result": "control",
+            "action": {"item_id": "tool:test/control"}
+        }]);
+
+        let plan = capture_effective_hook_plan(
+            "graph",
+            events.get("graph").unwrap().clone(),
+            &events,
+            Some(&authored),
+            vec!["ryeos.execute.tool.test/control".to_string()],
+            &absent_snapshots(),
+        )
+        .unwrap();
+        assert_eq!(plan.authored.hooks[0].result, HookResultMode::Control);
+
+        events.get_mut("graph").unwrap().insert(
+            "graph_controlled".to_string(),
+            event_contract(&[HookResultMode::Discard, HookResultMode::Observation]),
+        );
+        let error = capture_effective_hook_plan(
+            "graph",
+            events.get("graph").unwrap().clone(),
+            &events,
+            Some(&authored),
+            vec!["ryeos.execute.tool.test/control".to_string()],
+            &absent_snapshots(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("result `control` is not admitted by event `graph_controlled`")
         );
     }
 

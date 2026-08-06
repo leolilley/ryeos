@@ -123,10 +123,11 @@ impl EffectiveValidatorRegistry {
             } => EffectiveValidationSuccess::from_normalized(&normalized),
             HandlerResponse::EffectiveValidate {
                 response: EffectiveValidateResponse::Invalid { code, message },
-            } => Err(EngineError::Internal(format!(
-                "effective validator rejected `{}` ({code}): {message}",
-                resolution.root.resolved_ref
-            ))),
+            } => Err(EngineError::EffectiveValidationRejected {
+                canonical_ref: resolution.root.resolved_ref.clone(),
+                code,
+                message,
+            }),
             response => Err(EngineError::HandlerProtocolViolation {
                 handler: bound.handler.canonical_ref().to_string(),
                 detail: format!("unexpected effective-validator response: {response:?}"),

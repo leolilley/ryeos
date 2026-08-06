@@ -62,8 +62,9 @@ pub struct CallbackCapability {
     /// hook identity must match this value; resolving live during a callback
     /// would reintroduce a source-mutation race.
     pub root_raw_content_digest: String,
-    /// Exact effective executable identity captured with the token.
-    pub effective_definition_digest: String,
+    /// Exact effective executable identity captured with a managed program.
+    /// Non-program and deny-all callback tokens carry no invented identity.
+    pub effective_definition_digest: Option<String>,
     /// Exact hook identities captured from the verified definition and
     /// configured hook roots before the runtime starts. Empty is deny-all for
     /// hook dispatch while remaining valid for ordinary callbacks.
@@ -131,8 +132,8 @@ impl CallbackCapabilityStore {
             provenance,
             None,
             None,
-            root_raw_content_digest.clone(),
             root_raw_content_digest,
+            None,
             Value::Null,
             0,
         )
@@ -151,7 +152,7 @@ impl CallbackCapabilityStore {
         effective_bundle_id: Option<String>,
         item_ref: Option<String>,
         root_raw_content_digest: String,
-        effective_definition_digest: String,
+        effective_definition_digest: Option<String>,
         hard_limits: Value,
         depth: u32,
     ) -> CallbackCapability {
@@ -549,7 +550,7 @@ mod tests {
             None,
             None,
             "0".repeat(64),
-            "0".repeat(64),
+            Some("0".repeat(64)),
             serde_json::Value::Null,
             0,
         );
@@ -616,7 +617,7 @@ mod tests {
             Some("bundle-123".to_string()),
             Some("directive:team/parent".to_string()),
             "1".repeat(64),
-            "1".repeat(64),
+            Some("1".repeat(64)),
             hard_limits.clone(),
             4,
         );
@@ -630,6 +631,7 @@ mod tests {
         assert_eq!(validated.effective_bundle_id.as_deref(), Some("bundle-123"));
         assert_eq!(validated.item_ref.as_deref(), Some("directive:team/parent"));
         assert_eq!(validated.root_raw_content_digest, "1".repeat(64));
+        assert_eq!(validated.effective_definition_digest, Some("1".repeat(64)));
     }
 
     #[test]
@@ -847,7 +849,7 @@ mod tests {
             effective_bundle_id: None,
             item_ref: None,
             root_raw_content_digest: "0".repeat(64),
-            effective_definition_digest: "0".repeat(64),
+            effective_definition_digest: None,
             hook_dispatch_authorizations: Vec::new(),
             hard_limits: serde_json::Value::Null,
             depth: 0,

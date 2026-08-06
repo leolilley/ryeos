@@ -506,47 +506,6 @@ impl Walker {
             )
         });
 
-        let validation = analyze_graph(&self.graph);
-        if !validation.errors.is_empty() {
-            let result = GraphResult {
-                success: false,
-                graph_id: self.graph.graph_id.clone(),
-                definition_ref: self.graph.definition_ref.clone(),
-                effective_definition_digest: self.graph.effective_definition_digest.clone(),
-                graph_run_id,
-                status: GraphRunStatus::Invalid,
-                steps: 0,
-                state: json!({}),
-                result: None,
-                errors_suppressed: None,
-                errors: None,
-                error: Some(validation.errors.join("; ")),
-                cost: None,
-                node_costs: Vec::new(),
-                hook_costs: Vec::new(),
-            };
-            let completion = TerminalCompletion {
-                status: ThreadTerminalStatus::Failed,
-                outcome_code: Some(ThreadTerminalStatus::Failed.as_str().to_string()),
-                result: Some(
-                    serde_json::to_value(&result)
-                        .expect("GraphResult is an infallibly serializable runtime DTO"),
-                ),
-                error: Some(json!(validation.errors.join("; "))),
-                cost: None,
-                outputs: Value::Null,
-                warnings: self.warnings.lock().unwrap().snapshot(),
-            };
-            let r = self.client.finalize_thread(completion).await;
-            match r {
-                Ok(_) => guard.finalized = true,
-                Err(error) => {
-                    self.record_callback_warning("finalize_thread", Err(anyhow::anyhow!(error)))
-                }
-            }
-            return result;
-        }
-
         // D16: the daemon enforces capabilities at the callback boundary.
         // The walker does NOT self-police. The daemon enforces caps at the
         // callback boundary and carries parent budget/depth out-of-band on the
@@ -1617,22 +1576,42 @@ impl Walker {
         occurrence: ryeos_runtime::callback::HookDispatchOccurrence,
         context: Value,
     ) {
-        let (event, step) = match &occurrence {
-            ryeos_runtime::callback::HookDispatchOccurrence::GraphStarted { .. } => {
-                (RuntimeEventType::GraphStarted, None)
-            }
-            ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
-                step, ..
-            } => (RuntimeEventType::GraphStepCompleted, Some(*step)),
-            ryeos_runtime::callback::HookDispatchOccurrence::GraphCompleted { steps, .. } => {
-                (RuntimeEventType::GraphCompleted, Some(*steps))
-            }
-            _ => {
-                self.reject_run_history(format!(
-                    "non-graph hook occurrence `{}` reached graph runtime",
-                    occurrence.event()
-                ));
-                return;
+        let (event, step) = if occurrence.owner_kind != "graph" {
+            self.reject_run_history(format!(
+                "non-graph hook occurrence `{}/{}` reached graph runtime",
+                occurrence.owner_kind,
+                occurrence.event(),
+            ));
+            return;
+        } else {
+            match occurrence.event() {
+                "graph_started" => (RuntimeEventType::GraphStarted, None),
+                "graph_step_completed" => {
+                    let Some(step) = occurrence.counter_coordinate("step") else {
+                        self.reject_run_history(
+                            "graph_step_completed hook occurrence has no counter `step`"
+                                .to_string(),
+                        );
+                        return;
+                    };
+                    (RuntimeEventType::GraphStepCompleted, Some(step))
+                }
+                "graph_completed" => {
+                    let Some(steps) = occurrence.counter_coordinate("steps") else {
+                        self.reject_run_history(
+                            "graph_completed hook occurrence has no counter `steps`".to_string(),
+                        );
+                        return;
+                    };
+                    (RuntimeEventType::GraphCompleted, Some(steps))
+                }
+                _ => {
+                    self.reject_run_history(format!(
+                        "unknown graph hook occurrence `{}` reached graph runtime",
+                        occurrence.event()
+                    ));
+                    return;
+                }
             }
         };
         match crate::hooks::run_graph_hooks(
@@ -1675,12 +1654,14 @@ impl Walker {
         &self,
         graph_run_id: &str,
     ) -> ryeos_runtime::callback::HookDispatchOccurrence {
-        ryeos_runtime::callback::HookDispatchOccurrence::GraphStarted {
-            graph_run_id: graph_run_id.to_string(),
-            definition_ref: self.graph.definition_ref.clone(),
-            root_raw_content_digest: self.graph.root_raw_content_digest.clone(),
-            effective_definition_digest: self.graph.effective_definition_digest.clone(),
-        }
+        ryeos_runtime::callback::HookDispatchOccurrence::new(
+            "graph",
+            "graph_started",
+            self.graph.definition_ref.clone(),
+            self.graph.root_raw_content_digest.clone(),
+            self.graph.effective_definition_digest.clone(),
+        )
+        .with_text_coordinate("graph_run_id", graph_run_id)
     }
 
     fn graph_step_completed_hook_occurrence(
@@ -1689,14 +1670,16 @@ impl Walker {
         step: u32,
         node: &str,
     ) -> ryeos_runtime::callback::HookDispatchOccurrence {
-        ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
-            graph_run_id: graph_run_id.to_string(),
-            definition_ref: self.graph.definition_ref.clone(),
-            root_raw_content_digest: self.graph.root_raw_content_digest.clone(),
-            effective_definition_digest: self.graph.effective_definition_digest.clone(),
-            step,
-            node: node.to_string(),
-        }
+        ryeos_runtime::callback::HookDispatchOccurrence::new(
+            "graph",
+            "graph_step_completed",
+            self.graph.definition_ref.clone(),
+            self.graph.root_raw_content_digest.clone(),
+            self.graph.effective_definition_digest.clone(),
+        )
+        .with_text_coordinate("graph_run_id", graph_run_id)
+        .with_counter_coordinate("step", step)
+        .with_text_coordinate("node", node)
     }
 
     fn graph_completed_hook_occurrence(
@@ -1704,13 +1687,15 @@ impl Walker {
         graph_run_id: &str,
         steps: u32,
     ) -> ryeos_runtime::callback::HookDispatchOccurrence {
-        ryeos_runtime::callback::HookDispatchOccurrence::GraphCompleted {
-            graph_run_id: graph_run_id.to_string(),
-            definition_ref: self.graph.definition_ref.clone(),
-            root_raw_content_digest: self.graph.root_raw_content_digest.clone(),
-            effective_definition_digest: self.graph.effective_definition_digest.clone(),
-            steps,
-        }
+        ryeos_runtime::callback::HookDispatchOccurrence::new(
+            "graph",
+            "graph_completed",
+            self.graph.definition_ref.clone(),
+            self.graph.root_raw_content_digest.clone(),
+            self.graph.effective_definition_digest.clone(),
+        )
+        .with_text_coordinate("graph_run_id", graph_run_id)
+        .with_counter_coordinate("steps", steps)
     }
 
     /// Build the hook context for a `graph_step_completed` fire point. Carries

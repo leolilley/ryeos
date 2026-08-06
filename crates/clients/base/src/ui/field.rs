@@ -697,6 +697,29 @@ fn validate_id(id: &str) -> Result<(), String> {
     if id.is_empty() || id.len() > 1024 || id.trim() != id || id.chars().any(char::is_control) {
         return Err("field fact contains invalid stable ID".to_string());
     }
+    validate_shell_digest_slot(id)?;
+    Ok(())
+}
+
+fn validate_shell_digest_slot(id: &str) -> Result<(), String> {
+    const DIGEST_SHELLS: [&str; 4] = ["item:", "source-version:", "definition:", "graph-node:"];
+    if !DIGEST_SHELLS.iter().any(|prefix| id.starts_with(prefix)) {
+        return Ok(());
+    }
+    let Some((_, suffix)) = id.rsplit_once('@') else {
+        return Ok(());
+    };
+    let digest = suffix.split('#').next().unwrap_or(suffix);
+    if digest.starts_with("unknown:") {
+        return Ok(());
+    }
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("field fact has a non-canonical digest identity slot".to_string());
+    }
     Ok(())
 }
 

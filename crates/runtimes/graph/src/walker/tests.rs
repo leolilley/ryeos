@@ -158,7 +158,7 @@ fn make_callback(results: Vec<Value>) -> CallbackClient {
 }
 
 fn make_graph(yaml: &str) -> GraphDefinition {
-    GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap()
+    GraphDefinition::from_yaml_effective_fixture(yaml, Some("test.yaml")).unwrap()
 }
 
 fn make_walker(graph: GraphDefinition, results: Vec<Value>) -> Walker {
@@ -3040,10 +3040,8 @@ config:
         identity.result_mode,
         ryeos_runtime::HookResultMode::Observation
     );
-    assert!(matches!(
-        identity.occurrence,
-        ryeos_runtime::callback::HookDispatchOccurrence::GraphCompleted { .. }
-    ));
+    assert_eq!(identity.occurrence.owner_kind, "graph");
+    assert_eq!(identity.occurrence.event(), "graph_completed");
     assert_eq!(
         recorder.recorded_finalizations(),
         vec![(

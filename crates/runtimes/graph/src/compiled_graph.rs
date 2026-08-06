@@ -1,15 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
-#[cfg(test)]
-use ryeos_runtime::events::RuntimeEventType;
 use ryeos_runtime::{
     CompilationLimits, CompiledActionTemplate, CompiledExpression, CompiledHook,
     CompiledJsonTemplate, CompiledTemplate, ExpressionCondition, Reference, ReferenceSegment,
     ReferenceSet, compile_condition_for, compile_template_for,
 };
-#[cfg(test)]
-use ryeos_runtime::{HookContextSchema, HookSources, compile_hooks};
 
 use crate::model::{EdgeSpec, GraphConfig, GraphNode, NodeType};
 
@@ -20,19 +16,6 @@ pub(crate) struct CompiledGraph {
 }
 
 impl CompiledGraph {
-    #[cfg(test)]
-    pub(crate) fn compile(config: &GraphConfig, mut hook_sources: HookSources) -> Result<Self> {
-        hook_sources.retain_configured_events(&[
-            RuntimeEventType::GraphStarted.as_str(),
-            RuntimeEventType::GraphStepCompleted.as_str(),
-            RuntimeEventType::GraphCompleted.as_str(),
-        ]);
-        Self::compile_with(config, |limits| {
-            compile_hooks(hook_sources, &graph_hook_context_schemas(), limits)
-                .context("compile graph hooks")
-        })
-    }
-
     pub(crate) fn compile_effective(
         config: &GraphConfig,
         plan: &ryeos_engine::hooks::EffectiveHookPlan,
@@ -99,43 +82,6 @@ impl CompiledGraph {
             .flat_map(|node| node.references.iter())
             .chain(self.hooks.iter().flat_map(|hook| hook.references().iter()))
     }
-}
-
-#[cfg(test)]
-fn graph_hook_context_schemas() -> [HookContextSchema; 3] {
-    [
-        HookContextSchema::new(
-            RuntimeEventType::GraphStarted.as_str(),
-            ["event", "graph_id", "graph_run_id", "state", "inputs"],
-        ),
-        HookContextSchema::new(
-            RuntimeEventType::GraphStepCompleted.as_str(),
-            [
-                "event",
-                "graph_id",
-                "graph_run_id",
-                "node",
-                "step",
-                "status",
-                "state",
-                "error",
-            ],
-        ),
-        HookContextSchema::new(
-            RuntimeEventType::GraphCompleted.as_str(),
-            [
-                "event",
-                "graph_id",
-                "graph_run_id",
-                "status",
-                "settled",
-                "steps",
-                "success",
-                "state",
-                "inputs",
-            ],
-        ),
-    ]
 }
 
 #[derive(Debug, Clone)]
@@ -503,7 +449,7 @@ config:
   nodes:
     done: {node_type: return}
 "#;
-        let graph = crate::model::GraphDefinition::from_yaml_with_hook_sources(
+        let graph = crate::model::GraphDefinition::from_yaml_effective_fixture_with_hook_sources(
             raw,
             None,
             HookSources {

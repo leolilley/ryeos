@@ -271,33 +271,33 @@ mod tests {
 
     fn occurrence(event: &str) -> HookDispatchOccurrence {
         match event {
-            "graph_step_completed" => HookDispatchOccurrence::GraphStepCompleted {
-                graph_run_id: "graph-run-test".to_string(),
-                definition_ref: "graph:test/workflow".to_string(),
-                root_raw_content_digest: "a".repeat(64),
-                effective_definition_digest: "b".repeat(64),
-                step: 3,
-                node: "work".to_string(),
-            },
-            "graph_completed" => HookDispatchOccurrence::GraphCompleted {
-                graph_run_id: "graph-run-test".to_string(),
-                definition_ref: "graph:test/workflow".to_string(),
-                root_raw_content_digest: "a".repeat(64),
-                effective_definition_digest: "b".repeat(64),
-                steps: 4,
-            },
-            "after_step" => HookDispatchOccurrence::DirectiveAfterStep {
-                definition_ref: "directive:test/runner".to_string(),
-                root_raw_content_digest: "a".repeat(64),
-                effective_definition_digest: "b".repeat(64),
-                turn: 2,
-            },
-            "continuation" => HookDispatchOccurrence::DirectiveContinuation {
-                definition_ref: "directive:test/runner".to_string(),
-                root_raw_content_digest: "a".repeat(64),
-                effective_definition_digest: "b".repeat(64),
-                turn: 2,
-            },
+            "graph_step_completed" => HookDispatchOccurrence::new(
+                "graph",
+                event,
+                "graph:test/workflow",
+                "a".repeat(64),
+                "b".repeat(64),
+            )
+            .with_text_coordinate("graph_run_id", "graph-run-test")
+            .with_counter_coordinate("step", 3)
+            .with_text_coordinate("node", "work"),
+            "graph_completed" => HookDispatchOccurrence::new(
+                "graph",
+                event,
+                "graph:test/workflow",
+                "a".repeat(64),
+                "b".repeat(64),
+            )
+            .with_text_coordinate("graph_run_id", "graph-run-test")
+            .with_counter_coordinate("steps", 4),
+            "after_step" | "continuation" => HookDispatchOccurrence::new(
+                "directive",
+                event,
+                "directive:test/runner",
+                "a".repeat(64),
+                "b".repeat(64),
+            )
+            .with_counter_coordinate("turn", 2),
             other => panic!("unsupported test hook occurrence: {other}"),
         }
     }

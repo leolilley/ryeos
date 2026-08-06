@@ -86,12 +86,14 @@ fn state_after_serial_tool_result(
         }
     } else {
         State::FiringHooks {
-            occurrence: ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
-                definition_ref: definition_ref.to_string(),
-                root_raw_content_digest: root_raw_content_digest.to_string(),
-                effective_definition_digest: effective_definition_digest.to_string(),
-                turn,
-            },
+            occurrence: ryeos_runtime::callback::HookDispatchOccurrence::new(
+                "directive",
+                "after_step",
+                definition_ref,
+                root_raw_content_digest,
+                effective_definition_digest,
+            )
+            .with_counter_coordinate("turn", turn),
             context: json!({"turn": turn}),
             resume_to: Box::new(State::CheckingContinuation),
         }
@@ -2573,15 +2575,14 @@ impl Runner {
                         continue;
                     }
                     State::FiringHooks {
-                        occurrence:
-                            ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
-                                definition_ref: self.definition_ref.clone(),
-                                root_raw_content_digest: self.root_raw_content_digest.clone(),
-                                effective_definition_digest: self
-                                    .effective_definition_digest
-                                    .clone(),
-                                turn,
-                            },
+                        occurrence: ryeos_runtime::callback::HookDispatchOccurrence::new(
+                            "directive",
+                            "after_step",
+                            self.definition_ref.clone(),
+                            self.root_raw_content_digest.clone(),
+                            self.effective_definition_digest.clone(),
+                        )
+                        .with_counter_coordinate("turn", turn),
                         context: json!({"turn": turn}),
                         resume_to: Box::new(State::CheckingContinuation),
                     }
@@ -2889,12 +2890,14 @@ impl Runner {
                         // resolved carry_turns policy when folding history.)
                         if self.continuation_config.enabled() {
                             State::FiringHooks {
-                                occurrence: ryeos_runtime::callback::HookDispatchOccurrence::DirectiveContinuation {
-                                    definition_ref: self.definition_ref.clone(),
-                                    root_raw_content_digest: self.root_raw_content_digest.clone(),
-                                    effective_definition_digest: self.effective_definition_digest.clone(),
-                                    turn,
-                                },
+                                occurrence: ryeos_runtime::callback::HookDispatchOccurrence::new(
+                                    "directive",
+                                    "continuation",
+                                    self.definition_ref.clone(),
+                                    self.root_raw_content_digest.clone(),
+                                    self.effective_definition_digest.clone(),
+                                )
+                                .with_counter_coordinate("turn", turn),
                                 context: self.continuation_hook_context(live_context, threshold),
                                 resume_to: Box::new(State::Continued),
                             }
@@ -4298,6 +4301,30 @@ mod tests {
                 assert_eq!(pending[index].id.as_deref(), Some("second"));
             }
             _ => panic!("first settled call must advance to the next call"),
+        }
+    }
+
+    #[test]
+    fn serial_limit_final_result_builds_generic_after_step_occurrence() {
+        let pending = vec![crate::directive::ToolCall {
+            id: Some("only".to_string()),
+            name: "one".to_string(),
+            arguments: json!({}),
+        }];
+        match state_after_serial_tool_result(
+            pending,
+            0,
+            4,
+            "directive:test",
+            "root-hash",
+            "effective-hash",
+        ) {
+            State::FiringHooks { occurrence, .. } => {
+                assert_eq!(occurrence.owner_kind, "directive");
+                assert_eq!(occurrence.event(), "after_step");
+                assert_eq!(occurrence.counter_coordinate("turn"), Some(4));
+            }
+            _ => panic!("the final settled call must fire the after_step hooks"),
         }
     }
 

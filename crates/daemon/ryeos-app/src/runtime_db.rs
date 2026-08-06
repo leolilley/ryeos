@@ -990,8 +990,8 @@ const PREDECESSOR_RUNTIME_APP_ID: i32 = 0x5259_4541;
 const RUNTIME_OPERATOR_APP_ID_PREFIX: u32 = 0x5259_0000;
 const RUNTIME_OPERATOR_APP_ID_MASK: u32 = 0xffff_ff00;
 const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
-// Epoch 2 is the clean v2 hook-dispatch activation barrier. An epoch-1 store
-// may contain resumable v1-keyed occurrences and is deliberately refused by
+// Epoch 3 is the clean effective-program/hook-dispatch activation barrier. An
+// older store may contain resumable occurrences under superseded identity and is deliberately refused by
 // ordinary open; the explicit runtime-history reset is permitted only after
 // admission has stopped and resumable work has been drained/terminalized.
 const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 3;

@@ -358,7 +358,7 @@ fn compile_admitted_directive_hooks(
 
     let plan_value = composed_view
         .derived
-        .get("effective_hook_plan")
+        .get(ryeos_engine::hooks::EFFECTIVE_HOOK_PLAN_DERIVED_KEY)
         .ok_or_else(|| anyhow!("directive effective definition has no captured hook plan"))?;
     let plan = ryeos_engine::hooks::EffectiveHookPlan::from_value(plan_value)
         .map_err(|error| anyhow!(error))?;

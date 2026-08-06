@@ -1026,6 +1026,29 @@ fn validate_stable_id(label: &str, id: &str) -> Result<()> {
     if id.trim() != id || id.is_empty() || id.len() > 1024 || id.chars().any(char::is_control) {
         bail!("{label} has an invalid stable ID");
     }
+    validate_shell_digest_slot(label, id)?;
+    Ok(())
+}
+
+fn validate_shell_digest_slot(label: &str, id: &str) -> Result<()> {
+    const DIGEST_SHELLS: [&str; 4] = ["item:", "source-version:", "definition:", "graph-node:"];
+    if !DIGEST_SHELLS.iter().any(|prefix| id.starts_with(prefix)) {
+        return Ok(());
+    }
+    let Some((_, suffix)) = id.rsplit_once('@') else {
+        return Ok(());
+    };
+    let digest = suffix.split('#').next().unwrap_or(suffix);
+    if digest.starts_with("unknown:") {
+        return Ok(());
+    }
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("{label} has a non-canonical digest identity slot");
+    }
     Ok(())
 }
 
@@ -1062,6 +1085,26 @@ mod tests {
             attributes: serde_json::json!({}),
             provenance: FieldProvenance::pending("service:test", Vec::new()),
         }
+    }
+
+    #[test]
+    fn stable_shell_ids_require_lowercase_sha256_digest_slots() {
+        let digest = "a".repeat(64);
+        validate_stable_id(
+            "field entity",
+            &format!("graph-node:graph:test/build@{digest}#start"),
+        )
+        .unwrap();
+        assert!(
+            validate_stable_id("field entity", "definition:graph:test/build@not-a-digest").is_err()
+        );
+        assert!(
+            validate_stable_id(
+                "field entity",
+                &format!("source-version:graph:test/build@{}", "A".repeat(64))
+            )
+            .is_err()
+        );
     }
 
     #[test]

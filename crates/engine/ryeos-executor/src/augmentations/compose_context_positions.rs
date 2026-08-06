@@ -597,7 +597,7 @@ pub async fn run(
             None,
             Some(runtime_item_ref_string.clone()),
             verified_runtime.raw_content_digest.clone(),
-            verified_runtime.raw_content_digest.clone(),
+            None,
             serde_json::Value::Null,
             0,
         );

@@ -62,59 +62,87 @@ pub struct DispatchActionRequest {
     pub hook_dispatch: Option<HookDispatchIdentity>,
 }
 
+/// One scalar coordinate in a runtime-owned hook occurrence.
+///
+/// Occurrence coordinates are deliberately bounded to strings and counters:
+/// they identify a lifecycle boundary but cannot smuggle an unbounded nested
+/// document across the callback authority boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum HookDispatchCoordinate {
+    Text(String),
+    Counter(u32),
+}
+
 /// Stable logical occurrence of one runtime-hook event.
 ///
-/// The daemon namespaces this caller-supplied coordinate under authoritative
-/// chain and execution identity before using it for idempotency. Keeping the
-/// finite event vocabulary typed prevents an arbitrary string from silently
-/// creating a second ledger namespace for the same lifecycle boundary.
+/// The signed kind contract and launch-captured hook authorization own the
+/// `(owner_kind, event)` vocabulary. The generic callback substrate binds that
+/// pair to the admitted effective definition and opaque scalar coordinates;
+/// adding a hook-capable kind or event therefore requires no executor wire
+/// change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum HookDispatchOccurrence {
-    GraphStarted {
-        graph_run_id: String,
-        definition_ref: String,
-        root_raw_content_digest: String,
-        effective_definition_digest: String,
-    },
-    GraphStepCompleted {
-        graph_run_id: String,
-        definition_ref: String,
-        root_raw_content_digest: String,
-        effective_definition_digest: String,
-        step: u32,
-        node: String,
-    },
-    GraphCompleted {
-        graph_run_id: String,
-        definition_ref: String,
-        root_raw_content_digest: String,
-        effective_definition_digest: String,
-        steps: u32,
-    },
-    DirectiveAfterStep {
-        definition_ref: String,
-        root_raw_content_digest: String,
-        effective_definition_digest: String,
-        turn: u32,
-    },
-    DirectiveContinuation {
-        definition_ref: String,
-        root_raw_content_digest: String,
-        effective_definition_digest: String,
-        turn: u32,
-    },
+#[serde(deny_unknown_fields)]
+pub struct HookDispatchOccurrence {
+    pub owner_kind: String,
+    pub event: String,
+    pub definition_ref: String,
+    pub root_raw_content_digest: String,
+    pub effective_definition_digest: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub coordinates: BTreeMap<String, HookDispatchCoordinate>,
 }
 
 impl HookDispatchOccurrence {
-    pub const fn event(&self) -> &'static str {
-        match self {
-            Self::GraphStarted { .. } => "graph_started",
-            Self::GraphStepCompleted { .. } => "graph_step_completed",
-            Self::GraphCompleted { .. } => "graph_completed",
-            Self::DirectiveAfterStep { .. } => "after_step",
-            Self::DirectiveContinuation { .. } => "continuation",
+    pub fn new(
+        owner_kind: impl Into<String>,
+        event: impl Into<String>,
+        definition_ref: impl Into<String>,
+        root_raw_content_digest: impl Into<String>,
+        effective_definition_digest: impl Into<String>,
+    ) -> Self {
+        Self {
+            owner_kind: owner_kind.into(),
+            event: event.into(),
+            definition_ref: definition_ref.into(),
+            root_raw_content_digest: root_raw_content_digest.into(),
+            effective_definition_digest: effective_definition_digest.into(),
+            coordinates: BTreeMap::new(),
         }
+    }
+
+    pub fn with_text_coordinate(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.coordinates
+            .insert(key.into(), HookDispatchCoordinate::Text(value.into()));
+        self
+    }
+
+    pub fn with_counter_coordinate(mut self, key: impl Into<String>, value: u32) -> Self {
+        self.coordinates
+            .insert(key.into(), HookDispatchCoordinate::Counter(value));
+        self
+    }
+
+    pub fn text_coordinate(&self, key: &str) -> Option<&str> {
+        match self.coordinates.get(key) {
+            Some(HookDispatchCoordinate::Text(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn counter_coordinate(&self, key: &str) -> Option<u32> {
+        match self.coordinates.get(key) {
+            Some(HookDispatchCoordinate::Counter(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn event(&self) -> &str {
+        &self.event
     }
 }
 
@@ -864,34 +892,42 @@ mod tests {
     }
 
     #[test]
-    fn hook_dispatch_occurrence_uses_closed_tagged_wire() {
-        let occurrence = HookDispatchOccurrence::GraphStepCompleted {
-            graph_run_id: "graph-run-1".to_string(),
-            definition_ref: "graph:test/workflow".to_string(),
-            root_raw_content_digest: "a".repeat(64),
-            effective_definition_digest: "b".repeat(64),
-            step: 9,
-            node: "work".to_string(),
-        };
+    fn hook_dispatch_occurrence_uses_generic_scalar_coordinate_wire() {
+        let occurrence = HookDispatchOccurrence::new(
+            "graph",
+            "graph_step_completed",
+            "graph:test/workflow",
+            "a".repeat(64),
+            "b".repeat(64),
+        )
+        .with_text_coordinate("graph_run_id", "graph-run-1")
+        .with_counter_coordinate("step", 9)
+        .with_text_coordinate("node", "work");
         let wire = serde_json::to_value(&occurrence).unwrap();
-        assert_eq!(wire["kind"], "graph_step_completed");
-        assert_eq!(wire["graph_run_id"], "graph-run-1");
-        assert_eq!(wire["step"], 9);
+        assert_eq!(wire["owner_kind"], "graph");
+        assert_eq!(wire["event"], "graph_step_completed");
+        assert_eq!(wire["coordinates"]["graph_run_id"], "graph-run-1");
+        assert_eq!(wire["coordinates"]["step"], 9);
         assert_eq!(occurrence.event(), "graph_step_completed");
 
+        let future = serde_json::from_value::<HookDispatchOccurrence>(json!({
+            "owner_kind": "future_runtime",
+            "event": "phase_settled",
+            "definition_ref": "future_runtime:test/item",
+            "root_raw_content_digest": "a".repeat(64),
+            "effective_definition_digest": "b".repeat(64),
+            "coordinates": {"phase": 9}
+        }))
+        .unwrap();
+        assert_eq!(future.event(), "phase_settled");
         assert!(
             serde_json::from_value::<HookDispatchOccurrence>(json!({
-                "kind": "graph_step_finished",
-                "graph_run_id": "graph-run-1",
-                "step": 9,
-            }))
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<HookDispatchOccurrence>(json!({
-                "kind": "directive_after_step",
-                "turn": 2,
-                "legacy_event": "after_step",
+                "owner_kind": "graph",
+                "event": "graph_step_completed",
+                "definition_ref": "graph:test/workflow",
+                "root_raw_content_digest": "a".repeat(64),
+                "effective_definition_digest": "b".repeat(64),
+                "coordinates": {"nested": {"not": "a scalar"}},
             }))
             .is_err()
         );
@@ -913,12 +949,14 @@ mod tests {
                 launch_window: None,
             },
             hook_dispatch: Some(HookDispatchIdentity {
-                occurrence: HookDispatchOccurrence::DirectiveContinuation {
-                    definition_ref: "directive:test/runner".to_string(),
-                    root_raw_content_digest: "a".repeat(64),
-                    effective_definition_digest: "b".repeat(64),
-                    turn: 3,
-                },
+                occurrence: HookDispatchOccurrence::new(
+                    "directive",
+                    "continuation",
+                    "directive:test/runner",
+                    "a".repeat(64),
+                    "b".repeat(64),
+                )
+                .with_counter_coordinate("turn", 3),
                 hook_id: "continuation-audit".to_string(),
                 layer: crate::hooks_loader::HookLayer::Operator,
                 result_mode: crate::hooks_loader::HookResultMode::Control,

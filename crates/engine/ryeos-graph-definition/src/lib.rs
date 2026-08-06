@@ -157,7 +157,7 @@ pub fn validate_effective_graph(view: &KindComposedView) -> Result<ValidationSum
 
     let plan_value = view
         .derived
-        .get("effective_hook_plan")
+        .get(ryeos_engine::hooks::EFFECTIVE_HOOK_PLAN_DERIVED_KEY)
         .ok_or_else(|| anyhow!("composed graph has no captured `effective_hook_plan`"))?;
     let plan = EffectiveHookPlan::from_value(plan_value).map_err(|error| anyhow!(error))?;
     if plan.owner_kind != "graph" {

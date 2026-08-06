@@ -654,6 +654,7 @@ stale_bins=(
     rye-parser-yaml-header-document
     rye-parser-regex-kv
     rye-composer-extends-chain
+    rye-composer-graph-permissions
     ryeos-graph-effective-validator
     rye-composer-identity
 )

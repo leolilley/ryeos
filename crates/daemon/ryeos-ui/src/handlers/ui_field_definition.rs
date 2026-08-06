@@ -453,7 +453,7 @@ fn add_definition_sources(
     let plan = resolution
         .composed
         .derived
-        .get("effective_hook_plan")
+        .get(ryeos_engine::hooks::EFFECTIVE_HOOK_PLAN_DERIVED_KEY)
         .map(ryeos_engine::hooks::EffectiveHookPlan::from_value)
         .transpose()?;
     if let Some(plan) = plan {

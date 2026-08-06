@@ -5474,7 +5474,7 @@ async fn run_claimed_thread_row_inner(
         effective_bundle_id_for_request(resolved),
         Some(resolved.item_ref.clone()),
         resolution.root.raw_content_digest.clone(),
-        effective_program.effective_definition_digest().to_string(),
+        Some(effective_program.effective_definition_digest().to_string()),
         serde_json::to_value(&hard_limits).unwrap_or(Value::Null),
         current_depth,
     );

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use regex::Regex;
 use ryeos_handler_protocol::{
@@ -219,7 +219,7 @@ pub fn compose(
 
     let mut policy_facts: HashMap<String, Value> = HashMap::new();
     for pf in &cfg.policy_facts {
-        policy_facts.insert(pf.name.clone(), extract_policy_fact(&composed, pf));
+        policy_facts.insert(pf.name.clone(), extract_policy_fact(&composed, pf)?);
     }
 
     Ok(ComposeSuccess {
@@ -375,11 +375,16 @@ fn apply_strategy(
         }
         ComposerStrategy::DictMergeRootLast => {
             let mut merged: Map<String, Value> = Map::new();
+            let mut declared = false;
             for parent in ancestor_parsed {
+                declared |= parent.get(&rule.name).is_some_and(|value| !value.is_null());
                 merge_object_root_last(&mut merged, parent.get(&rule.name));
             }
+            declared |= root_parsed
+                .get(&rule.name)
+                .is_some_and(|value| !value.is_null());
             merge_object_root_last(&mut merged, root_parsed.get(&rule.name));
-            if let Value::Object(obj) = composed {
+            if declared && let Value::Object(obj) = composed {
                 obj.insert(rule.name.clone(), Value::Object(merged));
             }
         }
@@ -405,88 +410,12 @@ fn apply_strategy(
             }
         }
         ComposerStrategy::NarrowAgainstParentEffective => {
-            let child_has = root_parsed
-                .get(&rule.name)
-                .map(|v| !v.is_null())
-                .unwrap_or(false);
-
-            if !child_has {
-                // Child omitted the field — inherit from first ancestor that has it.
-                for parent in ancestor_parsed {
-                    if let Some(v) = parent.get(&rule.name)
-                        && !v.is_null()
-                        && let Value::Object(obj) = composed
-                    {
-                        obj.insert(rule.name.clone(), v.clone());
-                        break;
-                    }
-                }
-            } else {
-                // Child declared the field — narrow each verb against parent effective.
-                let child_val = root_parsed.get(&rule.name).unwrap();
-                let parent_val = ancestor_parsed
-                    .iter()
-                    .find_map(|p| p.get(&rule.name).filter(|v| !v.is_null()));
-
-                let narrowed = match (
-                    child_val.as_object(),
-                    parent_val.and_then(|v| v.as_object()),
-                ) {
-                    (Some(child_map), Some(parent_map)) => {
-                        let mut result = Map::new();
-                        let all_verbs: HashSet<&str> = child_map
-                            .keys()
-                            .chain(parent_map.keys())
-                            .map(|s| s.as_str())
-                            .collect();
-
-                        for verb in all_verbs {
-                            let child_verb_caps = child_map
-                                .get(verb)
-                                .and_then(|v| v.as_array())
-                                .map(|arr| {
-                                    arr.iter()
-                                        .filter_map(|v| v.as_str().map(String::from))
-                                        .collect::<Vec<String>>()
-                                })
-                                .unwrap_or_default();
-
-                            let parent_verb_caps = parent_map
-                                .get(verb)
-                                .and_then(|v| v.as_array())
-                                .map(|arr| {
-                                    arr.iter()
-                                        .filter_map(|v| v.as_str().map(String::from))
-                                        .collect::<Vec<String>>()
-                                })
-                                .unwrap_or_default();
-
-                            if child_map.contains_key(verb) {
-                                // Child declared this verb — narrow against parent
-                                let narrowed_caps =
-                                    narrow_capabilities(&child_verb_caps, &parent_verb_caps);
-                                result.insert(
-                                    verb.to_string(),
-                                    Value::Array(
-                                        narrowed_caps.into_iter().map(Value::String).collect(),
-                                    ),
-                                );
-                            } else {
-                                // Child omitted this verb — inherit parent's caps
-                                result.insert(
-                                    verb.to_string(),
-                                    parent_map.get(verb).cloned().unwrap_or(Value::Null),
-                                );
-                            }
-                        }
-                        Value::Object(result)
-                    }
-                    _ => child_val.clone(), // Not a mapping — verbatim (no narrowing possible)
-                };
-
-                if let Value::Object(obj) = composed {
-                    obj.insert(rule.name.clone(), narrowed);
-                }
+            let narrowed =
+                narrow_mapping_against_effective_parent(&rule.name, ancestor_parsed, root_parsed)?;
+            if let Some(narrowed) = narrowed
+                && let Value::Object(obj) = composed
+            {
+                obj.insert(rule.name.clone(), Value::Object(narrowed));
             }
         }
         ComposerStrategy::NarrowRequiresCapabilities => {
@@ -494,6 +423,88 @@ fn apply_strategy(
         }
     }
     Ok(())
+}
+
+/// Fold deepest ancestor through root. Every declaration is narrowed against
+/// the immediately effective parent, so authority discarded by an
+/// intermediate document cannot reappear in a grandchild.
+fn narrow_mapping_against_effective_parent(
+    field: &str,
+    ancestor_parsed: &[&Value],
+    root_parsed: &Value,
+) -> Result<Option<Map<String, Value>>, (ResolutionStepNameWire, String)> {
+    let mut effective: Option<Map<String, Value>> = None;
+    for source in ancestor_parsed
+        .iter()
+        .copied()
+        .chain(std::iter::once(root_parsed))
+    {
+        let Some(declared) = source.get(field).filter(|value| !value.is_null()) else {
+            continue;
+        };
+        let child = declared.as_object().ok_or_else(|| {
+            (
+                ResolutionStepNameWire::PipelineInit,
+                format!("composer field `{field}` must be a mapping"),
+            )
+        })?;
+        for (verb, value) in child {
+            strict_string_sequence(field, verb, value)?;
+        }
+
+        let Some(parent) = effective.as_ref() else {
+            effective = Some(child.clone());
+            continue;
+        };
+        let mut narrowed = parent.clone();
+        let all_verbs = parent
+            .keys()
+            .chain(child.keys())
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        for verb in all_verbs {
+            let Some(child_value) = child.get(verb) else {
+                continue;
+            };
+            let child_caps = strict_string_sequence(field, verb, child_value)?;
+            let parent_caps = parent
+                .get(verb)
+                .map(|value| strict_string_sequence(field, verb, value))
+                .transpose()?
+                .unwrap_or_default();
+            let caps = narrow_capabilities(&child_caps, &parent_caps);
+            narrowed.insert(
+                verb.to_string(),
+                Value::Array(caps.into_iter().map(Value::String).collect()),
+            );
+        }
+        effective = Some(narrowed);
+    }
+    Ok(effective)
+}
+
+fn strict_string_sequence(
+    field: &str,
+    verb: &str,
+    value: &Value,
+) -> Result<Vec<String>, (ResolutionStepNameWire, String)> {
+    let values = value.as_array().ok_or_else(|| {
+        (
+            ResolutionStepNameWire::PipelineInit,
+            format!("composer field `{field}.{verb}` must be an array of strings"),
+        )
+    })?;
+    values
+        .iter()
+        .map(|value| {
+            value.as_str().map(String::from).ok_or_else(|| {
+                (
+                    ResolutionStepNameWire::PipelineInit,
+                    format!("composer field `{field}.{verb}` must contain only strings"),
+                )
+            })
+        })
+        .collect()
 }
 
 /// Compose `requires.capabilities` for a child against its ancestors. See
@@ -1271,19 +1282,40 @@ fn build_derived_value(rule: &ComposerFieldRule, composed: &Value) -> Value {
     raw
 }
 
-fn extract_policy_fact(composed: &Value, pf: &PolicyFactExtractor) -> Value {
+fn extract_policy_fact(
+    composed: &Value,
+    pf: &PolicyFactExtractor,
+) -> Result<Value, (ResolutionStepNameWire, String)> {
     let mut cur = composed;
     for seg in &pf.path {
         match cur.get(seg) {
             Some(v) => cur = v,
-            None => return shape_default(pf.expect),
+            None => return Ok(shape_default(pf.expect)),
         }
     }
     match pf.expect {
         PolicyFactShape::ArrayOfStrings => {
-            let arr = cur.as_array().cloned().unwrap_or_default();
-            let filtered: Vec<Value> = arr.into_iter().filter(|v| v.is_string()).collect();
-            Value::Array(filtered)
+            let arr = cur.as_array().ok_or_else(|| {
+                (
+                    ResolutionStepNameWire::PipelineInit,
+                    format!(
+                        "policy fact `{}` path `{}` must resolve to an array of strings",
+                        pf.name,
+                        pf.path.join(".")
+                    ),
+                )
+            })?;
+            if arr.iter().any(|value| !value.is_string()) {
+                return Err((
+                    ResolutionStepNameWire::PipelineInit,
+                    format!(
+                        "policy fact `{}` path `{}` contains a non-string entry",
+                        pf.name,
+                        pf.path.join(".")
+                    ),
+                ));
+            }
+            Ok(Value::Array(arr.clone()))
         }
     }
 }
@@ -2178,6 +2210,50 @@ mod tests {
     }
 
     #[test]
+    fn grandchild_cannot_recover_authority_discarded_by_parent() {
+        let root = json!({
+            "name": "grandchild",
+            "extends": "parent",
+            "capabilities": { "execute": ["ryeos.execute.tool.write"] },
+            "body": "body"
+        });
+        let grandparent = json!({
+            "name": "grandparent",
+            "capabilities": {
+                "execute": ["ryeos.execute.tool.read", "ryeos.execute.tool.write"]
+            },
+            "body": ""
+        });
+        let parent = json!({
+            "name": "parent",
+            "extends": "grandparent",
+            "capabilities": { "execute": ["ryeos.execute.tool.read"] },
+            "body": ""
+        });
+        let view = run(
+            demo_config(),
+            root,
+            vec![
+                ancestor_input("grandparent", grandparent),
+                ancestor_input("parent", parent),
+            ],
+        )
+        .unwrap();
+        assert!(policy_fact_string_seq(&view, "effective_caps").is_empty());
+    }
+
+    #[test]
+    fn narrowed_mapping_rejects_non_string_entries() {
+        let root = json!({
+            "name": "child",
+            "capabilities": { "execute": ["ryeos.execute.tool.read", 7] },
+            "body": "body"
+        });
+        let error = run(demo_config(), root, Vec::new()).unwrap_err();
+        assert!(error.1.contains("must contain only strings"));
+    }
+
+    #[test]
     fn dict_merge_parents_first_then_root() {
         let r = json!({
             "extends": "parent",
@@ -2581,6 +2657,18 @@ mod tests {
     }
 
     #[test]
+    fn optional_dict_merge_preserves_true_absence() {
+        let cfg = json!({
+            "extends_field": "ext",
+            "fields": [
+                { "name": "ambient", "strategy": "dict_merge_root_last", "expect_value_type": "mapping" }
+            ]
+        });
+        let view = run(cfg, json!({}), Vec::new()).unwrap();
+        assert!(view.composed.get("ambient").is_none());
+    }
+
+    #[test]
     fn graph_config_hooks_inherit_clear_and_replace_atomically() {
         let cfg = json!({
             "extends_field": "extends",
@@ -2768,6 +2856,26 @@ mod tests {
         let r = json!({});
         let view = run(cfg, r, vec![]).unwrap();
         assert!(policy_fact_string_seq(&view, "caps").is_empty());
+    }
+
+    #[test]
+    fn policy_fact_present_path_rejects_non_string_entries() {
+        let cfg = json!({
+            "extends_field": "ext",
+            "fields": [
+                { "name": "perms", "strategy": "inherit_from_topmost" }
+            ],
+            "policy_facts": [
+                { "name": "caps", "path": ["perms", "execute"], "expect": "array_of_strings" }
+            ]
+        });
+        let error = run(
+            cfg,
+            json!({"perms": {"execute": ["allowed", 7]}}),
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert!(error.1.contains("contains a non-string entry"));
     }
 
     #[test]

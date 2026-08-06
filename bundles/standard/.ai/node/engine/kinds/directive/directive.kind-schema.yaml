@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-05T07:04:40Z:dcfaccdb78231087acdcd898213bebb70d67eff0327294f02027165f34a7a8b5:4icx9OwX9eyGmSlzzcXYv+R1X9e8dV62tcApd3+ck5BWUJz5+qmZ50ECsNTazs5aYa/Ydp5bpraOhugfXXgAAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-06T00:58:12Z:f4222bd4883c5d09d79ad875c6a418f5d6bd5a175a0e4f5a8848e83695440803:HIfgQtU1KAv8zrb8iGXPkh+DCGCiAxDIOPuEh+SiUUYjGFqP0uXTQgM5efnd+YpHzWBLo7IlaaDr4DdsFcsNBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/directive"
 version: "1.0.0"
 location:
@@ -68,10 +68,11 @@ composer_config:
       expect_value_type: string
       derive_as: body
     # Unified capability requirements. `declared` (self-asserted action
-    # authority → effective_caps) narrows against the parent by dropping;
-    # `manifest` (runtime authority, manifest-backed) narrows by failing on
-    # widen. A child can never request more than its parent template; the signed
-    # bundle manifest is the final upper bound for `manifest` at launch.
+    # authority → effective_caps) and `manifest` (manifest-backed runtime
+    # authority) inherit independently when omitted. A declaration atomically
+    # replaces its subtree and fails composition if it widens the immediately
+    # effective parent. The signed bundle manifest remains the final upper
+    # bound for `manifest` at launch.
     - name: requires
       strategy: narrow_requires_capabilities
       expect_value_type: mapping

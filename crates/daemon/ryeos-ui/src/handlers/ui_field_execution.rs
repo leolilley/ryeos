@@ -609,7 +609,24 @@ impl ExecutionAssembler {
             .insert("thread".to_string(), thread_context);
 
         let graph_identity =
-            event_graph_identity(&event, self.current_graph.get(&event.thread_id))?;
+            match event_graph_identity(&event, self.current_graph.get(&event.thread_id)) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    let message = format!(
+                        "event {} in chain {} has malformed graph identity: {error:#}",
+                        event.chain_seq, event.chain_root_id
+                    );
+                    self.builder.warn("malformed_graph_identity", &message);
+                    attributes
+                        .as_object_mut()
+                        .expect("event attributes are an object")
+                        .insert("graph_identity_error".to_string(), json!(message));
+                    if event.event_type == ryeos_state::event_types::GRAPH_COMPLETED {
+                        self.current_graph.remove(&event.thread_id);
+                    }
+                    None
+                }
+            };
         if let Some((graph_run_id, definition_ref, effective_definition_digest)) =
             graph_identity.as_ref()
         {
@@ -1026,52 +1043,25 @@ impl ExecutionAssembler {
         event_ref: &FieldEventRef,
         step_status: Option<&str>,
     ) -> Result<()> {
-        use ryeos_runtime::callback::HookDispatchOccurrence;
-
-        let (graph_run_id, definition_ref, effective_definition_digest, terminal_status) =
-            match occurrence {
-                HookDispatchOccurrence::GraphStarted {
-                    graph_run_id,
-                    definition_ref,
-                    effective_definition_digest,
-                    ..
-                } => (
-                    graph_run_id,
-                    definition_ref,
-                    effective_definition_digest,
-                    None,
-                ),
-                HookDispatchOccurrence::GraphStepCompleted {
-                    graph_run_id,
-                    definition_ref,
-                    effective_definition_digest,
-                    ..
-                } => (
-                    graph_run_id,
-                    definition_ref,
-                    effective_definition_digest,
-                    None,
-                ),
-                HookDispatchOccurrence::GraphCompleted {
-                    graph_run_id,
-                    definition_ref,
-                    effective_definition_digest,
-                    ..
-                } => (
-                    graph_run_id,
-                    definition_ref,
-                    effective_definition_digest,
-                    Some("completed"),
-                ),
-                HookDispatchOccurrence::DirectiveAfterStep { .. }
-                | HookDispatchOccurrence::DirectiveContinuation { .. } => return Ok(()),
-            };
+        if occurrence.owner_kind != "graph" {
+            return Ok(());
+        }
+        let terminal_status = match occurrence.event() {
+            "graph_started" | "graph_step_completed" => None,
+            "graph_completed" => Some("completed"),
+            _ => return Ok(()),
+        };
+        let graph_run_id = occurrence
+            .text_coordinate("graph_run_id")
+            .ok_or_else(|| anyhow::anyhow!("graph hook occurrence has no text `graph_run_id`"))?;
+        let definition_ref = &occurrence.definition_ref;
+        let effective_definition_digest = &occurrence.effective_definition_digest;
         let run = self
             .graph_runs
-            .entry((occurrence_thread_id.to_string(), graph_run_id.clone()))
+            .entry((occurrence_thread_id.to_string(), graph_run_id.to_string()))
             .or_insert_with(|| GraphRunFact {
                 thread_id: occurrence_thread_id.to_string(),
-                graph_run_id: graph_run_id.clone(),
+                graph_run_id: graph_run_id.to_string(),
                 definition_ref: definition_ref.clone(),
                 effective_definition_digest: effective_definition_digest.clone(),
                 status: Some("running".to_string()),
@@ -1087,13 +1077,19 @@ impl ExecutionAssembler {
         }
         push_evidence(&mut run.evidence, event_ref.clone());
 
-        let HookDispatchOccurrence::GraphStepCompleted { step, node, .. } = occurrence else {
+        if occurrence.event() != "graph_step_completed" {
             return Ok(());
-        };
+        }
+        let step = occurrence
+            .counter_coordinate("step")
+            .ok_or_else(|| anyhow::anyhow!("graph step hook occurrence has no counter `step`"))?;
+        let node = occurrence
+            .text_coordinate("node")
+            .ok_or_else(|| anyhow::anyhow!("graph step hook occurrence has no text `node`"))?;
         let key = OccurrenceKey {
             thread_id: occurrence_thread_id.to_string(),
-            graph_run_id: graph_run_id.clone(),
-            step: *step,
+            graph_run_id: graph_run_id.to_string(),
+            step,
             attempt: 0,
             iteration: 0,
         };
@@ -1104,11 +1100,11 @@ impl ExecutionAssembler {
                 key,
                 definition_ref: definition_ref.clone(),
                 effective_definition_digest: effective_definition_digest.clone(),
-                node: node.clone(),
+                node: node.to_string(),
                 status: step_status.map(str::to_string),
                 evidence: Vec::new(),
             });
-        if fact.node != *node
+        if fact.node != node
             || fact.definition_ref != *definition_ref
             || fact.effective_definition_digest != *effective_definition_digest
         {
@@ -1671,40 +1667,23 @@ fn occurrence_key_from_hook(
     thread_id: &str,
     occurrence: &ryeos_runtime::callback::HookDispatchOccurrence,
 ) -> Option<OccurrenceKey> {
-    match occurrence {
-        ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
-            graph_run_id,
-            step,
-            ..
-        } => Some(OccurrenceKey {
+    if occurrence.owner_kind == "graph" && occurrence.event() == "graph_step_completed" {
+        Some(OccurrenceKey {
             thread_id: thread_id.to_string(),
-            graph_run_id: graph_run_id.clone(),
-            step: *step,
+            graph_run_id: occurrence.text_coordinate("graph_run_id")?.to_string(),
+            step: occurrence.counter_coordinate("step")?,
             attempt: 0,
             iteration: 0,
-        }),
-        _ => None,
+        })
+    } else {
+        None
     }
 }
 
 fn occurrence_effective_definition_digest(
     occurrence: &ryeos_runtime::callback::HookDispatchOccurrence,
 ) -> Option<String> {
-    match occurrence {
-        ryeos_runtime::callback::HookDispatchOccurrence::GraphStarted {
-            effective_definition_digest,
-            ..
-        }
-        | ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
-            effective_definition_digest,
-            ..
-        }
-        | ryeos_runtime::callback::HookDispatchOccurrence::GraphCompleted {
-            effective_definition_digest,
-            ..
-        } => Some(effective_definition_digest.clone()),
-        _ => None,
-    }
+    (occurrence.owner_kind == "graph").then(|| occurrence.effective_definition_digest.clone())
 }
 
 fn bounded_u32(value: &Value, key: &str) -> Option<u32> {
@@ -2155,9 +2134,9 @@ mod tests {
     }
 
     #[test]
-    fn malformed_or_partial_graph_identity_fails_closed() {
+    fn malformed_or_partial_graph_identity_degrades_to_identityless_events() {
         let mut malformed = assembler();
-        let error = malformed
+        malformed
             .add_event(event(
                 1,
                 ryeos_state::event_types::GRAPH_STEP_STARTED,
@@ -2169,11 +2148,22 @@ mod tests {
                     "step": 0,
                 }),
             ))
-            .unwrap_err();
-        assert!(error.to_string().contains("effective digest is invalid"));
+            .unwrap();
+        let malformed = malformed.finish().unwrap();
+        assert!(malformed.entities.iter().any(|entity| {
+            entity.kind == "event"
+                && entity.effective_definition_digest.is_none()
+                && entity.attributes.get("graph_identity_error").is_some()
+        }));
+        assert!(malformed.warnings.iter().any(|warning| {
+            warning["code"] == "malformed_graph_identity"
+                && warning["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("effective digest is invalid"))
+        }));
 
         let mut partial = assembler();
-        let error = partial
+        partial
             .add_event(event(
                 1,
                 ryeos_state::event_types::GRAPH_STEP_STARTED,
@@ -2184,8 +2174,14 @@ mod tests {
                     "step": 0,
                 }),
             ))
-            .unwrap_err();
-        assert!(error.to_string().contains("partial identity"));
+            .unwrap();
+        let partial = partial.finish().unwrap();
+        assert!(partial.warnings.iter().any(|warning| {
+            warning["code"] == "malformed_graph_identity"
+                && warning["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("partial identity"))
+        }));
     }
 
     #[test]
@@ -2398,14 +2394,16 @@ mod tests {
                 id: "hook:system/evidence".to_string(),
                 layer: ryeos_runtime::hooks_loader::HookLayer::Infrastructure,
                 event: "graph_step_completed".to_string(),
-                occurrence: ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
-                    graph_run_id: "G-1".to_string(),
-                    definition_ref: "graph:test/build".to_string(),
-                    root_raw_content_digest: "r".repeat(64),
-                    effective_definition_digest: "d".repeat(64),
-                    step: 4,
-                    node: "build".to_string(),
-                },
+                occurrence: ryeos_runtime::callback::HookDispatchOccurrence::new(
+                    "graph",
+                    "graph_step_completed",
+                    "graph:test/build",
+                    "r".repeat(64),
+                    "d".repeat(64),
+                )
+                .with_text_coordinate("graph_run_id", "G-1")
+                .with_counter_coordinate("step", 4)
+                .with_text_coordinate("node", "build"),
             },
             context_hash: "c".repeat(64),
             response_hash: response_hash.to_string(),

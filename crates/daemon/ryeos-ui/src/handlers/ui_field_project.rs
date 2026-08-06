@@ -17,7 +17,7 @@ use ryeos_engine::contracts::{
     SubjectResolutionAuthority,
 };
 use ryeos_executor::execution::effective_program_projection::{
-    EffectiveProgramProjection, prepare_effective_program_projection,
+    EffectiveProgramProjection, EffectiveProgramProjectionSession,
 };
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -78,6 +78,12 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         execution_hints: ExecutionHints::default(),
         validate_only: true,
     };
+    let ui_state = crate::state::get_ui_state(&state).context("UI state is not registered")?;
+    let mut projection_session = EffectiveProgramProjectionSession::new(
+        &state.engine,
+        &plan_context,
+        project_root.as_deref().map(std::path::Path::new),
+    )?;
     let mut projections = BTreeMap::new();
     let mut projection_warnings = Vec::new();
     for node in topology
@@ -95,12 +101,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
                 continue;
             }
         };
-        match prepare_effective_program_projection(
-            &state.engine,
-            &plan_context,
-            project_root.as_deref().map(std::path::Path::new),
-            &canonical_ref,
-        ) {
+        match projection_session.prepare(&canonical_ref, Some(ui_state.field_projection_cache())) {
             Ok(projection) => {
                 projections.insert(node.id.clone(), projection);
             }
@@ -121,7 +122,6 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         projection_warnings,
     )?;
     if !request.expansions.is_empty() {
-        let ui_state = crate::state::get_ui_state(&state).context("UI state is not registered")?;
         document = apply_bounded_expansions(document, &request.expansions, &ui_state, SERVICE_REF)
             .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     }
@@ -259,6 +259,9 @@ fn project_facts(
         if node.kind == "graph_node"
             && let Some((definition_ref, node_name)) = node.id.split_once("#node:")
             && let Some(definition) = identities.get(definition_ref)
+            && projections
+                .get(definition_ref)
+                .is_some_and(|projection| effective_graph_contains_node(projection, node_name))
             && let Some(effective_definition_digest) =
                 definition.effective_definition_digest.as_deref()
         {
@@ -357,6 +360,17 @@ fn project_facts(
     }
 
     builder.finish()
+}
+
+fn effective_graph_contains_node(projection: &EffectiveProgramProjection, node_name: &str) -> bool {
+    projection
+        .resolution
+        .composed
+        .composed
+        .get("config")
+        .and_then(|config| config.get("nodes"))
+        .and_then(Value::as_object)
+        .is_some_and(|nodes| nodes.contains_key(node_name))
 }
 
 fn collect_item_identities(
@@ -520,16 +534,40 @@ mod tests {
                     status: None,
                     trust: None,
                 },
+                TopologyNode {
+                    id: "graph:test/build#node:removed".to_string(),
+                    kind: "graph_node".to_string(),
+                    label: "removed".to_string(),
+                    ref_: "graph:test/build#node:removed".to_string(),
+                    space: None,
+                    path: None,
+                    namespace: Some("graph:test/build".to_string()),
+                    virtual_: true,
+                    missing: false,
+                    status: None,
+                    trust: None,
+                },
             ],
-            edges: vec![TopologyEdge {
-                id: "contains".to_string(),
-                from: "graph:test/build".to_string(),
-                to: "graph:test/build#node:start".to_string(),
-                type_: "contains_node".to_string(),
-                label: "contains".to_string(),
-                source: None,
-                confidence: "structural".to_string(),
-            }],
+            edges: vec![
+                TopologyEdge {
+                    id: "contains".to_string(),
+                    from: "graph:test/build".to_string(),
+                    to: "graph:test/build#node:start".to_string(),
+                    type_: "contains_node".to_string(),
+                    label: "contains".to_string(),
+                    source: None,
+                    confidence: "structural".to_string(),
+                },
+                TopologyEdge {
+                    id: "contains-removed".to_string(),
+                    from: "graph:test/build".to_string(),
+                    to: "graph:test/build#node:removed".to_string(),
+                    type_: "contains_node".to_string(),
+                    label: "contains".to_string(),
+                    source: None,
+                    confidence: "structural".to_string(),
+                },
+            ],
             views: TopologyViewHints {
                 defaults: TopologyViewDefaults {
                     group_by: "kind".to_string(),
@@ -603,6 +641,14 @@ mod tests {
                 .iter()
                 .any(|relation| relation.kind == "contains")
         );
+        assert!(facts.entities.iter().all(|entity| {
+            !entity.id.starts_with("graph-node:graph:test/build@")
+                || !entity.id.ends_with("#removed")
+        }));
+        assert!(facts.entities.iter().any(|entity| {
+            entity.id == "item-ref:graph:test/build#node:removed"
+                && entity.effective_definition_digest.is_none()
+        }));
         assert!(!encoded.contains(tmp.path().to_string_lossy().as_ref()));
     }
 }
