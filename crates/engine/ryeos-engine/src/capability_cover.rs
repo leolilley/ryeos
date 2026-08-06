@@ -65,7 +65,7 @@ mod tests {
         assert!(capability_pattern_covers("a.b.*", "a.b.*"));
         assert!(capability_pattern_covers("a.*", "a.b.*"));
         assert!(capability_pattern_covers("ryeos.execute.tool.arc/*", "ryeos.execute.tool.arc/x*"));
-        // The blind spot this module exists to close: `?` must never cover `*`.
+        // A parent `?` narrows to one character and must never cover `*`.
         assert!(!capability_pattern_covers("ryeos.get.vault.?", "ryeos.get.vault.*"));
         // Interior parent wildcards cannot prove coverage of a child pattern.
         assert!(!capability_pattern_covers("a.*.c", "a.b.*"));

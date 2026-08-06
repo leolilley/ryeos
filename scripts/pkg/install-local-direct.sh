@@ -675,7 +675,7 @@ for b in "${stale_bins[@]}"; do
 done
 
 # Pre-authorize sudo before any spinner owns the terminal; a password prompt
-# raised under the progress UI is invisible and times out (2026-08-06).
+# raised under the progress UI is invisible and times out.
 if [[ $(id -u) -ne 0 ]]; then
     sudo -v || die "sudo authorization is required for /usr installs"
 fi

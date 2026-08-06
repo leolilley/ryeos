@@ -55,6 +55,8 @@ export function settleLayout(layout, amount = 1) {
   return layout;
 }
 
+// Entity-only by design: relation strokes are informational, and relation
+// interaction happens through the detail panel's connector buttons.
 export function hitTest(layout, x, y) {
   const nodes = [...layout.nodes.values()].reverse();
   return nodes.find(

@@ -359,7 +359,105 @@ fn project_facts(
         })?;
     }
 
+    add_admission_facts(&mut builder, &state, project_root.as_deref())?;
+
     builder.finish()
+}
+
+const MAX_ADMISSION_FACTS: usize = 50;
+
+/// Project the newest admission events (finalizer decisions) for this
+/// project as `admission:` facts. History unavailability degrades to a
+/// warning — admission evidence must never take the project document down.
+fn add_admission_facts(
+    builder: &mut FieldFactsBuilder,
+    state: &AppState,
+    project_root: Option<&str>,
+) -> Result<()> {
+    let Some(root) = project_root else {
+        return Ok(());
+    };
+    let page = match ryeos_app::admission_events::read_admission_events(
+        &state.state_store,
+        std::path::Path::new(root),
+        MAX_ADMISSION_FACTS,
+    ) {
+        Ok(page) => page,
+        Err(error) => {
+            builder.warn(
+                "admission_history_unavailable",
+                format!("admission history was not projected: {error}"),
+            );
+            return Ok(());
+        }
+    };
+    if page.next_cursor.is_some() {
+        builder.mark_truncated();
+        builder.warn(
+            "admission_history_truncated",
+            format!("newest {MAX_ADMISSION_FACTS} admission events projected"),
+        );
+    }
+    for record in &page.records {
+        let payload = &record.event.payload;
+        let text = |key: &str| payload.get(key).and_then(Value::as_str).unwrap_or("");
+        let id = format!("admission:{}", record.event_hash);
+        let recorded = record.event.event_type
+            == ryeos_app::admission_events::ADMISSION_RECORDED_EVENT_TYPE;
+        let non_empty = |value: &str| Some(value.to_string()).filter(|s| !s.is_empty());
+        builder.add_entity(FieldFactEntity {
+            id: id.clone(),
+            kind: "admission".to_string(),
+            label: record.event.event_type.clone(),
+            parent_id: None,
+            status: Some(if recorded { "recorded" } else { "refused" }.to_string()),
+            canonical_ref: non_empty(text("canonical_ref")),
+            source_content_digest: None,
+            effective_definition_digest: non_empty(text("effective_definition_digest")),
+            admitted_launch_capsule_hash: non_empty(text("admitted_launch_capsule_hash")),
+            event_ref: None,
+            artifact_ref: None,
+            attributes: json!({
+                "event_type": record.event.event_type,
+                "created_at": record.event.created_at,
+                "chain_seq": record.event.chain_seq,
+                "payload": payload,
+            }),
+            provenance: builder.provenance(Vec::new()),
+        })?;
+        let canonical = text("canonical_ref");
+        if canonical.is_empty() {
+            continue;
+        }
+        if recorded && !text("effective_definition_digest").is_empty() {
+            builder.add_relation(FieldFactRelation {
+                id: format!("admission-admits:{}", record.event_hash),
+                kind: "admits".to_string(),
+                source_id: id.clone(),
+                target_id: format!(
+                    "definition:{}@{}",
+                    canonical,
+                    text("effective_definition_digest")
+                ),
+                status: None,
+                directed: true,
+                attributes: json!({}),
+                provenance: builder.provenance(Vec::new()),
+            })?;
+        } else if !recorded {
+            builder.add_relation(FieldFactRelation {
+                id: format!("admission-refused:{}", record.event_hash),
+                kind: "refused".to_string(),
+                source_id: id.clone(),
+                target_id: format!("definition-family:{canonical}"),
+                status: None,
+                directed: true,
+                attributes: json!({}),
+                provenance: builder.provenance(Vec::new()),
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn effective_graph_contains_node(projection: &EffectiveProgramProjection, node_name: &str) -> bool {

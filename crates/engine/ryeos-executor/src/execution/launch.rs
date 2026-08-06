@@ -4809,7 +4809,96 @@ impl Drop for FinalizeFailedOnDrop<'_> {
     }
 }
 
+/// Admission-evidence wrapper: exactly one emission seam for every real
+/// managed-launch attempt. Success appends `admission_recorded` (implies a
+/// sealed capsule and a spawned thread); failure appends `admission_refused`
+/// with a closed stage. Emission failure is an evidence gap logged as a
+/// warning — it never alters the launch outcome. Preview/projection paths do
+/// not pass through here and never append.
 pub async fn build_and_launch(
+    params: BuildAndLaunchParams<'_>,
+) -> Result<NativeLaunchResult, BuildAndLaunchError> {
+    let state = params.state;
+    let project_path = params.project_path.to_path_buf();
+    let canonical_ref = params.resolved.item_ref.clone();
+    let acting_principal = params.acting_principal.to_string();
+    let outcome = build_and_launch_inner(params).await;
+    let emission = match &outcome {
+        Ok(result) => {
+            let text = |key: &str| {
+                result
+                    .thread
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            };
+            ryeos_app::admission_events::append_admission_recorded(
+                &state.state_store,
+                ryeos_app::admission_events::AdmissionRecorded {
+                    project_path: &project_path,
+                    canonical_ref: &canonical_ref,
+                    thread_id: &text("thread_id"),
+                    chain_root_id: &text("chain_root_id"),
+                    root_raw_content_digest: &text("root_raw_content_digest"),
+                    effective_definition_digest: &text("effective_definition_digest"),
+                    admitted_launch_capsule_hash: &text("admitted_launch_capsule_hash"),
+                    acting_principal: &acting_principal,
+                },
+            )
+        }
+        Err(error) => {
+            let (stage, reason_code) = admission_stage_for(error);
+            ryeos_app::admission_events::append_admission_refused(
+                &state.state_store,
+                ryeos_app::admission_events::AdmissionRefused {
+                    project_path: &project_path,
+                    canonical_ref: &canonical_ref,
+                    stage,
+                    reason_code: &reason_code,
+                    detail: &error.to_string(),
+                    acting_principal: &acting_principal,
+                },
+            )
+        }
+    };
+    if let Err(error) = emission {
+        tracing::warn!(%error, "admission evidence emission failed; launch outcome unaffected");
+    }
+    outcome
+}
+
+/// Exhaustive mapping from launch failure variants to admission refusal
+/// stages; adding a variant requires choosing its stage here.
+fn admission_stage_for(
+    error: &BuildAndLaunchError,
+) -> (ryeos_app::admission_events::AdmissionStage, String) {
+    use ryeos_app::admission_events::AdmissionStage as Stage;
+    match error {
+        BuildAndLaunchError::Materialization(_) => {
+            (Stage::Materialization, "materialization_failed".to_string())
+        }
+        BuildAndLaunchError::MissingSecrets { .. } => {
+            (Stage::Secrets, "missing_secrets".to_string())
+        }
+        BuildAndLaunchError::CapabilityRejected { .. } => {
+            (Stage::Authority, "capability_rejected".to_string())
+        }
+        BuildAndLaunchError::LaunchPreparation(inner) => {
+            let code = match inner.as_ref() {
+                DispatchError::LaunchPreparationFailed { code, .. } => code.clone(),
+                _ => "launch_preparation_failed".to_string(),
+            };
+            (Stage::Preparation, code)
+        }
+        BuildAndLaunchError::LaunchCancelled { stage, .. } => {
+            (Stage::Cancelled, format!("cancelled_before_{stage}"))
+        }
+        BuildAndLaunchError::Internal(_) => (Stage::Internal, "internal".to_string()),
+    }
+}
+
+async fn build_and_launch_inner(
     params: BuildAndLaunchParams<'_>,
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     // Allocate identity in memory, then complete the authoritative pass before

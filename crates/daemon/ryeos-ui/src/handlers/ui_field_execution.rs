@@ -789,6 +789,9 @@ impl ExecutionAssembler {
                     &event_ref,
                     Some("completed"),
                 )?;
+                // The daemon is the sole author of these events through one
+                // canonical serializer, so structural payload equality is
+                // byte equality here.
                 match self.observations.get_mut(&payload.observation_id) {
                     Some(existing) if existing.payload == payload => {
                         existing.event_refs.push(event_ref);

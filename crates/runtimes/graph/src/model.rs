@@ -422,10 +422,9 @@ impl GraphDefinition {
     /// Test adapter into the production effective-resolution constructor. No
     /// test-only graph compiler or alternate runtime parser exists.
     ///
-    /// Fidelity note (post-activation ledger E16): this fixture hand-duplicates
-    /// the graph event contracts. They match the signed kind schema today and
-    /// drift fails closed (plan validation rejects unknown contracts), but a
-    /// schema change must be mirrored here or these tests go stale.
+    /// The event contracts below mirror the signed graph kind schema. Drift
+    /// fails closed (plan validation rejects unknown contracts), but a schema
+    /// change must be mirrored here or these tests go stale.
     #[cfg(test)]
     pub fn from_yaml_effective_fixture(raw: &str, file_path: Option<&str>) -> anyhow::Result<Self> {
         Self::from_yaml_effective_fixture_with_hook_sources(

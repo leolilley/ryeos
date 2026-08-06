@@ -16,9 +16,9 @@ use ryeos_executor::execution::effective_program_projection::{
 const FIELD_PROJECTION_CACHE_MAX_ENTRIES: usize = 128;
 
 /// Count-bounded LRU keyed by string. Deliberately count- rather than
-/// byte-bounded: entries retain full source closures, so 128 projections can
-/// hold several hundred MiB on pathological projects — an accepted ceiling
-/// for a single-operator node, recorded in the post-activation ledger (N2).
+/// byte-bounded: entries retain full source closures, so the cap trades a
+/// bounded number of large entries for eviction simplicity on a
+/// single-operator node.
 #[derive(Default)]
 struct BoundedLruState<V> {
     entries: HashMap<String, V>,

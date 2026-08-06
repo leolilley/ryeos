@@ -137,7 +137,12 @@ while IFS= read -r bundle; do
         ryeos_term_fail "full bundle set is missing $bundle/.ai"
         exit 2
     }
-    assert_official_trust_metadata "$bundle_source/PUBLISHER_TRUST.toml"
+    # populate publishes one shared trust doc at the source root (asserted
+    # above); per-bundle docs are optional and asserted only when a bundle
+    # still ships one.
+    if [[ -f "$bundle_source/PUBLISHER_TRUST.toml" ]]; then
+        assert_official_trust_metadata "$bundle_source/PUBLISHER_TRUST.toml"
+    fi
     cp -a "$bundle_source" "$stage/$bundle"
 done < <(ryeos_bundle_set_names full)
 

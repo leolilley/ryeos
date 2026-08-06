@@ -397,9 +397,19 @@ fn validate_page_limit(limit: usize) -> anyhow::Result<()> {
 }
 
 fn effective_bundle_id(cap: &CallbackCapability) -> anyhow::Result<String> {
-    cap.effective_bundle_id
+    let bundle_id = cap
+        .effective_bundle_id
         .clone()
-        .ok_or_else(|| anyhow::anyhow!("callback token has no effective_bundle_id"))
+        .ok_or_else(|| anyhow::anyhow!("callback token has no effective_bundle_id"))?;
+    // Daemon-authored admission history lives under a reserved pseudo-bundle.
+    // No capability-lane operation may touch it, regardless of grants — the
+    // reservation is what makes admission events evidence rather than claims.
+    if bundle_id == crate::admission_events::ADMISSION_BUNDLE_ID {
+        anyhow::bail!(
+            "bundle id `{bundle_id}` is reserved for daemon-authored admission history"
+        );
+    }
+    Ok(bundle_id)
 }
 
 fn validate_bundle_identifiers(bundle_id: &str, event_kind: &str) -> anyhow::Result<()> {
@@ -482,6 +492,19 @@ mod tests {
             depth: 0,
             accounting_scope: None,
         }
+    }
+
+    #[test]
+    fn reserved_admission_bundle_is_refused_regardless_of_grants() {
+        // Even a token that somehow carries the reserved bundle id and a
+        // matching grant must be refused at the id boundary: admission
+        // history is daemon-authored evidence, never a claimable namespace.
+        let cap = cap(
+            vec!["ryeos.append.bundle-events.ryeos-node/admission".into()],
+            Some(crate::admission_events::ADMISSION_BUNDLE_ID),
+        );
+        let error = effective_bundle_id(&cap).unwrap_err();
+        assert!(error.to_string().contains("reserved"), "got: {error}");
     }
 
     #[test]
