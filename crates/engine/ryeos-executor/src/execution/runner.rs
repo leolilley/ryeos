@@ -1623,18 +1623,30 @@ fn ensure_restart_eligible_artifact(
     Ok(())
 }
 
+/// Fresh direct realization state carried from finalization to spawn: the
+/// staged-root publication to finish once the row is durable, and the bound
+/// mounts plus generation leases to hold for the runtime's lifetime.
+struct DirectExternalRealizations {
+    publication: Option<super::PendingCasPublication>,
+    bound: Option<super::external_content::BoundExternalRealizations>,
+}
+
 fn admitted_root_launch_metadata(
     state: &AppState,
     params: &ExecutionParams,
     project_authority: ryeos_state::objects::ExecutionProjectAuthority,
     prepared_plan: &mut thread_lifecycle::PreparedItemPlan,
     protocol: &ryeos_engine::protocols::VerifiedProtocol,
-) -> Result<ryeos_app::launch_metadata::RuntimeLaunchMetadata> {
+) -> Result<(
+    ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    DirectExternalRealizations,
+)> {
     let runtime_ref = match &params.runtime_ref {
         Some(runtime_ref) => runtime_ref.clone(),
         None => prepared_plan.runtime_ref()?.to_owned(),
     };
-    let finalized_program = finalize_direct_effective_program(params)?;
+    let (finalized_program, external_publication) =
+        finalize_direct_effective_program(state, params)?;
     let sealed = SealedRootExecutionRequest::capture_finalized(
         &params.resolved,
         runtime_ref.clone(),
@@ -1719,7 +1731,18 @@ fn admitted_root_launch_metadata(
         .with_resume_context(resume)
         .with_sealed_root_request(sealed);
     metadata.validate()?;
-    Ok(metadata)
+    let bound_external = super::external_content::bind_external_realizations(
+        state,
+        finalized_program.resolution(),
+        params.provenance.effective_path(),
+    )?;
+    Ok((
+        metadata,
+        DirectExternalRealizations {
+            publication: external_publication,
+            bound: bound_external,
+        },
+    ))
 }
 
 /// Finalize the exact resolution used by non-managed/direct execution before
@@ -1727,8 +1750,12 @@ fn admitted_root_launch_metadata(
 /// their configured policy must be captured by the managed-launch finalizer,
 /// never bypassed by this direct protocol path.
 fn finalize_direct_effective_program(
+    state: &AppState,
     params: &ExecutionParams,
-) -> Result<ryeos_engine::effective_program::FinalizedEffectiveProgram> {
+) -> Result<(
+    ryeos_engine::effective_program::FinalizedEffectiveProgram,
+    Option<super::PendingCasPublication>,
+)> {
     let admission = params.resolved.root_admission.as_ref().ok_or_else(|| {
         anyhow::anyhow!("cannot finalize a direct root execution without root admission")
     })?;
@@ -1746,7 +1773,42 @@ fn finalize_direct_effective_program(
         );
     }
 
-    let resolution = admission.resolution_output().clone();
+    let mut resolution = admission.resolution_output().clone();
+    let roots = engine.resolution_roots(match params.provenance.project_authority() {
+        ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => None,
+        ryeos_state::objects::ExecutionProjectAuthority::LiveProject { .. }
+        | ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. } => {
+            Some(params.provenance.original_project_path().to_path_buf())
+        }
+    });
+    // A declaring kind captures here exactly as the managed path does, and a
+    // direct launch dispatched as a child (`parent_thread_id`) inherits its
+    // parent's sealed realization under the same §6 rule — resolved from the
+    // parent's durable capsule, fail-closed on missing or malformed lineage.
+    let inherited_external = params
+        .parent_thread_id
+        .as_deref()
+        .map(|parent_thread_id| {
+            state
+                .state_store
+                .admitted_launch_capsule(parent_thread_id)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "dispatching parent {parent_thread_id} has no authoritative admitted launch capsule"
+                    )
+                })?
+                .external_realization_set()
+        })
+        .transpose()?
+        .flatten();
+    let captured_external = super::external_content::capture_external_realizations(
+        state,
+        engine,
+        &params.resolved.kind,
+        &mut resolution,
+        &roots,
+        inherited_external.as_ref(),
+    )?;
     let validation = engine
         .effective_validators
         .validate(&params.resolved.kind, &resolution)?;
@@ -1761,22 +1823,21 @@ fn finalize_direct_effective_program(
                 content as &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
             )
         });
-    let roots = engine.resolution_roots(match params.provenance.project_authority() {
-        ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => None,
-        ryeos_state::objects::ExecutionProjectAuthority::LiveProject { .. }
-        | ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. } => {
-            Some(params.provenance.original_project_path().to_path_buf())
-        }
-    });
     let proof = ryeos_engine::effective_program::prove_finalization_authority(
         &candidate,
         &[],
         &roots,
         project,
-        None,
+        captured_external
+            .as_ref()
+            .map(|captured| captured.finalization_evidence()),
     )?;
-    ryeos_engine::effective_program::finalize_effective_program(candidate, proof)
-        .map_err(Into::into)
+    let finalized =
+        ryeos_engine::effective_program::finalize_effective_program(candidate, proof)?;
+    Ok((
+        finalized,
+        captured_external.and_then(|captured| captured.into_publication()),
+    ))
 }
 
 fn recovered_direct_protocol(
@@ -2035,7 +2096,7 @@ pub async fn run_and_wait(
     let wait_cas_guard =
         ryeos_state::CasMutationGuard::shared_from_cas_root(&state.state_store.cas_root()?)
             .context("acquire direct admission CAS mutation authority")?;
-    let wait_launch_metadata = admitted_root_launch_metadata(
+    let (wait_launch_metadata, mut wait_external) = admitted_root_launch_metadata(
         &state,
         &params,
         wait_project_authority.clone(),
@@ -2058,6 +2119,14 @@ pub async fn run_and_wait(
             guard.cleanup();
         })?;
     drop(wait_cas_guard);
+    // The row and its capsule are durable, so realization roots are
+    // capsule-reachable; retire the staging lease. Failure before this point
+    // drops the publication and conservatively abandons the staged roots.
+    if let Some(publication) = wait_external.publication.take() {
+        publication.publish().map_err(|error| {
+            anyhow::anyhow!("publish direct external realization roots: {error:#}")
+        })?;
+    }
     guard.track_thread(&created.thread_id);
     if let Some(parent_thread_id) = params.parent_thread_id.as_deref() {
         let inherited_stop = match state.state_store.record_child_link(
@@ -2215,6 +2284,13 @@ pub async fn run_and_wait(
         guard.cleanup();
         anyhow::bail!("terminal subprocess {tid} was stopped before isolation and process spawn");
     }
+    // Mounts travel into the spawn; `wait_external.bound` (the generation
+    // leases) stays in this scope, which outlives the in-fn wait.
+    let wait_external_mounts = wait_external
+        .bound
+        .as_ref()
+        .map(|bound| bound.mounts().to_vec())
+        .unwrap_or_default();
     let spawn_workspace_lifeline = guard.temp_dir.clone();
     let spawn_handle = task::spawn_blocking(move || {
         let _spawn_workspace_lifeline = spawn_workspace_lifeline;
@@ -2230,9 +2306,7 @@ pub async fn run_and_wait(
             isolation: wait_isolation,
             isolation_project_authority: wait_isolation_project_authority,
             isolation_live_access_authority: wait_isolation_live_access_authority,
-            // Direct launches cannot yet realize external content; finalization
-            // refuses declaring programs, so an empty mount set is exact.
-            isolation_external_read_only_mounts: Vec::new(),
+            isolation_external_read_only_mounts: wait_external_mounts,
             isolation_daemon_socket_path: wait_isolation_daemon_socket_path.as_deref(),
             thread_state_dir: Some(thread_state_dir.as_path()),
             is_resume: false,
@@ -2706,7 +2780,7 @@ pub async fn run_detached(
     let bg_cas_guard =
         ryeos_state::CasMutationGuard::shared_from_cas_root(&state.state_store.cas_root()?)
             .context("acquire detached direct admission CAS mutation authority")?;
-    let bg_launch_metadata = admitted_root_launch_metadata(
+    let (bg_launch_metadata, mut bg_fresh_external) = admitted_root_launch_metadata(
         &state,
         &params,
         bg_project_authority.clone(),
@@ -2729,6 +2803,13 @@ pub async fn run_detached(
             guard.cleanup();
         })?;
     drop(bg_cas_guard);
+    // Row and capsule are durable: realization roots are capsule-reachable,
+    // so retire the staging lease before scheduling the detached task.
+    if let Some(publication) = bg_fresh_external.publication.take() {
+        publication.publish().map_err(|error| {
+            anyhow::anyhow!("publish direct external realization roots: {error:#}")
+        })?;
+    }
     guard.track_thread(&created.thread_id);
     if let Some(parent_thread_id) = params.parent_thread_id.as_deref() {
         let inherited_stop = match state.state_store.record_child_link(
@@ -2910,6 +2991,7 @@ pub async fn run_detached(
         bg_temp_dir,
         bg_skip_resume_snapshot_pin,
         bg_terminal_publication,
+        bg_fresh_external.bound,
         bg_runtime_state_dir,
         DetachedDispatchKind::Detached,
         Some(
@@ -2992,7 +3074,8 @@ impl DetachedDispatchKind {
         bg_project_path, bg_state_root,
         bg_project_authority,
         bg_isolation_project_authority, bg_isolation_daemon_socket_path, bg_temp_dir,
-        bg_skip_resume_snapshot_pin, bg_terminal_publication, bg_runtime_state_dir,
+        bg_skip_resume_snapshot_pin, bg_terminal_publication, bg_external_realizations,
+        bg_runtime_state_dir,
         prior_status_for_mark_running,
         bg_cb_token, bg_tat_token, launch_claim
     ),
@@ -3028,6 +3111,7 @@ async fn dispatch_detached_bg_task(
     mut bg_temp_dir: Option<Arc<TempDirGuard>>,
     bg_skip_resume_snapshot_pin: bool,
     bg_terminal_publication: Option<ryeos_state::objects::PinnedTerminalPublication>,
+    bg_external_realizations: Option<super::external_content::BoundExternalRealizations>,
     bg_runtime_state_dir: PathBuf,
     dispatch_kind: DetachedDispatchKind,
     prior_status_for_mark_running: Option<String>,
@@ -3039,6 +3123,13 @@ async fn dispatch_detached_bg_task(
     // running, wait, and failure/finalization. Every early return drops it; a
     // completed task releases it at the function boundary.
     let launch_claim_guard = launch_claim;
+    // Mount authorities travel into the spawn; the bound value itself — the
+    // materialization generation leases — lives to the end of this task,
+    // which spans spawn, attach, running, and wait.
+    let bg_external_mounts = bg_external_realizations
+        .as_ref()
+        .map(|bound| bound.mounts().to_vec())
+        .unwrap_or_default();
     let launch_owner = match launch_claim_guard
         .as_ref()
         .map(ThreadLaunchClaim::canonical_owner)
@@ -3147,9 +3238,7 @@ async fn dispatch_detached_bg_task(
             isolation: isolation_for_spawn,
             isolation_project_authority: bg_isolation_project_authority,
             isolation_live_access_authority: bg_isolation_live_access_authority,
-            // Direct launches cannot yet realize external content; finalization
-            // refuses declaring programs, so an empty mount set is exact.
-            isolation_external_read_only_mounts: Vec::new(),
+            isolation_external_read_only_mounts: bg_external_mounts,
             isolation_daemon_socket_path: isolation_daemon_socket_path_for_spawn.as_deref(),
             thread_state_dir: Some(thread_state_dir.as_path()),
             is_resume,
@@ -4519,6 +4608,19 @@ async fn run_existing_recovered_thread(
         .map(std::path::Path::to_path_buf);
     let bg_isolation_project_authority = params.provenance.isolation_project_authority();
     let bg_runtime_state_dir = state.config.app_root.clone();
+    // A recovered direct launch rebinds its sealed realization exactly. The
+    // restored admission carries the derived-bearing sealed resolution, and
+    // a missing manifest or blob refuses recovery here rather than letting
+    // the runtime read live content under a realized identity.
+    let bg_external_realizations = super::external_content::bind_external_realizations(
+        &bg_state,
+        bg_resolved
+            .root_admission
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("restored sealed root has no admission"))?
+            .resolution_output(),
+        params.provenance.effective_path(),
+    )?;
 
     tokio::spawn(dispatch_detached_bg_task(
         bg_state,
@@ -4543,6 +4645,7 @@ async fn run_existing_recovered_thread(
         bg_temp_dir,
         bg_skip_resume_snapshot_pin,
         bg_terminal_publication,
+        bg_external_realizations,
         bg_runtime_state_dir,
         dispatch_kind,
         Some(prior_status),
