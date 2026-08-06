@@ -305,9 +305,14 @@ refresh_installed_bundle_payload() {
 
     [[ -x "$target_dir/ryeos-core-tools" ]] || \
         die "bundle payload refresh requires built binary: $target_dir/ryeos-core-tools"
-    [[ -f "$dest/PUBLISHER_TRUST.toml" ]] || \
-        die "bundle payload refresh requires trust doc: $dest/PUBLISHER_TRUST.toml"
-    trust_fp="$(publisher_fingerprint_from_trust_doc "$dest/PUBLISHER_TRUST.toml")"
+    # populate-bundles.sh now publishes one shared trust doc at
+    # bundles/.ai/PUBLISHER_TRUST.toml and removes per-bundle copies; accept
+    # the per-bundle doc when a bundle still ships one, else the shared doc.
+    local trust_doc="$dest/PUBLISHER_TRUST.toml"
+    [[ -f "$trust_doc" ]] || trust_doc="$share_dir/.ai/PUBLISHER_TRUST.toml"
+    [[ -f "$trust_doc" ]] || \
+        die "bundle payload refresh requires trust doc: $dest/PUBLISHER_TRUST.toml or $share_dir/.ai/PUBLISHER_TRUST.toml"
+    trust_fp="$(publisher_fingerprint_from_trust_doc "$trust_doc")"
     operator_fp="$(operator_fingerprint || true)"
     if [[ -z "$operator_fp" || "$trust_fp" != "$operator_fp" ]]; then
         ryeos_term_note "skipping $name bundle payload refresh: installed bundle trusts $trust_fp, operator key is ${operator_fp:-unavailable}; run with --populate to refresh publisher-signed payloads"
