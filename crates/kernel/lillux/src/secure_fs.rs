@@ -156,7 +156,15 @@ pub struct PinnedDirectoryEntryMetadata {
     pub name: OsString,
     pub entry_type: PinnedEntryType,
     pub mode: u32,
+    /// Device-node identity (`st_rdev`). Meaningful only for device entries.
     pub device_id: u64,
+    /// Containing-filesystem identity (`st_dev`). A traversal that must stay
+    /// on one filesystem compares this against its pinned root, because a
+    /// bind mount or separate filesystem below the root is neither bounded
+    /// nor reproducible by the root's own declaration.
+    pub containing_device: u64,
+    /// Inode number, for identity comparisons within one filesystem.
+    pub inode: u64,
 }
 
 #[cfg(unix)]
@@ -882,6 +890,8 @@ impl PinnedDirectory {
                 entry_type,
                 mode: stat.st_mode,
                 device_id: stat.st_rdev,
+                containing_device: stat.st_dev,
+                inode: stat.st_ino,
             });
         }
         entries.sort_by(|left, right| left.name.cmp(&right.name));
@@ -1064,6 +1074,59 @@ impl PinnedDirectory {
 
     /// Open one existing child directory relative to this pinned directory.
     /// No component is followed through a symlink.
+    /// Read one child symlink's target without following it.
+    ///
+    /// Descriptor-relative `readlinkat`, so the lookup cannot be redirected by
+    /// swapping a path component after classification. Callers that record a
+    /// symlink as content need its target bytes: a digest of the target proves
+    /// what was observed but cannot reconstruct the link.
+    pub fn read_symlink_target(&self, name: &OsStr, max_bytes: usize) -> Result<Option<Vec<u8>>> {
+        #[cfg(not(unix))]
+        {
+            let _ = (name, max_bytes);
+            anyhow::bail!("descriptor-relative symlink reading is unavailable on this platform");
+        }
+        #[cfg(unix)]
+        {
+            validate_child_name(name)?;
+            let name_c = std::ffi::CString::new(name.as_bytes())?;
+            // One extra byte distinguishes "exactly at the bound" from
+            // "truncated", so an oversized target fails rather than being
+            // silently shortened into a different link.
+            let mut buffer = vec![0u8; max_bytes.saturating_add(1)];
+            let written = unsafe {
+                libc::readlinkat(
+                    self.directory.as_raw_fd(),
+                    name_c.as_ptr(),
+                    buffer.as_mut_ptr() as *mut libc::c_char,
+                    buffer.len(),
+                )
+            };
+            if written < 0 {
+                let error = std::io::Error::last_os_error();
+                return match error.raw_os_error() {
+                    Some(libc::ENOENT) => Ok(None),
+                    Some(libc::EINVAL) => Ok(None),
+                    _ => Err(error).with_context(|| {
+                        format!(
+                            "read symlink target {}",
+                            self.path.join(name).display()
+                        )
+                    }),
+                };
+            }
+            let written = written as usize;
+            if written > max_bytes {
+                anyhow::bail!(
+                    "symlink target at {} exceeds {max_bytes} bytes",
+                    self.path.join(name).display()
+                );
+            }
+            buffer.truncate(written);
+            Ok(Some(buffer))
+        }
+    }
+
     pub fn open_child_directory(&self, name: &OsStr) -> Result<Option<Self>> {
         #[cfg(not(unix))]
         {
@@ -3051,6 +3114,76 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn symlink_targets_are_readable_without_following_and_bounded() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("value"), b"value").unwrap();
+        symlink("value", dir.path().join("relative")).unwrap();
+        symlink("/usr/bin/python3", dir.path().join("escaping")).unwrap();
+        let pinned = PinnedDirectory::open(dir.path()).unwrap().unwrap();
+
+        // Targets are returned verbatim, including one that leaves the space:
+        // recording a link is not following it.
+        assert_eq!(
+            pinned
+                .read_symlink_target(OsStr::new("relative"), 1024)
+                .unwrap()
+                .unwrap(),
+            b"value".to_vec()
+        );
+        assert_eq!(
+            pinned
+                .read_symlink_target(OsStr::new("escaping"), 1024)
+                .unwrap()
+                .unwrap(),
+            b"/usr/bin/python3".to_vec()
+        );
+
+        // A regular file is not a link, and an absent name is not an error.
+        assert!(
+            pinned
+                .read_symlink_target(OsStr::new("value"), 1024)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            pinned
+                .read_symlink_target(OsStr::new("missing"), 1024)
+                .unwrap()
+                .is_none()
+        );
+
+        // An oversized target fails rather than being silently truncated into
+        // a different link.
+        assert!(
+            pinned
+                .read_symlink_target(OsStr::new("escaping"), 4)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn pinned_entry_metadata_reports_containing_device_and_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("value"), b"value").unwrap();
+        let pinned = PinnedDirectory::open(dir.path()).unwrap().unwrap();
+        let (root_device, _) = pinned.device_inode().unwrap();
+
+        let entries = pinned.entries_no_follow().unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.name == OsStr::new("value"))
+            .unwrap();
+
+        // A traversal that must stay on one filesystem compares this against
+        // its pinned root; `device_id` (st_rdev) cannot answer that question.
+        assert_eq!(entry.containing_device, root_device);
+        assert_ne!(entry.inode, 0);
+        assert_eq!(entry.device_id, 0);
+    }
+
     #[test]
     fn pinned_mixed_entry_open_distinguishes_files_and_directories_and_rejects_links() {
         use std::os::unix::fs::symlink;
