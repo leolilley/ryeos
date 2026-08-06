@@ -34,8 +34,22 @@ impl Walker {
         self.emit_foreach_iteration_statuses(graph_run_id, current, step, statuses, *total_items)
             .await;
         for observation in observations {
-            self.emit_dispatch_observation(current, step, observation)
-                .await;
+            if let Err(error) = self
+                .emit_dispatch_observation(graph_run_id, current, step, observation)
+                .await
+            {
+                return self
+                    .commit_observation_failure(
+                        graph_run_id,
+                        step,
+                        state,
+                        suppressed_errors,
+                        guard,
+                        inputs,
+                        error,
+                    )
+                    .await;
+            }
         }
 
         if let Some(cost) = cost {

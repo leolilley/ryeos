@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-21T00:24:29Z:fff3d94fbab5e888ac8c3d2db76b5782bb04abd9cabc937bc0b0be1c7809ccb1:NJdkP3zxtNonZd4MiDyOMtBPzig2GJk+5Ritor4AFnIwqIoYZJL2ALeBPOv+Y/qz+p9XnSQEww2FPnEXTlBsBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:26Z:cd098f7556ab5789e214c8d6cef7712cd2962096d1137f669a0618d090277d58:S9e4VU2lTlVfJqz85SMJhoVS0miPXxm2Ktnfnz7bF+p0cKo84EKS+q8JKHdERbEPEOvtvSrpChaQKDamEqnIDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: threads-list
 version: "1.0.0"
 description: Thread list over the ryeos-ui threads source
@@ -7,12 +7,13 @@ widget: table
 # Operator watch dashboard: the UI-ryeos-ui (operator-scoped) thread list, ordered
 # active-first then newest (sort: watch), applied before the limit so the most
 # relevant rows always show.
-source:
-  ref: service:ui/ryeos-ui/threads/list
-  params:
-    limit: 200
-    sort: watch
-  collection: threads
+sources:
+  default:
+    ref: service:ui/ryeos-ui/threads/list
+    params:
+      limit: 200
+      sort: watch
+    collection: threads
 projections:
   columns:
     - label: thread
@@ -106,7 +107,7 @@ affordances:
       open_view: view:ryeos/thread/tree
       drill: true
   # Inspect swaps the center lens to the thread's detail sections. Write the
-  # selected thread FIRST (the detail sources read @facet:selection.thread),
+  # selected thread FIRST (the detail sources read @facet:selection.thread_id),
   # then open the lens — the P1 open_view ordering guarantees the facet is set
   # before the new lens fetches.
   - id: inspect
@@ -115,7 +116,7 @@ affordances:
       plane: ui
       facet: selection
       value:
-        thread: "{record.thread_id}"
+        thread_id: "{record.thread_id}"
       open_view: view:ryeos/threads/detail
   # Row-specific cancel through the ONE ryeos-ui cancel path: the audited command
   # channel `service:commands/submit` with `command_type: cancel`. It carries

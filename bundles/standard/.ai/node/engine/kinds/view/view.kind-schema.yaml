@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:05Z:ee2db73781d726763c8ba4e218304f88232ef501b4133ad704494c077213bb0b:NqyTgwHqHqLKVZku/D7j+tm2iXxfBffx+Fw5TPzppRSI8ed9WYelj6YDSN/bACXxn+vlIegFkA5F9JohIGbQAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:26Z:e48684447e189aaf61ecee038f4682c9af95cc00f1c95d592b73ed8477ce23b8:rlsdpJ4kCcmpBF8GADgMAqQj3stbbWU9d7hF/lmc1IQOPjy490XJv4jnvRLjVAJfKIAyEJEhACrdlIArhtL3Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/view"
 version: "1.0.0"
 location:
@@ -24,7 +24,10 @@ composer_config:
       strategy: replace_root_last
       expect_value_type: string
       required: true
-    - name: source
+    - name: sources
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
+    - name: selection
       strategy: dict_merge_root_last
       expect_value_type: mapping
     - name: projections
@@ -45,7 +48,10 @@ composed_value_contract:
       type: single
       prim: string
   optional:
-    source:
+    sources:
+      type: single
+      prim: mapping
+    selection:
       type: single
       prim: mapping
     projections:

@@ -5,7 +5,7 @@ use super::event::RyeOsUiIntent;
 use super::model::{RyeOsCore, RyeOsDockContent, RyeOsDockEdge, RyeOsDockSlotState};
 use super::scene_model::{RyeOsSceneModel, build_scene_model};
 use super::seat::InvokeTemplate;
-use crate::ids::TileId;
+use crate::ids::{RyeOsViewInstanceKey, TileId};
 use crate::layout::{LayoutTree, SplitAxis};
 use crate::surface::{AmbientAtlasStyleSpec, SurfaceSpec};
 use crate::workspace::{TileState, ViewLocalState, ViewSpec};
@@ -213,6 +213,7 @@ pub struct RyeOsDockPlaneVm {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsDockTileVm {
+    pub instance_key: RyeOsViewInstanceKey,
     pub edge: RyeOsDockEdge,
     pub title: String,
     pub size: u16,
@@ -263,6 +264,7 @@ pub enum RyeOsLayoutNodeVm {
         second: Box<RyeOsLayoutNodeVm>,
     },
     Tile {
+        instance_key: RyeOsViewInstanceKey,
         tile_id: String,
         focused: bool,
         title: String,
@@ -289,6 +291,9 @@ pub enum RyeOsSplitAxisVm {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RyeOsViewVm {
+    Field {
+        field: Box<super::field::RyeOsFieldVm>,
+    },
     Text {
         title: String,
         lines: Vec<RyeOsTextLineVm>,
@@ -979,24 +984,26 @@ fn dock_tile_vm(
         return None;
     }
     let RyeOsDockContent::View { view_ref } = &state.content;
-    let source_key = super::model::dock_source_key(edge);
+    let instance_key = super::model::dock_view_instance_key(edge);
     let focused = matches!(
         core.focus_target(),
         super::model::RyeOsFocusTarget::Dock { edge: focused } if focused == edge
     );
     Some(RyeOsDockTileVm {
+        instance_key: instance_key.clone(),
         edge,
         title: view_ref.rsplit('/').next().unwrap_or(view_ref).to_string(),
         size: state.size,
         focused,
         view: bound_view_vm_keyed(
             core,
-            &source_key,
-            dock_selected_state(core, &source_key),
+            &instance_key,
+            None,
+            dock_selected_state(core, &instance_key),
             view_ref,
             &core.ui.atlas,
         ),
-        input: instance_input_vm(core, &source_key, view_ref),
+        input: instance_input_vm(core, &instance_key, view_ref),
     })
 }
 
@@ -1011,8 +1018,11 @@ struct RowLocalState<'a> {
     changed_rows: Option<&'a std::collections::BTreeMap<String, crate::workspace::RowFlash>>,
 }
 
-fn dock_selected_state<'a>(core: &'a RyeOsCore, source_key: &str) -> RowLocalState<'a> {
-    match core.ui.dock_local.get(source_key) {
+fn dock_selected_state<'a>(
+    core: &'a RyeOsCore,
+    instance_key: &RyeOsViewInstanceKey,
+) -> RowLocalState<'a> {
+    match core.ui.dock_local.get(instance_key) {
         Some(crate::workspace::ViewLocalState::GenericList {
             cursor,
             collapsed,
@@ -1033,10 +1043,14 @@ fn dock_selected_state<'a>(core: &'a RyeOsCore, source_key: &str) -> RowLocalSta
 
 /// The input prompt VM for a view instance, if its binding declares an
 /// `input` block. Re-sources the active transient buffer; layout-neutral.
-fn instance_input_vm(core: &RyeOsCore, instance_id: &str, view_ref: &str) -> Option<RyeOsInputVm> {
+fn instance_input_vm(
+    core: &RyeOsCore,
+    instance_key: &RyeOsViewInstanceKey,
+    view_ref: &str,
+) -> Option<RyeOsInputVm> {
     let binding = core.views.get(view_ref)?;
     let input = binding.input.as_ref()?;
-    let key = super::model::InputBufferKey::new(instance_id, view_ref, input.id.clone());
+    let key = super::model::InputBufferKey::new(instance_key.clone(), view_ref, input.id.clone());
     Some(input_vm(core, &key, view_ref, input))
 }
 
@@ -1044,9 +1058,17 @@ fn instance_input_vm(core: &RyeOsCore, instance_id: &str, view_ref: &str) -> Opt
 /// Pure projection; unknown widgets and missing data degrade honestly.
 pub(super) fn bound_view_vm(core: &RyeOsCore, tile_id: TileId, view_ref: &str) -> RyeOsViewVm {
     let (expanded_rows, collapsed_tree_rows, changed_rows) = selected_row_state(core, tile_id);
+    let instance_key = core
+        .workspace
+        .tiles
+        .get(&tile_id)
+        .map(|tile| tile.instance_key.clone())
+        .unwrap_or_else(|| RyeOsViewInstanceKey::workspace_tile(tile_id));
+    let scoped_dataset_key = tile_id.0.to_string();
     bound_view_vm_keyed(
         core,
-        &tile_id.0.to_string(),
+        &instance_key,
+        Some(&scoped_dataset_key),
         RowLocalState {
             cursor: selected_cursor(core, tile_id),
             collapsed: selected_collapsed(core, tile_id),
@@ -1061,7 +1083,8 @@ pub(super) fn bound_view_vm(core: &RyeOsCore, tile_id: TileId, view_ref: &str) -
 
 fn bound_view_vm_keyed(
     core: &RyeOsCore,
-    source_key: &str,
+    instance_key: &RyeOsViewInstanceKey,
+    scoped_dataset_key: Option<&str>,
     local: RowLocalState<'_>,
     view_ref: &str,
     atlas: &crate::atlas::AtlasUiStateVm,
@@ -1087,10 +1110,19 @@ fn bound_view_vm_keyed(
             message: reason.clone(),
         };
     }
+    let primary_source = binding.primary_source();
+    let source_key = primary_source.map(|(channel, _)| {
+        super::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), channel).encode()
+    });
     // Engine scene widgets render from shared topology/item data + this
     // tile's atlas arrangement, not from a per-tile source response — so
     // they dispatch before the source-required arms below.
     match binding.widget.as_str() {
+        "field" => {
+            return RyeOsViewVm::Field {
+                field: Box::new(project_field_vm(core, instance_key, view_ref, binding)),
+            };
+        }
         "atlas" => {
             // This tile's own scoped dataset when it has one (keyed by tile
             // id == source_key); otherwise None falls back to the shared data.
@@ -1098,8 +1130,8 @@ fn bound_view_vm_keyed(
                 scene: build_scene_model(
                     core,
                     atlas,
-                    core.data.tile_items.get(source_key),
-                    core.data.tile_file_space.get(source_key),
+                    scoped_dataset_key.and_then(|key| core.data.tile_items.get(key)),
+                    scoped_dataset_key.and_then(|key| core.data.tile_file_space.get(key)),
                 ),
             };
         }
@@ -1110,9 +1142,9 @@ fn bound_view_vm_keyed(
             };
         }
         "sections" => {
-            // A sections view reads one source per section (keyed by
-            // section_source_key), not the single per-tile response below — so
-            // it assembles here, ahead of the source-required arms.
+            // A sections view reads one typed source channel per section, not
+            // the default response below, so it assembles here ahead of the
+            // source-required arms.
             let title = view_ref.rsplit('/').next().unwrap_or(view_ref).to_string();
             if binding.sections.is_empty() {
                 return RyeOsViewVm::Placeholder {
@@ -1149,7 +1181,11 @@ fn bound_view_vm_keyed(
                             .is_ok()
                         })
                 });
-                let key = super::content::section_source_key(source_key, index);
+                let key = super::source_key::RyeOsSourceInstanceKey::named(
+                    instance_key.clone(),
+                    &section.source_channel,
+                )
+                .encode();
                 let records = core
                     .data
                     .sources
@@ -1219,9 +1255,11 @@ fn bound_view_vm_keyed(
         .facet
         .as_deref()
         .and_then(|facet| facet_backed_response(core, facet));
-    let response = facet_response
-        .as_ref()
-        .or_else(|| core.data.sources.get(source_key));
+    let response = facet_response.as_ref().or_else(|| {
+        source_key
+            .as_ref()
+            .and_then(|key| core.data.sources.get(key))
+    });
     let title = view_ref.rsplit('/').next().unwrap_or(view_ref).to_string();
     if binding.widget == "text"
         && let Some(lines) = static_text_lines(binding)
@@ -1244,30 +1282,32 @@ fn bound_view_vm_keyed(
                 message: "No conversation yet — type below to start one.".to_string(),
             }
         }
-        (_, None) if core.data.source_errors.contains_key(source_key) => RyeOsViewVm::Placeholder {
-            title,
-            message: format!(
-                "could not load {}: {}",
-                binding
-                    .source
-                    .as_ref()
-                    .map(|s| s.item_ref.as_str())
-                    .unwrap_or("source"),
-                core.data
-                    .source_errors
-                    .get(source_key)
-                    .map(String::as_str)
-                    .unwrap_or("source request failed")
-            ),
-        },
+        (_, None)
+            if source_key
+                .as_ref()
+                .is_some_and(|key| core.data.source_errors.contains_key(key)) =>
+        {
+            RyeOsViewVm::Placeholder {
+                title,
+                message: format!(
+                    "could not load {}: {}",
+                    primary_source
+                        .map(|(_, source)| source.item_ref.as_str())
+                        .unwrap_or("source"),
+                    source_key
+                        .as_ref()
+                        .and_then(|key| core.data.source_errors.get(key))
+                        .map(String::as_str)
+                        .unwrap_or("source request failed")
+                ),
+            }
+        }
         (_, None) => RyeOsViewVm::Placeholder {
             title,
             message: format!(
                 "loading {} …",
-                binding
-                    .source
-                    .as_ref()
-                    .map(|s| s.item_ref.as_str())
+                primary_source
+                    .map(|(_, source)| source.item_ref.as_str())
                     .unwrap_or("(no source)")
             ),
         },
@@ -1331,7 +1371,9 @@ fn bound_view_vm_keyed(
         ("timeline", Some(response)) => {
             use std::borrow::Cow;
 
-            let cached = core.data.timeline_sources.get(source_key);
+            let cached = source_key
+                .as_ref()
+                .and_then(|key| core.data.timeline_sources.get(key));
             let (full, full_indents, full_sources, full_sections, collapsible) =
                 if let Some(cache) = cached {
                     (
@@ -1584,6 +1626,114 @@ fn bound_view_vm_keyed(
     }
 }
 
+fn field_local_state<'a>(
+    core: &'a RyeOsCore,
+    instance_key: &RyeOsViewInstanceKey,
+) -> Option<&'a crate::workspace::FieldLocalState> {
+    let local = core
+        .workspace
+        .tiles
+        .values()
+        .find(|tile| &tile.instance_key == instance_key)
+        .map(|tile| &tile.local)
+        .or_else(|| core.ui.dock_local.get(instance_key));
+    match local {
+        Some(ViewLocalState::Field(local)) => Some(local),
+        _ => None,
+    }
+}
+
+fn project_field_vm(
+    core: &RyeOsCore,
+    instance_key: &RyeOsViewInstanceKey,
+    view_ref: &str,
+    binding: &super::content::ViewBinding,
+) -> super::field::RyeOsFieldVm {
+    let sources = binding
+        .sources
+        .iter()
+        .map(|(channel, source)| {
+            let key =
+                super::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), channel)
+                    .encode();
+            let refreshing = core
+                .data
+                .source_epoch
+                .get(&key)
+                .zip(core.data.source_stored_epoch.get(&key))
+                .is_some_and(|(requested, stored)| requested > stored);
+            super::field::FieldSourceInput {
+                channel,
+                source_ref: &source.item_ref,
+                subject_fingerprint: core
+                    .data
+                    .source_subject_fingerprint
+                    .get(&key)
+                    .map(String::as_str),
+                response: core.data.sources.get(&key),
+                parsed: core.data.field_sources.get(&key),
+                error: core.data.source_errors.get(&key).map(String::as_str),
+                refreshing,
+            }
+        })
+        .collect::<Vec<_>>();
+    let local = field_local_state(core, instance_key);
+    let title = binding
+        .title
+        .as_deref()
+        .or(binding.name.as_deref())
+        .unwrap_or_else(|| view_ref.rsplit('/').next().unwrap_or(view_ref));
+    let field_id = format!("{}@{}", view_ref, instance_key);
+    let fingerprint =
+        super::field::field_projection_fingerprint(&field_id, title, view_ref, binding, &sources);
+    let cached = core
+        .data
+        .field_projections
+        .borrow()
+        .get(instance_key)
+        .filter(|entry| entry.fingerprint == fingerprint)
+        .map(|entry| entry.base.clone());
+    let base = cached.unwrap_or_else(|| {
+        let base = super::field::project_field(&field_id, title, view_ref, binding, &sources, None);
+        core.data.field_projections.borrow_mut().insert(
+            instance_key.clone(),
+            super::field::FieldProjectionCacheEntry {
+                fingerprint,
+                base: base.clone(),
+            },
+        );
+        base
+    });
+    super::field::apply_field_local_state(base, local)
+}
+
+pub(crate) fn field_vm_for_instance(
+    core: &RyeOsCore,
+    instance_key: &RyeOsViewInstanceKey,
+) -> Option<(String, super::field::RyeOsFieldVm)> {
+    let view_ref = core
+        .workspace
+        .tiles
+        .values()
+        .find(|tile| &tile.instance_key == instance_key)
+        .map(|tile| tile.view.view_ref.clone())
+        .or_else(|| {
+            core.ui
+                .docks
+                .visible_slot_views()
+                .into_iter()
+                .find(|(edge, _)| super::model::dock_view_instance_key(*edge) == *instance_key)
+                .map(|(_, view_ref)| view_ref)
+        })?;
+    let binding = core.views.get(&view_ref)?;
+    (binding.widget == "field").then(|| {
+        (
+            view_ref.clone(),
+            project_field_vm(core, instance_key, &view_ref, binding),
+        )
+    })
+}
+
 /// The affordance a row's activation invokes, shared by the rows and table
 /// widgets. Activation is explicit — the view names it via `selection.activate`
 /// (no implicit "first affordance") — and the named affordance must be
@@ -1593,7 +1743,7 @@ fn activate_affordance(binding: &super::content::ViewBinding) -> Option<String> 
     binding
         .selection
         .as_ref()
-        .map(|selection| selection.activate.clone())
+        .and_then(|selection| selection.activate.clone())
         .filter(|affordance_id| {
             binding
                 .affordances
@@ -1738,7 +1888,7 @@ fn input_vm(
 
     // Completion suggestions: an inline @-mention hint when the cursor is in
     // one, else the input's `/` command grammar.
-    let completion = input_completion(core, view_ref, input, &text, cursor);
+    let completion = input_completion(core, key, input, &text, cursor);
     let live_filter = input.is_live_filter();
     // Cyclable live filters name their active field in the prompt and hint.
     let feeds = input.feeds.as_ref();
@@ -1860,7 +2010,7 @@ fn affordance_invoke_target(
 /// candidates; pure projection over open JSON.
 fn input_completion(
     core: &RyeOsCore,
-    view_ref: &str,
+    key: &super::model::InputBufferKey,
     input: &super::content::InputBlock,
     text: &str,
     cursor: usize,
@@ -1873,7 +2023,13 @@ fn input_completion(
         let records = core
             .data
             .sources
-            .get(&super::content::mention_source_key(view_ref, &input.id))
+            .get(
+                &super::source_key::RyeOsSourceInstanceKey::mention(
+                    key.view_instance_key.clone(),
+                    &key.input_id,
+                )
+                .encode(),
+            )
             .map(|response| super::content::project_mentions(mentions, response))
             .unwrap_or_default();
         return super::tokenize::mention_hint(&records, text, cursor)
@@ -1885,11 +2041,13 @@ fn input_completion(
     };
     // The completion grammar is fetched through the generic keyed source path
     // (identical to mentions), keyed per (view_ref, input.id).
-    let Some(response) = core
-        .data
-        .sources
-        .get(&super::content::completion_source_key(view_ref, &input.id))
-    else {
+    let Some(response) = core.data.sources.get(
+        &super::source_key::RyeOsSourceInstanceKey::completion(
+            key.view_instance_key.clone(),
+            &key.input_id,
+        )
+        .encode(),
+    ) else {
         return Vec::new();
     };
     let records = super::content::completion_records(completion, response);
@@ -1916,9 +2074,10 @@ fn layout_node_vm(node: &LayoutTree, core: &RyeOsCore) -> RyeOsLayoutNodeVm {
                 .get(tile_id)
                 .map(|tile| tile_title(core, &tile.view))
                 .unwrap_or_else(|| "Missing".to_string());
-            let input = core.workspace.tiles.get(tile_id).and_then(|tile| {
-                instance_input_vm(core, &tile_id.0.to_string(), &tile.view.view_ref)
-            });
+            let input =
+                core.workspace.tiles.get(tile_id).and_then(|tile| {
+                    instance_input_vm(core, &tile.instance_key, &tile.view.view_ref)
+                });
             let chrome_hidden = core
                 .workspace
                 .tiles
@@ -1930,6 +2089,12 @@ fn layout_node_vm(node: &LayoutTree, core: &RyeOsCore) -> RyeOsLayoutNodeVm {
                 .get(tile_id)
                 .is_some_and(|tile| view_has_transparent_background(core, &tile.view.view_ref));
             RyeOsLayoutNodeVm::Tile {
+                instance_key: core
+                    .workspace
+                    .tiles
+                    .get(tile_id)
+                    .map(|tile| tile.instance_key.clone())
+                    .unwrap_or_else(|| RyeOsViewInstanceKey::workspace_tile(*tile_id)),
                 tile_id: tile_id_text(*tile_id),
                 focused: *tile_id == core.workspace.focused_tile,
                 title,
@@ -2155,7 +2320,7 @@ fn launchable_view_label(view_ref: &str, binding: &ViewBinding) -> String {
 pub(crate) fn unsatisfied_facets(core: &RyeOsCore, binding: &ViewBinding) -> Vec<String> {
     let mut refs: Vec<String> = Vec::new();
     collect_required_facet_refs(&binding.body, &mut refs);
-    if let Some(source) = &binding.source {
+    for source in binding.sources.values() {
         collect_required_facet_refs(&source.params, &mut refs);
     }
     refs.sort();
@@ -2236,7 +2401,10 @@ fn focused_row_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
     if row.raw.is_null() {
         return Vec::new();
     }
-    let activate = binding.selection.as_ref().map(|s| s.activate.as_str());
+    let activate = binding
+        .selection
+        .as_ref()
+        .and_then(|selection| selection.activate.as_deref());
     binding
         .affordances
         .iter()
@@ -2737,6 +2905,34 @@ fn tile_intents(core: &RyeOsCore, tile_id: TileId) -> Vec<RyeOsTileIntentVm> {
 }
 
 pub(crate) fn intent_for_focused_row(core: &RyeOsCore) -> Option<RyeOsUiIntent> {
+    if let Some(instance_key) = focused_view_instance_key(core)
+        && let Some((_view_ref, field)) = field_vm_for_instance(core, &instance_key)
+        && let Some(selected) = field.selected.as_deref()
+    {
+        if let Some(intent) = field
+            .entities
+            .iter()
+            .find(|entity| entity.id == selected)
+            .and_then(|entity| entity.activate_intent.clone())
+        {
+            return Some(intent);
+        }
+        // The terminal has no pointer hit target for connector strokes. When
+        // the selected entity has exactly one actionable adjacent relation,
+        // Enter reaches that same relation intent exposed as a detail button
+        // on the web surface. Multiple actions remain explicit instead of
+        // choosing an arbitrary edge.
+        let mut adjacent = field.relations.iter().filter_map(|relation| {
+            (relation.source_id == selected || relation.target_id == selected)
+                .then(|| relation.activate_intent.clone())
+                .flatten()
+        });
+        if let Some(intent) = adjacent.next()
+            && adjacent.next().is_none()
+        {
+            return Some(intent);
+        }
+    }
     // Feed lens: activation acts on the entry under the point (e.g. enter a
     // forked subthread, inspect an error terminal), not a row.
     if let Some(entry) = focused_timeline_entry(core) {
@@ -2750,6 +2946,20 @@ pub(crate) fn intent_for_focused_row(core: &RyeOsCore) -> Option<RyeOsUiIntent> 
     }
     // Table lens: rows carry the same activation affordance, on a distinct VM.
     focused_selected_table_row(core).and_then(|row| row.intent)
+}
+
+fn focused_view_instance_key(core: &RyeOsCore) -> Option<RyeOsViewInstanceKey> {
+    match core.focus_target() {
+        super::model::RyeOsFocusTarget::WorkspaceTile { tile_id } => core
+            .workspace
+            .tiles
+            .iter()
+            .find(|(id, _)| id.0.to_string() == tile_id)
+            .map(|(_, tile)| tile.instance_key.clone()),
+        super::model::RyeOsFocusTarget::Dock { edge } => {
+            Some(super::model::dock_view_instance_key(edge))
+        }
+    }
 }
 
 /// The row under the point in the focused tile, if the point is on a row. The
@@ -2785,7 +2995,7 @@ fn selected_cursor(core: &RyeOsCore, tile_id: TileId) -> Option<usize> {
     let tile = core.workspace.tiles.get(&tile_id)?;
     match &tile.local {
         ViewLocalState::GenericList { cursor, .. } => Some(*cursor),
-        ViewLocalState::None => None,
+        ViewLocalState::None | ViewLocalState::Field(_) => None,
     }
 }
 
@@ -2795,7 +3005,7 @@ fn selected_collapsed(
 ) -> Option<&std::collections::BTreeSet<usize>> {
     match &core.workspace.tiles.get(&tile_id)?.local {
         ViewLocalState::GenericList { collapsed, .. } => Some(collapsed),
-        ViewLocalState::None => None,
+        ViewLocalState::None | ViewLocalState::Field(_) => None,
     }
 }
 
@@ -2896,29 +3106,51 @@ mod tests {
         }
     }
 
+    fn tile_default_source_key(core: &RyeOsCore, tile_id: TileId) -> String {
+        super::super::source_key::RyeOsSourceInstanceKey::named(
+            core.workspace.tiles[&tile_id].instance_key.clone(),
+            "default",
+        )
+        .encode()
+    }
+
+    fn dock_default_source_key(edge: RyeOsDockEdge) -> String {
+        super::super::source_key::RyeOsSourceInstanceKey::named(
+            super::super::model::dock_view_instance_key(edge),
+            "default",
+        )
+        .encode()
+    }
+
     #[test]
     fn failed_source_renders_error_instead_of_loading_forever() {
         let mut core = RyeOsCore::default();
         let view_ref = "view:test/threads";
-        let source_key = "tile-1";
+        let instance_key = RyeOsViewInstanceKey::workspace_tile(TileId::new(1));
+        let source_key = super::super::source_key::RyeOsSourceInstanceKey::named(
+            instance_key.clone(),
+            "default",
+        )
+        .encode();
         core.views.insert(
             view_ref.to_string(),
             serde_json::from_value(json!({
                 "widget": "rows",
-                "source": {
+                "sources": { "default": {
                     "ref": "service:ui/ryeos-ui/threads/list",
                     "collection": "threads"
-                }
+                } }
             }))
             .expect("view binding"),
         );
         core.data
             .source_errors
-            .insert(source_key.to_string(), "metadata type mismatch".to_string());
+            .insert(source_key, "metadata type mismatch".to_string());
 
         let view = bound_view_vm_keyed(
             &core,
-            source_key,
+            &instance_key,
+            None,
             RowLocalState {
                 cursor: None,
                 collapsed: None,
@@ -3009,7 +3241,7 @@ mod tests {
                 "views": {
                     "view:ryeos/node/status": {
                         "widget": "key_value",
-                        "source": { "ref": "service:node/status" },
+                        "sources": { "default": { "ref": "service:node/status" } },
                         "projections": { "detail": ["version"] }
                     }
                 }
@@ -3017,9 +3249,10 @@ mod tests {
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, crate::ui::model::BrowserViewport::default(), 0);
-        core.data
-            .sources
-            .insert("dock:top".to_string(), json!({ "version": "0.1.0" }));
+        core.data.sources.insert(
+            dock_default_source_key(RyeOsDockEdge::Top),
+            json!({ "version": "0.1.0" }),
+        );
         core.notice(
             "Queued behind active thread · 2 staged inputs.",
             RyeOsTone::Accent,
@@ -3031,6 +3264,7 @@ mod tests {
             .docks
             .top
             .expect("authored top status slot should render");
+        assert_eq!(dock.instance_key.as_str(), "dock:top");
         assert_eq!(dock.edge, RyeOsDockEdge::Top);
         assert_eq!(dock.title, "status");
         assert_eq!(dock.size, 3);
@@ -3260,7 +3494,7 @@ mod tests {
     fn timeline_entries_records_with_no_role_map_are_lines() {
         let binding: super::super::content::ViewBinding = serde_json::from_value(json!({
             "widget": "timeline",
-            "source": { "ref": "service:events/chain_replay", "collection": "events" },
+            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
             "projections": { "default": { "primary": "event_type" } }
         }))
         .unwrap();
@@ -3342,7 +3576,9 @@ mod tests {
         assert_eq!(binding.widget, "table");
         // The watch dashboard sources the operator-scoped UI-ryeos list,
         // active-first (sort: watch), before the limit.
-        let source = binding.source.as_ref().expect("threads list has a source");
+        let source = binding
+            .source("default")
+            .expect("threads list has a default source");
         assert_eq!(source.item_ref, "service:ui/ryeos-ui/threads/list");
         assert_eq!(source.params["limit"], 200);
         assert_eq!(source.params["sort"], "watch");
@@ -3492,8 +3728,11 @@ mod tests {
             Some("selection")
         );
         assert_eq!(
-            section("Summary").source.params["thread_id"],
-            "@facet:selection.thread"
+            binding
+                .source(&section("Summary").source_channel)
+                .expect("section source")
+                .params["thread_id"],
+            "@facet:selection.thread_id"
         );
     }
 
@@ -3544,7 +3783,7 @@ mod tests {
                 "views": {
                     "view:ryeos/threads/list": {
                         "widget": "table",
-                        "source": { "ref": "service:threads/list", "collection": "threads" },
+                        "sources": { "default": { "ref": "service:threads/list", "collection": "threads" } },
                         "projections": {
                             "columns": [
                                 { "label": "thread", "field": "thread_id" },
@@ -3565,7 +3804,7 @@ mod tests {
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        let key = core.workspace.focused_tile.0.to_string();
+        let key = tile_default_source_key(&core, core.workspace.focused_tile);
         core.data.sources.insert(
             key.clone(),
             json!({ "threads": [
@@ -3629,7 +3868,7 @@ mod tests {
                 "views": {
                     "view:ryeos/threads/list": {
                         "widget": "table",
-                        "source": { "ref": "service:ui/ryeos-ui/threads/list", "collection": "threads" },
+                        "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "collection": "threads" } },
                         "projections": { "columns": [ { "label": "thread", "field": "thread_id" } ] },
                         "selection": { "activate": "watch" },
                         "affordances": [
@@ -3648,7 +3887,7 @@ mod tests {
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        let key = core.workspace.focused_tile.0.to_string();
+        let key = tile_default_source_key(&core, core.workspace.focused_tile);
         core.data.sources.insert(
             key,
             json!({ "threads": [ { "thread_id": "T-ab", "chain_root_id": "T-ab" } ] }),
@@ -3689,7 +3928,7 @@ mod tests {
                 "views": {
                     "view:ryeos/chain/timeline": {
                         "widget": "timeline",
-                        "source": { "ref": "service:events/chain_replay", "collection": "events" }
+                        "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } }
                     }
                 }
             })),
@@ -3697,13 +3936,14 @@ mod tests {
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        let key = core.workspace.focused_tile.0.to_string();
+        let tile_key = core.workspace.focused_tile.0.to_string();
+        let key = tile_default_source_key(&core, core.workspace.focused_tile);
         core.data
             .sources
             .insert(key.clone(), json!({ "events": events }));
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::SetTileCursor {
-                tile_id: key,
+                tile_id: tile_key,
                 index: 0,
             },
         });
@@ -3883,7 +4123,7 @@ mod tests {
     fn timeline_entries_unknown_role_degrades_to_line() {
         let binding: super::super::content::ViewBinding = serde_json::from_value(json!({
             "widget": "timeline",
-            "source": { "ref": "service:events/chain_replay", "collection": "events" },
+            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
             "projections": {
                 "event_kinds": { "message": { "primary": "event_type", "role": "unknown" } },
                 "default": { "primary": "event_type" }
@@ -3927,6 +4167,24 @@ mod tests {
     }
 
     #[test]
+    fn workspace_vm_serializes_stable_view_instance_keys() {
+        let mut core = RyeOsCore::default();
+        let tile_id = core
+            .workspace
+            .add_tile(crate::workspace::ViewSpec::bound("view:test/missing"));
+        let vm = build_view_model(&core);
+        let root = vm.workspace.root.expect("mounted center tile");
+        let RyeOsLayoutNodeVm::Tile { instance_key, .. } = root else {
+            panic!("one tile renders as a leaf");
+        };
+        assert_eq!(instance_key.as_str(), format!("tile:{}", tile_id.0));
+        assert_eq!(
+            serde_json::to_value(instance_key).unwrap(),
+            json!(format!("tile:{}", tile_id.0))
+        );
+    }
+
+    #[test]
     fn target_label_override_wins_over_derived_strip() {
         let core = input_session(json!({
             "widget": "text",
@@ -3948,7 +4206,11 @@ mod tests {
             }
         }));
         core.data.sources.insert(
-            crate::ui::content::completion_source_key("view:ryeos/input", "line"),
+            crate::ui::source_key::RyeOsSourceInstanceKey::completion(
+                crate::ui::model::dock_view_instance_key(RyeOsDockEdge::Bottom),
+                "line",
+            )
+            .encode(),
             json!({
                 "commands": [
                     { "invocable": true, "tokens": ["thread", "list"], "description": "List threads" },
@@ -3957,8 +4219,12 @@ mod tests {
             }),
         );
         core.ui.input_buffers.insert(
-            crate::ui::model::InputBufferKey::new("dock:bottom", "view:ryeos/input", "line")
-                .storage_key(),
+            crate::ui::model::InputBufferKey::new(
+                crate::ui::model::dock_view_instance_key(RyeOsDockEdge::Bottom),
+                "view:ryeos/input",
+                "line",
+            )
+            .storage_key(),
             crate::ui::model::RyeOsInputState {
                 text: "/thread ".to_string(),
                 cursor: "/thread ".len(),
@@ -3984,14 +4250,22 @@ mod tests {
             "input": { "id": "line", "submit": "route" }
         }));
         core.data.sources.insert(
-            crate::ui::content::completion_source_key("view:ryeos/input", "line"),
+            crate::ui::source_key::RyeOsSourceInstanceKey::completion(
+                crate::ui::model::dock_view_instance_key(RyeOsDockEdge::Bottom),
+                "line",
+            )
+            .encode(),
             json!({ "commands": [
                 { "invocable": true, "tokens": ["thread", "list"] }
             ] }),
         );
         core.ui.input_buffers.insert(
-            crate::ui::model::InputBufferKey::new("dock:bottom", "view:ryeos/input", "line")
-                .storage_key(),
+            crate::ui::model::InputBufferKey::new(
+                crate::ui::model::dock_view_instance_key(RyeOsDockEdge::Bottom),
+                "view:ryeos/input",
+                "line",
+            )
+            .storage_key(),
             crate::ui::model::RyeOsInputState {
                 text: "/thr".to_string(),
                 cursor: 4,
@@ -4022,15 +4296,23 @@ mod tests {
             }
         }));
         core.data.sources.insert(
-            crate::ui::content::mention_source_key("view:ryeos/input", "line"),
+            crate::ui::source_key::RyeOsSourceInstanceKey::mention(
+                crate::ui::model::dock_view_instance_key(RyeOsDockEdge::Bottom),
+                "line",
+            )
+            .encode(),
             json!({ "threads": [
                 { "thread_id": "T-ab", "item_ref": "directive:ops/base" },
                 { "thread_id": "T-cd", "item_ref": "directive:demo/chat" }
             ]}),
         );
         core.ui.input_buffers.insert(
-            crate::ui::model::InputBufferKey::new("dock:bottom", "view:ryeos/input", "line")
-                .storage_key(),
+            crate::ui::model::InputBufferKey::new(
+                crate::ui::model::dock_view_instance_key(RyeOsDockEdge::Bottom),
+                "view:ryeos/input",
+                "line",
+            )
+            .storage_key(),
             crate::ui::model::RyeOsInputState {
                 text: "ping @directive".to_string(),
                 cursor: "ping @directive".len(),

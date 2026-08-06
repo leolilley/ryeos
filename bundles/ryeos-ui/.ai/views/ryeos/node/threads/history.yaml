@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-16T01:27:49Z:f512ff22cc72ac4e8d0bb04697b9b2c54f1103d795b5b9bef1c7abe47c41691f:z66XVKpA3Tml5t7zvNxQ1wxX+VSqGiaCHj/0sl4nh1e8czKdw35JhjqqmOm9KAb7zXzblHdv1Agl1TaCtEm5BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:25Z:9be880dd2e156334f6d6d8b0fed109344c19103d9f9edb7ed26a1e41769a9afb:iYfOQikCB+06NYtUSRMcJ/6WBMaUZ3o7pg02K0NpiY6MlffVJfMzHlUiU1hgOlfvXmWOuet/fYpSnBfccdWADw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-threads-history
 title: Node Threads
 version: "1.0.0"
@@ -7,12 +7,13 @@ description: >-
   active/status/kind/source filter instead of a separate active-only view.
 
 widget: table
-source:
-  ref: service:ui/ryeos-ui/threads/list
-  params:
-    limit: 200
-    sort: watch
-  collection: threads
+sources:
+  default:
+    ref: service:ui/ryeos-ui/threads/list
+    params:
+      limit: 200
+      sort: watch
+    collection: threads
 projections:
   columns:
     - label: thread
@@ -101,7 +102,7 @@ affordances:
       plane: ui
       facet: selection
       value:
-        thread: "{record.thread_id}"
+        thread_id: "{record.thread_id}"
       open_view: view:ryeos/threads/detail
 input:
   id: filter

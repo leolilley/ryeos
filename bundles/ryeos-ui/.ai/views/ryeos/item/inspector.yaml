@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-09T01:16:03Z:efd5d19815c21480a034f5c71e9a5e001b6b42afdb6f4acef47fd8a5d2828440:HInISK1bAmRcd2xuu9QFdcUDSgsQBB0NiB7JB/YhAQwiMf6bJ2g6JTmmaiVpJgB0TZRwhzJXNf/zsRxw7tp1Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:25Z:dedde31cfcd45ba22ea5c6febb3d6557b4522014bdb4396e37ea9b4e62020202:hzbrQD9ihFxB+591eptxvB5RXJHQwe4NFvQREkp9Dudl9I1URNx+qoHW751JmnI8sN+HWkJu7NNpiMC34pn3Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: item-inspector
 version: "1.0.0"
 description: Key-value inspection of the selection — an item (provenance first), or an inspected summary (an error terminal's full event)
@@ -9,13 +9,14 @@ widget: key_value
 # present it renders directly (no round trip); otherwise the view falls back to
 # the item-inspect fetch below against `selection.item`.
 facet: selection.summary
-source:
-  ref: service:ui/ryeos-ui/item/inspect
-  params:
-    canonical_ref: "@facet:selection.item"
-    include_raw: false
-    include_effective: true
-    project_path: ""
+sources:
+  default:
+    ref: service:ui/ryeos-ui/item/inspect
+    params:
+      canonical_ref: "@facet:selection.item"
+      include_raw: false
+      include_effective: true
+      project_path: ""
 projections:
   detail:
     - canonical_ref

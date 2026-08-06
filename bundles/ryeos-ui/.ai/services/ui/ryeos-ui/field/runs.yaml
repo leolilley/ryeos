@@ -1,0 +1,9 @@
+# ryeos:signed:2026-08-04T09:35:28Z:5ccdf379505c504726888d040bfa428addb623aece808b86b8e741f3b665fb0c:QQK6D1ekcFuVgb+3yoNvOACrn//cxzQbzbsAX9u/gJSyp2Xv9DX/A+q0mvmRkUo2q+h8OADlE9CEGPTrGi9DDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/field/runs
+version: "1.0.0"
+description: Returns bounded project, item, definition, and opaque-facet scoped run-summary facts.
+endpoint: ui.ryeos.field.runs
+ui_read_only: true
+record_thread: false
+availability: daemon_only

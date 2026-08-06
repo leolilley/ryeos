@@ -20,15 +20,15 @@ impl RyeOsCore {
         // down may now point past the shortened rows — which would make Enter
         // (activate row) a no-op. Reset the owning tile's cursor to the top so
         // the first narrowed row is selected and openable.
-        if let Some(tile_id) = self
-            .workspace
-            .tile_ids()
-            .into_iter()
-            .find(|id| id.0.to_string() == key.view_instance_id)
-        {
+        if let Some(tile_id) = self.workspace.tile_ids().into_iter().find(|id| {
+            self.workspace
+                .tiles
+                .get(id)
+                .is_some_and(|tile| tile.instance_key == key.view_instance_key)
+        }) {
             self.set_tile_cursor(tile_id, 0);
         }
-        self.emit_fetch_source_keyed(key.view_instance_id.clone(), &view_ref)
+        self.emit_fetch_source_for_instance(key.view_instance_key.clone(), &view_ref)
             .into_iter()
             .collect()
     }
@@ -182,19 +182,30 @@ impl RyeOsCore {
     /// declares `refresh.on_facet: <key>` or whose source params
     /// reference the facet explicitly.
     pub fn effects_for_facet(&mut self, facet: &str) -> Vec<RyeOsEffect> {
-        let binding_subscribes = |binding: &super::content::ViewBinding| {
-            binding.refresh.get("on_facet").and_then(|v| v.as_str()) == Some(facet)
-                || binding
-                    .source
-                    .iter()
-                    .chain(binding.sections.iter().map(|section| &section.source))
-                    .any(|source| {
-                        serde_json::to_string(&source.params)
+        let subscribed_channels = |binding: &super::content::ViewBinding| {
+            binding
+                .sources
+                .iter()
+                .filter(|(_, source)| {
+                    let refresh = if source.refresh.is_null()
+                        || source
+                            .refresh
+                            .as_object()
+                            .is_some_and(|value| value.is_empty())
+                    {
+                        &binding.refresh
+                    } else {
+                        &source.refresh
+                    };
+                    refresh.get("on_facet").and_then(|v| v.as_str()) == Some(facet)
+                        || serde_json::to_string(&source.params)
                             .unwrap_or_default()
                             .contains(&format!("@facet:{facet}"))
-                    })
+                })
+                .map(|(channel, _)| channel.clone())
+                .collect::<Vec<_>>()
         };
-        let mut targets: Vec<(String, String)> = self
+        let mut targets: Vec<(crate::ids::RyeOsViewInstanceKey, String, Vec<String>)> = self
             .workspace
             .tile_ids()
             .into_iter()
@@ -202,22 +213,35 @@ impl RyeOsCore {
                 let tile = self.workspace.tiles.get(&tile_id)?;
                 let view_ref = &tile.view.view_ref;
                 let binding = self.views.get(view_ref)?;
-                binding_subscribes(binding).then(|| (tile_id.0.to_string(), view_ref.clone()))
+                let channels = subscribed_channels(binding);
+                (!channels.is_empty())
+                    .then(|| (tile.instance_key.clone(), view_ref.clone(), channels))
             })
             .collect();
-        targets.extend(
-            self.visible_dock_views()
-                .into_iter()
-                .filter(|(_, view_ref)| self.views.get(view_ref).is_some_and(&binding_subscribes)),
-        );
+        targets.extend(self.visible_dock_views().into_iter().filter_map(
+            |(instance_key, view_ref)| {
+                let channels = self
+                    .views
+                    .get(&view_ref)
+                    .map(&subscribed_channels)
+                    .unwrap_or_default();
+                (!channels.is_empty()).then_some((instance_key, view_ref, channels))
+            },
+        ));
         targets
             .into_iter()
-            .flat_map(|(source_key, view_ref)| {
+            .flat_map(|(instance_key, view_ref, channels)| {
                 // A facet write means the SUBJECT changed (a new selection,
-                // a new route). Fence the old source before resolving the new
-                // parameters; if they resolve to null, the view stays empty.
-                self.invalidate_view_sources(&source_key, &view_ref);
-                self.emit_fetch_source_keyed(source_key, &view_ref)
+                // a new route). Fence only subscribed named channels before
+                // resolving their new parameters; unrelated evidence stays
+                // mounted and keeps its accepted revision.
+                channels
+                    .into_iter()
+                    .flat_map(|channel| {
+                        self.clear_field_expansions_for_channel(&instance_key, &channel);
+                        self.refresh_source_channel(instance_key.clone(), &view_ref, &channel)
+                    })
+                    .collect::<Vec<_>>()
             })
             .collect()
     }
@@ -288,7 +312,7 @@ mod tests {
             "view:test/list",
             serde_json::json!({
                 "widget": "rows",
-                "source": { "ref": "service:test/list", "params": {}, "collection": "rows" },
+                "sources": { "default": { "ref": "service:test/list", "params": {}, "collection": "rows" } },
                 "affordances": [{
                     "id": "select-item",
                     "invoke": {
@@ -304,19 +328,20 @@ mod tests {
             "view:test/inspector",
             serde_json::json!({
                 "widget": "key_value",
-                "source": {
+                "sources": { "default": {
                     "ref": "service:test/inspect",
                     "params": { "canonical_ref": "@facet:selection.item" }
-                }
+                } }
             }),
         );
-        let tile_id = core
-            .workspace
-            .add_tile(ViewSpec {
-                view_ref: "view:test/inspector".to_string(),
-            })
-            .0
-            .to_string();
+        let tile_id = core.workspace.add_tile(ViewSpec {
+            view_ref: "view:test/inspector".to_string(),
+        });
+        let source_key = crate::ui::source_key::RyeOsSourceInstanceKey::named(
+            core.workspace.tiles[&tile_id].instance_key.clone(),
+            "default",
+        )
+        .encode();
 
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
@@ -333,7 +358,7 @@ mod tests {
         assert!(matches!(
             effects.first().map(|effect| &effect.kind),
             Some(RyeOsEffectKind::FetchSource { tile_id: fetched_tile, source_ref, params })
-                if fetched_tile == &tile_id
+                if fetched_tile == &source_key
                     && source_ref == "service:test/inspect"
                     && params["canonical_ref"] == "tool:demo/run"
         ));
@@ -349,7 +374,7 @@ mod tests {
             "view:ryeos/threads/list",
             serde_json::json!({
                 "widget": "table",
-                "source": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "threads" },
+                "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "threads" } },
                 "affordances": [{
                     "id": "watch",
                     "invoke": {
@@ -366,11 +391,11 @@ mod tests {
             "view:ryeos/thread/transcript",
             serde_json::json!({
                 "widget": "timeline",
-                "source": {
+                "sources": { "default": {
                     "ref": "service:events/chain_replay",
                     "params": { "chain_root_id": "@facet:input.route.chain_root" },
                     "collection": "events"
-                }
+                } }
             }),
         );
 
@@ -420,7 +445,7 @@ mod tests {
             "view:ryeos/threads/list",
             serde_json::json!({
                 "widget": "table",
-                "source": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "threads" },
+                "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "threads" } },
                 "affordances": [{
                     "id": "cancel",
                     "invoke": {
@@ -471,11 +496,11 @@ mod tests {
             "view:ryeos/thread/transcript",
             serde_json::json!({
                 "widget": "timeline",
-                "source": {
+                "sources": { "default": {
                     "ref": "service:events/chain_replay",
                     "params": { "chain_root_id": "@facet:input.route.chain_root" },
                     "collection": "events"
-                }
+                } }
             }),
         );
         // A pre-existing route field must survive the merge.
@@ -597,11 +622,11 @@ mod tests {
             "view:ryeos/thread/transcript",
             serde_json::json!({
                 "widget": "timeline",
-                "source": {
+                "sources": { "default": {
                     "ref": "service:events/chain_replay",
                     "params": { "chain_root_id": "@facet:input.route.chain_root" },
                     "collection": "events"
-                }
+                } }
             }),
         );
         // On the game braid (chain_root A).
@@ -670,11 +695,11 @@ mod tests {
             "view:ryeos/thread/transcript",
             serde_json::json!({
                 "widget": "timeline",
-                "source": {
+                "sources": { "default": {
                     "ref": "service:events/chain_replay",
                     "params": { "chain_root_id": "@facet:input.route.chain_root" },
                     "collection": "events"
-                }
+                } }
             }),
         );
         // On the parent braid (chain_root P).
@@ -733,7 +758,7 @@ mod tests {
             "view:test/threads",
             serde_json::json!({
                 "widget": "rows",
-                "source": { "ref": "service:test/threads", "params": {}, "collection": "rows" },
+                "sources": { "default": { "ref": "service:test/threads", "params": {}, "collection": "rows" } },
                 "affordances": [{
                     "id": "cancel",
                     "invoke": {
@@ -782,7 +807,7 @@ mod tests {
             "view:test/threads",
             serde_json::json!({
                 "widget": "rows",
-                "source": { "ref": "service:test/threads", "params": {}, "collection": "rows" },
+                "sources": { "default": { "ref": "service:test/threads", "params": {}, "collection": "rows" } },
                 "affordances": [{
                     "id": "aim-input",
                     "invoke": {
@@ -897,12 +922,16 @@ mod tests {
             "view:ryeos/threads/list",
             serde_json::json!({
                 "widget": "rows",
-                "source": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "rows" },
+                "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "rows" } },
                 "projections": { "primary": "thread_id", "meta": "item_ref" }
             }),
         );
         core.data.sources.insert(
-            "dock:left".to_string(),
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(
+                crate::ui::model::dock_view_instance_key(crate::ui::model::RyeOsDockEdge::Left),
+                "default",
+            )
+            .encode(),
             serde_json::json!({
                 "rows": [{
                     "thread_id": "T-running",
@@ -934,30 +963,39 @@ mod tests {
             "view:ryeos/threads/list",
             serde_json::json!({
                 "widget": "sections",
+                "sources": {
+                    "threads": { "ref": "service:ui/ryeos-ui/threads/list" },
+                    "bundles": { "ref": "service:ui/ryeos-ui/items/list" }
+                },
                 "sections": [
                     {
                         "title": "Threads",
-                        "source": { "ref": "service:ui/ryeos-ui/threads/list", "collection": "rows" },
+                        "source_channel": "threads",
+                        "collection": "rows",
                         "projection": { "primary": "thread_id", "meta": "status" }
                     },
                     {
                         "title": "Bundles",
-                        "source": { "ref": "service:ui/ryeos-ui/items/list", "collection": "rows" },
+                        "source_channel": "bundles",
+                        "collection": "rows",
                         "projection": { "primary": "name", "meta": "version" }
                     }
                 ]
             }),
         );
         // Each section's response lands under its own per-section key.
+        let instance_key =
+            crate::ui::model::dock_view_instance_key(crate::ui::model::RyeOsDockEdge::Left);
         core.data.sources.insert(
-            crate::ui::content::section_source_key("dock:left", 0),
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), "threads")
+                .encode(),
             serde_json::json!({ "rows": [
                 { "thread_id": "T-ab", "status": "running" },
                 { "thread_id": "T-cd", "status": "done" }
             ]}),
         );
         core.data.sources.insert(
-            crate::ui::content::section_source_key("dock:left", 1),
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key, "bundles").encode(),
             serde_json::json!({ "rows": [ { "name": "ryeos", "version": "v1.0.0" } ]}),
         );
 
@@ -990,7 +1028,7 @@ mod tests {
                 "widget": "sections",
                 "sections": [{
                     "title": "Threads",
-                    "source": { "ref": "service:ui/ryeos-ui/threads/list", "collection": "rows" },
+                    "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "collection": "rows" } },
                     "projection": { "primary": "thread_id" }
                 }]
             }),

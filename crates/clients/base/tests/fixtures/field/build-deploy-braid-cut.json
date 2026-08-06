@@ -1,0 +1,31 @@
+{
+  "schema_version": "ryeos.ui.field.facts.v1",
+  "source": "execution",
+  "subject": { "kind": "thread", "id": "T-build-root", "definition_ref": "graph:example/build-deploy", "definition_hash": "sha256:def-build-deploy-v1" },
+  "revision": "event:build-root:12:hash-12",
+  "cursor": {
+    "mode": "braid_cut",
+    "anchor": { "chain_root_id": "T-build-root", "chain_seq": 12, "event_hash": "hash-12" },
+    "through_chain_seq": 12,
+    "outside_cut": ["T-deploy-follow", "T-build-continuation"]
+  },
+  "replay": {
+    "capability": "adjacent_event_refs",
+    "previous": { "chain_root_id": "T-build-root", "chain_seq": 11, "event_hash": "hash-11" },
+    "next": { "chain_root_id": "T-build-root", "chain_seq": 13, "event_hash": "hash-13" },
+    "live_head": { "chain_root_id": "T-build-root", "chain_seq": 18, "event_hash": "hash-18" }
+  },
+  "truncated": false,
+  "entities": [
+    { "id": "thread:T-build-root", "kind": "thread", "label": "build root", "status": "running", "attributes": { "thread": { "id": "T-build-root", "facets": { "environment": "staging" } } }, "provenance": { "source_ref": "service:fixture/field/execution", "source_revision": "event:build-root:12:hash-12", "evidence": [{ "kind": "thread", "thread_id": "T-build-root" }] } },
+    { "id": "thread:T-deploy-follow", "kind": "thread", "label": "deploy follow", "status": "outside_cut", "attributes": { "thread": { "id": "T-deploy-follow", "facets": { "environment": "staging" } } }, "provenance": { "source_ref": "service:fixture/field/execution", "source_revision": "event:build-root:12:hash-12", "evidence": [{ "kind": "event", "chain_root_id": "T-build-root", "chain_seq": 12, "event_hash": "hash-12" }] } },
+    { "id": "thread:T-build-continuation", "kind": "thread", "label": "build continuation", "status": "outside_cut", "attributes": { "thread": { "id": "T-build-continuation", "facets": { "environment": "staging" } } }, "provenance": { "source_ref": "service:fixture/field/execution", "source_revision": "event:build-root:12:hash-12", "evidence": [{ "kind": "event", "chain_root_id": "T-build-root", "chain_seq": 15, "event_hash": "hash-15" }] } }
+  ],
+  "relations": [
+    { "id": "follow:root:deploy", "kind": "followed", "source_id": "thread:T-build-root", "target_id": "thread:T-deploy-follow", "directed": true, "attributes": {}, "provenance": { "source_ref": "service:fixture/field/execution", "source_revision": "event:build-root:12:hash-12", "evidence": [{ "kind": "event", "chain_root_id": "T-build-root", "chain_seq": 12, "event_hash": "hash-12" }] } }
+  ],
+  "previews": [],
+  "metrics": [],
+  "expansions": [],
+  "warnings": [{ "kind": "outside_cut", "message": "Two returned chains are not claimed at this braid frontier." }]
+}

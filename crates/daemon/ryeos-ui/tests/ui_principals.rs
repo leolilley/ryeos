@@ -96,6 +96,7 @@ async fn ryeos_dimension_exposes_session_user_principal() {
 async fn launch_mint_rejects_invalid_user_principal_as_bad_request() {
     let (_tmp, state) = build_test_state();
     let req = ryeos_ui::handlers::ui_launch_mint::Request {
+        ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.to_string(),
         surface_ref: "surface:ryeos/ui/base".into(),
         project_path: None,
         read_only: false,
@@ -118,6 +119,7 @@ async fn launch_mint_rejects_invalid_user_principal_as_bad_request() {
 async fn launch_mint_rejects_mismatched_user_principal() {
     let (_tmp, state) = build_test_state();
     let req = ryeos_ui::handlers::ui_launch_mint::Request {
+        ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.to_string(),
         surface_ref: "surface:ryeos/ui/base".into(),
         project_path: None,
         read_only: false,

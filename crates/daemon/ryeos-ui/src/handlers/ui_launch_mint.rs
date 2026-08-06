@@ -22,6 +22,7 @@ use crate::state::get_ui_state;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
+    pub ui_binding_contract_revision: String,
     pub surface_ref: String,
     #[serde(default)]
     pub project_path: Option<String>,
@@ -42,12 +43,15 @@ fn launch_session_caps() -> Vec<String> {
 #[derive(Debug, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Response {
+    pub ui_binding_contract_revision: &'static str,
     pub token: String,
     pub launch_url: String,
     pub session_id: String,
 }
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
+    require_current_binding_contract(&req.ui_binding_contract_revision)?;
+
     // Require a verified signed caller. Hosted principal launches bind
     // principal storage to this caller's fingerprint.
     if !ctx.is_present() {
@@ -89,12 +93,24 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let launch_url = format!("http://{bind}{launch_path}");
 
     let response = Response {
+        ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION,
         token,
         launch_url,
         session_id,
     };
 
     serde_json::to_value(response).map_err(Into::into)
+}
+
+fn require_current_binding_contract(advertised: &str) -> std::result::Result<(), HandlerError> {
+    if advertised != crate::UI_BINDING_CONTRACT_REVISION {
+        return Err(HandlerError::BadRequest(format!(
+            "UI binding contract mismatch: launcher advertised '{}', daemon requires '{}'",
+            advertised,
+            crate::UI_BINDING_CONTRACT_REVISION
+        )));
+    }
+    Ok(())
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -210,11 +226,32 @@ mod tests {
     #[test]
     fn launch_mint_request_defaults_to_read_only() {
         let req: Request = serde_json::from_value(serde_json::json!({
+            "ui_binding_contract_revision": crate::UI_BINDING_CONTRACT_REVISION,
             "surface_ref": "surface:ryeos/ui/base"
         }))
         .unwrap();
 
         assert!(req.read_only);
+    }
+
+    #[test]
+    fn launch_mint_requires_the_exact_binding_contract_revision() {
+        let missing = serde_json::from_value::<Request>(serde_json::json!({
+            "surface_ref": "surface:ryeos/ui/base"
+        }));
+        assert!(missing.is_err(), "old launchers must fail request decoding");
+
+        let current: Request = serde_json::from_value(serde_json::json!({
+            "ui_binding_contract_revision": crate::UI_BINDING_CONTRACT_REVISION,
+            "surface_ref": "surface:ryeos/ui/base"
+        }))
+        .unwrap();
+        assert_eq!(
+            current.ui_binding_contract_revision,
+            crate::UI_BINDING_CONTRACT_REVISION
+        );
+        assert!(require_current_binding_contract("ryeos.ui.binding.v1").is_err());
+        assert!(require_current_binding_contract(crate::UI_BINDING_CONTRACT_REVISION).is_ok());
     }
 
     #[test]

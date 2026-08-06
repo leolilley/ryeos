@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-16T01:27:49Z:28f028f635bf8f56663ebaab13d8f3d3a4e154fa3562325254acf7349eff87a8:/9DNuUI6GF08dA3SrMkZOtTyj2yq6oQkyrbvqK4jn/t2r9qQN8VRUkg/lBMTWRpECHWQLe6sVCRIMY7mN7nlDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:25Z:4e5e4de0bbefe3d9a2c98db8633e4e4061f470b6a560aea6cf4f6f0a59ad5420:URkJeezP1LsFsW7yukatBReNRpkW1/Zsu02Gxy22FjoigbyVZG+tigNEPuAKE0SSr5DWNjbEVvitcf6EitBZBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-threads
 title: Project Threads
 version: "1.0.0"
@@ -9,14 +9,15 @@ description: >-
   active-only views.
 
 widget: table
-source:
-  ref: service:ui/ryeos-ui/threads/list
-  params:
-    project: current
-    project_path: ""
-    limit: 200
-    sort: watch
-  collection: threads
+sources:
+  default:
+    ref: service:ui/ryeos-ui/threads/list
+    params:
+      project: current
+      project_path: ""
+      limit: 200
+      sort: watch
+    collection: threads
 projections:
   columns:
     - label: thread
@@ -103,7 +104,7 @@ affordances:
       plane: ui
       facet: selection
       value:
-        thread: "{record.thread_id}"
+        thread_id: "{record.thread_id}"
       open_view: view:ryeos/threads/detail
   - id: cancel
     label: Cancel

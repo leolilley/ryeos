@@ -494,6 +494,25 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
+    async fn publish_state_anchor(
+        &self,
+        thread_id: &str,
+        request: Value,
+    ) -> Result<Value, CallbackError> {
+        let mut params = request;
+        let Some(object) = params.as_object_mut() else {
+            return Err(CallbackError::Transport(anyhow::anyhow!(
+                "publish_state_anchor request must be an object"
+            )));
+        };
+        object.insert("thread_id".to_string(), json!(thread_id));
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.publish_state_anchor", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
     async fn get_facets(&self, thread_id: &str) -> Result<Value, CallbackError> {
         let mut params = json!({"thread_id": thread_id});
         self.inject_callback_token(&mut params);
@@ -581,6 +600,7 @@ mod tests {
             },
             hook_id: "audit".to_string(),
             layer: crate::hooks_loader::HookLayer::Infrastructure,
+            result_mode: crate::hooks_loader::HookResultMode::Observation,
             context_hash: "sha256-context".to_string(),
         };
         let request = DispatchActionRequest {

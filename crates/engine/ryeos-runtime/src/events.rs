@@ -78,6 +78,53 @@ pub const MAX_RUNTIME_EVENT_PAYLOAD_BYTES: usize = 256 * 1024;
 pub const MAX_RUNTIME_EVENT_BATCH_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_RUNTIME_EVENT_BATCH_ITEMS: usize = 64;
 
+pub const HOOK_OBSERVATION_SCHEMA: &str = "ryeos.hook_observation.v1";
+pub const HOOK_FAILURE_SCHEMA: &str = "ryeos.hook_failure.v1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookEvidenceDescriptor {
+    pub id: String,
+    pub layer: crate::hooks_loader::HookLayer,
+    pub event: String,
+    pub occurrence: crate::callback::HookDispatchOccurrence,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookObservationRecordedPayload {
+    pub schema_version: String,
+    pub observation_id: String,
+    pub dispatch_key: String,
+    pub occurrence_thread_id: String,
+    pub hook: HookEvidenceDescriptor,
+    pub context_hash: String,
+    pub response_hash: String,
+    pub observation: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookFailureClass {
+    Child,
+    ChildIntegrity,
+    DispatchEnvelopeIntegrity,
+    ObservationInvalid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookFailedPayload {
+    pub schema_version: String,
+    pub failure_id: String,
+    pub dispatch_key: String,
+    pub occurrence_thread_id: String,
+    pub hook: HookEvidenceDescriptor,
+    pub context_hash: String,
+    pub response_hash: String,
+    pub failure_class: HookFailureClass,
+}
+
 /// Versioned payload used only when a rendered `cognition_in` stimulus cannot
 /// fit in one runtime event. The complete set is appended atomically and folds
 /// back into one provider message; individual chunks are never provider turns.
@@ -461,6 +508,10 @@ pub enum RuntimeEventType {
     /// runtime-owned namespaced `kind`; shared layers do not interpret it.
     Observation,
 
+    // ── Daemon-authored hook evidence ──────────────────────────
+    HookObservationRecorded,
+    HookFailed,
+
     // ── Audit / artifact ────────────────────────────────────────
     ArtifactPublished,
     /// Slim launch-time resolution digest (extends-chain refs + content
@@ -545,6 +596,8 @@ impl RuntimeEventType {
             Self::StreamSnapshot => wire::STREAM_SNAPSHOT,
             Self::StreamClosed => wire::STREAM_CLOSED,
             Self::Observation => wire::OBSERVATION,
+            Self::HookObservationRecorded => wire::HOOK_OBSERVATION_RECORDED,
+            Self::HookFailed => wire::HOOK_FAILED,
             Self::ArtifactPublished => wire::ARTIFACT_PUBLISHED,
             Self::AsLaunchedResolution => wire::AS_LAUNCHED_RESOLUTION,
             Self::AsLaunchedRefBindings => wire::AS_LAUNCHED_REF_BINDINGS,
@@ -599,6 +652,8 @@ impl RuntimeEventType {
             wire::STREAM_SNAPSHOT => Ok(Self::StreamSnapshot),
             wire::STREAM_CLOSED => Ok(Self::StreamClosed),
             wire::OBSERVATION => Ok(Self::Observation),
+            wire::HOOK_OBSERVATION_RECORDED => Ok(Self::HookObservationRecorded),
+            wire::HOOK_FAILED => Ok(Self::HookFailed),
             wire::ARTIFACT_PUBLISHED => Ok(Self::ArtifactPublished),
             wire::AS_LAUNCHED_RESOLUTION => Ok(Self::AsLaunchedResolution),
             wire::AS_LAUNCHED_REF_BINDINGS => Ok(Self::AsLaunchedRefBindings),
@@ -701,6 +756,8 @@ impl RuntimeEventType {
             | Self::CommandCompleted
             | Self::StreamOpened
             | Self::StreamClosed
+            | Self::HookObservationRecorded
+            | Self::HookFailed
             | Self::ArtifactPublished
             | Self::AsLaunchedResolution
             | Self::AsLaunchedRefBindings

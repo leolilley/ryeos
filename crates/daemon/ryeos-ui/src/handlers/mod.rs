@@ -3,6 +3,11 @@
 use ryeos_api::registry::ServiceDescriptor;
 
 pub mod ui_dimension;
+pub mod ui_field;
+pub mod ui_field_definition;
+pub mod ui_field_execution;
+pub mod ui_field_project;
+pub mod ui_field_runs;
 pub mod ui_files;
 pub mod ui_gc;
 pub mod ui_graph_topology;
@@ -27,6 +32,10 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_intents_apply::DESCRIPTOR,
     ui_invocations_dispatch::DESCRIPTOR,
     ui_graph_topology::DESCRIPTOR,
+    ui_field_definition::DESCRIPTOR,
+    ui_field_execution::DESCRIPTOR,
+    ui_field_project::DESCRIPTOR,
+    ui_field_runs::DESCRIPTOR,
     ui_dimension::DESCRIPTOR,
     ui_items::ITEMS_LIST_DESCRIPTOR,
     ui_items::ITEM_INSPECT_DESCRIPTOR,

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-26T23:29:56Z:637bc41da49d57a491defb0f30721d6dfb46185fec1b7d0eb988ff8934bb8298:/YyhbZLKOF8ii6D0bH54Yds1o64bpCJ/sVTyQdX+4KMdBMNg81nDX+DUWyWEn6Mi2dD5Ewhga0LO8vkTF92xAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-04T08:52:12Z:02f20547012c801759541916ce9aefb632859dc02736faebe1f4b561d27a4cf8:Ntja3qkolvAkpTtH5Wx+UIaPc2CLFrdTNY0K/wKnmdBTdKGXX2yp9R3BPMMDjZMfTp2SSOrOcpmcnR9eOKTHDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, graphs, dag, state-machine]
 version: "1.0.0"
@@ -199,6 +199,7 @@ config:
   hooks:
     - id: announce_done
       event: graph_completed
+      result: discard
       condition: 'status == "completed"'
       action: { item_id: tool:ops/notify, params: { text: "graph ${graph_id} done" } }
 ```
@@ -207,6 +208,10 @@ Fire points are `graph_started`, `graph_step_completed` (after every node,
 with typed `ok`, `error`, or `retry` status), and `graph_completed`.
 Each event exposes an exact root schema; unknown hook events and references to
 roots outside that event fail graph loading.
+Every hook declares its successful leaf policy: `discard`, `control`, or
+`observation`. Graph hooks use `discard` for side-effect observers or
+`observation` for a bounded namespaced `{kind, payload}` record; their return
+value never redirects the graph.
 Hooks are **observers**: a hook action is a real dispatch (its `effective_caps`
 are enforced, its cost accrues to the run, it shows in the braid) but it cannot
 redirect the walk — routing stays the walker's job. Ordinary condition/action

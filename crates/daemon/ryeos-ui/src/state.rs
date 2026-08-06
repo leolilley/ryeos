@@ -13,6 +13,7 @@ use crate::session_bus::SessionBus;
 pub struct UiState {
     pub browser_sessions: Arc<BrowserSessionStore>,
     pub session_bus: Arc<SessionBus>,
+    field_token_key: Arc<[u8; 32]>,
 }
 
 impl Default for UiState {
@@ -26,7 +27,24 @@ impl UiState {
         Self {
             browser_sessions: Arc::new(BrowserSessionStore::new()),
             session_bus: Arc::new(SessionBus::new()),
+            field_token_key: Arc::new(rand::random()),
         }
+    }
+
+    pub(crate) fn sign_field_token(&self, message: &[u8]) -> String {
+        lillux::crypto::hmac_sha256_hex(self.field_token_key.as_ref(), message)
+    }
+
+    pub(crate) fn verify_field_token_mac(&self, message: &[u8], supplied: &str) -> bool {
+        let expected = self.sign_field_token(message);
+        if expected.len() != supplied.len() {
+            return false;
+        }
+        expected
+            .bytes()
+            .zip(supplied.bytes())
+            .fold(0u8, |different, (left, right)| different | (left ^ right))
+            == 0
     }
 }
 

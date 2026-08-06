@@ -322,10 +322,20 @@ fn confirm_recorded_service_terminal(
     if snapshot.outcome_code != params.outcome_code {
         bail!("authoritative terminal outcome_code differs");
     }
-    if snapshot.result != params.result {
+    if !ryeos_app::thread_lifecycle::recorded_service_terminal_json_equal(
+        snapshot.result.as_ref(),
+        params.result.as_ref(),
+    )
+    .context("compare authoritative terminal result canonical JSON")?
+    {
         bail!("authoritative terminal result differs");
     }
-    if snapshot.error != params.error {
+    if !ryeos_app::thread_lifecycle::recorded_service_terminal_json_equal(
+        snapshot.error.as_ref(),
+        params.error.as_ref(),
+    )
+    .context("compare authoritative terminal error canonical JSON")?
+    {
         bail!("authoritative terminal error differs");
     }
     if snapshot.result_project_snapshot_hash.is_some() {

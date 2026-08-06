@@ -5,10 +5,10 @@ use std::pin::Pin;
 use crate::callback::{CallbackError, HookDispatchIdentity, HookDispatchOccurrence};
 use crate::envelope::{
     COST_BASIS_ROLLUP, HOOK_INTEGRITY_FAILURE_CODE, HookDispatchFailureKind, HookDispatchOutput,
-    RuntimeCost,
+    RuntimeCost, normalize_hook_observation, validate_hook_observation_action,
 };
 use crate::expression::{EvaluationLimits, EvaluationSession};
-use crate::hooks_loader::CompiledHook;
+use crate::hooks_loader::{CompiledHook, HookResultMode};
 
 pub type HookDispatcher = Box<
     dyn Fn(
@@ -131,11 +131,24 @@ pub async fn run_hooks(
                 &aggregate_cost,
             )
         })?;
+        if hook.result_mode() == HookResultMode::Observation {
+            validate_hook_observation_action(&rendered).map_err(|error| {
+                HookRunError::new(
+                    HookRunErrorKind::Evaluation,
+                    format!(
+                        "hook[{idx}] (id={}): observation action rejected: {error}",
+                        hook.id()
+                    ),
+                    &aggregate_cost,
+                )
+            })?;
+        }
 
         let identity = HookDispatchIdentity {
             occurrence: occurrence.clone(),
             hook_id: hook.id().to_string(),
             layer: hook.layer(),
+            result_mode: hook.result_mode(),
             context_hash: context_hash.clone(),
         };
         let dispatched = match dispatcher(rendered, project_path.to_string(), identity).await {
@@ -188,12 +201,25 @@ pub async fn run_hooks(
             ));
         }
 
-        if hook.layer().is_observer_only() {
-            continue;
-        }
-
-        if control_result.is_none() && dispatched.value.get("action").is_some() {
-            control_result = Some(dispatched.value);
+        match hook.result_mode() {
+            HookResultMode::Discard => {}
+            HookResultMode::Control => {
+                if control_result.is_none() && dispatched.value.get("action").is_some() {
+                    control_result = Some(dispatched.value);
+                }
+            }
+            HookResultMode::Observation => {
+                normalize_hook_observation(dispatched.value).map_err(|error| {
+                    HookRunError::new(
+                        HookRunErrorKind::Integrity,
+                        format!(
+                            "hook[{idx}] (id={}): observation result rejected: {error}",
+                            hook.id()
+                        ),
+                        &aggregate_cost,
+                    )
+                })?;
+            }
         }
     }
 
@@ -208,7 +234,8 @@ mod tests {
     use super::*;
     use crate::envelope::HookDispatchOutput;
     use crate::hooks_loader::{
-        CompiledHook, HookContextSchema, HookDefinition, HookLayer, HookSources, compile_hooks,
+        CompiledHook, HookContextSchema, HookDefinition, HookLayer, HookResultMode, HookSources,
+        compile_hooks,
     };
     use crate::{CompilationLimits, ExpressionCondition};
     use serde_json::json;
@@ -217,6 +244,7 @@ mod tests {
         HookDefinition {
             id: id.to_string(),
             event: event.to_string(),
+            result: HookResultMode::Control,
             condition: ExpressionCondition::Absent,
             action: json!({
                 "primary": "execute",
@@ -346,9 +374,11 @@ mod tests {
 
     #[tokio::test]
     async fn run_hooks_attaches_compiled_identity_and_exact_context_hash() {
+        let mut audit = make_hook("audit", "graph_step_completed");
+        audit.result = HookResultMode::Discard;
         let hooks = compile_hooks(
             HookSources {
-                infrastructure: vec![make_hook("audit", "graph_step_completed")],
+                infrastructure: vec![audit],
                 ..HookSources::default()
             },
             &schemas(),
@@ -375,6 +405,7 @@ mod tests {
         assert_eq!(identity.occurrence, occurrence);
         assert_eq!(identity.hook_id, "audit");
         assert_eq!(identity.layer, HookLayer::Infrastructure);
+        assert_eq!(identity.result_mode, HookResultMode::Discard);
         assert_eq!(
             identity.context_hash,
             lillux::sha256_hex(lillux::canonical_json(&context).unwrap().as_bytes())
@@ -383,9 +414,11 @@ mod tests {
 
     #[tokio::test]
     async fn infrastructure_hooks_are_observer_only() {
+        let mut infra = make_hook("infra", "graph_step_completed");
+        infra.result = HookResultMode::Discard;
         let hooks = compile_hooks(
             HookSources {
-                infrastructure: vec![make_hook("infra", "graph_step_completed")],
+                infrastructure: vec![infra],
                 ..HookSources::default()
             },
             &schemas(),
@@ -406,6 +439,91 @@ mod tests {
         .await
         .unwrap();
         assert!(result.control.is_none());
+    }
+
+    #[tokio::test]
+    async fn hook_observation_is_validated_and_never_becomes_control() {
+        let mut hook = make_hook("evidence", "graph_step_completed");
+        hook.result = HookResultMode::Observation;
+        let hooks = compile(vec![hook]);
+        let dispatcher: HookDispatcher = Box::new(|_action, _project, identity| {
+            Box::pin(async move {
+                assert_eq!(identity.result_mode, HookResultMode::Observation);
+                Ok(HookDispatchOutput::bare(json!({
+                    "kind": "build.step_completed",
+                    "payload": {"node": "compile"}
+                })))
+            })
+        });
+        let result = run_hooks(
+            occurrence("graph_step_completed"),
+            &json!({"state": {}}),
+            &hooks,
+            "/tmp",
+            &dispatcher,
+        )
+        .await
+        .unwrap();
+        assert!(result.control.is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_hook_observation_is_an_integrity_error() {
+        let mut hook = make_hook("evidence", "graph_step_completed");
+        hook.result = HookResultMode::Observation;
+        let hooks = compile(vec![hook]);
+        let dispatcher: HookDispatcher = Box::new(|_action, _project, _identity| {
+            Box::pin(async { Ok(HookDispatchOutput::bare(json!({"action": "continue"}))) })
+        });
+        let error = run_hooks(
+            occurrence("graph_step_completed"),
+            &json!({"state": {}}),
+            &hooks,
+            "/tmp",
+            &dispatcher,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind, HookRunErrorKind::Integrity);
+        assert!(error.contains("observation result rejected"));
+    }
+
+    #[tokio::test]
+    async fn oversized_hook_observation_action_fails_before_dispatch() {
+        let hooks = compile(vec![HookDefinition {
+            id: "evidence".to_string(),
+            event: "continuation".to_string(),
+            result: HookResultMode::Observation,
+            condition: ExpressionCondition::Absent,
+            action: json!({
+                "item_id": "tool:test/evidence",
+                "params": {"payload": "${event.payload}"}
+            }),
+        }]);
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_dispatch = calls.clone();
+        let dispatcher: HookDispatcher = Box::new(move |_action, _project, _identity| {
+            calls_for_dispatch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async {
+                Ok(HookDispatchOutput::bare(
+                    json!({"kind": "build.evidence", "payload": {}}),
+                ))
+            })
+        });
+        let error = run_hooks(
+            occurrence("continuation"),
+            &json!({"event": {
+                "payload": "x".repeat(crate::envelope::MAX_HOOK_OBSERVATION_ACTION_BYTES)
+            }}),
+            &hooks,
+            "/tmp",
+            &dispatcher,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind, HookRunErrorKind::Evaluation);
+        assert!(error.contains("observation action rejected"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -479,6 +597,7 @@ mod tests {
         let hooks = compile(vec![HookDefinition {
             id: "needs-missing".to_string(),
             event: "continuation".to_string(),
+            result: HookResultMode::Control,
             condition: ExpressionCondition::Absent,
             action: json!({
                 "primary": "execute",
@@ -510,6 +629,7 @@ mod tests {
         let hooks = compile(vec![HookDefinition {
             id: "typed-event".to_string(),
             event: "continuation".to_string(),
+            result: HookResultMode::Control,
             condition: ExpressionCondition::Absent,
             action: json!({
                 "primary": "execute",

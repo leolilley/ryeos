@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail};
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -13,9 +14,8 @@ use ryeos_state::CreateChainWithEventSuccessorRequest;
 use ryeos_state::StateDb;
 use ryeos_state::UsageSubject;
 use ryeos_state::chain::{ChainLock, SnapshotUpdate};
-use ryeos_state::objects::ThreadSnapshot;
-use ryeos_state::objects::ThreadUsage;
 use ryeos_state::objects::thread_snapshot::{ThreadStatus, parse_canonical_timestamp};
+use ryeos_state::objects::{StateManifest, StateManifestBlob, ThreadSnapshot, ThreadUsage};
 use ryeos_state::queries;
 use ryeos_state::signer::Signer;
 
@@ -69,6 +69,10 @@ const MAX_ACTIVE_LAUNCH_SIGNALS: usize = 4_096;
 /// four MiB also covers worst-case JSON escaping of a malformed stored error
 /// converted to a JSON string.
 const MAX_THREAD_RESULT_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_STATE_RESTORE_BYTES: usize = 256 * 1024;
+const MAX_STATE_MANIFEST_INPUT_BYTES: usize = 1024 * 1024;
+const MAX_STATE_MANIFEST_TOTAL_INPUT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_STATE_ANCHOR_METADATA_BYTES: usize = 192 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchCancellationResolution {
@@ -155,6 +159,21 @@ pub struct PersistedEventPage {
     pub has_more: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PersistedEventRef {
+    pub chain_root_id: String,
+    pub chain_seq: i64,
+    pub event_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PersistedEventNavigation {
+    pub previous: Option<PersistedEventRef>,
+    pub current: Option<PersistedEventRef>,
+    pub next: Option<PersistedEventRef>,
+    pub live_head: Option<PersistedEventRef>,
+}
+
 pub struct NodeIdentitySigner {
     fingerprint: String,
     signing_key: lillux::crypto::SigningKey,
@@ -221,6 +240,47 @@ pub struct NewArtifactRecord {
     pub uri: String,
     pub content_hash: Option<String>,
     pub metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateManifestInput {
+    pub name: String,
+    pub media_type: String,
+    pub content_base64: String,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateAnchorDraft {
+    pub label: String,
+    pub runtime: Value,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateAnchorPublishParams {
+    pub thread_id: String,
+    pub graph_run_id: String,
+    pub definition_ref: String,
+    pub definition_hash: String,
+    pub node: String,
+    pub step: u32,
+    pub contract: String,
+    pub restore: Value,
+    pub restore_digest: String,
+    #[serde(default)]
+    pub objects: Vec<StateManifestInput>,
+    pub anchor: StateAnchorDraft,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StateAnchorPublication {
+    pub state_digest: String,
+    pub manifest_ref: String,
+    pub event: PersistedEventRecord,
 }
 
 #[derive(Debug)]
@@ -753,6 +813,26 @@ pub struct ThreadListEnrichment {
     pub facets: HashMap<String, Vec<(String, String)>>,
     pub current_graph_nodes: HashMap<String, (String, u32)>,
     pub terminal_error_previews: HashMap<String, String>,
+}
+
+/// One graph run's identity lifted from the latest bounded
+/// `graph_step_started` payload for a thread-list page. This preserves the
+/// existing node-keyed list summary while allowing generic run sources to
+/// link a row to the exact definition and graph-run occurrence without N+1
+/// event replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GraphRunListIdentity {
+    pub definition_ref: String,
+    pub definition_hash: String,
+    pub graph_run_id: String,
+    pub node: String,
+    pub step: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedProgramEvidence {
+    pub admitted_capsule_hash: String,
+    pub subject: crate::thread_lifecycle::AdmittedProgramSubject,
 }
 
 #[derive(Debug, Default)]
@@ -1944,6 +2024,41 @@ fn convert_events(
         .collect()
 }
 
+fn hook_failed_event(
+    completed: &runtime_db::CompletedHookDispatch,
+    identity: &ryeos_runtime::callback::HookDispatchIdentity,
+    descriptor: ryeos_runtime::HookEvidenceDescriptor,
+    failure_class: ryeos_runtime::HookFailureClass,
+) -> Result<NewEventRecord> {
+    let identity_bytes = lillux::canonical_json(&serde_json::json!({
+        "schema": "ryeos.hook_failure_identity.v1",
+        "chain_root_id": &completed.chain_root_id,
+        "occurrence_thread_id": &completed.occurrence_thread_id,
+        "occurrence": &identity.occurrence,
+        "hook_id": &identity.hook_id,
+        "context_hash": &identity.context_hash,
+        "failure_class": failure_class,
+    }))?;
+    let failure_id = format!(
+        "hook-failure:{}",
+        lillux::sha256_hex(identity_bytes.as_bytes())
+    );
+    Ok(NewEventRecord {
+        event_type: ryeos_state::event_types::HOOK_FAILED.to_string(),
+        storage_class: "indexed".to_string(),
+        payload: serde_json::to_value(ryeos_runtime::HookFailedPayload {
+            schema_version: ryeos_runtime::HOOK_FAILURE_SCHEMA.to_string(),
+            failure_id,
+            dispatch_key: completed.dispatch_key.clone(),
+            occurrence_thread_id: completed.occurrence_thread_id.clone(),
+            hook: descriptor,
+            context_hash: identity.context_hash.clone(),
+            response_hash: completed.response_hash.clone(),
+            failure_class,
+        })?,
+    })
+}
+
 fn persisted_from_append(
     result: &ryeos_state::chain::AppendResult,
     events: &[NewEventRecord],
@@ -2230,6 +2345,99 @@ fn ensure_artifact_projection_capacity(
         bail!(
             "thread {thread_id} artifacts would exceed the {MAX_THREAD_ARTIFACT_RESPONSE_BYTES}-byte response maximum"
         );
+    }
+    Ok(())
+}
+
+fn validate_state_anchor_request(params: &StateAnchorPublishParams) -> Result<()> {
+    for (label, value) in [
+        ("thread_id", params.thread_id.as_str()),
+        ("graph_run_id", params.graph_run_id.as_str()),
+        ("definition_ref", params.definition_ref.as_str()),
+        ("node", params.node.as_str()),
+        ("contract", params.contract.as_str()),
+        ("anchor label", params.anchor.label.as_str()),
+    ] {
+        if value.is_empty()
+            || value.trim() != value
+            || value.chars().any(char::is_control)
+            || value.len() > 4 * 1024
+        {
+            bail!("state-anchor {label} must be a bounded, trimmed, control-free string");
+        }
+    }
+    if !lillux::valid_hash(&params.definition_hash)
+        || params
+            .definition_hash
+            .bytes()
+            .any(|byte| byte.is_ascii_uppercase())
+    {
+        bail!("state-anchor definition_hash must be a canonical SHA-256 hash");
+    }
+    if !params.restore.is_object() {
+        bail!("state-anchor restore contract must be an object");
+    }
+    if !params.anchor.runtime.is_object() {
+        bail!("state-anchor runtime must be an object");
+    }
+    if !params.anchor.metadata.is_object() {
+        bail!("state-anchor metadata must be an object");
+    }
+    let metadata_bytes = lillux::canonical_json(&params.anchor.metadata)
+        .context("canonicalize state-anchor metadata")?
+        .len();
+    if metadata_bytes > MAX_STATE_ANCHOR_METADATA_BYTES {
+        bail!(
+            "state-anchor metadata is {metadata_bytes} bytes; maximum is {MAX_STATE_ANCHOR_METADATA_BYTES}"
+        );
+    }
+    if params.objects.len() > ryeos_state::objects::MAX_STATE_MANIFEST_OBJECTS {
+        bail!(
+            "state manifest has {} objects; maximum is {}",
+            params.objects.len(),
+            ryeos_state::objects::MAX_STATE_MANIFEST_OBJECTS
+        );
+    }
+    let mut names = HashSet::new();
+    names.insert("restore");
+    for input in &params.objects {
+        for (label, value) in [
+            ("object name", input.name.as_str()),
+            ("object media_type", input.media_type.as_str()),
+        ] {
+            if value.is_empty()
+                || value.trim() != value
+                || value.chars().any(char::is_control)
+                || value.len() > 1024
+            {
+                bail!("state manifest {label} must be bounded, trimmed, and control-free");
+            }
+        }
+        if !names.insert(input.name.as_str()) {
+            bail!(
+                "state manifest contains duplicate object name {:?}",
+                input.name
+            );
+        }
+        validate_prefixed_digest("state manifest object digest", &input.digest)?;
+    }
+    validate_prefixed_digest("restore_digest", &params.restore_digest)
+}
+
+fn validate_prefixed_digest(label: &str, value: &str) -> Result<()> {
+    let Some(hash) = value.strip_prefix("sha256:") else {
+        bail!("{label} must use the sha256:<hash> form");
+    };
+    if !lillux::valid_hash(hash) || hash.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        bail!("{label} must contain a canonical SHA-256 hash");
+    }
+    Ok(())
+}
+
+fn require_prefixed_digest(label: &str, value: &str, expected_hash: &str) -> Result<()> {
+    validate_prefixed_digest(label, value)?;
+    if value != format!("sha256:{expected_hash}") {
+        bail!("{label} does not match the canonical supplied bytes");
     }
     Ok(())
 }
@@ -6674,6 +6882,170 @@ impl StateStore {
     }
 
     #[tracing::instrument(
+        name = "state:publish_state_anchor",
+        skip(self, params),
+        fields(thread_id = %params.thread_id, contract = %params.contract)
+    )]
+    pub fn publish_state_anchor(
+        &self,
+        params: &StateAnchorPublishParams,
+    ) -> Result<StateAnchorPublication> {
+        validate_state_anchor_request(params)?;
+
+        let restore_bytes = lillux::canonical_json(&params.restore)
+            .context("canonicalize state restore contract")?
+            .into_bytes();
+        if restore_bytes.len() > MAX_STATE_RESTORE_BYTES {
+            bail!(
+                "state restore contract is {} bytes; maximum is {MAX_STATE_RESTORE_BYTES}",
+                restore_bytes.len()
+            );
+        }
+        let restore_hash = lillux::sha256_hex(&restore_bytes);
+        require_prefixed_digest("restore_digest", &params.restore_digest, &restore_hash)?;
+
+        let mut decoded_objects = Vec::with_capacity(params.objects.len());
+        let mut total_input_bytes = 0usize;
+        for input in &params.objects {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&input.content_base64)
+                .with_context(|| format!("decode state manifest object {:?}", input.name))?;
+            if bytes.len() > MAX_STATE_MANIFEST_INPUT_BYTES {
+                bail!(
+                    "state manifest object {:?} is {} bytes; maximum is {MAX_STATE_MANIFEST_INPUT_BYTES}",
+                    input.name,
+                    bytes.len()
+                );
+            }
+            total_input_bytes = total_input_bytes
+                .checked_add(bytes.len())
+                .ok_or_else(|| anyhow!("state manifest input byte total overflow"))?;
+            if total_input_bytes > MAX_STATE_MANIFEST_TOTAL_INPUT_BYTES {
+                bail!(
+                    "state manifest inputs total {total_input_bytes} bytes; maximum is {MAX_STATE_MANIFEST_TOTAL_INPUT_BYTES}"
+                );
+            }
+            let hash = lillux::sha256_hex(&bytes);
+            require_prefixed_digest("state manifest object digest", &input.digest, &hash)?;
+            decoded_objects.push((input, bytes, hash));
+        }
+
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let thread = g
+            .state_db
+            .get_thread(&params.thread_id)?
+            .ok_or_else(|| anyhow!("state-anchor thread not found: {}", params.thread_id))?;
+        if thread.status != ThreadStatus::Running.as_str() {
+            bail!(
+                "state-anchor publication requires a running thread; {} is '{}'",
+                params.thread_id,
+                thread.status
+            );
+        }
+        let runtime = g
+            .runtime_db
+            .get_runtime_info(&params.thread_id)?
+            .ok_or_else(|| anyhow!("runtime row missing while publishing state anchor"))?;
+        if runtime.stop_intent.is_some()
+            || !self
+                .process_attachment_admission_open
+                .load(Ordering::Acquire)
+        {
+            bail!(
+                "state-anchor publication is closed for thread {}",
+                params.thread_id
+            );
+        }
+        if !self.projection_health.is_current() {
+            bail!("state-anchor admission requires a current thread projection");
+        }
+
+        self.state_authority.ensure_guard(permit.cas_guard())?;
+        let cas = self.state_authority.cas_store()?;
+        let stored_restore = cas.put_blob(&restore_bytes)?;
+        if stored_restore.hash != restore_hash {
+            bail!(
+                "state restore CAS hash mismatch: expected {restore_hash}, stored {}",
+                stored_restore.hash
+            );
+        }
+        let restore = StateManifestBlob {
+            name: "restore".to_string(),
+            media_type: "application/json".to_string(),
+            blob_hash: restore_hash,
+            size_bytes: u64::try_from(restore_bytes.len())
+                .context("state restore byte length exceeds u64")?,
+        };
+        let mut objects = Vec::with_capacity(decoded_objects.len());
+        for (input, bytes, expected_hash) in decoded_objects {
+            let stored = cas.put_blob(&bytes)?;
+            if stored.hash != expected_hash {
+                bail!(
+                    "state manifest object {:?} CAS hash mismatch: expected {expected_hash}, stored {}",
+                    input.name,
+                    stored.hash
+                );
+            }
+            objects.push(StateManifestBlob {
+                name: input.name.clone(),
+                media_type: input.media_type.clone(),
+                blob_hash: expected_hash,
+                size_bytes: u64::try_from(bytes.len())
+                    .context("state manifest object byte length exceeds u64")?,
+            });
+        }
+        let manifest = StateManifest::new(
+            params.contract.clone(),
+            thread.chain_root_id.clone(),
+            params.thread_id.clone(),
+            restore,
+            objects,
+        )?;
+        let manifest_hash = cas
+            .store_object(&manifest.to_value())
+            .context("store canonical state manifest")?;
+        let state_digest = format!("sha256:{manifest_hash}");
+        let manifest_ref = format!("cas:{manifest_hash}");
+        let event = NewEventRecord {
+            event_type: ryeos_state::event_types::MILESTONE.to_string(),
+            storage_class: "indexed".to_string(),
+            payload: json!({
+                "kind": "state_anchor",
+                "payload": {
+                    "schema_version": 1,
+                    "label": params.anchor.label,
+                    "state_digest": state_digest.clone(),
+                    "manifest_ref": manifest_ref.clone(),
+                    "runtime": params.anchor.runtime,
+                    "metadata": params.anchor.metadata,
+                },
+                "graph_run_id": params.graph_run_id,
+                "definition_ref": params.definition_ref,
+                "definition_hash": params.definition_hash,
+                "node": params.node,
+                "step": params.step,
+            }),
+        };
+        let persisted = append_events_locked(
+            &g,
+            Some(permit.cas_guard()),
+            &thread.chain_root_id,
+            &params.thread_id,
+            std::slice::from_ref(&event),
+        )?;
+        let event = persisted
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("state-anchor milestone was not persisted"))?;
+        Ok(StateAnchorPublication {
+            state_digest,
+            manifest_ref,
+            event,
+        })
+    }
+
+    #[tracing::instrument(
         name = "state:publish_artifact",
         skip(self, artifact),
         fields(thread_id = %thread_id, artifact_type = %artifact.artifact_type)
@@ -6993,6 +7365,67 @@ impl StateStore {
             follow_waiters,
             terminal_error_previews,
         )
+    }
+
+    /// Load graph-run identity for a bounded thread page in one projection
+    /// query. Missing or malformed payloads produce no identity rather than a
+    /// guessed link to mutable definition content.
+    pub fn graph_run_list_identities(
+        &self,
+        thread_ids: &[String],
+    ) -> Result<HashMap<String, GraphRunListIdentity>> {
+        let payloads = {
+            let g = self.lock()?;
+            queries::current_graph_node_payloads(
+                g.state_db.projection(),
+                thread_ids,
+                MAX_THREAD_LIST_ENRICHMENT_THREADS,
+                MAX_THREAD_LIST_EVENT_PAYLOAD_BYTES,
+                MAX_THREAD_LIST_EVENT_PAYLOAD_TOTAL_BYTES,
+            )?
+        };
+        let mut identities = HashMap::new();
+        for (thread_id, payload) in payloads {
+            let payload: Value = match serde_json::from_slice(&payload) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    tracing::warn!(
+                        %thread_id,
+                        %error,
+                        "ignoring malformed graph identity payload in field run enrichment"
+                    );
+                    continue;
+                }
+            };
+            let Some(definition_ref) = payload.get("definition_ref").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(definition_hash) = payload.get("definition_hash").and_then(Value::as_str)
+            else {
+                continue;
+            };
+            let Some(graph_run_id) = payload.get("graph_run_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(node) = payload.get("node").and_then(Value::as_str) else {
+                continue;
+            };
+            let step = payload.get("step").and_then(Value::as_u64).unwrap_or(0);
+            let Ok(step) = u32::try_from(step) else {
+                continue;
+            };
+            identities.insert(
+                thread_id,
+                GraphRunListIdentity {
+                    definition_ref: definition_ref.to_string(),
+                    definition_hash: definition_hash.to_string(),
+                    graph_run_id: graph_run_id.to_string(),
+                    node: node.to_string(),
+                    step,
+                },
+            );
+        }
+        Ok(identities)
     }
 
     pub fn thread_list_enrichment_with_waiters(
@@ -7385,6 +7818,34 @@ impl StateStore {
             .as_deref()
             .map(|hash| load_admitted_launch_capsule(&self.state_authority, hash))
             .transpose()
+    }
+
+    /// Load and independently verify the exact root program retained by the
+    /// thread's CAS-rooted admitted capsule. Only the subject and capsule hash
+    /// cross this boundary; sealed invocation, capabilities, and closure stay
+    /// private to execution recovery.
+    pub fn admitted_program_evidence(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<AdmittedProgramEvidence>> {
+        let g = self.lock()?;
+        let Some(snapshot) = g.state_db.get_thread(thread_id)? else {
+            return Ok(None);
+        };
+        let Some(capsule_hash) = snapshot.admitted_launch_capsule_hash else {
+            return Ok(None);
+        };
+        let capsule = load_admitted_launch_capsule(&self.state_authority, &capsule_hash)?;
+        let request: crate::thread_lifecycle::SealedRootExecutionRequest =
+            serde_json::from_value(capsule.exact_program)
+                .context("decode exact admitted root program")?;
+        let subject = request
+            .admitted_program_subject()
+            .context("verify exact admitted root subject")?;
+        Ok(Some(AdmittedProgramEvidence {
+            admitted_capsule_hash: capsule_hash,
+            subject,
+        }))
     }
 
     /// Compare a recovery attempt with the CAS-rooted artifact identity before
@@ -8441,10 +8902,142 @@ impl StateStore {
         dispatch_key: &str,
         request_hash: &str,
         response: &Value,
-    ) -> Result<()> {
+    ) -> Result<runtime_db::CompletedHookDispatch> {
         let g = self.lock()?;
         g.runtime_db
             .complete_hook_dispatch(dispatch_key, request_hash, response)
+    }
+
+    /// Append the daemon-authored durable outcome for one completed
+    /// observation hook. The completed response is re-read from the
+    /// operational ledger under the same state lock; caller-supplied result
+    /// bytes are never accepted as evidence.
+    pub fn append_completed_hook_outcome(
+        &self,
+        current_thread_id: &str,
+        identity: &ryeos_runtime::callback::HookDispatchIdentity,
+        dispatch_key: &str,
+        request_hash: &str,
+    ) -> Result<PersistedEventRecord> {
+        use ryeos_runtime::envelope::{
+            HookDispatchFailureKind, normalize_hook_dispatch_result, normalize_hook_observation,
+        };
+        use ryeos_runtime::{
+            HOOK_OBSERVATION_SCHEMA, HookEvidenceDescriptor, HookFailureClass,
+            HookObservationRecordedPayload, HookResultMode,
+        };
+
+        if identity.result_mode != HookResultMode::Observation {
+            bail!("durable hook outcome requires result mode `observation`");
+        }
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let completed = g
+            .runtime_db
+            .completed_hook_dispatch(dispatch_key, request_hash)?;
+        if completed.event != identity.occurrence.event() || completed.hook_id != identity.hook_id {
+            bail!("completed hook dispatch identity does not match callback identity");
+        }
+        let current_thread = g
+            .state_db
+            .get_thread(current_thread_id)?
+            .ok_or_else(|| anyhow!("hook outcome thread not found: {current_thread_id}"))?;
+        if current_thread.chain_root_id != completed.chain_root_id {
+            bail!(
+                "hook outcome thread {current_thread_id} belongs to chain {}, not {}",
+                current_thread.chain_root_id,
+                completed.chain_root_id
+            );
+        }
+        if current_thread.status != ThreadStatus::Running.as_str() {
+            bail!(
+                "hook outcome append requires a running caller; {current_thread_id} is '{}'",
+                current_thread.status
+            );
+        }
+        let occurrence_thread = g
+            .state_db
+            .get_thread(&completed.occurrence_thread_id)?
+            .ok_or_else(|| {
+                anyhow!(
+                    "hook occurrence thread not found: {}",
+                    completed.occurrence_thread_id
+                )
+            })?;
+        if occurrence_thread.chain_root_id != completed.chain_root_id {
+            bail!("hook occurrence thread does not belong to the completed dispatch chain");
+        }
+        let runtime = g
+            .runtime_db
+            .get_runtime_info(current_thread_id)?
+            .ok_or_else(|| anyhow!("runtime row missing for hook outcome: {current_thread_id}"))?;
+        if runtime.stop_intent.is_some()
+            || !self
+                .process_attachment_admission_open
+                .load(Ordering::Acquire)
+        {
+            bail!("hook outcome append refused after runtime admission closed");
+        }
+
+        let callback: ryeos_runtime::callback_contract::CallbackDispatchResponse =
+            serde_json::from_value(completed.response.clone())
+                .context("completed hook response violates callback contract")?;
+        let descriptor = HookEvidenceDescriptor {
+            id: identity.hook_id.clone(),
+            layer: identity.layer,
+            event: identity.occurrence.event().to_string(),
+            occurrence: identity.occurrence.clone(),
+        };
+        let outcome = normalize_hook_dispatch_result(callback.result);
+        let event = match outcome {
+            Ok(output) if output.failure.is_none() => {
+                match normalize_hook_observation(output.value) {
+                    Ok(observation) => NewEventRecord {
+                        event_type: ryeos_state::event_types::HOOK_OBSERVATION_RECORDED.to_string(),
+                        storage_class: "indexed".to_string(),
+                        payload: serde_json::to_value(HookObservationRecordedPayload {
+                            schema_version: HOOK_OBSERVATION_SCHEMA.to_string(),
+                            observation_id: format!("hook-observation:{dispatch_key}"),
+                            dispatch_key: dispatch_key.to_string(),
+                            occurrence_thread_id: completed.occurrence_thread_id.clone(),
+                            hook: descriptor,
+                            context_hash: identity.context_hash.clone(),
+                            response_hash: completed.response_hash.clone(),
+                            observation,
+                        })?,
+                    },
+                    Err(_) => hook_failed_event(
+                        &completed,
+                        identity,
+                        descriptor,
+                        HookFailureClass::ObservationInvalid,
+                    )?,
+                }
+            }
+            Ok(output) => {
+                let failure_class = match output.failure.expect("checked failure").kind {
+                    HookDispatchFailureKind::Child => HookFailureClass::Child,
+                    HookDispatchFailureKind::Integrity => HookFailureClass::ChildIntegrity,
+                };
+                hook_failed_event(&completed, identity, descriptor, failure_class)?
+            }
+            Err(_) => hook_failed_event(
+                &completed,
+                identity,
+                descriptor,
+                HookFailureClass::DispatchEnvelopeIntegrity,
+            )?,
+        };
+        let mut persisted = append_events_locked(
+            &g,
+            Some(permit.cas_guard()),
+            &completed.chain_root_id,
+            current_thread_id,
+            &[event],
+        )?;
+        persisted
+            .pop()
+            .ok_or_else(|| anyhow!("hook outcome append returned no event"))
     }
 
     /// Reserve the stable child identity for one detached callback operation
@@ -9028,6 +9621,82 @@ impl StateStore {
         Ok(PersistedEventPage {
             events,
             has_more: page.has_more,
+        })
+    }
+
+    pub fn replay_events_through(
+        &self,
+        chain_root_id: &str,
+        thread_id: Option<&str>,
+        after_seq: Option<i64>,
+        through_seq: i64,
+        limit: usize,
+        max_serialized_bytes: usize,
+    ) -> Result<PersistedEventPage> {
+        let g = self.lock()?;
+        let page = queries::replay_events_through_bounded(
+            g.state_db.projection(),
+            chain_root_id,
+            thread_id,
+            after_seq,
+            through_seq,
+            limit,
+            max_serialized_bytes,
+        )?;
+        drop(g);
+        let events = page
+            .rows
+            .into_iter()
+            .map(|row| {
+                let payload: Value = serde_json::from_slice(&row.payload).with_context(|| {
+                    format!(
+                        "malformed JSON payload for event {} (chain_seq {})",
+                        row.event_id, row.chain_seq
+                    )
+                })?;
+                Ok(PersistedEventRecord {
+                    event_id: row.event_id,
+                    event_hash: Some(row.event_hash),
+                    chain_root_id: row.chain_root_id,
+                    chain_seq: row.chain_seq,
+                    thread_id: row.thread_id,
+                    thread_seq: row.thread_seq,
+                    event_type: row.event_type,
+                    storage_class: row.durability,
+                    ts: row.ts,
+                    prev_chain_event_hash: row.prev_chain_event_hash,
+                    prev_thread_event_hash: row.prev_thread_event_hash,
+                    payload,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(PersistedEventPage {
+            events,
+            has_more: page.has_more,
+        })
+    }
+
+    pub fn chain_event_navigation(
+        &self,
+        chain_root_id: &str,
+        chain_seq: i64,
+    ) -> Result<PersistedEventNavigation> {
+        fn convert(row: ryeos_state::queries::ChainEventRefRow) -> PersistedEventRef {
+            PersistedEventRef {
+                chain_root_id: row.chain_root_id,
+                chain_seq: row.chain_seq,
+                event_hash: row.event_hash,
+            }
+        }
+
+        let g = self.lock()?;
+        let navigation =
+            queries::chain_event_navigation(g.state_db.projection(), chain_root_id, chain_seq)?;
+        Ok(PersistedEventNavigation {
+            previous: navigation.previous.map(convert),
+            current: navigation.current.map(convert),
+            next: navigation.next.map(convert),
+            live_head: navigation.live_head.map(convert),
         })
     }
 
@@ -10672,6 +11341,122 @@ mod tests {
             .into_iter()
             .map(|event| event.event_type)
             .collect()
+    }
+
+    fn running_in_process_test_root(store: &StateStore, thread_id: &str) {
+        let metadata = in_process_launch_metadata();
+        let owner = store
+            .register_in_process_handler(thread_id)
+            .expect("register hook evidence owner");
+        store
+            .create_in_process_root_with_events_and_launch_metadata(
+                &thread_record(thread_id, thread_id),
+                vec![NewEventRecord {
+                    event_type: ryeos_state::event_types::THREAD_STARTED.to_string(),
+                    storage_class: "indexed".to_string(),
+                    payload: json!({}),
+                }],
+                &metadata,
+                &owner,
+            )
+            .expect("create running hook evidence root");
+    }
+
+    fn hook_observation_identity(hook_id: &str) -> ryeos_runtime::callback::HookDispatchIdentity {
+        ryeos_runtime::callback::HookDispatchIdentity {
+            occurrence: ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
+                graph_run_id: "G-hook-evidence".to_string(),
+                definition_ref: "graph:test/hook-evidence".to_string(),
+                definition_hash: "d".repeat(64),
+                step: 3,
+                node: "observe".to_string(),
+            },
+            hook_id: hook_id.to_string(),
+            layer: ryeos_runtime::hooks_loader::HookLayer::Infrastructure,
+            result_mode: ryeos_runtime::hooks_loader::HookResultMode::Observation,
+            context_hash: "c".repeat(64),
+        }
+    }
+
+    #[test]
+    fn completed_observation_hook_appends_durable_daemon_evidence_on_replay() {
+        let store = test_store();
+        let thread_id = "T-hook-evidence";
+        running_in_process_test_root(&store, thread_id);
+        let identity = hook_observation_identity("hook:system/evidence");
+        let seed = runtime_db::NewHookDispatch {
+            seed_version: runtime_db::HOOK_DISPATCH_SEED_VERSION,
+            dispatch_key: "a".repeat(64),
+            chain_root_id: thread_id.to_string(),
+            caller_thread_id: thread_id.to_string(),
+            event: identity.occurrence.event().to_string(),
+            hook_id: identity.hook_id.clone(),
+            request_hash: "b".repeat(64),
+        };
+        assert!(matches!(
+            store
+                .reserve_hook_dispatch(&seed)
+                .expect("reserve evidence hook"),
+            runtime_db::HookDispatchReservation::Execute
+        ));
+        let response = json!({
+            "thread": {"id": "T-hook-child", "status": "completed"},
+            "result": {
+                "kind": "build.step_completed",
+                "payload": {"step": 3, "ok": true}
+            }
+        });
+        store
+            .complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &response)
+            .expect("complete evidence hook");
+        let first = store
+            .append_completed_hook_outcome(
+                thread_id,
+                &identity,
+                &seed.dispatch_key,
+                &seed.request_hash,
+            )
+            .expect("append completed observation");
+        assert_eq!(
+            first.event_type,
+            ryeos_state::event_types::HOOK_OBSERVATION_RECORDED
+        );
+
+        let runtime_db::HookDispatchReservation::Replay(replayed) = store
+            .reserve_hook_dispatch(&seed)
+            .expect("replay completed evidence hook")
+        else {
+            panic!("completed hook must replay");
+        };
+        let duplicate = store
+            .append_completed_hook_outcome(
+                thread_id,
+                &identity,
+                &replayed.dispatch_key,
+                &replayed.request_hash,
+            )
+            .expect("append replayed observation");
+
+        let events = store
+            .replay_events(thread_id, Some(thread_id), None, 16, 1024 * 1024)
+            .expect("replay durable hook evidence")
+            .events
+            .into_iter()
+            .filter(|event| event.event_type == ryeos_state::event_types::HOOK_OBSERVATION_RECORDED)
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 2, "retry appends a foldable duplicate");
+        let first_payload: ryeos_runtime::HookObservationRecordedPayload =
+            serde_json::from_value(events[0].payload.clone()).expect("decode first observation");
+        let duplicate_payload: ryeos_runtime::HookObservationRecordedPayload =
+            serde_json::from_value(events[1].payload.clone())
+                .expect("decode duplicate observation");
+        assert_eq!(first_payload, duplicate_payload);
+        assert_eq!(
+            first_payload.observation_id,
+            format!("hook-observation:{}", seed.dispatch_key)
+        );
+        assert_eq!(first_payload.occurrence_thread_id, thread_id);
+        assert_eq!(first.payload, duplicate.payload);
     }
 
     fn in_process_launch_metadata() -> crate::launch_metadata::RuntimeLaunchMetadata {

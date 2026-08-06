@@ -44,6 +44,13 @@ pub fn ryeos_start(
 ) -> Result<JsValue, JsValue> {
     let session: RyeOsBrowserSession = serde_wasm_bindgen::from_value(session_json)
         .map_err(|e| JsValue::from_str(&format!("invalid RyeOS browser session: {e}")))?;
+    if session.ui_binding_contract_revision != ryeos_client_base::UI_BINDING_CONTRACT_REVISION {
+        return Err(JsValue::from_str(&format!(
+            "UI binding contract mismatch: session advertised '{}', client requires '{}'",
+            session.ui_binding_contract_revision,
+            ryeos_client_base::UI_BINDING_CONTRACT_REVISION
+        )));
+    }
     let viewport: BrowserViewport = serde_wasm_bindgen::from_value(viewport_json)
         .map_err(|e| JsValue::from_str(&format!("invalid RyeOS viewport: {e}")))?;
 

@@ -1,14 +1,15 @@
-# ryeos:signed:2026-07-09T06:05:20Z:7f30e056da0582e2becfb477dda24f42235f262dae8f6f4bfc1d783e15e402e8:bHf/hlp6wm5I+X++kBbm529vc1N1R66bLVbSg+4hKB0YdF2C/NpwB8x3DEzEymhVVx/oPjqERbknybDBylgODw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:25Z:0501e23e31c330db9931cf08626a878902a2079066ebb4e50c29b44c07df4741:3m88dSgbYk9KBdTFUMq3V2qj/GGt39bhmGXAwtymsdnIbiznucPzno8d6C5HmIJEpTfPbgYmFlVAugWdEZ7vCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-remotes
 title: Remotes
 version: "1.0.0"
 description: Configured remote nodes
 
 widget: table
-source:
-  ref: service:ui/ryeos-ui/remotes/list
-  params: {}
-  collection: remotes
+sources:
+  default:
+    ref: service:ui/ryeos-ui/remotes/list
+    params: {}
+    collection: remotes
 projections:
   columns:
     - label: remote

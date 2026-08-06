@@ -682,6 +682,7 @@ mod tests {
 hooks:
   - id: selected
     event: after_step
+    result: control
     condition: "turn >= 2"
     action: {item_id: "tool:test/hook"}
 "#,
@@ -699,6 +700,7 @@ hooks:
 hooks:
   - id: legacy
     event: after_step
+    result: control
     condition: {path: turn, op: gte, value: 2}
     action: {item_id: "tool:test/hook"}
 "#,

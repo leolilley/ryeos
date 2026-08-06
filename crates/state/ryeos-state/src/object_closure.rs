@@ -967,6 +967,25 @@ fn typed_object_edges(value: &Value) -> Result<Vec<ObjectEdge>, String> {
                 Some(HistoryGraph::ThreadEventThreadPredecessors),
                 &mut edges,
             )?;
+            if value.get("event_type").and_then(Value::as_str) == Some("milestone")
+                && value.pointer("/payload/kind").and_then(Value::as_str) == Some("state_anchor")
+            {
+                let manifest_ref = value
+                    .pointer("/payload/payload/manifest_ref")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        "state_anchor milestone is missing string manifest_ref".to_string()
+                    })?;
+                let manifest_hash = manifest_ref.strip_prefix("cas:").ok_or_else(|| {
+                    "state_anchor manifest_ref must use the cas:<hash> form".to_string()
+                })?;
+                push_typed_hash(
+                    manifest_hash,
+                    ExpectedObject::Kind("state_manifest"),
+                    None,
+                    &mut edges,
+                )?;
+            }
         }
         "bundle_event" => push_optional_object_edge(
             value,
@@ -1037,7 +1056,7 @@ fn typed_object_edges(value: &Value) -> Result<Vec<ObjectEdge>, String> {
                 push_typed_hash(hash, ExpectedObject::Kind("project_file"), None, &mut edges)?;
             }
         }
-        "project_file" | "project_snapshot_policy" => {}
+        "project_file" | "project_snapshot_policy" | "state_manifest" => {}
         "item_source" => {}
         _ => return Ok(Vec::new()),
     }
@@ -1133,6 +1152,9 @@ fn validate_current_object(value: &Value) -> anyhow::Result<()> {
                 .context("deserialize bundle_event")
                 .and_then(|object| object.validate())
         }
+        "state_manifest" => crate::objects::StateManifest::from_current_value(value.clone())
+            .context("deserialize current state_manifest")
+            .map(|_| ()),
         "project_snapshot" => crate::objects::ProjectSnapshot::from_value(value).map(|_| ()),
         "project_tree" => crate::objects::ProjectTree::from_value(value).map(|_| ()),
         "project_file" => crate::objects::ProjectFile::from_value(value).map(|_| ()),
@@ -1228,6 +1250,19 @@ pub fn object_links(value: &Value) -> Result<ObjectLinks, String> {
         "thread_event" => {
             push_optional_hash(value, "prev_chain_event_hash", &mut links.object_hashes)?;
             push_optional_hash(value, "prev_thread_event_hash", &mut links.object_hashes)?;
+        }
+        "state_manifest" => {
+            let restore = value
+                .get("restore")
+                .ok_or_else(|| "state_manifest missing restore object".to_string())?;
+            push_required_hash(restore, "blob_hash", &mut links.blob_hashes)?;
+            let objects = value
+                .get("objects")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "state_manifest missing objects array".to_string())?;
+            for object in objects {
+                push_required_hash(object, "blob_hash", &mut links.blob_hashes)?;
+            }
         }
         "bundle_event" => {
             push_optional_hash(value, "prev_chain_event_hash", &mut links.object_hashes)?;
@@ -1594,6 +1629,49 @@ mod tests {
         }))
         .unwrap();
         assert!(links.object_hashes.contains(&event_hash));
+    }
+
+    #[test]
+    fn state_anchor_event_reaches_manifest_and_manifest_reaches_every_blob() {
+        let manifest_hash = h("ac");
+        let event = json!({
+            "kind": "thread_event",
+            "event_type": "milestone",
+            "prev_chain_event_hash": null,
+            "prev_thread_event_hash": null,
+            "payload": {
+                "kind": "state_anchor",
+                "payload": {"manifest_ref": format!("cas:{manifest_hash}")}
+            }
+        });
+        let edges = typed_object_edges(&event).unwrap();
+        assert!(edges.iter().any(|edge| {
+            edge.hash == manifest_hash && edge.expected == ExpectedObject::Kind("state_manifest")
+        }));
+
+        let restore_hash = h("bd");
+        let input_hash = h("ce");
+        let links = object_links(&json!({
+            "kind": "state_manifest",
+            "schema": 1,
+            "contract": "domain.restore.v1",
+            "publisher_chain_root_id": "T-root",
+            "publisher_thread_id": "T-root",
+            "restore": {
+                "name": "restore",
+                "media_type": "application/json",
+                "blob_hash": restore_hash,
+                "size_bytes": 1
+            },
+            "objects": [{
+                "name": "engine",
+                "media_type": "application/octet-stream",
+                "blob_hash": input_hash,
+                "size_bytes": 1
+            }]
+        }))
+        .unwrap();
+        assert_eq!(links.blob_hashes, vec![restore_hash, input_hash]);
     }
 
     #[test]

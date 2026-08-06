@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use serde_json::{Value, json};
 
 use crate::edges;
@@ -94,10 +95,32 @@ impl Walker {
 
     async fn emit_dispatch_observation(
         &self,
+        graph_run_id: &str,
         node: &str,
         step: u32,
         observation: &DispatchObservation,
-    ) {
+    ) -> anyhow::Result<()> {
+        for request in &observation.state_anchors {
+            let mut request = request.clone();
+            let object = request
+                .as_object_mut()
+                .ok_or_else(|| anyhow::anyhow!("state_anchors entries must be objects"))?;
+            object.insert("graph_run_id".to_string(), json!(graph_run_id));
+            object.insert(
+                "definition_ref".to_string(),
+                json!(&self.graph.definition_ref),
+            );
+            object.insert(
+                "definition_hash".to_string(),
+                json!(&self.graph.definition_hash),
+            );
+            object.insert("node".to_string(), json!(node));
+            object.insert("step".to_string(), json!(step));
+            self.client
+                .publish_state_anchor(request)
+                .await
+                .context("publish authoritative state anchor")?;
+        }
         if let Some(child_thread_id) = &observation.child_thread_id {
             let result = self
                 .client
@@ -132,6 +155,32 @@ impl Walker {
                 .await;
             self.record_callback_warning("milestone", result);
         }
+        Ok(())
+    }
+
+    async fn commit_observation_failure(
+        &self,
+        graph_run_id: &str,
+        step: u32,
+        state: &mut Value,
+        suppressed_errors: &mut Vec<ErrorRecord>,
+        guard: &mut RunGuard,
+        inputs: &Value,
+        error: anyhow::Error,
+    ) -> CommitResult {
+        let message = format!("authoritative dispatch observation failed: {error:#}");
+        self.commit_terminal(CommitTerminalInput {
+            graph_run_id,
+            steps: step,
+            state,
+            suppressed_errors,
+            base_status: GraphRunStatus::Error,
+            error: Some(&message),
+            output: None,
+            guard,
+            inputs,
+        })
+        .await
     }
 
     async fn emit_foreach_iteration_statuses(

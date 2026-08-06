@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::event::{RyeOsStackMoveDirection, RyeOsUiEvent, RyeOsUiIntent};
+use super::event::{FieldStepDirection, RyeOsStackMoveDirection, RyeOsUiEvent, RyeOsUiIntent};
 use super::model::RyeOsDockEdge;
 use crate::workspace::FocusDirection;
 
@@ -78,6 +78,27 @@ pub struct RyeOsKeyContext {
     pub focused_tree_collapsible: bool,
     /// The selected hierarchy row currently hides those descendants.
     pub focused_tree_collapsed: bool,
+    /// Capabilities of the focused semantic field, if the focused instance is
+    /// one. The keymap consumes capabilities rather than widget names or
+    /// project roles, so every renderer gets the same actions.
+    pub field: Option<RyeOsFieldKeyContext>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RyeOsFieldKeyContext {
+    pub query_editing: bool,
+    pub query_has_text: bool,
+    pub group_collapsible: bool,
+    pub group_collapsed: bool,
+    pub has_parent: bool,
+    pub has_child: bool,
+    pub replay_previous: bool,
+    pub replay_next: bool,
+    pub replay_live: bool,
+    pub replay_playing: bool,
+    pub search_matches: bool,
+    pub compare: bool,
+    pub expand: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -97,6 +118,27 @@ pub enum RyeOsKeyCommand {
         ch: char,
     },
     DeleteOverlayChar,
+    SetFocusedFieldGroupCollapsed {
+        collapsed: bool,
+    },
+    MoveFocusedFieldHierarchy {
+        parent: bool,
+    },
+    StepFocusedFieldCursor {
+        direction: FieldStepDirection,
+    },
+    ToggleFocusedFieldPlayback,
+    BeginFocusedFieldQuery,
+    EndFocusedFieldQuery,
+    InsertFocusedFieldQueryChar {
+        ch: char,
+    },
+    DeleteFocusedFieldQueryChar,
+    MoveFocusedFieldSearchMatch {
+        delta: i32,
+    },
+    ToggleFocusedFieldCompare,
+    ExpandFocusedField,
     Quit,
     Ignore,
 }
@@ -104,6 +146,32 @@ pub enum RyeOsKeyCommand {
 pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeOsKeyCommand {
     if context.overlay_open {
         return overlay_key_command(event);
+    }
+
+    if let Some(field) = context.field.filter(|field| field.query_editing) {
+        return match event.key {
+            RyeOsKey::Escape if event.modifiers.none() => RyeOsKeyCommand::EndFocusedFieldQuery,
+            RyeOsKey::Enter if event.modifiers.none_or_shift() => {
+                RyeOsKeyCommand::EndFocusedFieldQuery
+            }
+            RyeOsKey::ArrowUp if event.modifiers.none() => {
+                RyeOsKeyCommand::MoveFocusedFieldSearchMatch { delta: -1 }
+            }
+            RyeOsKey::ArrowDown if event.modifiers.none() => {
+                RyeOsKeyCommand::MoveFocusedFieldSearchMatch { delta: 1 }
+            }
+            RyeOsKey::Backspace if event.modifiers.none() && field.query_has_text => {
+                RyeOsKeyCommand::DeleteFocusedFieldQueryChar
+            }
+            RyeOsKey::Backspace if event.modifiers.none() => RyeOsKeyCommand::EndFocusedFieldQuery,
+            RyeOsKey::Char(ch)
+                if !event.modifiers.ctrl && !event.modifiers.alt && !event.modifiers.meta =>
+            {
+                RyeOsKeyCommand::InsertFocusedFieldQueryChar { ch }
+            }
+            RyeOsKey::Char('c') if event.modifiers.ctrl_only() => RyeOsKeyCommand::Quit,
+            _ => RyeOsKeyCommand::Ignore,
+        };
     }
 
     match event.key {
@@ -238,6 +306,89 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
             delta: 1,
             fallback_direction: FocusDirection::Down,
         },
+        RyeOsKey::ArrowRight
+            if event.modifiers.none()
+                && context
+                    .field
+                    .is_some_and(|field| field.group_collapsible && field.group_collapsed) =>
+        {
+            RyeOsKeyCommand::SetFocusedFieldGroupCollapsed { collapsed: false }
+        }
+        RyeOsKey::ArrowLeft
+            if event.modifiers.none()
+                && context
+                    .field
+                    .is_some_and(|field| field.group_collapsible && !field.group_collapsed) =>
+        {
+            RyeOsKeyCommand::SetFocusedFieldGroupCollapsed { collapsed: true }
+        }
+        RyeOsKey::ArrowLeft
+            if event.modifiers.none() && context.field.is_some_and(|field| field.has_parent) =>
+        {
+            RyeOsKeyCommand::MoveFocusedFieldHierarchy { parent: true }
+        }
+        RyeOsKey::ArrowRight
+            if event.modifiers.none() && context.field.is_some_and(|field| field.has_child) =>
+        {
+            RyeOsKeyCommand::MoveFocusedFieldHierarchy { parent: false }
+        }
+        RyeOsKey::Char('[')
+            if event.modifiers.none()
+                && context.field.is_some_and(|field| field.replay_previous) =>
+        {
+            RyeOsKeyCommand::StepFocusedFieldCursor {
+                direction: FieldStepDirection::Previous,
+            }
+        }
+        RyeOsKey::Char(']')
+            if event.modifiers.none() && context.field.is_some_and(|field| field.replay_next) =>
+        {
+            RyeOsKeyCommand::StepFocusedFieldCursor {
+                direction: FieldStepDirection::Next,
+            }
+        }
+        RyeOsKey::Char(c)
+            if event.modifiers.none()
+                && c.eq_ignore_ascii_case(&'l')
+                && context.field.is_some_and(|field| field.replay_live) =>
+        {
+            RyeOsKeyCommand::StepFocusedFieldCursor {
+                direction: FieldStepDirection::Live,
+            }
+        }
+        RyeOsKey::Char(c)
+            if event.modifiers.none()
+                && c.eq_ignore_ascii_case(&'p')
+                && context
+                    .field
+                    .is_some_and(|field| field.replay_playing || field.replay_next) =>
+        {
+            RyeOsKeyCommand::ToggleFocusedFieldPlayback
+        }
+        RyeOsKey::Char('/') if event.modifiers.none() && context.field.is_some() => {
+            RyeOsKeyCommand::BeginFocusedFieldQuery
+        }
+        RyeOsKey::Char(c)
+            if event.modifiers.none_or_shift()
+                && c.eq_ignore_ascii_case(&'n')
+                && context.field.is_some_and(|field| field.search_matches) =>
+        {
+            RyeOsKeyCommand::MoveFocusedFieldSearchMatch {
+                delta: if event.modifiers.shift { -1 } else { 1 },
+            }
+        }
+        RyeOsKey::Char(' ')
+            if event.modifiers.none() && context.field.is_some_and(|field| field.compare) =>
+        {
+            RyeOsKeyCommand::ToggleFocusedFieldCompare
+        }
+        RyeOsKey::Char(c)
+            if event.modifiers.none()
+                && c.eq_ignore_ascii_case(&'e')
+                && context.field.is_some_and(|field| field.expand) =>
+        {
+            RyeOsKeyCommand::ExpandFocusedField
+        }
         RyeOsKey::Char(c) if event.modifiers.ctrl_only() && c.eq_ignore_ascii_case(&'u') => {
             RyeOsKeyCommand::MoveFocusedRowPage { direction: -1 }
         }
@@ -454,8 +605,172 @@ impl super::model::RyeOsCore {
                     event: RyeOsUiEvent::SetOverlayQuery { query },
                 })
             }
+            RyeOsKeyCommand::SetFocusedFieldGroupCollapsed { collapsed } => {
+                let Some((instance_key, field)) = focused_field(self) else {
+                    return Vec::new();
+                };
+                let Some(group_id) =
+                    selected_field_entity(&field).and_then(|entity| entity.group_id.clone())
+                else {
+                    return Vec::new();
+                };
+                self.dispatch(RyeOsEvent::Ui {
+                    event: RyeOsUiEvent::SetFieldGroupCollapsed {
+                        instance_key,
+                        group_id,
+                        collapsed,
+                    },
+                })
+            }
+            RyeOsKeyCommand::MoveFocusedFieldHierarchy { parent } => {
+                let Some((instance_key, field)) = focused_field(self) else {
+                    return Vec::new();
+                };
+                let Some(selected) = selected_field_entity(&field) else {
+                    return Vec::new();
+                };
+                let entity_id = if parent {
+                    selected.parent_id.clone()
+                } else {
+                    field
+                        .entities
+                        .iter()
+                        .find(|entity| entity.parent_id.as_deref() == Some(selected.id.as_str()))
+                        .map(|entity| entity.id.clone())
+                };
+                let Some(entity_id) = entity_id else {
+                    return Vec::new();
+                };
+                self.dispatch(RyeOsEvent::Ui {
+                    event: RyeOsUiEvent::SetFieldSelection {
+                        instance_key,
+                        entity_id: Some(entity_id),
+                    },
+                })
+            }
+            RyeOsKeyCommand::StepFocusedFieldCursor { direction } => {
+                let Some(instance_key) = focused_field_instance(self) else {
+                    return Vec::new();
+                };
+                self.dispatch(RyeOsEvent::Ui {
+                    event: RyeOsUiEvent::StepFieldCursor {
+                        instance_key,
+                        direction,
+                    },
+                })
+            }
+            RyeOsKeyCommand::ToggleFocusedFieldPlayback => {
+                let Some((instance_key, field)) = focused_field(self) else {
+                    return Vec::new();
+                };
+                self.dispatch(RyeOsEvent::Ui {
+                    event: RyeOsUiEvent::SetFieldPlayback {
+                        instance_key,
+                        playing: !field.replay.playing,
+                    },
+                })
+            }
+            RyeOsKeyCommand::BeginFocusedFieldQuery => {
+                let Some(instance_key) = focused_field_instance(self) else {
+                    return Vec::new();
+                };
+                if self.ui.field_query_editing.as_ref() != Some(&instance_key) {
+                    self.ui.field_query_editing = Some(instance_key);
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
+            RyeOsKeyCommand::EndFocusedFieldQuery => {
+                if self.ui.field_query_editing.take().is_some() {
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
+            RyeOsKeyCommand::InsertFocusedFieldQueryChar { ch } => {
+                self.edit_focused_field_query(|query| query.push(ch))
+            }
+            RyeOsKeyCommand::DeleteFocusedFieldQueryChar => {
+                self.edit_focused_field_query(|query| {
+                    query.pop();
+                })
+            }
+            RyeOsKeyCommand::MoveFocusedFieldSearchMatch { delta } => {
+                let Some(instance_key) = focused_field_instance(self) else {
+                    return Vec::new();
+                };
+                self.dispatch(RyeOsEvent::Ui {
+                    event: RyeOsUiEvent::MoveFieldSearchMatch {
+                        instance_key,
+                        delta,
+                    },
+                })
+            }
+            RyeOsKeyCommand::ToggleFocusedFieldCompare => {
+                let Some((instance_key, field)) = focused_field(self) else {
+                    return Vec::new();
+                };
+                let Some(entity_id) = field.selected else {
+                    return Vec::new();
+                };
+                self.dispatch(RyeOsEvent::Ui {
+                    event: RyeOsUiEvent::ToggleFieldCompare {
+                        instance_key,
+                        entity_id,
+                    },
+                })
+            }
+            RyeOsKeyCommand::ExpandFocusedField => {
+                let Some((instance_key, field)) = focused_field(self) else {
+                    return Vec::new();
+                };
+                let Some(selected) = selected_field_entity(&field) else {
+                    return Vec::new();
+                };
+                let source = selected.source.clone();
+                let root_id = selected.id.clone();
+                let expansion = field
+                    .expansions
+                    .iter()
+                    .find(|item| item.source == source && item.root_id == root_id);
+                let event = match expansion {
+                    Some(expansion) if expansion.can_continue => {
+                        RyeOsUiEvent::ContinueFieldExpansion {
+                            instance_key,
+                            source,
+                            root_id,
+                        }
+                    }
+                    Some(_) => return Vec::new(),
+                    None => RyeOsUiEvent::RequestFieldExpansion {
+                        instance_key,
+                        source,
+                        root_id,
+                    },
+                };
+                self.dispatch(RyeOsEvent::Ui { event })
+            }
             RyeOsKeyCommand::Quit | RyeOsKeyCommand::Ignore => Vec::new(),
         }
+    }
+
+    fn edit_focused_field_query(
+        &mut self,
+        edit: impl FnOnce(&mut String),
+    ) -> Vec<super::RyeOsEffect> {
+        let Some((instance_key, field)) = focused_field(self) else {
+            return Vec::new();
+        };
+        if self.ui.field_query_editing.as_ref() != Some(&instance_key) {
+            return Vec::new();
+        }
+        let mut query = field.search.query;
+        edit(&mut query);
+        self.dispatch(super::RyeOsEvent::Ui {
+            event: super::RyeOsUiEvent::SetFieldQuery {
+                instance_key,
+                query,
+            },
+        })
     }
 
     /// Move the point within the focused list, falling back to a directional
@@ -489,7 +804,7 @@ impl super::model::RyeOsCore {
             super::model::RyeOsFocusTarget::Dock { edge } => {
                 dock_vm_for_edge(&vm.workspace.docks, edge)
                     .map(|dock| FocusedRowsTarget {
-                        source_key: super::model::dock_source_key(edge),
+                        instance_key: super::model::dock_view_instance_key(edge),
                         count_and_feed: selectable_of(&dock.view),
                     })
                     .filter(|target| target.count_and_feed.0 > 0)
@@ -509,7 +824,12 @@ impl super::model::RyeOsCore {
                     return (false, Vec::new());
                 };
                 FocusedRowsTarget {
-                    source_key: focused,
+                    instance_key: self
+                        .workspace
+                        .tiles
+                        .get(&self.workspace.focused_tile)
+                        .map(|tile| tile.instance_key.clone())
+                        .expect("focused VM tile has workspace state"),
                     count_and_feed,
                 }
             }
@@ -518,8 +838,20 @@ impl super::model::RyeOsCore {
         if count == 0 {
             return (false, Vec::new());
         }
+        if matches!(
+            view_local_for_instance(self, &target.instance_key),
+            Some(crate::workspace::ViewLocalState::Field(_))
+        ) {
+            let effects = self.dispatch(super::RyeOsEvent::Ui {
+                event: super::RyeOsUiEvent::MoveFieldSelection {
+                    instance_key: target.instance_key,
+                    delta,
+                },
+            });
+            return (true, effects);
+        }
         let current = self
-            .stored_cursor_for(&target.source_key)
+            .stored_cursor_for(&target.instance_key)
             .min(count.saturating_sub(1));
         // The feed cursor is distance-from-bottom (0 = newest), so arrow-up
         // walks back into history — the opposite sense from a top-down row
@@ -536,22 +868,22 @@ impl super::model::RyeOsCore {
         if next == current {
             return (false, Vec::new());
         }
-        self.set_cursor_for(&target.source_key, next);
+        self.set_cursor_for(&target.instance_key, next);
         (true, Vec::new())
     }
 
     /// The focused view-instance's stored list cursor (row index, or feed
     /// distance-from-bottom). Both renderers store it the same way; the meaning
     /// is per-widget.
-    fn stored_cursor_for(&self, source_key: &str) -> usize {
-        match view_local_for_source(self, source_key) {
+    fn stored_cursor_for(&self, instance_key: &crate::ids::RyeOsViewInstanceKey) -> usize {
+        match view_local_for_instance(self, instance_key) {
             Some(crate::workspace::ViewLocalState::GenericList { cursor, .. }) => *cursor,
             _ => 0,
         }
     }
 
-    fn set_cursor_for(&mut self, source_key: &str, index: usize) {
-        let Some(local) = view_local_for_source_mut(self, source_key) else {
+    fn set_cursor_for(&mut self, instance_key: &crate::ids::RyeOsViewInstanceKey, index: usize) {
+        let Some(local) = view_local_for_instance_mut(self, instance_key) else {
             return;
         };
         let crate::workspace::ViewLocalState::GenericList { cursor, .. } = local else {
@@ -564,46 +896,136 @@ impl super::model::RyeOsCore {
     }
 }
 
+pub(crate) fn focused_field_key_context(
+    core: &super::model::RyeOsCore,
+) -> Option<RyeOsFieldKeyContext> {
+    let (instance_key, field) = focused_field(core)?;
+    let selected = selected_field_entity(&field);
+    let group = selected
+        .and_then(|entity| entity.group_id.as_deref())
+        .and_then(|group_id| field.groups.iter().find(|group| group.id == group_id));
+    let selected_id = selected.map(|entity| entity.id.as_str());
+    let has_child = selected_id.is_some_and(|selected_id| {
+        field
+            .entities
+            .iter()
+            .any(|entity| entity.parent_id.as_deref() == Some(selected_id))
+    });
+    let compare = selected.is_some_and(|entity| {
+        field.compare.contains(&entity.id)
+            || entity.preview_ids.iter().any(|preview_id| {
+                field
+                    .previews
+                    .iter()
+                    .any(|preview| preview.id == *preview_id && preview.comparison_key.is_some())
+            })
+    });
+    let expand = selected.is_some_and(|entity| {
+        field
+            .expansions
+            .iter()
+            .find(|item| item.source == entity.source && item.root_id == entity.id)
+            .is_none_or(|item| item.can_continue)
+    });
+    Some(RyeOsFieldKeyContext {
+        query_editing: core.ui.field_query_editing.as_ref() == Some(&instance_key),
+        query_has_text: !field.search.query.is_empty(),
+        group_collapsible: group.is_some(),
+        group_collapsed: group.is_some_and(|group| group.collapsed),
+        has_parent: selected.is_some_and(|entity| entity.parent_id.is_some()),
+        has_child,
+        replay_previous: field.replay.previous.is_some(),
+        replay_next: field.replay.next.is_some(),
+        replay_live: field.replay.mode != "live" && field.replay.live_head.is_some(),
+        replay_playing: field.replay.playing,
+        search_matches: !field.search.match_ids.is_empty(),
+        compare,
+        expand,
+    })
+}
+
+fn selected_field_entity(
+    field: &super::field::RyeOsFieldVm,
+) -> Option<&super::field::RyeOsFieldEntityVm> {
+    field
+        .selected
+        .as_deref()
+        .and_then(|id| field.entities.iter().find(|entity| entity.id == id))
+}
+
+fn focused_field(
+    core: &super::model::RyeOsCore,
+) -> Option<(crate::ids::RyeOsViewInstanceKey, super::field::RyeOsFieldVm)> {
+    let instance_key = focused_field_instance(core)?;
+    let (_, field) = super::view_model::field_vm_for_instance(core, &instance_key)?;
+    Some((instance_key, field))
+}
+
+fn focused_field_instance(
+    core: &super::model::RyeOsCore,
+) -> Option<crate::ids::RyeOsViewInstanceKey> {
+    use super::model::RyeOsFocusTarget;
+    let instance_key = match core.focus_target() {
+        RyeOsFocusTarget::WorkspaceTile { .. } => core
+            .workspace
+            .tiles
+            .get(&core.workspace.focused_tile)
+            .map(|tile| tile.instance_key.clone()),
+        RyeOsFocusTarget::Dock { edge } => Some(super::model::dock_view_instance_key(edge)),
+    }?;
+    matches!(
+        view_local_for_instance(core, &instance_key),
+        Some(crate::workspace::ViewLocalState::Field(_))
+    )
+    .then_some(instance_key)
+}
+
 struct FocusedRowsTarget {
-    source_key: String,
+    instance_key: crate::ids::RyeOsViewInstanceKey,
     count_and_feed: (usize, bool),
 }
 
-fn view_local_for_source<'a>(
+fn view_local_for_instance<'a>(
     core: &'a super::model::RyeOsCore,
-    source_key: &str,
+    instance_key: &crate::ids::RyeOsViewInstanceKey,
 ) -> Option<&'a crate::workspace::ViewLocalState> {
-    if let Some(dock) = source_key.strip_prefix("dock:") {
-        let key = format!("dock:{dock}");
-        return core.ui.dock_local.get(&key);
-    }
-    let tile_id = source_key
-        .parse::<u64>()
-        .ok()
-        .map(crate::ids::TileId::new)?;
-    core.workspace.tiles.get(&tile_id).map(|tile| &tile.local)
+    core.workspace
+        .tiles
+        .values()
+        .find(|tile| &tile.instance_key == instance_key)
+        .map(|tile| &tile.local)
+        .or_else(|| core.ui.dock_local.get(instance_key))
 }
 
-fn view_local_for_source_mut<'a>(
+fn view_local_for_instance_mut<'a>(
     core: &'a mut super::model::RyeOsCore,
-    source_key: &str,
+    instance_key: &crate::ids::RyeOsViewInstanceKey,
 ) -> Option<&'a mut crate::workspace::ViewLocalState> {
-    if source_key.starts_with("dock:") {
+    let tile_id = core
+        .workspace
+        .tiles
+        .iter()
+        .find_map(|(tile_id, tile)| (&tile.instance_key == instance_key).then_some(*tile_id));
+    if let Some(tile_id) = tile_id {
+        return core
+            .workspace
+            .tiles
+            .get_mut(&tile_id)
+            .map(|tile| &mut tile.local);
+    }
+    if core
+        .visible_dock_views()
+        .iter()
+        .any(|(key, _)| key == instance_key)
+    {
         return Some(
             core.ui
                 .dock_local
-                .entry(source_key.to_string())
+                .entry(instance_key.clone())
                 .or_insert_with(initial_list_local_state),
         );
     }
-    let tile_id = source_key
-        .parse::<u64>()
-        .ok()
-        .map(crate::ids::TileId::new)?;
-    core.workspace
-        .tiles
-        .get_mut(&tile_id)
-        .map(|tile| &mut tile.local)
+    None
 }
 
 fn initial_list_local_state() -> crate::workspace::ViewLocalState {
@@ -658,6 +1080,7 @@ fn selectable_of(view: &super::view_model::RyeOsViewVm) -> (usize, bool) {
             rows, total_rows, ..
         } => ((*total_rows).max(rows.len()), false),
         RyeOsViewVm::Timeline { entries, .. } => (entries.len(), true),
+        RyeOsViewVm::Field { field } => (field.traversal.len(), false),
         // The point walks a flat top-down list: an expanded section's rows,
         // or a collapsed section's single header (so it stays re-expandable)
         // — matching the flat cursor the resolver projects selection from.
@@ -831,6 +1254,82 @@ mod tests {
                 event: RyeOsUiEvent::SetTreeRowCollapsed { collapsed: true }
             }
         ));
+    }
+
+    #[test]
+    fn field_keys_resolve_to_renderer_neutral_semantic_commands() {
+        let mut ctx = context(false, false);
+        ctx.field = Some(RyeOsFieldKeyContext {
+            group_collapsible: true,
+            replay_previous: true,
+            replay_next: true,
+            replay_live: true,
+            search_matches: true,
+            compare: true,
+            expand: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            ryeos_key_command(key(RyeOsKey::ArrowLeft), ctx),
+            RyeOsKeyCommand::SetFocusedFieldGroupCollapsed { collapsed: true }
+        );
+        assert_eq!(
+            ryeos_key_command(key(RyeOsKey::Char('[')), ctx),
+            RyeOsKeyCommand::StepFocusedFieldCursor {
+                direction: FieldStepDirection::Previous
+            }
+        );
+        assert_eq!(
+            ryeos_key_command(key(RyeOsKey::Char(']')), ctx),
+            RyeOsKeyCommand::StepFocusedFieldCursor {
+                direction: FieldStepDirection::Next
+            }
+        );
+        assert_eq!(
+            ryeos_key_command(key(RyeOsKey::Char('l')), ctx),
+            RyeOsKeyCommand::StepFocusedFieldCursor {
+                direction: FieldStepDirection::Live
+            }
+        );
+        assert_eq!(
+            ryeos_key_command(key(RyeOsKey::Char('/')), ctx),
+            RyeOsKeyCommand::BeginFocusedFieldQuery
+        );
+        assert_eq!(
+            ryeos_key_command(key(RyeOsKey::Char(' ')), ctx),
+            RyeOsKeyCommand::ToggleFocusedFieldCompare
+        );
+        assert_eq!(
+            ryeos_key_command(key(RyeOsKey::Char('e')), ctx),
+            RyeOsKeyCommand::ExpandFocusedField
+        );
+    }
+
+    #[test]
+    fn field_query_editor_owns_text_and_match_navigation_until_closed() {
+        let mut ctx = context(false, false);
+        ctx.field = Some(RyeOsFieldKeyContext {
+            query_editing: true,
+            query_has_text: true,
+            search_matches: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            ryeos_key_command(key(RyeOsKey::Char('x')), ctx),
+            RyeOsKeyCommand::InsertFocusedFieldQueryChar { ch: 'x' }
+        );
+        assert_eq!(
+            ryeos_key_command(key(RyeOsKey::Backspace), ctx),
+            RyeOsKeyCommand::DeleteFocusedFieldQueryChar
+        );
+        assert_eq!(
+            ryeos_key_command(key(RyeOsKey::ArrowDown), ctx),
+            RyeOsKeyCommand::MoveFocusedFieldSearchMatch { delta: 1 }
+        );
+        assert_eq!(
+            ryeos_key_command(key(RyeOsKey::Escape), ctx),
+            RyeOsKeyCommand::EndFocusedFieldQuery
+        );
     }
 
     #[test]

@@ -121,6 +121,7 @@ pub struct HookDispatchIdentity {
     pub occurrence: HookDispatchOccurrence,
     pub hook_id: String,
     pub layer: crate::hooks_loader::HookLayer,
+    pub result_mode: crate::hooks_loader::HookResultMode,
     pub context_hash: String,
 }
 
@@ -630,6 +631,19 @@ pub trait RuntimeCallbackAPI: Send + Sync {
         artifact: Value,
     ) -> Result<Value, CallbackError>;
 
+    /// Publish an opaque restore closure and its authoritative state-anchor
+    /// milestone as one daemon-owned operation. Runtimes without this exact
+    /// callback must fail rather than emitting a partial anchor.
+    async fn publish_state_anchor(
+        &self,
+        _thread_id: &str,
+        _request: Value,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::Transport(anyhow::anyhow!(
+            "runtime.publish_state_anchor callback is not implemented by this client"
+        )))
+    }
+
     async fn get_facets(&self, thread_id: &str) -> Result<Value, CallbackError>;
 
     /// Drain-and-persist operator inputs staged for this RUNNING thread,
@@ -899,6 +913,7 @@ mod tests {
                 },
                 hook_id: "continuation-audit".to_string(),
                 layer: crate::hooks_loader::HookLayer::Operator,
+                result_mode: crate::hooks_loader::HookResultMode::Control,
                 context_hash: "context-digest".to_string(),
             }),
         };

@@ -1,10 +1,20 @@
-# ryeos:signed:2026-07-09T06:05:20Z:49f78d6abfcc3bbb46577fcc322697f0592c4baeb31fe43a54d5a70e878c83f1:Gpw4ohz+ULywYPBiqp2r58lrrkYibyQG+8UBkvZozOB7EfYlwfN0vVnqZ7Ng2e7w3Rb9H7e6xGxbZckt6y/uAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:25Z:6c32c2a0d67893ed3ba3f9854da66a03d3ed1d28296fd76b08b5f1025be061f3:J7QtEq5uwZ3GxDUWOoSEC4+NX0BJUmfWd4i7NucrcBaq03AaTu8L8yfXTY7zQR3sPxpOODY8WnRT5ONgsSV9Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-events
 title: Events
 version: "1.0.0"
 description: Recent durable events across every thread on the node
 
 widget: sections
+sources:
+  pulse:
+    ref: service:ui/ryeos-ui/node/activity
+    params:
+      event_limit: 1
+  recent:
+    ref: service:ui/ryeos-ui/node/activity
+    params:
+      event_limit: 80
+      exclude_types: ["seat.facet", "thread_usage", "cognition_out"]
 affordances:
   - id: watch-thread
     label: Watch thread
@@ -18,21 +28,14 @@ affordances:
       drill: true
 sections:
   - title: Pulse
-    source:
-      ref: service:ui/ryeos-ui/node/activity
-      params:
-        event_limit: 1
-      collection: pulse
+    source_channel: pulse
+    collection: pulse
     projection:
       primary: value
       meta: label
   - title: Recent
-    source:
-      ref: service:ui/ryeos-ui/node/activity
-      params:
-        event_limit: 80
-        exclude_types: ["seat.facet", "thread_usage", "cognition_out"]
-      collection: events
+    source_channel: recent
+    collection: events
     projection:
       primary: event_type
       meta: thread_id

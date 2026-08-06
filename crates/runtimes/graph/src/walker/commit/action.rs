@@ -53,8 +53,22 @@ impl Walker {
         if let Some(observation) =
             DispatchObservation::from_success(item_id.to_string(), child_thread_id.clone(), result)
         {
-            self.emit_dispatch_observation(current, step, &observation)
-                .await;
+            if let Err(error) = self
+                .emit_dispatch_observation(graph_run_id, current, step, &observation)
+                .await
+            {
+                return self
+                    .commit_observation_failure(
+                        graph_run_id,
+                        step,
+                        state,
+                        suppressed_errors,
+                        guard,
+                        inputs,
+                        error,
+                    )
+                    .await;
+            }
         }
 
         // State mutation: `assign` was already evaluated in

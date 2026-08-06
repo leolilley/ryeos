@@ -1,0 +1,9 @@
+# ryeos:signed:2026-08-04T09:35:28Z:08adf9f137317c685a2605feda004486985ff2344166fe7dc4d843502c6dd46d:F2I1eAM2FxO6S/yb+uTTbVwXGc2/aTXyH3HaPs7v/dGMtyFxvYqLosy0SFBRSspGvmLuD6kD3GO57zGSOdQyDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/field/definition
+version: "1.0.0"
+description: Returns exact graph-definition facts proven by a thread's CAS-rooted admitted program.
+endpoint: ui.ryeos.field.definition
+ui_read_only: true
+record_thread: false
+availability: daemon_only

@@ -591,7 +591,7 @@ mod tests {
                 "tiles": ["view:ryeos/threads/list"],
                 "views": { "view:ryeos/threads/list": {
                     "widget": "table",
-                    "source": { "ref": "service:ui/ryeos-ui/threads/list", "params": { "sort": "watch" }, "collection": "threads" },
+                    "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "params": { "sort": "watch" }, "collection": "threads" } },
                     "input": { "id": "filter", "feeds": { "fields": [
                         { "param": "status", "label": "status" },
                         { "param": "requested_by", "label": "source" }
@@ -640,7 +640,7 @@ mod tests {
                 "views": {
                     "view:ryeos/threads/list": {
                         "widget": "table",
-                        "source": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "threads" },
+                        "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "threads" } },
                         "projections": { "columns": [ { "label": "thread", "field": "thread_id" } ] },
                         "selection": { "activate": "watch" },
                         "affordances": [{
@@ -656,10 +656,15 @@ mod tests {
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
         let tile = core.workspace.focused_tile;
-        let key = tile.0.to_string();
+        let tile_key = tile.0.to_string();
+        let source_key = crate::ui::source_key::RyeOsSourceInstanceKey::named(
+            core.workspace.tiles[&tile].instance_key.clone(),
+            "default",
+        )
+        .encode();
         // A long list the operator has scrolled down into.
         core.data.sources.insert(
-            key.clone(),
+            source_key.clone(),
             serde_json::json!({
                 "threads": (0..60)
                     .map(|i| serde_json::json!({ "thread_id": format!("T-{i}") }))
@@ -668,7 +673,7 @@ mod tests {
         );
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::SetTileCursor {
-                tile_id: key.clone(),
+                tile_id: tile_key,
                 index: 50,
             },
         });
@@ -690,7 +695,7 @@ mod tests {
 
         // With the narrowed result, the reset cursor resolves the first row.
         core.data.sources.insert(
-            key.clone(),
+            source_key,
             serde_json::json!({ "threads": [ { "thread_id": "T-only" } ] }),
         );
         match intent_for_focused_row(&core).expect("first narrowed row activates") {
@@ -1363,7 +1368,7 @@ mod tests {
             "view:test/filter",
             serde_json::json!({
                 "widget": "rows",
-                "source": { "ref": "service:test/items", "params": {}, "collection": "items" },
+                "sources": { "default": { "ref": "service:test/items", "params": {}, "collection": "items" } },
                 "input": { "id": "q", "feeds": { "param": "query" } }
             }),
         );

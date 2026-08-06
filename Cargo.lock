@@ -1453,7 +1453,7 @@ dependencies = [
 
 [[package]]
 name = "lillux"
-version = "0.5.75"
+version = "0.5.76"
 dependencies = [
  "anyhow",
  "base64",
@@ -2468,7 +2468,7 @@ dependencies = [
 
 [[package]]
 name = "ryeos-cli"
-version = "0.5.75"
+version = "0.5.76"
 dependencies = [
  "anyhow",
  "base64",
@@ -2509,6 +2509,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "thiserror 2.0.18",
  "toml",
  "unicode-width",
@@ -2567,7 +2568,7 @@ dependencies = [
 
 [[package]]
 name = "ryeos-core-tools"
-version = "0.5.75"
+version = "0.5.76"
 dependencies = [
  "anyhow",
  "base64",
@@ -2806,7 +2807,7 @@ dependencies = [
 
 [[package]]
 name = "ryeos-runtime"
-version = "0.5.75"
+version = "0.5.76"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2890,6 +2891,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "axum",
+ "base64",
  "lillux",
  "rand 0.8.6",
  "ryeos-api",
@@ -2939,7 +2941,7 @@ dependencies = [
 
 [[package]]
 name = "ryeosd"
-version = "0.5.75"
+version = "0.5.76"
 dependencies = [
  "anyhow",
  "arc-swap",

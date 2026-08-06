@@ -1,14 +1,15 @@
-# ryeos:signed:2026-07-09T06:05:20Z:585e312b1c3acfa2f08d0fc3f36f2a9aa0074a8e972ca56f95d747f88aa40401:T6VgDdxhb9bpugpWWl96wmNg7wxGV0qUBqwIblSHXxsUk+r3CWUQaRzcOFoT5IsFuIs7ywn3Y6f+v0s6tswFAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:25Z:6bc03cf832257621feb7f3dfce20878839e8f53ad1b07874bc1dc4c39578d0eb:kF+AnHxFcTcdOY+U0Wg8DZVzy+U73ErJINO1+4Gh/lBMiQpoI/4z7asjaPjYSoBRlwelCi55YnqNVA1eiYrRCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-schedules
 title: Schedules
 version: "1.0.0"
 description: Registered schedules and their state
 
 widget: table
-source:
-  ref: service:scheduler/list
-  params: {}
-  collection: schedules
+sources:
+  default:
+    ref: service:scheduler/list
+    params: {}
+    collection: schedules
 projections:
   columns:
     - label: schedule

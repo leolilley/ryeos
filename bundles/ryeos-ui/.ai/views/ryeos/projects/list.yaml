@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-09T06:05:20Z:75b2834cae00c9786a30c444ba682313e8eab846c2d6a129c1d31e85f6bf382f:1IYAqautQ2YwmuwzdJx0mdTD/OAItrqkNNxFPnrDZE02AtuWJAb/nfSi4DhZsq/MPW6JRAeLqIf1sSAkoScvBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:25Z:997f68bc79c40074cadfa7b2e7094e66b98904c0877001146ace6d86653151da:KMn2WBJooHJHbjKkXXp1etGvofDpADOT9QGfXb+YKK7dxNAcNOqP3ZnCIgn++k+q4ZALmOilqX0eR6DOEe1zAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: projects-list
 title: Projects
 version: "1.0.0"
@@ -8,11 +8,12 @@ description: >-
   launches retarget to that root.
 
 widget: table
-source:
-  ref: service:projects/list
-  params:
-    project_path: ""
-  collection: projects
+sources:
+  default:
+    ref: service:projects/list
+    params:
+      project_path: ""
+    collection: projects
 projections:
   columns:
     - label: current

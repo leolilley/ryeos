@@ -1,16 +1,17 @@
-# ryeos:signed:2026-07-09T06:05:20Z:46da4093a3fca1da3893ee63e39bdb7914120a3c69ab18fc78795ae5d2bee5cd:yn6RhHcw4ilgWu3WZ493Go212WKOPx9cOywLCK7w/paP0cUq9Di9WPuUfNPtZeaaHZJXBI0nkuwVYRIZQ3YpCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:25Z:9e6e2e7e30bc37ce94771543b6fcfb44126bb4aecd5b2a5e274e77e276e7b80e:OFGaO0dXiD3g12onk5e5hdIWXslE3KmqBfg3mSvJpbEdlwAG8uKdrzaT8Yj8+rsJgc+DTKdNq5ishqluLSDvBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: items-space
 title: Item Space
 version: "1.0.0"
 description: The item space - signed content across system, user, and project
 
 widget: table
-source:
-  ref: service:ui/ryeos-ui/items/list
-  params:
-    limit: 500
-    project_path: ""
-  collection: items
+sources:
+  default:
+    ref: service:ui/ryeos-ui/items/list
+    params:
+      limit: 500
+      project_path: ""
+    collection: items
 projections:
   columns:
     - label: item

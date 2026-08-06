@@ -2402,7 +2402,7 @@ mod tests {
         // Mirrors bundles/ryeos-ui/.ai/views/ryeos/chain/timeline.yaml.
         let binding: ViewBinding = serde_json::from_value(json!({
             "widget": "timeline",
-            "source": { "ref": "service:events/chain_replay", "collection": "events" },
+            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
             "projections": {
                 "event_kinds": {
                     "cognition_out": { "primary": "payload.content", "role": "flow" },
@@ -2471,7 +2471,7 @@ mod tests {
         // to prove the coalescer repairs the fallback from raw event_type lines.
         let binding: ViewBinding = serde_json::from_value(json!({
             "widget": "timeline",
-            "source": { "ref": "service:events/chain_replay", "collection": "events" },
+            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
             "projections": {
                 "event_kinds": {
                     "tool_call_start": {

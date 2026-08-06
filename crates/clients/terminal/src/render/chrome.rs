@@ -224,6 +224,7 @@ fn draw_dock_tile(
 pub fn draw_tile(
     surface: &mut TextSurface,
     rect: Rect,
+    _instance_key: &ryeos_client_base::ids::RyeOsViewInstanceKey,
     _tile_id: &str,
     focused: bool,
     title: &str,
@@ -325,6 +326,10 @@ pub fn draw_tile(
 
 fn view_chrome(view: &RyeOsViewVm) -> Option<(&str, &[String])> {
     match view {
+        RyeOsViewVm::Field { field } => field
+            .provenance
+            .first()
+            .map(|provenance| (provenance.as_str(), &[][..])),
         RyeOsViewVm::Rows {
             provenance,
             affordance_hints,
@@ -353,6 +358,7 @@ mod tests {
 
     fn dock(edge: RyeOsDockEdge, size: u16) -> RyeOsDockTileVm {
         RyeOsDockTileVm {
+            instance_key: ryeos_client_base::ui::model::dock_view_instance_key(edge),
             edge,
             title: "t".into(),
             size,
@@ -446,6 +452,9 @@ mod tests {
         draw_tile(
             &mut surface,
             Rect::new(0, 0, 40, 10),
+            &ryeos_client_base::ids::RyeOsViewInstanceKey::workspace_tile(
+                ryeos_client_base::ids::TileId::new(1),
+            ),
             "t",
             true,
             "threads",

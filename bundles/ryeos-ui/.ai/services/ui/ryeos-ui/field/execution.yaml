@@ -1,0 +1,9 @@
+# ryeos:signed:2026-08-04T09:54:25Z:4225b2b989feccf3d87694138e4454b0bfec0e8e3d05fe239c64f390326d61b0:RsiVcrXkn6dhWm9mSRc11hMp2btuz/kdXikMhecImvgXmzNvQ+DS7QCDazp7D/FRvsDE74pmSSc++sK3O0tuCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/field/execution
+version: "1.0.0"
+description: Returns bounded live execution, occurrence, artifact, and hook-evidence facts.
+endpoint: ui.ryeos.field.execution
+ui_read_only: true
+record_thread: false
+availability: daemon_only

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-09T01:23:50Z:f037b01dc4ec84c4c0d25acce18b34a9ccafe6368486c3da6ad33589999d5551:vm3WI5erEWX20gNjsPgV3FAPqzoRPxQfHVr2Vs/2MpH0YuG7cZhJKZ0rvpWqCDIV28Y0EevX1+4KUCiGluMfBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-04T23:37:21Z:a8105b26cda29fb14920eefbef6e877649d14eec0d31bdb8e0758854cf240053:viy+DRhZsnTUQO78Z0uBPu+c3HZZyaJ35VfK5iLBkphtgXKFpJCVPBxdW3aHytVNvJsazqEyuRQyjY6imUHlDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
@@ -298,20 +298,22 @@ view:ryeos/gc/status                view:ryeos/node/gc
 `view:ryeos/threads/history` is project-scoped by default:
 
 ```yaml
-source:
-  ref: service:ui/ryeos-ui/threads/list
-  params:
-    project: current
-    project_path: ""
+sources:
+  default:
+    ref: service:ui/ryeos-ui/threads/list
+    params:
+      project: current
+      project_path: ""
 ```
 
 `view:ryeos/node/threads/history` is node-scoped:
 
 ```yaml
-source:
-  ref: service:ui/ryeos-ui/threads/list
-  params:
-    sort: watch
+sources:
+  default:
+    ref: service:ui/ryeos-ui/threads/list
+    params:
+      sort: watch
 ```
 
 Both thread tables expose the same filter input:

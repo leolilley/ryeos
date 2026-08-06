@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-02T05:15:26Z:b4e04d42eb3e40f360574025214bf5b3c5cea924dcc7ab99b92803547849ffd3:VKtkWeo5qziGo4q77UIeEa/QB7LyX9P5L0wNZbkwfkkhb37L+g9eV/uU8ZGimzaZy7lt5jreYkO7KTj+Gb2zCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-04T08:52:12Z:ea81ade1c8adf6bde92cbef10cbc6f5ec74eebe3266665c972bfd09b84fdec4d:rRDVSneIsw54M6ppvLoxqPRArrlqm1z8R/3YpP0hIPea8ovaC6dJSrRyaaCzhpXKEIvdXFPa79o4dAhnxxLpAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "E2E directive that intentionally crosses a tiny local continuation threshold and invokes a continuation summary hook."
 version: "1.0.0"
@@ -21,6 +21,7 @@ requires:
 hooks:
   - id: e2e-summarize-before-continuing
     event: continuation
+    result: control
     action:
       item_id: directive:test/continuation/summarize_hook
       thread: inline

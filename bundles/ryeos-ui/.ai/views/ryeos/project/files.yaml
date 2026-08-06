@@ -1,17 +1,18 @@
-# ryeos:signed:2026-07-09T06:05:20Z:423aeda273ec2d07737df847bf022458cf857467cea88304eeb711cfb9569d8f:IZIgUg7wKgWtKtxb5/LgCB4dVuthNJPaB+Jnuv4JoYFyweh+9iwyyC6cKqeeODjCQwqMApEmnGAb/OeBDVsABQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:25Z:20ab1c523870d01a448be73dd5d90acd2ca9b9d7b9c918eaaf38344723cb7186:NVS33JuceTyVyxGJH2Z1fKnDBBVhpwnomYHly7eCnj4WrW0jki9Od0sB0CAS9Pvg3PLcXhQHKXRHisjevV7nBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-files
 title: Files
 version: "1.0.0"
 description: Active project file tree
 
 widget: rows
-source:
-  ref: service:ui/ryeos-ui/files/list
-  params:
-    root: project
-    project_path: ""
-    path: ""
-  collection: entries
+sources:
+  default:
+    ref: service:ui/ryeos-ui/files/list
+    params:
+      root: project
+      project_path: ""
+      path: ""
+    collection: entries
 projections:
   primary: name
   meta: kind

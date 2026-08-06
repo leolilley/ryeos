@@ -182,6 +182,21 @@ struct SealedResolvedItem {
     metadata: SealedItemMetadata,
 }
 
+/// Secret-free exact subject retained by an admitted launch. This is the
+/// narrow read model used by definition inspection; it deliberately excludes
+/// source paths, invocation parameters, capabilities, and execution closure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedProgramSubject {
+    pub canonical_ref: String,
+    pub kind: String,
+    pub source_content: String,
+    pub source_content_hash: String,
+    pub raw_content: String,
+    pub raw_content_digest: String,
+    pub source_extension: String,
+    pub parser_ref: String,
+}
+
 impl SealedResolvedItem {
     fn capture(resolved: &ResolvedItem, retained_source_bytes: Option<&[u8]>) -> Result<Self> {
         let source_bytes = match retained_source_bytes {
@@ -364,6 +379,54 @@ impl SealedResolvedItem {
                 required_secrets: self.metadata.required_secrets.clone(),
                 extra: self.metadata.extra.clone(),
             },
+        })
+    }
+
+    fn exact_subject(&self) -> Result<AdmittedProgramSubject> {
+        let canonical_ref = CanonicalRef::parse(&self.canonical_ref)
+            .map_err(|error| anyhow!("invalid sealed canonical ref: {error}"))?;
+        if canonical_ref.kind != self.kind {
+            bail!(
+                "sealed resolved kind `{}` does not match canonical ref kind `{}`",
+                self.kind,
+                canonical_ref.kind
+            );
+        }
+        let source_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&self.source_content_b64)
+            .context("decode admitted launch capsule source bytes")?;
+        let observed_source_hash = lillux::sha256_hex(&source_bytes);
+        if observed_source_hash != self.content_hash {
+            bail!(
+                "admitted launch capsule source digest mismatch: sealed source {}, observed source {}",
+                self.content_hash,
+                observed_source_hash
+            );
+        }
+        let source_content = String::from_utf8(source_bytes)
+            .context("admitted launch capsule subject source is not UTF-8")?;
+        let raw_content = lillux::signature::strip_signature_lines_with_envelope(
+            &source_content,
+            &self.source_format.signature_prefix,
+            self.source_format.signature_suffix.as_deref(),
+        );
+        let observed_raw_digest = ryeos_engine::item_resolution::content_hash(&raw_content);
+        if observed_raw_digest != self.raw_content_digest {
+            bail!(
+                "admitted launch capsule runtime-body digest mismatch: sealed {}, observed {}",
+                self.raw_content_digest,
+                observed_raw_digest
+            );
+        }
+        Ok(AdmittedProgramSubject {
+            canonical_ref: self.canonical_ref.clone(),
+            kind: self.kind.clone(),
+            source_content,
+            source_content_hash: self.content_hash.clone(),
+            raw_content,
+            raw_content_digest: self.raw_content_digest.clone(),
+            source_extension: self.source_format.extension.clone(),
+            parser_ref: self.source_format.parser.clone(),
         })
     }
 }
@@ -636,6 +699,22 @@ impl SealedRootExecutionRequest {
 
     pub fn item_ref(&self) -> &str {
         &self.item_ref
+    }
+
+    /// Verify and return only the exact admitted root subject. This is safe for
+    /// definition inspection because no mutable resolution or operational
+    /// launch metadata is consulted.
+    pub fn admitted_program_subject(&self) -> Result<AdmittedProgramSubject> {
+        if self.item_ref != self.verified_subject.canonical_ref {
+            bail!("sealed request root identity differs from its admitted subject");
+        }
+        if self.resolution_output.root.resolved_ref != self.item_ref
+            || self.resolution_output.root.raw_content_digest
+                != self.verified_subject.raw_content_digest
+        {
+            bail!("sealed resolution root differs from its admitted subject");
+        }
+        self.verified_subject.exact_subject()
     }
 
     pub fn project_context(&self) -> &ProjectContext {
@@ -1443,6 +1522,27 @@ mod authority_tests {
             restored.materialized_project_root,
             Some(PathBuf::from("/admitted/project"))
         );
+    }
+
+    #[test]
+    fn admitted_program_subject_rechecks_source_and_runtime_body_hashes() {
+        let request = SealedRootExecutionRequest::storage_test_fixture();
+        let subject = request.admitted_program_subject().unwrap();
+        assert_eq!(subject.canonical_ref, "graph:test/storage-fixture");
+        assert_eq!(subject.source_content, "{}");
+        assert_eq!(subject.raw_content, "{}");
+        assert_eq!(subject.source_content_hash, lillux::sha256_hex(b"{}"));
+        assert_eq!(subject.raw_content_digest, lillux::sha256_hex(b"{}"));
+
+        let mut source_tampered = request.clone();
+        source_tampered.verified_subject.source_content_b64 =
+            base64::engine::general_purpose::STANDARD.encode(b"changed");
+        assert!(source_tampered.admitted_program_subject().is_err());
+
+        let mut body_tampered = request;
+        body_tampered.verified_subject.raw_content_digest = "f".repeat(64);
+        body_tampered.resolution_output.root.raw_content_digest = "f".repeat(64);
+        assert!(body_tampered.admitted_program_subject().is_err());
     }
 
     #[test]

@@ -571,6 +571,7 @@ fn session_for(
         .map(str::to_string)
         .unwrap_or_else(|| loaded_surface.spec().name.clone());
     BrowserSession {
+        ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION.to_string(),
         session_id: format!("terminal:{}", now_ms()),
         surface_ref,
         user_principal_id: None,

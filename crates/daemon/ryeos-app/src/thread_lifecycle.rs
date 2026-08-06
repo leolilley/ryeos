@@ -19,8 +19,9 @@ use crate::state_store::{
     ChildLineageAppendOutcome,
     FinalizeCreatedUnattachedOutcome as StoreFinalizeCreatedUnattachedOutcome,
     FinalizeIfNonterminalOutcome as StoreFinalizeIfNonterminalOutcome, FinalizeThreadRecord,
-    NewArtifactRecord, NewEventRecord, NewThreadRecord, PersistedEventRecord, StateStore,
-    ThreadArtifactRecord, ThreadDetail, ThreadEdgeRecord, ThreadListItem, ThreadResultRecord,
+    NewArtifactRecord, NewEventRecord, NewThreadRecord, PersistedEventRecord,
+    StateAnchorPublication, StateAnchorPublishParams, StateStore, ThreadArtifactRecord,
+    ThreadDetail, ThreadEdgeRecord, ThreadListItem, ThreadResultRecord,
 };
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{
@@ -53,7 +54,7 @@ pub use direct_execution::{
 };
 #[cfg(test)]
 use sealed_request::SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION;
-pub use sealed_request::SealedRootExecutionRequest;
+pub use sealed_request::{AdmittedProgramSubject, SealedRootExecutionRequest};
 
 use validation::{
     normalize_terminal_status, validate_kind, validate_launch_mode, validate_thread_id_format,
@@ -565,6 +566,23 @@ pub struct ThreadFinalizeParams {
     pub final_cost: Option<FinalCost>,
     #[serde(default)]
     pub summary_json: Option<Value>,
+}
+
+/// Compare a recorded-service terminal JSON field using the signed CAS wire
+/// contract. `serde_json::Value` equality is too strong here: a typed float
+/// can retain a different in-memory representation after canonical JSON is
+/// decoded even though its durable bytes are identical.
+pub fn recorded_service_terminal_json_equal(
+    authoritative: Option<&Value>,
+    requested: Option<&Value>,
+) -> Result<bool> {
+    match (authoritative, requested) {
+        (None, None) => Ok(true),
+        (Some(authoritative), Some(requested)) => {
+            Ok(lillux::canonical_json(authoritative)? == lillux::canonical_json(requested)?)
+        }
+        (None, Some(_)) | (Some(_), None) => Ok(false),
+    }
 }
 
 /// Lifecycle-layer result of a conditional pre-launch cleanup. `Finalized` and
@@ -4022,8 +4040,14 @@ impl ThreadLifecycleService {
             })?;
         if authoritative.status.as_str() != reported_status
             || authoritative.outcome_code != params.outcome_code
-            || authoritative.result != params.result
-            || authoritative.error != params.error
+            || !recorded_service_terminal_json_equal(
+                authoritative.result.as_ref(),
+                params.result.as_ref(),
+            )?
+            || !recorded_service_terminal_json_equal(
+                authoritative.error.as_ref(),
+                params.error.as_ref(),
+            )?
             || authoritative.result_project_snapshot_hash.is_some()
             || authoritative.budget.is_some()
             || !authoritative.artifacts.is_empty()
@@ -4861,6 +4885,18 @@ impl ThreadLifecycleService {
         )?;
         self.publish_records(std::slice::from_ref(&persisted));
         Ok(artifact)
+    }
+
+    /// Materialize one opaque restore closure and append its conforming anchor
+    /// milestone under a single state mutation guard. The runtime cannot forge
+    /// this event through the ordinary append lane.
+    pub fn publish_state_anchor(
+        &self,
+        params: &StateAnchorPublishParams,
+    ) -> Result<StateAnchorPublication> {
+        let publication = self.state_store.publish_state_anchor(params)?;
+        self.publish_records(std::slice::from_ref(&publication.event));
+        Ok(publication)
     }
 
     /// Append caller-supplied events to a running thread, then publish the
@@ -6241,6 +6277,44 @@ mod tests {
     use ryeos_engine::resolution::{
         KindComposedView, ResolutionOutput, ResolutionStepName, ResolvedAncestor,
     };
+
+    #[test]
+    fn recorded_service_terminal_json_equality_uses_canonical_cas_numbers() {
+        let typed_spend = serde_json::to_value(3.0478680000000002_f64)
+            .expect("encode typed floating-point result");
+        let requested = json!({
+            "rows": [{"spend_usd": typed_spend}],
+            "semantics": {"source": "latest cumulative usage"}
+        });
+        let canonical = lillux::canonical_json(&requested).expect("canonical result bytes");
+        let authoritative: Value =
+            serde_json::from_str(&canonical).expect("decode authoritative result");
+
+        assert_ne!(
+            authoritative, requested,
+            "fixture must exercise serde_json's distinct typed-number representations"
+        );
+        assert!(
+            recorded_service_terminal_json_equal(Some(&authoritative), Some(&requested),)
+                .expect("compare canonical terminal fields")
+        );
+        assert!(recorded_service_terminal_json_equal(None, None).unwrap());
+        assert!(!recorded_service_terminal_json_equal(None, Some(&requested)).unwrap());
+        assert!(
+            !recorded_service_terminal_json_equal(
+                Some(&authoritative),
+                Some(&json!({
+                    "rows": [{"spend_usd": 3.047869}],
+                    "semantics": {"source": "latest cumulative usage"}
+                })),
+            )
+            .unwrap()
+        );
+        assert!(!recorded_service_terminal_json_equal(Some(&json!(1)), Some(&json!(1.0))).unwrap());
+        assert!(
+            !recorded_service_terminal_json_equal(Some(&json!(-0.0)), Some(&json!(0.0))).unwrap()
+        );
+    }
 
     fn empty_test_engine() -> Arc<Engine> {
         Arc::new(Engine::new(

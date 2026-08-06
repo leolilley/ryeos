@@ -151,6 +151,18 @@ impl DaemonClient {
             user_principal_id.as_deref(),
         );
         let response = self.signed_post("/ui/api/launch/mint", &body).await?;
+        if response
+            .get("ui_binding_contract_revision")
+            .and_then(serde_json::Value::as_str)
+            != Some(ryeos_client_base::UI_BINDING_CONTRACT_REVISION)
+        {
+            return Err(ClientError::Transport(CliTransportError::BodyDecode {
+                detail: format!(
+                    "UI binding contract mismatch: daemon must advertise '{}'",
+                    ryeos_client_base::UI_BINDING_CONTRACT_REVISION
+                ),
+            }));
+        }
         let Some(session_id) = response.get("session_id").and_then(|value| value.as_str()) else {
             return Err(ClientError::DaemonDown {
                 url: format!("{}/ui/api/launch/mint", self.base_url.trim_end_matches('/')),
@@ -398,6 +410,7 @@ fn ui_session_mint_body(
     user_principal_id: Option<&str>,
 ) -> serde_json::Value {
     serde_json::json!({
+        "ui_binding_contract_revision": ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
         "surface_ref": surface_ref,
         "project_path": project_path,
         "read_only": read_only,
@@ -495,5 +508,9 @@ mod tests {
         );
         assert_eq!(body["user_principal_id"], "fp:operator");
         assert_eq!(body["project_path"], "/work/project");
+        assert_eq!(
+            body["ui_binding_contract_revision"],
+            ryeos_client_base::UI_BINDING_CONTRACT_REVISION
+        );
     }
 }

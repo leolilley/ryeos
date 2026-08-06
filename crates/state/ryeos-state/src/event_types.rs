@@ -66,6 +66,10 @@ pub const TOKEN_DELTA: &str = "token_delta";
 pub const STREAM_SNAPSHOT: &str = "stream_snapshot";
 pub const STREAM_CLOSED: &str = "stream_closed";
 pub const OBSERVATION: &str = "observation";
+/// Daemon-authored durable result of a hook declared as `observation`.
+pub const HOOK_OBSERVATION_RECORDED: &str = "hook_observation_recorded";
+/// Daemon-authored classified failure for an observation hook.
+pub const HOOK_FAILED: &str = "hook_failed";
 
 pub const ARTIFACT_PUBLISHED: &str = "artifact_published";
 pub const AS_LAUNCHED_RESOLUTION: &str = "as_launched_resolution";

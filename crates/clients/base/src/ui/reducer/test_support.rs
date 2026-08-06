@@ -11,6 +11,7 @@ pub(crate) use crate::workspace::{FocusDirection, ViewSpec};
 
 pub(crate) fn session() -> BrowserSession {
     BrowserSession {
+        ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
         session_id: "session-1".to_string(),
         surface_ref: "surface:ryeos/ryeos/base".to_string(),
         user_principal_id: Some(format!("fp:{}", "ab".repeat(32))),
@@ -70,7 +71,7 @@ pub(crate) fn seed_view(core: &mut RyeOsCore, view_ref: &str) {
         view_ref.to_string(),
         serde_json::from_value(serde_json::json!({
             "widget": "rows",
-            "source": { "ref": "service:test/source", "params": {}, "collection": "rows" }
+            "sources": { "default": { "ref": "service:test/source", "params": {}, "collection": "rows" } }
         }))
         .unwrap(),
     );
@@ -115,7 +116,11 @@ pub(crate) fn focused_input_text(core: &RyeOsCore) -> String {
 /// the generic keyed source store, as `initial_effects`' FetchSource would.
 pub(crate) fn seed_commands(core: &mut RyeOsCore, commands: serde_json::Value) {
     core.data.sources.insert(
-        crate::ui::content::completion_source_key("view:ryeos/input", "line"),
+        crate::ui::source_key::RyeOsSourceInstanceKey::completion(
+            crate::ui::model::dock_view_instance_key(crate::ui::model::RyeOsDockEdge::Bottom),
+            "line",
+        )
+        .encode(),
         commands,
     );
 }
@@ -156,7 +161,7 @@ pub(crate) fn seed_filter_tile(core: &mut RyeOsCore) -> String {
         "view:test/filter",
         serde_json::json!({
             "widget": "rows",
-            "source": { "ref": "service:test/items", "params": { "limit": 50 }, "collection": "items" },
+            "sources": { "default": { "ref": "service:test/items", "params": { "limit": 50 }, "collection": "items" } },
             "input": { "id": "q", "placeholder": "filter…", "feeds": { "param": "query", "debounce_ms": 120 } }
         }),
     );

@@ -15,6 +15,12 @@ pub use browser_session::{BrowserSession, BrowserSessionStore, LaunchContext};
 pub use session_bus::SessionBus;
 pub use state::UiState;
 
+/// Exact signed UI binding contract served by this daemon build.
+///
+/// This intentionally has no compatibility range. Launchers must advertise
+/// the same revision before the daemon will create a browser session.
+pub const UI_BINDING_CONTRACT_REVISION: &str = "ryeos.ui.binding.v2";
+
 /// Register UI extensions into the provided registries.
 ///
 /// The daemon calls this during composition to add UI-specific auth

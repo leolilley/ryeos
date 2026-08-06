@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-15T02:35:27Z:5709c65ad0796150c25bfcb530cb5b7e905cbbaa714ce92b2cdd9edc1bd3dced:0CBT2UG1XSrex6Xu89XWfctcsYj4fQmoXdr7Q2BzrxqIETIXUBoiI/8Zr8E8OvDmWOqjqftoKWaw20pxj4xHCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:25Z:5e9acd00e108c6f2d0ed6ed772a2ef834aafd500f88a2c2e1b28167999bde8d7:LnQv18Yl6kDplszQNyAXUzeyEldQ494k2X37z5xQpbuNQopgl8T1oQRgZtSULUGT8Tn3TqLdqm/Vqnvh8XYvCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-execution-tree
 title: Execution Tree
 version: "1.0.0"
@@ -8,13 +8,14 @@ description: >-
   inspect that thread's live transcript.
 
 widget: table
-source:
-  ref: service:ui/ryeos-ui/thread/tree
-  params:
-    thread_id: "@facet:input.route.thread"
-    max_depth: 32
-    max_nodes: 500
-  collection: threads
+sources:
+  default:
+    ref: service:ui/ryeos-ui/thread/tree
+    params:
+      thread_id: "@facet:input.route.thread"
+      max_depth: 32
+      max_nodes: 500
+    collection: threads
 projections:
   hierarchy:
     id: thread_id
@@ -82,7 +83,7 @@ affordances:
       plane: ui
       facet: selection
       value:
-        thread: "{record.thread_id}"
+        thread_id: "{record.thread_id}"
       open_view: view:ryeos/threads/detail
 
 refresh:

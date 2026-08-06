@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-06T12:24:56Z:525db0338d96fbd9d9e4fcd46b1677ce3fef54386df64ec0edbff2c7b0a2ff99:B/eaO6RM02acOyoKSu3KPhWbQ0f0I/M0gyCZZ5djeU2gA2e2AlEBuHN4gdOlrJeEt+/C/CBb3b2mQQmEDLLdCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-04T10:21:25Z:e6baac4417c5af7fbab33459b496c192721274d1034f876e64e48659d978d653:lOzSl4lJwRDTDC1tqJkH6UFBXbganvNd7611fB2pHL5tVL4l5wnq1yduorSohF7OrjP8Z8X6AHAbC2VTkDhUDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-detail
 version: "1.0.0"
 description: >-
@@ -9,16 +9,18 @@ description: >-
 
 widget: sections
 title: Thread
+sources:
+  detail:
+    ref: service:ui/ryeos-ui/thread/inspect
+    params:
+      thread_id: "@facet:selection.thread_id"
 
 sections:
   # Summary: the whole `thread` sub-record projected to one row (item + status),
   # toned by status so the header reads at a glance.
   - title: Summary
-    source:
-      ref: service:ui/ryeos-ui/thread/inspect
-      params:
-        thread_id: "@facet:selection.thread"
-      collection: thread
+    source_channel: detail
+    collection: thread
     projection:
       primary: item_ref
       meta: status
@@ -36,11 +38,8 @@ sections:
   # display/scoping metadata for local RyeOS UI sessions, not an authorization
   # boundary; old/system rows may be empty.
   - title: Project
-    source:
-      ref: service:ui/ryeos-ui/thread/inspect
-      params:
-        thread_id: "@facet:selection.thread"
-      collection: thread
+    source_channel: detail
+    collection: thread
     projection:
       primary: project.path
       meta: project.name
@@ -55,11 +54,8 @@ sections:
   # thread yields an empty collection — so the section degrades to empty rather
   # than dumping the thread record.
   - title: Follow
-    source:
-      ref: service:ui/ryeos-ui/thread/inspect
-      params:
-        thread_id: "@facet:selection.thread"
-      collection: follow
+    source_channel: detail
+    collection: follow
     projection:
       primary: value
       meta: label
@@ -67,11 +63,8 @@ sections:
   # Usage: chain-wide execution totals (tokens, cost, turns, thread count), one
   # metric per row — the deep-watch summary of what this execution consumed.
   - title: Usage
-    source:
-      ref: service:ui/ryeos-ui/thread/inspect
-      params:
-        thread_id: "@facet:selection.thread"
-      collection: usage
+    source_channel: detail
+    collection: usage
     projection:
       primary: value
       meta: label
@@ -81,11 +74,8 @@ sections:
   # row, read from the signed thread.json audit record (plus the projection's
   # executor identity). Empty when the thread carries no audit record.
   - title: Execution
-    source:
-      ref: service:ui/ryeos-ui/thread/inspect
-      params:
-        thread_id: "@facet:selection.thread"
-      collection: execution_meta
+    source_channel: detail
+    collection: execution_meta
     projection:
       primary: value
       meta: label
@@ -93,11 +83,8 @@ sections:
   # Outcome: the `result` sub-object (outcome code + error). Null until the
   # thread finishes → this section is simply empty.
   - title: Outcome
-    source:
-      ref: service:ui/ryeos-ui/thread/inspect
-      params:
-        thread_id: "@facet:selection.thread"
-      collection: result
+    source_channel: detail
+    collection: result
     projection:
       primary: outcome_code
       meta: error
@@ -110,22 +97,16 @@ sections:
 
   # Artifacts the execution produced (one row each; empty when none).
   - title: Artifacts
-    source:
-      ref: service:ui/ryeos-ui/thread/inspect
-      params:
-        thread_id: "@facet:selection.thread"
-      collection: artifacts
+    source_channel: detail
+    collection: artifacts
     projection:
       primary: artifact_type
       meta: uri
 
   # Child threads spawned by this one (the chain fanning out).
   - title: Children
-    source:
-      ref: service:ui/ryeos-ui/thread/inspect
-      params:
-        thread_id: "@facet:selection.thread"
-      collection: children
+    source_channel: detail
+    collection: children
     projection:
       primary: item_ref
       meta: status
@@ -140,6 +121,6 @@ sections:
         default: neutral
 
 # Re-fetch whenever the selected thread changes (the inspect affordance writes
-# selection.thread before opening this lens).
+# selection.thread_id before opening this lens).
 refresh:
   on_facet: selection

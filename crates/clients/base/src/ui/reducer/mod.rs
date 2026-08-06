@@ -19,6 +19,7 @@
 
 mod affordances;
 mod effect_results;
+mod field_interaction;
 mod input;
 #[cfg(test)]
 mod test_support;
@@ -70,12 +71,14 @@ impl RyeOsCore {
                     }
                 }
                 self.advance_backdrop_break(dt_ms);
+                self.expire_field_changes(now_ms);
+                let effects = self.advance_field_playback();
                 // The frame clock advances `generation` so generation-keyed
                 // motion (the backdrop twinkle, via the generic scene
                 // renderer) steps each tick. The loop already repaints on
                 // tick; bumping generation is what makes the step visible.
                 self.bump_generation();
-                Vec::new()
+                effects
             }
             RyeOsEvent::Resize { viewport } => {
                 self.runtime.viewport = viewport;
@@ -230,6 +233,19 @@ impl RyeOsCore {
                     Vec::new()
                 }
             }
+            event @ (RyeOsUiEvent::SetFieldSelection { .. }
+            | RyeOsUiEvent::MoveFieldSelection { .. }
+            | RyeOsUiEvent::SetFieldGroupCollapsed { .. }
+            | RyeOsUiEvent::SetFieldLayerVisible { .. }
+            | RyeOsUiEvent::SetFieldCursor { .. }
+            | RyeOsUiEvent::StepFieldCursor { .. }
+            | RyeOsUiEvent::SetFieldPlayback { .. }
+            | RyeOsUiEvent::SetFieldQuery { .. }
+            | RyeOsUiEvent::MoveFieldSearchMatch { .. }
+            | RyeOsUiEvent::ToggleFieldCompare { .. }
+            | RyeOsUiEvent::RequestFieldExpansion { .. }
+            | RyeOsUiEvent::ContinueFieldExpansion { .. }
+            | RyeOsUiEvent::ClearFieldExpansion { .. }) => self.dispatch_field_event(event),
             RyeOsUiEvent::FocusChanged { target } => {
                 let Some(tile_id) = target
                     .and_then(|target| target.parse::<u64>().ok())
@@ -256,13 +272,13 @@ impl RyeOsCore {
                 let super::model::RyeOsDockContent::View { view_ref } = &slot.content;
                 let view_ref = view_ref.clone();
                 self.ui.focus_target = Some(super::model::RyeOsFocusTarget::Dock { edge });
-                let key = super::model::dock_source_key(edge);
+                let key = super::model::dock_view_instance_key(edge);
                 self.ui
                     .dock_local
                     .entry(key.clone())
                     .or_insert_with(initial_list_local_state);
                 self.bump_generation();
-                self.emit_fetch_source_keyed(key, &view_ref)
+                self.emit_fetch_source_for_instance(key, &view_ref)
             }
             RyeOsUiEvent::FocusDirection { direction } => {
                 if self.workspace.focus_in_direction(direction) {
@@ -362,46 +378,51 @@ impl RyeOsCore {
                 // An inline @-mention under the cursor wins; otherwise the
                 // line-start / command grammar. Both resolve to an optional
                 // (text, cursor) before the buffer is mutated.
-                let completed =
-                    if super::tokenize::active_mention(&buffer.text, buffer.cursor).is_some() {
-                        let records = self
-                            .views
-                            .get(&view_ref)
-                            .and_then(|binding| binding.input.as_ref())
-                            .and_then(|input| input.mentions.as_ref())
-                            .and_then(|mentions| {
-                                let response = self.data.sources.get(
-                                    &super::content::mention_source_key(&view_ref, &key.input_id),
-                                )?;
-                                Some(super::content::project_mentions(mentions, response))
-                            })
-                            .unwrap_or_default();
-                        super::tokenize::accept_mention_completion(
-                            &records,
-                            &buffer.text,
-                            buffer.cursor,
-                        )
-                    } else {
-                        self.views
-                            .get(&view_ref)
-                            .and_then(|binding| binding.input.as_ref())
-                            .and_then(|input| input.completion.as_ref())
-                            .and_then(|completion| {
-                                let response = self.data.sources.get(
-                                    &super::content::completion_source_key(
-                                        &view_ref,
-                                        &key.input_id,
-                                    ),
-                                )?;
-                                let records =
-                                    super::content::completion_records(completion, response);
-                                super::tokenize::accept_slash_completion(
-                                    records,
-                                    &buffer.text,
-                                    buffer.cursor,
+                let completed = if super::tokenize::active_mention(&buffer.text, buffer.cursor)
+                    .is_some()
+                {
+                    let records = self
+                        .views
+                        .get(&view_ref)
+                        .and_then(|binding| binding.input.as_ref())
+                        .and_then(|input| input.mentions.as_ref())
+                        .and_then(|mentions| {
+                            let response = self.data.sources.get(
+                                &super::source_key::RyeOsSourceInstanceKey::mention(
+                                    key.view_instance_key.clone(),
+                                    &key.input_id,
                                 )
-                            })
-                    };
+                                .encode(),
+                            )?;
+                            Some(super::content::project_mentions(mentions, response))
+                        })
+                        .unwrap_or_default();
+                    super::tokenize::accept_mention_completion(
+                        &records,
+                        &buffer.text,
+                        buffer.cursor,
+                    )
+                } else {
+                    self.views
+                        .get(&view_ref)
+                        .and_then(|binding| binding.input.as_ref())
+                        .and_then(|input| input.completion.as_ref())
+                        .and_then(|completion| {
+                            let response = self.data.sources.get(
+                                &super::source_key::RyeOsSourceInstanceKey::completion(
+                                    key.view_instance_key.clone(),
+                                    &key.input_id,
+                                )
+                                .encode(),
+                            )?;
+                            let records = super::content::completion_records(completion, response);
+                            super::tokenize::accept_slash_completion(
+                                records,
+                                &buffer.text,
+                                buffer.cursor,
+                            )
+                        })
+                };
                 if let Some((text, cursor)) = completed
                     && let Some(buffer) = self.focused_input_buffer_mut()
                 {
@@ -665,18 +686,11 @@ impl RyeOsCore {
                 } else {
                     None
                 };
-                let key = format!(
-                    "dock:{}",
-                    match edge {
-                        super::model::RyeOsDockEdge::Top => "top",
-                        super::model::RyeOsDockEdge::Bottom => "bottom",
-                        super::model::RyeOsDockEdge::Left => "left",
-                        super::model::RyeOsDockEdge::Right => "right",
-                    }
-                );
+                let key = super::model::dock_view_instance_key(edge);
+                self.normalize_field_local_states();
                 self.bump_generation();
                 shown_view
-                    .map(|view_ref| self.emit_fetch_source_keyed(key, &view_ref))
+                    .map(|view_ref| self.emit_fetch_source_for_instance(key, &view_ref))
                     .unwrap_or_default()
             }
             RyeOsUiIntent::ResizeFocused { direction } => {
@@ -710,7 +724,7 @@ impl RyeOsCore {
             RyeOsUiIntent::InspectThread { thread_id } => {
                 self.seat.append_facet(
                     super::seat::KEY_SELECTION,
-                    serde_json::json!({ "thread": thread_id }),
+                    serde_json::json!({ "thread_id": thread_id }),
                 );
                 self.bump_generation();
                 self.effects_for_facet(super::seat::KEY_SELECTION)
@@ -1248,7 +1262,7 @@ mod tests {
             "view:ryeos/threads/list",
             serde_json::json!({
                 "widget": "rows",
-                "source": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "rows" }
+                "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "rows" } }
             }),
         );
         assert!(build_view_model(&core).workspace.docks.left.is_none());
@@ -1262,10 +1276,15 @@ mod tests {
         });
 
         assert!(build_view_model(&core).workspace.docks.left.is_some());
+        let source_key = crate::ui::source_key::RyeOsSourceInstanceKey::named(
+            crate::ui::model::dock_view_instance_key(crate::ui::model::RyeOsDockEdge::Left),
+            "default",
+        )
+        .encode();
         assert!(matches!(
             effects.first().map(|effect| &effect.kind),
             Some(RyeOsEffectKind::FetchSource { tile_id, source_ref, .. })
-                if tile_id == "dock:left" && source_ref == "service:ui/ryeos-ui/threads/list"
+                if tile_id == &source_key && source_ref == "service:ui/ryeos-ui/threads/list"
         ));
     }
 
@@ -1505,7 +1524,11 @@ mod tests {
         );
         // The refs land under the mention source key via the generic fetch.
         core.data.sources.insert(
-            crate::ui::content::mention_source_key("view:ryeos/input", "line"),
+            crate::ui::source_key::RyeOsSourceInstanceKey::mention(
+                crate::ui::model::dock_view_instance_key(crate::ui::model::RyeOsDockEdge::Bottom),
+                "line",
+            )
+            .encode(),
             serde_json::json!({ "threads": [
                 { "thread_id": "T-ab", "item_ref": "directive:ops/base" },
                 { "thread_id": "T-cd", "item_ref": "directive:demo/chat" }
@@ -1698,7 +1721,7 @@ mod tests {
             serde_json::from_value(serde_json::json!({
                 "widget": "rows",
                 "description": "Item space",
-                "source": { "ref": "service:ui/ryeos-ui/items/list", "params": {}, "collection": "items" }
+                "sources": { "default": { "ref": "service:ui/ryeos-ui/items/list", "params": {}, "collection": "items" } }
             }))
             .unwrap(),
         );
@@ -1798,7 +1821,7 @@ mod tests {
             "view:test/threads/history",
             serde_json::json!({
                 "widget": "table",
-                "source": { "ref": "service:test/threads", "params": {}, "collection": "threads" },
+                "sources": { "default": { "ref": "service:test/threads", "params": {}, "collection": "threads" } },
                 "input": { "id": "q", "feeds": { "param": "filter" } }
             }),
         );
@@ -2031,10 +2054,10 @@ mod tests {
             serde_json::json!({
                 "widget": "key_value",
                 "facet": "selection.summary",
-                "source": {
+                "sources": { "default": {
                     "ref": "service:ui/ryeos-ui/item/inspect",
                     "params": { "canonical_ref": "@facet:selection.item" }
-                },
+                } },
                 "projections": { "detail": ["canonical_ref", "title", "detail"] },
                 "refresh": { "on_facet": "selection" }
             }),

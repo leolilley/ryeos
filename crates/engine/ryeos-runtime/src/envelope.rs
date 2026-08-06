@@ -106,6 +106,11 @@ impl std::fmt::Display for HookDispatchFailure {
 }
 
 pub const HOOK_INTEGRITY_FAILURE_CODE: &str = "hook_child_integrity_failed";
+pub const MAX_HOOK_OBSERVATION_ACTION_BYTES: usize = 64 * 1024;
+pub const MAX_HOOK_OBSERVATION_BYTES: usize = 192 * 1024;
+pub const MAX_HOOK_OBSERVATION_JSON_DEPTH: usize = 32;
+pub const MAX_HOOK_OBSERVATION_JSON_VALUES: usize = 8_192;
+pub const MAX_HOOK_OBSERVATION_KIND_BYTES: usize = 128;
 
 impl HookDispatchOutput {
     pub fn bare(value: serde_json::Value) -> Self {
@@ -119,6 +124,118 @@ impl HookDispatchOutput {
 
 fn hook_child_failure(message: impl Into<String>) -> String {
     format!("hook_child_failed: {}", message.into())
+}
+
+/// Bound the fully rendered parameters of an observation-producing action
+/// before it is dispatched. This is intentionally smaller than the graph
+/// checkpoint limit: observation publication cannot use runtime state as an
+/// unbounded transport.
+pub fn validate_hook_observation_action(action: &serde_json::Value) -> Result<(), String> {
+    let params = action
+        .as_object()
+        .and_then(|object| object.get("params"))
+        .unwrap_or(&serde_json::Value::Null);
+    validate_bounded_json(
+        params,
+        MAX_HOOK_OBSERVATION_ACTION_BYTES,
+        MAX_HOOK_OBSERVATION_JSON_DEPTH,
+        MAX_HOOK_OBSERVATION_JSON_VALUES,
+        "observation action params",
+    )
+}
+
+/// Validate and reconstruct the one leaf value an observation hook may
+/// publish. Runtime envelopes must already have been peeled by
+/// `normalize_hook_dispatch_result`; unknown top-level fields are rejected.
+pub fn normalize_hook_observation(value: serde_json::Value) -> Result<serde_json::Value, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "observation result must be an object".to_string())?;
+    if object.len() != 2 || !object.contains_key("kind") || !object.contains_key("payload") {
+        return Err("observation result must contain exactly `kind` and `payload`".to_string());
+    }
+    let kind = object
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "observation result `kind` must be a string".to_string())?;
+    validate_observation_kind(kind)?;
+    let normalized = serde_json::json!({
+        "kind": kind,
+        "payload": object.get("payload").expect("checked payload").clone(),
+    });
+    validate_bounded_json(
+        &normalized,
+        MAX_HOOK_OBSERVATION_BYTES,
+        MAX_HOOK_OBSERVATION_JSON_DEPTH,
+        MAX_HOOK_OBSERVATION_JSON_VALUES,
+        "observation result",
+    )?;
+    Ok(normalized)
+}
+
+fn validate_observation_kind(kind: &str) -> Result<(), String> {
+    if kind.is_empty() || kind.len() > MAX_HOOK_OBSERVATION_KIND_BYTES {
+        return Err(format!(
+            "observation result `kind` must be 1..={MAX_HOOK_OBSERVATION_KIND_BYTES} bytes"
+        ));
+    }
+    let mut segments = kind.split('.');
+    let mut count = 0usize;
+    for segment in &mut segments {
+        count += 1;
+        let mut bytes = segment.bytes();
+        if !bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+            || !bytes.all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+            })
+        {
+            return Err(
+                "observation result `kind` must use lowercase namespaced segments".to_string(),
+            );
+        }
+    }
+    if count < 2 {
+        return Err("observation result `kind` must be namespaced".to_string());
+    }
+    Ok(())
+}
+
+fn validate_bounded_json(
+    value: &serde_json::Value,
+    max_bytes: usize,
+    max_depth: usize,
+    max_values: usize,
+    label: &str,
+) -> Result<(), String> {
+    let canonical = lillux::canonical_json(value)
+        .map_err(|error| format!("{label} cannot be represented as canonical JSON: {error}"))?;
+    if canonical.len() > max_bytes {
+        return Err(format!(
+            "{label} is {} bytes; maximum is {max_bytes}",
+            canonical.len()
+        ));
+    }
+    let mut stack = vec![(value, 1usize)];
+    let mut values = 0usize;
+    while let Some((current, depth)) = stack.pop() {
+        values = values.saturating_add(1);
+        if values > max_values {
+            return Err(format!("{label} exceeds {max_values} JSON values"));
+        }
+        if depth > max_depth {
+            return Err(format!("{label} exceeds {max_depth} JSON levels"));
+        }
+        match current {
+            serde_json::Value::Array(items) => {
+                stack.extend(items.iter().map(|item| (item, depth + 1)));
+            }
+            serde_json::Value::Object(items) => {
+                stack.extend(items.values().map(|item| (item, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Strictly classify and peel a hook child's daemon envelope.
@@ -315,6 +432,78 @@ pub fn follow_envelope_terminal_status(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn hook_observation_accepts_only_the_bounded_namespaced_leaf_envelope() {
+        let expected = json!({
+            "kind": "build.step_completed",
+            "payload": {"step": 4, "ok": true}
+        });
+        assert_eq!(
+            normalize_hook_observation(expected.clone()).unwrap(),
+            expected
+        );
+
+        for rejected in [
+            json!(null),
+            json!({"kind": "build.step_completed"}),
+            json!({"kind": "build.step_completed", "payload": {}, "extra": true}),
+            json!({"kind": "unscoped", "payload": {}}),
+            json!({"kind": "Build.completed", "payload": {}}),
+        ] {
+            assert!(normalize_hook_observation(rejected).is_err());
+        }
+    }
+
+    #[test]
+    fn hook_observation_rejects_byte_depth_and_value_limit_overflow() {
+        assert!(
+            normalize_hook_observation(json!({
+                "kind": "build.payload",
+                "payload": "x".repeat(MAX_HOOK_OBSERVATION_BYTES)
+            }))
+            .unwrap_err()
+            .contains("maximum")
+        );
+
+        let mut deep = json!(true);
+        for _ in 0..MAX_HOOK_OBSERVATION_JSON_DEPTH {
+            deep = json!([deep]);
+        }
+        assert!(
+            normalize_hook_observation(json!({
+                "kind": "build.deep",
+                "payload": deep
+            }))
+            .unwrap_err()
+            .contains("JSON levels")
+        );
+
+        assert!(
+            normalize_hook_observation(json!({
+                "kind": "build.wide",
+                "payload": vec![0; MAX_HOOK_OBSERVATION_JSON_VALUES]
+            }))
+            .unwrap_err()
+            .contains("JSON values")
+        );
+    }
+
+    #[test]
+    fn hook_observation_action_params_are_capped_before_dispatch() {
+        validate_hook_observation_action(&json!({
+            "item_id": "tool:test/evidence",
+            "params": {"path": ["a", "b"]}
+        }))
+        .unwrap();
+        let error = validate_hook_observation_action(&json!({
+            "item_id": "tool:test/evidence",
+            "params": {"path": "x".repeat(MAX_HOOK_OBSERVATION_ACTION_BYTES)}
+        }))
+        .unwrap_err();
+        assert!(error.contains("observation action params"));
+        assert!(error.contains("maximum"));
+    }
 
     #[test]
     fn native_success_requires_typed_consistent_status() {

@@ -8,6 +8,17 @@ use serde_json::Value;
 
 use crate::execution_provenance::ExecutionProvenance;
 
+/// Hook identity admitted at the same launch boundary that mints callback
+/// authority. Runtime callback input may select one of these identities; it
+/// cannot author a new provenance label for durable hook evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookDispatchAuthorization {
+    pub hook_id: String,
+    pub event: String,
+    pub layer: ryeos_runtime::hooks_loader::HookLayer,
+    pub result_mode: ryeos_runtime::hooks_loader::HookResultMode,
+}
+
 /// Default TTL for callback tokens when no explicit duration is requested.
 const DEFAULT_CALLBACK_TTL_SECS: u64 = 300;
 
@@ -46,6 +57,10 @@ pub struct CallbackCapability {
     /// hook identity must match this value; resolving live during a callback
     /// would reintroduce a source-mutation race.
     pub root_content_digest: String,
+    /// Exact hook identities captured from the verified definition and
+    /// configured hook roots before the runtime starts. Empty is deny-all for
+    /// hook dispatch while remaining valid for ordinary callbacks.
+    pub hook_dispatch_authorizations: Vec<HookDispatchAuthorization>,
     /// Parent thread's resolved hard limits, serialized by the launcher. The
     /// daemon passes this through out-of-band on callback-dispatched child
     /// launches so runtimes cannot spoof parent budget inheritance.
@@ -155,6 +170,7 @@ impl CallbackCapabilityStore {
             effective_bundle_id,
             item_ref,
             root_content_digest,
+            hook_dispatch_authorizations: Vec::new(),
             hard_limits,
             depth,
             accounting_scope: None,
@@ -162,6 +178,30 @@ impl CallbackCapabilityStore {
 
         self.capabilities.lock().unwrap().insert(token, cap.clone());
         cap
+    }
+
+    /// Bind the launch-captured hook identity allow-list before the token is
+    /// exposed to a runtime. Returns whether the token was still present.
+    pub fn set_hook_dispatch_authorizations(
+        &self,
+        token: &str,
+        mut authorizations: Vec<HookDispatchAuthorization>,
+    ) -> bool {
+        authorizations.sort_by(|left, right| {
+            left.hook_id
+                .cmp(&right.hook_id)
+                .then_with(|| left.event.cmp(&right.event))
+                .then_with(|| left.layer.cmp(&right.layer))
+                .then_with(|| left.result_mode.as_str().cmp(right.result_mode.as_str()))
+        });
+        authorizations.dedup();
+        match self.capabilities.lock().unwrap().get_mut(token) {
+            Some(cap) => {
+                cap.hook_dispatch_authorizations = authorizations;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Bind the minting thread's accounting scope to a freshly-minted cap.
@@ -795,6 +835,7 @@ mod tests {
             effective_bundle_id: None,
             item_ref: None,
             root_content_digest: "0".repeat(64),
+            hook_dispatch_authorizations: Vec::new(),
             hard_limits: serde_json::Value::Null,
             depth: 0,
             accounting_scope: None,

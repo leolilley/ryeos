@@ -1,0 +1,9 @@
+# ryeos:signed:2026-08-04T09:35:28Z:76d50e20e2c363880222f76e5f08f5387a4063e84ee1c6b59bb7c66aac98e5d2:HVadqtaTrNxplUEwN+EI2TqVGdBslLrpq2v9UUhGTR6mJbbN/s2dNK6Bv2Be53cby367eWvchRpLUB579vuPDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/field/project
+version: "1.0.0"
+description: Returns bounded signed-item and graph-definition facts for the admitted UI project.
+endpoint: ui.ryeos.field.project
+ui_read_only: true
+record_thread: false
+availability: daemon_only
