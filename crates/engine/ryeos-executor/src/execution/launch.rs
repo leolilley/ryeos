@@ -3472,6 +3472,8 @@ struct PreparedManagedLaunchAuthority {
     launch_metadata: Option<ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
     pending_project_snapshot: Option<super::CapturedProjectGeneration>,
     pending_executor_blob: Option<super::PendingCasPublication>,
+    pending_external_realization: Option<super::PendingCasPublication>,
+    bound_external_realizations: Option<super::external_content::BoundExternalRealizations>,
     augmentation_audits: Vec<crate::augmentations::LaunchAugmentationAudit>,
     /// True when this preparation minted the accounting scope (fresh
     /// admission) rather than copying a frozen one forward. Only a freshly
@@ -4383,7 +4385,7 @@ async fn prepare_managed_launch_authority(
     // Capture the complete hook policy after every declared augmentation and
     // capability derivation, then lock/validate/finalize the exact resolution
     // before any capsule, callback token, or runtime envelope can exist.
-    let effective_program = if admitted_capsule.is_some() {
+    let (effective_program, pending_external_realization) = if admitted_capsule.is_some() {
         let hooks = engine
             .kinds
             .get(&params.resolved.resolved_item.kind)
@@ -4411,6 +4413,11 @@ async fn prepare_managed_launch_authority(
         super::admitted_trust::validate_hook_plan_current_trust(engine, current_trust_store, &plan)
             .map_err(BuildAndLaunchError::Internal)?;
 
+        let recovered_external = super::external_content::recover_external_realizations(
+            params.state,
+            &resolution,
+        )
+        .map_err(BuildAndLaunchError::Internal)?;
         let validation = engine
             .effective_validators
             .validate(&params.resolved.resolved_item.kind, &resolution)
@@ -4443,10 +4450,19 @@ async fn prepare_managed_launch_authority(
             &[],
             &engine_roots,
             finalization_project,
+            recovered_external
+                .as_ref()
+                .map(|captured| captured.finalization_evidence()),
         )
         .map_err(BuildAndLaunchError::from)?;
-        ryeos_engine::effective_program::finalize_effective_program(candidate, finalization_proof)
-            .map_err(BuildAndLaunchError::from)?
+        (
+            ryeos_engine::effective_program::finalize_effective_program(
+                candidate,
+                finalization_proof,
+            )
+            .map_err(BuildAndLaunchError::from)?,
+            None,
+        )
     } else {
         let request_snapshot = effective_request_snapshot.as_deref().ok_or_else(|| {
             BuildAndLaunchError::Internal(anyhow::anyhow!(
@@ -4465,6 +4481,7 @@ async fn prepare_managed_launch_authority(
             .resolution_materialization_binding()
             .map_err(BuildAndLaunchError::Internal)?;
         super::effective_program_projection::capture_and_finalize_fresh_effective_program(
+            params.state,
             engine,
             &params.resolved.resolved_item.kind,
             resolution,
@@ -4476,6 +4493,12 @@ async fn prepare_managed_launch_authority(
         )
         .map_err(BuildAndLaunchError::from)?
     };
+    let bound_external_realizations = super::external_content::bind_external_realizations(
+        params.state,
+        effective_program.resolution(),
+        params.project_path,
+    )
+    .map_err(BuildAndLaunchError::Internal)?;
     let admitted_artifact_identity =
         ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
             runtime_ref: selected_runtime.canonical_ref.to_string(),
@@ -4733,6 +4756,8 @@ async fn prepare_managed_launch_authority(
         launch_metadata,
         pending_project_snapshot,
         pending_executor_blob,
+        pending_external_realization,
+        bound_external_realizations,
         augmentation_audits,
         freshly_minted_accounting_scope,
     })
@@ -5016,6 +5041,7 @@ async fn build_and_launch_inner(
     }
     drop(authority.pending_project_snapshot.take());
     drop(authority.pending_executor_blob.take());
+    drop(authority.pending_external_realization.take());
     let result = run_claimed_thread_row_with_authority(
         params,
         thread,
@@ -5214,6 +5240,8 @@ async fn run_claimed_thread_row_inner(
         launch_metadata,
         pending_project_snapshot,
         pending_executor_blob,
+        pending_external_realization,
+        bound_external_realizations,
         augmentation_audits,
         freshly_minted_accounting_scope,
     } = authority;
@@ -5250,6 +5278,7 @@ async fn run_claimed_thread_row_inner(
     // persisted identity that selected this row.
     drop(pending_project_snapshot);
     drop(pending_executor_blob);
+    drop(pending_external_realization);
 
     // Record operational lineage the instant we commit to launching a child, so a
     // cancel/kill of the parent can cascade to it. Only a launch carrying a parent
@@ -6113,6 +6142,7 @@ async fn run_claimed_thread_row_inner(
             roots: runtime_roots,
             isolation: isolation.as_ref(),
             verified_command: &isolation_verified_command,
+            external_realizations: bound_external_realizations,
             cas_root: &cas_root_owned,
             checkpoint_dir: checkpoint_dir_owned.as_deref(),
             // A machine continuation of a replay-aware kind resumes from the
@@ -6488,6 +6518,7 @@ impl PreparedOperatorSuccessorLaunch {
         self.prepared.launch_audit = LaunchAuditDisposition::CommittedAtBirth;
         drop(self.prepared.authority.pending_project_snapshot.take());
         drop(self.prepared.authority.pending_executor_blob.take());
+        drop(self.prepared.authority.pending_external_realization.take());
         self
     }
 }
@@ -6501,6 +6532,7 @@ impl PreparedMachineSuccessorLaunch {
         self.prepared.launch_audit = LaunchAuditDisposition::CommittedAtBirth;
         drop(self.prepared.authority.pending_project_snapshot.take());
         drop(self.prepared.authority.pending_executor_blob.take());
+        drop(self.prepared.authority.pending_external_realization.take());
         self
     }
 }
@@ -6547,6 +6579,7 @@ impl PreparedFollowChildLaunch {
         self.launch_audit = LaunchAuditDisposition::CommittedAtBirth;
         drop(self.authority.pending_project_snapshot.take());
         drop(self.authority.pending_executor_blob.take());
+        drop(self.authority.pending_external_realization.take());
         self
     }
 }

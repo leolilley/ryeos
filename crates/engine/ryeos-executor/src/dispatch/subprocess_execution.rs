@@ -860,6 +860,7 @@ async fn dispatch_streaming_subprocess(
                     node_trusted_keys_dir: Some(&state.config.runtime_root().trusted_keys_dir()),
                     verified_code: &[],
                     verified_command: Some(&isolation_verified_command),
+                    external_read_only_mounts: &[],
                     item_ref: &subject_item_ref,
                     thread_id: &thread_id,
                 },

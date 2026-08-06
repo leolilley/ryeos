@@ -1773,6 +1773,7 @@ fn finalize_direct_effective_program(
         &[],
         &roots,
         project,
+        None,
     )?;
     ryeos_engine::effective_program::finalize_effective_program(candidate, proof)
         .map_err(Into::into)
@@ -2229,6 +2230,9 @@ pub async fn run_and_wait(
             isolation: wait_isolation,
             isolation_project_authority: wait_isolation_project_authority,
             isolation_live_access_authority: wait_isolation_live_access_authority,
+            // Direct launches cannot yet realize external content; finalization
+            // refuses declaring programs, so an empty mount set is exact.
+            isolation_external_read_only_mounts: Vec::new(),
             isolation_daemon_socket_path: wait_isolation_daemon_socket_path.as_deref(),
             thread_state_dir: Some(thread_state_dir.as_path()),
             is_resume: false,
@@ -3143,6 +3147,9 @@ async fn dispatch_detached_bg_task(
             isolation: isolation_for_spawn,
             isolation_project_authority: bg_isolation_project_authority,
             isolation_live_access_authority: bg_isolation_live_access_authority,
+            // Direct launches cannot yet realize external content; finalization
+            // refuses declaring programs, so an empty mount set is exact.
+            isolation_external_read_only_mounts: Vec::new(),
             isolation_daemon_socket_path: isolation_daemon_socket_path_for_spawn.as_deref(),
             thread_state_dir: Some(thread_state_dir.as_path()),
             is_resume,

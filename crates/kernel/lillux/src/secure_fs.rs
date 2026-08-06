@@ -1127,6 +1127,40 @@ impl PinnedDirectory {
         }
     }
 
+    /// Create one symlink relative to this exact directory without replacing
+    /// an existing entry. The target is opaque bytes: it is never resolved or
+    /// followed while the realization is assembled.
+    pub fn create_symlink(&self, name: &OsStr, target: &[u8]) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = (name, target);
+            anyhow::bail!("descriptor-relative symlink creation is unavailable on this platform");
+        }
+        #[cfg(unix)]
+        {
+            validate_child_name(name)?;
+            if target.is_empty() {
+                anyhow::bail!("symlink target must not be empty");
+            }
+            let name_c = std::ffi::CString::new(name.as_bytes())?;
+            let target_c = std::ffi::CString::new(target)?;
+            if unsafe {
+                libc::symlinkat(
+                    target_c.as_ptr(),
+                    self.directory.as_raw_fd(),
+                    name_c.as_ptr(),
+                )
+            } != 0
+            {
+                return Err(std::io::Error::last_os_error()).with_context(|| {
+                    format!("create secure symlink {}", self.path.join(name).display())
+                });
+            }
+            self.directory.sync_all()?;
+            Ok(())
+        }
+    }
+
     pub fn open_child_directory(&self, name: &OsStr) -> Result<Option<Self>> {
         #[cfg(not(unix))]
         {

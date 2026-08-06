@@ -97,6 +97,7 @@ impl<'a> EffectiveProgramProjectionSession<'a> {
                 &self.request_snapshot.trust_store,
                 None,
                 &self.hook_snapshots,
+                None,
             ) {
                 Err(DispatchError::LaunchPreparationFailed { code, .. })
                     if code == "effective_program_authority_changed"
@@ -206,6 +207,23 @@ impl<'a> EffectiveProgramProjectionSession<'a> {
             return Err(DispatchError::Internal(anyhow::anyhow!(
                 "effective-program projection refuses kind `{kind}` because it declares launch-only augmentation"
             )));
+        }
+        if resolution
+            .composed
+            .composed
+            .get("external_content")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|declarations| !declarations.is_empty())
+        {
+            return Err(DispatchError::LaunchPreparationFailed {
+                code: "environment_unproven".to_string(),
+                message: format!(
+                    "effective-program projection refuses `{canonical_ref}` because its external content is realized only during launch admission"
+                ),
+                classification: "unavailable".to_string(),
+                binding: None,
+                details: Box::default(),
+            });
         }
 
         let declared_caps = super::launch::derive_effective_caps(&resolution.composed);
@@ -333,6 +351,7 @@ fn projection_cache_key(
 }
 
 pub(crate) fn capture_and_finalize_fresh_effective_program(
+    state: &ryeos_app::state::AppState,
     engine: &ryeos_engine::engine::Engine,
     kind: &str,
     resolution: ResolutionOutput,
@@ -341,11 +360,18 @@ pub(crate) fn capture_and_finalize_fresh_effective_program(
     parsers: &ryeos_engine::parsers::ParserDispatcher,
     trust_store: &ryeos_engine::trust::TrustStore,
     materialization: Option<&ryeos_app::resolution_cache::ResolutionMaterializationBinding>,
-) -> Result<FinalizedEffectiveProgram, DispatchError> {
+) -> Result<
+    (
+        FinalizedEffectiveProgram,
+        Option<super::PendingCasPublication>,
+    ),
+    DispatchError,
+> {
     let mut mutable_authority_races = 0usize;
     loop {
         match capture_and_finalize_fresh_effective_program_once(
             engine,
+            state,
             kind,
             resolution.clone(),
             effective_caps,
@@ -374,6 +400,7 @@ pub(crate) fn capture_and_finalize_fresh_effective_program(
 
 fn capture_and_finalize_fresh_effective_program_once(
     engine: &ryeos_engine::engine::Engine,
+    state: &ryeos_app::state::AppState,
     kind: &str,
     resolution: ResolutionOutput,
     effective_caps: &[String],
@@ -381,7 +408,13 @@ fn capture_and_finalize_fresh_effective_program_once(
     parsers: &ryeos_engine::parsers::ParserDispatcher,
     trust_store: &ryeos_engine::trust::TrustStore,
     materialization: Option<&ryeos_app::resolution_cache::ResolutionMaterializationBinding>,
-) -> Result<FinalizedEffectiveProgram, DispatchError> {
+) -> Result<
+    (
+        FinalizedEffectiveProgram,
+        Option<super::PendingCasPublication>,
+    ),
+    DispatchError,
+> {
     let config_roots = engine.launch_config_roots(roots);
     let snapshots = super::launch_preparation::load_launch_config_set_under_current_authority(
         &ryeos_engine::hooks::hook_source_declarations(),
@@ -391,7 +424,16 @@ fn capture_and_finalize_fresh_effective_program_once(
         trust_store,
         materialization,
     )?;
-    capture_and_finalize_with_hook_snapshots(
+    let mut resolution = resolution;
+    let captured_external = super::external_content::capture_external_realizations(
+        state,
+        engine,
+        kind,
+        &mut resolution,
+        roots,
+    )
+    .map_err(DispatchError::Internal)?;
+    let finalized = capture_and_finalize_with_hook_snapshots(
         engine,
         kind,
         resolution,
@@ -400,7 +442,12 @@ fn capture_and_finalize_fresh_effective_program_once(
         trust_store,
         materialization,
         &snapshots,
-    )
+        captured_external.as_ref(),
+    )?;
+    Ok((
+        finalized,
+        captured_external.and_then(|captured| captured.into_publication()),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -413,6 +460,7 @@ fn capture_and_finalize_with_hook_snapshots(
     trust_store: &ryeos_engine::trust::TrustStore,
     materialization: Option<&ryeos_app::resolution_cache::ResolutionMaterializationBinding>,
     snapshots: &LaunchConfigSnapshotSet,
+    external_realization: Option<&super::external_content::CapturedExternalRealizations>,
 ) -> Result<FinalizedEffectiveProgram, DispatchError> {
     let hook_contract = engine
         .kinds
@@ -492,6 +540,7 @@ fn capture_and_finalize_with_hook_snapshots(
         std::slice::from_ref(&snapshots.dependency_proof),
         &config_roots,
         project,
+        external_realization.map(|captured| captured.finalization_evidence()),
     )
     .map_err(|error| match error {
         ryeos_engine::error::EngineError::MutableEffectiveProgramAuthorityChanged => {

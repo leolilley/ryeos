@@ -321,6 +321,7 @@ pub const NEVER_DEPLOY_SECRETS: &[&str] = &[
 /// only *add*. Deploying these would clobber or leak the remote's own state.
 pub const NODE_OWNED: &[&str] = &[
     ".ai/state",
+    ".ai/cache",
     ".ai/node/schedules",
     ".ai/node/routes",
     ".ai/node/bundles",
@@ -379,6 +380,14 @@ pub fn is_project_snapshot_floor_excluded(rel_path: &str) -> bool {
     matched_prefix(rel_path, NEVER_DEPLOY_SECRETS).is_some()
         || matched_prefix(rel_path, NODE_OWNED).is_some()
         || transaction_artifact
+}
+
+/// Floor for content copied into durable CAS rather than merely read live.
+/// The project safety floor and the shared built-in ingest floor are both
+/// mandatory; a node's loaded ignore configuration may only narrow further.
+pub fn is_durable_content_capture_floor_excluded(rel_path: &str) -> bool {
+    is_project_snapshot_floor_excluded(rel_path)
+        || crate::ignore::durable_capture_floor().is_ignored(rel_path)
 }
 
 fn surface_kind_str(kind: ProjectAiSurfaceKind) -> &'static str {

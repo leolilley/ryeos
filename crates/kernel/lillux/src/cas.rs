@@ -605,12 +605,33 @@ impl CasStore {
     /// read, so concurrent mutation fails rather than publishing torn bytes.
     pub fn put_blob_from_open_regular(
         &self,
+        source: fs::File,
+        display_path: &Path,
+    ) -> Result<StreamedBlobOutcome> {
+        self.put_blob_from_open_regular_inner(source, display_path, None)
+    }
+
+    /// Bounded form of [`Self::put_blob_from_open_regular`]. The bound is
+    /// checked against both the opening metadata and the bytes actually read,
+    /// before an over-limit chunk is written to CAS staging.
+    pub fn put_blob_from_open_regular_bounded(
+        &self,
+        source: fs::File,
+        display_path: &Path,
+        max_bytes: u64,
+    ) -> Result<StreamedBlobOutcome> {
+        self.put_blob_from_open_regular_inner(source, display_path, Some(max_bytes))
+    }
+
+    fn put_blob_from_open_regular_inner(
+        &self,
         mut source: fs::File,
         display_path: &Path,
+        max_bytes: Option<u64>,
     ) -> Result<StreamedBlobOutcome> {
         #[cfg(not(unix))]
         {
-            let _ = (&mut source, display_path);
+            let _ = (&mut source, display_path, max_bytes);
             anyhow::bail!("streaming regular-file CAS ingestion is unavailable on this platform")
         }
         #[cfg(unix)]
@@ -621,6 +642,14 @@ impl CasStore {
             if !before.file_type().is_file() {
                 anyhow::bail!(
                     "streaming CAS source is not a regular file: {}",
+                    display_path.display()
+                );
+            }
+            if let Some(max_bytes) = max_bytes
+                && before.len() > max_bytes
+            {
+                anyhow::bail!(
+                    "streaming CAS source exceeds {max_bytes} bytes: {}",
                     display_path.display()
                 );
             }
@@ -655,11 +684,20 @@ impl CasStore {
                     if read == 0 {
                         break;
                     }
-                    digest.update(&buffer[..read]);
-                    staged.write_all(&buffer[..read])?;
-                    size = size
+                    let next_size = size
                         .checked_add(read as u64)
                         .ok_or_else(|| anyhow::anyhow!("project file size overflow"))?;
+                    if let Some(max_bytes) = max_bytes
+                        && next_size > max_bytes
+                    {
+                        anyhow::bail!(
+                            "streaming CAS source exceeds {max_bytes} bytes while reading: {}",
+                            display_path.display()
+                        );
+                    }
+                    digest.update(&buffer[..read]);
+                    staged.write_all(&buffer[..read])?;
+                    size = next_size;
                 }
                 staged.sync_all()?;
 

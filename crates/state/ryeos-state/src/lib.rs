@@ -13,6 +13,7 @@ pub mod bundle_outbox;
 pub mod bundle_projection;
 pub mod chain;
 pub mod event_types;
+pub mod external_content;
 pub mod gc;
 pub mod head_cache;
 pub mod ignore;
@@ -49,6 +50,7 @@ pub use bundle_projection::{
     BundleProjectionCursor, BundleProjectionDb, BundleProjectionSyncReport,
 };
 pub use chain::{AppendResult, CreateResult, ReadSnapshotResult, SnapshotUpdate};
+pub use external_content::VerifiedExternalContentClosure;
 pub use head_cache::{CachedHead, HeadCache};
 pub use locators::ThreadLocator;
 pub use objects::{

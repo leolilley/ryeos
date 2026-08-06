@@ -33,6 +33,7 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub roots: ryeos_app::env_contract::DaemonRootEnv,
     pub isolation: &'a ryeos_engine::isolation::IsolationRuntime,
     pub verified_command: &'a ryeos_engine::isolation::IsolationDescriptorBoundCommand,
+    pub external_realizations: Option<super::super::external_content::BoundExternalRealizations>,
     pub cas_root: &'a Path,
     /// Daemon-allocated checkpoint dir for a replay-aware runtime.
     pub checkpoint_dir: Option<&'a Path>,
@@ -48,6 +49,7 @@ pub(super) struct SpawnedRuntime {
     process: Option<lillux::RunningProcess>,
     attached_process: Option<AttachedProcessGuard>,
     workspace_lifeline: Option<std::sync::Arc<ryeos_app::temp_dir_guard::TempDirGuard>>,
+    external_realizations: Option<super::super::external_content::BoundExternalRealizations>,
     immediate_result: Option<RuntimeResult>,
 }
 
@@ -70,6 +72,7 @@ impl SpawnedRuntime {
         );
         drop(self.attached_process.take());
         drop(self.workspace_lifeline.take());
+        drop(self.external_realizations.take());
         if !result.success {
             return Ok(runtime_failure_result(
                 &result.stderr,
@@ -140,6 +143,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         roots,
         isolation,
         verified_command,
+        external_realizations,
         cas_root,
         checkpoint_dir,
         is_resume,
@@ -252,6 +256,10 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
                 node_trusted_keys_dir: Some(&envelope.roots.node_trusted_keys_dir),
                 verified_code: &[],
                 verified_command: Some(verified_command),
+                external_read_only_mounts: external_realizations
+                    .as_ref()
+                    .map(|bound| bound.mounts())
+                    .unwrap_or(&[]),
                 item_ref: &isolation_item_ref,
                 thread_id,
             },
@@ -279,6 +287,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
                 process: None,
                 attached_process: None,
                 workspace_lifeline,
+                external_realizations,
                 immediate_result: Some(runtime_failure_result(
                     &result.stderr,
                     result.timed_out,
@@ -380,6 +389,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         process: Some(spawned),
         attached_process: Some(attached_process),
         workspace_lifeline,
+        external_realizations,
         immediate_result: None,
     })
 }

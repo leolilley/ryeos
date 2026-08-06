@@ -8,6 +8,7 @@ pub(crate) mod admitted_trust;
 pub mod arch_check;
 pub mod cache;
 pub mod effective_program_projection;
+pub(crate) mod external_content;
 pub mod ingest;
 pub mod launch;
 pub(crate) mod launch_claim;

@@ -323,11 +323,33 @@ impl ResolutionOutput {
     /// Exact identity of the admitted effective executable definition.
     ///
     /// This commits to ordered definition contributors, lateral references,
-    /// trust/signer/source-space evidence, and the complete composed view. It
+    /// trust/signer/source-space evidence, and the complete composed view —
+    /// which carries derived values, so a captured external-content
+    /// realization participates here without a second commitment path. It
     /// deliberately excludes paths, resolver diagnostics, invocation data,
     /// timestamps, raw payload bytes, and whole signature envelopes.
     pub fn effective_definition_digest(
         &self,
+    ) -> Result<EffectiveDefinitionDigest, EffectiveDefinitionDigestError> {
+        self.definition_digest(DigestScope::Effective)
+    }
+
+    /// Identity of the authored program alone, with realized environment
+    /// excluded.
+    ///
+    /// Projection-only: it groups the definition versions that share authored
+    /// content across an environment change. It is never an authority
+    /// boundary, and no consumer may read it as executable equality — two
+    /// programs with one authored digest can execute different bytes.
+    pub fn authored_definition_digest(
+        &self,
+    ) -> Result<EffectiveDefinitionDigest, EffectiveDefinitionDigestError> {
+        self.definition_digest(DigestScope::Authored)
+    }
+
+    fn definition_digest(
+        &self,
+        scope: DigestScope,
     ) -> Result<EffectiveDefinitionDigest, EffectiveDefinitionDigestError> {
         let mut referenced_items = self
             .referenced_items
@@ -343,8 +365,12 @@ impl ResolutionOutput {
             .collect::<Result<Vec<_>, _>>()?;
         reference_edges.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
 
-        let seed = EffectiveDefinitionSeedV1 {
-            schema: "ryeos.effective_definition.v1",
+        // One builder produces both scopes: an authored digest is the same
+        // seed with the realization slot removed, never a second
+        // canonicalizer that could drift from this one.
+        let composed = scope.composed_view(&self.composed);
+        let seed = EffectiveDefinitionSeedV2 {
+            schema: scope.schema_tag(),
             root: EffectiveContributorV1::try_from(&self.root)?,
             ancestors: self
                 .ancestors
@@ -354,7 +380,7 @@ impl ResolutionOutput {
             referenced_items,
             reference_edges,
             effective_trust_class: self.effective_trust_class,
-            composed: &self.composed,
+            composed: composed.as_ref(),
         };
         let value = serde_json::to_value(seed).map_err(|error| {
             EffectiveDefinitionDigestError(format!("serialize effective-definition seed: {error}"))
@@ -409,9 +435,49 @@ impl std::fmt::Display for EffectiveDefinitionDigestError {
 
 impl std::error::Error for EffectiveDefinitionDigestError {}
 
+/// Which identity a digest names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DigestScope {
+    /// Program plus realized environment: what actually executes.
+    Effective,
+    /// Program alone, for grouping versions across an environment change.
+    Authored,
+}
+
+impl DigestScope {
+    fn schema_tag(self) -> &'static str {
+        match self {
+            Self::Effective => "ryeos.effective_definition.v2",
+            Self::Authored => "ryeos.authored_definition.v2",
+        }
+    }
+
+    /// The composed view this scope commits to.
+    ///
+    /// `Effective` borrows the view unchanged. `Authored` clones it once and
+    /// drops the realization slot, so the two scopes cannot disagree about
+    /// anything except the environment they deliberately differ on.
+    fn composed_view<'a>(self, composed: &'a KindComposedView) -> std::borrow::Cow<'a, KindComposedView> {
+        match self {
+            Self::Effective => std::borrow::Cow::Borrowed(composed),
+            Self::Authored => {
+                let mut authored = composed.clone();
+                authored
+                    .derived
+                    .retain(|key, _| key != EXTERNAL_REALIZATIONS_DERIVED_KEY);
+                std::borrow::Cow::Owned(authored)
+            }
+        }
+    }
+}
+
+/// Derived slot carrying the captured external realization set.
+pub const EXTERNAL_REALIZATIONS_DERIVED_KEY: &str =
+    ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY;
+
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
-struct EffectiveDefinitionSeedV1<'a> {
+struct EffectiveDefinitionSeedV2<'a> {
     schema: &'static str,
     root: EffectiveContributorV1,
     ancestors: Vec<EffectiveContributorV1>,

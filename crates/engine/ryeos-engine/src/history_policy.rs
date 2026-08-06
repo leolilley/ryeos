@@ -768,6 +768,7 @@ mod tests {
                 augmentation_methods: Default::default(),
                 launch_augmentations: Vec::new(),
                 hooks: None,
+                external_content: None,
                 effective_validator: None,
             }),
             composed_value_contract: crate::contracts::ValueShape::any_mapping(),

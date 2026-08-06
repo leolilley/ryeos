@@ -773,6 +773,18 @@ pub struct ExecutionHooksDecl {
     pub events: BTreeMap<String, crate::hooks::HookEventContract>,
 }
 
+/// Signed, kind-owned external-content admission contract.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionExternalContentDecl {
+    /// Reserved derived slot populated only by launch-time realization.
+    pub realization_derived: String,
+    /// Named-root classes this kind permits its items to declare.
+    pub allowed_roots: Vec<String>,
+    /// Kind-local ceiling, additionally bounded by the substrate maximum.
+    pub max_declarations: usize,
+}
+
 /// Optional signed semantic validator for the complete effective value.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -831,6 +843,10 @@ pub struct ExecutionSchema {
     /// captured plan in the declared derived slot before finalization.
     #[serde(default)]
     pub hooks: Option<ExecutionHooksDecl>,
+    /// Optional external-content realization contract. Absence means an item
+    /// of this kind may not declare the top-level `external_content` field.
+    #[serde(default)]
+    pub external_content: Option<ExecutionExternalContentDecl>,
     /// Optional kind-specific semantic validator over the complete composed
     /// effective program.
     #[serde(default)]
@@ -2067,6 +2083,22 @@ fn parse_execution_schema(
             None => None,
         };
 
+    let external_content = match execution_value.get("external_content") {
+        Some(value) => {
+            let declaration = serde_yaml::from_value::<ExecutionExternalContentDecl>(
+                value.clone(),
+            )
+            .map_err(|error| EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: invalid execution.external_content declaration: {error}"
+                ),
+            })?;
+            validate_execution_external_content_decl(&declaration, display)?;
+            Some(declaration)
+        }
+        None => None,
+    };
+
     let effective_validator = match execution_value.get("effective_validator") {
         Some(value) => {
             let declaration = serde_yaml::from_value::<EffectiveValidatorDecl>(value.clone())
@@ -2281,6 +2313,7 @@ fn parse_execution_schema(
         thread_profile,
         history_policy,
         hooks,
+        external_content,
         effective_validator,
         method_dispatch,
         methods,
@@ -2326,6 +2359,61 @@ fn validate_execution_hooks_decl(
             return Err(EngineError::SchemaLoaderError {
                 reason: format!(
                     "{display}: execution.hooks event `{event}` has an invalid context/result contract"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_execution_external_content_decl(
+    declaration: &ExecutionExternalContentDecl,
+    display: &str,
+) -> Result<(), EngineError> {
+    if declaration.realization_derived
+        != crate::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY
+    {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: execution.external_content.realization_derived must be `{}`",
+                crate::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY
+            ),
+        });
+    }
+    if declaration.max_declarations == 0
+        || declaration.max_declarations
+            > crate::external_content::MAX_DECLARATIONS_PER_ITEM
+    {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: execution.external_content.max_declarations must be within 1..={} ",
+                crate::external_content::MAX_DECLARATIONS_PER_ITEM
+            ),
+        });
+    }
+    if declaration.allowed_roots.is_empty() {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: execution.external_content.allowed_roots must not be empty"
+            ),
+        });
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for root in &declaration.allowed_roots {
+        if !matches!(
+            root.as_str(),
+            "project_ai" | "project_files" | "node_files" | "bundle:own"
+        ) {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: execution.external_content.allowed_roots contains unsupported root class `{root}`"
+                ),
+            });
+        }
+        if !seen.insert(root) {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: execution.external_content.allowed_roots contains duplicate `{root}`"
                 ),
             });
         }

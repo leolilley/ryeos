@@ -32,7 +32,7 @@ mod provenance;
 pub use authority::{
     IsolationCommandAuthority, IsolationCommandAuthorityRef, IsolationDescriptorBoundCommand,
     IsolationDescriptorFileIdentity, IsolationLaunchContext, IsolationLiveAccessAuthority,
-    IsolationProjectAuthority, IsolationVerifiedCode,
+    IsolationProjectAuthority, IsolationReadOnlyMountAuthority, IsolationVerifiedCode,
 };
 pub use backend::ResolvedIsolationBackend;
 pub use inspection::{IsolationBackendInspection, IsolationBackendStatus, IsolationInspection};
@@ -698,11 +698,14 @@ struct ReadableMount {
     source: PathBuf,
     destination: PathBuf,
     source_handle: Arc<std::fs::File>,
+    layer: u32,
 }
 
 impl PartialEq for ReadableMount {
     fn eq(&self, other: &Self) -> bool {
-        self.source == other.source && self.destination == other.destination
+        self.source == other.source
+            && self.destination == other.destination
+            && self.layer == other.layer
     }
 }
 
@@ -2462,6 +2465,40 @@ impl IsolationRuntime {
                     && mount.destination.starts_with(&project_destination))
             });
         }
+        // Admitted realization mounts are added only after workspace
+        // supersession: they are launch-admitted authority, not configured
+        // project content, and their cache source lives under the project's
+        // `.ai/state` — the retain above would silently strip them in
+        // pinned-workspace mode, leaving live or absent bytes where identity
+        // claims the realization.
+        let mut external_destinations = Vec::with_capacity(context.external_read_only_mounts.len());
+        for external in context.external_read_only_mounts {
+            let destination = external.destination();
+            validate_namespace_destination("external realization mount", destination)?;
+            if destination == project_destination || !destination.starts_with(&project_destination)
+            {
+                return Err(refused(format!(
+                    "external realization mount {} is not a strict child of project root {}",
+                    destination.display(),
+                    project_destination.display()
+                )));
+            }
+            if external_destinations.iter().any(|other: &PathBuf| {
+                destination.starts_with(other) || other.starts_with(destination)
+            }) {
+                return Err(refused(format!(
+                    "external realization mount {} overlaps another admitted realization",
+                    destination.display()
+                )));
+            }
+            external_destinations.push(destination.to_path_buf());
+            readable_mounts.push(ReadableMount {
+                source: external.source_path().to_path_buf(),
+                destination: destination.to_path_buf(),
+                source_handle: external.source().clone(),
+                layer: 30,
+            });
+        }
         readable_mounts.sort_by(|left, right| {
             left.destination
                 .cmp(&right.destination)
@@ -2633,6 +2670,7 @@ impl IsolationRuntime {
                         source,
                         destination,
                         source_handle,
+                        layer: 20,
                     });
                 }
             }
@@ -2651,6 +2689,7 @@ impl IsolationRuntime {
                         source,
                         destination,
                         source_handle,
+                        layer: 20,
                     });
                 }
             }
@@ -2668,7 +2707,7 @@ impl IsolationRuntime {
             }
             for (index, mount) in readable_mounts
                 .iter()
-                .filter(|mount| !verified_code_mounts.contains(mount))
+                .filter(|mount| mount.layer == 20 && !verified_code_mounts.contains(mount))
                 .enumerate()
             {
                 add_mount(
@@ -2678,7 +2717,7 @@ impl IsolationRuntime {
                     &mount.destination,
                     IsolationMountAccess::ReadOnly,
                     IsolationAuthorityPurpose::ReadOnlyMount,
-                    20,
+                    mount.layer,
                 )?;
             }
             for (index, mount) in system_readable_mounts.iter().enumerate() {
@@ -2710,6 +2749,21 @@ impl IsolationRuntime {
                     )?;
                 }
             }
+            for (index, mount) in readable_mounts
+                .iter()
+                .filter(|mount| mount.layer == 30)
+                .enumerate()
+            {
+                add_mount(
+                    "external-realization",
+                    index,
+                    mount.source_handle.clone(),
+                    &mount.destination,
+                    IsolationMountAccess::ReadOnly,
+                    IsolationAuthorityPurpose::ReadOnlyMount,
+                    mount.layer,
+                )?;
+            }
             let mut target_authority = None;
             for (index, mount) in verified_code_mounts.iter().enumerate() {
                 let is_target = mount.destination == command_path;
@@ -2724,7 +2778,7 @@ impl IsolationRuntime {
                     } else {
                         IsolationAuthorityPurpose::ReadOnlyMount
                     },
-                    30,
+                    40,
                 )?;
                 if is_target {
                     target_authority = Some(id);
@@ -2741,7 +2795,7 @@ impl IsolationRuntime {
                         &command_path,
                         IsolationMountAccess::ReadOnly,
                         IsolationAuthorityPurpose::Executable,
-                        40,
+                        50,
                     )?
                 }
             }
@@ -3439,6 +3493,7 @@ impl IsolationRuntime {
             source_handle: artifact.handle,
             source: artifact.path,
             destination,
+            layer: 40,
         };
         Ok(PreparedVerifiedCode {
             original: original.to_path_buf(),
@@ -3976,6 +4031,7 @@ fn code_namespace_layout(
             source_handle: pin_mount_source("code authority", &authority_source)?,
             source: authority_source,
             destination: namespace_root.clone(),
+            layer: 40,
         }),
         namespace_root.join(relative),
     ))
@@ -4419,6 +4475,7 @@ fn resolve_readable_mounts(
             source: source_path,
             destination,
             source_handle: Arc::new(source_handle),
+            layer: 20,
         }]);
     }
 
@@ -4449,6 +4506,7 @@ fn resolve_readable_mounts(
             source: configured.source.clone(),
             destination: requested.to_path_buf(),
             source_handle: configured.entry.clone(),
+            layer: 20,
         }]);
     }
 
@@ -4463,6 +4521,7 @@ fn resolve_readable_mounts(
                     source,
                     destination: destination.to_path_buf(),
                     source_handle,
+                    layer: 20,
                 })
             })
             .collect();
@@ -4478,6 +4537,7 @@ fn resolve_readable_mounts(
             source,
             destination: destination.to_path_buf(),
             source_handle,
+            layer: 20,
         }]);
     }
 
@@ -4520,6 +4580,7 @@ fn resolve_readable_mounts(
         destination,
         source,
         source_handle,
+        layer: 20,
     }])
 }
 
@@ -5109,6 +5170,7 @@ mod tests {
                     node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(command.identity()),
                     verified_command: Some(&command),
+                    external_read_only_mounts: &[],
                     item_ref: "tool:tests/descriptor-bound-disabled",
                     thread_id: "T-descriptor-bound-disabled",
                 },
@@ -5182,6 +5244,7 @@ mod tests {
                     node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(&captured),
                     verified_command: Some(&captured),
+                    external_read_only_mounts: &[],
                     item_ref: "tool:tests/verified-command",
                     thread_id: "T-verified-command",
                 },
@@ -5242,6 +5305,7 @@ mod tests {
                     node_trusted_keys_dir: None,
                     verified_code: &verified_code,
                     verified_command: Some(&command),
+                    external_read_only_mounts: &[],
                     item_ref: "tool:tests/sealed-code",
                     thread_id: "T-sealed-code",
                 },
@@ -5336,6 +5400,7 @@ mod tests {
                     node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(&verified),
                     verified_command: None,
+                    external_read_only_mounts: &[],
                     item_ref: "tool:tests/enforced-handoff",
                     thread_id: "T-enforced-handoff",
                 },
@@ -5412,6 +5477,7 @@ mod tests {
                     node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(&captured),
                     verified_command: Some(&captured),
+                    external_read_only_mounts: &[],
                     item_ref: "tool:tests/mutated-command",
                     thread_id: "T-mutated-command",
                 },
@@ -5505,6 +5571,7 @@ mod tests {
             node_trusted_keys_dir: None,
             verified_code: &[],
             verified_command: None,
+            external_read_only_mounts: &[],
             item_ref: "tool:tests/attachment",
             thread_id: "T-attachment",
         };
@@ -5554,6 +5621,7 @@ mod tests {
             node_trusted_keys_dir: None,
             verified_code: &[],
             verified_command: None,
+            external_read_only_mounts: &[],
             item_ref: "tool:tests/attachment",
             thread_id: "T-attachment",
         };
@@ -5595,6 +5663,7 @@ mod tests {
             node_trusted_keys_dir: None,
             verified_code: &[],
             verified_command: None,
+            external_read_only_mounts: &[],
             item_ref: "tool:tests/live",
             thread_id: "T-live",
         };
@@ -5664,6 +5733,7 @@ mod tests {
                     node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: None,
+                    external_read_only_mounts: &[],
                     item_ref: "tool:tests/runtime-workspace",
                     thread_id: "T-runtime-workspace",
                 },

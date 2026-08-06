@@ -111,6 +111,10 @@ pub fn prove_finalization_authority(
     proofs: &[LaunchConfigDependencyProof],
     roots: &ResolutionRoots,
     project: Option<(&std::path::Path, &dyn AuthoritativeProjectContent)>,
+    external_realization: Option<(
+        &crate::external_realization::ExternalRealizationProof,
+        &dyn crate::external_realization::RealizationStore,
+    )>,
 ) -> Result<FinalizationAuthorityProof, EngineError> {
     let mut identities = Vec::with_capacity(proofs.len());
     for proof in proofs {
@@ -125,6 +129,63 @@ pub fn prove_finalization_authority(
                         .to_string(),
                 ));
             }
+        }
+    }
+    let captured = candidate
+        .resolution
+        .composed
+        .derived
+        .get(crate::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY)
+        .map(ryeos_state::objects::ExternalContentRealizationSet::from_value)
+        .transpose()
+        .map_err(|error| EngineError::Internal(format!(
+            "invalid external realization set at finalization: {error}"
+        )))?;
+    // A composed view that declares external content commits that declaration
+    // into identity. Finalizing without a realization would admit a program
+    // whose identity names dependencies it never captured — the launch path
+    // must realize the declaration or refuse, never silently read live.
+    let declared_external = candidate
+        .resolution
+        .composed
+        .composed
+        .get("external_content")
+        .and_then(|value| value.as_array())
+        .is_some_and(|entries| !entries.is_empty());
+    if declared_external && captured.is_none() {
+        return Err(EngineError::Internal(
+            "effective program declares external content that was never realized; \
+             this launch path cannot execute external declarations"
+                .to_string(),
+        ));
+    }
+    match (captured.as_ref(), external_realization) {
+        (None, None) => {}
+        (Some(_), None) => {
+            return Err(EngineError::Internal(
+                "effective program carries external realizations without a realization proof"
+                    .to_string(),
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(EngineError::Internal(
+                "external realization proof does not belong to this effective program"
+                    .to_string(),
+            ));
+        }
+        (Some(captured), Some((proof, store))) => {
+            if proof.realized() != captured {
+                return Err(EngineError::Internal(
+                    "external realization proof belongs to a different effective program"
+                        .to_string(),
+                ));
+            }
+            if proof.revalidate(store)
+                != crate::external_realization::RealizationProofStatus::Current
+            {
+                return Err(EngineError::MutableEffectiveProgramAuthorityChanged);
+            }
+            identities.push(format!("external:{}", proof.identity_digest()?));
         }
     }
     identities.sort();
@@ -233,6 +294,7 @@ mod tests {
             &[],
             &ResolutionRoots::from_flat(None, Vec::new()),
             None,
+            None,
         )
         .unwrap();
         let candidate_b = lock_validated_effective_program(
@@ -257,6 +319,7 @@ mod tests {
             &[],
             &ResolutionRoots::from_flat(None, Vec::new()),
             None,
+            None,
         )
         .unwrap();
         let candidate_b = lock_validated_effective_program(
@@ -280,6 +343,7 @@ mod tests {
             &candidate,
             &[],
             &ResolutionRoots::from_flat(None, Vec::new()),
+            None,
             None,
         )
         .unwrap();
@@ -325,7 +389,55 @@ mod tests {
         )
         .unwrap();
 
-        let error = prove_finalization_authority(&candidate, &[proof], &roots, None).unwrap_err();
+        let error =
+            prove_finalization_authority(&candidate, &[proof], &roots, None, None).unwrap_err();
         assert!(error.to_string().contains("authority changed"));
+    }
+
+    #[test]
+    fn a_declared_but_unrealized_external_set_cannot_finalize() {
+        // A non-empty declaration with no captured realization must refuse on
+        // every launch path — silently reading live content while identity
+        // commits to the declaration is the state this layer exists to remove.
+        let mut declaring = resolution("declares-external");
+        declaring.composed.composed = serde_json::json!({
+            "config": {"start": "declares-external"},
+            "external_content": [{"id": "sim", "kind": "tree"}],
+        });
+        let candidate = lock_validated_effective_program(
+            declaring,
+            EffectiveValidationSuccess::no_declared_validator(),
+        )
+        .unwrap();
+        let error = prove_finalization_authority(
+            &candidate,
+            &[],
+            &ResolutionRoots::from_flat(None, Vec::new()),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("never realized"));
+
+        // An explicit empty declaration means "captures nothing" and needs no
+        // realization to finalize.
+        let mut declares_none = resolution("declares-none");
+        declares_none.composed.composed = serde_json::json!({
+            "config": {"start": "declares-none"},
+            "external_content": [],
+        });
+        let candidate = lock_validated_effective_program(
+            declares_none,
+            EffectiveValidationSuccess::no_declared_validator(),
+        )
+        .unwrap();
+        prove_finalization_authority(
+            &candidate,
+            &[],
+            &ResolutionRoots::from_flat(None, Vec::new()),
+            None,
+            None,
+        )
+        .unwrap();
     }
 }

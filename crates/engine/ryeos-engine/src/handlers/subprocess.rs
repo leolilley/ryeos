@@ -126,6 +126,7 @@ pub(crate) fn run_handler_subprocess(
             node_trusted_keys_dir: None,
             verified_code: &verified_code,
             verified_command: Some(&verified_code[0]),
+            external_read_only_mounts: &[],
             item_ref: &canonical_ref,
             thread_id: "handler",
         },

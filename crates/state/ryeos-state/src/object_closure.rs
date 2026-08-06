@@ -13,7 +13,10 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 const DEFAULT_MAX_OBJECTS: usize = 10_000;
-const DEFAULT_MAX_BLOBS: usize = 10_000;
+// One external realization may reference 10,000 blobs. Capsules also carry
+// executable/protocol blobs, so the closure-wide ceiling must leave bounded
+// headroom rather than making a contract-valid realization untransferable.
+const DEFAULT_MAX_BLOBS: usize = 20_000;
 const DEFAULT_MAX_OBJECT_BYTES: u64 = 1024 * 1024;
 const DEFAULT_MAX_BLOB_BYTES: u64 = 32 * 1024 * 1024;
 const DEFAULT_MAX_TOTAL_BLOB_BYTES: u64 = 512 * 1024 * 1024;
@@ -951,6 +954,18 @@ fn typed_object_edges(value: &Value) -> Result<Vec<ObjectEdge>, String> {
                     )?;
                 }
             }
+            // Realized external content hangs off the sealed program's derived
+            // values. Traversal follows typed edges, so this is what keeps a
+            // realization — and every blob it needs — reachable from the
+            // capsule that admitted it.
+            for hash in external_realization_manifest_hashes(value)? {
+                push_typed_hash(
+                    &hash,
+                    ExpectedObject::Kind("external_content_manifest"),
+                    None,
+                    &mut edges,
+                )?;
+            }
         }
         "thread_event" => {
             push_optional_object_edge(
@@ -1061,6 +1076,9 @@ fn typed_object_edges(value: &Value) -> Result<Vec<ObjectEdge>, String> {
             }
         }
         "project_file" | "project_snapshot_policy" | "state_manifest" => {}
+        // Known kind with no outbound object edges; its blobs are reported by
+        // `object_links`.
+        "external_content_manifest" => {}
         "item_source" => {}
         _ => return Ok(Vec::new()),
     }
@@ -1159,6 +1177,11 @@ fn validate_current_object(value: &Value) -> anyhow::Result<()> {
         "state_manifest" => crate::objects::StateManifest::from_current_value(value.clone())
             .context("deserialize current state_manifest")
             .map(|_| ()),
+        "external_content_manifest" => {
+            crate::objects::ExternalContentManifestObject::from_value(value)
+                .context("deserialize external_content_manifest")
+                .map(|_| ())
+        }
         "project_snapshot" => crate::objects::ProjectSnapshot::from_value(value).map(|_| ()),
         "project_tree" => crate::objects::ProjectTree::from_value(value).map(|_| ()),
         "project_file" => crate::objects::ProjectFile::from_value(value).map(|_| ()),
@@ -1250,10 +1273,30 @@ pub fn object_links(value: &Value) -> Result<ObjectLinks, String> {
                     &mut links.blob_hashes,
                 )?;
             }
+            // A capsule reaches its realized external content through the
+            // sealed program's derived values. Without this edge the manifest
+            // and its blobs would be unreachable from the capsule that
+            // admitted them, and recovery would find its content collected.
+            for hash in external_realization_manifest_hashes(value)? {
+                push_hash(&hash, &mut links.object_hashes)?;
+            }
         }
         "thread_event" => {
             push_optional_hash(value, "prev_chain_event_hash", &mut links.object_hashes)?;
             push_optional_hash(value, "prev_thread_event_hash", &mut links.object_hashes)?;
+        }
+        "external_content_manifest" => {
+            // Every blob a realization needs must be reachable from here, or
+            // garbage collection would reclaim content a resumable chain still
+            // has to execute against.
+            let entries = value
+                .get("entries")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "external_content_manifest missing entries array".to_string())?;
+            for entry in entries {
+                push_optional_hash(entry, "blob_hash", &mut links.blob_hashes)?;
+                push_optional_hash(entry, "target_blob", &mut links.blob_hashes)?;
+            }
         }
         "state_manifest" => {
             let restore = value
@@ -1335,6 +1378,31 @@ pub fn object_links(value: &Value) -> Result<ObjectLinks, String> {
     links.blob_hashes.sort();
     links.blob_hashes.dedup();
     Ok(links)
+}
+
+/// Manifest hashes for every external realization sealed into one capsule.
+///
+/// This parses the one reserved durable slot using the shared wire type. A
+/// shape probe over arbitrary derived values would let unrelated data create
+/// false CAS edges and would make GC semantics depend on field-name
+/// coincidence.
+fn external_realization_manifest_hashes(capsule: &Value) -> Result<Vec<String>, String> {
+    let Some(derived) = capsule
+        .get("exact_program")
+        .and_then(|program| program.get("resolution_output"))
+        .and_then(|resolution| resolution.get("composed"))
+        .and_then(|composed| composed.get("derived"))
+        .and_then(Value::as_object)
+    else {
+        return Ok(Vec::new());
+    };
+
+    let Some(value) = derived.get(crate::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY) else {
+        return Ok(Vec::new());
+    };
+    crate::objects::ExternalContentRealizationSet::from_value(value)
+        .map(|set| set.manifest_hashes())
+        .map_err(|error| format!("invalid external realization set: {error}"))
 }
 
 fn push_required_hash(value: &Value, field: &str, out: &mut Vec<String>) -> Result<(), String> {

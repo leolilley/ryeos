@@ -810,6 +810,7 @@ pub async fn run(
                     node_trusted_keys_dir: Some(&state.config.runtime_root().trusted_keys_dir()),
                     verified_code: &[],
                     verified_command: Some(&isolation_verified_command),
+                    external_read_only_mounts: &[],
                     item_ref: &runtime_item_ref_string,
                     thread_id: &child_thread_id,
                 },

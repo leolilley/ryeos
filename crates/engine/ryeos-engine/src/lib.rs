@@ -13,6 +13,8 @@ pub mod engine;
 pub mod error;
 pub mod execution_policy;
 pub mod executor_resolution;
+pub mod external_content;
+pub mod external_realization;
 pub mod handlers;
 pub mod history_policy;
 pub mod hooks;

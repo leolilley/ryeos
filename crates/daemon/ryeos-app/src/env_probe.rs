@@ -324,6 +324,7 @@ mod tests {
                 node_trusted_keys_dir: None,
                 verified_code: &[],
                 verified_command: None,
+                external_read_only_mounts: &[],
                 item_ref: "tool:test",
                 thread_id: "env-probe-test",
             },

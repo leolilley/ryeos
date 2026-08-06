@@ -26,6 +26,7 @@ pub mod project_snapshot_policy;
 pub mod project_tree;
 pub mod source_manifest;
 pub mod state_anchor;
+pub mod external_content_manifest;
 pub mod state_manifest;
 pub mod thread_event;
 pub mod thread_snapshot;
@@ -59,6 +60,15 @@ pub use project_snapshot_policy::ProjectSnapshotPolicy;
 pub use project_tree::ProjectTree;
 pub use source_manifest::SourceManifest;
 pub use state_anchor::{STATE_ANCHOR_SCHEMA_VERSION, StateAnchorMilestoneV2, StateAnchorPayloadV2};
+pub use external_content_manifest::{
+    EXTERNAL_CONTENT_MANIFEST_KIND, EXTERNAL_CONTENT_TREE_SCHEMA,
+    EXTERNAL_REALIZATIONS_DERIVED_KEY, ExternalContentKind, ExternalContentManifestEntry,
+    ExternalContentManifestEntryKind, ExternalContentManifestObject, ExternalContentMode,
+    ExternalContentRealization, ExternalContentRealizationSet, MAX_EXTERNAL_CONTENT_ENTRIES,
+    MAX_EXTERNAL_CONTENT_FILE_BYTES, MAX_EXTERNAL_CONTENT_MANIFEST_BYTES,
+    MAX_EXTERNAL_CONTENT_PATH_BYTES, MAX_EXTERNAL_CONTENT_TOTAL_BYTES,
+    MAX_INLINE_SYMLINK_TARGET_BYTES, MAX_SYMLINK_TARGET_BYTES,
+};
 pub use state_manifest::{
     MAX_STATE_MANIFEST_OBJECTS, STATE_MANIFEST_KIND, STATE_MANIFEST_SCHEMA_VERSION, StateManifest,
     StateManifestBlob,
@@ -114,7 +124,7 @@ impl std::error::Error for IncompatibleCurrentObjectSchema {}
 /// Validate the canonical, contained project-relative path used as the source
 /// manifest key and embedded `ItemSource.item_ref`. These fields identify
 /// files, not executable item kinds: they deliberately remain kind-agnostic.
-pub(crate) fn validate_canonical_project_relative_path(value: &str) -> anyhow::Result<()> {
+pub fn validate_canonical_project_relative_path(value: &str) -> anyhow::Result<()> {
     if value.is_empty() {
         anyhow::bail!("project-relative source path must not be empty");
     }

@@ -469,6 +469,7 @@ fn isolation_plan_request(
                         command.code() as &dyn crate::isolation::IsolationCommandAuthority
                     })
                 }),
+            external_read_only_mounts: &ctx.isolation_external_read_only_mounts,
             item_ref,
             thread_id: &ctx.thread_id,
         },
@@ -502,6 +503,7 @@ fn isolation_plan_request_awaiting_attachment(
                         command.code() as &dyn crate::isolation::IsolationCommandAuthority
                     })
                 }),
+            external_read_only_mounts: &ctx.isolation_external_read_only_mounts,
             item_ref,
             thread_id: &ctx.thread_id,
         },
@@ -643,6 +645,7 @@ mod tests {
             isolation_node_trusted_keys_dir: None,
             isolation_verified_code: Vec::new(),
             isolation_verified_command: None,
+            isolation_external_read_only_mounts: Vec::new(),
             thread_id: "thread:test".into(),
             chain_root_id: "chain:test".into(),
             current_site_id: "site:test".into(),

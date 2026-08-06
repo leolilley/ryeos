@@ -585,6 +585,7 @@ mod tests {
                 augmentation_methods: std::collections::BTreeMap::new(),
                 launch_augmentations: Vec::new(),
                 hooks: None,
+                external_content: None,
                 effective_validator: None,
             }),
             extensions: extensions

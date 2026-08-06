@@ -420,6 +420,17 @@ pub(crate) fn field_requirements_for_schema(schema: &KindSchema) -> Vec<Composer
             },
         });
     }
+    if schema
+        .execution
+        .as_ref()
+        .and_then(|execution| execution.external_content.as_ref())
+        .is_some()
+    {
+        requirements.push(ComposerFieldRequirement {
+            path: vec!["external_content".to_string()],
+            semantics,
+        });
+    }
     requirements
 }
 

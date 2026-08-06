@@ -127,6 +127,40 @@ pub trait IsolationCommandAuthority: std::fmt::Debug + Send + Sync {
     fn authority(&self) -> IsolationCommandAuthorityRef<'_>;
 }
 
+/// One daemon-admitted immutable mount that is additional to node policy.
+///
+/// The opened descriptor is the authority; `source_path` is diagnostic only.
+/// This is used for content-addressed realizations whose logical destination
+/// is committed by the effective program.
+#[derive(Debug, Clone)]
+pub struct IsolationReadOnlyMountAuthority {
+    source_path: PathBuf,
+    destination: PathBuf,
+    source: Arc<std::fs::File>,
+}
+
+impl IsolationReadOnlyMountAuthority {
+    pub fn new(source_path: PathBuf, destination: PathBuf, source: std::fs::File) -> Self {
+        Self {
+            source_path,
+            destination,
+            source: Arc::new(source),
+        }
+    }
+
+    pub(crate) fn source_path(&self) -> &Path {
+        &self.source_path
+    }
+
+    pub(crate) fn destination(&self) -> &Path {
+        &self.destination
+    }
+
+    pub(crate) fn source(&self) -> &Arc<std::fs::File> {
+        &self.source
+    }
+}
+
 impl IsolationCommandAuthority for IsolationVerifiedCode {
     fn authority(&self) -> IsolationCommandAuthorityRef<'_> {
         IsolationCommandAuthorityRef::Revalidate(self)
@@ -155,6 +189,9 @@ pub struct IsolationLaunchContext<'a> {
     /// Other entries may be imported tool/runtime files and cannot silently
     /// substitute for a changed command.
     pub verified_command: Option<&'a dyn IsolationCommandAuthority>,
+    /// Exact read-only realization mounts admitted for this program. These
+    /// are not ambient policy paths and may not be synthesized by runtimes.
+    pub external_read_only_mounts: &'a [IsolationReadOnlyMountAuthority],
     pub item_ref: &'a str,
     pub thread_id: &'a str,
 }

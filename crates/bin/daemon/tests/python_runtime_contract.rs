@@ -176,6 +176,7 @@ fn run_tool_with_hints(
             content_hash: verified.resolved.content_hash.clone(),
         }],
         isolation_verified_command: None,
+        isolation_external_read_only_mounts: Vec::new(),
         thread_id: "thread:test".into(),
         chain_root_id: "chain:test".into(),
         current_site_id: "site:test".into(),

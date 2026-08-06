@@ -194,6 +194,8 @@ pub struct EngineContext {
     /// When present it must match the plan's serialized verified-command
     /// identity; dispatch never reopens that command by pathname.
     pub isolation_verified_command: Option<crate::isolation::IsolationDescriptorBoundCommand>,
+    pub isolation_external_read_only_mounts:
+        Vec<crate::isolation::IsolationReadOnlyMountAuthority>,
     pub thread_id: String,
     pub chain_root_id: String,
     pub current_site_id: String,

@@ -723,6 +723,8 @@ pub struct SpawnItemParams<'a> {
     pub isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority,
     pub isolation_live_access_authority:
         Option<ryeos_engine::isolation::IsolationLiveAccessAuthority>,
+    pub isolation_external_read_only_mounts:
+        Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
     /// Exact daemon socket requested by the verified callback channel, or
     /// `None` for a callback-free launch.
     pub isolation_daemon_socket_path: Option<&'a std::path::Path>,
@@ -759,6 +761,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItemAwaitingAtta
         isolation,
         isolation_project_authority,
         isolation_live_access_authority,
+        isolation_external_read_only_mounts,
         isolation_daemon_socket_path,
         thread_state_dir,
         is_resume,
@@ -924,6 +927,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItemAwaitingAtta
         isolation_node_trusted_keys_dir: Some(isolation_node_trusted_keys_dir),
         isolation_verified_code,
         isolation_verified_command: prepared_plan.admitted_command,
+        isolation_external_read_only_mounts,
         thread_id: thread_id.to_string(),
         chain_root_id: chain_root_id.to_string(),
         current_site_id: resolved.current_site_id.clone(),

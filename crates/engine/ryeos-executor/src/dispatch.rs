@@ -2454,6 +2454,7 @@ pub(crate) async fn dispatch_method(
                     node_trusted_keys_dir: Some(&node_trusted_keys_dir),
                     verified_code: &[],
                     verified_command: Some(&isolation_verified_command),
+                    external_read_only_mounts: &[],
                     item_ref: &runtime_item_ref_string,
                     thread_id: &thread_id,
                 },
@@ -7473,6 +7474,7 @@ requires:
             augmentation_methods: BTreeMap::new(),
             launch_augmentations: Vec::new(),
             hooks: None,
+            external_content: None,
             effective_validator: None,
         }
     }
