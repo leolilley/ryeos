@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-02T11:12:41Z:f3eca272834966006d78e8e550aeff1ba9e72866f511c10d6936972072cbe3b3:aZcXuIgD6pLw++ZVnLYw5QZ+W4zlZPyZX+y9p8YUmL1lzvSxs+AkDj79pzMT604Sck3oVf3e7U1ayEvnkvvfCQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-06T03:37:12Z:cbc777d3e3590a78c9cd37c5047f19ee25974e6c6c786470f7ecaee486063aa0:WazzF/LC+t28uO1pMR0WxdQBxIVIG6bgBGCXsYax4XDYPWUsVhbyDPa781smz93E7ssA1zSLGp5JBEhVm3E1DA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/future
 name: README
@@ -37,6 +37,14 @@ from the former top-level `docs/future` tree include:
   taxonomy;
 - [`project-ai-surface-registry.md`](project-ai-surface-registry.md) — a signed
   discoverable registry for deployable project surfaces;
+- [`determinism-classes.md`](determinism-classes.md) — effect-class contract
+  (sealed/recorded/live) and replay-or-divergence-proof semantics;
+- [`execution-family-analytics.md`](execution-family-analytics.md) — seed-diff
+  attribution and cost series over effective-definition families;
+- [`key-lifecycle.md`](key-lifecycle.md) — signer rotation, succession, and
+  delegation for a substrate whose history is gated by revocation;
+- [`reflexive-deployment.md`](reflexive-deployment.md) — activation sets as
+  admitted programs; RyeOS sealing its own upgrades;
 - [`resolution-pipeline-advanced.md`](resolution-pipeline-advanced.md) —
   criteria for adding new resolution stages; and
 - [`ryeos-native-development-platform.md`](ryeos-native-development-platform.md)
