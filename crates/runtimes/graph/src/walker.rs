@@ -11,6 +11,7 @@ use crate::edges;
 use crate::evaluation::{ExpressionScope, validate_runtime_value};
 use crate::foreach;
 use crate::model::*;
+#[cfg(test)]
 use crate::validation::analyze_graph;
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::checkpoint::CheckpointWriter;
