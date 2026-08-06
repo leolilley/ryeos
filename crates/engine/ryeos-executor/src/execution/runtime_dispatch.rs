@@ -256,6 +256,11 @@ fn validate_hook_identity_authority(
             )));
         }
     }
+    // Coordinates are bounded and shape-checked only; per-event presence and
+    // values (e.g. a positive `turn`) are runtime-asserted by the admitted
+    // runtime. Occurrence identity is trusted to that runtime, and projection
+    // degrades malformed coordinates rather than erroring history — see the
+    // standing disciplines in effective-programs.md.
     if occurrence.coordinates.len() > 64 {
         return Err(hook_integrity(
             "hook occurrence has more than 64 scalar coordinates",

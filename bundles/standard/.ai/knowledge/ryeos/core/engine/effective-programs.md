@@ -137,3 +137,23 @@ They join only when their effective digests match. Source-version and
 policy-source entities retain the separate source digests, signers, spaces,
 trust, layer, and contribution role so an operator can see why two effective
 versions differ.
+
+## Standing disciplines
+
+1. **Admission caching keys on digests only.** Any memoization of
+   resolve/compose/capture/finalize work must key on the content digests of
+   its inputs (root, ancestors, config snapshots). A cache keyed on paths,
+   mtimes, or session state reintroduces ambient behavior through the cache.
+2. **Epochs are rare, boring, and about identity.** The schema-epoch
+   mechanism exists for identity cuts, not migration convenience. After the
+   effective-definition activation the identity layer is expected to go
+   quiet; each further epoch must name what identity changed.
+3. **Occurrence coordinates are runtime-asserted by acceptance.** The daemon
+   bounds and shape-checks hook occurrence coordinates but does not validate
+   per-event coordinate presence or values; occurrence identity is trusted to
+   the admitted runtime, and at-most-once is per asserted occurrence.
+   Malformed coordinates degrade in projection rather than erroring history.
+4. **Composer binaries are a trust boundary.** `requires` narrowing is
+   enforced by the trusted-bundle composer with the engine's post-compose
+   defense and validator cap-parity as backstops; the shared
+   `capability_cover` module is the single coverage semantics for both.

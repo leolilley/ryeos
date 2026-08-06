@@ -15,43 +15,80 @@ use ryeos_executor::execution::effective_program_projection::{
 
 const FIELD_PROJECTION_CACHE_MAX_ENTRIES: usize = 128;
 
+/// Count-bounded LRU keyed by string. Deliberately count- rather than
+/// byte-bounded: entries retain full source closures, so 128 projections can
+/// hold several hundred MiB on pathological projects — an accepted ceiling
+/// for a single-operator node, recorded in the post-activation ledger (N2).
 #[derive(Default)]
-struct FieldProjectionCacheState {
-    entries: HashMap<String, EffectiveProgramProjection>,
+struct BoundedLruState<V> {
+    entries: HashMap<String, V>,
     order: VecDeque<String>,
 }
 
 #[derive(Default)]
-struct FieldProjectionCache {
-    state: Mutex<FieldProjectionCacheState>,
+struct BoundedLru<V> {
+    state: Mutex<BoundedLruState<V>>,
+    max_entries: usize,
 }
 
-impl EffectiveProgramProjectionCache for FieldProjectionCache {
-    fn get(&self, key: &str) -> Option<EffectiveProgramProjection> {
+impl<V: Clone> BoundedLru<V> {
+    fn with_capacity(max_entries: usize) -> Self {
+        Self {
+            state: Mutex::new(BoundedLruState {
+                entries: HashMap::new(),
+                order: VecDeque::new(),
+            }),
+            max_entries,
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<V> {
         let mut state = self.state.lock().ok()?;
-        let projection = state.entries.get(key)?.clone();
+        let value = state.entries.get(key)?.clone();
         if let Some(position) = state.order.iter().position(|entry| entry == key) {
             state.order.remove(position);
         }
         state.order.push_back(key.to_string());
-        Some(projection)
+        Some(value)
     }
 
-    fn insert(&self, key: String, projection: EffectiveProgramProjection) {
+    fn insert(&self, key: String, value: V) {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
         if let Some(position) = state.order.iter().position(|entry| entry == &key) {
             state.order.remove(position);
         }
-        state.entries.insert(key.clone(), projection);
+        state.entries.insert(key.clone(), value);
         state.order.push_back(key);
-        while state.entries.len() > FIELD_PROJECTION_CACHE_MAX_ENTRIES {
+        while state.entries.len() > self.max_entries {
             let Some(evicted) = state.order.pop_front() else {
                 break;
             };
             state.entries.remove(&evicted);
         }
+    }
+}
+
+struct FieldProjectionCache {
+    lru: BoundedLru<EffectiveProgramProjection>,
+}
+
+impl Default for FieldProjectionCache {
+    fn default() -> Self {
+        Self {
+            lru: BoundedLru::with_capacity(FIELD_PROJECTION_CACHE_MAX_ENTRIES),
+        }
+    }
+}
+
+impl EffectiveProgramProjectionCache for FieldProjectionCache {
+    fn get(&self, key: &str) -> Option<EffectiveProgramProjection> {
+        self.lru.get(key)
+    }
+
+    fn insert(&self, key: String, projection: EffectiveProgramProjection) {
+        self.lru.insert(key, projection)
     }
 }
 
@@ -105,4 +142,34 @@ impl UiState {
 /// Returns `None` if the extension is not set (e.g., in API-only tests).
 pub fn get_ui_state(state: &ryeos_app::state::AppState) -> Option<Arc<UiState>> {
     state.extensions.get::<UiState>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BoundedLru;
+
+    #[test]
+    fn lru_evicts_least_recently_used_at_capacity() {
+        let lru: BoundedLru<u32> = BoundedLru::with_capacity(2);
+        lru.insert("a".into(), 1);
+        lru.insert("b".into(), 2);
+        // Touch `a` so `b` becomes least recently used.
+        assert_eq!(lru.get("a"), Some(1));
+        lru.insert("c".into(), 3);
+        assert_eq!(lru.get("b"), None, "least-recently-used entry must evict");
+        assert_eq!(lru.get("a"), Some(1));
+        assert_eq!(lru.get("c"), Some(3));
+    }
+
+    #[test]
+    fn reinserting_a_key_refreshes_without_duplicating() {
+        let lru: BoundedLru<u32> = BoundedLru::with_capacity(2);
+        lru.insert("a".into(), 1);
+        lru.insert("a".into(), 10);
+        lru.insert("b".into(), 2);
+        lru.insert("c".into(), 3);
+        assert_eq!(lru.get("a"), None, "refreshed key still evicts in order");
+        assert_eq!(lru.get("b"), Some(2));
+        assert_eq!(lru.get("c"), Some(3));
+    }
 }

@@ -674,6 +674,12 @@ for b in "${stale_bins[@]}"; do
     fi
 done
 
+# Pre-authorize sudo before any spinner owns the terminal; a password prompt
+# raised under the progress UI is invisible and times out (2026-08-06).
+if [[ $(id -u) -ne 0 ]]; then
+    sudo -v || die "sudo authorization is required for /usr installs"
+fi
+
 for name in "${bundle_names[@]}"; do
     [[ -d "$repo_root/bundles/$name/.ai" ]] || die "missing bundles/$name/.ai"
 done

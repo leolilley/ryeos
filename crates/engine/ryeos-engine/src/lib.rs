@@ -1,6 +1,7 @@
 pub mod binary_resolver;
 pub mod boot_validation;
 pub mod canonical_ref;
+pub mod capability_cover;
 pub mod composers;
 pub mod config_loading;
 pub mod contracts;

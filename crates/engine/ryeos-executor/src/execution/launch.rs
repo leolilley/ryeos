@@ -273,6 +273,22 @@ impl From<DispatchError> for BuildAndLaunchError {
 
 impl From<ryeos_engine::error::EngineError> for BuildAndLaunchError {
     fn from(error: ryeos_engine::error::EngineError) -> Self {
+        // A signed kind validator rejecting the composed definition is an
+        // authoring error in launched content, not an internal fault.
+        if let ryeos_engine::error::EngineError::EffectiveValidationRejected {
+            canonical_ref,
+            code,
+            message,
+        } = &error
+        {
+            return Self::LaunchPreparation(Box::new(DispatchError::LaunchPreparationFailed {
+                code: format!("effective_validation_rejected:{code}"),
+                message: format!("effective validator rejected `{canonical_ref}`: {message}"),
+                classification: "configuration".to_owned(),
+                binding: None,
+                details: Box::new(std::collections::BTreeMap::new()),
+            }));
+        }
         Self::Internal(anyhow::anyhow!(error))
     }
 }

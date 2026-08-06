@@ -1,27 +1,9 @@
-use regex::Regex;
-
-/// Check whether a granted capability pattern covers a child capability using
-/// the same anchored wildcard vocabulary as runtime authorization.
+/// One shared coverage check with the engine's post-compose narrowing defense
+/// (`ryeos_engine::capability_cover`), so the composer and the engine can
+/// never disagree — including pattern-language coverage for wildcard-bearing
+/// child declarations.
 fn capability_covers(granted: &str, child: &str) -> bool {
-    if granted == child {
-        return true;
-    }
-    let mut regex_str = String::from("^");
-    for ch in granted.chars() {
-        match ch {
-            '*' => regex_str.push_str(".*"),
-            '?' => regex_str.push('.'),
-            '.' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '\\' => {
-                regex_str.push('\\');
-                regex_str.push(ch);
-            }
-            _ => regex_str.push(ch),
-        }
-    }
-    regex_str.push('$');
-    Regex::new(&regex_str)
-        .map(|regex| regex.is_match(child))
-        .unwrap_or(false)
+    ryeos_engine::capability_cover::capability_pattern_covers(granted, child)
 }
 
 /// Retain child capabilities covered by at least one parent capability.
@@ -75,6 +57,18 @@ mod tests {
         assert_eq!(
             narrow_capabilities(&caps(&["one", "two/child"]), &caps(&["*"])),
             caps(&["one", "two/child"])
+        );
+    }
+
+    #[test]
+    fn child_wildcards_cannot_outrun_a_narrower_parent_pattern() {
+        // A parent `?` narrows to exactly one character; a child `*` would
+        // widen it. Language coverage, not text matching, must decide.
+        assert!(narrow_capabilities(&caps(&["ryeos.get.vault.*"]), &caps(&["ryeos.get.vault.?"])).is_empty());
+        // A trailing-star parent provably covers a prefixed child pattern.
+        assert_eq!(
+            narrow_capabilities(&caps(&["a.b.*"]), &caps(&["a.*"])),
+            caps(&["a.b.*"])
         );
     }
 }

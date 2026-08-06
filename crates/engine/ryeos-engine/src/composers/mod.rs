@@ -375,23 +375,7 @@ fn invalid_capability_definition(kind: &str, reason: &str) -> ResolutionError {
     }
 }
 
-fn capability_pattern_covers(parent: &str, child: &str) -> bool {
-    if parent == child {
-        return true;
-    }
-    let mut pattern = String::from("^");
-    for character in parent.chars() {
-        match character {
-            '*' => pattern.push_str(".*"),
-            '?' => pattern.push('.'),
-            other => pattern.push_str(&regex::escape(&other.to_string())),
-        }
-    }
-    pattern.push('$');
-    regex::Regex::new(&pattern)
-        .map(|pattern| pattern.is_match(child))
-        .unwrap_or(false)
-}
+use crate::capability_cover::capability_pattern_covers;
 
 /// Derive exact-value composer requirements from one verified kind schema.
 ///
