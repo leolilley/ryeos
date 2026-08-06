@@ -568,6 +568,23 @@ pub struct ThreadFinalizeParams {
     pub summary_json: Option<Value>,
 }
 
+/// Compare a recorded-service terminal JSON field using the signed CAS wire
+/// contract. `serde_json::Value` equality is too strong here: a typed float
+/// can retain a different in-memory representation after canonical JSON is
+/// decoded even though its durable bytes are identical.
+pub fn recorded_service_terminal_json_equal(
+    authoritative: Option<&Value>,
+    requested: Option<&Value>,
+) -> Result<bool> {
+    match (authoritative, requested) {
+        (None, None) => Ok(true),
+        (Some(authoritative), Some(requested)) => {
+            Ok(lillux::canonical_json(authoritative)? == lillux::canonical_json(requested)?)
+        }
+        (None, Some(_)) | (Some(_), None) => Ok(false),
+    }
+}
+
 /// Lifecycle-layer result of a conditional pre-launch cleanup. `Finalized` and
 /// `AlreadyTerminal` are settled outcomes; `NotCurrent` means another owner
 /// advanced or claimed the child, so the caller must not overwrite it.
@@ -4023,8 +4040,14 @@ impl ThreadLifecycleService {
             })?;
         if authoritative.status.as_str() != reported_status
             || authoritative.outcome_code != params.outcome_code
-            || authoritative.result != params.result
-            || authoritative.error != params.error
+            || !recorded_service_terminal_json_equal(
+                authoritative.result.as_ref(),
+                params.result.as_ref(),
+            )?
+            || !recorded_service_terminal_json_equal(
+                authoritative.error.as_ref(),
+                params.error.as_ref(),
+            )?
             || authoritative.result_project_snapshot_hash.is_some()
             || authoritative.budget.is_some()
             || !authoritative.artifacts.is_empty()
@@ -6254,6 +6277,44 @@ mod tests {
     use ryeos_engine::resolution::{
         KindComposedView, ResolutionOutput, ResolutionStepName, ResolvedAncestor,
     };
+
+    #[test]
+    fn recorded_service_terminal_json_equality_uses_canonical_cas_numbers() {
+        let typed_spend = serde_json::to_value(3.0478680000000002_f64)
+            .expect("encode typed floating-point result");
+        let requested = json!({
+            "rows": [{"spend_usd": typed_spend}],
+            "semantics": {"source": "latest cumulative usage"}
+        });
+        let canonical = lillux::canonical_json(&requested).expect("canonical result bytes");
+        let authoritative: Value =
+            serde_json::from_str(&canonical).expect("decode authoritative result");
+
+        assert_ne!(
+            authoritative, requested,
+            "fixture must exercise serde_json's distinct typed-number representations"
+        );
+        assert!(
+            recorded_service_terminal_json_equal(Some(&authoritative), Some(&requested),)
+                .expect("compare canonical terminal fields")
+        );
+        assert!(recorded_service_terminal_json_equal(None, None).unwrap());
+        assert!(!recorded_service_terminal_json_equal(None, Some(&requested)).unwrap());
+        assert!(
+            !recorded_service_terminal_json_equal(
+                Some(&authoritative),
+                Some(&json!({
+                    "rows": [{"spend_usd": 3.047869}],
+                    "semantics": {"source": "latest cumulative usage"}
+                })),
+            )
+            .unwrap()
+        );
+        assert!(!recorded_service_terminal_json_equal(Some(&json!(1)), Some(&json!(1.0))).unwrap());
+        assert!(
+            !recorded_service_terminal_json_equal(Some(&json!(-0.0)), Some(&json!(0.0))).unwrap()
+        );
+    }
 
     fn empty_test_engine() -> Arc<Engine> {
         Arc::new(Engine::new(
