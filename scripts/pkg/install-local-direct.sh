@@ -276,9 +276,13 @@ collect_selected_source_trust_args() {
     SELECTED_SOURCE_TRUST_ARGS=(--trust-file "$root_trust_file")
     for name in "$@"; do
         trust_file="$installed_share_dir/$name/PUBLISHER_TRUST.toml"
-        [[ -f "$trust_file" ]] && \
+        if [[ -f "$trust_file" ]]; then
             SELECTED_SOURCE_TRUST_ARGS+=(--trust-file "$trust_file")
+        fi
     done
+    # Per-bundle docs are optional under the shared-root trust model; the
+    # trailing test above must not decide this function's exit status.
+    return 0
 }
 
 operator_fingerprint() {
