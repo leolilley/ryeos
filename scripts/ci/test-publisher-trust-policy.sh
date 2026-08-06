@@ -94,6 +94,8 @@ collect_selected_source_trust_args "$installed_share" core
 [[ ${#SELECTED_SOURCE_TRUST_ARGS[@]} -eq 4 ]]
 [[ "${SELECTED_SOURCE_TRUST_ARGS[0]}" == "--trust-file" ]]
 [[ "${SELECTED_SOURCE_TRUST_ARGS[1]}" == "$installed_share/.ai/PUBLISHER_TRUST.toml" ]]
+[[ "${SELECTED_SOURCE_TRUST_ARGS[2]}" == "--trust-file" ]]
+[[ "${SELECTED_SOURCE_TRUST_ARGS[3]}" == "$installed_share/core/PUBLISHER_TRUST.toml" ]]
 
 # Shared-root model: a bundle without a per-bundle doc collects only the root
 # document, and the collector still succeeds (its exit status must not leak
@@ -102,9 +104,8 @@ collect_selected_source_trust_args "$installed_share" core
 rm "$installed_share/core/PUBLISHER_TRUST.toml"
 collect_selected_source_trust_args "$installed_share" core
 [[ ${#SELECTED_SOURCE_TRUST_ARGS[@]} -eq 2 ]]
+[[ "${SELECTED_SOURCE_TRUST_ARGS[0]}" == "--trust-file" ]]
 [[ "${SELECTED_SOURCE_TRUST_ARGS[1]}" == "$installed_share/.ai/PUBLISHER_TRUST.toml" ]]
-[[ "${SELECTED_SOURCE_TRUST_ARGS[2]}" == "--trust-file" ]]
-[[ "${SELECTED_SOURCE_TRUST_ARGS[3]}" == "$installed_share/core/PUBLISHER_TRUST.toml" ]]
 [[ " ${SELECTED_SOURCE_TRUST_ARGS[*]} " != *" $installed_share/residual/PUBLISHER_TRUST.toml "* ]]
 
 echo "publisher trust policy cases passed"
