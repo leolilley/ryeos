@@ -187,12 +187,9 @@ impl RyeOsCore {
                 .sources
                 .iter()
                 .filter(|(_, source)| {
-                    let refresh = if source.refresh.is_null()
-                        || source
-                            .refresh
-                            .as_object()
-                            .is_some_and(|value| value.is_empty())
-                    {
+                    // Absent/null inherits the view policy; an explicit empty
+                    // object is a declaration of no per-source liveness.
+                    let refresh = if source.refresh.is_null() {
                         &binding.refresh
                     } else {
                         &source.refresh
@@ -304,6 +301,34 @@ impl RyeOsCore {
 mod tests {
     use super::*;
     use crate::ui::reducer::test_support::*;
+
+    #[test]
+    fn explicit_empty_source_refresh_disables_inherited_facet_liveness() {
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/static",
+            serde_json::json!({
+                "widget": "text",
+                "sources": {
+                    "default": {
+                        "ref": "service:test/static",
+                        "params": {},
+                        "refresh": {}
+                    }
+                },
+                "refresh": {"on_facet": "selection"}
+            }),
+        );
+        core.workspace.add_tile(ViewSpec {
+            view_ref: "view:test/static".to_string(),
+        });
+
+        assert!(
+            core.effects_for_facet("selection").is_empty(),
+            "an explicit per-source empty policy is not an inheritance fallback"
+        );
+    }
 
     #[test]
     fn invoke_affordance_ui_plane_writes_facet_and_refetches_subscribers() {

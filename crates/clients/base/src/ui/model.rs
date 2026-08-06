@@ -1042,12 +1042,9 @@ impl RyeOsCore {
                 .sources
                 .iter()
                 .filter(|(_, source)| {
-                    let refresh = if source.refresh.is_null()
-                        || source
-                            .refresh
-                            .as_object()
-                            .is_some_and(|value| value.is_empty())
-                    {
+                    // Absent/null inherits the view policy; an explicit empty
+                    // object is a declaration of no per-source liveness.
+                    let refresh = if source.refresh.is_null() {
                         &binding.refresh
                     } else {
                         &source.refresh

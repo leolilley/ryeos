@@ -1051,9 +1051,16 @@ impl ExecutionAssembler {
             "graph_completed" => Some("completed"),
             _ => return Ok(()),
         };
-        let graph_run_id = occurrence
-            .text_coordinate("graph_run_id")
-            .ok_or_else(|| anyhow::anyhow!("graph hook occurrence has no text `graph_run_id`"))?;
+        let Some(graph_run_id) = occurrence.text_coordinate("graph_run_id") else {
+            self.builder.warn(
+                "malformed_hook_occurrence",
+                format!(
+                    "graph hook occurrence at {}:{} lacks text `graph_run_id`; run linkage skipped",
+                    event_ref.chain_root_id, event_ref.chain_seq
+                ),
+            );
+            return Ok(());
+        };
         let definition_ref = &occurrence.definition_ref;
         let effective_definition_digest = &occurrence.effective_definition_digest;
         let run = self
@@ -1080,12 +1087,20 @@ impl ExecutionAssembler {
         if occurrence.event() != "graph_step_completed" {
             return Ok(());
         }
-        let step = occurrence
-            .counter_coordinate("step")
-            .ok_or_else(|| anyhow::anyhow!("graph step hook occurrence has no counter `step`"))?;
-        let node = occurrence
-            .text_coordinate("node")
-            .ok_or_else(|| anyhow::anyhow!("graph step hook occurrence has no text `node`"))?;
+        let (Some(step), Some(node)) = (
+            occurrence.counter_coordinate("step"),
+            occurrence.text_coordinate("node"),
+        ) else {
+            self.builder.warn(
+                "malformed_hook_occurrence",
+                format!(
+                    "graph step hook occurrence at {}:{} lacks `step`/`node` coordinates; \
+                     occurrence linkage skipped",
+                    event_ref.chain_root_id, event_ref.chain_seq
+                ),
+            );
+            return Ok(());
+        };
         let key = OccurrenceKey {
             thread_id: occurrence_thread_id.to_string(),
             graph_run_id: graph_run_id.to_string(),
@@ -2489,6 +2504,45 @@ mod tests {
                 .entities
                 .iter()
                 .all(|entity| entity.kind != "hook_observation")
+        );
+    }
+
+    #[test]
+    fn hook_occurrence_missing_coordinates_degrades_without_losing_the_document() {
+        let mut assembler = assembler();
+        let mut payload = observation_payload(&"b".repeat(64));
+        payload.hook.occurrence = ryeos_runtime::callback::HookDispatchOccurrence::new(
+            "graph",
+            "graph_step_completed",
+            "graph:test/build",
+            "r".repeat(64),
+            "d".repeat(64),
+        )
+        .with_text_coordinate("graph_run_id", "G-1");
+        assembler
+            .add_event(event(
+                1,
+                ryeos_state::event_types::HOOK_OBSERVATION_RECORDED,
+                serde_json::to_value(&payload).unwrap(),
+            ))
+            .unwrap();
+        let facts = assembler.finish().unwrap();
+        assert!(facts.warnings.iter().any(|warning| {
+            warning.get("code").and_then(Value::as_str) == Some("malformed_hook_occurrence")
+        }));
+        assert!(
+            facts
+                .entities
+                .iter()
+                .any(|entity| entity.kind == "hook_observation"),
+            "observation itself must survive coordinate degradation"
+        );
+        assert!(
+            facts
+                .entities
+                .iter()
+                .all(|entity| entity.kind != "graph_occurrence"),
+            "no occurrence may be fabricated without step/node coordinates"
         );
     }
 
