@@ -14,7 +14,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ryeos_handler_protocol::{
-    HandlerRequest, HandlerResponse, LaunchPrepareRequest, LaunchPrepareResponse,
+    HandlerRequest, HandlerRequestEnvelope, HandlerResponse, HandlerResponseEnvelope,
+    LaunchPrepareRequest, LaunchPrepareResponse,
 };
 
 use crate::canonical_ref::CanonicalRef;
@@ -210,12 +211,11 @@ impl LaunchPreparerRunner {
             }
         };
 
-        let request_value = serde_json::to_value(request).map_err(|error| {
-            EngineError::LaunchPreparerProtocolInvalid {
+        let request_value = serde_json::to_value(HandlerRequestEnvelope::new(request.clone()))
+            .map_err(|error| EngineError::LaunchPreparerProtocolInvalid {
                 handler: canonical_ref.clone(),
                 detail: format!("encode handler request: {error}"),
-            }
-        })?;
+            })?;
         let request_json = lillux::canonical_json(&request_value)
             .map(String::into_bytes)
             .map_err(|error| EngineError::LaunchPreparerProtocolInvalid {
@@ -294,12 +294,18 @@ impl LaunchPreparerRunner {
             });
         }
 
-        let response: HandlerResponse = ryeos_handler_protocol::from_json_slice_strict(
-            result.stdout.as_bytes(),
-        )
-        .map_err(|error| EngineError::LaunchPreparerProtocolInvalid {
-            handler: canonical_ref.clone(),
-            detail: error.to_string(),
+        let response_envelope: HandlerResponseEnvelope =
+            ryeos_handler_protocol::from_json_slice_strict(result.stdout.as_bytes()).map_err(
+                |error| EngineError::LaunchPreparerProtocolInvalid {
+                    handler: canonical_ref.clone(),
+                    detail: error.to_string(),
+                },
+            )?;
+        let response: HandlerResponse = response_envelope.into_response().map_err(|detail| {
+            EngineError::LaunchPreparerProtocolInvalid {
+                handler: canonical_ref.clone(),
+                detail,
+            }
         })?;
         let response_value = serde_json::to_value(&response).map_err(|error| {
             EngineError::LaunchPreparerProtocolInvalid {
