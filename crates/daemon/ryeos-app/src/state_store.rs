@@ -9799,6 +9799,39 @@ impl StateStore {
             .append_bundle_event_admitted(request, g.signer.as_ref(), permit.cas_guard())
     }
 
+    /// Append a daemon-owned event at the authoritative head selected while
+    /// holding the state-store lock.
+    ///
+    /// This is intentionally crate-private: capability-facing bundle-event
+    /// callers must continue to supply an explicit expected head. Internal
+    /// evidence streams whose only writer is this daemon need a single atomic
+    /// read-head/append operation so concurrent launches cannot create
+    /// avoidable evidence gaps.
+    pub(crate) fn append_daemon_bundle_event_at_current_head(
+        &self,
+        mut request: ryeos_state::BundleEventAppendRequest,
+    ) -> Result<ryeos_state::BundleEventAppendResult> {
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let bundle_id = request
+            .bundle_id
+            .as_deref()
+            .unwrap_or(&request.effective_bundle_id);
+        let head = g.state_db.read_bundle_event_chain_page(
+            bundle_id,
+            &request.event_kind,
+            &request.chain_id,
+            None,
+            1,
+            ryeos_state::objects::MAX_BUNDLE_EVENT_SERIALIZED_BYTES,
+            g.signer.as_ref(),
+        )?;
+        request.expected_chain_head_hash =
+            head.records.first().map(|record| record.event_hash.clone());
+        g.state_db
+            .append_bundle_event_admitted(request, g.signer.as_ref(), permit.cas_guard())
+    }
+
     pub fn append_bundle_event_with_attachments(
         &self,
         mut request: ryeos_state::BundleEventAppendRequest,
@@ -10380,6 +10413,65 @@ mod tests {
             Arc::new(head_trust),
         )
         .expect("state store")
+    }
+
+    #[test]
+    fn daemon_bundle_event_append_serializes_concurrent_writers_at_current_head() {
+        const WRITERS: usize = 12;
+        let store = Arc::new(test_store());
+        let start = Arc::new(std::sync::Barrier::new(WRITERS));
+        let writers = (0..WRITERS)
+            .map(|index| {
+                let store = Arc::clone(&store);
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    store
+                        .append_daemon_bundle_event_at_current_head(
+                            ryeos_state::BundleEventAppendRequest {
+                                effective_bundle_id: "ryeos-node".to_string(),
+                                bundle_id: None,
+                                event_kind: "admission".to_string(),
+                                chain_id: "project-test".to_string(),
+                                event_type: "admission_recorded".to_string(),
+                                schema_version: 1,
+                                payload: json!({"writer": index}),
+                                expected_chain_head_hash: None,
+                                idempotency_key: None,
+                                correlation_id: None,
+                                causation_id: None,
+                                attribution:
+                                    ryeos_state::objects::BundleEventAttribution::default(),
+                                attachments: vec![],
+                            },
+                        )
+                        .expect("daemon-owned append")
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for writer in writers {
+            writer.join().expect("writer thread");
+        }
+
+        let page = store
+            .read_bundle_event_chain_page(
+                "ryeos-node",
+                "admission",
+                "project-test",
+                None,
+                WRITERS,
+                ryeos_state::objects::MAX_BUNDLE_EVENT_SERIALIZED_BYTES,
+            )
+            .expect("read daemon-owned event chain");
+        assert_eq!(page.records.len(), WRITERS);
+        let mut sequences = page
+            .records
+            .iter()
+            .map(|record| record.event.chain_seq)
+            .collect::<Vec<_>>();
+        sequences.sort_unstable();
+        assert_eq!(sequences, (1..=WRITERS as u64).collect::<Vec<_>>());
     }
 
     fn positioned_test_event(

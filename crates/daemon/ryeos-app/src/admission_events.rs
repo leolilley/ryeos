@@ -110,7 +110,7 @@ fn append(state_store: &StateStore, project_path: &Path, event_type: &str, paylo
             serialized.len()
         );
     }
-    state_store.append_bundle_event_with_attachments(
+    state_store.append_daemon_bundle_event_at_current_head(
         ryeos_state::BundleEventAppendRequest {
             effective_bundle_id: ADMISSION_BUNDLE_ID.to_string(),
             bundle_id: None,
@@ -131,7 +131,6 @@ fn append(state_store: &StateStore, project_path: &Path, event_type: &str, paylo
             },
             attachments: vec![],
         },
-        vec![],
     )?;
     Ok(())
 }
