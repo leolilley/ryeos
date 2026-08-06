@@ -403,7 +403,7 @@ pub struct ThreadView {
 /// A `ThreadListItem` projection decorated with daemon-authored
 /// [`ExecutionFacts`], follow lineage, and staged-input depth — the list-row
 /// analogue of [`ThreadView`].
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ThreadListView {
     #[serde(flatten)]
     pub item: ThreadListItem,
@@ -455,6 +455,28 @@ pub struct ExecutionTreeResult {
     pub root_thread_id: Option<String>,
     pub threads: Vec<ExecutionTreeView>,
     pub truncated: bool,
+}
+
+fn expand_execution_tree_paths(
+    decorated: Vec<ThreadListView>,
+    paths: Vec<(String, ExecutionTreePosition)>,
+) -> Result<Vec<ExecutionTreeView>> {
+    let snapshots = decorated
+        .into_iter()
+        .map(|thread| (thread.item.thread_id.clone(), thread))
+        .collect::<BTreeMap<_, _>>();
+    paths
+        .into_iter()
+        .map(|(thread_id, tree)| {
+            let thread = snapshots
+                .get(&thread_id)
+                .with_context(|| {
+                    format!("execution tree path references missing thread `{thread_id}`")
+                })?
+                .clone();
+            Ok(ExecutionTreeView { thread, tree })
+        })
+        .collect()
 }
 
 /// A graph thread's current node/step (see [`ThreadListView::current_node`]).
@@ -5072,27 +5094,31 @@ impl ThreadLifecycleService {
         let page = self
             .state_store
             .execution_tree(selected_thread_id, max_depth, max_nodes)?;
-        let positions = page
-            .items
-            .iter()
-            .map(|item| ExecutionTreePosition {
-                parent_thread_id: item.tree_parent_thread_id.clone(),
-                relation: item.relation.clone(),
-                depth: item.depth,
-                has_children: item.has_children,
-            })
-            .collect::<Vec<_>>();
-        let items = page
-            .items
-            .into_iter()
-            .map(|item| item.item)
-            .collect::<Vec<_>>();
+        // A DAG fan-in emits one structural row per path. Decorate each thread
+        // exactly once, then reuse that page-scoped live snapshot for every
+        // path. Decorating duplicate rows independently can observe different
+        // facets/current-node/pending state within one response, and the field
+        // projection must never receive divergent facts for one thread id.
+        let mut seen = std::collections::BTreeSet::new();
+        let mut items = Vec::new();
+        let mut paths = Vec::with_capacity(page.items.len());
+        for item in page.items {
+            let thread_id = item.item.thread_id.clone();
+            paths.push((
+                thread_id.clone(),
+                ExecutionTreePosition {
+                    parent_thread_id: item.tree_parent_thread_id,
+                    relation: item.relation,
+                    depth: item.depth,
+                    has_children: item.has_children,
+                },
+            ));
+            if seen.insert(thread_id) {
+                items.push(item.item);
+            }
+        }
         let decorated = self.decorate_list_items(items)?;
-        let threads = decorated
-            .into_iter()
-            .zip(positions)
-            .map(|(thread, tree)| ExecutionTreeView { thread, tree })
-            .collect::<Vec<_>>();
+        let threads = expand_execution_tree_paths(decorated, paths)?;
         let root_thread_id = threads.first().map(|row| row.thread.item.thread_id.clone());
         Ok(ExecutionTreeResult {
             root_thread_id,
@@ -6959,6 +6985,80 @@ mod tests {
         let steered = ThreadListView { pending: 2, ..view };
         let v2 = serde_json::to_value(&steered).unwrap();
         assert_eq!(v2["pending"], json!(2));
+    }
+
+    #[test]
+    fn execution_tree_fan_in_reuses_one_decorated_snapshot_for_every_path() {
+        let thread = ThreadListView {
+            item: ThreadListItem {
+                thread_id: "T-joined".to_string(),
+                chain_root_id: "T-root".to_string(),
+                kind: "graph".to_string(),
+                status: "completed".to_string(),
+                item_ref: "graph:test/fan-in".to_string(),
+                launch_mode: "managed_async".to_string(),
+                current_site_id: "site:test".to_string(),
+                origin_site_id: "site:test".to_string(),
+                upstream_thread_id: None,
+                successor_thread_id: None,
+                requested_by: None,
+                project_root: None,
+                project_authority: None,
+                lifecycle_authority: None,
+                admitted_launch_capsule_hash: None,
+                created_at: "t0".to_string(),
+                updated_at: "t1".to_string(),
+            },
+            execution: ExecutionFacts {
+                supports_continuation: true,
+                supports_operator_followup: false,
+            },
+            follow: None,
+            project: None,
+            pending: 2,
+            facets: BTreeMap::from([("game".to_string(), "fixture".to_string())]),
+            current_node: Some(CurrentNode {
+                node: "done".to_string(),
+                step: 11,
+            }),
+            error: None,
+        };
+        let paths = vec![
+            (
+                "T-joined".to_string(),
+                ExecutionTreePosition {
+                    parent_thread_id: Some("T-left".to_string()),
+                    relation: "spawned".to_string(),
+                    depth: 3,
+                    has_children: false,
+                },
+            ),
+            (
+                "T-joined".to_string(),
+                ExecutionTreePosition {
+                    parent_thread_id: Some("T-right".to_string()),
+                    relation: "spawned".to_string(),
+                    depth: 3,
+                    has_children: false,
+                },
+            ),
+        ];
+
+        let rows = expand_execution_tree_paths(vec![thread], paths).unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].tree.parent_thread_id.as_deref(), Some("T-left"));
+        assert_eq!(rows[1].tree.parent_thread_id.as_deref(), Some("T-right"));
+        for row in rows {
+            assert_eq!(row.thread.pending, 2);
+            assert_eq!(
+                row.thread.facets.get("game").map(String::as_str),
+                Some("fixture")
+            );
+            let current = row.thread.current_node.expect("current graph node");
+            assert_eq!(current.node, "done");
+            assert_eq!(current.step, 11);
+        }
     }
 
     #[test]

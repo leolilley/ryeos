@@ -756,7 +756,7 @@ pub struct PendingHeadTransitionStatus {
     pub oldest_age_seconds: Option<u64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ThreadListItem {
     pub thread_id: String,
     pub chain_root_id: String,
