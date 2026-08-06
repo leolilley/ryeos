@@ -115,11 +115,19 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         .as_deref()
         .map(|path| format!("project:{}", lillux::sha256_hex(path.as_bytes())))
         .unwrap_or_else(|| "project:node".to_string());
+    let admission = project_root.as_deref().map(|root| {
+        ryeos_app::admission_events::read_admission_events(
+            &state.state_store,
+            std::path::Path::new(root),
+            MAX_ADMISSION_FACTS,
+        )
+    });
     let mut document = project_facts(
         topology,
         project_identity,
         &projections,
         projection_warnings,
+        admission,
     )?;
     if !request.expansions.is_empty() {
         document = apply_bounded_expansions(document, &request.expansions, &ui_state, SERVICE_REF)
@@ -133,6 +141,7 @@ fn project_facts(
     project_identity: String,
     projections: &BTreeMap<String, EffectiveProgramProjection>,
     projection_warnings: Vec<String>,
+    admission: Option<anyhow::Result<ryeos_state::BundleEventChainPage>>,
 ) -> Result<super::ui_field::FieldFactsDocument> {
     let subject = FieldFactSubject {
         kind: "project".to_string(),
@@ -359,7 +368,7 @@ fn project_facts(
         })?;
     }
 
-    add_admission_facts(&mut builder, &state, project_root.as_deref())?;
+    add_admission_facts(&mut builder, admission)?;
 
     builder.finish()
 }
@@ -371,17 +380,12 @@ const MAX_ADMISSION_FACTS: usize = 50;
 /// warning — admission evidence must never take the project document down.
 fn add_admission_facts(
     builder: &mut FieldFactsBuilder,
-    state: &AppState,
-    project_root: Option<&str>,
+    admission: Option<anyhow::Result<ryeos_state::BundleEventChainPage>>,
 ) -> Result<()> {
-    let Some(root) = project_root else {
+    let Some(read) = admission else {
         return Ok(());
     };
-    let page = match ryeos_app::admission_events::read_admission_events(
-        &state.state_store,
-        std::path::Path::new(root),
-        MAX_ADMISSION_FACTS,
-    ) {
+    let page = match read {
         Ok(page) => page,
         Err(error) => {
             builder.warn(
@@ -715,7 +719,14 @@ mod tests {
             },
         )]);
         let facts =
-            project_facts(graph, "project:test".to_string(), &projections, Vec::new()).unwrap();
+            project_facts(
+                graph,
+                "project:test".to_string(),
+                &projections,
+                Vec::new(),
+                None,
+            )
+            .unwrap();
         let encoded = serde_json::to_string(&facts).unwrap();
         assert_eq!(
             facts.schema_version,
