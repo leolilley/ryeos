@@ -360,6 +360,7 @@ pub(crate) fn capture_and_finalize_fresh_effective_program(
     parsers: &ryeos_engine::parsers::ParserDispatcher,
     trust_store: &ryeos_engine::trust::TrustStore,
     materialization: Option<&ryeos_app::resolution_cache::ResolutionMaterializationBinding>,
+    inherited_external: Option<&ryeos_engine::external_realization::RealizedExternalContentSet>,
 ) -> Result<
     (
         FinalizedEffectiveProgram,
@@ -379,6 +380,7 @@ pub(crate) fn capture_and_finalize_fresh_effective_program(
             parsers,
             trust_store,
             materialization,
+            inherited_external,
         ) {
             Err(DispatchError::LaunchPreparationFailed { code, .. })
                 if code == "effective_program_authority_changed"
@@ -408,6 +410,7 @@ fn capture_and_finalize_fresh_effective_program_once(
     parsers: &ryeos_engine::parsers::ParserDispatcher,
     trust_store: &ryeos_engine::trust::TrustStore,
     materialization: Option<&ryeos_app::resolution_cache::ResolutionMaterializationBinding>,
+    inherited_external: Option<&ryeos_engine::external_realization::RealizedExternalContentSet>,
 ) -> Result<
     (
         FinalizedEffectiveProgram,
@@ -431,6 +434,7 @@ fn capture_and_finalize_fresh_effective_program_once(
         kind,
         &mut resolution,
         roots,
+        inherited_external,
     )
     .map_err(DispatchError::Internal)?;
     let finalized = capture_and_finalize_with_hook_snapshots(

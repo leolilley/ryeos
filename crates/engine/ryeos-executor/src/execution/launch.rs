@@ -3815,6 +3815,35 @@ async fn prepare_managed_launch_authority(
         }
     }
     let admitted_capsule = authoritative_admitted_capsule;
+    // §6 inheritance: a fresh child seals its dispatching parent's exact
+    // realization set unless it authors its own declaration. Resolved from
+    // the parent's durable capsule — never from operational metadata — and
+    // fail-closed: a dispatching parent without an admitted capsule is
+    // broken lineage, not an empty inheritance. Recovered launches read
+    // their own sealed set instead, so nothing is resolved here for them.
+    let inherited_external_realizations = if admitted_capsule.is_none() {
+        params
+            .parent_execution_context
+            .map(|parent| {
+                params
+                    .state
+                    .state_store
+                    .admitted_launch_capsule(&parent.parent_thread_id)
+                    .map_err(BuildAndLaunchError::Internal)?
+                    .ok_or_else(|| {
+                        BuildAndLaunchError::Internal(anyhow::anyhow!(
+                            "dispatching parent {} has no authoritative admitted launch capsule",
+                            parent.parent_thread_id
+                        ))
+                    })?
+                    .external_realization_set()
+                    .map_err(BuildAndLaunchError::Internal)
+            })
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
     let root_admission = params.resolved.root_admission.as_ref().ok_or_else(|| {
         BuildAndLaunchError::Internal(anyhow::anyhow!(
             "managed launch is missing exact admitted resolution authority"
@@ -4490,6 +4519,7 @@ async fn prepare_managed_launch_authority(
             &request_snapshot.parser_dispatcher,
             &request_snapshot.trust_store,
             Some(&materialization),
+            inherited_external_realizations.as_ref(),
         )
         .map_err(BuildAndLaunchError::from)?
     };

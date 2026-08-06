@@ -481,6 +481,27 @@ pub struct AdmittedLaunchCapsule {
 }
 
 impl AdmittedLaunchCapsule {
+    /// External realization set sealed into this capsule's exact program,
+    /// parsed with the shared wire type. `Ok(None)` when the program sealed
+    /// no realization slot; malformed derived data is an error, never an
+    /// empty inheritance.
+    pub fn external_realization_set(
+        &self,
+    ) -> anyhow::Result<Option<super::ExternalContentRealizationSet>> {
+        let Some(value) = self
+            .exact_program
+            .get("resolution_output")
+            .and_then(|resolution| resolution.get("composed"))
+            .and_then(|composed| composed.get("derived"))
+            .and_then(|derived| derived.get(super::EXTERNAL_REALIZATIONS_DERIVED_KEY))
+        else {
+            return Ok(None);
+        };
+        super::ExternalContentRealizationSet::from_value(value)
+            .map(Some)
+            .context("admitted capsule carries an invalid external realization set")
+    }
+
     /// Decode only the exact current CAS wire contract.
     ///
     /// Inspecting the outer identity first ensures a predecessor nested

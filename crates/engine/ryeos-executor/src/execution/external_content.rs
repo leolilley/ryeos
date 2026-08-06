@@ -410,6 +410,42 @@ pub(crate) fn recover_external_realizations(
     }))
 }
 
+/// Inherit the dispatching program's sealed realization verbatim.
+///
+/// Contract §6: every descendant of one admitted solve executes against the
+/// same realization — manifests *and* logical mounts — unless it authors its
+/// own declaration, which replaces inheritance entirely. Redeemability is
+/// re-proved from CAS under the pinned authority. No staged publication is
+/// needed: the parent's capsule roots every manifest across the admission
+/// window, and the child's own capsule roots them durably once sealed.
+fn inherit_external_realizations(
+    state: &ryeos_app::state::AppState,
+    resolution: &mut ryeos_engine::resolution::ResolutionOutput,
+    inherited: Option<&RealizedExternalContentSet>,
+) -> anyhow::Result<Option<CapturedExternalRealizations>> {
+    let Some(inherited) = inherited else {
+        return Ok(None);
+    };
+    let realized = inherited.clone();
+    resolution.composed.derived.insert(
+        ryeos_engine::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY.to_string(),
+        realized.to_value()?,
+    );
+    let authority = super::pinned_state_authority(state)?;
+    let store = ExternalRealizationStore::new(authority);
+    let proof =
+        ryeos_engine::external_realization::prove_external_realizations(realized, &store)?;
+    tracing::info!(
+        realization_count = proof.realized().iter().len(),
+        "inherited external content realization"
+    );
+    Ok(Some(CapturedExternalRealizations {
+        proof,
+        store,
+        publication: None,
+    }))
+}
+
 /// Exact CAS authority used to re-prove a realization at finalization.
 pub(crate) struct ExternalRealizationStore {
     authority: ryeos_state::PinnedStateAuthority,
@@ -497,6 +533,7 @@ pub(crate) fn capture_external_realizations(
     kind: &str,
     resolution: &mut ryeos_engine::resolution::ResolutionOutput,
     roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    inherited: Option<&RealizedExternalContentSet>,
 ) -> anyhow::Result<Option<CapturedExternalRealizations>> {
     let contract = engine
         .kinds
@@ -509,7 +546,9 @@ pub(crate) fn capture_external_realizations(
         contract,
         declarer,
     )? else {
-        return Ok(None);
+        // No authored declaration: a descendant seals its dispatching
+        // program's realization; an independent root seals nothing.
+        return inherit_external_realizations(state, resolution, inherited);
     };
 
     let authority = super::pinned_state_authority(state)?;
