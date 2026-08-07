@@ -302,6 +302,13 @@ struct GraphFile {
     /// to parse.
     #[serde(default)]
     requires: Option<ryeos_bundle::runtime_authority::RuntimeRequires>,
+    /// Item-level external content declaration. Validated, captured, and
+    /// realized by the engine before this runtime ever launches; the runtime
+    /// sees the realization as read-only mounts, so the declaration itself is
+    /// opaque here — named only so the strict decode admits it.
+    #[serde(default)]
+    #[allow(dead_code)]
+    external_content: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
