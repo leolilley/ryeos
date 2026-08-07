@@ -1066,4 +1066,189 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("aggregate entries"));
     }
+
+    // ── Composed-value declarations (the extends-chain product) ─────────
+
+    fn contract(
+        allowed_roots: &[&str],
+        max_declarations: usize,
+    ) -> crate::kind_registry::ExecutionExternalContentDecl {
+        crate::kind_registry::ExecutionExternalContentDecl {
+            realization_derived: EXTERNAL_REALIZATIONS_DERIVED_KEY.to_string(),
+            allowed_roots: allowed_roots.iter().map(|root| root.to_string()).collect(),
+            max_declarations,
+        }
+    }
+
+    fn composed_with(declarations: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "external_content": declarations })
+    }
+
+    fn tree_declaration(id: &str, root: &str, mount: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "kind": "tree",
+            "locator": {"root": root, "path": "vendor/sim"},
+            "mode": "captured",
+            "mount": mount,
+        })
+    }
+
+    #[test]
+    fn composed_absence_and_an_empty_list_remain_distinct() {
+        let contract = contract(&["project_files"], 4);
+        // Absence: the item never declared the field.
+        assert!(
+            declarations_from_composed(
+                &serde_json::json!({}),
+                Some(&contract),
+                DeclaringAuthority::Project,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            declarations_from_composed(&serde_json::json!({}), None, DeclaringAuthority::Project)
+                .unwrap()
+                .is_none()
+        );
+        // An explicit empty list is a positive declaration of no content.
+        assert_eq!(
+            declarations_from_composed(
+                &composed_with(serde_json::json!([])),
+                Some(&contract),
+                DeclaringAuthority::Project,
+            )
+            .unwrap(),
+            Some(Vec::new())
+        );
+        // Null is neither: it must fail rather than be read as either form.
+        assert!(
+            declarations_from_composed(
+                &composed_with(serde_json::Value::Null),
+                Some(&contract),
+                DeclaringAuthority::Project,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn authoring_without_a_kind_contract_is_refused() {
+        let error = declarations_from_composed(
+            &composed_with(serde_json::json!([])),
+            None,
+            DeclaringAuthority::Project,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("no execution.external_content contract"),
+            "got {error:#}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_declaration_parses_through_the_composed_value() {
+        let contract = contract(&["project_files"], 4);
+        let digest = "a".repeat(64);
+        let declarations = declarations_from_composed(
+            &composed_with(serde_json::json!([{
+                "id": "sim",
+                "kind": "tree",
+                "locator": {"root": "project_files", "path": "vendor/sim"},
+                "mode": "pinned",
+                "digest": digest,
+                "mount": "vendor/sim",
+            }])),
+            Some(&contract),
+            DeclaringAuthority::Project,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(declarations.len(), 1);
+        let declaration = &declarations[0];
+        assert_eq!(declaration.id, "sim");
+        assert_eq!(declaration.kind, ExternalContentKind::Tree);
+        assert_eq!(declaration.mode, ExternalContentMode::Pinned);
+        assert_eq!(declaration.digest.as_deref(), Some(digest.as_str()));
+        assert_eq!(declaration.locator.root.label(), "project_files");
+        assert_eq!(declaration.mount, "vendor/sim");
+    }
+
+    #[test]
+    fn the_contract_bounds_declaration_count_and_roots() {
+        let error = declarations_from_composed(
+            &composed_with(serde_json::json!([
+                tree_declaration("one", "project_files", "vendor/one"),
+                tree_declaration("two", "project_files", "vendor/two"),
+            ])),
+            Some(&contract(&["project_files"], 1)),
+            DeclaringAuthority::Project,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("permits"), "got {error:#}");
+
+        let error = declarations_from_composed(
+            &composed_with(serde_json::json!([tree_declaration(
+                "sim",
+                "project_files",
+                "vendor/sim"
+            )])),
+            Some(&contract(&["project_ai"], 4)),
+            DeclaringAuthority::Project,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("does not permit"),
+            "got {error:#}"
+        );
+    }
+
+    #[test]
+    fn declarer_authority_gates_roots_before_the_contract() {
+        // A project-admitted item may not direct the daemon at node space,
+        // even when the kind contract would allow the class.
+        let error = declarations_from_composed(
+            &composed_with(serde_json::json!([tree_declaration(
+                "cfg",
+                "node_files",
+                "vendor/cfg"
+            )])),
+            Some(&contract(&["node_files"], 4)),
+            DeclaringAuthority::Project,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("may not declare"),
+            "got {error:#}"
+        );
+
+        // A bundle may name only itself.
+        let foreign = declarations_from_composed(
+            &composed_with(serde_json::json!([tree_declaration(
+                "lib",
+                "bundle:other",
+                "vendor/lib"
+            )])),
+            Some(&contract(&["bundle:own"], 4)),
+            DeclaringAuthority::Bundle("own"),
+        )
+        .unwrap_err();
+        assert!(
+            foreign.to_string().contains("may not declare"),
+            "got {foreign:#}"
+        );
+        let own = declarations_from_composed(
+            &composed_with(serde_json::json!([tree_declaration(
+                "lib",
+                "bundle:own",
+                "vendor/lib"
+            )])),
+            Some(&contract(&["bundle:own"], 4)),
+            DeclaringAuthority::Bundle("own"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(own.len(), 1);
+    }
 }

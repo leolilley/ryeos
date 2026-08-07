@@ -217,14 +217,18 @@ impl ExternalMaterializationCache {
         result
     }
 
-    /// Best-effort, lease-respecting sweep back under the cache budget.
+    fn sweep(&self) -> anyhow::Result<()> {
+        self.sweep_to_budget(MAX_EXTERNAL_MATERIALIZATION_CACHE_BYTES)
+    }
+
+    /// Best-effort, lease-respecting sweep back under the given byte budget.
     ///
     /// A generation is reclaimable only when the sweep wins BOTH its build
     /// lock and its lease file exclusively without blocking. `materialize`
     /// acquires the shared lease before releasing the build lock, so a live
     /// user can never lose both races. Eviction is operational, never a
     /// correctness event: a later bind re-materializes from CAS.
-    fn sweep(&self) -> anyhow::Result<()> {
+    fn sweep_to_budget(&self, budget: u64) -> anyhow::Result<()> {
         let Some(root) = lillux::PinnedDirectory::open(&self.root)? else {
             return Ok(());
         };
@@ -268,13 +272,13 @@ impl ExternalMaterializationCache {
             total_bytes = total_bytes.saturating_add(bytes);
             generations.push((name, bytes, recency));
         }
-        if total_bytes <= MAX_EXTERNAL_MATERIALIZATION_CACHE_BYTES {
+        if total_bytes <= budget {
             return Ok(());
         }
         // Oldest first; a generation with no lease record sorts oldest.
         generations.sort_by_key(|(_, _, recency)| *recency);
         for (name, bytes, _) in generations {
-            if total_bytes <= MAX_EXTERNAL_MATERIALIZATION_CACHE_BYTES {
+            if total_bytes <= budget {
                 break;
             }
             let lock = locks.open_regular_create(OsStr::new(&name), true, false, 0o600)?;
@@ -1236,5 +1240,129 @@ mod tests {
                 size: 2
             }
         ));
+    }
+
+    // ── Materialization cache and sweep ─────────────────────────────────
+
+    fn temp_cas() -> (tempfile::TempDir, lillux::CasStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("cas");
+        std::fs::create_dir_all(&root).unwrap();
+        (dir, lillux::CasStore::new(root))
+    }
+
+    fn store_tree_closure(
+        cas: &lillux::CasStore,
+        files: &[(&str, &[u8])],
+    ) -> ryeos_state::VerifiedExternalContentClosure {
+        let mut entries = files
+            .iter()
+            .map(|(path, bytes)| ryeos_state::objects::ExternalContentManifestEntry {
+                path: (*path).to_string(),
+                kind: ryeos_state::objects::ExternalContentManifestEntryKind::File,
+                mode: Some(0o644),
+                blob_hash: Some(cas.store_blob(bytes).unwrap()),
+                size: Some(bytes.len() as u64),
+                target: None,
+                target_blob: None,
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.path.cmp(&right.path));
+        let manifest = ryeos_state::objects::ExternalContentManifestObject {
+            schema: ryeos_state::objects::EXTERNAL_CONTENT_TREE_SCHEMA.to_string(),
+            kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.to_string(),
+            entry_count: entries.len(),
+            total_bytes: entries.iter().filter_map(|entry| entry.size).sum(),
+            entries,
+        };
+        let hash = cas
+            .store_object(&serde_json::to_value(&manifest).unwrap())
+            .unwrap();
+        ryeos_state::VerifiedExternalContentClosure::load(cas, &hash).unwrap()
+    }
+
+    #[test]
+    fn materialize_builds_verifies_and_heals_the_generation() {
+        let (dir, cas) = temp_cas();
+        let app_root = dir.path().join("app");
+        std::fs::create_dir_all(&app_root).unwrap();
+        let cache = ExternalMaterializationCache::from_app_root(&app_root);
+        let closure =
+            store_tree_closure(&cas, &[("alpha.txt", b"alpha"), ("omega.txt", b"omega!")]);
+
+        let generation = cache
+            .materialize(&cas, &closure, ExternalContentKind::Tree)
+            .unwrap();
+        let root = generation.source_path.clone();
+        assert_eq!(std::fs::read(root.join("alpha.txt")).unwrap(), b"alpha");
+        assert_eq!(std::fs::read(root.join("omega.txt")).unwrap(), b"omega!");
+        drop(generation);
+
+        // A generation that no longer matches its manifest must be discarded
+        // and rebuilt, never served: the tree on disk is a cache, and the
+        // manifest is the identity.
+        std::fs::write(root.join("alpha.txt"), b"corrupted").unwrap();
+        let healed = cache
+            .materialize(&cas, &closure, ExternalContentKind::Tree)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(healed.source_path.join("alpha.txt")).unwrap(),
+            b"alpha"
+        );
+    }
+
+    #[test]
+    fn a_file_realization_materializes_its_content_entry() {
+        let (dir, cas) = temp_cas();
+        let app_root = dir.path().join("app");
+        std::fs::create_dir_all(&app_root).unwrap();
+        let cache = ExternalMaterializationCache::from_app_root(&app_root);
+        let closure = store_tree_closure(
+            &cas,
+            &[(
+                ryeos_engine::external_content::FILE_REALIZATION_ENTRY_PATH,
+                b"payload",
+            )],
+        );
+
+        let generation = cache
+            .materialize(&cas, &closure, ExternalContentKind::File)
+            .unwrap();
+        assert!(
+            generation
+                .source_path
+                .ends_with(ryeos_engine::external_content::FILE_REALIZATION_ENTRY_PATH)
+        );
+        assert_eq!(std::fs::read(&generation.source_path).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn sweep_reclaims_only_unleased_generations() {
+        let (dir, cas) = temp_cas();
+        let app_root = dir.path().join("app");
+        std::fs::create_dir_all(&app_root).unwrap();
+        let cache = ExternalMaterializationCache::from_app_root(&app_root);
+        let first = store_tree_closure(&cas, &[("one.txt", b"generation one")]);
+        let second = store_tree_closure(&cas, &[("two.txt", b"generation two")]);
+
+        let idle = cache
+            .materialize(&cas, &first, ExternalContentKind::Tree)
+            .unwrap();
+        let idle_root = idle.source_path.clone();
+        let live = cache
+            .materialize(&cas, &second, ExternalContentKind::Tree)
+            .unwrap();
+        let live_root = live.source_path.clone();
+        drop(idle);
+
+        // A zero budget makes everything reclaimable, but the held lease
+        // must still protect its generation.
+        cache.sweep_to_budget(0).unwrap();
+        assert!(!idle_root.exists());
+        assert!(live_root.exists());
+
+        drop(live);
+        cache.sweep_to_budget(0).unwrap();
+        assert!(!live_root.exists());
     }
 }

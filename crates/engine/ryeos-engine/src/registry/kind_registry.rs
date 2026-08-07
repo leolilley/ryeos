@@ -4853,4 +4853,122 @@ metadata:
             .expect_err("unknown placeholders must fail closed");
         assert!(error.to_string().contains("capability_template"));
     }
+
+    // ── execution.external_content contract parsing ─────────────────────
+
+    fn load_external_content_schema(
+        contract_lines: &[&str],
+    ) -> Result<KindRegistry, EngineError> {
+        let mut yaml = String::from(
+            "location:\n  directory: tools\nexecution:\n  aliases:\n    \"@base\": \"tool:ryeos/base/base\"\n  external_content:\n",
+        );
+        for line in contract_lines {
+            yaml.push_str("    ");
+            yaml.push_str(line);
+            yaml.push('\n');
+        }
+        yaml.push_str(
+            "formats:\n  - extensions: [\".yaml\"]\n    parser: parser:ryeos/core/yaml/yaml\n    signature:\n      prefix: \"#\"\nmetadata:\n  rules:\n    name:\n      from: filename\n",
+        );
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        sign_and_write_schema(&tmp, "tool", &yaml, &sk);
+        let result = KindRegistry::load_base(std::slice::from_ref(&tmp), &ts);
+        let _ = fs::remove_dir_all(&tmp);
+        result
+    }
+
+    #[test]
+    fn external_content_contract_loads_from_a_signed_schema() {
+        let registry = load_external_content_schema(&[
+            "realization_derived: effective_external_realizations",
+            "allowed_roots: [\"project_ai\", \"bundle:own\"]",
+            "max_declarations: 4",
+        ])
+        .unwrap();
+        let contract = registry
+            .get("tool")
+            .and_then(|schema| schema.execution.as_ref())
+            .and_then(|execution| execution.external_content.as_ref())
+            .expect("signed contract is exposed on the loaded schema");
+        assert_eq!(
+            contract.realization_derived,
+            "effective_external_realizations"
+        );
+        assert_eq!(contract.allowed_roots, ["project_ai", "bundle:own"]);
+        assert_eq!(contract.max_declarations, 4);
+    }
+
+    #[test]
+    fn external_content_contract_rejects_a_foreign_derived_slot() {
+        let error = load_external_content_schema(&[
+            "realization_derived: some_other_slot",
+            "allowed_roots: [\"project_ai\"]",
+            "max_declarations: 4",
+        ])
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("realization_derived must be"),
+            "got {error}"
+        );
+    }
+
+    #[test]
+    fn external_content_contract_bounds_max_declarations() {
+        for bad in ["max_declarations: 0", "max_declarations: 9"] {
+            let error = load_external_content_schema(&[
+                "realization_derived: effective_external_realizations",
+                "allowed_roots: [\"project_ai\"]",
+                bad,
+            ])
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("max_declarations must be within"),
+                "{bad}: got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn external_content_contract_requires_supported_root_classes() {
+        let error = load_external_content_schema(&[
+            "realization_derived: effective_external_realizations",
+            "allowed_roots: []",
+            "max_declarations: 4",
+        ])
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("must not be empty"),
+            "got {error}"
+        );
+
+        let error = load_external_content_schema(&[
+            "realization_derived: effective_external_realizations",
+            "allowed_roots: [\"host_path\"]",
+            "max_declarations: 4",
+        ])
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("unsupported root class"),
+            "got {error}"
+        );
+    }
+
+    #[test]
+    fn external_content_contract_refuses_unknown_fields() {
+        let error = load_external_content_schema(&[
+            "realization_derived: effective_external_realizations",
+            "allowed_roots: [\"project_ai\"]",
+            "max_declarations: 4",
+            "surprise: true",
+        ])
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("invalid execution.external_content declaration"),
+            "got {error}"
+        );
+    }
 }

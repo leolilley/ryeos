@@ -437,4 +437,43 @@ mod tests {
             vec!["a".repeat(64), "b".repeat(64)]
         );
     }
+
+    fn realization(id: &str, mount: &str) -> ExternalContentRealization {
+        ExternalContentRealization {
+            id: id.to_string(),
+            kind: ExternalContentKind::Tree,
+            mode: ExternalContentMode::Captured,
+            manifest_hash: "a".repeat(64),
+            entry_count: 1,
+            total_bytes: 10,
+            mount: mount.to_string(),
+        }
+    }
+
+    #[test]
+    fn realization_set_round_trips_through_its_wire_value() {
+        let set = ExternalContentRealizationSet::new(vec![
+            realization("beta", "vendor/beta"),
+            realization("alpha", "vendor/alpha"),
+        ])
+        .unwrap();
+        let value = set.to_value().unwrap();
+        let restored = ExternalContentRealizationSet::from_value(&value).unwrap();
+        assert_eq!(restored, set);
+        // Construction ordered by id, and the ordering survives the wire.
+        assert_eq!(
+            restored.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>(),
+            ["alpha", "beta"]
+        );
+    }
+
+    #[test]
+    fn overlapping_realization_mounts_are_rejected() {
+        let error = ExternalContentRealizationSet::new(vec![
+            realization("outer", "vendor/sim"),
+            realization("inner", "vendor/sim/lib"),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("overlap"), "got {error}");
+    }
 }

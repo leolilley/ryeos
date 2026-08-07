@@ -102,3 +102,94 @@ impl VerifiedExternalContentClosure {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_cas() -> (tempfile::TempDir, lillux::CasStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("cas");
+        std::fs::create_dir_all(&root).unwrap();
+        (dir, lillux::CasStore::new(root))
+    }
+
+    fn file_entry(
+        path: &str,
+        blob_hash: &str,
+        size: u64,
+    ) -> crate::objects::ExternalContentManifestEntry {
+        crate::objects::ExternalContentManifestEntry {
+            path: path.to_string(),
+            kind: ExternalContentManifestEntryKind::File,
+            mode: Some(0o644),
+            blob_hash: Some(blob_hash.to_string()),
+            size: Some(size),
+            target: None,
+            target_blob: None,
+        }
+    }
+
+    fn manifest(
+        entries: Vec<crate::objects::ExternalContentManifestEntry>,
+        total_bytes: u64,
+    ) -> ExternalContentManifestObject {
+        ExternalContentManifestObject {
+            schema: crate::objects::EXTERNAL_CONTENT_TREE_SCHEMA.to_string(),
+            kind: crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND.to_string(),
+            entry_count: entries.len(),
+            entries,
+            total_bytes,
+        }
+    }
+
+    #[test]
+    fn a_stored_manifest_closure_round_trips_from_cas() {
+        let (_dir, cas) = temp_cas();
+        let alpha = cas.store_blob(b"alpha bytes").unwrap();
+        let omega = cas.store_blob(b"omega").unwrap();
+        let stored = manifest(
+            vec![
+                file_entry("alpha.txt", &alpha, 11),
+                file_entry("omega.txt", &omega, 5),
+            ],
+            16,
+        );
+        let hash = cas
+            .store_object(&serde_json::to_value(&stored).unwrap())
+            .unwrap();
+
+        let closure = VerifiedExternalContentClosure::load(&cas, &hash).unwrap();
+        assert_eq!(closure.manifest_hash(), hash);
+        assert_eq!(closure.manifest(), &stored);
+        assert_eq!(closure.verified_blob_sizes().get(&alpha), Some(&11));
+        assert_eq!(closure.verified_blob_sizes().get(&omega), Some(&5));
+    }
+
+    #[test]
+    fn closure_load_refuses_missing_and_lying_payloads() {
+        let (_dir, cas) = temp_cas();
+
+        // A manifest naming a blob CAS does not hold is unavailable, never
+        // partially verified.
+        let absent = manifest(vec![file_entry("ghost.txt", &"f".repeat(64), 3)], 3);
+        let hash = cas
+            .store_object(&serde_json::to_value(&absent).unwrap())
+            .unwrap();
+        let error = VerifiedExternalContentClosure::load(&cas, &hash).unwrap_err();
+        assert!(format!("{error:#}").contains("ghost.txt"), "got {error:#}");
+
+        // A manifest asserting a size its blob does not have is a lie about
+        // executable identity, not a tolerable drift.
+        let blob = cas.store_blob(b"12345").unwrap();
+        let lying = manifest(vec![file_entry("short.txt", &blob, 6)], 6);
+        let hash = cas
+            .store_object(&serde_json::to_value(&lying).unwrap())
+            .unwrap();
+        let error = VerifiedExternalContentClosure::load(&cas, &hash).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("expected 6"),
+            "got {error:#}"
+        );
+    }
+}
+
