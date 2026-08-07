@@ -738,6 +738,19 @@ pub trait RuntimeCallbackAPI: Send + Sync {
         )))
     }
 
+    /// Re-verify every stored large object and report typed integrity
+    /// findings. Manifest-declared runtime authority
+    /// (`large_content: [scrub]`); refused by default.
+    async fn scrub_large_content(
+        &self,
+        _thread_id: &str,
+        _request: Value,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::Transport(anyhow::anyhow!(
+            "runtime.scrub_large_content callback is not implemented by this client"
+        )))
+    }
+
     async fn claim_commands(&self, thread_id: &str) -> Result<Value, CallbackError>;
 
     /// Report a claimed command as `completed` or `rejected`. `command_id` is the

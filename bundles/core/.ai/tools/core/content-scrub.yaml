@@ -1,0 +1,26 @@
+# ryeos:signed:2026-08-07T11:15:13Z:5cf99ea3095397caf9ef34b59d4ca7cdafeab60d573e566e4e9e78225f907b7d:O0atRFAWMN1RkGoU9yscEZgJixuyAgh6t3p2o39bjyiB3zmCeKChHx9uYCED4lRo5wX+yYC+oMYH9QP6wPafBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+executor_id: "@subprocess"
+category: "core"
+name: "content-scrub"
+requires:
+  capabilities:
+    manifest:
+      runtime_authority:
+        large_content: [scrub]
+description: "Re-verify every stored large object chunk by chunk and report typed integrity findings."
+
+config:
+  command: "bin:ryeos-core-tools"
+  args:
+    - "content-scrub"
+    - "--stdin-json"
+  input_data: "${params_json}"
+  timeout_secs: 3600
+
+config_schema:
+  type: object
+  properties:
+    project_path:
+      type: string
+      description: "Project root (parent of .ai/). Defaults to caller cwd."

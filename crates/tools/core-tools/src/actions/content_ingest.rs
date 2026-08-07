@@ -23,6 +23,29 @@ pub struct ContentIngestParams {
     pub project_path: Option<PathBuf>,
 }
 
+#[derive(Debug, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ContentScrubParams {
+    #[serde(default)]
+    pub project_path: Option<PathBuf>,
+}
+
+pub fn run_content_scrub(_params: ContentScrubParams) -> Result<Value> {
+    let thread_id = std::env::var("RYEOSD_THREAD_ID").context(
+        "RYEOSD_THREAD_ID is not set — large-content scrub requires a daemon-dispatched thread",
+    )?;
+    let client = ryeos_runtime::callback_uds::UdsRuntimeClient::from_env()
+        .map_err(|error| anyhow::anyhow!("cannot build runtime callback client: {error}"))?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("build scrub callback runtime")?;
+    use ryeos_runtime::callback::RuntimeCallbackAPI;
+    runtime
+        .block_on(client.scrub_large_content(&thread_id, serde_json::json!({})))
+        .map_err(|error| anyhow::anyhow!("runtime.scrub_large_content failed: {error}"))
+}
+
 pub fn run_content_ingest(params: ContentIngestParams) -> Result<Value> {
     let source_path = if params.source_path.is_absolute() {
         params.source_path.clone()

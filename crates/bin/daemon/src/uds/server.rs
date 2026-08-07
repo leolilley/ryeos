@@ -411,6 +411,9 @@ pub(crate) async fn dispatch_runtime_method(
         "runtime.ingest_large_content" => {
             handle_runtime_ingest_large_content(&clean_params, state, callback_cap.as_ref())
         }
+        "runtime.scrub_large_content" => {
+            handle_runtime_scrub_large_content(&clean_params, state, callback_cap.as_ref())
+        }
         "runtime.vault_put" => {
             handle_runtime_vault_put(&clean_params, state, callback_cap.as_ref())
         }
@@ -1295,6 +1298,23 @@ fn handle_runtime_ingest_large_content(
         serde_json::from_value(params.clone())
             .context("invalid runtime.ingest_large_content params")?;
     ryeos_app::large_content_service::RuntimeLargeContentService::ingest(
+        &state.state_store,
+        &state.authorizer,
+        cap,
+        params,
+    )
+}
+
+fn handle_runtime_scrub_large_content(
+    params: &serde_json::Value,
+    state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+) -> Result<serde_json::Value> {
+    let cap = cap.ok_or_else(|| anyhow::anyhow!("missing callback capability"))?;
+    let params: ryeos_app::large_content_service::RuntimeLargeContentScrubParams =
+        serde_json::from_value(params.clone())
+            .context("invalid runtime.scrub_large_content params")?;
+    ryeos_app::large_content_service::RuntimeLargeContentService::scrub(
         &state.state_store,
         &state.authorizer,
         cap,

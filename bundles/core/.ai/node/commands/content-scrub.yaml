@@ -1,0 +1,13 @@
+# ryeos:signed:2026-08-07T11:15:13Z:c38d5b809b1c8d49805f347497718b5ca1809f434ca23564b5b1af67d06cb469:/w9lfrZTBOenuTx/9jvjJXXZf/ltnVSMkk0bEFqW/yw/Mepj49NPrmxm/zzTqOwszpuWgt0LEzFHsLVQSq+qBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- content
+- scrub
+description: Re-verify every stored large object and report integrity findings
+forms:
+- slots: []
+project:
+  resolution: required
+dispatch:
+  kind: execute_ref
+  execute: tool:core/content-scrub
+  availability: daemon

@@ -232,6 +232,9 @@ enum Cmd {
         expected_sha256: Option<String>,
     },
 
+    /// Re-verify every stored large object and report integrity findings.
+    ContentScrub,
+
     /// Return the node's public identity document.
     Identity {
         /// App root directory.
@@ -606,6 +609,21 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&run_content_ingest(params)?)?
+            );
+            Ok(())
+        }
+        Cmd::ContentScrub => {
+            use ryeos_core_tools::actions::content_ingest::{
+                ContentScrubParams, run_content_scrub,
+            };
+            let params = if cli.stdin_json {
+                serde_json::from_value(read_stdin_json()?)?
+            } else {
+                ContentScrubParams::default()
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&run_content_scrub(params)?)?
             );
             Ok(())
         }

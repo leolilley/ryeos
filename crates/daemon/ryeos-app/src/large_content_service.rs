@@ -167,6 +167,45 @@ impl RuntimeLargeContentService {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeLargeContentScrubParams {
+    pub thread_id: String,
+}
+
+impl RuntimeLargeContentService {
+    /// Re-verify every stored large object streaming, chunk by chunk, and
+    /// report typed integrity findings. A non-empty findings list is
+    /// substrate damage, not noise.
+    pub fn scrub(
+        state_store: &StateStore,
+        authorizer: &Authorizer,
+        cap: &CallbackCapability,
+        _params: RuntimeLargeContentScrubParams,
+    ) -> Result<Value> {
+        let required = large_content_cap(&LargeContentOperation::Scrub);
+        authorizer
+            .authorize(&cap.effective_caps, &AuthorizationPolicy::require(&required))
+            .with_context(|| {
+                format!(
+                    "missing required capability: {required} — large-content scrub is manifest \
+                     runtime authority: declare `runtime_authority.large_content: [scrub]` in \
+                     the bundle's `.ai/manifest.source.yaml` and request it from the item"
+                )
+            })?;
+        let authority = state_store.with_state_db(|db| db.pinned_authority())?;
+        let store = authority.large_object_store()?;
+        let report = store.scrub_all()?;
+        let staging_reclaimed = store.sweep_abandoned_staging()?;
+        Ok(json!({
+            "objects_verified": report.objects_verified,
+            "bytes_verified": report.bytes_verified,
+            "findings": serde_json::to_value(&report.findings)?,
+            "staging_reclaimed": staging_reclaimed,
+        }))
+    }
+}
+
 /// Walk a shard directory into (manifest path, filesystem path) pairs,
 /// sorted by path bytes as the manifest requires. Symlinks fail closed: a
 /// pinned identity must not depend on where a link points today.
