@@ -1043,6 +1043,28 @@ impl Runner {
                                 turn,
                                 "provider call replayed from record; no reservation, no provider contact"
                             );
+                            // Live watchers see the replayed content arrive as
+                            // one ephemeral delta (chunk cadence is transport
+                            // texture, not evidence); the durable record of the
+                            // turn still comes from emit_turn_complete.
+                            if let Some(text) = response
+                                .message
+                                .content
+                                .as_ref()
+                                .and_then(serde_json::Value::as_str)
+                            {
+                                let _ = self
+                                    .callback
+                                    .append_runtime_event(
+                                        RuntimeEventType::CognitionOut,
+                                        json!({
+                                            "turn": turn,
+                                            "delta": text,
+                                            "replayed": true,
+                                        }),
+                                    )
+                                    .await;
+                            }
                             Ok(crate::provider_adapter::StreamOutcome::Completed {
                                 response,
                                 events: Vec::new(),
