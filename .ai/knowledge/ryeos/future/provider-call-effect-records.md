@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-07T08:39:23Z:85c53df156f4a8f94b08f93d0698a56f3d6ce406d4c62b66bed32976c50606aa:WJ/7UVxSi/ii8ZcCkyC6STO+Fi+ALcMO5wuPW8Zd3hj1p5f5bboQIHiy7BTk0l1UsLc0RAw7OSGFYam+uBhJCQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-07T08:52:05Z:f2847dac8081231d8637f9615b671367877e1b2d7439c9c3f325419a08c8c19d:AXSa3vBwUKASjzb60YniN71yLdFqzKc1kVfXO1L/+X4hgGSu4Kiguc/cJO0i+JWpBNqa8Te5qNqJNstoUFpeDw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, replay, provider, directive, evidence]
 version: "0.1.0"
@@ -165,8 +165,17 @@ on the same keys rather than replacing the machinery.
    fresh init under the byte-for-byte assertion, a v1 store chains
    through both migrations in one open, rows feed both GC gatherers as
    roots, and retention reuses the never-replayed-first lanes.
-3. Capture for non-streaming calls behind the sealed opt-in declaration.
-   **Daemon half DONE (`a669df5ec`)**:
+3. **DONE** — capture behind the sealed opt-in declaration, both halves.
+   Runtime half (`e3c014751`): after a settled, completed call, a
+   directive whose sealed program declares a durable class submits the
+   intent and envelope preimages, body digest, and response-as-consumed
+   through `runtime.publish_provider_call_record`; failure is record
+   loss, never turn failure. The directive kind's extends-chain composer
+   and composed contract carry the top-level `effects` field so the
+   declaration seals into the digest the daemon reads. (Capture runs
+   after stream completion, so "non-streaming first" arrived as
+   final-response capture; increment 5 owes only replay-into-a-stream.)
+   Daemon half (`a669df5ec`):
    `runtime.publish_provider_call_record` validates preimage-first — the
    echoed reservation intent must hash to the ledger's stored
    `request_hash` for a settled attempt owned by the publishing thread
