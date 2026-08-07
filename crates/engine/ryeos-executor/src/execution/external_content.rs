@@ -36,6 +36,19 @@ impl BoundExternalRealizations {
     }
 }
 
+/// Operational ceiling for the materialization cache as a whole. Redeemability
+/// never depends on this cache — an evicted generation re-materializes from
+/// CAS, whose blobs are capsule-protected — so the budget is free to be
+/// modest. Live generations are lease-protected and never counted against
+/// eviction eligibility.
+const MAX_EXTERNAL_MATERIALIZATION_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// A crashed build's staging directory is torn down once clearly abandoned.
+/// A live staging is always younger than this: a build publishes or cleans
+/// up within one materialization call.
+const STALE_STAGING_MAX_AGE: std::time::Duration =
+    std::time::Duration::from_secs(24 * 60 * 60);
+
 struct ExternalMaterializationCache {
     root: PathBuf,
 }
@@ -108,6 +121,10 @@ impl ExternalMaterializationCache {
         if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_SH) } != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
+        // Recency signal for the sweep: every use refreshes the lease file's
+        // modification time. Best-effort — eviction order is a policy, not a
+        // correctness input.
+        let _ = lease.set_modified(std::time::SystemTime::now());
 
         let (source_path, source) = match kind {
             ExternalContentKind::Tree => (
@@ -191,6 +208,123 @@ impl ExternalMaterializationCache {
         }
         result
     }
+
+    /// Best-effort, lease-respecting sweep back under the cache budget.
+    ///
+    /// A generation is reclaimable only when the sweep wins BOTH its build
+    /// lock and its lease file exclusively without blocking. `materialize`
+    /// acquires the shared lease before releasing the build lock, so a live
+    /// user can never lose both races. Eviction is operational, never a
+    /// correctness event: a later bind re-materializes from CAS.
+    fn sweep(&self) -> anyhow::Result<()> {
+        let Some(root) = lillux::PinnedDirectory::open(&self.root)? else {
+            return Ok(());
+        };
+        let locks = root.open_or_create_child(OsStr::new(".locks"), 0o700)?;
+        let leases = root.open_or_create_child(OsStr::new(".leases"), 0o700)?;
+        let now = std::time::SystemTime::now();
+        let mut generations = Vec::new();
+        let mut total_bytes = 0u64;
+        for entry in root.entries_no_follow()? {
+            if entry.entry_type != lillux::PinnedEntryType::Directory {
+                continue;
+            }
+            let Some(name) = entry.name.to_str().map(str::to_owned) else {
+                continue;
+            };
+            if name == ".locks" || name == ".leases" {
+                continue;
+            }
+            let Some(directory) = root.open_child_directory(OsStr::new(&name))? else {
+                continue;
+            };
+            if name.starts_with('.') {
+                let abandoned = directory
+                    .try_clone_descriptor()?
+                    .metadata()?
+                    .modified()
+                    .ok()
+                    .and_then(|modified| now.duration_since(modified).ok())
+                    .is_some_and(|age| age > STALE_STAGING_MAX_AGE);
+                if abandoned {
+                    directory.remove_contents_recursive()?;
+                    let _ = root.remove_empty_child_if_same(OsStr::new(&name), &directory);
+                }
+                continue;
+            }
+            let bytes = directory_content_bytes(&directory)?;
+            let recency = leases
+                .open_regular(OsStr::new(&name), false)?
+                .and_then(|file| file.metadata().ok())
+                .and_then(|metadata| metadata.modified().ok());
+            total_bytes = total_bytes.saturating_add(bytes);
+            generations.push((name, bytes, recency));
+        }
+        if total_bytes <= MAX_EXTERNAL_MATERIALIZATION_CACHE_BYTES {
+            return Ok(());
+        }
+        // Oldest first; a generation with no lease record sorts oldest.
+        generations.sort_by_key(|(_, _, recency)| *recency);
+        for (name, bytes, _) in generations {
+            if total_bytes <= MAX_EXTERNAL_MATERIALIZATION_CACHE_BYTES {
+                break;
+            }
+            let lock = locks.open_regular_create(OsStr::new(&name), true, false, 0o600)?;
+            #[cfg(unix)]
+            if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                continue;
+            }
+            let lease = leases.open_regular_create(OsStr::new(&name), true, false, 0o600)?;
+            #[cfg(unix)]
+            let leased =
+                unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0;
+            #[cfg(not(unix))]
+            let leased = true;
+            if leased {
+                drop(lease);
+                drop(lock);
+                continue;
+            }
+            let Some(directory) = root.open_child_directory(OsStr::new(&name))? else {
+                continue;
+            };
+            directory.remove_contents_recursive()?;
+            if root.remove_empty_child_if_same(OsStr::new(&name), &directory)? {
+                total_bytes = total_bytes.saturating_sub(bytes);
+                tracing::info!(
+                    manifest_hash = %name,
+                    bytes,
+                    "evicted external-content materialization"
+                );
+            }
+            drop(lease);
+            drop(lock);
+        }
+        Ok(())
+    }
+}
+
+/// Sum of regular-file bytes under one materialized generation, walked
+/// descriptor-relative. Symlink targets and directory entries are noise at
+/// this granularity.
+fn directory_content_bytes(directory: &lillux::PinnedDirectory) -> anyhow::Result<u64> {
+    let mut total = 0u64;
+    for entry in directory.entries_no_follow()? {
+        match entry.entry_type {
+            lillux::PinnedEntryType::Directory => {
+                if let Some(child) = directory.open_child_directory(&entry.name)? {
+                    total = total.saturating_add(directory_content_bytes(&child)?);
+                }
+            }
+            lillux::PinnedEntryType::Regular => {
+                if let Some(file) = directory.open_regular(&entry.name, false)? {
+                    total = total.saturating_add(file.metadata()?.len());
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(total)
 }
 
 /// Verify and materialize the exact realization set committed by a finalized
@@ -241,6 +375,11 @@ pub(crate) fn bind_external_realizations(
         leases.push(generation.lease);
     }
     authority.ensure_guard(&guard)?;
+    // This launch's generations are lease-protected above, so the sweep can
+    // only reclaim idle history. Failure to sweep never fails a launch.
+    if let Err(error) = cache.sweep() {
+        tracing::warn!(%error, "external-content materialization sweep failed");
+    }
     Ok(Some(BoundExternalRealizations {
         mounts,
         _leases: leases,
