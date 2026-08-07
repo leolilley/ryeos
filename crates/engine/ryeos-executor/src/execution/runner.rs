@@ -1013,7 +1013,7 @@ fn post_execution_foldback(
     // Acquire write barrier for CAS mutations (fold-back + head advance).
     let _permit = state
         .write_barrier
-        .try_acquire()
+        .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("acquire CAS write permit for fold-back: {error}"))?;
 
     // Fold back changes

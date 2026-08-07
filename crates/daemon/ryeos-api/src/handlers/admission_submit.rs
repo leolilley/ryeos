@@ -122,7 +122,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let _cas_guard = authority.acquire_shared_guard()?;
     let _permit = state
         .write_barrier
-        .try_acquire()
+        .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("cannot acquire CAS write permit: {e}"))?;
     let result = state.state_store.with_state_db(|db| {
         ryeos_state::admit_root(

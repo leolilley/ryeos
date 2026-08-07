@@ -933,7 +933,7 @@ pub(crate) fn capture_external_realizations(
     authority.ensure_guard(&guard)?;
     let _permit = state
         .write_barrier
-        .try_acquire()
+        .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
     let cas = authority.cas_store()?;
     let mut staged_roots = authority

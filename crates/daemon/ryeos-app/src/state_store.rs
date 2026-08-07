@@ -3426,9 +3426,12 @@ impl StateStore {
         let _cas_guard = self
             .state_authority
             .acquire_exclusive_guard(!self.read_only)?;
-        let _write_permit = self.write_barrier.try_acquire().map_err(|error| {
-            anyhow!("cannot acquire write permit for projection verification: {error}")
-        })?;
+        let _write_permit = self
+            .write_barrier
+            .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
+            .map_err(|error| {
+                anyhow!("cannot acquire write permit for projection verification: {error}")
+            })?;
         let g = self.lock()?;
         g.state_db.verify_projection_generation()
     }
@@ -3445,9 +3448,12 @@ impl StateStore {
         }
         let _fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
         let cas_guard = self.state_authority.acquire_exclusive_guard(true)?;
-        let _write_permit = self.write_barrier.try_acquire().map_err(|error| {
-            anyhow!("cannot acquire write permit for projection rebuild: {error}")
-        })?;
+        let _write_permit = self
+            .write_barrier
+            .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
+            .map_err(|error| {
+                anyhow!("cannot acquire write permit for projection rebuild: {error}")
+            })?;
         let mut g = self.lock()?;
         let Inner {
             state_db,
@@ -3516,7 +3522,7 @@ impl StateStore {
         let cas_guard = self.state_authority.acquire_shared_guard()?;
         let write_permit = self
             .write_barrier
-            .try_acquire()
+            .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
             .map_err(|e| anyhow!("cannot acquire write permit: {e}"))?;
         Ok(StateMutationPermit {
             _fork_sensitive_descriptors: fork_sensitive_descriptors,
@@ -3536,7 +3542,7 @@ impl StateStore {
         let cas_guard = self.state_authority.acquire_shared_guard()?;
         let write_permit = self
             .write_barrier
-            .try_acquire()
+            .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
             .map_err(|e| anyhow!("cannot acquire GC inspection permit: {e}"))?;
         Ok(StateMutationPermit {
             _fork_sensitive_descriptors: fork_sensitive_descriptors,
@@ -3556,7 +3562,7 @@ impl StateStore {
         let cas_guard = self.state_authority.acquire_shared_guard()?;
         let write_permit = self
             .write_barrier
-            .try_acquire()
+            .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
             .map_err(|e| anyhow!("cannot acquire recovery cleanup permit: {e}"))?;
         Ok(StateMutationPermit {
             _fork_sensitive_descriptors: fork_sensitive_descriptors,

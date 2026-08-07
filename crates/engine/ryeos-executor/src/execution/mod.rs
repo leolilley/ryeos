@@ -330,7 +330,7 @@ pub(crate) fn capture_live_project_tree(
     authority.ensure_guard(&guard)?;
     let _permit = state
         .write_barrier
-        .try_acquire()
+        .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
     let cas = authority.cas_store()?;
     let mut staged_roots = authority
@@ -384,7 +384,7 @@ pub(crate) fn capture_tree_project_snapshot(
     publication.authority.ensure_guard(&guard)?;
     let _permit = state
         .write_barrier
-        .try_acquire()
+        .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
     let cas = publication.authority.cas_store()?;
     ryeos_state::project_materialization::VerifiedProjectTreeClosure::load(
@@ -852,7 +852,7 @@ pub(crate) fn seal_callback_workspace_generation(
     }
     let permit = state
         .write_barrier
-        .try_acquire()
+        .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("acquire callback generation write permit: {error}"))?;
     let (next_tree, mut publication) = fold_back_outputs(FoldBackOutputsParams {
         authority: &authority,
@@ -927,7 +927,7 @@ pub fn recover_interrupted_workspace_freeze(
     .ok_or_else(|| anyhow::anyhow!("freezing workspace base snapshot is absent"))?;
     let permit = state
         .write_barrier
-        .try_acquire()
+        .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("acquire recovery freeze write permit: {error}"))?;
     let (next_tree, mut publication) = fold_back_outputs(FoldBackOutputsParams {
         authority: &authority,

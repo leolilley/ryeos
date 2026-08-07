@@ -70,7 +70,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     stage.ensure_publication_contract(&publication_key, expected_previous_hash)?;
     let _permit = state
         .write_barrier
-        .try_acquire()
+        .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|e| anyhow!("cannot acquire CAS write permit: {e}"))?;
 
     if let Some(admitted_target) = stage.admitted_target_hash() {

@@ -1961,11 +1961,14 @@ fn stage_managed_executor_blob(
     authority
         .ensure_guard(&guard)
         .map_err(BuildAndLaunchError::Internal)?;
-    let _permit = state.write_barrier.try_acquire().map_err(|error| {
-        BuildAndLaunchError::Internal(anyhow::anyhow!(
-            "cannot acquire managed executor CAS write permit: {error}"
-        ))
-    })?;
+    let _permit = state
+        .write_barrier
+        .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
+        .map_err(|error| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "cannot acquire managed executor CAS write permit: {error}"
+            ))
+        })?;
     let cas = authority
         .cas_store()
         .map_err(BuildAndLaunchError::Internal)?;

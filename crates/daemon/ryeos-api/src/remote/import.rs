@@ -251,7 +251,7 @@ pub async fn import_admitted_root(
     let cas = authority.cas_store()?;
     let _permit = state
         .write_barrier
-        .try_acquire()
+        .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("cannot acquire CAS write permit: {e}"))?;
     let import = state.state_store.with_state_db(|db| {
         ryeos_state::sync::import_objects_staged(db, &payload, &attribution, &cas_guard)
