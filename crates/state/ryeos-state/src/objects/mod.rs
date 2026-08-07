@@ -27,6 +27,7 @@ pub mod project_tree;
 pub mod source_manifest;
 pub mod state_anchor;
 pub mod external_content_manifest;
+pub mod graph_node_effect_record;
 pub mod state_manifest;
 pub mod thread_event;
 pub mod thread_snapshot;
@@ -60,6 +61,10 @@ pub use project_snapshot_policy::ProjectSnapshotPolicy;
 pub use project_tree::ProjectTree;
 pub use source_manifest::SourceManifest;
 pub use state_anchor::{STATE_ANCHOR_SCHEMA_VERSION, StateAnchorMilestoneV2, StateAnchorPayloadV2};
+pub use graph_node_effect_record::{
+    GRAPH_NODE_EFFECT_RECORD_KIND, GRAPH_NODE_EFFECT_RECORD_SCHEMA_VERSION,
+    GraphNodeEffectRecord, MAX_EFFECT_RECORD_RESULT_BYTES, RECORDABLE_EFFECT_CLASSES,
+};
 pub use external_content_manifest::{
     EXTERNAL_CONTENT_MANIFEST_KIND, EXTERNAL_CONTENT_TREE_SCHEMA,
     EXTERNAL_REALIZATIONS_DERIVED_KEY, ExternalContentKind, ExternalContentManifestEntry,

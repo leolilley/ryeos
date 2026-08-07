@@ -1079,6 +1079,9 @@ fn typed_object_edges(value: &Value) -> Result<Vec<ObjectEdge>, String> {
         // Known kind with no outbound object edges; its blobs are reported by
         // `object_links`.
         "external_content_manifest" => {}
+        // The recorded result is opaque by contract and carries no CAS
+        // references; the record is a leaf.
+        "graph_node_effect_record" => {}
         "item_source" => {}
         _ => return Ok(Vec::new()),
     }
@@ -1180,6 +1183,11 @@ fn validate_current_object(value: &Value) -> anyhow::Result<()> {
         "external_content_manifest" => {
             crate::objects::ExternalContentManifestObject::from_value(value)
                 .context("deserialize external_content_manifest")
+                .map(|_| ())
+        }
+        "graph_node_effect_record" => {
+            crate::objects::GraphNodeEffectRecord::from_current_value(value)
+                .context("deserialize graph_node_effect_record")
                 .map(|_| ())
         }
         "project_snapshot" => crate::objects::ProjectSnapshot::from_value(value).map(|_| ()),
