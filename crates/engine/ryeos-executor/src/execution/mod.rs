@@ -20,6 +20,7 @@ pub(crate) mod prepared_launch_cache;
 pub(crate) mod process_attachment;
 pub mod project_source;
 pub mod runner;
+pub mod provider_record;
 pub mod runtime_dispatch;
 pub mod spawn_detached_child;
 pub mod spawn_follow_child;

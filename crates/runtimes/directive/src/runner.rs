@@ -419,32 +419,7 @@ fn retry_backoff(
 /// exact fingerprint recovers the recorded operation, while replaying it
 /// with different prepared bytes is an integrity conflict daemon-side.
 #[allow(clippy::too_many_arguments)] // one field per bound fact, by design
-fn provider_attempt_request_hash(
-    thread_id: &str,
-    turn: u32,
-    attempt_number: u32,
-    config_hash: &str,
-    provider_id: &str,
-    model_name: &str,
-    requested_output_tokens: Option<u64>,
-    authority_digest: &str,
-    body_sha256: &str,
-) -> String {
-    let value = json!({
-        "thread_id": thread_id,
-        "turn": turn,
-        "attempt_number": attempt_number,
-        "config_hash": config_hash,
-        "provider_id": provider_id,
-        "model_name": model_name,
-        "requested_output_tokens": requested_output_tokens,
-        "authority_digest": authority_digest,
-        "body_sha256": body_sha256,
-    });
-    let canonical = lillux::cas::canonical_json(&value)
-        .expect("request-hash input is plain scalar JSON and must canonicalize");
-    lillux::cas::sha256_hex(canonical.as_bytes())
-}
+use ryeos_accounting::rpc::provider_attempt_request_hash;
 
 /// Truncate a settlement diagnostic to the shared RPC bound (char-safe).
 fn bound_diagnostic(text: &str) -> String {

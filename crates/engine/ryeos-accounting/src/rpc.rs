@@ -265,9 +265,92 @@ pub struct ProviderAttemptBudgetRecord {
     pub reason: Option<ReconciliationReason>,
 }
 
+/// Reservation intent hash (§9.3), shared between the runtime that reserves
+/// and the daemon that later verifies a record publication's echoed intent
+/// against the reservation row. Both sides hash the same canonical value, so
+/// equality with the stored `request_hash` binds every component — including
+/// the exact request body digest — to the reservation the ledger billed.
+#[allow(clippy::too_many_arguments)]
+pub fn provider_attempt_request_hash(
+    thread_id: &str,
+    turn: u32,
+    attempt_number: u32,
+    config_hash: &str,
+    provider_id: &str,
+    model_name: &str,
+    requested_output_tokens: Option<u64>,
+    authority_digest: &str,
+    body_sha256: &str,
+) -> String {
+    let value = serde_json::json!({
+        "thread_id": thread_id,
+        "turn": turn,
+        "attempt_number": attempt_number,
+        "config_hash": config_hash,
+        "provider_id": provider_id,
+        "model_name": model_name,
+        "requested_output_tokens": requested_output_tokens,
+        "authority_digest": authority_digest,
+        "body_sha256": body_sha256,
+    });
+    let canonical = lillux::cas::canonical_json(&value)
+        .expect("request-hash input is plain scalar JSON and must canonicalize");
+    lillux::cas::sha256_hex(canonical.as_bytes())
+}
+
+/// The prepared provider request's digest (§9.2) from its non-secret parts:
+/// method, url, sorted header names, exact body digest, and the effective
+/// output ceiling. The runtime computes it at prepare time over what it will
+/// actually send; the daemon recomputes it from an echoed preimage, so a
+/// record's request identity is never runtime-named.
+pub fn prepared_request_digest_from_parts(
+    method: &str,
+    url: &str,
+    sorted_header_names: &[String],
+    body_sha256: &str,
+    requested_output_tokens: Option<u64>,
+) -> String {
+    let value = serde_json::json!({
+        "method": method,
+        "url": url,
+        "header_names": sorted_header_names,
+        "body_sha256": body_sha256,
+        "requested_output_tokens": requested_output_tokens,
+    });
+    let canonical = lillux::cas::canonical_json(&value)
+        .expect("request-digest input is plain scalar JSON and must canonicalize");
+    lillux::cas::sha256_hex(canonical.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_derivations_are_deterministic_and_component_sensitive() {
+        let base = || {
+            provider_attempt_request_hash(
+                "T-1", 2, 1, "cfg", "openrouter", "gpt", Some(64), "auth", "body",
+            )
+        };
+        assert_eq!(base(), base());
+        assert_ne!(
+            base(),
+            provider_attempt_request_hash(
+                "T-1", 2, 1, "cfg", "openrouter", "gpt", Some(64), "auth", "other-body",
+            )
+        );
+
+        let names = vec!["Content-Type".to_string(), "x-api-key".to_string()];
+        let digest = || {
+            prepared_request_digest_from_parts("POST", "https://p/v1", &names, "body", Some(64))
+        };
+        assert_eq!(digest(), digest());
+        assert_ne!(
+            digest(),
+            prepared_request_digest_from_parts("POST", "https://p/v1", &names, "body", Some(65))
+        );
+    }
 
     fn digest_of(tag: &str) -> HexDigest {
         HexDigest::new(lillux::cas::sha256_hex(tag.as_bytes())).unwrap()

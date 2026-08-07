@@ -502,6 +502,21 @@ impl AdmittedLaunchCapsule {
             .context("admitted capsule carries an invalid external realization set")
     }
 
+    /// Effect class the sealed program declares for its own execution
+    /// boundary (the composed top-level `effects` field), or `None` when the
+    /// program declares nothing. This is publication authority: a runtime
+    /// cannot opt itself into durable recording — only the sealed, signed
+    /// program can, and the daemon reads the declaration from the capsule it
+    /// admitted, never from the runtime's own words.
+    pub fn declared_effect_class(&self) -> Option<&str> {
+        self.exact_program
+            .get("resolution_output")
+            .and_then(|resolution| resolution.get("composed"))
+            .and_then(|composed| composed.get("composed"))
+            .and_then(|composed| composed.get("effects"))
+            .and_then(serde_json::Value::as_str)
+    }
+
     /// Decode only the exact current CAS wire contract.
     ///
     /// Inspecting the outer identity first ensures a predecessor nested
@@ -1261,5 +1276,19 @@ mod tests {
             error.to_string(),
             "admitted execution closure and artifact drivers disagree"
         );
+    }
+
+    #[test]
+    fn declared_effect_class_reads_only_the_sealed_composed_value() {
+        let mut capsule = direct_capsule(DirectExecutableIdentity::NodePolicy);
+        assert_eq!(capsule.declared_effect_class(), None);
+        capsule.exact_program["resolution_output"] = serde_json::json!({
+            "composed": {"composed": {"effects": "recorded"}, "derived": {}}
+        });
+        assert_eq!(capsule.declared_effect_class(), Some("recorded"));
+        // A non-string declaration is no declaration, never a default.
+        capsule.exact_program["resolution_output"]["composed"]["composed"]["effects"] =
+            serde_json::json!(7);
+        assert_eq!(capsule.declared_effect_class(), None);
     }
 }

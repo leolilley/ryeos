@@ -618,6 +618,13 @@ struct StoredReleaseResponse {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
+/// See [`AccountingDb::reservation_publication_binding`].
+pub struct ReservationPublicationBinding {
+    pub thread_id: String,
+    pub state: AttemptBudgetState,
+    pub request_hash: String,
+}
+
 struct ReservationRow {
     attempt_id: String,
     launch_generation: String,
@@ -4056,6 +4063,25 @@ impl AccountingDb {
         )
         .context("insert provider attempt reservation")?;
         Ok(())
+    }
+
+    /// Reservation facts a provider-call record publication binds to,
+    /// loaded by attempt id: the owning thread, the attempt's budget state,
+    /// and the stored reservation intent hash. The caller recomputes the
+    /// intent hash over an echoed preimage; equality with `request_hash`
+    /// binds the echoed body digest to the reservation this ledger billed.
+    pub fn reservation_publication_binding(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<ReservationPublicationBinding>> {
+        let conn = self.lock_conn()?;
+        Ok(self
+            .load_reservation_by_id(&conn, attempt_id)?
+            .map(|row| ReservationPublicationBinding {
+                thread_id: row.thread_id,
+                state: row.state,
+                request_hash: row.request_hash,
+            }))
     }
 
     fn load_operation(

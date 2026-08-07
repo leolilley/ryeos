@@ -273,16 +273,13 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
     }
     header_names.sort();
 
-    let digest_input = serde_json::json!({
-        "method": "POST",
-        "url": &url,
-        "header_names": &header_names,
-        "body_sha256": &body_sha256,
-        "requested_output_tokens": requested_output_tokens,
-    });
-    let canonical = lillux::cas::canonical_json(&digest_input)
-        .map_err(|e| anyhow!("canonicalize prepared-request digest input: {e}"))?;
-    let request_digest = streaming::sha256_hex(canonical.as_bytes());
+    let request_digest = ryeos_accounting::rpc::prepared_request_digest_from_parts(
+        "POST",
+        &url,
+        &header_names,
+        &body_sha256,
+        requested_output_tokens,
+    );
     #[cfg(feature = "latency-profiling")]
     let request_metrics = PreparedRequestMetrics {
         prepare_duration_us: u64::try_from(prepare_started.elapsed().as_micros())
