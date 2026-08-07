@@ -1532,4 +1532,29 @@ config:
             "unexpected error: {error}"
         );
     }
+
+    #[test]
+    fn external_content_declarations_are_admitted_and_opaque() {
+        // The engine validates and realizes this field before the runtime
+        // ever launches; the strict decode must admit it without meaning.
+        let file: GraphFile = serde_json::from_value(json!({
+            "version": "1.0.0",
+            "category": "test",
+            "config": {
+                "start": "only",
+                "nodes": {"only": {"node_type": "return", "output": "ok"}}
+            },
+            "external_content": [{
+                "id": "sim",
+                "kind": "tree",
+                "locator": {"root": "project_ai", "path": "tools/lib"},
+                "mode": "pinned",
+                "digest": "f".repeat(64),
+                "exclude": ["__pycache__"],
+                "mount": ".ai/tools/lib"
+            }]
+        }))
+        .expect("strict decode admits the engine-owned declaration");
+        assert!(file.external_content.is_some());
+    }
 }

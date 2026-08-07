@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-05T07:04:40Z:915bff35574658477426e636d4cb8e8de48cb8612fa5d5f56f412cf9523a999a:XDY/V5TDMX2+z3KfTvZM5qd8NFuuj3ENkZtQNccYj/uUCcbBfSQkwkPK1mrrgG6b3Cur5lxD2BM/R9ALAkMQDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-07T01:40:51Z:c750e10bdb3da4f039c208ab268d3f7871faaaac34f504571c96bb1aca899805:87TrcClQ7NZZgS9p1EaJHvNdepBI7FEOR+H0sjbe8fNbUEYw40VQjAbH9np5Xy3DwcEHK9+SjcuTymnEfXwkAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/graph"
 version: "1.0.0"
 location:
@@ -57,6 +57,14 @@ execution:
           schema: ryeos.hooks.context.v1
           allowed_roots: [event, graph_id, graph_run_id, status, settled, steps, success, state, inputs]
         allowed_results: [discard, observation]
+  # Items of this kind may declare top-level `external_content`: content
+  # outside the signed closure that must be captured into CAS at admission
+  # and executed from its realization. The reserved derived slot carries the
+  # realized set into the effective digest; descendants inherit it.
+  external_content:
+    realization_derived: effective_external_realizations
+    allowed_roots: [project_ai, project_files]
+    max_declarations: 4
   effective_validator:
     handler: handler:ryeos/core/graph-effective-validator
     config: {}
@@ -89,6 +97,11 @@ composer_config:
     - name: requires
       strategy: narrow_requires_capabilities
       expect_value_type: mapping
+    # Atomic inherit-or-replace: a child's declaration replaces the inherited
+    # set entirely; explicit `[]` declares none and is preserved as such.
+    - name: external_content
+      strategy: replace_root_last
+      expect_value_type: array
   policy_facts:
     - name: effective_caps
       path: [requires, capabilities, declared]
@@ -117,6 +130,9 @@ composed_value_contract:
     requires:
       type: single
       prim: mapping
+    external_content:
+      type: single
+      prim: array
 metadata:
   rules:
     name:
