@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-07T09:09:46Z:1bd03a599ebfb74a6c1f27e2e568fd2d57ce4d09b9bc014073433e3576e5291d:X4zD+DLiWypynENxAcv1uEkbJ+uqC8pkDF49ZT+dmvyn1QWht1NynpM1zj9QckqPIJYBGl+aJSrh30p3HC3sCQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-07T09:13:37Z:59527e0e04fa23c2dd46c178d7d895543a7c95044fd4db1dc5ef169eadf37b44:i1EcvBKw04oExd0ehJu09HPNGJYHF9/Wtf3ULvne6z+MDEFwuWyRSxFm2vXSS9P6tyTQxd4e35P2ASC3W3EsBQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, replay, provider, directive, evidence]
 version: "0.1.0"
@@ -192,7 +192,10 @@ on the same keys rather than replacing the machinery.
    response reconstructs with no usage — a replayed call has no provider
    usage — while `replayed_from` provenance lands in the turn's durable
    provider accounting.
-5. Streaming capture/replay.
+5. **DONE (`e3c014751`, `4ff41a5b4`, and the ephemeral surface commit)**
+   — capture always ran post-stream-completion, and replay serves the
+   recorded final message with one ephemeral delta for live watchers;
+   chunk cadence was never evidence.
 6. Measure on ARC: a full re-solve of a solved game under an unchanged
    digest, reporting replayed turns, saved spend, and wall-clock delta —
    the end-to-end-free number the campaign instrument exists to produce.
