@@ -1092,6 +1092,18 @@ async fn dispatch_tool_subprocess(
     };
 
     resolved.kind = thread_profile.to_string();
+    enforce_item_effect_class(
+        &resolved.item_ref,
+        resolved
+            .root_admission
+            .as_ref()
+            .map(|admission| &admission.resolution_output().composed.composed),
+        request.requested_effect_class.as_deref(),
+    )
+    .map_err(|error| DispatchError::SchemaMisconfigured {
+        kind: current_ref.kind.clone(),
+        detail: error.to_string(),
+    })?;
     // Data-driven execution routine: walk the wrapper's executor chain to its
     // terminal and branch on the terminal's typed `terminal_executor.kind` —
     // never on the alias name or the terminal ref. Every terminal must declare
@@ -1287,5 +1299,121 @@ fn map_runner_error(item_ref: String, error: anyhow::Error) -> DispatchError {
     DispatchError::SubprocessRunFailed {
         item_ref,
         detail: error.to_string(),
+    }
+}
+
+/// `live` < `recorded` < `sealed`: the strength order for effect-class
+/// claims.
+fn effect_class_strength(class: &str) -> Option<u8> {
+    match class {
+        "live" => Some(0),
+        "recorded" => Some(1),
+        "sealed" => Some(2),
+        _ => None,
+    }
+}
+
+/// A dispatch may not claim a stronger effect class than the dispatched item
+/// vouches for itself.
+///
+/// The caller's class arrives from a graph node's `effects:` declaration; the
+/// item's own composed `effects` field is its author's signed statement about
+/// what the item does. A tool that writes outside its result envelope
+/// declares `live`, and no node may then record it — replay serves the stored
+/// result and executes nothing, so recording would make every replay silently
+/// skip the writes. An item that declares nothing constrains nothing: the
+/// node author's covenant governs alone, exactly as before this check.
+fn enforce_item_effect_class(
+    item_ref: &str,
+    composed: Option<&serde_json::Value>,
+    requested: Option<&str>,
+) -> anyhow::Result<()> {
+    let Some(requested) = requested else {
+        return Ok(());
+    };
+    let Some(requested_strength) = effect_class_strength(requested) else {
+        anyhow::bail!("dispatch requested unknown effect class `{requested}`");
+    };
+    let Some(declared) = composed.and_then(|composed| composed.get("effects")) else {
+        return Ok(());
+    };
+    let declared = declared.as_str().ok_or_else(|| {
+        anyhow::anyhow!("item `{item_ref}` declares a non-string effects class")
+    })?;
+    let Some(declared_strength) = effect_class_strength(declared) else {
+        anyhow::bail!("item `{item_ref}` declares unknown effect class `{declared}`");
+    };
+    if requested_strength > declared_strength {
+        anyhow::bail!(
+            "dispatch claims effect class `{requested}` but `{item_ref}` vouches only \
+             `{declared}`; a caller may not claim a stronger class than the item declares"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod effect_class_tests {
+    use super::enforce_item_effect_class;
+
+    fn composed_with(effects: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "effects": effects })
+    }
+
+    #[test]
+    fn a_silent_item_constrains_nothing() {
+        enforce_item_effect_class("tool:t", None, Some("recorded")).unwrap();
+        enforce_item_effect_class(
+            "tool:t",
+            Some(&serde_json::json!({"other": 1})),
+            Some("sealed"),
+        )
+        .unwrap();
+        enforce_item_effect_class(
+            "tool:t",
+            Some(&composed_with(serde_json::json!("live"))),
+            None,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn an_item_vetoes_stronger_claims_than_it_vouches() {
+        let live = composed_with(serde_json::json!("live"));
+        let error =
+            enforce_item_effect_class("tool:t", Some(&live), Some("recorded")).unwrap_err();
+        assert!(
+            error.to_string().contains("vouches only `live`"),
+            "got {error}"
+        );
+        assert!(enforce_item_effect_class("tool:t", Some(&live), Some("sealed")).is_err());
+
+        let recorded = composed_with(serde_json::json!("recorded"));
+        let error =
+            enforce_item_effect_class("tool:t", Some(&recorded), Some("sealed")).unwrap_err();
+        assert!(
+            error.to_string().contains("vouches only `recorded`"),
+            "got {error}"
+        );
+    }
+
+    #[test]
+    fn equal_or_weaker_claims_pass() {
+        let recorded = composed_with(serde_json::json!("recorded"));
+        enforce_item_effect_class("tool:t", Some(&recorded), Some("recorded")).unwrap();
+        let sealed = composed_with(serde_json::json!("sealed"));
+        enforce_item_effect_class("tool:t", Some(&sealed), Some("recorded")).unwrap();
+        enforce_item_effect_class("tool:t", Some(&sealed), Some("sealed")).unwrap();
+    }
+
+    #[test]
+    fn garbage_classes_fail_closed() {
+        assert!(enforce_item_effect_class("tool:t", None, Some("bogus")).is_err());
+        let bogus = composed_with(serde_json::json!("bogus"));
+        assert!(enforce_item_effect_class("tool:t", Some(&bogus), Some("recorded")).is_err());
+        let non_string = composed_with(serde_json::json!({"class": "recorded"}));
+        assert!(
+            enforce_item_effect_class("tool:t", Some(&non_string), Some("recorded")).is_err()
+        );
     }
 }

@@ -809,6 +809,10 @@ async fn handle_execute(
         root_admission: None,
         root_dispatch_evidence: None,
         parent_execution_context: Some(parent_execution_context_from_capability(cap)),
+        requested_effect_class: params
+            .effect_replay
+            .as_ref()
+            .map(|replay| replay.class.clone()),
     };
 
     // V5.4 P2.3 cleanup — async end-to-end: the UDS dispatcher is

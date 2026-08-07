@@ -351,6 +351,13 @@ pub struct DispatchRequest<'a> {
     /// consumed only if schema-driven dispatch reaches a managed, method, or
     /// terminal subprocess launch; in-process services ignore it.
     pub parent_execution_context: Option<ParentExecutionContext>,
+    /// Durable effect class the caller declared for this dispatch
+    /// (`recorded` | `sealed`), from a graph node's `effects:` declaration.
+    /// After resolution the dispatched item's own composed `effects` field is
+    /// checked against it: a caller may not claim a stronger class than the
+    /// item vouches for itself. `None` means no durable class was requested
+    /// and no check applies.
+    pub requested_effect_class: Option<String>,
 }
 
 /// Check the schema-derived `DispatchCapabilities` for the matched
@@ -3179,6 +3186,7 @@ async fn dispatch_via_method_executor(
         root_admission: request.root_admission.clone(),
         root_dispatch_evidence: request.root_dispatch_evidence.clone(),
         parent_execution_context: request.parent_execution_context.clone(),
+        requested_effect_class: request.requested_effect_class.clone(),
     };
 
     // Re-enter the shared dispatch loop on the target ref. Boxed: this closes
@@ -3697,6 +3705,7 @@ pub fn dispatch_daemon_owned(
     let root_admission = request.root_admission.clone();
     let root_dispatch_evidence = request.root_dispatch_evidence.clone();
     let parent_execution_context = request.parent_execution_context.clone();
+    let requested_effect_class = request.requested_effect_class.clone();
     let ctx = ExecutionContext {
         principal_fingerprint: ctx.principal_fingerprint.clone(),
         caller_scopes: ctx.caller_scopes.clone(),
@@ -3726,6 +3735,7 @@ pub fn dispatch_daemon_owned(
             root_admission,
             root_dispatch_evidence,
             parent_execution_context,
+            requested_effect_class,
         };
         let result = Box::pin(dispatch_inner(
             &item_ref, None, None, &request, &ctx, &state, None,
