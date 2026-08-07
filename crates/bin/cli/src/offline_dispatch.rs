@@ -708,6 +708,9 @@ fn exec_tool(
                 ),
                 verified_code: &isolation_verified_code,
                 verified_command: Some(&verified_command),
+                // Offline dispatch admits no launch capsule, so there is no
+                // realization to bind; declaring kinds refuse at finalization.
+                external_read_only_mounts: &[],
                 item_ref: tool_ref_str,
                 thread_id: "offline-cli",
             },
