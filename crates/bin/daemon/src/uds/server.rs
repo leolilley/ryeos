@@ -384,6 +384,9 @@ pub(crate) async fn dispatch_runtime_method(
         "runtime.publish_provider_call_record" => {
             ryeos_executor::execution::provider_record::handle(params, state).await
         }
+        "runtime.lookup_provider_call_record" => {
+            ryeos_executor::execution::provider_record::handle_lookup(params, state).await
+        }
         "runtime.spawn_follow_child" => {
             Box::pin(ryeos_executor::execution::spawn_follow_child::handle(
                 params, state,
@@ -553,6 +556,7 @@ fn is_running_runtime_mutation(method: &str) -> bool {
             | "runtime.append_events"
             | "runtime.dispatch_action"
             | "runtime.publish_provider_call_record"
+            | "runtime.lookup_provider_call_record"
             | "runtime.spawn_follow_child"
             | "runtime.request_continuation"
             | "runtime.author_item"

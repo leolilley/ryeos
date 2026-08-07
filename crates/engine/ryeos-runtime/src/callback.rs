@@ -589,6 +589,19 @@ pub trait RuntimeCallbackAPI: Send + Sync {
         )))
     }
 
+    /// Ask the daemon for a banked record answering this request preimage.
+    /// Transports without a daemon record store refuse by default; every
+    /// caller treats an error as a miss and executes live.
+    async fn lookup_provider_call_record(
+        &self,
+        _thread_id: &str,
+        _request: Value,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::Transport(anyhow::anyhow!(
+            "provider-call record lookup is unsupported by this callback transport"
+        )))
+    }
+
     async fn attach_process(&self, thread_id: &str, pid: u32) -> Result<Value, CallbackError>;
 
     async fn mark_running(&self, thread_id: &str) -> Result<Value, CallbackError>;

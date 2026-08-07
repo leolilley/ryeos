@@ -661,6 +661,26 @@ impl CallbackClient {
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
+    /// Ask the daemon for a banked record answering this request preimage.
+    /// Every error is a miss: the caller executes live.
+    pub async fn lookup_provider_call_record(&self, mut request: Value) -> Result<Value> {
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback lookup_provider_call_record called without an inner UDS client"
+            )
+        })?;
+        if let Some(map) = request.as_object_mut() {
+            map.insert(
+                "project_path".to_string(),
+                serde_json::json!(self.project_path),
+            );
+        }
+        client
+            .lookup_provider_call_record(&self.thread_id, request)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
     pub async fn vault_get(&self, request: Value) -> Result<Value> {
         let client = self.inner.as_ref().ok_or_else(|| {
             anyhow::anyhow!(

@@ -17,6 +17,112 @@ use ryeos_app::state::AppState;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct LookupProviderCallRecordParams {
+    callback_token: String,
+    thread_id: String,
+    project_path: String,
+    thread_auth_token: String,
+    envelope: EnvelopeEcho,
+    body_sha256: String,
+}
+
+/// Serve a banked record for the request this envelope preimage describes,
+/// or `{stored: false}` to execute live. The daemon derives the request
+/// digest and cache key itself, reads the declared class from the admitted
+/// capsule, and refuses the whole lookup when the sealed program never
+/// opted in — an undeclared program cannot even observe whether a record
+/// exists.
+pub async fn handle_lookup(params: &Value, state: &AppState) -> Result<Value> {
+    let params: LookupProviderCallRecordParams = serde_json::from_value(params.clone())
+        .context("invalid runtime.lookup_provider_call_record params")?;
+    let project_path = std::path::PathBuf::from(&params.project_path);
+    let cap = state
+        .callback_tokens
+        .validate(&params.callback_token, &params.thread_id, &project_path)?;
+    let launch_owner = cap
+        .launch_owner
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("record lookup capability has no launch owner"))?;
+    state
+        .state_store
+        .assert_launch_owner(&params.thread_id, launch_owner)?;
+    let _thread_auth = state
+        .thread_auth
+        .validate(&params.thread_auth_token, &params.thread_id)?;
+    let effective_definition_digest = cap.effective_definition_digest.clone().ok_or_else(|| {
+        anyhow::anyhow!("record lookup requires an admitted effective-definition identity")
+    })?;
+    let declared_class = state
+        .state_store
+        .admitted_launch_capsule(&params.thread_id)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "looking-up thread {} has no admitted launch capsule",
+                params.thread_id
+            )
+        })?
+        .declared_effect_class()
+        .map(str::to_string);
+    let Some(declared_class) = declared_class else {
+        bail!("the sealed program declares no effect class; replay is opt-in");
+    };
+    if !ryeos_state::objects::RECORDABLE_EFFECT_CLASSES.contains(&declared_class.as_str()) {
+        bail!(
+            "the sealed program declares effect class `{declared_class}`; \
+             live calls never replay"
+        );
+    }
+
+    let request_digest = ryeos_accounting::rpc::prepared_request_digest_from_parts(
+        &params.envelope.method,
+        &params.envelope.url,
+        &params.envelope.header_names,
+        &params.body_sha256,
+        params.envelope.requested_output_tokens,
+    );
+    let cache_key = ryeos_state::objects::provider_call_cache_key(
+        &effective_definition_digest,
+        &request_digest,
+    )?;
+    let Some(record_hash) = state
+        .state_store
+        .with_state_db(|db| db.lookup_provider_call_record(&cache_key))?
+    else {
+        return Ok(serde_json::json!({ "stored": false }));
+    };
+    let authority = super::pinned_state_authority(state)?;
+    let guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&guard)?;
+    let cas = authority.cas_store()?;
+    let value = cas.get_object(&record_hash)?.ok_or_else(|| {
+        anyhow::anyhow!("indexed provider call record {record_hash} is missing")
+    })?;
+    authority.ensure_guard(&guard)?;
+    let record = ryeos_state::objects::ProviderCallEffectRecord::from_current_value(&value)?;
+    if record.cache_key != cache_key {
+        bail!("provider call record {record_hash} does not answer for its indexed identity");
+    }
+    if let Err(error) = state
+        .state_store
+        .with_state_db(|db| db.touch_provider_call_record(&cache_key))
+    {
+        tracing::warn!(%error, "provider call record touch failed");
+    }
+    tracing::info!(
+        thread_id = %params.thread_id,
+        record_hash = %record_hash,
+        "served provider call record replay"
+    );
+    Ok(serde_json::json!({
+        "stored": true,
+        "record_hash": record_hash,
+        "response": record.response,
+        "provider_accounting": record.provider_accounting,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PublishProviderCallRecordParams {
     callback_token: String,
     thread_id: String,

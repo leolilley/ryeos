@@ -987,6 +987,7 @@ impl Runner {
                     // SAME turn, not a new one. Each retry is logged (tracing +
                     // a run warning surfaced on `RuntimeResult.warnings`) so the
                     // stall is visible instead of silent.
+                    let mut turn_replayed_from: Option<String> = None;
                     let mut attempt: u32 = 0;
                     let stream_result = loop {
                         if self.budget.is_exhausted() {
@@ -1029,169 +1030,189 @@ impl Runner {
                                 Ok(prepared) => prepared,
                                 Err(error) => break Err(error),
                             };
-                        // Ledger admission: verify → reserve → (release on a
-                        // pre-issue signal) → mark issued. No provider request
-                        // may start unless the issue is durably proven.
-                        let ledger_attempt = if let Some(authority) = ledger_authority.as_ref() {
-                            let verified = match crate::spend_verifier::verify_prepared_spend_bound(
-                                &prepared,
-                                authority,
-                                &self.provider_config,
-                                self.context_window,
-                                self.execution.max_provider_output_tokens_per_turn,
-                            ) {
-                                Ok(verified) => verified,
-                                Err(error) => {
-                                    break Err(anyhow::anyhow!(
-                                        "provider_spend_bound_unverified: {error:#}"
-                                    ));
-                                }
-                            };
-                            match self
-                                .admit_ledger_attempt(
-                                    turn,
-                                    attempt_number,
+                        // Replay serve: consult the record store before any
+                        // reservation. A served record answers the identical
+                        // prepared request under this sealed program; billing
+                        // nothing and consuming no reservation is the point.
+                        let replayed = self.lookup_provider_call_replay(&prepared).await;
+                        turn_replayed_from =
+                            replayed.as_ref().map(|(record_hash, _)| record_hash.clone());
+                        let call = if let Some((record_hash, response)) = replayed {
+                            tracing::info!(
+                                %record_hash,
+                                turn,
+                                "provider call replayed from record; no reservation, no provider contact"
+                            );
+                            Ok(crate::provider_adapter::StreamOutcome::Completed {
+                                response,
+                                events: Vec::new(),
+                            })
+                        } else {
+                            // Ledger admission: verify → reserve → (release on a
+                            // pre-issue signal) → mark issued. No provider request
+                            // may start unless the issue is durably proven.
+                            let ledger_attempt = if let Some(authority) = ledger_authority.as_ref() {
+                                let verified = match crate::spend_verifier::verify_prepared_spend_bound(
                                     &prepared,
                                     authority,
-                                    verified,
-                                    &cancel_flag,
-                                    &interrupt_flag,
-                                )
-                                .await
-                            {
-                                Ok(LedgerAdmission::Admitted(ledger)) => {
-                                    last_attempt_id = Some(ledger.attempt_id.clone());
-                                    Some(ledger)
-                                }
-                                Ok(LedgerAdmission::Denied) => {
-                                    // Terminal directive error — the ledger
-                                    // durably recorded the denial; the retry
-                                    // loop must not spin against it.
-                                    break Err(anyhow::anyhow!(
-                                        "budget_exceeded: the daemon ledger denied the provider \
-                                         attempt reservation (insufficient available balance for \
-                                         the route maximum); zero provider requests"
-                                    ));
-                                }
-                                Ok(LedgerAdmission::CancelledBeforeIssue) => {
-                                    break Ok(crate::provider_adapter::StreamOutcome::Cancelled {
-                                        attempt:
-                                            crate::provider_adapter::streaming::CutAttemptState {
-                                                usage: None,
-                                                generation_header_id: None,
-                                                response_id: None,
-                                                requested_output_tokens: prepared
-                                                    .requested_output_tokens,
-                                                observed_output: Default::default(),
+                                    &self.provider_config,
+                                    self.context_window,
+                                    self.execution.max_provider_output_tokens_per_turn,
+                                ) {
+                                    Ok(verified) => verified,
+                                    Err(error) => {
+                                        break Err(anyhow::anyhow!(
+                                            "provider_spend_bound_unverified: {error:#}"
+                                        ));
+                                    }
+                                };
+                                match self
+                                    .admit_ledger_attempt(
+                                        turn,
+                                        attempt_number,
+                                        &prepared,
+                                        authority,
+                                        verified,
+                                        &cancel_flag,
+                                        &interrupt_flag,
+                                    )
+                                    .await
+                                {
+                                    Ok(LedgerAdmission::Admitted(ledger)) => {
+                                        last_attempt_id = Some(ledger.attempt_id.clone());
+                                        Some(ledger)
+                                    }
+                                    Ok(LedgerAdmission::Denied) => {
+                                        // Terminal directive error — the ledger
+                                        // durably recorded the denial; the retry
+                                        // loop must not spin against it.
+                                        break Err(anyhow::anyhow!(
+                                            "budget_exceeded: the daemon ledger denied the provider \
+                                             attempt reservation (insufficient available balance for \
+                                             the route maximum); zero provider requests"
+                                        ));
+                                    }
+                                    Ok(LedgerAdmission::CancelledBeforeIssue) => {
+                                        break Ok(crate::provider_adapter::StreamOutcome::Cancelled {
+                                            attempt:
+                                                crate::provider_adapter::streaming::CutAttemptState {
+                                                    usage: None,
+                                                    generation_header_id: None,
+                                                    response_id: None,
+                                                    requested_output_tokens: prepared
+                                                        .requested_output_tokens,
+                                                    observed_output: Default::default(),
+                                                },
+                                        });
+                                    }
+                                    Ok(LedgerAdmission::InterruptedBeforeIssue) => {
+                                        break Ok(crate::provider_adapter::StreamOutcome::Interrupted {
+                                            partial_message: ProviderMessage {
+                                                role: "assistant".to_string(),
+                                                content: None,
+                                                tool_calls: None,
+                                                tool_call_id: None,
+                                                reasoning_content: None,
                                             },
-                                    });
+                                            events: Vec::new(),
+                                            attempt:
+                                                crate::provider_adapter::streaming::CutAttemptState {
+                                                    usage: None,
+                                                    generation_header_id: None,
+                                                    response_id: None,
+                                                    requested_output_tokens: prepared
+                                                        .requested_output_tokens,
+                                                    observed_output: Default::default(),
+                                                },
+                                        });
+                                    }
+                                    Ok(LedgerAdmission::ReleasedByDaemon { detail }) => {
+                                        break Err(anyhow::anyhow!(
+                                            "provider_attempt_released_before_issue: {detail}; \
+                                             zero provider connections"
+                                        ));
+                                    }
+                                    Err(error) => break Err(error),
                                 }
-                                Ok(LedgerAdmission::InterruptedBeforeIssue) => {
-                                    break Ok(crate::provider_adapter::StreamOutcome::Interrupted {
-                                        partial_message: ProviderMessage {
-                                            role: "assistant".to_string(),
-                                            content: None,
-                                            tool_calls: None,
-                                            tool_call_id: None,
-                                            reasoning_content: None,
-                                        },
-                                        events: Vec::new(),
-                                        attempt:
-                                            crate::provider_adapter::streaming::CutAttemptState {
-                                                usage: None,
-                                                generation_header_id: None,
-                                                response_id: None,
-                                                requested_output_tokens: prepared
-                                                    .requested_output_tokens,
-                                                observed_output: Default::default(),
-                                            },
-                                    });
-                                }
-                                Ok(LedgerAdmission::ReleasedByDaemon { detail }) => {
-                                    break Err(anyhow::anyhow!(
-                                        "provider_attempt_released_before_issue: {detail}; \
-                                         zero provider connections"
-                                    ));
-                                }
-                                Err(error) => break Err(error),
-                            }
-                        } else {
-                            None
-                        };
-                        // Send the exact prepared bytes.
-                        let call = crate::provider_adapter::send_prepared_streaming(
-                            &call_input,
-                            &prepared,
-                        )
-                        .await;
-                        // One terminal daemon settlement per issued attempt,
-                        // BEFORE retry classification: a retry is a NEW attempt
-                        // and may only be admitted after its predecessor's
-                        // financial state is durable (§9.4).
-                        if let Some(ledger) = ledger_attempt {
-                            let (stream_completed, ledger_usage, ledger_diag): (
-                                bool,
-                                Option<&crate::provider_adapter::http::TokenUsage>,
-                                Option<String>,
-                            ) = match &call {
-                                Ok(crate::provider_adapter::StreamOutcome::Completed {
-                                    response,
-                                    ..
-                                }) => (true, response.usage.as_ref(), None),
-                                Ok(crate::provider_adapter::StreamOutcome::Cancelled {
-                                    attempt: cut,
-                                }) => (
-                                    false,
-                                    cut.usage.as_ref(),
-                                    Some("cancelled after the issue boundary".to_string()),
-                                ),
-                                Ok(crate::provider_adapter::StreamOutcome::Interrupted {
-                                    attempt: cut,
-                                    ..
-                                }) => (
-                                    false,
-                                    cut.usage.as_ref(),
-                                    Some("interrupted after the issue boundary".to_string()),
-                                ),
-                                Err(error) => (
-                                    false,
-                                    carried_usage_from_error(error),
-                                    Some(format!(
-                                        "provider attempt failed after the issue boundary: \
-                                         {error:#}"
-                                    )),
-                                ),
+                            } else {
+                                None
                             };
-                            let authority = ledger_authority
-                                .as_ref()
-                                .expect("ledger attempt implies ledger authority");
-                            let (spend, tokens) = build_ledger_settlement(
-                                authority,
-                                stream_completed,
-                                ledger_usage,
-                                ledger_diag.as_deref(),
-                            );
-                            if let Err(settle_error) =
-                                self.settle_ledger_attempt(&ledger, spend, tokens).await
-                            {
-                                // Terminal settlement unprovable: no retry,
-                                // fail-safe termination.
-                                break Err(anyhow::anyhow!(
-                                    "provider_attempt_settlement_unprovable: {settle_error:#}"
-                                ));
+                            // Send the exact prepared bytes.
+                            let call = crate::provider_adapter::send_prepared_streaming(
+                                &call_input,
+                                &prepared,
+                            )
+                            .await;
+                            // One terminal daemon settlement per issued attempt,
+                            // BEFORE retry classification: a retry is a NEW attempt
+                            // and may only be admitted after its predecessor's
+                            // financial state is durable (§9.4).
+                            if let Some(ledger) = ledger_attempt {
+                                let (stream_completed, ledger_usage, ledger_diag): (
+                                    bool,
+                                    Option<&crate::provider_adapter::http::TokenUsage>,
+                                    Option<String>,
+                                ) = match &call {
+                                    Ok(crate::provider_adapter::StreamOutcome::Completed {
+                                        response,
+                                        ..
+                                    }) => (true, response.usage.as_ref(), None),
+                                    Ok(crate::provider_adapter::StreamOutcome::Cancelled {
+                                        attempt: cut,
+                                    }) => (
+                                        false,
+                                        cut.usage.as_ref(),
+                                        Some("cancelled after the issue boundary".to_string()),
+                                    ),
+                                    Ok(crate::provider_adapter::StreamOutcome::Interrupted {
+                                        attempt: cut,
+                                        ..
+                                    }) => (
+                                        false,
+                                        cut.usage.as_ref(),
+                                        Some("interrupted after the issue boundary".to_string()),
+                                    ),
+                                    Err(error) => (
+                                        false,
+                                        carried_usage_from_error(error),
+                                        Some(format!(
+                                            "provider attempt failed after the issue boundary: \
+                                             {error:#}"
+                                        )),
+                                    ),
+                                };
+                                let authority = ledger_authority
+                                    .as_ref()
+                                    .expect("ledger attempt implies ledger authority");
+                                let (spend, tokens) = build_ledger_settlement(
+                                    authority,
+                                    stream_completed,
+                                    ledger_usage,
+                                    ledger_diag.as_deref(),
+                                );
+                                if let Err(settle_error) =
+                                    self.settle_ledger_attempt(&ledger, spend, tokens).await
+                                {
+                                    // Terminal settlement unprovable: no retry,
+                                    // fail-safe termination.
+                                    break Err(anyhow::anyhow!(
+                                        "provider_attempt_settlement_unprovable: {settle_error:#}"
+                                    ));
+                                }
+                                if stream_completed
+                                    && let Ok(crate::provider_adapter::StreamOutcome::Completed {
+                                        response,
+                                        ..
+                                    }) = &call
+                                {
+                                    self.publish_provider_call_record_best_effort(
+                                        &ledger, turn, attempt_number, &prepared, response,
+                                    )
+                                    .await;
+                                }
                             }
-                            if stream_completed
-                                && let Ok(crate::provider_adapter::StreamOutcome::Completed {
-                                    response,
-                                    ..
-                                }) = &call
-                            {
-                                self.publish_provider_call_record_best_effort(
-                                    &ledger, turn, attempt, &prepared, response,
-                                )
-                                .await;
-                            }
-                        }
+                            call
+                        };
                         match call {
                             Err(e) => match retry_backoff(&e, attempt, &self.execution) {
                                 Some(delay) => {
@@ -1723,6 +1744,7 @@ impl Runner {
                                 "observed_output": &resp.observed_output,
                                 "generation_header_id": &resp.generation_header_id,
                                 "response_id": &resp.response_id,
+                                "replayed_from": &turn_replayed_from,
                             }));
                             if let Err(e) = self
                                 .callback
@@ -3634,6 +3656,69 @@ impl Runner {
     /// Settle the issued attempt with bounded exact-retry recovery, then a
     /// recorded-state read. A terminal settlement that cannot be proven is an
     /// error — the caller must fail safe without admitting a retry.
+    /// Ask the daemon for a banked record answering this exact prepared
+    /// request. Any transport error or miss means live execution; a hit is
+    /// billed nothing, consumes no reservation, and reconstructs the
+    /// response with `usage: None` — a replayed call has no provider usage,
+    /// and pretending otherwise would double-report history as spend.
+    async fn lookup_provider_call_replay(
+        &self,
+        prepared: &crate::provider_adapter::PreparedProviderRequest,
+    ) -> Option<(String, crate::provider_adapter::http::AdapterResponse)> {
+        if !self.provider_effects_recorded {
+            return None;
+        }
+        let request = serde_json::json!({
+            "envelope": {
+                "method": "POST",
+                "url": prepared.url,
+                "header_names": prepared.header_names,
+                "requested_output_tokens": prepared.requested_output_tokens,
+            },
+            "body_sha256": prepared.body_sha256,
+        });
+        let value = match self.callback.lookup_provider_call_record(request).await {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::debug!(%error, "provider record lookup unavailable; executing live");
+                return None;
+            }
+        };
+        if value.get("stored").and_then(serde_json::Value::as_bool) != Some(true) {
+            return None;
+        }
+        let record_hash = value.get("record_hash")?.as_str()?.to_string();
+        let response_value = value.get("response")?;
+        let message: ProviderMessage =
+            match serde_json::from_value(response_value.get("message")?.clone()) {
+                Ok(message) => message,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        %record_hash,
+                        "banked provider record message failed to decode; executing live"
+                    );
+                    return None;
+                }
+            };
+        let finish_reason = response_value
+            .get("finish_reason")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        Some((
+            record_hash,
+            crate::provider_adapter::http::AdapterResponse {
+                message,
+                usage: None,
+                finish_reason,
+                generation_header_id: None,
+                response_id: None,
+                requested_output_tokens: prepared.requested_output_tokens,
+                observed_output: Default::default(),
+            },
+        ))
+    }
+
     /// Submit one settled, completed provider call for daemon-validated
     /// record publication. Best-effort by contract: record loss is honest
     /// loss — a failed publication warns and the run proceeds, and the next
