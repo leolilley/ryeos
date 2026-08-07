@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-07T04:04:35Z:02dd2f39a012c2304c61aa70ac9e434ddbe344c0f8a658399774afbe5bba4feb:h8QBVydfcU//Dq1N3ekx3ZbIbdImVk8tdBWqD5K4uvxMTJVVeV0Ey3fjA3Lsmjy/dK61Ml954wlcuASvAkamCg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-07T04:38:01Z:0e2e5d1856496f3a878492162b62afc1b38a54ee0c90b062512d6a4289aefe05:1eV641rhDJ72Ot833SynLQqiNFwCkF1fJ5O5phGb21rt1ZAy8Sp4MJ7xicU29EpC0IqNr/lL1ia3ktQBySKeBg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, replay, cache, evidence, graph]
 version: "0.1.0"
@@ -102,8 +102,12 @@ else that determines behavior.
 
 ## Increments
 
-0. Stamp effect-class markers on existing recorded evidence (pull-forward
-   item from determinism-classes; additive).
+0. **CLOSED, definitionally** — the hook dispatch ledger is recorded-class
+   by construction: the table is the record store for that boundary, its
+   rows carry their own seed version, and a replay engine maps
+   table → class statically. A redundant marker column in a
+   CHECK-constrained ledger would be churn without a consumer. The ARC
+   offline-simulator half belongs to the ARC repository.
 1. **DONE (`ec264c155`)** — `effects: sealed|recorded|live` on graph nodes:
    one shared enum across both strict decoders, default `live` off the wire
    (checkpoints byte-stable), foreach/follow/detach refuse durable classes,
@@ -179,8 +183,12 @@ else that determines behavior.
      from the envelope into the node receipt beside `cache_hit`.
    - **Record loader**: a `state_store` helper following
      `admitted_launch_capsule`'s load pattern.
-4. Retention sweep (pattern exists) + `field/runs` projection of replay
-   provenance.
+4. **DONE** — retention prunes the least-recently-replayed rows beyond a
+   10k cap inside maintenance GC, before root gathering, so un-rooted
+   record objects are sweepable in the same pass; replay provenance
+   reaches the UI with zero code, because receipts flow as opaque bounded
+   artifact metadata and now carry `replayed_from` only when a record was
+   actually served.
 5. Measure on ARC: re-solve a solved game; count replayed nodes and saved
    cost/latency. That number decides how hard to push increment 6
    (cross-digest *analysis* — never reuse — for divergence attribution).

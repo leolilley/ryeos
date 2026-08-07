@@ -1748,6 +1748,33 @@ impl OperationalDb {
             .context("failed to collect effect record roots")
     }
 
+    /// Retention: drop the least-recently-replayed records beyond
+    /// `max_rows`. Deleting a row un-roots its object; the ordinary CAS
+    /// sweep reclaims the bytes. Losing a record is never a correctness
+    /// event — the next run executes live and is a different run.
+    pub fn prune_effect_records(&self, max_rows: usize) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM effect_records", [], |row| row.get(0))
+            .context("failed to count effect records")?;
+        let excess = usize::try_from(count).unwrap_or(0).saturating_sub(max_rows);
+        if excess == 0 {
+            return Ok(0);
+        }
+        let deleted = self
+            .conn
+            .execute(
+                "DELETE FROM effect_records WHERE cache_key IN (
+                    SELECT cache_key FROM effect_records
+                    ORDER BY last_replayed_at ASC, cache_key ASC
+                    LIMIT ?
+                )",
+                [excess as i64],
+            )
+            .context("failed to prune effect records")?;
+        Ok(deleted)
+    }
+
     pub fn delete_effect_records(&self, cache_keys: &[String]) -> Result<usize> {
         let mut deleted = 0usize;
         for cache_key in cache_keys {
@@ -2542,6 +2569,36 @@ mod tests {
 
         assert_eq!(db.delete_effect_records(&[key.clone()]).unwrap(), 1);
         assert!(db.lookup_effect_record(&key).unwrap().is_none());
+        assert!(db.list_effect_record_hashes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn effect_record_pruning_drops_least_recently_replayed_first() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        let db = OperationalDb::open(&path).unwrap();
+        // Wall-clock stamps are second-granular, so recency is set
+        // explicitly: `b` is oldest, `a` newest.
+        for (c, at) in [
+            ("a", "2026-01-03T00:00:00Z"),
+            ("b", "2026-01-01T00:00:00Z"),
+            ("c", "2026-01-02T00:00:00Z"),
+        ] {
+            db.publish_effect_record(&c.repeat(64), &c.repeat(64)).unwrap();
+            db.conn
+                .execute(
+                    "UPDATE effect_records SET last_replayed_at = ? WHERE cache_key = ?",
+                    rusqlite::params![at, c.repeat(64)],
+                )
+                .unwrap();
+        }
+
+        assert_eq!(db.prune_effect_records(3).unwrap(), 0);
+        assert_eq!(db.prune_effect_records(2).unwrap(), 1);
+        let remaining = db.list_effect_record_hashes().unwrap();
+        assert!(!remaining.contains(&"b".repeat(64)), "oldest replay pruned first");
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(db.prune_effect_records(0).unwrap(), 2);
         assert!(db.list_effect_record_hashes().unwrap().is_empty());
     }
 

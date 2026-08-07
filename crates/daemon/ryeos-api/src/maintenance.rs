@@ -335,6 +335,16 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
     // The worker already owns the exclusive cross-process guard and the daemon
     // write barrier is quiesced. Every unresolved Set/Remove closure remains a
     // temporary root until its compare-acknowledged journal record is removed.
+    // Effect-record retention runs before root gathering so a pruned row's
+    // object is sweepable in this same pass. The cap is a row count: results
+    // are bounded per record, and the CAS bytes follow the rows.
+    const MAX_EFFECT_RECORDS: usize = 10_000;
+    let pruned_effect_records = state_store
+        .with_state_db(|db| db.prune_effect_records(MAX_EFFECT_RECORDS))
+        .context("prune stale effect records before CAS sweep")?;
+    if pruned_effect_records > 0 {
+        tracing::info!(pruned_effect_records, "effect-record retention pruned rows");
+    }
     let mut operational_object_roots = state_store
         .with_state_db(|db| db.pending_transition_object_roots())
         .context("read pending chain-head transition roots before CAS sweep")?

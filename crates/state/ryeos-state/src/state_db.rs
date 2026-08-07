@@ -5430,6 +5430,10 @@ impl StateDb {
         self.operational()?.delete_effect_records(cache_keys)
     }
 
+    pub fn prune_effect_records(&self, max_rows: usize) -> anyhow::Result<usize> {
+        self.operational()?.prune_effect_records(max_rows)
+    }
+
     pub fn record_admission_attestation(
         &self,
         record: &NewAdmissionAttestationRecord,
