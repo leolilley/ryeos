@@ -676,6 +676,12 @@ impl Runner {
         let effective_caps = harness.effective_caps().to_vec();
         let dispatcher = Dispatcher::new(tools.clone(), effective_caps);
 
+        if provider_effects_recorded && financial_authority.is_none() {
+            tracing::warn!(
+                "directive declares a durable effects class but its provider route has no \
+                 spend authority; calls cannot bind to a reservation and will bank no records"
+            );
+        }
         Self {
             messages: initial_messages,
             tools,
@@ -1536,7 +1542,15 @@ impl Runner {
                             } else {
                                 false
                             };
-                            if usage_required && valid_usage.is_none() {
+                            // A replayed turn has no usage by construction:
+                            // nothing was reserved, issued, or billed, so the
+                            // fail-closed snapshot requirement does not apply.
+                            // Its accounting fact is `replayed_from`, carried
+                            // in the durable turn evidence.
+                            if usage_required
+                                && valid_usage.is_none()
+                                && turn_replayed_from.is_none()
+                            {
                                 let usage_detail = resp
                                     .usage
                                     .as_ref()
@@ -1570,7 +1584,7 @@ impl Runner {
                                     "provider accounting unavailable on turn {turn}; malformed \
                                      token counts were not settled as zero"
                                 ));
-                            } else if resp.usage.is_none() {
+                            } else if resp.usage.is_none() && turn_replayed_from.is_none() {
                                 warnings.push(format!(
                                     "provider accounting unavailable on turn {turn}; no usage \
                                      snapshot was reported and no token counts were settled"
