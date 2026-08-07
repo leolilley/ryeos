@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-07T08:08:24Z:9f8ed63dca88e6a56de7d018df94dc01762b7cbbc5502f774faa0bd78c02d8c8:PdCXtk7VAJb0mpXoKqCe2pqcO6LrOOvlSJWZe4OF4BwhNt/oPf2PJKjShIkkPgW2hpyowOaRZE4B/YzwAlodCw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-07T09:22:42Z:a9da3ef6c33d19451508c074ce4d0c363474ad86930b39d7c74fe910c4acf7f5:eAGRtNUWagMGG3wrjwYz20JUvRb5WZWWK0zLA3F0Gbnshny7XqamRiOl0Bd1gy3wm/Cz6tmKqSDFUcWyNVowBw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, inference, tinygrad, sealed, replay, arc]
 version: "0.1.0"
@@ -122,11 +122,13 @@ KV-prefix sharing.
    (`knowledge:ryeos/future/provider-call-effect-records`) — the identity
    and store machinery, placement- and class-agnostic by design; local
    arrival changes the class marker on the same keys.
-2. **Weights-tier realizations.** Current bounds (32 MiB/file,
-   256 MiB/launch) are three orders short of safetensors reality, and
-   weights want read-only mmap straight from CAS, not the
-   materialize-copy path. This gates everything and deserves design
-   before local work begins.
+2. **Weights-tier realizations** — designed:
+   `knowledge:ryeos/future/weights-tier-realizations`. Pin-only ingest,
+   contiguous mmap-ready storage under the pinned authority with
+   streaming chunk verification, no materialize-copy, dedup by
+   base-plus-adapter composition rather than chunking, per-kind bounds.
+   Identity layer unchanged. This gates local work and is now ready to
+   build.
 3. **Execution-identity vocabulary** — device class, kernel artifacts,
    tinygrad version as named digest components; the divergence proof
    gains a hardware tranche.
