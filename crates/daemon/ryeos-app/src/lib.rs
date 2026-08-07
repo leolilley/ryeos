@@ -45,6 +45,7 @@ pub mod resolution_cache;
 pub mod route_diagnostics;
 pub mod route_raw;
 pub mod runtime_db;
+pub mod large_content_service;
 pub mod runtime_item_author_service;
 pub mod runtime_project_snapshot_service;
 pub mod runtime_vault_service;

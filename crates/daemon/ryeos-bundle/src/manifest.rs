@@ -38,6 +38,17 @@ pub enum ProjectSnapshotOperation {
     Create,
 }
 
+/// Operations on the node's large-content tier: the large-object store and
+/// its manifests. Operations, not content classes — what a caller stores
+/// there (model weights, checkpoints, datasets) is item-space meaning the
+/// authority layer never names.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum LargeContentOperation {
+    Ingest,
+    Scrub,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BundleEventDecl {
@@ -77,6 +88,8 @@ pub struct RuntimeAuthorityDecls {
     pub item_authoring: Vec<ItemAuthorDecl>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub project_snapshots: Vec<ProjectSnapshotOperation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub large_content: Vec<LargeContentOperation>,
 }
 
 /// One declared smoke execution: an item the bundle's author nominates as a
@@ -981,6 +994,7 @@ typo_field: oops
             "runtime_vault",
             "item_authoring",
             "project_snapshots",
+            "large_content",
         ] {
             let yaml = format!(
                 "name: test\nversion: \"1.0\"\nprovides_kinds: []\nrequires_kinds: []\n{field}: []\n"

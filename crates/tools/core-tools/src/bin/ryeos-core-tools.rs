@@ -222,6 +222,16 @@ enum Cmd {
         cmd: SnapshotCmd,
     },
 
+    /// Ingest a file or shard directory into the node's large-object store.
+    ContentIngest {
+        /// File or directory to ingest.
+        #[arg(long)]
+        source_path: Option<PathBuf>,
+        /// Refuse publication unless the single-file source hashes to this.
+        #[arg(long)]
+        expected_sha256: Option<String>,
+    },
+
     /// Return the node's public identity document.
     Identity {
         /// App root directory.
@@ -576,6 +586,29 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Snapshot { cmd } => run_snapshot(cmd, cli.stdin_json),
+        Cmd::ContentIngest {
+            source_path,
+            expected_sha256,
+        } => {
+            use ryeos_core_tools::actions::content_ingest::{
+                ContentIngestParams, run_content_ingest,
+            };
+            let params = if cli.stdin_json {
+                serde_json::from_value(read_stdin_json()?)?
+            } else {
+                ContentIngestParams {
+                    source_path: source_path
+                        .ok_or_else(|| anyhow::anyhow!("--source-path required"))?,
+                    expected_sha256,
+                    project_path: None,
+                }
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&run_content_ingest(params)?)?
+            );
+            Ok(())
+        }
         Cmd::Identity { app_root } => {
             let params = if cli.stdin_json {
                 read_stdin_json()?

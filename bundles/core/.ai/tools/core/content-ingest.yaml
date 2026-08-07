@@ -1,0 +1,33 @@
+# ryeos:signed:2026-08-07T10:58:33Z:53e33d1e67614a784b1f318f4dd108f7ef8b8ae9020920d19ff4b0e9cced6e41:kboaMjKVGx8s6e1UtY9MWFfr9ehh3IpLbC/bxaolNkCX8TB9cpVO8E1HbBU4LLUy6I71HM9mF/ZisAi+acgEAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+executor_id: "@subprocess"
+category: "core"
+name: "content-ingest"
+requires:
+  capabilities:
+    manifest:
+      runtime_authority:
+        large_content: [ingest]
+description: "Stream a file or shard directory into the node's large-object store and publish its large-content manifest."
+
+config:
+  command: "bin:ryeos-core-tools"
+  args:
+    - "content-ingest"
+    - "--stdin-json"
+  input_data: "${params_json}"
+  timeout_secs: 3600
+
+config_schema:
+  type: object
+  properties:
+    source_path:
+      type: string
+      description: "File or shard directory to ingest; resolved against the caller's working directory."
+    expected_sha256:
+      type: string
+      description: "Refuse publication unless the single-file source hashes to exactly this digest."
+    project_path:
+      type: string
+      description: "Project root (parent of .ai/). Defaults to caller cwd."
+  required: [source_path]
