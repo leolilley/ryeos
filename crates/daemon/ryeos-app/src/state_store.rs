@@ -8552,6 +8552,20 @@ impl StateStore {
         g.runtime_db.bump_resume_attempts(thread_id)
     }
 
+    /// Startup sweep of launch claims left by dead daemon generations — see
+    /// [`runtime_db::RuntimeDb::clear_stale_launch_claims`]. Must run before
+    /// recovery drives any launch, or every stranded row skips as
+    /// `AlreadyClaimed` forever.
+    pub fn clear_stale_launch_claims(
+        &self,
+        current_daemon_generation_id: &str,
+    ) -> Result<Vec<runtime_db::StaleLaunchClaimCleared>> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        g.runtime_db
+            .clear_stale_launch_claims(current_daemon_generation_id)
+    }
+
     /// Atomically claim the right to launch a thread. The sole authorization for
     /// a spawn — see [`runtime_db::RuntimeDb::claim_thread_launch`].
     pub fn claim_thread_launch(

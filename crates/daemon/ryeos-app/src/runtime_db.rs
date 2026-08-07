@@ -482,6 +482,14 @@ pub enum LaunchClaimOutcome {
     AlreadyClaimed,
 }
 
+/// One dead-generation launch claim removed by the startup sweep.
+#[derive(Debug, Clone)]
+pub struct StaleLaunchClaimCleared {
+    pub thread_id: String,
+    pub claim_id: String,
+    pub dead_generation: String,
+}
+
 /// A live launch claim, as read back for reconcile/inspection.
 #[derive(Debug, Clone)]
 pub struct LaunchClaim {
@@ -5539,6 +5547,56 @@ impl RuntimeDb {
         Ok(LaunchClaimOutcome::Claimed)
     }
 
+    /// Clear every launch claim owned by a daemon generation other than
+    /// `current_daemon_generation_id` — the startup half of the claim
+    /// contract. Claims deliberately never expire by wall clock, on the
+    /// promise that a restart clears the previous daemon's survivors; a claim
+    /// from another generation cannot have a live launch task by
+    /// construction, and leaving it would turn every future recovery of its
+    /// thread into a silent `AlreadyClaimed` skip — the stranded-`created`
+    /// bug. A row whose stored owner does not parse is equally dead (this
+    /// generation only writes valid owners) and is cleared fail-closed.
+    /// Deletes are exact `(thread_id, claim_id)` matches, never cross-owner.
+    pub fn clear_stale_launch_claims(
+        &self,
+        current_daemon_generation_id: &str,
+    ) -> Result<Vec<StaleLaunchClaimCleared>> {
+        let mut rows: Vec<(String, String, String)> = Vec::new();
+        {
+            let mut statement = self
+                .conn
+                .prepare("SELECT thread_id, claim_id, claimed_by FROM thread_launch_claim")?;
+            let mapped = statement.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+            for row in mapped {
+                rows.push(row?);
+            }
+        }
+        let mut cleared = Vec::new();
+        for (thread_id, claim_id, claimed_by) in rows {
+            let dead_generation = match serde_json::from_str::<LaunchOwner>(&claimed_by) {
+                Ok(owner) if owner.daemon_generation_id == current_daemon_generation_id => {
+                    continue;
+                }
+                Ok(owner) => owner.daemon_generation_id,
+                Err(_) => "<malformed owner>".to_string(),
+            };
+            let removed = self.conn.execute(
+                "DELETE FROM thread_launch_claim WHERE thread_id = ?1 AND claim_id = ?2",
+                params![thread_id, claim_id],
+            )?;
+            if removed > 0 {
+                cleared.push(StaleLaunchClaimCleared {
+                    thread_id,
+                    claim_id,
+                    dead_generation,
+                });
+            }
+        }
+        Ok(cleared)
+    }
+
     /// Release a launch claim the caller owns (matched by `claim_id`), e.g. when
     /// the launch failed and the thread should become reclaimable immediately
     /// rather than waiting for restart recovery. Returns true if a row was
@@ -10140,6 +10198,58 @@ mod tests {
             lillux::canonical_json(&serde_json::to_value(&claim.owner).unwrap()).unwrap()
         );
         assert_eq!(claim.lease_expires_at_ms, i64::MAX);
+    }
+
+    #[test]
+    fn startup_sweep_clears_only_dead_generation_claims() {
+        let (_tmp, db) = fresh_db();
+        assert_eq!(
+            db.claim_thread_launch("t-dead", "c-dead", "daemon-old").unwrap(),
+            LaunchClaimOutcome::Claimed
+        );
+        assert_eq!(
+            db.claim_thread_launch("t-live", "c-live", "daemon-current").unwrap(),
+            LaunchClaimOutcome::Claimed
+        );
+
+        let cleared = db.clear_stale_launch_claims("daemon-current").unwrap();
+        assert_eq!(cleared.len(), 1);
+        assert_eq!(cleared[0].thread_id, "t-dead");
+        assert_eq!(cleared[0].dead_generation, "daemon-old");
+
+        // The live claim survives; the dead thread is claimable again and its
+        // epoch fencing still advances monotonically.
+        assert!(db.get_launch_claim("t-live").unwrap().is_some());
+        assert!(db.get_launch_claim("t-dead").unwrap().is_none());
+        assert_eq!(
+            db.claim_thread_launch("t-dead", "c-new", "daemon-current").unwrap(),
+            LaunchClaimOutcome::Claimed
+        );
+        let reclaimed = db.get_launch_claim("t-dead").unwrap().expect("reclaimed");
+        assert_eq!(reclaimed.owner.monotonic_launch_epoch, 2);
+
+        // Idempotent: a second sweep finds nothing.
+        assert!(db.clear_stale_launch_claims("daemon-current").unwrap().is_empty());
+    }
+
+    #[test]
+    fn startup_sweep_clears_malformed_owner_rows_fail_closed() {
+        let (_tmp, db) = fresh_db();
+        db.conn
+            .execute(
+                "INSERT INTO thread_launch_claim
+                     (thread_id, claim_id, claimed_at_ms, lease_expires_at_ms, claimed_by)
+                 VALUES ('t-junk', 'c-junk', 0, 9223372036854775807, 'not json')",
+                [],
+            )
+            .unwrap();
+        let cleared = db.clear_stale_launch_claims("daemon-current").unwrap();
+        assert_eq!(cleared.len(), 1);
+        assert_eq!(cleared[0].dead_generation, "<malformed owner>");
+        assert_eq!(
+            db.claim_thread_launch("t-junk", "c-new", "daemon-current").unwrap(),
+            LaunchClaimOutcome::Claimed
+        );
     }
 
     #[test]

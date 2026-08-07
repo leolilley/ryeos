@@ -1090,6 +1090,31 @@ async fn reconcile_active_threads_inner(
     state: &AppState,
     mode: ActiveReconcileMode,
 ) -> Result<ActiveThreadReconcileReport> {
+    // The startup half of the launch-claim contract: claims never expire by
+    // wall clock, so every claim surviving from a previous daemon generation
+    // must be cleared here — before any recovery launch runs — or its thread
+    // is skipped `AlreadyClaimed` on every restart, forever, while sitting
+    // `created`. Live mode never clears: this daemon's claims are held by
+    // live launch tasks.
+    if mode == ActiveReconcileMode::Startup {
+        let cleared = state
+            .state_store
+            .clear_stale_launch_claims(ryeos_app::runtime_db::daemon_generation_id())?;
+        for claim in &cleared {
+            tracing::warn!(
+                thread_id = %claim.thread_id,
+                dead_generation = %claim.dead_generation,
+                "cleared launch claim left by a dead daemon generation — thread is \
+                 recoverable again"
+            );
+        }
+        if !cleared.is_empty() {
+            tracing::warn!(
+                count = cleared.len(),
+                "dead-generation launch claims cleared at startup"
+            );
+        }
+    }
     repair_detached_spawn_links(state)?;
     reconcile_accounting(state)?;
     let blocked_freezes = reconcile_execution_workspaces(state, mode)?;
