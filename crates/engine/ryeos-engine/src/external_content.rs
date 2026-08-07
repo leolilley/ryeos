@@ -819,3 +819,251 @@ fn walk_directory(
     }
     Ok(())
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// Records what reached storage; the walk owns everything else.
+    struct RecordingSink {
+        stored: Vec<String>,
+        lie_size_for: Option<String>,
+    }
+
+    impl RecordingSink {
+        fn new() -> Self {
+            Self {
+                stored: Vec::new(),
+                lie_size_for: None,
+            }
+        }
+    }
+
+    impl ExternalContentBlobSink for RecordingSink {
+        fn store_file(
+            &mut self,
+            mut file: std::fs::File,
+            path: &str,
+            expected_size: u64,
+        ) -> anyhow::Result<(String, u64)> {
+            use std::io::Read as _;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            self.stored.push(path.to_string());
+            let size = if self.lie_size_for.as_deref() == Some(path) {
+                expected_size + 1
+            } else {
+                bytes.len() as u64
+            };
+            Ok((lillux::sha256_hex(&bytes), size))
+        }
+
+        fn store_target(&mut self, target: &[u8], path: &str) -> anyhow::Result<String> {
+            self.stored.push(format!("target:{path}"));
+            Ok(lillux::sha256_hex(target))
+        }
+    }
+
+    fn declaration(path: &str) -> ExternalContentDeclaration {
+        serde_json::from_value(serde_json::json!({
+            "id": "sim",
+            "kind": "tree",
+            "locator": {"root": "project_files", "path": path},
+            "mode": "captured",
+            "mount": "vendor/sim",
+        }))
+        .expect("test declaration is wire-valid")
+    }
+
+    fn pinned(path: &std::path::Path) -> lillux::secure_fs::PinnedDirectory {
+        lillux::secure_fs::PinnedDirectory::open(path)
+            .expect("open pinned root")
+            .expect("declared root exists")
+    }
+
+    fn capture(
+        root: &std::path::Path,
+        excludes: &[String],
+        sink: &mut RecordingSink,
+    ) -> anyhow::Result<ExternalContentManifestObject> {
+        let matcher = ryeos_state::ignore::matcher_from_builtins();
+        let policy = ExternalCapturePolicy::for_declaration(&declaration("vendor/sim"), &matcher)?;
+        let mut budget = LaunchRealizationBudget::default();
+        build_manifest(&pinned(root), excludes, &policy, &mut budget, sink)
+    }
+
+    #[test]
+    fn floor_excluded_content_never_reaches_capture() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("keep.txt"), b"keep").unwrap();
+        std::fs::write(dir.path().join(".env"), b"SECRET=1").unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git/config"), b"[core]").unwrap();
+        std::fs::create_dir(dir.path().join("nested")).unwrap();
+        std::fs::write(dir.path().join("nested/.env"), b"SECRET=2").unwrap();
+        std::fs::write(dir.path().join("nested/ok.txt"), b"ok").unwrap();
+
+        let mut sink = RecordingSink::new();
+        let manifest = capture(dir.path(), &[], &mut sink).unwrap();
+
+        let paths: Vec<&str> = manifest.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, vec!["keep.txt", "nested", "nested/ok.txt"]);
+        // The invariant is stronger than manifest shape: excluded bytes must
+        // never even be offered to storage.
+        assert_eq!(sink.stored, vec!["keep.txt", "nested/ok.txt"]);
+        assert_eq!(manifest.total_bytes, 6);
+        assert_eq!(manifest.entry_count, 3);
+    }
+
+    #[test]
+    fn a_locator_inside_the_floor_is_refused() {
+        let matcher = ryeos_state::ignore::matcher_from_builtins();
+        let error = ExternalCapturePolicy::for_declaration(&declaration(".git"), &matcher)
+            .err()
+            .expect("a floor locator must refuse");
+        assert!(error.to_string().contains("excluded by the admitted capture policy"));
+    }
+
+    #[test]
+    fn author_excludes_prune_by_name_and_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("keep.rs"), b"k").unwrap();
+        std::fs::write(dir.path().join("noise.log"), b"n").unwrap();
+        std::fs::create_dir(dir.path().join("skip")).unwrap();
+        std::fs::write(dir.path().join("skip/inner.rs"), b"i").unwrap();
+
+        let mut sink = RecordingSink::new();
+        let manifest = capture(
+            dir.path(),
+            &["*.log".to_string(), "skip".to_string()],
+            &mut sink,
+        )
+        .unwrap();
+
+        let paths: Vec<&str> = manifest.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, vec!["keep.rs"]);
+        assert_eq!(sink.stored, vec!["keep.rs"]);
+    }
+
+    #[test]
+    fn entries_are_ordered_and_deterministic_across_creation_order() {
+        let build = |names: &[&str]| {
+            let dir = tempfile::tempdir().unwrap();
+            for name in names {
+                std::fs::write(dir.path().join(name), format!("content of {name}")).unwrap();
+            }
+            let mut sink = RecordingSink::new();
+            capture(dir.path(), &[], &mut sink).unwrap()
+        };
+        let first = build(&["b.txt", "a.txt", "c.txt"]);
+        let second = build(&["c.txt", "b.txt", "a.txt"]);
+        assert_eq!(first, second);
+        assert!(
+            first
+                .entries
+                .windows(2)
+                .all(|pair| pair[0].path.as_bytes() < pair[1].path.as_bytes())
+        );
+        assert_eq!(
+            lillux::cas::canonical_json(&serde_json::to_value(&first).unwrap()).unwrap(),
+            lillux::cas::canonical_json(&serde_json::to_value(&second).unwrap()).unwrap(),
+        );
+    }
+
+    #[test]
+    fn a_size_lie_from_the_sink_fails_capture() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("volatile.bin"), b"contents").unwrap();
+
+        let mut sink = RecordingSink::new();
+        sink.lie_size_for = Some("volatile.bin".to_string());
+        let error = capture(dir.path(), &[], &mut sink).unwrap_err();
+        assert!(error.to_string().contains("changed size during capture"));
+    }
+
+    #[test]
+    fn symlinks_are_recorded_never_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("real")).unwrap();
+        std::fs::write(dir.path().join("real/inner.txt"), b"inner").unwrap();
+        std::os::unix::fs::symlink("real", dir.path().join("link-dir")).unwrap();
+        std::os::unix::fs::symlink("../outside", dir.path().join("escape")).unwrap();
+        let long_target = "t".repeat(MAX_INLINE_SYMLINK_TARGET_BYTES + 1);
+        std::os::unix::fs::symlink(&long_target, dir.path().join("long")).unwrap();
+
+        let mut sink = RecordingSink::new();
+        let manifest = capture(dir.path(), &[], &mut sink).unwrap();
+
+        let entry = |path: &str| {
+            manifest
+                .entries
+                .iter()
+                .find(|entry| entry.path == path)
+                .unwrap_or_else(|| panic!("manifest records {path}"))
+        };
+        assert_eq!(entry("escape").target.as_deref(), Some("../outside"));
+        assert_eq!(entry("link-dir").target.as_deref(), Some("real"));
+        // The directory the symlink names is captured once, as itself; the
+        // link is never traversed.
+        assert!(!manifest.entries.iter().any(|e| e.path == "link-dir/inner.txt"));
+        assert!(manifest.entries.iter().any(|e| e.path == "real/inner.txt"));
+        let long = entry("long");
+        assert!(long.target.is_none());
+        assert!(long.target_blob.is_some());
+        assert!(sink.stored.iter().any(|stored| stored == "target:long"));
+    }
+
+    #[test]
+    fn depth_beyond_the_bound_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut deep = dir.path().to_path_buf();
+        for level in 0..=MAX_DECLARATION_DEPTH {
+            deep = deep.join(format!("d{level}"));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+
+        let mut sink = RecordingSink::new();
+        let error = capture(dir.path(), &[], &mut sink).unwrap_err();
+        assert!(error.to_string().contains("directory levels"));
+    }
+
+    #[test]
+    fn non_utf8_names_fail_closed() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let bad = std::ffi::OsStr::from_bytes(b"bad\xff.bin");
+        std::fs::write(dir.path().join(bad), b"x").unwrap();
+
+        let mut sink = RecordingSink::new();
+        let error = capture(dir.path(), &[], &mut sink).unwrap_err();
+        assert!(error.to_string().contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn the_launch_budget_is_aggregate_across_declarations() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("one.txt"), b"payload").unwrap();
+
+        let matcher = ryeos_state::ignore::matcher_from_builtins();
+        let policy =
+            ExternalCapturePolicy::for_declaration(&declaration("vendor/sim"), &matcher).unwrap();
+
+        // A previous declaration exhausted the byte budget; this one must
+        // fail even though it is well within its own per-declaration bounds.
+        let mut budget = LaunchRealizationBudget::default();
+        budget.charge_bytes(MAX_LAUNCH_BYTES).unwrap();
+        let mut sink = RecordingSink::new();
+        let error = build_manifest(&pinned(dir.path()), &[], &policy, &mut budget, &mut sink)
+            .unwrap_err();
+        assert!(error.to_string().contains("aggregate bytes"));
+
+        let mut budget = LaunchRealizationBudget::default();
+        for _ in 0..MAX_LAUNCH_ENTRIES {
+            budget.charge_entry().unwrap();
+        }
+        let mut sink = RecordingSink::new();
+        let error = build_manifest(&pinned(dir.path()), &[], &policy, &mut budget, &mut sink)
+            .unwrap_err();
+        assert!(error.to_string().contains("aggregate entries"));
+    }
+}

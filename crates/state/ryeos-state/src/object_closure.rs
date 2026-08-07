@@ -1968,4 +1968,97 @@ mod tests {
 
         assert!(err.to_string().contains("exceeds max_links_per_object"));
     }
+
+    #[test]
+    fn a_capsule_edge_reaches_its_realization_manifest() {
+        let manifest_hash = h("aa");
+        // The wire key is asserted literally on purpose: renaming the
+        // reserved derived slot must break this test, not silently detach
+        // every realization from GC reachability.
+        let capsule = json!({
+            "kind": "admitted_launch_capsule",
+            "project_authority": {"kind": "live_project"},
+            "exact_program": {
+                "resolution_output": {
+                    "composed": {
+                        "derived": {
+                            "effective_external_realizations": [{
+                                "id": "sim",
+                                "kind": "tree",
+                                "mode": "captured",
+                                "manifest_hash": manifest_hash,
+                                "entry_count": 1,
+                                "total_bytes": 5,
+                                "mount": "vendor/sim"
+                            }]
+                        }
+                    }
+                }
+            }
+        });
+        let edges = typed_object_edges(&capsule).unwrap();
+        assert!(edges.iter().any(|edge| {
+            edge.hash == manifest_hash
+                && edge.expected == ExpectedObject::Kind("external_content_manifest")
+        }));
+
+        // Malformed derived data is a closure error, never an empty edge set:
+        // silently dropping the edge is exactly how a realization becomes
+        // collectable garbage.
+        let mut malformed = capsule;
+        malformed["exact_program"]["resolution_output"]["composed"]["derived"]
+            ["effective_external_realizations"] = json!([{"id": "sim"}]);
+        assert!(
+            typed_object_edges(&malformed)
+                .unwrap_err()
+                .contains("invalid external realization set")
+        );
+    }
+
+    #[test]
+    fn an_external_manifest_closure_reaches_every_blob() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let file_blob = write_blob(&cas_root, b"hello");
+        let target_blob = write_blob(&cas_root, "t".repeat(2000).as_bytes());
+        let manifest = write_object(
+            &cas_root,
+            &json!({
+                "kind": "external_content_manifest",
+                "schema": "ryeos.external_content.tree.v1",
+                "entries": [
+                    {"path": "content", "kind": "file", "mode": 0o644,
+                     "blob_hash": file_blob, "size": 5},
+                    {"path": "link", "kind": "symlink", "target_blob": target_blob}
+                ],
+                "entry_count": 2,
+                "total_bytes": 5
+            }),
+        );
+        let report = collect_object_closure(&cas_root, [manifest]).unwrap();
+        assert!(report.is_complete());
+        assert!(report.blob_hashes.contains(&file_blob));
+        assert!(report.blob_hashes.contains(&target_blob));
+    }
+
+    #[test]
+    fn a_realization_with_a_missing_blob_is_incomplete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let ghost = h("ee");
+        let manifest = write_object(
+            &cas_root,
+            &json!({
+                "kind": "external_content_manifest",
+                "schema": "ryeos.external_content.tree.v1",
+                "entries": [{"path": "content", "kind": "file", "mode": 0o644,
+                             "blob_hash": ghost, "size": 1}],
+                "entry_count": 1,
+                "total_bytes": 1
+            }),
+        );
+        let report = collect_object_closure(&cas_root, [manifest]).unwrap();
+        assert!(!report.is_complete());
+        assert!(report.missing_blobs.iter().any(|blob| blob.hash == ghost));
+    }
 }

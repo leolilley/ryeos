@@ -1211,4 +1211,34 @@ mod tests {
             assert_eq!(effective_trust(a, &[ancestor(b)]), expected);
         }
     }
+
+    #[test]
+    fn authored_digest_is_stable_across_realization_changes() {
+        let mut resolution = effective_digest_fixture();
+        let effective_before = resolution.effective_definition_digest().unwrap();
+        let authored_before = resolution.authored_definition_digest().unwrap();
+        // Distinct schema tags: the two scopes can never collide, even for a
+        // program that realizes nothing.
+        assert_ne!(effective_before, authored_before);
+
+        resolution.composed.derived.insert(
+            EXTERNAL_REALIZATIONS_DERIVED_KEY.to_string(),
+            serde_json::json!([{
+                "id": "sim",
+                "kind": "tree",
+                "mode": "captured",
+                "manifest_hash": "a".repeat(64),
+                "entry_count": 1,
+                "total_bytes": 5,
+                "mount": "vendor/sim"
+            }]),
+        );
+        let effective_realized = resolution.effective_definition_digest().unwrap();
+        let authored_realized = resolution.authored_definition_digest().unwrap();
+        // The environment is part of what executes, so the effective digest
+        // moves; the authored digest is the cross-environment grouping key
+        // and must hold.
+        assert_ne!(effective_realized, effective_before);
+        assert_eq!(authored_realized, authored_before);
+    }
 }
