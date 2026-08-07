@@ -339,6 +339,16 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
     // object is sweepable in this same pass. The cap is a row count: results
     // are bounded per record, and the CAS bytes follow the rows.
     const MAX_EFFECT_RECORDS: usize = 10_000;
+    const MAX_PROVIDER_CALL_RECORDS: usize = 10_000;
+    let pruned_provider_call_records = state_store
+        .with_state_db(|db| db.prune_provider_call_records(MAX_PROVIDER_CALL_RECORDS))
+        .context("prune provider call record retention")?;
+    if pruned_provider_call_records > 0 {
+        tracing::info!(
+            pruned_provider_call_records,
+            "provider-call-record retention pruned rows"
+        );
+    }
     let pruned_effect_records = state_store
         .with_state_db(|db| db.prune_effect_records(MAX_EFFECT_RECORDS))
         .context("prune stale effect records before CAS sweep")?;
@@ -376,6 +386,11 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
         state_store
             .with_state_db(|db| db.list_effect_record_hashes())
             .context("read durable effect record roots before sweep")?,
+    );
+    operational_object_roots.extend(
+        state_store
+            .with_state_db(|db| db.list_provider_call_record_hashes())
+            .context("read durable provider call record roots before sweep")?,
     );
     let operational_roots = gc::AdditionalCasRoots {
         object_hashes: operational_object_roots.into_iter().collect(),

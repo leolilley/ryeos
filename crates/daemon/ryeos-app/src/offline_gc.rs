@@ -617,6 +617,11 @@ fn inspect_operational_gc_roots(
             .list_effect_record_hashes()
             .context("collect durable effect record roots")?,
     );
+    roots.object_hashes.extend(
+        operational
+            .list_provider_call_record_hashes()
+            .context("collect durable provider call record roots")?,
+    );
     Ok(roots)
 }
 

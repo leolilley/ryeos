@@ -28,6 +28,7 @@ pub mod source_manifest;
 pub mod state_anchor;
 pub mod external_content_manifest;
 pub mod graph_node_effect_record;
+pub mod provider_call_effect_record;
 pub mod state_manifest;
 pub mod thread_event;
 pub mod thread_snapshot;
@@ -64,6 +65,11 @@ pub use state_anchor::{STATE_ANCHOR_SCHEMA_VERSION, StateAnchorMilestoneV2, Stat
 pub use graph_node_effect_record::{
     GRAPH_NODE_EFFECT_RECORD_KIND, GRAPH_NODE_EFFECT_RECORD_SCHEMA_VERSION,
     GraphNodeEffectRecord, MAX_EFFECT_RECORD_RESULT_BYTES, RECORDABLE_EFFECT_CLASSES,
+};
+pub use provider_call_effect_record::{
+    MAX_PROVIDER_CALL_RESPONSE_BYTES, PROVIDER_CALL_EFFECT_RECORD_KIND,
+    PROVIDER_CALL_EFFECT_RECORD_SCHEMA_VERSION, ProviderCallEffectRecord,
+    provider_call_cache_key,
 };
 pub use external_content_manifest::{
     EXTERNAL_CONTENT_MANIFEST_KIND, EXTERNAL_CONTENT_TREE_SCHEMA,

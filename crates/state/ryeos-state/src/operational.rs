@@ -15,7 +15,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use crate::sqlite_schema;
 
 const OPERATIONAL_APP_ID: i32 = 0x5259_4f50; // "RYOP"
-const OPERATIONAL_SCHEMA_VERSION: i32 = 2;
+const OPERATIONAL_SCHEMA_VERSION: i32 = 3;
 pub const OPERATIONAL_DB_FILENAME: &str = "operational.sqlite3";
 pub(crate) const OPERATIONAL_INITIALIZED_FILENAME: &str = "operational.initialized";
 const OPERATIONAL_INITIALIZED_CONTENT: &[u8] = b"ryeos-operational-v1\n";
@@ -23,7 +23,7 @@ const OPERATIONAL_INITIALIZED_CONTENT: &[u8] = b"ryeos-operational-v1\n";
 const SCHEMA_SQL: &str = r#"
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
-PRAGMA user_version=2;
+PRAGMA user_version=3;
 
 CREATE TABLE cas_entries (
     hash TEXT NOT NULL,
@@ -113,6 +113,16 @@ CREATE TABLE effect_records (
 
 CREATE INDEX idx_effect_records_last_replayed ON effect_records(last_replayed_at);
 CREATE INDEX idx_effect_records_record_hash ON effect_records(record_hash);
+
+CREATE TABLE provider_call_records (
+    cache_key TEXT PRIMARY KEY,
+    record_hash TEXT NOT NULL,
+    produced_at TEXT NOT NULL,
+    last_replayed_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_provider_call_records_last_replayed ON provider_call_records(last_replayed_at);
+CREATE INDEX idx_provider_call_records_record_hash ON provider_call_records(record_hash);
 "#;
 
 /// Schema-v2 additions, applied verbatim by the v1→v2 forward migration. A
@@ -128,6 +138,20 @@ CREATE TABLE effect_records (
 
 CREATE INDEX idx_effect_records_last_replayed ON effect_records(last_replayed_at);
 CREATE INDEX idx_effect_records_record_hash ON effect_records(record_hash);
+"#;
+
+/// Schema-v3 additions, applied verbatim by the v2→v3 forward migration,
+/// under the same verbatim-inside-`SCHEMA_SQL` assertion as v2's block.
+const PROVIDER_CALL_RECORDS_DDL: &str = r#"
+CREATE TABLE provider_call_records (
+    cache_key TEXT PRIMARY KEY,
+    record_hash TEXT NOT NULL,
+    produced_at TEXT NOT NULL,
+    last_replayed_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_provider_call_records_last_replayed ON provider_call_records(last_replayed_at);
+CREATE INDEX idx_provider_call_records_record_hash ON provider_call_records(record_hash);
 "#;
 
 fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
@@ -459,6 +483,35 @@ fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "provider_call_records",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "cache_key",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "record_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "produced_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "last_replayed_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -554,6 +607,18 @@ fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
             sqlite_schema::IndexSpec {
                 name: "idx_effect_records_record_hash",
                 table: "effect_records",
+                columns: &["record_hash"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_provider_call_records_last_replayed",
+                table: "provider_call_records",
+                columns: &["last_replayed_at"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_provider_call_records_record_hash",
+                table: "provider_call_records",
                 columns: &["record_hash"],
                 unique: false,
             },
@@ -1300,6 +1365,20 @@ fn migrate_forward_if_owned(conn: &Connection, path: &Path) -> Result<()> {
                     "operational schema migrated v1 → v2 (effect records)"
                 );
             }
+            2 => {
+                let tx = conn
+                    .unchecked_transaction()
+                    .context("begin operational v2→v3 migration")?;
+                tx.execute_batch(PROVIDER_CALL_RECORDS_DDL)
+                    .context("apply operational v2→v3 migration DDL")?;
+                tx.pragma_update(None, "user_version", 3)
+                    .context("stamp operational schema v3")?;
+                tx.commit().context("commit operational v2→v3 migration")?;
+                tracing::info!(
+                    path = %path.display(),
+                    "operational schema migrated v2 → v3 (provider call records)"
+                );
+            }
             other => {
                 anyhow::bail!(
                     "operational schema version {other} has no forward migration in {}",
@@ -1859,6 +1938,122 @@ impl OperationalDb {
                     [cache_key],
                 )
                 .context("failed to delete effect record")?;
+        }
+        Ok(deleted)
+    }
+
+    pub fn publish_provider_call_record(
+        &self,
+        cache_key: &str,
+        record_hash: &str,
+    ) -> Result<()> {
+        validate_canonical_hash("provider call record cache key", cache_key)?;
+        validate_canonical_hash("provider call record hash", record_hash)?;
+        let now = lillux::time::iso8601_now();
+        self.conn
+            .execute(
+                "INSERT INTO provider_call_records (cache_key, record_hash, produced_at, last_replayed_at)
+                 VALUES (?, ?, ?, ?)
+                 ON CONFLICT(cache_key) DO UPDATE SET
+                    record_hash = excluded.record_hash,
+                    produced_at = excluded.produced_at,
+                    last_replayed_at = excluded.last_replayed_at",
+                rusqlite::params![cache_key, record_hash, &now, &now],
+            )
+            .context("failed to publish provider call record")?;
+        Ok(())
+    }
+
+    pub fn lookup_provider_call_record(&self, cache_key: &str) -> Result<Option<String>> {
+        validate_canonical_hash("provider call record cache key", cache_key)?;
+        self.conn
+            .query_row(
+                "SELECT record_hash FROM provider_call_records WHERE cache_key = ?",
+                [cache_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to look up provider call record")
+    }
+
+    /// Refresh the replay-recency signal the retention sweep orders by.
+    pub fn touch_provider_call_record(&self, cache_key: &str) -> Result<()> {
+        validate_canonical_hash("provider call record cache key", cache_key)?;
+        let now = lillux::time::iso8601_now();
+        self.conn
+            .execute(
+                "UPDATE provider_call_records SET last_replayed_at = ? WHERE cache_key = ?",
+                rusqlite::params![&now, cache_key],
+            )
+            .context("failed to touch provider call record")?;
+        Ok(())
+    }
+
+    /// Every indexed record hash. These are garbage-collection roots: a
+    /// record stays reachable exactly as long as its row exists, and
+    /// retention is row deletion followed by an ordinary sweep.
+    pub fn list_provider_call_record_hashes(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT record_hash FROM provider_call_records ORDER BY record_hash",
+            )
+            .context("failed to prepare provider call record root query")?;
+        let rows = stmt
+            .query_map([], |row| row.get(0))
+            .context("failed to query provider call record roots")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect provider call record roots")
+    }
+
+    /// Retention: drop records beyond `max_rows`, never-replayed rows first
+    /// (oldest publication first), then the least-recently-replayed — the
+    /// same lanes as effect-record retention, for the same reason: a
+    /// run-scoped request param publishes a one-shot row per call whose
+    /// recency is newer than a banked record's last genuine replay, and
+    /// recency order alone would evict the proven records and keep the
+    /// junk. Losing a record is never a correctness event — the next run
+    /// pays the provider and is a different run.
+    pub fn prune_provider_call_records(&self, max_rows: usize) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM provider_call_records",
+                [],
+                |row| row.get(0),
+            )
+            .context("failed to count provider call records")?;
+        let excess = usize::try_from(count).unwrap_or(0).saturating_sub(max_rows);
+        if excess == 0 {
+            return Ok(0);
+        }
+        let deleted = self
+            .conn
+            .execute(
+                "DELETE FROM provider_call_records WHERE cache_key IN (
+                    SELECT cache_key FROM provider_call_records
+                    ORDER BY (last_replayed_at != produced_at) ASC,
+                             last_replayed_at ASC,
+                             cache_key ASC
+                    LIMIT ?
+                )",
+                [excess as i64],
+            )
+            .context("failed to prune provider call records")?;
+        Ok(deleted)
+    }
+
+    pub fn delete_provider_call_records(&self, cache_keys: &[String]) -> Result<usize> {
+        let mut deleted = 0usize;
+        for cache_key in cache_keys {
+            validate_canonical_hash("provider call record cache key", cache_key)?;
+            deleted += self
+                .conn
+                .execute(
+                    "DELETE FROM provider_call_records WHERE cache_key = ?",
+                    [cache_key],
+                )
+                .context("failed to delete provider call record")?;
         }
         Ok(deleted)
     }
@@ -2612,8 +2807,8 @@ mod tests {
         assert_eq!(app_id, OPERATIONAL_APP_ID);
         assert_eq!(version, OPERATIONAL_SCHEMA_VERSION);
         assert_eq!(synchronous, 2, "SQLite FULL synchronous mode");
-        assert_eq!(tables, 5);
-        assert_eq!(indexes, 16);
+        assert_eq!(tables, 6);
+        assert_eq!(indexes, 18);
     }
 
     #[test]
@@ -2647,9 +2842,10 @@ mod tests {
 
     #[test]
     fn schema_sql_embeds_the_migration_ddl_verbatim() {
-        // Fresh initialization and the v1→v2 migration must produce the
-        // exact same schema; the shared block is asserted byte-for-byte.
+        // Fresh initialization and the forward migrations must produce the
+        // exact same schema; each shared block is asserted byte-for-byte.
         assert!(SCHEMA_SQL.contains(EFFECT_RECORDS_DDL.trim()));
+        assert!(SCHEMA_SQL.contains(PROVIDER_CALL_RECORDS_DDL.trim()));
     }
 
     #[test]
@@ -2672,7 +2868,10 @@ mod tests {
             .unwrap();
             db.conn
                 .execute_batch(
-                    "DROP INDEX idx_effect_records_last_replayed;
+                    "DROP INDEX idx_provider_call_records_last_replayed;
+                     DROP INDEX idx_provider_call_records_record_hash;
+                     DROP TABLE provider_call_records;
+                     DROP INDEX idx_effect_records_last_replayed;
                      DROP INDEX idx_effect_records_record_hash;
                      DROP TABLE effect_records;
                      PRAGMA user_version=1;",
@@ -2686,7 +2885,8 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, OPERATIONAL_SCHEMA_VERSION);
-        // Pre-migration rows survive; the migrated table is fully usable.
+        // Pre-migration rows survive; both migrated tables are fully usable
+        // — a v1 store chains through v2 to the current version in one open.
         assert_eq!(
             db.list_cas_entries_by_state(CasEntryState::Mirrored)
                 .unwrap()
@@ -2695,6 +2895,97 @@ mod tests {
         );
         db.publish_effect_record(&"a".repeat(64), &"b".repeat(64)).unwrap();
         assert!(db.lookup_effect_record(&"a".repeat(64)).unwrap().is_some());
+        db.publish_provider_call_record(&"e".repeat(64), &"f".repeat(64))
+            .unwrap();
+        assert!(
+            db.lookup_provider_call_record(&"e".repeat(64))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_v2_store_migrates_forward_in_place() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        {
+            // Rewind a fresh store to the exact v2 shape: no
+            // provider_call_records, stamped v2, with a v2-era effect record
+            // that must survive.
+            let db = OperationalDb::open(&path).unwrap();
+            db.publish_effect_record(&"a".repeat(64), &"b".repeat(64))
+                .unwrap();
+            db.conn
+                .execute_batch(
+                    "DROP INDEX idx_provider_call_records_last_replayed;
+                     DROP INDEX idx_provider_call_records_record_hash;
+                     DROP TABLE provider_call_records;
+                     PRAGMA user_version=2;",
+                )
+                .unwrap();
+        }
+
+        let db = OperationalDb::open(&path).unwrap();
+        let version: i32 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, OPERATIONAL_SCHEMA_VERSION);
+        assert!(db.lookup_effect_record(&"a".repeat(64)).unwrap().is_some());
+        db.publish_provider_call_record(&"e".repeat(64), &"f".repeat(64))
+            .unwrap();
+        assert!(
+            db.lookup_provider_call_record(&"e".repeat(64))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn provider_call_records_round_trip_and_prune_by_lanes() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        let db = OperationalDb::open(&path).unwrap();
+
+        let key = "a".repeat(64);
+        let hash = "b".repeat(64);
+        assert!(db.lookup_provider_call_record(&key).unwrap().is_none());
+        db.publish_provider_call_record(&key, &hash).unwrap();
+        assert_eq!(
+            db.lookup_provider_call_record(&key).unwrap().as_deref(),
+            Some(hash.as_str())
+        );
+        assert_eq!(
+            db.list_provider_call_record_hashes().unwrap(),
+            vec![hash.clone()]
+        );
+        db.touch_provider_call_record(&key).unwrap();
+        assert_eq!(db.delete_provider_call_records(&[key.clone()]).unwrap(), 1);
+        assert!(db.lookup_provider_call_record(&key).unwrap().is_none());
+
+        // One banked record replayed long ago, two fresh never-replayed
+        // rows: the never-replayed lane prunes first even though its
+        // recency is newer.
+        for (c, produced, replayed) in [
+            ("a", "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"),
+            ("b", "2026-08-01T00:00:00Z", "2026-08-01T00:00:00Z"),
+            ("c", "2026-08-02T00:00:00Z", "2026-08-02T00:00:00Z"),
+        ] {
+            db.publish_provider_call_record(&c.repeat(64), &c.repeat(64))
+                .unwrap();
+            db.conn
+                .execute(
+                    "UPDATE provider_call_records SET produced_at = ?, last_replayed_at = ?
+                     WHERE cache_key = ?",
+                    rusqlite::params![produced, replayed, c.repeat(64)],
+                )
+                .unwrap();
+        }
+        assert_eq!(db.prune_provider_call_records(1).unwrap(), 2);
+        assert_eq!(
+            db.list_provider_call_record_hashes().unwrap(),
+            vec!["a".repeat(64)]
+        );
     }
 
     #[test]

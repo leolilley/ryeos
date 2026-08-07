@@ -5434,6 +5434,38 @@ impl StateDb {
         self.operational()?.prune_effect_records(max_rows)
     }
 
+    pub fn publish_provider_call_record(
+        &self,
+        cache_key: &str,
+        record_hash: &str,
+    ) -> anyhow::Result<()> {
+        self.operational()?
+            .publish_provider_call_record(cache_key, record_hash)
+    }
+
+    pub fn lookup_provider_call_record(
+        &self,
+        cache_key: &str,
+    ) -> anyhow::Result<Option<String>> {
+        self.operational()?.lookup_provider_call_record(cache_key)
+    }
+
+    pub fn touch_provider_call_record(&self, cache_key: &str) -> anyhow::Result<()> {
+        self.operational()?.touch_provider_call_record(cache_key)
+    }
+
+    pub fn list_provider_call_record_hashes(&self) -> anyhow::Result<Vec<String>> {
+        self.operational()?.list_provider_call_record_hashes()
+    }
+
+    pub fn delete_provider_call_records(&self, cache_keys: &[String]) -> anyhow::Result<usize> {
+        self.operational()?.delete_provider_call_records(cache_keys)
+    }
+
+    pub fn prune_provider_call_records(&self, max_rows: usize) -> anyhow::Result<usize> {
+        self.operational()?.prune_provider_call_records(max_rows)
+    }
+
     pub fn record_admission_attestation(
         &self,
         record: &NewAdmissionAttestationRecord,
