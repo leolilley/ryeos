@@ -27,6 +27,7 @@ pub mod project_tree;
 pub mod source_manifest;
 pub mod state_anchor;
 pub mod external_content_manifest;
+pub mod execution_identity;
 pub mod graph_node_effect_record;
 pub mod provider_call_effect_record;
 pub mod state_manifest;
@@ -70,6 +71,10 @@ pub use provider_call_effect_record::{
     MAX_PROVIDER_CALL_RESPONSE_BYTES, PROVIDER_CALL_EFFECT_RECORD_KIND,
     PROVIDER_CALL_EFFECT_RECORD_SCHEMA_VERSION, ProviderCallEffectRecord,
     provider_call_cache_key,
+};
+pub use execution_identity::{
+    EXECUTION_IDENTITY_KIND, EXECUTION_IDENTITY_SCHEMA_VERSION, ExecutionDeviceIdentity,
+    ExecutionIdentity, ExecutionInterpreterIdentity, MAX_EXECUTION_IDENTITY_BYTES,
 };
 pub use external_content_manifest::{
     EXTERNAL_CONTENT_MANIFEST_KIND, EXTERNAL_CONTENT_TREE_SCHEMA,
