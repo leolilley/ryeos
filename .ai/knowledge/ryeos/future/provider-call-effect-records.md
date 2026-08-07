@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-07T08:52:05Z:f2847dac8081231d8637f9615b671367877e1b2d7439c9c3f325419a08c8c19d:AXSa3vBwUKASjzb60YniN71yLdFqzKc1kVfXO1L/+X4hgGSu4Kiguc/cJO0i+JWpBNqa8Te5qNqJNstoUFpeDw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-07T09:09:46Z:1bd03a599ebfb74a6c1f27e2e568fd2d57ce4d09b9bc014073433e3576e5291d:X4zD+DLiWypynENxAcv1uEkbJ+uqC8pkDF49ZT+dmvyn1QWht1NynpM1zj9QckqPIJYBGl+aJSrh30p3HC3sCQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, replay, provider, directive, evidence]
 version: "0.1.0"
@@ -185,8 +185,13 @@ on the same keys rather than replacing the machinery.
    daemon-recomputed from the shared derivations now living in
    `ryeos-accounting`. Remaining for 3: the runtime-side submission after
    settle and the directive kind's `effects` admission treatment.
-4. Replay serve with provenance, billing nothing, consuming no
-   reservation.
+4. **DONE (`4ff41a5b4`)** — replay serves before any reservation: the
+   runtime asks with the envelope preimage capture publishes, a hit
+   skips reserve/issue/transport/settle entirely, the daemon refuses
+   lookups from undeclared programs (no existence oracle), and the
+   response reconstructs with no usage — a replayed call has no provider
+   usage — while `replayed_from` provenance lands in the turn's durable
+   provider accounting.
 5. Streaming capture/replay.
 6. Measure on ARC: a full re-solve of a solved game under an unchanged
    digest, reporting replayed turns, saved spend, and wall-clock delta —
