@@ -30,6 +30,11 @@ const MAX_FACET_KEY_BYTES: usize = 128;
 const MAX_FACET_VALUE_BYTES: usize = 512;
 const MAX_THREAD_FACETS: usize = 32;
 const MAX_THREAD_FACET_VALUE_BYTES: usize = 512;
+/// Distinct `(definition_ref, effective_definition_digest)` versions whose
+/// identity closure (family, definition, authored root, realizations) is
+/// emitted per response. Runs beyond this keep their summaries; only the
+/// anchor closure is truncated, and the truncation is declared.
+const MAX_RUN_DEFINITION_VERSIONS: usize = 32;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -112,6 +117,8 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     };
     let mut builder = FieldFactsBuilder::new("runs", SERVICE_REF, subject);
     let mut matched = 0usize;
+    let mut definition_versions: BTreeMap<(String, String), String> = BTreeMap::new();
+    let mut definition_versions_truncated = false;
     for row in rows.iter().filter(|row| {
         run_matches(
             row,
@@ -127,8 +134,33 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             builder.mark_truncated();
             continue;
         }
-        add_run_summary(&mut builder, row, graph_runs.get(&row.item.thread_id))?;
+        let graph_run = graph_runs.get(&row.item.thread_id);
+        add_run_summary(&mut builder, row, graph_run)?;
+        if let Some(identity) = graph_run {
+            let key = (
+                identity.definition_ref.clone(),
+                identity.effective_definition_digest.clone(),
+            );
+            if definition_versions.contains_key(&key) {
+                // keep the first representative thread
+            } else if definition_versions.len() < MAX_RUN_DEFINITION_VERSIONS {
+                definition_versions.insert(key, row.item.thread_id.clone());
+            } else {
+                definition_versions_truncated = true;
+            }
+        }
     }
+    if definition_versions_truncated {
+        builder.mark_truncated();
+        builder.warn(
+            "definition_version_limit",
+            format!(
+                "runs reference more than {MAX_RUN_DEFINITION_VERSIONS} definition versions; \
+                 later versions keep summaries but lose their identity anchors"
+            ),
+        );
+    }
+    add_run_definition_versions(&mut builder, &state, &definition_versions)?;
     if rows.len() == MAX_SCAN {
         builder.mark_truncated();
         builder.warn(
@@ -269,6 +301,216 @@ fn add_run_summary(
             provenance: builder.provenance(evidence),
         })?;
     }
+    Ok(())
+}
+
+/// Identity closure for every definition version the listed runs reference.
+///
+/// `executes_definition` and `at_graph_node` point at entities this projection
+/// historically never created, and the client drops dangling relations. Once
+/// realizations split runs across digests, every run off the currently
+/// projected digest would silently lose its edges — so each referenced
+/// version gets its `definition-family:`/`definition:` anchors, its authored
+/// root source, and one `external-content:` entity per realized declaration,
+/// reconstructed from the run's own admitted capsule.
+fn add_run_definition_versions(
+    builder: &mut FieldFactsBuilder,
+    state: &AppState,
+    versions: &BTreeMap<(String, String), String>,
+) -> Result<()> {
+    for ((definition_ref, digest), thread_id) in versions {
+        let evidence = vec![FieldEvidenceRef::Thread {
+            thread_id: thread_id.clone(),
+        }];
+        let family_id = format!("definition-family:{definition_ref}");
+        let definition_id = format!("definition:{definition_ref}@{digest}");
+        let label = super::ui_graph_topology::label_for_bare_id(
+            definition_ref
+                .split_once(':')
+                .map_or(definition_ref.as_str(), |(_, bare)| bare),
+        );
+        builder.add_entity(FieldFactEntity {
+            id: family_id.clone(),
+            kind: "definition_family".to_string(),
+            label: label.clone(),
+            parent_id: None,
+            status: None,
+            canonical_ref: Some(definition_ref.clone()),
+            source_content_digest: None,
+            effective_definition_digest: None,
+            admitted_launch_capsule_hash: None,
+            event_ref: None,
+            artifact_ref: None,
+            attributes: json!({}),
+            provenance: builder.provenance(Vec::new()),
+        })?;
+        builder.add_entity(FieldFactEntity {
+            id: definition_id.clone(),
+            kind: "graph_definition".to_string(),
+            label,
+            parent_id: Some(family_id.clone()),
+            status: None,
+            canonical_ref: Some(definition_ref.clone()),
+            source_content_digest: None,
+            effective_definition_digest: Some(digest.clone()),
+            admitted_launch_capsule_hash: None,
+            event_ref: None,
+            artifact_ref: None,
+            attributes: json!({}),
+            provenance: builder.provenance(evidence.clone()),
+        })?;
+        builder.add_relation(FieldFactRelation {
+            id: format!("definition-version:{family_id}:{definition_id}"),
+            kind: "has_effective_version".to_string(),
+            source_id: family_id,
+            target_id: definition_id.clone(),
+            status: None,
+            directed: true,
+            attributes: json!({}),
+            provenance: builder.provenance(Vec::new()),
+        })?;
+
+        let capsule = match state.state_store.admitted_launch_capsule(thread_id) {
+            Ok(Some(capsule)) => capsule,
+            Ok(None) => {
+                builder.warn(
+                    "definition_context_unavailable",
+                    format!("run `{thread_id}` has no admitted launch capsule"),
+                );
+                continue;
+            }
+            Err(error) => {
+                builder.warn(
+                    "definition_context_unavailable",
+                    format!("run `{thread_id}` capsule is unreadable: {error}"),
+                );
+                continue;
+            }
+        };
+        if let Some(root) = capsule
+            .exact_program
+            .get("resolution_output")
+            .and_then(|resolution| resolution.get("root"))
+            .cloned()
+            .and_then(|root| {
+                serde_json::from_value::<ryeos_engine::resolution::ResolvedAncestor>(root).ok()
+            })
+        {
+            add_run_root_source(builder, &definition_id, &root)?;
+        }
+        match capsule.external_realization_set() {
+            Ok(Some(realized)) => {
+                for entry in realized.iter() {
+                    let external_id =
+                        format!("external-content:{}@{}", entry.id, entry.manifest_hash);
+                    builder.add_entity(FieldFactEntity {
+                        id: external_id.clone(),
+                        kind: "external_content".to_string(),
+                        label: entry.id.clone(),
+                        parent_id: Some(definition_id.clone()),
+                        status: None,
+                        canonical_ref: None,
+                        source_content_digest: None,
+                        effective_definition_digest: None,
+                        admitted_launch_capsule_hash: None,
+                        event_ref: None,
+                        artifact_ref: None,
+                        attributes: json!({
+                            "content_kind": entry.kind,
+                            "mode": entry.mode,
+                            "manifest_hash": entry.manifest_hash,
+                            "entry_count": entry.entry_count,
+                            "total_bytes": entry.total_bytes,
+                            "mount": entry.mount,
+                        }),
+                        provenance: builder.provenance(evidence.clone()),
+                    })?;
+                    builder.add_relation(FieldFactRelation {
+                        id: format!("environment-contributes:{external_id}:{definition_id}"),
+                        kind: "environment_contributes".to_string(),
+                        source_id: external_id,
+                        target_id: definition_id.clone(),
+                        status: None,
+                        directed: true,
+                        attributes: json!({"mount": entry.mount}),
+                        provenance: builder.provenance(evidence.clone()),
+                    })?;
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                builder.warn(
+                    "external_realization_invalid",
+                    format!("run `{thread_id}` carries an invalid realization set: {error}"),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The definition version's authored root, in exactly the shape the
+/// definition projection emits, so cross-document identity converges.
+fn add_run_root_source(
+    builder: &mut FieldFactsBuilder,
+    definition_id: &str,
+    source: &ryeos_engine::resolution::ResolvedAncestor,
+) -> Result<()> {
+    let source_id = format!(
+        "source-version:{}@{}",
+        source.resolved_ref, source.source_content_digest
+    );
+    let source_evidence = vec![FieldEvidenceRef::Item {
+        canonical_ref: source.resolved_ref.clone(),
+        source_content_digest: source.source_content_digest.clone(),
+    }];
+    builder.add_entity(FieldFactEntity {
+        id: source_id.clone(),
+        kind: "source_version".to_string(),
+        label: super::ui_graph_topology::label_for_bare_id(
+            source
+                .resolved_ref
+                .split_once(':')
+                .map_or(&source.resolved_ref, |(_, bare)| bare),
+        ),
+        parent_id: None,
+        status: None,
+        canonical_ref: Some(source.resolved_ref.clone()),
+        source_content_digest: Some(source.source_content_digest.clone()),
+        effective_definition_digest: None,
+        admitted_launch_capsule_hash: None,
+        event_ref: None,
+        artifact_ref: None,
+        attributes: json!({
+            "root_raw_content_digest": source.raw_content_digest,
+            "signer_fingerprint": source.signer_fingerprint,
+        }),
+        provenance: builder.provenance(source_evidence.clone()),
+    })?;
+    let space = source.source_space.as_str();
+    let trust = serde_json::to_value(source.trust_class)?;
+    let trust_id = trust
+        .as_str()
+        .expect("resolution trust class serializes as a string");
+    let added_by = source.added_by.to_string();
+    builder.add_relation(FieldFactRelation {
+        id: format!(
+            "source-contributes:{definition_id}:{source_id}:root:0:{space}:{trust_id}:{added_by}"
+        ),
+        kind: "source_contributes".to_string(),
+        source_id,
+        target_id: definition_id.to_string(),
+        status: None,
+        directed: true,
+        attributes: json!({
+            "role": "root",
+            "ordinal": 0,
+            "source_space": space,
+            "trust_class": trust,
+            "added_by": added_by,
+        }),
+        provenance: builder.provenance(source_evidence),
+    })?;
     Ok(())
 }
 
