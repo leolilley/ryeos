@@ -44,6 +44,12 @@ pub struct GraphNodeEffectRecord {
     pub result: Value,
     /// Thread that produced the recorded execution, for provenance.
     pub produced_by_thread: String,
+    /// Digest of the execution identity the producing node attested at
+    /// boot — the coordinate beside the program digest. Provenance, never
+    /// key material: replay matches on cache_key regardless, and sealed
+    /// claims scope to (program, identity) when a comparator exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_identity: Option<String>,
 }
 
 fn require_hex64(field: &str, value: &str) -> anyhow::Result<()> {
@@ -89,6 +95,9 @@ impl GraphNodeEffectRecord {
                 value,
                 false,
             )?;
+        }
+        if let Some(execution_identity) = &self.execution_identity {
+            require_hex64("execution_identity", execution_identity)?;
         }
         let result_bytes = serde_json::to_vec(&self.result)?.len();
         if result_bytes > MAX_EFFECT_RECORD_RESULT_BYTES {
@@ -150,6 +159,7 @@ mod tests {
             class: "recorded".to_string(),
             result: json!({"outcome_code": null, "result": {"ok": true}}),
             produced_by_thread: "T-1234".to_string(),
+            execution_identity: None,
         }
     }
 

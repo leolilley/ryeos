@@ -286,6 +286,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         response: params.response.clone(),
         provider_accounting: params.provider_accounting.clone(),
         produced_by_thread: params.thread_id.clone(),
+        execution_identity: super::runtime_dispatch::node_execution_identity_digest(state),
     };
     let value = record.to_value()?;
 

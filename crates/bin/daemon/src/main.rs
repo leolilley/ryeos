@@ -720,6 +720,12 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                 }
             };
 
+            let node_execution_identity =
+                ryeos_app::execution_identity_probe::boot_node_execution_identity(
+                    &state_store,
+                    &identity,
+                );
+
             let mut app_state = AppState {
                 config: Arc::new(config.clone()),
                 daemon_build: build.clone(),
@@ -745,6 +751,9 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                     ext.insert(ui_state);
                     ext.insert(route_diagnostics);
                     ext.insert(prospective_node_config_validator);
+                    if let Some(node_execution_identity) = node_execution_identity {
+                        ext.insert(node_execution_identity);
+                    }
                     Arc::new(ext)
                 },
                 write_barrier: Arc::new(write_barrier),

@@ -51,6 +51,12 @@ pub struct ProviderCallEffectRecord {
     pub provider_accounting: Option<Value>,
     /// Thread that paid for the recorded call, for provenance.
     pub produced_by_thread: String,
+    /// Digest of the execution identity the producing node attested at
+    /// boot — the coordinate beside the program digest. Provenance, never
+    /// key material: cache_key stays (program, request) exactly, and a
+    /// remote provider's record simply carries the caller node's identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_identity: Option<String>,
 }
 
 fn require_hex64(field: &str, value: &str) -> anyhow::Result<()> {
@@ -127,6 +133,9 @@ impl ProviderCallEffectRecord {
             &self.produced_by_thread,
             false,
         )?;
+        if let Some(execution_identity) = &self.execution_identity {
+            require_hex64("execution_identity", execution_identity)?;
+        }
         let response_bytes = serde_json::to_vec(&self.response)?.len();
         if response_bytes > MAX_PROVIDER_CALL_RESPONSE_BYTES {
             bail!(
@@ -191,7 +200,8 @@ mod tests {
             response: json!({"content": "the answer", "tool_calls": []}),
             provider_accounting: Some(json!({"input_tokens": 100, "output_tokens": 12})),
             produced_by_thread: "T-1234".to_string(),
-        }
+            execution_identity: None,
+       }
     }
 
     #[test]

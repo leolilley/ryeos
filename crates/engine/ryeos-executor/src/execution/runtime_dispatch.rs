@@ -227,6 +227,18 @@ fn try_replay_effect_record(
     Some(response)
 }
 
+/// Digest of the node's boot-attested execution identity, for record
+/// provenance. Absent when the probe did not run (tests, degraded boot) —
+/// records simply carry no coordinate.
+pub(crate) fn node_execution_identity_digest(
+    state: &ryeos_app::state::AppState,
+) -> Option<String> {
+    state
+        .extensions
+        .get::<ryeos_app::execution_identity_probe::NodeExecutionIdentity>()
+        .map(|identity| identity.digest.clone())
+}
+
 /// A response is recordable only when the leaf reports success: a non-null
 /// `error` in the envelope marks failure regardless of other fields, and a
 /// native envelope's `success` flag is authoritative when present.
@@ -269,6 +281,7 @@ fn publish_effect_record_best_effort(
         class: identity.class.clone(),
         result: response.clone(),
         produced_by_thread,
+        execution_identity: node_execution_identity_digest(state),
     };
     let value = match record.to_value() {
         Ok(value) => value,
