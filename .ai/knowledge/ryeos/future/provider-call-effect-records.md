@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-07T07:37:04Z:0c4755a96feb61689fb1787f1788c840f2e5c09dbcacd849b202c9aca5e9e901:kAKffd/pGsiyjpuI+36ySeKm+9TUq0+2944AdjFP+I36izP04fJk5GEDru3/cACCmFoYhcj4uRwoRNJIxIH7BA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-07T08:08:24Z:59df498ef517d861127d8167c4e9ef1d0a8e4445a9be435e25f145505e87c6ff:Nb4OzQCSdZ3bBUjcn5cj5i4gWRsalHI06C0rNN5I/OHpPsOuVgvzk7ujawdjXIq0LiHV9zbIZOCvNAOI0vrfBA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, replay, provider, directive, evidence]
 version: "0.1.0"
@@ -112,6 +112,18 @@ includes the solver's reasoning — and a divergence localizes to the first
 turn whose request digest moved, which names the exact upstream change
 (tool result, realization, directive text) that altered what the model was
 asked.
+
+## The local endgame
+
+This boundary's `recorded` ceiling is a property of *remote* providers,
+not of LLM calls. Local inference on tinygrad under full execution
+control upgrades the class to `sealed` — weights, kernels, sampler state,
+and device as admitted content, re-derivation instead of replay, token-
+level checkpoints, KV-prefix reuse as CAS. The destination design is
+`knowledge:ryeos/future/sealed-local-inference`. Everything here is built
+to carry over: the request-identity scheme and the record store are
+placement- and class-agnostic, so local arrival changes the class marker
+on the same keys rather than replacing the machinery.
 
 ## Increments
 
