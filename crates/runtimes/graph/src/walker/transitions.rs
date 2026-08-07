@@ -58,6 +58,7 @@ mod tests {
             next: None,
             on_error: None,
             cache_result: false,
+            effects: Default::default(),
             follow: false,
             detach: false,
             facets: None,

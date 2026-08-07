@@ -3815,7 +3815,7 @@ async fn prepare_managed_launch_authority(
         }
     }
     let admitted_capsule = authoritative_admitted_capsule;
-    // §6 inheritance: a fresh child seals its dispatching parent's exact
+    // Inheritance: a fresh child seals its dispatching parent's exact
     // realization set unless it authors its own declaration. Resolved from
     // the parent's durable capsule — never from operational metadata — and
     // fail-closed: a dispatching parent without an admitted capsule is

@@ -1783,7 +1783,7 @@ fn finalize_direct_effective_program(
     });
     // A declaring kind captures here exactly as the managed path does, and a
     // direct launch dispatched as a child (`parent_thread_id`) inherits its
-    // parent's sealed realization under the same §6 rule — resolved from the
+    // parent's sealed realization under the same inheritance rule — resolved from the
     // parent's durable capsule, fail-closed on missing or malformed lineage.
     let inherited_external = params
         .parent_thread_id

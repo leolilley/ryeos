@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use ryeos_graph_definition::EffectClass;
 use ryeos_runtime::envelope::RuntimeCost;
 use ryeos_runtime::events::RuntimeEventType;
 
@@ -100,6 +101,11 @@ pub struct GraphNode {
     pub on_error: Option<String>,
     #[serde(default)]
     pub cache_result: bool,
+    /// Determinism class for durable cross-run replay; shared with the
+    /// static definition so the two decoders cannot drift. `live` (default)
+    /// is skipped on the wire, keeping existing checkpoints byte-stable.
+    #[serde(default, skip_serializing_if = "EffectClass::is_live")]
+    pub effects: EffectClass,
     /// FOLLOW node: instead of dispatching the action inline, the daemon launches
     /// it as a detached child and suspends this graph until the child's whole
     /// continuation chain reaches terminal, then resumes with its result. Only
@@ -173,6 +179,11 @@ where
 impl GraphNode {
     pub fn is_cacheable(&self) -> bool {
         self.cache_result
+    }
+
+    /// Class governing durable cross-run replay of this node's action.
+    pub fn effect_class(&self) -> EffectClass {
+        self.effects
     }
 
     pub fn foreach_var(&self) -> &str {
@@ -1556,5 +1567,22 @@ config:
         }))
         .expect("strict decode admits the engine-owned declaration");
         assert!(file.external_content.is_some());
+    }
+
+    #[test]
+    fn effect_classes_decode_and_default_live() {
+        let node: GraphNode = serde_json::from_value(json!({
+            "action": {"item_id": "tool:t/x"},
+            "effects": "recorded"
+        }))
+        .unwrap();
+        assert_eq!(node.effect_class(), EffectClass::Recorded);
+
+        // Absent means live, and live stays off the wire, so checkpoints
+        // written before the field existed remain byte-stable.
+        let node: GraphNode = serde_json::from_value(json!({})).unwrap();
+        assert!(node.effect_class().is_live());
+        let wire = serde_json::to_value(&node).unwrap();
+        assert!(wire.get("effects").is_none());
     }
 }

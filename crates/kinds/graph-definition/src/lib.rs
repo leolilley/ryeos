@@ -73,6 +73,26 @@ pub enum ErrorMode {
     Continue,
 }
 
+/// Determinism class of a node's action: whether its result may be replayed
+/// across runs from a durable effect record. `sealed` re-derives or replays
+/// (a divergence is a substrate bug), `recorded` replays the record, and
+/// `live` — the default — never replays across runs. Orthogonal to
+/// `cache_result`, which governs reuse within one execution only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectClass {
+    Sealed,
+    Recorded,
+    #[default]
+    Live,
+}
+
+impl EffectClass {
+    pub fn is_live(&self) -> bool {
+        matches!(self, Self::Live)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphNode {
@@ -88,6 +108,8 @@ pub struct GraphNode {
     pub on_error: Option<String>,
     #[serde(default)]
     pub cache_result: bool,
+    #[serde(default)]
+    pub effects: EffectClass,
     #[serde(default)]
     pub follow: bool,
     #[serde(default)]
@@ -317,6 +339,12 @@ fn validate_node(name: &str, node: &GraphNode, config: &GraphConfig) -> Result<(
             if node.cache_result {
                 bail!("foreach node `{name}` cannot cache its aggregate dispatch");
             }
+            if !node.effects.is_live() {
+                bail!(
+                    "foreach node `{name}` cannot declare a durable effect class \
+                     for its aggregate dispatch"
+                );
+            }
             if !node.env_requires.is_empty() {
                 bail!("foreach node `{name}` cannot declare inert env_requires");
             }
@@ -344,6 +372,12 @@ fn validate_node(name: &str, node: &GraphNode, config: &GraphConfig) -> Result<(
         if node.cache_result {
             bail!("follow node `{name}` cannot cache a result before its child settles");
         }
+        if !node.effects.is_live() {
+            bail!(
+                "follow node `{name}` cannot declare a durable effect class \
+                 before its child settles"
+            );
+        }
         if node.over.is_some() {
             if !node.parallel || node.assign.is_some() || node.r#as.is_none() {
                 bail!("follow fanout node `{name}` requires parallel and as, and forbids assign");
@@ -364,6 +398,9 @@ fn validate_node(name: &str, node: &GraphNode, config: &GraphConfig) -> Result<(
         }
         if node.cache_result {
             bail!("detach node `{name}` cannot cache a result at launch time");
+        }
+        if !node.effects.is_live() {
+            bail!("detach node `{name}` cannot declare a durable effect class at launch time");
         }
     }
     if node.facets.is_some() && !(node.detach || follow_fanout) {
@@ -841,5 +878,59 @@ mod tests {
         let mut graph = composed_graph();
         graph["config"]["hooks"] = serde_json::to_value([hook]).unwrap();
         graph
+    }
+
+    #[test]
+    fn durable_effect_classes_are_declared_and_bounded() {
+        // A plain action node may declare a durable class; the declaration
+        // lives in the composed value and therefore in the digest.
+        let mut graph = composed_graph();
+        graph["config"]["nodes"]["inherited"]["action"] =
+            serde_json::json!({"item_id": "tool:test/audit"});
+        graph["config"]["nodes"]["inherited"]["effects"] = serde_json::json!("recorded");
+        validate_effective_graph(&view(graph, Vec::new())).unwrap();
+
+        // Absent means live: cross-run replay is never implied.
+        let file: GraphFile = serde_json::from_value(composed_graph()).unwrap();
+        assert!(file.config.nodes["inherited"].effects.is_live());
+
+        // Shapes whose results cannot exist at publication time refuse the
+        // declaration outright.
+        for (patch, expect) in [
+            (
+                serde_json::json!({
+                    "node_type": "foreach",
+                    "action": {"item_id": "tool:test/audit"},
+                    "over": "state.goal",
+                    "as": "item",
+                    "effects": "recorded",
+                    "next": {"type": "unconditional", "to": "finish"}
+                }),
+                "aggregate dispatch",
+            ),
+            (
+                serde_json::json!({
+                    "action": {"item_id": "tool:test/audit"},
+                    "follow": true,
+                    "effects": "sealed",
+                    "next": {"type": "unconditional", "to": "finish"}
+                }),
+                "child settles",
+            ),
+            (
+                serde_json::json!({
+                    "action": {"item_id": "tool:test/audit"},
+                    "detach": true,
+                    "effects": "recorded",
+                    "next": {"type": "unconditional", "to": "finish"}
+                }),
+                "launch time",
+            ),
+        ] {
+            let mut graph = composed_graph();
+            graph["config"]["nodes"]["inherited"] = patch;
+            let error = validate_effective_graph(&view(graph, Vec::new())).unwrap_err();
+            assert!(error.to_string().contains(expect), "unexpected: {error:#}");
+        }
     }
 }

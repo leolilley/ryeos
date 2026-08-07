@@ -561,7 +561,7 @@ pub(crate) fn recover_external_realizations(
 
 /// Inherit the dispatching program's sealed realization verbatim.
 ///
-/// Contract §6: every descendant of one admitted solve executes against the
+/// Every descendant of one admitted solve executes against the
 /// same realization — manifests *and* logical mounts — unless it authors its
 /// own declaration, which replaces inheritance entirely. Redeemability is
 /// re-proved from CAS under the pinned authority. No staged publication is
