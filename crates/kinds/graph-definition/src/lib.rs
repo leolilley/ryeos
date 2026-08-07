@@ -31,6 +31,12 @@ pub struct GraphFile {
     pub config: GraphConfig,
     #[serde(default)]
     pub requires: Option<ryeos_bundle::runtime_authority::RuntimeRequires>,
+    /// Item-level external content declaration. Validated, captured, and
+    /// realized entirely by the engine's admission path; opaque to graph
+    /// semantics, so the strict decode names the field without
+    /// interpreting it.
+    #[serde(default)]
+    pub external_content: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
