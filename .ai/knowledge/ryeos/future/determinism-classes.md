@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-06T03:37:09Z:9431a5125ac9f8395f1e77186ad6073527549cde23f86fea4ad3d0091960e5f6:UwG5nEsbmtXwRQg0ZV7qOPVjhCqM1YI0dwGQzzUH+k48p6iapjnIKlLgcAZgHm5DadA9I1MngWOUhjy/xmuqAg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-07T02:50:56Z:c31e22e55db592c38cec78fd458b37fdf58b5d2e1d43f91df33c565a3291bbf9:Y3rTKCxxXLzKvQJr0xukcUVXbEnomu8RReKsvkVKX2kY51c3hxkE5PFho0lSMpPIt7yXBz7YNYW86rHtQzjtAA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, replay, evidence, effects]
-version: "0.1.0"
-status: deferred
+version: "0.2.0"
+status: implementable
 description: >
   Effect-class contract (sealed/recorded/live) making chain re-execution mean
   "derive the same result or produce a typed divergence proof."
@@ -55,23 +55,35 @@ A divergence produces a typed proof, not a shrug:
 `{effect ref, occurrence identity, recorded digest, derived digest, class}` —
 enough to name which boundary the world moved at.
 
-## Prerequisites (why this is deferred)
+## Prerequisites — SATISFIED 2026-08-07
 
-1. **Engine/toolchain identity** (`content-addressed-managed-runtime-workers`)
-   must land first. A divergence proof against an unpinned engine cannot
-   distinguish "engine changed" from "tool misbehaved"; proofs that cannot
-   make that distinction lie, and lying proofs are worse than none.
-2. The effective-program activation must be complete (it is the identity the
-   record binds to).
+1. **Engine/toolchain identity.** Originally cited against
+   `content-addressed-managed-runtime-workers`; that attribution was
+   inverted. The thing that names tool/toolchain bytes is **external content
+   realization** — declared trees captured into CAS, sealed into the
+   effective digest, executed from read-only realization mounts, inherited
+   by every descendant. Landed, activated on the graph kind, and proven
+   live (pinned `arc_tooling` on `graph:arc/game_solver`; first realized
+   solve `T-dd12da9b-…`). A divergence proof can now distinguish "the
+   runtime changed" from "the tool misbehaved" for everything declared;
+   what remains ambient is named as ambient. Workers *consume* this
+   identity; they were never its source.
+2. **Effective-program activation** — complete (seed v2, realization in the
+   digest, epoch cut over).
 
-## What may be pulled forward without the prerequisites
+Status accordingly: no longer deferred. The first consumer is designed:
+`knowledge:ryeos/future/durable-node-effect-records` — cross-run replay of
+graph node results as recorded-class effect records, keyed by the
+now-truthful node cache identity.
+
+## What may be pulled forward independently
 
 - **Class annotation of existing evidence.** Hook-ledger entries and ARC
   offline simulator responses are already recorded-class; stamping the class
   marker on that evidence now means history is pre-classified when replay
   lands. Cheap, additive, no semantics change.
-- The `execution.effects` schema design, folded into the workers package so
-  the worker contract is shaped by its consumer.
+- The `execution.effects` schema design — now shaped by its first real
+  consumer (the effect-record store), not by the workers package.
 
 ## ARC payoff
 
