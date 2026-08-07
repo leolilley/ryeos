@@ -707,6 +707,7 @@ fn string_array(v: &Value) -> Vec<String> {
 const BUNDLE_EVENT_OPS: &[&str] = &["append", "scan"];
 const RUNTIME_VAULT_OPS: &[&str] = &["put", "get", "delete", "list"];
 const PROJECT_SNAPSHOT_OPS: &[&str] = &["status", "log", "show", "create"];
+const LARGE_CONTENT_OPS: &[&str] = &["ingest", "scrub"];
 
 /// The only key permitted directly under `requires.capabilities.manifest`: the
 /// `runtime_authority` family set the daemon mints from the signed manifest.
@@ -758,6 +759,12 @@ const RUNTIME_AUTHORITY_FAMILIES: &[ManifestFamily] = &[
         key: "project_snapshots",
         shape: ManifestFamilyShape::OperationList {
             operations: PROJECT_SNAPSHOT_OPS,
+        },
+    },
+    ManifestFamily {
+        key: "large_content",
+        shape: ManifestFamilyShape::OperationList {
+            operations: LARGE_CONTENT_OPS,
         },
     },
 ];

@@ -17,8 +17,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use ryeos_bundle::manifest::{
-    BundleEventOperation, BundleManifest, BundleManifestSource, ProjectSnapshotOperation,
-    RuntimeVaultOperation,
+    BundleEventOperation, BundleManifest, BundleManifestSource, LargeContentOperation,
+    ProjectSnapshotOperation, RuntimeVaultOperation,
 };
 
 /// Relative risk of a single authority change. Ordered highest-to-lowest so a
@@ -117,6 +117,14 @@ fn project_snapshot_op_str(op: &ProjectSnapshotOperation) -> &'static str {
         ProjectSnapshotOperation::Log => "log",
         ProjectSnapshotOperation::Show => "show",
         ProjectSnapshotOperation::Create => "create",
+    }
+}
+
+/// Snake-case wire form of a large-content operation.
+fn large_content_op_str(op: &LargeContentOperation) -> &'static str {
+    match op {
+        LargeContentOperation::Ingest => "ingest",
+        LargeContentOperation::Scrub => "scrub",
     }
 }
 
@@ -248,6 +256,21 @@ pub fn diff_authority(old: &BundleManifest, new: &BundleManifest) -> Vec<AuditFi
         "project_snapshots",
         &mut findings,
     );
+
+    // ── large_content ──
+    let old_large: BTreeSet<&str> = old
+        .runtime_authority
+        .large_content
+        .iter()
+        .map(large_content_op_str)
+        .collect();
+    let new_large: BTreeSet<&str> = new
+        .runtime_authority
+        .large_content
+        .iter()
+        .map(large_content_op_str)
+        .collect();
+    diff_operation_set(&old_large, &new_large, "large_content", &mut findings);
 
     // ── provides / requires / uses kinds ──
     diff_kind_list(
