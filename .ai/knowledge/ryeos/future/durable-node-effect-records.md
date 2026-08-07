@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-07T03:31:55Z:d1f4a745fdb0278634fa3476e67cb90727b3c21768109e590a7f18bd419c60db:9UWOaLkWR/MCju1ssonGY+1PpWP/GYaZLB95cuRs+DvofM1oSraqej5W3aCtN78o4tywcb62dLjfrQzLrroGAg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-07T04:04:35Z:02dd2f39a012c2304c61aa70ac9e434ddbe344c0f8a658399774afbe5bba4feb:h8QBVydfcU//Dq1N3ekx3ZbIbdImVk8tdBWqD5K4uvxMTJVVeV0Ey3fjA3Lsmjy/dK61Ml954wlcuASvAkamCg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, replay, cache, evidence, graph]
 version: "0.1.0"
@@ -132,7 +132,12 @@ else that determines behavior.
      resets operational state on install per the clean-cut law; losing the
      ledger degrades to live re-execution, the retention semantics already
      accepted above.
-3. Daemon dispatch interception — fully mapped, ready to build:
+3. **DONE (`fc7380d6f`)** — built exactly as mapped, plus replay
+   provenance threaded end-to-end immediately (envelope → ActionSuccess →
+   ActionOkOutcome → NodeReceipt.replayed_from → persisted receipt)
+   rather than deferred: dead wire fields were refused on review. Two
+   directive-runtime request literals and four runtime test literals were
+   the compiler's catches beyond the map. Original map:
    - **Wire** (`ryeos-runtime/src/callback.rs`): optional
      `effect_replay: Option<EffectReplayRequest { node, class }>` on
      `DispatchActionRequest`. The runtime never names its own cache key —
