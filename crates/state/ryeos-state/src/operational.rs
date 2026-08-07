@@ -115,6 +115,21 @@ CREATE INDEX idx_effect_records_last_replayed ON effect_records(last_replayed_at
 CREATE INDEX idx_effect_records_record_hash ON effect_records(record_hash);
 "#;
 
+/// Schema-v2 additions, applied verbatim by the v1→v2 forward migration. A
+/// test asserts this block appears verbatim inside `SCHEMA_SQL`, so a
+/// migrated store and a fresh store cannot drift apart.
+const EFFECT_RECORDS_DDL: &str = r#"
+CREATE TABLE effect_records (
+    cache_key TEXT PRIMARY KEY,
+    record_hash TEXT NOT NULL,
+    produced_at TEXT NOT NULL,
+    last_replayed_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_effect_records_last_replayed ON effect_records(last_replayed_at);
+CREATE INDEX idx_effect_records_record_hash ON effect_records(record_hash);
+"#;
+
 fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
     sqlite_schema::SchemaSpec {
         application_id: OPERATIONAL_APP_ID,
@@ -815,6 +830,9 @@ impl OperationalDb {
         if mode.may_initialize() && sqlite_schema::is_empty_or_owned(&conn, spec.application_id)? {
             sqlite_schema::init_owned(&conn, &spec, SCHEMA_SQL, &path)?;
         }
+        if !mode.is_read_only() {
+            migrate_forward_if_owned(&conn, &path)?;
+        }
         assert_current(&conn, &path)?;
         let journal_mode: String = conn
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -1246,6 +1264,50 @@ fn assert_integrity(conn: &Connection, path: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Explicit atomic forward migration for the versioned operational store,
+/// per this store's charter: never reset, never archived, one transaction
+/// per schema step, using the same DDL fresh initialization uses. A store
+/// stamped NEWER than this binary is untouched and fails loudly downstream —
+/// that is an operator downgrade, not a cutover. A foreign application id is
+/// untouched for the same reason: the strict ownership check speaks.
+fn migrate_forward_if_owned(conn: &Connection, path: &Path) -> Result<()> {
+    let application_id: i32 = conn
+        .query_row("PRAGMA application_id", [], |row| row.get(0))
+        .context("read operational application id before migration")?;
+    if application_id != OPERATIONAL_APP_ID {
+        return Ok(());
+    }
+    loop {
+        let stored: i32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .context("read operational schema version before migration")?;
+        match stored {
+            v if v >= OPERATIONAL_SCHEMA_VERSION => return Ok(()),
+            0 => return Ok(()),
+            1 => {
+                let tx = conn
+                    .unchecked_transaction()
+                    .context("begin operational v1→v2 migration")?;
+                tx.execute_batch(EFFECT_RECORDS_DDL)
+                    .context("apply operational v1→v2 migration DDL")?;
+                tx.pragma_update(None, "user_version", 2)
+                    .context("stamp operational schema v2")?;
+                tx.commit().context("commit operational v1→v2 migration")?;
+                tracing::info!(
+                    path = %path.display(),
+                    "operational schema migrated v1 → v2 (effect records)"
+                );
+            }
+            other => {
+                anyhow::bail!(
+                    "operational schema version {other} has no forward migration in {}",
+                    path.display()
+                );
+            }
+        }
+    }
 }
 
 fn assert_current(conn: &Connection, path: &Path) -> Result<()> {
@@ -2570,6 +2632,58 @@ mod tests {
         assert_eq!(db.delete_effect_records(&[key.clone()]).unwrap(), 1);
         assert!(db.lookup_effect_record(&key).unwrap().is_none());
         assert!(db.list_effect_record_hashes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn schema_sql_embeds_the_migration_ddl_verbatim() {
+        // Fresh initialization and the v1→v2 migration must produce the
+        // exact same schema; the shared block is asserted byte-for-byte.
+        assert!(SCHEMA_SQL.contains(EFFECT_RECORDS_DDL.trim()));
+    }
+
+    #[test]
+    fn a_v1_store_migrates_forward_in_place() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        {
+            // Rewind a fresh store to the exact v1 shape: no effect_records,
+            // stamped v1, with real v1-era rows that must survive.
+            let db = OperationalDb::open(&path).unwrap();
+            db.record_cas_entry(&NewCasEntryAttribution {
+                hash: "d".repeat(64),
+                entry_kind: CasEntryKind::Object,
+                bytes: 7,
+                source_principal: None,
+                source_peer: None,
+                job_id: None,
+                state: CasEntryState::Mirrored,
+            })
+            .unwrap();
+            db.conn
+                .execute_batch(
+                    "DROP INDEX idx_effect_records_last_replayed;
+                     DROP INDEX idx_effect_records_record_hash;
+                     DROP TABLE effect_records;
+                     PRAGMA user_version=1;",
+                )
+                .unwrap();
+        }
+
+        let db = OperationalDb::open(&path).unwrap();
+        let version: i32 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, OPERATIONAL_SCHEMA_VERSION);
+        // Pre-migration rows survive; the migrated table is fully usable.
+        assert_eq!(
+            db.list_cas_entries_by_state(CasEntryState::Mirrored)
+                .unwrap()
+                .len(),
+            1
+        );
+        db.publish_effect_record(&"a".repeat(64), &"b".repeat(64)).unwrap();
+        assert!(db.lookup_effect_record(&"a".repeat(64)).unwrap().is_some());
     }
 
     #[test]
