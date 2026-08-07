@@ -2291,6 +2291,10 @@ pub async fn run_and_wait(
         .as_ref()
         .map(|bound| bound.mounts().to_vec())
         .unwrap_or_default();
+    let wait_external_sealed_env = wait_external
+        .bound
+        .as_ref()
+        .map(|bound| bound.sealed_set_env().to_string());
     let spawn_workspace_lifeline = guard.temp_dir.clone();
     let spawn_handle = task::spawn_blocking(move || {
         let _spawn_workspace_lifeline = spawn_workspace_lifeline;
@@ -2307,6 +2311,7 @@ pub async fn run_and_wait(
             isolation_project_authority: wait_isolation_project_authority,
             isolation_live_access_authority: wait_isolation_live_access_authority,
             isolation_external_read_only_mounts: wait_external_mounts,
+            external_realizations_env: wait_external_sealed_env,
             isolation_daemon_socket_path: wait_isolation_daemon_socket_path.as_deref(),
             thread_state_dir: Some(thread_state_dir.as_path()),
             is_resume: false,
@@ -3130,6 +3135,9 @@ async fn dispatch_detached_bg_task(
         .as_ref()
         .map(|bound| bound.mounts().to_vec())
         .unwrap_or_default();
+    let bg_external_sealed_env = bg_external_realizations
+        .as_ref()
+        .map(|bound| bound.sealed_set_env().to_string());
     let launch_owner = match launch_claim_guard
         .as_ref()
         .map(ThreadLaunchClaim::canonical_owner)
@@ -3239,6 +3247,7 @@ async fn dispatch_detached_bg_task(
             isolation_project_authority: bg_isolation_project_authority,
             isolation_live_access_authority: bg_isolation_live_access_authority,
             isolation_external_read_only_mounts: bg_external_mounts,
+            external_realizations_env: bg_external_sealed_env,
             isolation_daemon_socket_path: isolation_daemon_socket_path_for_spawn.as_deref(),
             thread_state_dir: Some(thread_state_dir.as_path()),
             is_resume,
