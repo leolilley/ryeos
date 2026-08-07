@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-06T00:58:12Z:f4222bd4883c5d09d79ad875c6a418f5d6bd5a175a0e4f5a8848e83695440803:HIfgQtU1KAv8zrb8iGXPkh+DCGCiAxDIOPuEh+SiUUYjGFqP0uXTQgM5efnd+YpHzWBLo7IlaaDr4DdsFcsNBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-07T08:47:24Z:53771588f8217cbbf2d320c3bf47813cf000f12be54a585f358a4e26f6c6c345:ZahwxfbtrgPx6mt/nzd35lfQtSp3D4WSSf0xBSBicgeu6T5V69P1eDkTI29hAui5qPvRWaRqlaT7/r/RdcajBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/directive"
 version: "1.0.0"
 location:
@@ -94,6 +94,14 @@ composer_config:
     - name: hooks
       strategy: replace_root_last
       expect_value_type: sequence
+    # Author-vouched effect class for the directive's provider boundary
+    # (`recorded` | `sealed` | `live`; absent means live — fresh sampling,
+    # no records). The daemon reads the sealed declaration from the admitted
+    # capsule at record publication; the runtime reads it only to decide
+    # whether to submit.
+    - name: effects
+      strategy: replace_root_last
+      expect_value_type: string
   policy_facts:
     - name: effective_caps
       path: [requires, capabilities, declared]
@@ -131,6 +139,10 @@ composed_value_contract:
     requires:
       type: single
       prim: mapping
+    # Effect class for the provider boundary; see the composer field above.
+    effects:
+      type: single
+      prim: string
 metadata:
   rules:
     name:

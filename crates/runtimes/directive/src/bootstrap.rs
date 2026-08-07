@@ -217,9 +217,18 @@ pub fn bootstrap(
         })?
         .to_string();
 
+    let provider_effects_recorded = matches!(
+        composed_view
+            .composed
+            .get("effects")
+            .and_then(|value| value.as_str()),
+        Some("recorded") | Some("sealed")
+    );
+
     Ok(BootstrapOutput {
         config: BootstrapConfig {
             execution,
+            provider_effects_recorded,
             tools,
             system_prompt,
             user_prompt,

@@ -190,6 +190,8 @@ pub struct Runner {
     matched_profile: Option<String>,
     /// SHA-256 of the canonical-JSON provider config from the snapshot.
     config_hash: String,
+    /// Sealed-program opt-in for provider-call effect records.
+    provider_effects_recorded: bool,
     /// Sealed financial authority when the launch carried one. `Paid` /
     /// `ExplicitlyFree` spend bounds make this a ledger route: the daemon
     /// owns the attempt budget lifecycle (reserve → issue → settle).
@@ -612,6 +614,10 @@ pub struct RunnerConfig {
     pub matched_profile: Option<String>,
     /// SHA-256 of the canonical-JSON provider config from the snapshot.
     pub config_hash: String,
+    /// Sealed-program opt-in: submit a provider-call effect record after
+    /// each settled, completed call. The daemon independently re-reads the
+    /// declaration from the admitted capsule at publication.
+    pub provider_effects_recorded: bool,
     /// Sealed financial authority from the launch envelope, when present.
     pub financial_authority: Option<ProviderAccountingAuthority>,
     /// Daemon-minted accounting scope identities from the launch envelope.
@@ -645,6 +651,7 @@ impl Runner {
             context_threshold_ratio,
             provider_config,
             provider_id,
+            provider_effects_recorded,
             execution,
             model_name,
             thread_id,
@@ -685,6 +692,7 @@ impl Runner {
             financial_authority,
             accounting_scope,
             context_window,
+            provider_effects_recorded,
             execution,
             model_name,
             thread_id,
@@ -1171,6 +1179,17 @@ impl Runner {
                                 break Err(anyhow::anyhow!(
                                     "provider_attempt_settlement_unprovable: {settle_error:#}"
                                 ));
+                            }
+                            if stream_completed
+                                && let Ok(crate::provider_adapter::StreamOutcome::Completed {
+                                    response,
+                                    ..
+                                }) = &call
+                            {
+                                self.publish_provider_call_record_best_effort(
+                                    &ledger, turn, attempt, &prepared, response,
+                                )
+                                .await;
                             }
                         }
                         match call {
@@ -3615,6 +3634,58 @@ impl Runner {
     /// Settle the issued attempt with bounded exact-retry recovery, then a
     /// recorded-state read. A terminal settlement that cannot be proven is an
     /// error — the caller must fail safe without admitting a retry.
+    /// Submit one settled, completed provider call for daemon-validated
+    /// record publication. Best-effort by contract: record loss is honest
+    /// loss — a failed publication warns and the run proceeds, and the next
+    /// identical run simply pays the provider again. The daemon re-derives
+    /// every digest and the effect class from its own state; this request
+    /// carries only preimages and the response as consumed.
+    async fn publish_provider_call_record_best_effort(
+        &self,
+        ledger: &LedgerAttempt,
+        turn: u32,
+        attempt_number: u32,
+        prepared: &crate::provider_adapter::PreparedProviderRequest,
+        response: &crate::provider_adapter::http::AdapterResponse,
+    ) {
+        if !self.provider_effects_recorded {
+            return;
+        }
+        let request = serde_json::json!({
+            "attempt_id": ledger.attempt_id,
+            "intent": {
+                "turn": turn,
+                "attempt_number": attempt_number,
+                "config_hash": self.config_hash,
+                "provider_id": self.provider_id,
+                "model_name": self.model_name,
+                "requested_output_tokens": prepared.requested_output_tokens,
+                "authority_digest": ledger.authority_digest.as_str(),
+            },
+            "envelope": {
+                "method": "POST",
+                "url": prepared.url,
+                "header_names": prepared.header_names,
+                "requested_output_tokens": prepared.requested_output_tokens,
+            },
+            "body_sha256": prepared.body_sha256,
+            "response": {
+                "message": response.message,
+                "usage": response.usage,
+                "finish_reason": response.finish_reason,
+            },
+            "provider_accounting": response.usage,
+        });
+        if let Err(error) = self.callback.publish_provider_call_record(request).await {
+            tracing::warn!(
+                %error,
+                turn,
+                attempt_number,
+                "provider call record publication failed; continuing without a record"
+            );
+        }
+    }
+
     async fn settle_ledger_attempt(
         &self,
         ledger: &LedgerAttempt,
@@ -4387,6 +4458,7 @@ mod tests {
             provider_id: "openai".to_string(),
             matched_profile: None,
             config_hash: "test_hash".to_string(),
+            provider_effects_recorded: false,
             financial_authority: None,
             accounting_scope: None,
             execution: ExecutionConfig::default(),
@@ -4465,6 +4537,7 @@ mod tests {
             provider_id: "openai".to_string(),
             matched_profile: None,
             config_hash: "test_hash".to_string(),
+            provider_effects_recorded: false,
             financial_authority: None,
             accounting_scope: None,
             execution: ExecutionConfig::default(),
@@ -4525,6 +4598,7 @@ mod tests {
             provider_id: "openai".to_string(),
             matched_profile: None,
             config_hash: "test_hash".to_string(),
+            provider_effects_recorded: false,
             financial_authority: None,
             accounting_scope: None,
             execution: ExecutionConfig::default(),
@@ -4583,6 +4657,7 @@ mod tests {
             provider_id: "openai".to_string(),
             matched_profile: None,
             config_hash: "test_hash".to_string(),
+            provider_effects_recorded: false,
             financial_authority: None,
             accounting_scope: None,
             execution: ExecutionConfig::default(),
@@ -4653,6 +4728,7 @@ mod tests {
             provider_id: "openai".to_string(),
             matched_profile: None,
             config_hash: "test_hash".to_string(),
+            provider_effects_recorded: false,
             financial_authority: None,
             accounting_scope: None,
             execution: ExecutionConfig::default(),
@@ -4825,6 +4901,7 @@ mod tests {
             provider_id: "openai".to_string(),
             matched_profile: None,
             config_hash: "test_hash".to_string(),
+            provider_effects_recorded: false,
             financial_authority: None,
             accounting_scope: None,
             execution: ExecutionConfig::default(),
@@ -4898,6 +4975,7 @@ mod tests {
             provider_id: "zen".to_string(),
             matched_profile: None,
             config_hash: "test_hash".to_string(),
+            provider_effects_recorded: false,
             financial_authority: None,
             accounting_scope: None,
             execution: ExecutionConfig::default(),
@@ -4968,6 +5046,7 @@ mod tests {
             provider_id: "zen".to_string(),
             matched_profile: None,
             config_hash: "test_hash".to_string(),
+            provider_effects_recorded: false,
             financial_authority: None,
             accounting_scope: None,
             execution: ExecutionConfig::default(),
@@ -5022,6 +5101,7 @@ mod tests {
             provider_id: "openai".to_string(),
             matched_profile: None,
             config_hash: "test_hash".to_string(),
+            provider_effects_recorded: false,
             financial_authority: None,
             accounting_scope: None,
             execution: ExecutionConfig::default(),
@@ -5769,6 +5849,7 @@ mod tests {
             provider_id: "route".to_string(),
             matched_profile: None,
             config_hash: "test_hash".to_string(),
+            provider_effects_recorded: false,
             financial_authority: None,
             accounting_scope: None,
             execution: ExecutionConfig::default(),

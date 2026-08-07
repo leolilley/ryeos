@@ -376,6 +376,23 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
+    async fn publish_provider_call_record(
+        &self,
+        thread_id: &str,
+        mut request: Value,
+    ) -> Result<Value, CallbackError> {
+        request["thread_id"] = json!(thread_id);
+        self.inject_callback_token(&mut request);
+        self.rpc
+            .request_with_timeout(
+                "runtime.publish_provider_call_record",
+                request,
+                Some(crate::daemon_rpc::DEFAULT_RPC_TIMEOUT),
+            )
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
     async fn vault_get(&self, thread_id: &str, mut request: Value) -> Result<Value, CallbackError> {
         request["thread_id"] = json!(thread_id);
         self.inject_callback_token(&mut request);

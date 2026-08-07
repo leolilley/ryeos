@@ -576,6 +576,19 @@ pub trait RuntimeCallbackAPI: Send + Sync {
     async fn dispatch_action(&self, request: DispatchActionRequest)
     -> Result<Value, CallbackError>;
 
+    /// Publish one provider-call effect record for daemon validation.
+    /// Transports without a daemon record store refuse by default; every
+    /// caller treats an error as record loss, never as turn failure.
+    async fn publish_provider_call_record(
+        &self,
+        _thread_id: &str,
+        _request: Value,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::Transport(anyhow::anyhow!(
+            "provider-call record publication is unsupported by this callback transport"
+        )))
+    }
+
     async fn attach_process(&self, thread_id: &str, pid: u32) -> Result<Value, CallbackError>;
 
     async fn mark_running(&self, thread_id: &str) -> Result<Value, CallbackError>;

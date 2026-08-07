@@ -470,6 +470,13 @@ impl ExecutionConfig {
 #[serde(deny_unknown_fields)]
 pub struct BootstrapConfig {
     pub execution: ExecutionConfig,
+    /// Whether the sealed program declares a durable effect class
+    /// (`recorded` | `sealed`) for its provider boundary. The runtime uses
+    /// this only to decide whether to submit records; the daemon re-reads
+    /// the declaration from the admitted capsule at publication and is the
+    /// authority.
+    #[serde(default)]
+    pub provider_effects_recorded: bool,
     pub tools: Vec<ToolSchema>,
     pub system_prompt: Option<String>,
     pub user_prompt: String,
