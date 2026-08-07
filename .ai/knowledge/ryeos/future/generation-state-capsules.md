@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-07T09:55:50Z:b29ba743dae79fa8751359e4255db0e654d378018885589797933ecaad417715:cu2hatW4e/xC/fl85RuYN8n28co8ny6yDYhOcG0xkIjvM6MmS/WymXvfasToO8WNYEcEh/AG0OqphNt0qCAjAg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-07T10:40:48Z:a453f9fa66d3262832cfa4329f68e99fe7ae18d9b44b42285efdadf24a1bd832:LJz+U48AjvcwPltUlvvve3W9ra5UcfMIz3IdZbFJa3AlMqge62fBrUe7QdxFCDb4Wcfg3fA2l9qLlhl/3K4ODw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, inference, checkpoint, capsule, tinygrad, search, sealed]
 version: "0.1.0"
@@ -36,10 +36,11 @@ A content-addressed object:
   everywhere: the sequence digest is the identity of "where in the
   generation," so two checkpoints at the same offset of different
   generations can never be confused.
-- **state payload** — the KV tensors, stored through the weights-tier
-  large-object store (`knowledge:ryeos/future/weights-tier-realizations`):
-  contiguous, mmap-ready, streaming-verified at write. The capsule holds
-  hashes, never tensors.
+- **state payload** — the KV tensors, stored through the semantically
+  blind large-object store
+  (`knowledge:ryeos/future/weights-tier-realizations`): contiguous,
+  mmap-ready, streaming-verified at write. The capsule holds hashes,
+  never tensors.
 - **lineage** — the parent capsule hash when this checkpoint continues or
   forks another. The search tree is literally the capsule lineage graph.
 

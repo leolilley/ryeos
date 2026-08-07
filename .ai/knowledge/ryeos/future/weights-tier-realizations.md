@@ -1,14 +1,16 @@
-<!-- ryeos:signed:2026-08-07T10:17:43Z:7c47e3564328217a05d6a13cf14201c41dc6e270bb77332dcb45602e99920192:a8Fx6vU+4I5QvwVZcRX0GLkqu3N2UmcQPwxByFwgIwP3byvW9vq8hwKeg3tEeyPczgW7aNq+8F8AsdXNudirAQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-07T10:40:48Z:2b52b6c614b6f58f573d799d12a432b07714a0de32b677fa2562b7e9fd18c644:o8AXqzv0ZoE/yXMGk5IIn8ptMGPky+c8QNMR2/gRCgV96wEyTQPVBcvNHJZLy5mPUHp0aeNnIJcakm1zX+jTCQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, realization, weights, storage, inference, tinygrad]
-version: "0.2.0"
+version: "0.3.0"
 status: draft
 description: >
-  A large-object tier for external-content realizations so model weights can
-  be sealed content: pin-only ingest, contiguous mmap-ready storage under the
-  pinned authority, streaming verification — identity layer AND wire
-  vocabulary unchanged; the tier is named by manifest-object kind and
-  permitted by kind-schema contract data, never by a new enum variant.
+  A semantically-blind large-content tier for external realizations, with
+  model weights as its motivating first consumer: pin-only ingest,
+  contiguous mmap-ready storage under the pinned authority, streaming
+  verification — identity layer AND wire vocabulary unchanged; the tier is
+  named by manifest-object kind and permitted by kind-schema contract data,
+  never by a new enum variant, and the substrate vocabulary never says
+  "weights".
 ---
 
 # Weights-tier realizations
@@ -39,23 +41,35 @@ Where the distinction actually lives — as data, following the kind
 pattern the substrate already runs on:
 
 - **The manifest object names its own tier.** Bind and admission fetch
-  the pinned manifest from CAS regardless; a weights realization's
-  `manifest_hash` resolves to an `external_weights_manifest` object
-  instead of the content manifest. Routing to the large-object store is
-  decided by what the digest-pinned manifest says it is — sealed by
-  identity, no wire discriminator, no ambient decision.
+  the pinned manifest from CAS regardless; a large realization's
+  `manifest_hash` resolves to an `external_large_content_manifest`
+  object instead of the content manifest. Routing to the large-object
+  store is decided by what the digest-pinned manifest says it is —
+  sealed by identity, no wire discriminator, no ambient decision.
 - **The kind-schema contract grants the tier.** `execution.
   external_content` already carries `allowed_roots` and
   `max_declarations` as signed schema values; permission to pin
-  weights-scale content and its bounds land beside them. An item kind
-  that never declared weights capability cannot bind a weights manifest
-  — refused at admission, from data, not from Rust.
+  large-tier content and its bounds land beside them. An item kind that
+  never declared the capability cannot bind a large-content manifest —
+  refused at admission, from data, not from Rust.
+
+And the tier itself is **semantically blind**. "Weights" appears nowhere
+in substrate vocabulary — not in the manifest kind, not in the store,
+not in the bounds — because the mechanism (contiguous immutable large
+objects, chunked streaming ingest, mmap binding, lease/budget sweep,
+scrub) carries model weights exactly as it will carry generation-state
+checkpoints, training-data sets, or an oversized runtime tree. Weights
+is what an *author* names their realization in item-space, the way one
+is named `simulator_runtime` today. The state layer's charter — it
+knows nothing about what content means — holds all the way down.
 
 An earlier draft of this note put `kind: weights` in the shared
-realization enum. That was the wrong layer twice over: it conflated a
-storage tier with a shape, and it hard-coded policy into closed wire
-vocabulary that the schema-data layer exists to express. Storage changes;
-identity and vocabulary do not.
+realization enum, and a second draft named the manifest kind and store
+after weights. Same mistake at two depths: letting the first consumer
+leak into mechanism vocabulary — as closed wire policy the schema-data
+layer should express, then as meaning the state layer is chartered not
+to hold. Storage changes; identity, vocabulary, and meaning-blindness
+do not.
 
 ## Decisions
 
@@ -102,7 +116,7 @@ identity and vocabulary do not.
    manifest kinds exist. So: capture keeps enforcing content bounds in
    the walk (unchanged in effect — every captured set is content), and
    admission enforces per-tier byte bounds after fetching manifests,
-   when it knows what each one is. The weights tier is bounded by the
+   when it knows what each one is. The large tier is bounded by the
    node's large-object budget and a per-file ceiling sized for real
    shards (hundreds of GB node budget, tens of GB per file), enforced
    at ingest where the cost is paid knowingly. The wire validator
@@ -124,20 +138,21 @@ design, never realization content.
 ## Increments
 
 There is no wire-contract increment: the vocabulary does not change, and
-until the weights manifest object exists there is nothing to validate
-differently — the tier's first code is the store that gives the manifest
-something to name.
+until the large-content manifest object exists there is nothing to
+validate differently — the tier's first code is the store that gives the
+manifest something to name.
 
-1. Large-object store + the `external_weights_manifest` object under the
-   pinned authority: streaming resumable ingest (hash-while-write, chunk
-   sidecar), immutable publication, lease + budget sweep. The
-   bounds relocation (capture-side content caps, admission-side per-tier
-   caps, wire validator reduced to structure + sanity ceiling) lands
-   here, in the same change that creates the second manifest kind.
-2. Operator ingest surface (`ryeos weights realize <path>` or a signed
-   tool): stream a safetensors file or shard directory in, emit the
-   manifest object, print the pin line an author pastes into a
-   declaration.
+1. Large-object store + the `external_large_content_manifest` object
+   under the pinned authority: streaming resumable ingest
+   (hash-while-write, chunk sidecar), immutable publication, lease +
+   budget sweep. The bounds relocation (capture-side content caps,
+   admission-side per-tier caps, wire validator reduced to structure +
+   sanity ceiling) lands here, in the same change that creates the
+   second manifest kind.
+2. Operator ingest surface (`ryeos content ingest <path>` or a signed
+   tool — tier-named, never consumer-named): stream a file or shard
+   directory in, emit the manifest object, print the pin line an author
+   pastes into a declaration.
 3. Bind path: route on manifest-object kind, mount weights realizations
    straight from the store; launch admission proves closure presence and
    sizes, and refuses weights manifests on item kinds whose contract

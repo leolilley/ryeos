@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-07T09:55:51Z:b002b2b8fc89fb8753c945528f0ba6fa303f0f1bffc09dffad1c1aba88f77256:gpOhtXTlaC4QJUw+ujS4br3lCaWfi1/895JnlaQ2RAYk+W9Lu85U04Cpgow2GP0/ktP8XOclYCwy1gLZERIzCg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-07T10:40:49Z:95ec4404b762f238b01c2639df69eae1f344f1a3f6b3791e5a75b25ac98b4384:2/tzuR+NlV0X9dV8vzmSuy4OU2ZsZTtHtzeCfnHreKe2S9iHYCEkYlAyUnCurro73PY+rk7fIBE+Ava+88blAA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, inference, tinygrad, sealed, replay, arc]
 version: "0.1.0"
@@ -145,7 +145,7 @@ KV-prefix sharing.
    discipline applies to caches exactly as it did to the interpreter).
 5. **Generation-state capsules** — designed:
    `knowledge:ryeos/future/generation-state-capsules`. Park/resume/fork
-   at declared token boundaries, KV through the weights-tier store,
+   at declared token boundaries, KV through the large-object store,
    prefix cache unified as the degenerate checkpoint, foreign-identity
    capsules refused with replay as the graceful path.
 6. **Sealed training runs** (later) — data manifests as realizations,
