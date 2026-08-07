@@ -25,6 +25,10 @@ use super::PendingCasPublication;
 /// leases. This value must live until the spawned process exits.
 pub(crate) struct BoundExternalRealizations {
     mounts: Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
+    /// Canonical JSON of the sealed realization set, injected into the spawn
+    /// env (`RYEOS_EXTERNAL_REALIZATIONS`) so a runtime can reference the
+    /// identity it executes under without re-observing any content.
+    sealed_set_env: String,
     _leases: Vec<fs::File>,
 }
 
@@ -33,6 +37,10 @@ impl BoundExternalRealizations {
         &self,
     ) -> &[ryeos_engine::isolation::IsolationReadOnlyMountAuthority] {
         &self.mounts
+    }
+
+    pub(crate) fn sealed_set_env(&self) -> &str {
+        &self.sealed_set_env
     }
 }
 
@@ -345,6 +353,7 @@ pub(crate) fn bind_external_realizations(
     if realized.is_empty() {
         return Ok(None);
     }
+    let sealed_set_env = lillux::cas::canonical_json(&realized.to_value()?)?;
     let authority = super::pinned_state_authority(state)?;
     let guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&guard)?;
@@ -382,6 +391,7 @@ pub(crate) fn bind_external_realizations(
     }
     Ok(Some(BoundExternalRealizations {
         mounts,
+        sealed_set_env,
         _leases: leases,
     }))
 }

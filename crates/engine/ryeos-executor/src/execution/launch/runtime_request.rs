@@ -221,6 +221,16 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
             ));
         }
     }
+    // The sealed realization identity travels with the spawn: a runtime (or
+    // any tool it hosts) references the admitted set from here rather than
+    // re-observing content the contract forbids it to re-verify live.
+    if let Some(bound) = &external_realizations {
+        protocol_bindings.push(ryeos_app::env_contract::EnvBinding::new(
+            "RYEOS_EXTERNAL_REALIZATIONS",
+            bound.sealed_set_env(),
+            ryeos_app::env_contract::EnvSourceDetail::PerSpawnDaemon,
+        ));
+    }
 
     let declared_secret_bindings = secret_map
         .iter()

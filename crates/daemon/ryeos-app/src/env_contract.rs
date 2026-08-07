@@ -52,6 +52,11 @@ const DAEMON_CALLBACK_NAMES: &[&str] = &[
 
 const DAEMON_RESUME_NAMES: &[&str] = &["RYEOS_CHECKPOINT_DIR", "RYEOS_RESUME"];
 
+/// Sealed external-realization facts injected per spawn: the canonical JSON
+/// of the launch's admitted realization set, so a runtime can reference the
+/// identity it executes under without re-observing any content.
+const DAEMON_REALIZATION_NAMES: &[&str] = &["RYEOS_EXTERNAL_REALIZATIONS"];
+
 const PROXY_AND_CA_NAMES: &[&str] = &[
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -324,7 +329,9 @@ fn validate_binding_name(binding: &EnvBinding) -> Result<(), EnvContractError> {
             validate_protocol_injection_name(&binding.key, *source, &binding.source)
         }
         EnvSourceDetail::PerSpawnDaemon => {
-            if DAEMON_CALLBACK_NAMES.contains(&binding.key.as_str()) {
+            if DAEMON_CALLBACK_NAMES.contains(&binding.key.as_str())
+                || DAEMON_REALIZATION_NAMES.contains(&binding.key.as_str())
+            {
                 Ok(())
             } else {
                 invalid(
