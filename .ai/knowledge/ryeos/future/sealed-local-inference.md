@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-07T09:22:42Z:a9da3ef6c33d19451508c074ce4d0c363474ad86930b39d7c74fe910c4acf7f5:eAGRtNUWagMGG3wrjwYz20JUvRb5WZWWK0zLA3F0Gbnshny7XqamRiOl0Bd1gy3wm/Cz6tmKqSDFUcWyNVowBw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-07T09:52:47Z:d2c0e0be6462f95c71bfeaabe457c945a12f14ecf7f7dc1d1557bd4e1144f53e:Q1H8/iZXE7ORHe4ZqG9O9J0vMJbgkGK0nspN9RRKBiK6Cw0faON3ukCuXZAvEgf7YC0hz1DshuMA5wbKxUPRBA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, inference, tinygrad, sealed, replay, arc]
 version: "0.1.0"
@@ -47,10 +47,13 @@ admitted content:
   existing framed-streaming protocol surface.
 - **sampler** — RNG seed and sampler config in the action identity, like
   any other param.
-- **device** — device class named in the digest. Float non-associativity
+- **device** — named in the execution identity, a content-addressed
+  coordinate *beside* the program digest
+  (`knowledge:ryeos/future/execution-identity`). Float non-associativity
   means bit-stability does not transfer across hardware; `sealed` is
-  always scoped to an execution identity. A different GPU is a different
-  digest is a different run — never a false "sealed everywhere."
+  scoped to (program, execution identity), and on foreign hardware sealed
+  evidence degrades to recorded — still replayable, no longer
+  re-derivable there — never a false "sealed everywhere."
 
 What stays `recorded` even locally: effects crossing outside the sealed
 set — live retrieval, user interaction — and sampling on any execution
@@ -129,9 +132,13 @@ KV-prefix sharing.
    base-plus-adapter composition rather than chunking, per-kind bounds.
    Identity layer unchanged. This gates local work and is now ready to
    build.
-3. **Execution-identity vocabulary** — device class, kernel artifacts,
-   tinygrad version as named digest components; the divergence proof
-   gains a hardware tranche.
+3. **Execution-identity vocabulary** — designed:
+   `knowledge:ryeos/future/execution-identity`. A coordinate beside the
+   program digest, not a digest tranche: sealed claims scope to the
+   pair and degrade to recorded across hardware; the interpreter
+   residue is absorbed as a named tranche; divergence distinguishes
+   scope from finding. Ready to build, and useful before local
+   inference arrives.
 4. **tinygrad as a realized managed runtime** — the inference server on
    the framed-streaming protocol, its tree and its JIT/BEAM caches either
    pinned as realizations or declared live (the ambient-content
