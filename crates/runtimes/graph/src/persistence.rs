@@ -9,7 +9,7 @@ pub async fn write_node_receipt(
     graph_run_id: &str,
     receipt: &NodeReceipt,
 ) -> anyhow::Result<Value> {
-    let receipt_json = json!({
+    let mut receipt_json = json!({
         "node": receipt.node,
         "step": receipt.step,
         "definition_ref": receipt.definition_ref,
@@ -17,12 +17,16 @@ pub async fn write_node_receipt(
         "graph_run_id": graph_run_id,
         "node_result_hash": receipt.result_hash,
         "cache_hit": receipt.cache_hit,
-        "replayed_from": receipt.replayed_from,
         "elapsed_ms": receipt.elapsed_ms,
         "timestamp": lillux::time::iso8601_now(),
         "error": receipt.error,
         "cost": receipt.cost,
     });
+    // Replay provenance appears only when a record was actually served,
+    // mirroring the receipt struct's skip-when-absent wire shape.
+    if let Some(replayed_from) = &receipt.replayed_from {
+        receipt_json["replayed_from"] = json!(replayed_from);
+    }
 
     callback
         .publish_artifact(json!({

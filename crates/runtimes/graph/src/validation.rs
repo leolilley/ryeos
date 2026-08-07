@@ -670,6 +670,16 @@ mod tests {
         GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap()
     }
 
+    /// Rejection at the definition boundary: structural shape rules are
+    /// enforced by `GraphDefinition::from_yaml`, so shape tests assert the
+    /// load error.
+    fn make_graph_err(yaml: &str) -> String {
+        format!(
+            "{:#}",
+            GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap_err()
+        )
+    }
+
     #[test]
     fn validate_graph_warns_unreachable_nodes() {
         let yaml = r#"
@@ -764,13 +774,12 @@ config:
   start: step1
   nodes: {}
 "#;
-        let graph = make_graph(yaml);
-        let result = validate_graph(&graph);
+        // With no nodes, the start reference cannot resolve; the definition
+        // boundary refuses the shape before graph analysis ever runs.
+        let error = make_graph_err(yaml);
         assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| e.contains("config.nodes is empty"))
+            error.contains("config.start must name an existing node"),
+            "empty nodes must fail at load: {error}"
         );
     }
 
@@ -814,24 +823,23 @@ __LIMITS__
             ),
             (
                 "  segment_steps: 0",
-                "config.segment_steps must be between 1 and 500",
+                "config.segment_steps must be in range",
             ),
             (
                 "  max_steps: 500\n  segment_steps: 501",
-                "config.segment_steps must be between 1 and 500",
+                "config.segment_steps must be in range",
             ),
             (
                 "  max_steps: 10\n  segment_steps: 11",
-                "config.segment_steps (11) must not exceed config.max_steps (10)",
+                "config.segment_steps must be in range",
             ),
         ];
 
         for (limits, expected) in cases {
-            let result = validate_graph(&make_graph(&base.replace("__LIMITS__", limits)));
+            let error = make_graph_err(&base.replace("__LIMITS__", limits));
             assert!(
-                result.errors.iter().any(|error| error.contains(expected)),
-                "missing {expected:?} for {limits:?}: {:?}",
-                result.errors
+                error.contains(expected),
+                "missing {expected:?} for {limits:?}: {error}"
             );
         }
     }
@@ -905,7 +913,7 @@ config:
 "#;
         let error = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap_err();
         assert!(
-            format!("{error:#}").contains("event has no HookContextSchema"),
+            format!("{error:#}").contains("targets undeclared event"),
             "expected an unknown hook event compilation error, got: {error:#}"
         );
     }
@@ -971,13 +979,10 @@ config:
     step1:
       action: {item_id: "tool:test/echo", ref_bindings: {}}
 "#;
-        let graph = make_graph(yaml);
-        let result = validate_graph(&graph);
+        let error = make_graph_err(yaml);
         assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| e.contains("nonexistent") && e.contains("does not exist"))
+            error.contains("config.start must name an existing node"),
+            "a dangling start must fail at load: {error}"
         );
     }
 
@@ -1002,15 +1007,10 @@ config:
     done:
       node_type: return
 "#;
-        let graph = make_graph(yaml);
-        let result = validate_graph(&graph);
+        let error = make_graph_err(yaml);
         assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| e.contains("iterate") && e.contains("must declare 'as'")),
-            "expected error for foreach without 'as', got: {:?}",
-            result.errors
+            error.contains("foreach node `iterate` requires action, over, and as"),
+            "expected error for foreach without 'as': {error}"
         );
     }
 
@@ -1032,13 +1032,10 @@ __CACHE__
     done: {node_type: return}
 "#;
         let field = "      cache_result: true";
-        let result = validate_graph(&make_graph(&base.replace("__CACHE__", field)));
+        let error = make_graph_err(&base.replace("__CACHE__", field));
         assert!(
-            result.errors.iter().any(|error| {
-                error.contains("foreach node 'iterate'") && error.contains("not cacheable")
-            }),
-            "{field} must be rejected on foreach: {:?}",
-            result.errors
+            error.contains("foreach node `iterate` cannot cache its aggregate dispatch"),
+            "{field} must be rejected on foreach: {error}"
         );
     }
 
@@ -1059,13 +1056,10 @@ config:
       next: {type: unconditional, to: done}
     done: {node_type: return}
 "#;
-        let result = validate_graph(&make_graph(yaml));
+        let error = make_graph_err(yaml);
         assert!(
-            result.errors.iter().any(|error| {
-                error.contains("foreach node 'iterate'") && error.contains("env_requires")
-            }),
-            "inert foreach env_requires must be rejected: {:?}",
-            result.errors
+            error.contains("foreach node `iterate` cannot declare inert env_requires"),
+            "inert foreach env_requires must be rejected: {error}"
         );
     }
 
@@ -1082,13 +1076,10 @@ config:
       next: {type: unconditional, to: unreachable}
     unreachable: {node_type: return}
 "#;
-        let result = validate_graph(&make_graph(yaml));
+        let error = make_graph_err(yaml);
         assert!(
-            result.errors.iter().any(|error| {
-                error.contains("return node 'done'") && error.contains("cannot declare 'next'")
-            }),
-            "terminal return next must be rejected: {:?}",
-            result.errors
+            error.contains("return node `done` cannot declare next"),
+            "terminal return next must be rejected: {error}"
         );
     }
 
@@ -1126,13 +1117,10 @@ __NODE__
             ),
         ];
         for node in cases {
-            let result = validate_graph(&make_graph(&base.replace("__NODE__", node)));
+            let error = make_graph_err(&base.replace("__NODE__", node));
             assert!(
-                result.errors.iter().any(|error| {
-                    error.contains("max_concurrency") && error.contains("where it has no effect")
-                }),
-                "unused max_concurrency must be rejected for {node:?}: {:?}",
-                result.errors
+                error.contains("has invalid or inert max_concurrency"),
+                "unused max_concurrency must be rejected for {node:?}: {error}"
             );
         }
     }
@@ -1208,15 +1196,10 @@ config:
     done:
       node_type: return
 "#;
-        let graph = make_graph(yaml);
-        let result = validate_graph(&graph);
+        let error = make_graph_err(yaml);
         assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| e.contains("check") && e.contains("conditional")),
-            "expected error for gate with unconditional next, got: {:?}",
-            result.errors
+            error.contains("gate node `check` requires non-empty conditional next"),
+            "expected error for gate with unconditional next: {error}"
         );
     }
 
@@ -1277,14 +1260,10 @@ config:
     done:
       node_type: return
 "#;
-        let result = validate_graph(&make_graph(yaml));
+        let error = make_graph_err(yaml);
         assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| e.contains("iterate") && e.contains("both 'collect' and 'as'")),
-            "expected collect==as error, got: {:?}",
-            result.errors
+            error.contains("cannot use `results` for both collect and as"),
+            "expected collect==as error: {error}"
         );
     }
 
@@ -1308,43 +1287,46 @@ config:
 "#;
         assert!(validate_graph(&make_graph(base)).errors.is_empty());
         let cases = [
-            ("      as: item\n", "", "must declare 'as'"),
+            (
+                "      as: item\n",
+                "",
+                "follow fanout node `fan` requires parallel and as",
+            ),
             (
                 "      parallel: true\n",
                 "      parallel: false\n",
-                "parallel: true",
+                "follow fanout node `fan` requires parallel and as",
             ),
             (
                 "      collect: results\n",
                 "      collect: item\n",
-                "both 'collect' and 'as'",
+                "cannot use `item` for both collect and as",
             ),
             (
                 "      max_concurrency: 3\n",
                 "      max_concurrency: 0\n",
-                "between 1 and 256",
+                "has invalid or inert max_concurrency",
             ),
             (
                 "      max_concurrency: 3\n",
                 "      max_concurrency: 257\n",
-                "between 1 and 256",
+                "has invalid or inert max_concurrency",
             ),
             (
                 "      action: {item_id: \"directive:child\", ref_bindings: {}, params: {value: \"${item}\"}}\n",
                 "      retry: {attempts: 2, backoff_ms: 0}\n      action: {item_id: \"directive:child\", ref_bindings: {}}\n",
-                "cannot combine 'retry' and 'follow'",
+                "invalid retry policy",
             ),
         ];
         for (from, to, expected) in cases {
             let mut yaml = base.replacen(from, to, 1);
-            if expected == "must declare 'as'" {
+            if from == "      as: item\n" {
                 yaml = yaml.replace("${item}", "1");
             }
-            let graph = make_graph(&yaml);
-            let errors = validate_graph(&graph).errors;
+            let error = make_graph_err(&yaml);
             assert!(
-                errors.iter().any(|e| e.contains(expected)),
-                "missing {expected:?} in {errors:?}"
+                error.contains(expected),
+                "missing {expected:?} in {error}"
             );
         }
     }
@@ -1601,15 +1583,10 @@ config:
     orphan:
       assign: {foo: bar}
 "#;
-        let graph = make_graph(yaml);
-        let result = validate_graph(&graph);
+        let error = make_graph_err(yaml);
         assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| e.contains("orphan") && e.contains("ambiguous")),
-            "expected error for node with no action/type, got: {:?}",
-            result.errors
+            error.contains("node `orphan` is an ambiguous action node without action"),
+            "expected error for node with no action/type: {error}"
         );
     }
 
@@ -1628,14 +1605,10 @@ config:
       node_type: return
       follow: true
 "#;
-        let result = validate_graph(&make_graph(yaml));
+        let error = make_graph_err(yaml);
         assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| e.contains("follow") && e.contains("only action nodes")),
-            "expected non-action follow rejection, got: {:?}",
-            result.errors
+            error.contains("follow node `done` requires an action node with action"),
+            "expected non-action follow rejection: {error}"
         );
     }
 
@@ -1655,14 +1628,10 @@ config:
     done:
       node_type: return
 "#;
-        let result = validate_graph(&make_graph(yaml));
+        let error = make_graph_err(yaml);
         assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| e.contains("follow") && e.contains("cacheable")),
-            "expected cacheable-follow rejection, got: {:?}",
-            result.errors
+            error.contains("follow node `step1` cannot cache a result before its child settles"),
+            "expected cacheable-follow rejection: {error}"
         );
     }
 
@@ -1682,14 +1651,10 @@ config:
     done:
       node_type: return
 "#;
-        let result = validate_graph(&make_graph(yaml));
+        let error = make_graph_err(yaml);
         assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| e.contains("follow") && e.contains("parallel")),
-            "expected parallel-follow rejection, got: {:?}",
-            result.errors
+            error.contains("declares iteration fields without foreach or follow fanout"),
+            "expected parallel-follow rejection: {error}"
         );
     }
 
@@ -1708,14 +1673,10 @@ config:
     done:
       node_type: return
 "#;
-        let result = validate_graph(&make_graph(yaml));
+        let error = make_graph_err(yaml);
         assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| e.contains("follow node") && e.contains("no 'action'")),
-            "expected follow-without-action rejection, got: {:?}",
-            result.errors
+            error.contains("follow node `step1` requires an action node with action"),
+            "expected follow-without-action rejection: {error}"
         );
     }
 
@@ -1811,8 +1772,8 @@ config:
 
     // ── §A per-step retry validation ─────────────────────────────────
 
-    fn retry_graph(node_body: &str) -> GraphDefinition {
-        let yaml = format!(
+    fn retry_yaml(node_body: &str) -> String {
+        format!(
             r#"
 version: "1.0.0"
 category: test
@@ -1824,8 +1785,21 @@ config:
     done:
       node_type: return
 "#
+        )
+    }
+
+    fn retry_graph(node_body: &str) -> GraphDefinition {
+        make_graph(&retry_yaml(node_body))
+    }
+
+    /// Every malformed retry shape is refused at the definition boundary
+    /// with one policy-level message; the shape under test names the intent.
+    fn assert_retry_rejected(node_body: &str) {
+        let error = make_graph_err(&retry_yaml(node_body));
+        assert!(
+            error.contains("node `n` has invalid retry policy"),
+            "expected retry policy rejection: {error}"
         );
-        make_graph(&yaml)
     }
 
     #[test]
@@ -1842,102 +1816,50 @@ config:
 
     #[test]
     fn validate_graph_rejects_retry_attempts_out_of_range() {
-        let too_many = validate_graph(&retry_graph(
+        assert_retry_rejected(
             "      action: {item_id: \"tool:x\", ref_bindings: {}}\n      retry: {attempts: 11, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
-        ));
-        assert!(
-            too_many
-                .errors
-                .iter()
-                .any(|e| e.contains("retry.attempts must be between 1 and 10")),
-            "expected attempts range rejection, got: {:?}",
-            too_many.errors
         );
-        let zero = validate_graph(&retry_graph(
+        assert_retry_rejected(
             "      action: {item_id: \"tool:x\", ref_bindings: {}}\n      retry: {attempts: 0, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
-        ));
-        assert!(
-            zero.errors
-                .iter()
-                .any(|e| e.contains("retry.attempts must be between 1 and 10"))
         );
     }
 
     #[test]
     fn validate_graph_rejects_retry_zero_backoff() {
-        let result = validate_graph(&retry_graph(
+        assert_retry_rejected(
             "      action: {item_id: \"tool:x\", ref_bindings: {}}\n      retry: {attempts: 3, backoff_ms: 0}\n      next: {type: unconditional, to: done}",
-        ));
-        assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| e.contains("retry.backoff_ms must be greater than 0")),
-            "expected backoff>0 rejection, got: {:?}",
-            result.errors
         );
     }
 
     #[test]
     fn validate_graph_rejects_retry_delays_above_runtime_maximum() {
         let too_large = MAX_RETRY_BACKOFF_MS + 1;
-        let backoff = validate_graph(&retry_graph(&format!(
+        assert_retry_rejected(&format!(
             "      action: {{item_id: \"tool:x\"}}\n      retry: {{attempts: 2, backoff_ms: {too_large}}}\n      next: {{type: unconditional, to: done}}"
-        )));
-        assert!(backoff.errors.iter().any(|error| {
-            error.contains("retry.backoff_ms") && error.contains("runtime maximum")
-        }));
-
-        let cap = validate_graph(&retry_graph(&format!(
+        ));
+        assert_retry_rejected(&format!(
             "      action: {{item_id: \"tool:x\"}}\n      retry: {{attempts: 2, backoff_ms: 1, max_backoff_ms: {too_large}}}\n      next: {{type: unconditional, to: done}}"
-        )));
-        assert!(cap.errors.iter().any(|error| {
-            error.contains("retry.max_backoff_ms") && error.contains("runtime maximum")
-        }));
+        ));
     }
 
     #[test]
     fn validate_graph_rejects_retry_max_below_backoff() {
-        let result = validate_graph(&retry_graph(
+        assert_retry_rejected(
             "      action: {item_id: \"tool:x\", ref_bindings: {}}\n      retry: {attempts: 3, backoff_ms: 1000, max_backoff_ms: 500}\n      next: {type: unconditional, to: done}",
-        ));
-        assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| e.contains("retry.max_backoff_ms") && e.contains(">= retry.backoff_ms")),
-            "expected max<backoff rejection, got: {:?}",
-            result.errors
         );
     }
 
     #[test]
     fn validate_graph_rejects_retry_on_gate_node() {
-        let result = validate_graph(&retry_graph(
+        assert_retry_rejected(
             "      node_type: gate\n      retry: {attempts: 3, backoff_ms: 100}\n      next: {type: conditional, branches: [{to: done}]}",
-        ));
-        assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| e.contains("retry is only valid on")),
-            "expected non-action retry rejection, got: {:?}",
-            result.errors
         );
     }
 
     #[test]
     fn validate_graph_rejects_retry_plus_follow() {
-        let result = validate_graph(&retry_graph(
+        assert_retry_rejected(
             "      action: {item_id: \"tool:x\", ref_bindings: {}}\n      follow: true\n      retry: {attempts: 3, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
-        ));
-        assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| e.contains("cannot combine 'retry' and 'follow'")),
-            "expected retry+follow rejection, got: {:?}",
-            result.errors
         );
     }
 
@@ -1979,21 +1901,13 @@ config:
     done:
       node_type: return
 "#;
-        let result = validate_graph(&make_graph(yaml));
+        let error = make_graph_err(yaml);
         assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| e.contains("bundle-events.foo/evt") && e.contains("reserved")),
-            "expected runtime-authority reject, got: {:?}",
-            result.errors
+            error.contains("bundle-events.foo/evt") && error.contains("reserved"),
+            "expected runtime-authority reject: {error}"
         );
-        // The ordinary execute permission must NOT be flagged.
-        assert!(
-            !result.errors.iter().any(|e| e.contains("tool.echo")),
-            "ordinary execute permission must not be flagged: {:?}",
-            result.errors
-        );
+        // The ordinary execute permission alone must load cleanly.
+        make_graph(&yaml.replace("      - ryeos.append.bundle-events.foo/evt\n", ""));
     }
 
     #[test]
@@ -2013,14 +1927,10 @@ config:
     done:
       node_type: return
 "#;
-        let result = validate_graph(&make_graph(yaml));
+        let error = make_graph_err(yaml);
         assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| e.contains("scan.bundle-events.*") && e.contains("reserved")),
-            "expected wildcard intrusion to be rejected, got: {:?}",
-            result.errors
+            error.contains("scan.bundle-events.*") && error.contains("reserved"),
+            "expected wildcard intrusion to be rejected: {error}"
         );
     }
 
@@ -2042,20 +1952,16 @@ config:
     done:
       node_type: return
 "#;
-        let result = validate_graph(&make_graph(yaml));
+        let error = make_graph_err(yaml);
         assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| e.contains("ryeos.p*.vault.*") && e.contains("not a canonical")),
-            "expected malformed grant to be rejected, got: {:?}",
-            result.errors
+            error.contains("ryeos.p*.vault.*") && error.contains("not a canonical"),
+            "expected malformed grant to be rejected: {error}"
         );
     }
 
     #[test]
     fn parallel_foreach_rejects_assignment() {
-        let graph = make_graph(
+        let error = make_graph_err(
             r#"
 version: "1"
 category: test
@@ -2074,11 +1980,9 @@ config:
     done: {node_type: return}
 "#,
         );
-        let result = validate_graph(&graph);
         assert!(
-            result.errors.iter().any(|error| {
-                error.contains("parallel: true") && error.contains("with 'assign'")
-            })
+            error.contains("cannot combine parallel with assign"),
+            "expected parallel+assign rejection: {error}"
         );
     }
 
@@ -2089,7 +1993,7 @@ config:
             ("results", "results"),
             ("results", "item"),
         ] {
-            let graph = make_graph(&format!(
+            let error = make_graph_err(&format!(
                 r#"
 version: "1"
 category: test
@@ -2107,10 +2011,9 @@ config:
     done: {{node_type: return}}
 "#
             ));
-            let result = validate_graph(&graph);
             assert!(
-                !result.errors.is_empty(),
-                "expected collision error for collect={collect}, assign={assign}"
+                error.contains("`each`"),
+                "expected collision error for collect={collect}, assign={assign}: {error}"
             );
         }
     }
@@ -2200,7 +2103,7 @@ config:
 "#;
         let error = GraphDefinition::from_yaml(branch_uses_item, Some("test.yaml")).unwrap_err();
         assert!(
-            format!("{error:#}").contains("expression root `item` is not available here"),
+            format!("{error:#}").contains("expression root `item` is unavailable"),
             "a fanout branch runs after the temporary item binding is gone: {error:#}"
         );
     }
@@ -2224,7 +2127,7 @@ config:
 "#;
         let error = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap_err();
         assert!(
-            format!("{error:#}").contains("expression root `result` is not available here"),
+            format!("{error:#}").contains("expression root `result` is unavailable"),
             "an action-shaped routing node without an action has no result: {error:#}"
         );
     }
@@ -2249,7 +2152,7 @@ config:
 "#;
         let error = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap_err();
         assert!(
-            format!("{error:#}").contains("expression root `result` is not available here"),
+            format!("{error:#}").contains("expression root `result` is unavailable"),
             "gate conditions have no action result: {error:#}"
         );
     }
@@ -2329,7 +2232,7 @@ config:
 "#;
         let error = GraphDefinition::from_yaml(unknown, Some("test.yaml")).unwrap_err();
         assert!(
-            format!("{error:#}").contains("expression root `ambient` is not available here"),
+            format!("{error:#}").contains("expression root `ambient` is unavailable"),
             "unknown roots must fail graph loading: {error:#}"
         );
 
@@ -2397,40 +2300,30 @@ __ASSIGN__
     done: {node_type: return}
 "#;
 
-        for (assign, collision) in [
-            ("      assign: {}", None),
-            ("      assign: {count: 1}", None),
-            (
-                "      assign: {item: 1}",
-                Some("both its iteration variable and an assign key"),
-            ),
-            (
-                "      assign: {results: 1}",
-                Some("both its collect key and an assign key"),
-            ),
+        // Any assign on a follow fanout — empty, fresh key, or a key that
+        // would collide with the iteration or collect binding — refuses at
+        // the definition boundary with the shape rule itself.
+        for assign in [
+            "      assign: {}",
+            "      assign: {count: 1}",
+            "      assign: {item: 1}",
+            "      assign: {results: 1}",
         ] {
-            let graph = make_graph(&base.replace("__ASSIGN__", assign));
-            let errors = validate_graph(&graph).errors;
+            let error = make_graph_err(&base.replace("__ASSIGN__", assign));
             assert!(
-                errors.iter().any(|error| {
-                    error.contains("follow fanout") && error.contains("cannot declare 'assign'")
-                }),
-                "follow fanout assignment must be rejected: {errors:?}"
+                error.contains(
+                    "follow fanout node `fan` requires parallel and as, and forbids assign"
+                ),
+                "follow fanout assignment must be rejected: {error}"
             );
-            if let Some(collision) = collision {
-                assert!(
-                    errors.iter().any(|error| error.contains(collision)),
-                    "missing collision diagnostic {collision:?}: {errors:?}"
-                );
-            }
         }
     }
 
     #[test]
     fn graph_load_rejects_invalid_and_reserved_iteration_variables() {
         for (variable, expected) in [
-            ("bad-name", "must match [A-Za-z_][A-Za-z0-9_]*"),
-            ("9item", "must match [A-Za-z_][A-Za-z0-9_]*"),
+            ("bad-name", "has an invalid rye-expr name"),
+            ("9item", "has an invalid rye-expr name"),
             ("state", "reserved by rye-expr/1"),
             ("result", "reserved by rye-expr/1"),
             ("_run", "reserved by rye-expr/1"),

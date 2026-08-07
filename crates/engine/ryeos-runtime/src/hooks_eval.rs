@@ -320,7 +320,12 @@ mod tests {
             HookSources {
                 authored: vec![make_hook("authored", "graph_step_completed")],
                 builtin: vec![make_hook("builtin", "graph_step_completed")],
-                infrastructure: vec![make_hook("infra", "graph_step_completed")],
+                // Infrastructure hooks may observe but never steer, so the
+                // precedence fixture gives this layer a non-control result.
+                infrastructure: vec![HookDefinition {
+                    result: HookResultMode::Observation,
+                    ..make_hook("infra", "graph_step_completed")
+                }],
                 context: vec![make_hook("context", "graph_step_completed")],
                 operator: vec![make_hook("operator", "graph_step_completed")],
                 project: vec![make_hook("project", "graph_step_completed")],

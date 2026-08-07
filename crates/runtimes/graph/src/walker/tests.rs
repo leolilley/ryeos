@@ -1648,10 +1648,13 @@ config:
     step1:
       action: {item_id: "tool:test/echo", ref_bindings: {}}
 "#;
-    let graph = make_graph(yaml);
-    let w = make_walker(graph, vec![]);
-    let result = w.validate();
-    assert!(!result.success);
+    let error = GraphDefinition::from_yaml_effective_fixture(yaml, Some("test.yaml"))
+        .map(|_| ())
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("config.start must name an existing node"),
+        "a dangling start must fail at load: {error:#}"
+    );
 }
 
 #[tokio::test]
@@ -4435,9 +4438,13 @@ config:
     assert!(result.success);
     assert_eq!(result.definition_ref, "graph:test/test");
     assert_eq!(result.graph_run_id, "gr-fence-test");
+    // The digest is whatever the effective fixture mints for this exact
+    // yaml; the walker must carry it through unchanged.
     assert_eq!(
         result.effective_definition_digest,
-        lillux::cas::sha256_hex(lillux::signature::strip_signature_lines(yaml).as_bytes())
+        GraphDefinition::from_yaml_effective_fixture(yaml, Some("test.yaml"))
+            .unwrap()
+            .effective_definition_digest
     );
 
     let events = recorder.recorded_events();

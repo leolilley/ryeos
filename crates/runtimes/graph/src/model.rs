@@ -526,13 +526,33 @@ impl GraphDefinition {
         let sources = configured_layers
             .iter()
             .filter(|(_, hooks)| !hooks.is_empty())
-            .map(|(layer, _)| HookSourceEvidence {
-                layer: *layer,
-                canonical_ref: format!("config:test/{}", layer.as_str()),
-                source_space: ryeos_engine::contracts::ItemSpace::Bundle,
-                trust_class: TrustClass::TrustedBundle,
-                signer_fingerprint: "e".repeat(64),
-                source_raw_content_digest: lillux::cas::sha256_hex(layer.as_str().as_bytes()),
+            .map(|(layer, _)| {
+                // Each configured layer demands the source authority that
+                // actually owns it: bundle content for the bundle-shipped
+                // layers, the node for operator policy, the project for
+                // project policy.
+                let (source_space, trust_class) = match layer {
+                    HookLayer::Operator => (
+                        ryeos_engine::contracts::ItemSpace::Node,
+                        TrustClass::TrustedNode,
+                    ),
+                    HookLayer::Project => (
+                        ryeos_engine::contracts::ItemSpace::Project,
+                        TrustClass::TrustedProject,
+                    ),
+                    _ => (
+                        ryeos_engine::contracts::ItemSpace::Bundle,
+                        TrustClass::TrustedBundle,
+                    ),
+                };
+                HookSourceEvidence {
+                    layer: *layer,
+                    canonical_ref: format!("config:test/{}", layer.as_str()),
+                    source_space,
+                    trust_class,
+                    signer_fingerprint: "e".repeat(64),
+                    source_raw_content_digest: lillux::cas::sha256_hex(layer.as_str().as_bytes()),
+                }
             })
             .collect();
         let plan = EffectiveHookPlan {
@@ -1077,6 +1097,8 @@ version: "1.0.0"
 category: test
 config:
   start: a
+  nodes:
+    a: {node_type: return}
 requires:
   capabilities:
     declared:
@@ -1116,6 +1138,8 @@ version: "1.0.0"
 category: test
 config:
   start: a
+  nodes:
+    a: {node_type: return}
 "#;
         let def = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap();
         assert!(def.declared_permissions.is_empty());
@@ -1131,6 +1155,8 @@ version: "1.0.0"
 category: test
 config:
   start: a
+  nodes:
+    a: {node_type: return}
 requires:
   capabilities:
     declared:
@@ -1173,6 +1199,8 @@ version: "1.0.0"
 category: test
 config:
   start: a
+  nodes:
+    a: {node_type: return}
 requires:
   capabilities:
     manifest:
@@ -1192,6 +1220,8 @@ version: "1.0.0"
 category: test
 config:
   start: a
+  nodes:
+    a: {node_type: return}
 requires:
   capabilities:
     manifest:
@@ -1351,18 +1381,31 @@ config:
     }
 
     #[test]
-    fn empty_category_uses_file_stem_without_leading_slash() {
-        let yaml = r#"
+    fn category_must_be_non_empty_and_ids_derive_from_file_stem() {
+        // An empty category is refused outright — there is no silent
+        // fall-back identity.
+        let empty = r#"
 version: "1.0.0"
 category: ""
 config:
   start: a
+  nodes:
+    a: {node_type: return}
 "#;
+        let error = GraphDefinition::from_yaml(empty, Some("/tmp/flow.yaml")).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("graph category must be non-empty"),
+            "empty category must fail at load: {error:#}"
+        );
 
-        let def = GraphDefinition::from_yaml(yaml, Some("/tmp/flow.yaml")).unwrap();
-
-        assert_eq!(def.graph_id, "flow");
-        assert_eq!(def.definition_ref, "graph:flow");
+        // With a real category, the graph id still derives from the file
+        // stem, never carrying a leading slash.
+        let def = GraphDefinition::from_yaml(
+            &empty.replace("category: \"\"", "category: test"),
+            Some("/tmp/flow.yaml"),
+        )
+        .unwrap();
+        assert_eq!(def.graph_id, "test/flow");
         assert!(!def.graph_id.starts_with('/'));
     }
 
@@ -1516,8 +1559,11 @@ config:
             let error = GraphDefinition::from_yaml(&yaml, Some("test.yaml"))
                 .unwrap_err()
                 .to_string();
+            // A YAML boolean (`as: true`) is refused at the type level; the
+            // named cases are refused as iteration-variable rules. Both are
+            // the intended rejection.
             assert!(
-                error.contains("iteration variable"),
+                error.contains("iteration variable") || error.contains("expected a string"),
                 "unexpected error: {error}"
             );
         }
