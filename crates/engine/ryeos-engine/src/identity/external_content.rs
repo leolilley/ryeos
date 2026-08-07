@@ -56,7 +56,7 @@ pub const MAX_EXCLUDES_PER_DECLARATION: usize = 32;
 /// Canonical internal entry name for a `kind: file` realization. Source
 /// locator names are evidence-only; the logical mount carries binding
 /// identity, so host basenames must not leak into the content manifest.
-pub const FILE_REALIZATION_ENTRY_PATH: &str = "content";
+pub use ryeos_state::objects::FILE_REALIZATION_ENTRY_PATH;
 
 /// Who is declaring, with enough identity to answer the bundle row of the
 /// authority matrix.

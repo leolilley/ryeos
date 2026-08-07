@@ -1939,6 +1939,12 @@ impl PinnedStateAuthority {
         ))
     }
 
+    /// The large-content-tier large-object store, rooted beside the CAS under this
+    /// exact pinned runtime generation.
+    pub fn large_object_store(&self) -> anyhow::Result<crate::large_object_store::LargeObjectStore> {
+        crate::large_object_store::LargeObjectStore::open_or_create_under(&self.runtime_directory)
+    }
+
     pub fn cas_directory(&self) -> &lillux::PinnedDirectory {
         &self.cas_directory
     }

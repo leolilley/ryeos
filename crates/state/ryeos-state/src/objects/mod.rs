@@ -27,6 +27,7 @@ pub mod project_tree;
 pub mod source_manifest;
 pub mod state_anchor;
 pub mod external_content_manifest;
+pub mod external_large_content_manifest;
 pub mod execution_identity;
 pub mod graph_node_effect_record;
 pub mod provider_call_effect_record;
@@ -80,10 +81,17 @@ pub use external_content_manifest::{
     EXTERNAL_CONTENT_MANIFEST_KIND, EXTERNAL_CONTENT_TREE_SCHEMA,
     EXTERNAL_REALIZATIONS_DERIVED_KEY, ExternalContentKind, ExternalContentManifestEntry,
     ExternalContentManifestEntryKind, ExternalContentManifestObject, ExternalContentMode,
-    ExternalContentRealization, ExternalContentRealizationSet, MAX_EXTERNAL_CONTENT_ENTRIES,
-    MAX_EXTERNAL_CONTENT_FILE_BYTES, MAX_EXTERNAL_CONTENT_MANIFEST_BYTES,
-    MAX_EXTERNAL_CONTENT_PATH_BYTES, MAX_EXTERNAL_CONTENT_TOTAL_BYTES,
-    MAX_INLINE_SYMLINK_TARGET_BYTES, MAX_SYMLINK_TARGET_BYTES,
+    ExternalContentRealization, ExternalContentRealizationSet, FILE_REALIZATION_ENTRY_PATH,
+    MAX_EXTERNAL_CONTENT_ENTRIES, MAX_EXTERNAL_CONTENT_FILE_BYTES,
+    MAX_EXTERNAL_CONTENT_MANIFEST_BYTES, MAX_EXTERNAL_CONTENT_PATH_BYTES,
+    MAX_EXTERNAL_CONTENT_TOTAL_BYTES, MAX_INLINE_SYMLINK_TARGET_BYTES,
+    MAX_REALIZATION_CLAIMED_BYTES, MAX_SYMLINK_TARGET_BYTES,
+};
+pub use external_large_content_manifest::{
+    EXTERNAL_LARGE_CONTENT_MANIFEST_KIND, EXTERNAL_LARGE_CONTENT_SCHEMA, ExternalLargeContentManifestEntry,
+    ExternalLargeContentManifestObject, MAX_LARGE_CONTENT_CHUNK_BYTES, MAX_LARGE_CONTENT_FILE_BYTES,
+    MAX_LARGE_CONTENT_MANIFEST_BYTES, MAX_LARGE_CONTENT_MANIFEST_ENTRIES, MAX_LARGE_CONTENT_TOTAL_BYTES,
+    MIN_LARGE_CONTENT_CHUNK_BYTES, LARGE_CONTENT_CHUNK_BYTES,
 };
 pub use state_manifest::{
     MAX_STATE_MANIFEST_OBJECTS, STATE_MANIFEST_KIND, STATE_MANIFEST_SCHEMA_VERSION, StateManifest,

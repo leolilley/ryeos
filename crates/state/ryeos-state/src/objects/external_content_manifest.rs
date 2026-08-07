@@ -19,12 +19,20 @@ use serde_json::Value;
 pub const EXTERNAL_CONTENT_MANIFEST_KIND: &str = "external_content_manifest";
 pub const EXTERNAL_CONTENT_TREE_SCHEMA: &str = "ryeos.external_content.tree.v1";
 pub const EXTERNAL_REALIZATIONS_DERIVED_KEY: &str = "effective_external_realizations";
+/// The single manifest path a file-shaped realization stores its content
+/// under. Wire-level: both manifest kinds spell file shape the same way.
+pub const FILE_REALIZATION_ENTRY_PATH: &str = "content";
 /// Matches the generic closure link ceiling: a manifest that cannot be
 /// traversed is unusable however well it hashes.
 pub const MAX_EXTERNAL_CONTENT_ENTRIES: usize = 10_000;
 pub const MAX_EXTERNAL_CONTENT_MANIFEST_BYTES: usize = 1024 * 1024;
 pub const MAX_EXTERNAL_CONTENT_FILE_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_EXTERNAL_CONTENT_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+/// Pure DoS sanity for byte claims on the tier-blind realization wire. The
+/// real byte policy is per-tier and lives where the manifest kind is known:
+/// the content caps above on the content manifest object and in the capture
+/// walk, the weights caps on the weights manifest object and at ingest.
+pub const MAX_REALIZATION_CLAIMED_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 pub const MAX_EXTERNAL_CONTENT_PATH_BYTES: usize = 4096;
 pub const MAX_INLINE_SYMLINK_TARGET_BYTES: usize = 1024;
 pub const MAX_SYMLINK_TARGET_BYTES: u64 = 4096;
@@ -148,9 +156,9 @@ impl ExternalContentRealizationSet {
                     entry.id
                 );
             }
-            if entry.total_bytes > MAX_EXTERNAL_CONTENT_TOTAL_BYTES {
+            if entry.total_bytes > MAX_REALIZATION_CLAIMED_BYTES {
                 anyhow::bail!(
-                    "external realization `{}` exceeds {MAX_EXTERNAL_CONTENT_TOTAL_BYTES} bytes",
+                    "external realization `{}` claims more than {MAX_REALIZATION_CLAIMED_BYTES} bytes",
                     entry.id
                 );
             }
@@ -161,7 +169,7 @@ impl ExternalContentRealizationSet {
                 .checked_add(entry.total_bytes)
                 .ok_or_else(|| anyhow::anyhow!("external realization byte count overflow"))?;
             if entry_total > MAX_EXTERNAL_CONTENT_ENTRIES
-                || byte_total > MAX_EXTERNAL_CONTENT_TOTAL_BYTES
+                || byte_total > MAX_REALIZATION_CLAIMED_BYTES
             {
                 anyhow::bail!("external realization set exceeds the per-launch aggregate bound");
             }

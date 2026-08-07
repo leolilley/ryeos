@@ -35,6 +35,7 @@ pub mod sqlite_schema;
 pub mod state_db;
 pub mod sync;
 pub mod verify;
+pub mod large_object_store;
 
 pub use admission::{AdmissionRequest, AdmissionResult, admit_root};
 pub use bundle_events::{
