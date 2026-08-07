@@ -225,7 +225,20 @@ fn walk_and_verify(
             if !extensions.contains(&suffix) {
                 return Ok(());
             }
-            let bytes = lillux::read_open_regular_file_bounded(file, MAX_DEPENDENCY_FILE_BYTES)?;
+            // A dependency covered by an admitted realization mount is
+            // judged by the bytes the runtime will execute. Plan build runs
+            // in the daemon, where that mount does not exist, so a live read
+            // here would verify content the run never sees — and a live edit
+            // would refuse a launch whose executable bytes never changed.
+            let bytes = match ctx
+                .sealed_content
+                .map(|sealed| sealed.sealed_bytes(&path, MAX_DEPENDENCY_FILE_BYTES))
+                .transpose()?
+                .flatten()
+            {
+                Some(sealed) => sealed,
+                None => lillux::read_open_regular_file_bounded(file, MAX_DEPENDENCY_FILE_BYTES)?,
+            };
             aggregate_bytes = aggregate_bytes
                 .checked_add(bytes.len() as u64)
                 .ok_or_else(|| anyhow::anyhow!("verify_deps byte count overflow"))?;
@@ -503,6 +516,7 @@ mod tests {
             node_trust_store: trust,
             project_root: None,
             project_authority: None,
+            sealed_content: None,
             root_trust_class: crate::resolution::TrustClass::TrustedBundle,
             host_env: &EMPTY_HOST_ENV,
         }

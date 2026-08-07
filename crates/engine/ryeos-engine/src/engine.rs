@@ -3111,6 +3111,7 @@ impl Engine {
             node_trust_store: &self.node_trust_store,
             host_env: &self.host_env,
             project_authority: None,
+            sealed_content: None,
         })
     }
 
@@ -3175,6 +3176,7 @@ impl Engine {
                 node_trust_store: &self.node_trust_store,
                 host_env: &self.host_env,
                 project_authority: Some((project_root, project_content)),
+                sealed_content: None,
             })
         })
     }

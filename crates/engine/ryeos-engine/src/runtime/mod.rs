@@ -352,6 +352,10 @@ pub struct CompileContext<'a> {
         &'a Path,
         &'a dyn crate::project_content::AuthoritativeProjectContent,
     )>,
+    /// Sealed bytes for dependencies covered by an admitted realization
+    /// mount. Verification consults this before the live filesystem, so a
+    /// realized dependency is judged by the bytes the runtime will execute.
+    pub sealed_content: Option<&'a dyn crate::project_content::SealedDependencyBytes>,
     pub root_trust_class: TrustClass,
     /// Operator-supplied allowlist + snapshot for host-env passthrough.
     /// Populated once at daemon bootstrap from `RYEOS_TOOL_ENV_PASSTHROUGH`.
@@ -515,6 +519,7 @@ pub fn compile_with_handlers(
         &Path,
         &dyn crate::project_content::AuthoritativeProjectContent,
     )>,
+    sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
 ) -> Result<PlanSubprocessSpec, EngineError> {
     let mut ctx = CompileContext {
         template_ctx: TemplateContext::new(root_source_path.to_path_buf()),
@@ -535,6 +540,7 @@ pub fn compile_with_handlers(
         node_trust_store,
         project_root,
         project_authority,
+        sealed_content,
         root_trust_class,
         host_env,
     };

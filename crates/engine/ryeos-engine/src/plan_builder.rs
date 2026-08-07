@@ -873,6 +873,9 @@ pub struct BuildPlanInput<'a> {
         &'a Path,
         &'a dyn crate::project_content::AuthoritativeProjectContent,
     )>,
+    /// Sealed bytes for dependencies covered by an admitted realization
+    /// mount; `None` when the launch realizes nothing.
+    pub sealed_content: Option<&'a dyn crate::project_content::SealedDependencyBytes>,
 }
 
 #[tracing::instrument(
@@ -894,6 +897,7 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         node_trust_store,
         host_env,
         project_authority,
+        sealed_content,
     } = input;
     let resolved = &item.resolved;
     let canonical_ref = resolved.canonical_ref.to_string();
@@ -1097,6 +1101,7 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         roots,
         root_trust_class,
         project_authority,
+        sealed_content,
     )?;
 
     // Step 5: Build plan node
@@ -1611,6 +1616,7 @@ config:
             node_trust_store: &ts,
             host_env: &HostEnvBindings::default(),
             project_authority: None,
+            sealed_content: None,
         })
         .unwrap();
 
@@ -1662,6 +1668,7 @@ config:
             node_trust_store: &ts,
             host_env: &HostEnvBindings::default(),
             project_authority: None,
+            sealed_content: None,
         })
         .unwrap_err();
 
@@ -1731,6 +1738,7 @@ config:
             node_trust_store: &ts,
             host_env: &HostEnvBindings::default(),
             project_authority: None,
+            sealed_content: None,
         })
         .unwrap_err();
 
@@ -1776,6 +1784,7 @@ config:
             node_trust_store: &TrustStore::empty(),
             host_env: &HostEnvBindings::default(),
             project_authority: None,
+            sealed_content: None,
         })
         .unwrap_err();
 
@@ -1848,6 +1857,7 @@ config:
             &roots,
             ResolutionTrustClass::TrustedBundle,
             None,
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, EngineError::NoRuntimeConfig { .. }));
@@ -1899,6 +1909,7 @@ config:
             &ts,
             &roots,
             ResolutionTrustClass::TrustedBundle,
+            None,
             None,
         )
         .unwrap_err();
@@ -1952,6 +1963,7 @@ config:
             &roots,
             ResolutionTrustClass::TrustedBundle,
             None,
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, EngineError::ReservedEnvKey { .. }));
@@ -1997,6 +2009,7 @@ config:
             &ts,
             &roots,
             ResolutionTrustClass::TrustedBundle,
+            None,
             None,
         )
         .unwrap();
@@ -2054,6 +2067,7 @@ config:
             &ts,
             &roots,
             ResolutionTrustClass::TrustedBundle,
+            None,
             None,
         )
         .unwrap_err();
@@ -2145,6 +2159,7 @@ config:
             node_trust_store: &ts,
             host_env: &HostEnvBindings::default(),
             project_authority: None,
+            sealed_content: None,
         })
         .unwrap_err();
 
@@ -2343,6 +2358,7 @@ category: ryeos/core/subprocess\n";
             node_trust_store: &ts,
             host_env: &HostEnvBindings::default(),
             project_authority: None,
+            sealed_content: None,
         })
         .expect("build_plan should succeed for valid 3-hop chain");
 

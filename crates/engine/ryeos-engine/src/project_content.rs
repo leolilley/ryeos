@@ -21,6 +21,27 @@ pub struct ProjectContentEntry {
     pub normalized_mode: u32,
 }
 
+/// Bytes that will actually execute for a path covered by an admitted
+/// realization mount.
+///
+/// Plan-build verification runs in the daemon, where the runtime's read-only
+/// realization mounts do not exist. Reading such a path live would verify
+/// bytes the runtime is never going to see: the live file can differ from the
+/// sealed content without changing what executes. Any verifier that decides
+/// whether a dependency is admissible must therefore source its bytes here
+/// first, and fall back to the live filesystem only for paths no realization
+/// covers.
+pub trait SealedDependencyBytes {
+    /// Sealed content for `absolute_path`, or `None` when no admitted
+    /// realization covers it. Oversized content is rejected rather than
+    /// truncated, so a caller can never verify a prefix of a file.
+    fn sealed_bytes(
+        &self,
+        absolute_path: &Path,
+        max_bytes: u64,
+    ) -> Result<Option<Vec<u8>>, EngineError>;
+}
+
 pub trait AuthoritativeProjectContent {
     /// List regular files beneath the project-relative `prefix`, returning
     /// each entry relative to that prefix. The authority enforces `max_entries`
