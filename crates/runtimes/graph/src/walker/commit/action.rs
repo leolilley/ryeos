@@ -24,11 +24,13 @@ impl Walker {
             next,
             child_thread_id,
             cache_hit,
+            replayed_from,
             cache_write_key,
             elapsed_ms,
             cost,
         } = outcome.as_ref();
         let cache_hit = *cache_hit;
+        let replayed_from = replayed_from.clone();
         let elapsed_ms = *elapsed_ms;
         // R3 fence order:
         // graph_step_started → tool_call_start → (dispatch in run_node_body) →
@@ -114,6 +116,7 @@ impl Walker {
             effective_definition_digest: self.graph.effective_definition_digest.clone(),
             result_hash: Some(result_hash),
             cache_hit,
+            replayed_from,
             elapsed_ms,
             error: None,
             cost: cost.clone(),

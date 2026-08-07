@@ -285,6 +285,9 @@ pub(super) struct ActionOkOutcome {
     /// succeeded, then emitted by the commit fence.
     pub(super) child_thread_id: Option<String>,
     pub(super) cache_hit: bool,
+    /// The durable effect record the daemon replayed this result from, when
+    /// it substituted a recorded result for execution.
+    pub(super) replayed_from: Option<String>,
     /// Cache key reserved on a miss. The result is persisted only in commit,
     /// after result validation, assignment, and branch selection all succeed.
     pub(super) cache_write_key: Option<String>,
@@ -731,6 +734,7 @@ mod history_tests {
             effective_definition_digest: "sha256:definition".to_string(),
             result_hash: None,
             cache_hit: false,
+            replayed_from: None,
             elapsed_ms: 1,
             error: None,
             cost: None,
@@ -756,6 +760,7 @@ mod history_tests {
             effective_definition_digest: "sha256:definition".to_string(),
             result_hash: None,
             cache_hit: false,
+            replayed_from: None,
             elapsed_ms: 1,
             error: None,
             cost: Some(RuntimeCost {

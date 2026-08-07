@@ -2775,6 +2775,7 @@ impl Runner {
                                             project_path: proj,
                                             action: payload,
                                             hook_dispatch: Some(hook_dispatch),
+                                            effect_replay: None,
                                         },
                                     )
                                     .await?;
@@ -3218,6 +3219,7 @@ impl Runner {
                             launch_window: None,
                         },
                         hook_dispatch: None,
+                        effect_replay: None,
                     }))
                 }
             }

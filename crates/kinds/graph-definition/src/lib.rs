@@ -91,6 +91,14 @@ impl EffectClass {
     pub fn is_live(&self) -> bool {
         matches!(self, Self::Live)
     }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Sealed => "sealed",
+            Self::Recorded => "recorded",
+            Self::Live => "live",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

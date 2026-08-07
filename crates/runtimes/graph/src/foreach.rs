@@ -277,7 +277,7 @@ async fn dispatch_item_with_retry(
     loop {
         attempt += 1;
         let outcome =
-            crate::dispatch::dispatch_action(client, action, thread_id, project_path, exec_ctx)
+            crate::dispatch::dispatch_action(client, action, thread_id, project_path, None, exec_ctx)
                 .await;
         let retryable = match &outcome {
             Err(error) => error.retryable,
@@ -565,6 +565,9 @@ pub async fn run_foreach_sequential(
                     result: val,
                     cost,
                     child_thread_id,
+                    // Foreach items never request replay; the aggregate
+                    // refuses durable classes at the definition layer.
+                    replayed_from: _,
                 } = success;
                 if let Err(error) = add_cost(&mut total_cost, cost) {
                     statuses.push(GraphToolCallStatus::IntegrityFailed);
@@ -1016,6 +1019,7 @@ pub async fn run_foreach_parallel(
                             result,
                             cost,
                             child_thread_id,
+                            replayed_from: _,
                         } = success;
                         if let Err(error) = validate_runtime_value(
                             &result,

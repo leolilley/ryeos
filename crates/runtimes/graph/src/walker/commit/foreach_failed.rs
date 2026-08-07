@@ -62,6 +62,7 @@ impl Walker {
             effective_definition_digest: self.graph.effective_definition_digest.clone(),
             result_hash: None,
             cache_hit: false,
+            replayed_from: None,
             elapsed_ms: *elapsed_ms,
             error: Some(diagnostic.clone()),
             cost: cost.clone(),

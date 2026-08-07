@@ -1515,6 +1515,7 @@ mod tests {
                 launch_window: None,
             },
             hook_dispatch: None,
+            effect_replay: None,
         };
         let err = client.dispatch_action(req).await.unwrap_err();
         let msg = err.to_string();

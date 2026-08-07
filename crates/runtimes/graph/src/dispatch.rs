@@ -103,6 +103,10 @@ pub struct ActionSuccess {
     /// walker emits a `child_thread_spawned` event from this so the dispatch
     /// edge lands in the parent's portable braid.
     pub child_thread_id: Option<String>,
+    /// The durable effect record this result was replayed from, when the
+    /// daemon substituted a recorded result for execution. Flows into the
+    /// node receipt so replay provenance is inspectable per step.
+    pub replayed_from: Option<String>,
 }
 
 impl ActionSuccess {
@@ -115,6 +119,7 @@ impl ActionSuccess {
             result,
             cost: None,
             child_thread_id: None,
+            replayed_from: None,
         }
     }
 }
@@ -132,6 +137,7 @@ pub async fn dispatch_action(
     action: &Value,
     thread_id: &str,
     project_path: &str,
+    effect_replay: Option<ryeos_runtime::callback::EffectReplayRequest>,
     _exec_ctx: Option<&ExecutionContext>,
 ) -> Result<ActionOutcome, ActionDispatchError> {
     let action = action.clone();
@@ -199,6 +205,7 @@ pub async fn dispatch_action(
             launch_window,
         },
         hook_dispatch: None,
+        effect_replay,
     };
 
     let response = client
@@ -429,6 +436,10 @@ struct NativeResultEnvelope {
     outputs: Value,
     warnings: Vec<String>,
     cost: Value,
+    /// Present when the daemon served this result from a durable effect
+    /// record instead of executing; carried into the node receipt.
+    #[serde(default)]
+    replayed_from: Option<String>,
 }
 
 #[derive(Debug)]
@@ -455,6 +466,10 @@ struct SubprocessResultEnvelope {
     result: Value,
     error: Value,
     artifacts: Vec<Value>,
+    /// Present when the daemon served this result from a durable effect
+    /// record instead of executing; carried into the node receipt.
+    #[serde(default)]
+    replayed_from: Option<String>,
 }
 
 /// Exact wire shape written by `managed_runtime_envelope` and spliced into a
@@ -555,6 +570,7 @@ fn classify_follow_envelope_with_projection(
             result,
             cost,
             child_thread_id: Some(envelope_child_thread_id),
+            replayed_from: None,
         })
     } else {
         let structured_failure = parse_runtime_failure(&result);
@@ -705,6 +721,7 @@ fn classify_native_runtime_envelope(
         outputs,
         warnings: _warnings,
         cost,
+        replayed_from,
     } = envelope;
     let cost = match parse_native_cost(cost) {
         Ok(cost) => cost,
@@ -733,6 +750,7 @@ fn classify_native_runtime_envelope(
                 result,
                 cost,
                 child_thread_id: None,
+                replayed_from,
             }),
             Err(diagnostic) => malformed_native_runtime_failure(diagnostic, cost),
         }
@@ -791,9 +809,15 @@ fn classify_subprocess_envelope(value: Value) -> ActionOutcome {
         result,
         error,
         artifacts: _artifacts,
+        replayed_from,
     } = envelope;
     if error.is_null() {
-        ActionOutcome::Success(ActionSuccess::bare(result))
+        ActionOutcome::Success(ActionSuccess {
+            result,
+            cost: None,
+            child_thread_id: None,
+            replayed_from,
+        })
     } else {
         ActionOutcome::Failure(ActionFailure {
             diagnostic: describe_subprocess_failure(outcome_code.as_deref(), &error),
@@ -1278,7 +1302,7 @@ mod tests {
             "params": {},
             "call": { "method": "query", "args": { "query": "hint", "limit": 5 } },
         });
-        dispatch_action(&client, &action, "T-test", "/project", None)
+        dispatch_action(&client, &action, "T-test", "/project", None, None)
             .await
             .expect("dispatch ok");
 
@@ -1302,7 +1326,7 @@ mod tests {
             "thread": "detached",
             "launch_window": { "key": "gr-1:fan", "width": 12 },
         });
-        dispatch_action(&client, &action, "T-test", "/project", None)
+        dispatch_action(&client, &action, "T-test", "/project", None, None)
             .await
             .expect("dispatch ok");
 
@@ -1321,7 +1345,7 @@ mod tests {
             "thread": "detached",
             "launch_window": { "width": "twelve" },
         });
-        let err = dispatch_action(&client, &action, "T-test", "/project", None)
+        let err = dispatch_action(&client, &action, "T-test", "/project", None, None)
             .await
             .expect_err("malformed launch_window must fail");
         assert!(err.to_string().contains("launch_window"), "got: {err}");
@@ -1335,7 +1359,7 @@ mod tests {
         let client = CallbackClient::from_inner(inner, "T-test", "/project", "tat-test");
 
         let action = json!({ "item_id": "tool:t/echo", "ref_bindings": {}, "params": {} });
-        dispatch_action(&client, &action, "T-test", "/project", None)
+        dispatch_action(&client, &action, "T-test", "/project", None, None)
             .await
             .expect("dispatch ok");
 
@@ -1353,7 +1377,7 @@ mod tests {
         // Parity with `/execute`'s `Option<MethodCall>`: explicit null == absent.
         let action =
             json!({ "item_id": "tool:t/echo", "ref_bindings": {}, "params": {}, "call": null });
-        dispatch_action(&client, &action, "T-test", "/project", None)
+        dispatch_action(&client, &action, "T-test", "/project", None, None)
             .await
             .expect("dispatch ok");
 
@@ -1375,7 +1399,7 @@ mod tests {
                 "ref_bindings": {},
                 "params": {"user_input": "kept"},
             });
-            dispatch_action(&client, &action, "T-test", "/project", None)
+            dispatch_action(&client, &action, "T-test", "/project", None, None)
                 .await
                 .expect("dispatch ok");
 
@@ -1393,7 +1417,7 @@ mod tests {
             "params": {},
             "call": { "op": "query" }, // unknown field — deny_unknown_fields
         });
-        let err = dispatch_action(&client, &action, "T-test", "/project", None)
+        let err = dispatch_action(&client, &action, "T-test", "/project", None, None)
             .await
             .expect_err("malformed call must fail");
         assert!(
@@ -1409,7 +1433,7 @@ mod tests {
         // `follow: true`), never silently block chasing the chain.
         let client = make_mock_client(vec![json!({"continuation_id": "cont-1"})]);
         let action = json!({"item_id": "tool:test/deep", "ref_bindings": {}});
-        let outcome = dispatch_action(&client, &action, "t-1", "/tmp/test", None)
+        let outcome = dispatch_action(&client, &action, "t-1", "/tmp/test", None, None)
             .await
             .unwrap();
         let failure = expect_action_failure(outcome);
@@ -1434,7 +1458,7 @@ mod tests {
             "T-child-failed",
         );
         let action = json!({"item_id": "directive:test/child", "ref_bindings": {}});
-        let outcome = dispatch_action(&client, &action, "T-parent", "/tmp/test", None)
+        let outcome = dispatch_action(&client, &action, "T-parent", "/tmp/test", None, None)
             .await
             .expect("dispatch response");
         let failure = expect_action_failure(outcome);
@@ -1461,7 +1485,7 @@ mod tests {
             "T-child;tail",
         );
         let action = json!({"item_id": "directive:test/child", "ref_bindings": {}});
-        let outcome = dispatch_action(&client, &action, "T-parent", "/tmp/test", None)
+        let outcome = dispatch_action(&client, &action, "T-parent", "/tmp/test", None, None)
             .await
             .expect("dispatch response");
         let failure = expect_action_failure(outcome);

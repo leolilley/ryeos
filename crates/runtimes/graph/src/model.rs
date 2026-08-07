@@ -773,6 +773,10 @@ pub struct NodeReceipt {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result_hash: Option<String>,
     pub cache_hit: bool,
+    /// The durable effect record this node's result was replayed from, when
+    /// the daemon substituted a recorded result for execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replayed_from: Option<String>,
     pub elapsed_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,

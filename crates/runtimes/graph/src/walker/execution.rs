@@ -80,6 +80,7 @@ impl Walker {
                         next: Some(n),
                         child_thread_id: None,
                         cache_hit: false,
+                        replayed_from: None,
                         cache_write_key: None,
                         elapsed_ms: start.elapsed().as_millis() as u64,
                         cost: None,
@@ -267,6 +268,15 @@ impl Walker {
         // success/failure path (receipt, cost, and assign land in commit_step).
         let mut cache_hit = false;
         let mut cache_write_key = None;
+        // A durable-class node asks the daemon to replay its recorded result
+        // or record this one. Only the node name and authored class travel;
+        // the daemon derives the identity itself.
+        let effect_replay = (!node.effect_class().is_live()).then(|| {
+            ryeos_runtime::callback::EffectReplayRequest {
+                node: current.to_string(),
+                class: node.effect_class().as_str().to_string(),
+            }
+        });
         let outcome: Result<dispatch::ActionOutcome, dispatch::ActionDispatchError> = if let Some(
             (envelope, stored_item_ref),
         ) =
@@ -338,6 +348,7 @@ impl Walker {
                     &rendered_action,
                     &self.thread_id,
                     &self.project_path,
+                    effect_replay.clone(),
                     Some(exec_ctx),
                 )
                 .await
@@ -359,6 +370,7 @@ impl Walker {
                 &rendered_action,
                 &self.thread_id,
                 &self.project_path,
+                effect_replay,
                 Some(exec_ctx),
             )
             .await
@@ -442,6 +454,7 @@ impl Walker {
                     result: val,
                     cost,
                     child_thread_id,
+                    replayed_from,
                 } = success;
                 if let Err(error) = validate_runtime_shape(&val, "graph action result") {
                     return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
@@ -540,6 +553,7 @@ impl Walker {
                     next,
                     child_thread_id,
                     cache_hit,
+                    replayed_from,
                     cache_write_key,
                     elapsed_ms: elapsed,
                     cost,

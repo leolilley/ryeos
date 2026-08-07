@@ -20,6 +20,21 @@ struct DispatchActionParams {
     action: ryeos_runtime::callback::ActionPayload,
     #[serde(default)]
     hook_dispatch: Option<ryeos_runtime::callback::HookDispatchIdentity>,
+    #[serde(default)]
+    effect_replay: Option<ryeos_runtime::callback::EffectReplayRequest>,
+}
+
+/// Daemon-derived replay identity for one durable-class dispatch. Every
+/// component comes from the callback capability or the action payload on
+/// this request — the runtime's own words name only the node and class, so
+/// it cannot bind a result to an identity it does not hold.
+struct EffectReplayIdentity {
+    cache_key: String,
+    action_digest: String,
+    effective_definition_digest: String,
+    root_ref: String,
+    node: String,
+    class: String,
 }
 
 pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
@@ -99,6 +114,21 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         "thread auth token validated: using server-side principal",
     );
 
+    // Durable-class replay: derive the identity daemon-side, serve the
+    // record when one exists, and otherwise execute and record. Everything
+    // here is best-effort — replay is a substitution for execution, never a
+    // precondition of it, so any failure in this block degrades to a normal
+    // live dispatch.
+    let replay_identity = derive_effect_replay_identity(&params, &cap);
+    if let Some(identity) = &replay_identity
+        && let Some(response) = try_replay_effect_record(state, identity)
+    {
+        drop(caller_thread);
+        drop(thread_auth);
+        return Ok(response);
+    }
+    let caller_thread_id = params.thread_id.clone();
+
     let result = handle_execute(
         params,
         state,
@@ -109,9 +139,175 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         child_provenance,
     )
     .await;
+    if let (Ok(response), Some(identity)) = (&result, &replay_identity) {
+        publish_effect_record_best_effort(state, identity, response, &caller_thread_id);
+    }
     drop(caller_thread);
     drop(thread_auth);
     result
+}
+
+fn derive_effect_replay_identity(
+    params: &DispatchActionParams,
+    cap: &ryeos_app::callback_token::CallbackCapability,
+) -> Option<EffectReplayIdentity> {
+    let request = params.effect_replay.as_ref()?;
+    // Detached children have no result at dispatch time; the definition
+    // layer already refuses the combination, so this is a belt.
+    if params.action.thread == "detached" {
+        return None;
+    }
+    if !ryeos_state::objects::RECORDABLE_EFFECT_CLASSES.contains(&request.class.as_str()) {
+        return None;
+    }
+    let digest = cap.effective_definition_digest.as_deref()?;
+    let root_ref = cap.item_ref.as_deref()?;
+    let cache_key = ryeos_runtime::callback::node_effect_cache_key(
+        digest,
+        root_ref,
+        &request.node,
+        &params.action,
+    )
+    .ok()?;
+    let action_digest =
+        ryeos_runtime::callback::node_effect_action_digest(&params.action).ok()?;
+    Some(EffectReplayIdentity {
+        cache_key,
+        action_digest,
+        effective_definition_digest: digest.to_string(),
+        root_ref: root_ref.to_string(),
+        node: request.node.clone(),
+        class: request.class.clone(),
+    })
+}
+
+/// Serve a stored record for this identity, or `None` to execute live.
+fn try_replay_effect_record(
+    state: &AppState,
+    identity: &EffectReplayIdentity,
+) -> Option<Value> {
+    let record_hash = state
+        .state_store
+        .with_state_db(|db| db.lookup_effect_record(&identity.cache_key))
+        .map_err(|error| tracing::warn!(%error, "effect record lookup failed"))
+        .ok()??;
+    let authority = super::pinned_state_authority(state)
+        .map_err(|error| tracing::warn!(%error, "effect replay has no state authority"))
+        .ok()?;
+    let value = authority
+        .cas_store()
+        .and_then(|cas| {
+            cas.get_object(&record_hash)?
+                .ok_or_else(|| anyhow::anyhow!("indexed effect record {record_hash} is missing"))
+        })
+        .map_err(|error| tracing::warn!(%error, "effect record load failed"))
+        .ok()?;
+    let record = ryeos_state::objects::GraphNodeEffectRecord::from_current_value(&value)
+        .map_err(|error| tracing::warn!(%error, "effect record decode failed"))
+        .ok()?;
+    if record.cache_key != identity.cache_key {
+        tracing::warn!(
+            record_hash,
+            "effect record does not answer for its indexed identity; executing live"
+        );
+        return None;
+    }
+    if let Err(error) = state
+        .state_store
+        .with_state_db(|db| db.touch_effect_record(&identity.cache_key))
+    {
+        tracing::warn!(%error, "effect record touch failed");
+    }
+    let mut response = record.result;
+    if let Some(result) = response.get_mut("result")
+        && let Some(envelope) = result.as_object_mut()
+    {
+        envelope.insert("replayed_from".to_string(), Value::String(record_hash));
+    }
+    Some(response)
+}
+
+/// A response is recordable only when the leaf reports success: a non-null
+/// `error` in the envelope marks failure regardless of other fields, and a
+/// native envelope's `success` flag is authoritative when present.
+fn response_is_recordable(response: &Value) -> bool {
+    let Some(result) = response.get("result") else {
+        return false;
+    };
+    if result.get("error").is_some_and(|error| !error.is_null()) {
+        return false;
+    }
+    if let Some(success) = result.get("success").and_then(Value::as_bool) {
+        return success;
+    }
+    true
+}
+
+fn publish_effect_record_best_effort(
+    state: &AppState,
+    identity: &EffectReplayIdentity,
+    response: &Value,
+    caller_thread_id: &str,
+) {
+    if !response_is_recordable(response) {
+        return;
+    }
+    let produced_by_thread = response
+        .get("thread")
+        .and_then(Value::as_str)
+        .filter(|thread| !thread.is_empty())
+        .unwrap_or(caller_thread_id)
+        .to_string();
+    let record = ryeos_state::objects::GraphNodeEffectRecord {
+        schema: ryeos_state::objects::GRAPH_NODE_EFFECT_RECORD_SCHEMA_VERSION,
+        kind: ryeos_state::objects::GRAPH_NODE_EFFECT_RECORD_KIND.to_string(),
+        cache_key: identity.cache_key.clone(),
+        effective_definition_digest: identity.effective_definition_digest.clone(),
+        graph_id: identity.root_ref.clone(),
+        node: identity.node.clone(),
+        action_digest: identity.action_digest.clone(),
+        class: identity.class.clone(),
+        result: response.clone(),
+        produced_by_thread,
+    };
+    let value = match record.to_value() {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, "effect record failed validation; not recorded");
+            return;
+        }
+    };
+    let stored = super::pinned_state_authority(state)
+        .and_then(|authority| {
+            let guard = authority.acquire_shared_guard()?;
+            authority.ensure_guard(&guard)?;
+            let cas = authority.cas_store()?;
+            let hash = cas.store_object(&value)?;
+            authority.ensure_guard(&guard)?;
+            Ok(hash)
+        })
+        .and_then(|hash| {
+            // The index row is the reachability root; writing it second means
+            // a crash between the two leaves an orphan object for the sweep,
+            // never a dangling root.
+            state
+                .state_store
+                .with_state_db(|db| db.publish_effect_record(&identity.cache_key, &hash))?;
+            Ok(hash)
+        });
+    match stored {
+        Ok(hash) => {
+            tracing::info!(
+                cache_key = %identity.cache_key,
+                record_hash = %hash,
+                node = %identity.node,
+                "published durable node effect record"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(%error, "effect record publication failed");
+        }
+    }
 }
 
 fn hook_integrity(detail: impl Into<String>) -> anyhow::Error {

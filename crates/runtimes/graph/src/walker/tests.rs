@@ -2361,6 +2361,7 @@ fn step_outcome_action_ok_captures_fields() {
         next: Some("done".to_string()),
         child_thread_id: None,
         cache_hit: false,
+        replayed_from: None,
         cache_write_key: None,
         elapsed_ms: 42,
         cost: None,

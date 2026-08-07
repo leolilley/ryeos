@@ -624,6 +624,7 @@ mod tests {
                 launch_window: None,
             },
             hook_dispatch: Some(identity.clone()),
+            effect_replay: None,
         };
 
         let (params, inline) =
@@ -651,6 +652,7 @@ mod tests {
                 launch_window: None,
             },
             hook_dispatch: None,
+            effect_replay: None,
         };
 
         let (params, _) = UdsRuntimeClient::serialize_dispatch_action_request(request).unwrap();

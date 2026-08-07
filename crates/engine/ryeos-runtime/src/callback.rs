@@ -60,6 +60,59 @@ pub struct DispatchActionRequest {
     pub action: ActionPayload,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_dispatch: Option<HookDispatchIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_replay: Option<EffectReplayRequest>,
+}
+
+/// Replay eligibility for a durable-class node action.
+///
+/// The runtime declares only the node name and its authored class; it never
+/// names a cache key. The daemon derives the key itself from the callback
+/// capability's digest and root ref plus the action payload on this same
+/// request, so a runtime cannot bind a result to an identity it does not
+/// hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectReplayRequest {
+    pub node: String,
+    /// `sealed` or `recorded`; a `live` node never sends this request.
+    pub class: String,
+}
+
+/// Replay identity for one node action: the daemon-side derivation both ends
+/// share. Hashing the wire `ActionPayload` — not either side's private value
+/// — makes the key identical by construction wherever it is computed.
+pub fn node_effect_cache_key(
+    effective_definition_digest: &str,
+    root_ref: &str,
+    node: &str,
+    action: &ActionPayload,
+) -> anyhow::Result<String> {
+    #[derive(Serialize)]
+    struct Seed<'a> {
+        schema: &'static str,
+        effective_definition_digest: &'a str,
+        root_ref: &'a str,
+        node: &'a str,
+        action: &'a ActionPayload,
+    }
+    let value = serde_json::to_value(Seed {
+        schema: "ryeos.node_effect_record.key.v1",
+        effective_definition_digest,
+        root_ref,
+        node,
+        action,
+    })?;
+    let canonical = lillux::cas::canonical_json(&value)?;
+    Ok(lillux::sha256_hex(canonical.as_bytes()))
+}
+
+/// Canonical digest of the exact dispatched action, stored on the record so
+/// a record can be audited against the action that produced it.
+pub fn node_effect_action_digest(action: &ActionPayload) -> anyhow::Result<String> {
+    let value = serde_json::to_value(action)?;
+    let canonical = lillux::cas::canonical_json(&value)?;
+    Ok(lillux::sha256_hex(canonical.as_bytes()))
 }
 
 /// One scalar coordinate in a runtime-owned hook occurrence.
@@ -966,6 +1019,7 @@ mod tests {
                 },
                 context_hash: "context-digest".to_string(),
             }),
+            effect_replay: None,
         };
 
         let wire = serde_json::to_value(&request).unwrap();
