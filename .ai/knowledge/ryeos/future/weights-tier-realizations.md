@@ -1,12 +1,14 @@
-<!-- ryeos:signed:2026-08-07T09:22:40Z:00e5e29cc565c9c344f87f79de27a2afb3c345f37617a40fd020e1fabba021a9:7LZ9RYqU6NOht9fFNTJh1b9OZPBbCQAqpfcF7yetnBcDKq1GKNkPLQEpWzI/90a1PB+b65jNT+jQfJPL5bXYBg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-07T10:17:43Z:7c47e3564328217a05d6a13cf14201c41dc6e270bb77332dcb45602e99920192:a8Fx6vU+4I5QvwVZcRX0GLkqu3N2UmcQPwxByFwgIwP3byvW9vq8hwKeg3tEeyPczgW7aNq+8F8AsdXNudirAQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, realization, weights, storage, inference, tinygrad]
-version: "0.1.0"
+version: "0.2.0"
 status: draft
 description: >
   A large-object tier for external-content realizations so model weights can
   be sealed content: pin-only ingest, contiguous mmap-ready storage under the
-  pinned authority, streaming verification — identity layer unchanged.
+  pinned authority, streaming verification — identity layer AND wire
+  vocabulary unchanged; the tier is named by manifest-object kind and
+  permitted by kind-schema contract data, never by a new enum variant.
 ---
 
 # Weights-tier realizations
@@ -22,22 +24,49 @@ whole payloads into memory for verification. Every one of those is wrong
 at weights scale. This note designs the tier that is right at that scale
 while changing nothing above the storage layer.
 
-## The invariant: identity is already done
+## The invariant: identity is already done — and so is the vocabulary
 
 A weights realization slots into the existing wire shape —
 `{id, kind, mode, manifest_hash, entry_count, total_bytes, mount}` — so
 sealing into the effective digest, descendant inheritance, capsule
 reading, effect-record scoping, and divergence attribution all work
-untouched. A new `kind: weights` changes how bytes are stored, ingested,
-mounted, and verified. It does not change what identity means.
+untouched. And `kind` stays what it is: **shape** (`file` | `tree`), a
+closed mechanical vocabulary where each variant is a distinct capture and
+mount implementation. A sharded model is a tree; a single safetensors
+file is a file. Weights-ness is not a shape.
+
+Where the distinction actually lives — as data, following the kind
+pattern the substrate already runs on:
+
+- **The manifest object names its own tier.** Bind and admission fetch
+  the pinned manifest from CAS regardless; a weights realization's
+  `manifest_hash` resolves to an `external_weights_manifest` object
+  instead of the content manifest. Routing to the large-object store is
+  decided by what the digest-pinned manifest says it is — sealed by
+  identity, no wire discriminator, no ambient decision.
+- **The kind-schema contract grants the tier.** `execution.
+  external_content` already carries `allowed_roots` and
+  `max_declarations` as signed schema values; permission to pin
+  weights-scale content and its bounds land beside them. An item kind
+  that never declared weights capability cannot bind a weights manifest
+  — refused at admission, from data, not from Rust.
+
+An earlier draft of this note put `kind: weights` in the shared
+realization enum. That was the wrong layer twice over: it conflated a
+storage tier with a shape, and it hard-coded policy into closed wire
+vocabulary that the schema-data layer exists to express. Storage changes;
+identity and vocabulary do not.
 
 ## Decisions
 
-1. **Pin-only.** A weights declaration requires `mode: pinned` with its
-   manifest digest; `captured` is refused at validation. Capturing tens of
-   GB of ambient bytes inside launch admission is the anti-pattern this
-   tier exists to avoid — weights enter through an explicit ingest action,
-   and a launch only proves the pinned closure is present.
+1. **Pin-only, by construction rather than by rule.** The only producer
+   of weights manifests is the explicit ingest action; launch capture
+   only ever emits content manifests, under content bounds. Capturing
+   tens of GB of ambient bytes inside launch admission — the
+   anti-pattern this tier exists to avoid — is therefore not *refused*,
+   it is unreachable: there is no path from `mode: captured` to a
+   weights manifest at all. A launch proves the pinned closure is
+   present; ingest is where weights enter.
 2. **Contiguous storage, chunked verification.** Large objects live as
    contiguous read-only files under the pinned state authority, named by
    content hash — mmap-ready for tinygrad's safetensors path, zero copies
@@ -67,12 +96,19 @@ mounted, and verified. It does not change what identity means.
    friends, MBs not GBs) as ordinary content-tier realizations mounted
    beside them. The flywheel's distilled checkpoints should prefer
    adapter form whenever the training method allows it.
-6. **Bounds become per-kind.** The 32 MiB / 256 MiB / 10k-entry bounds
-   keep governing `tree` and `file` realizations unchanged. The weights
-   kind is bounded by the node's large-object budget and a per-file
-   ceiling sized for real shards (hundreds of GB node budget, tens of GB
-   per file), enforced at ingest where the cost is paid knowingly, not at
-   launch where it is too late.
+6. **Bounds move to where the tier is known.** The 32 MiB / 256 MiB
+   byte caps are per-tier policy, and the wire-level realization-set
+   validator is tier-blind — it cannot apply them soundly once two
+   manifest kinds exist. So: capture keeps enforcing content bounds in
+   the walk (unchanged in effect — every captured set is content), and
+   admission enforces per-tier byte bounds after fetching manifests,
+   when it knows what each one is. The weights tier is bounded by the
+   node's large-object budget and a per-file ceiling sized for real
+   shards (hundreds of GB node budget, tens of GB per file), enforced
+   at ingest where the cost is paid knowingly. The wire validator
+   retains what is structural — ordering, uniqueness, canonical paths,
+   hash formats, the 10k entry cap, overflow-checked sums — plus a
+   generous absolute ceiling as pure DoS sanity, not policy.
 
 ## GC and retention
 
@@ -87,19 +123,25 @@ design, never realization content.
 
 ## Increments
 
-0. Wire contract: `kind: weights` in the shared realization enum,
-   pin-only validation, per-kind bounds carve-out. Every strict decoder
-   that names realization kinds is taught in the same commit — the
-   admit-the-field lesson is standing.
-1. Large-object store under the pinned authority: streaming resumable
-   ingest (hash-while-write, chunk sidecar), immutable publication,
-   lease + budget sweep.
+There is no wire-contract increment: the vocabulary does not change, and
+until the weights manifest object exists there is nothing to validate
+differently — the tier's first code is the store that gives the manifest
+something to name.
+
+1. Large-object store + the `external_weights_manifest` object under the
+   pinned authority: streaming resumable ingest (hash-while-write, chunk
+   sidecar), immutable publication, lease + budget sweep. The
+   bounds relocation (capture-side content caps, admission-side per-tier
+   caps, wire validator reduced to structure + sanity ceiling) lands
+   here, in the same change that creates the second manifest kind.
 2. Operator ingest surface (`ryeos weights realize <path>` or a signed
    tool): stream a safetensors file or shard directory in, emit the
    manifest object, print the pin line an author pastes into a
    declaration.
-3. Bind path: mount weights realizations straight from the store; launch
-   admission proves closure presence and sizes.
+3. Bind path: route on manifest-object kind, mount weights realizations
+   straight from the store; launch admission proves closure presence and
+   sizes, and refuses weights manifests on item kinds whose contract
+   never granted the tier.
 4. Scrub: streaming chunk re-verification as a maintenance action, with
    findings as typed integrity evidence.
 5. First consumer: the tinygrad runtime realization pins base weights,
