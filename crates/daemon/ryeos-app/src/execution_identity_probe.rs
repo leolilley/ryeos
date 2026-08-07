@@ -23,7 +23,6 @@ use ryeos_state::objects::{
     EXECUTION_IDENTITY_KIND, EXECUTION_IDENTITY_SCHEMA_VERSION, ExecutionDeviceIdentity,
     ExecutionIdentity, ExecutionInterpreterIdentity,
 };
-use ryeos_state::signer::Signer;
 
 /// Claim string for the boot-probe attestation. Local policy that treats
 /// node-issued execution identities as authoritative keys on this.
