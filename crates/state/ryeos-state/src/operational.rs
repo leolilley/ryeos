@@ -1810,10 +1810,19 @@ impl OperationalDb {
             .context("failed to collect effect record roots")
     }
 
-    /// Retention: drop the least-recently-replayed records beyond
-    /// `max_rows`. Deleting a row un-roots its object; the ordinary CAS
-    /// sweep reclaims the bytes. Losing a record is never a correctness
-    /// event — the next run executes live and is a different run.
+    /// Retention: drop records beyond `max_rows`, never-replayed rows first
+    /// (oldest publication first), then the least-recently-replayed.
+    ///
+    /// A record that has never served a replay is publication churn — a
+    /// run-scoped action param makes every key unique, publishing a one-shot
+    /// row per dispatch — and its `last_replayed_at` is *newer* than a
+    /// banked record's last genuine replay, so recency order alone would
+    /// evict the proven records and keep the junk. Never-replayed rows have
+    /// `last_replayed_at` equal to `produced_at` (publication stamps both;
+    /// only a replay moves one), which is the lane discriminator. Deleting
+    /// a row un-roots its object; the ordinary CAS sweep reclaims the
+    /// bytes. Losing a record is never a correctness event — the next run
+    /// executes live and is a different run.
     pub fn prune_effect_records(&self, max_rows: usize) -> Result<usize> {
         let count: i64 = self
             .conn
@@ -1828,7 +1837,9 @@ impl OperationalDb {
             .execute(
                 "DELETE FROM effect_records WHERE cache_key IN (
                     SELECT cache_key FROM effect_records
-                    ORDER BY last_replayed_at ASC, cache_key ASC
+                    ORDER BY (last_replayed_at != produced_at) ASC,
+                             last_replayed_at ASC,
+                             cache_key ASC
                     LIMIT ?
                 )",
                 [excess as i64],
@@ -2714,6 +2725,36 @@ mod tests {
         assert_eq!(remaining.len(), 2);
         assert_eq!(db.prune_effect_records(0).unwrap(), 2);
         assert!(db.list_effect_record_hashes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn effect_record_pruning_spares_replayed_records_from_publication_churn() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        let db = OperationalDb::open(&path).unwrap();
+        // One banked record replayed long ago, and two fresh never-replayed
+        // rows (publication stamps both columns equal) whose recency is
+        // NEWER than the banked record's last replay. Recency order alone
+        // would evict the banked record first; the never-replayed lane must
+        // go first instead.
+        for (c, produced, replayed) in [
+            ("a", "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"),
+            ("b", "2026-08-01T00:00:00Z", "2026-08-01T00:00:00Z"),
+            ("c", "2026-08-02T00:00:00Z", "2026-08-02T00:00:00Z"),
+        ] {
+            db.publish_effect_record(&c.repeat(64), &c.repeat(64)).unwrap();
+            db.conn
+                .execute(
+                    "UPDATE effect_records SET produced_at = ?, last_replayed_at = ?
+                     WHERE cache_key = ?",
+                    rusqlite::params![produced, replayed, c.repeat(64)],
+                )
+                .unwrap();
+        }
+
+        assert_eq!(db.prune_effect_records(1).unwrap(), 2);
+        let remaining = db.list_effect_record_hashes().unwrap();
+        assert_eq!(remaining, vec!["a".repeat(64)]);
     }
 
     #[test]

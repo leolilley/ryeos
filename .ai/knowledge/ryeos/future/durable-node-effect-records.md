@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-07T04:38:01Z:0e2e5d1856496f3a878492162b62afc1b38a54ee0c90b062512d6a4289aefe05:1eV641rhDJ72Ot833SynLQqiNFwCkF1fJ5O5phGb21rt1ZAy8Sp4MJ7xicU29EpC0IqNr/lL1ia3ktQBySKeBg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-07T07:17:24Z:801e6abd7759f2b54b28955388586a86eb40ebec64214c6160936075f4d7ac71:1AK3FpnS+oC9y09CFM4qdD1xrVHIY66Snv4QC/JvCSmaBPMSb81f56s7tOAe87H3Ol3iu0C08Quq+TsBbxvTCQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, replay, cache, evidence, graph]
 version: "0.1.0"
@@ -61,6 +61,25 @@ Default `live` keeps every existing graph's semantics byte-identical until an
 author declares otherwise. The declaration composes and seals like everything
 else that determines behavior.
 
+## Author covenants
+
+Two properties the contract requires of a `recorded` node, surfaced by the
+first adoption review:
+
+1. **Result completeness.** Replay serves the stored result and executes
+   nothing: any write the action performs — workspace output, a knowledge
+   append, external mutation — silently does not happen on a replayed
+   dispatch. A node is eligible for `recorded` only when its result
+   envelope IS its entire observable effect. Anything else is `live`.
+2. **Run-stable action payloads.** The action payload is the record's
+   identity. A run-scoped value in the params — a thread id, a timestamp, a
+   fresh token — makes every key unique: a permanent miss on every run and
+   a one-shot record published per dispatch. Retention prunes never-replayed
+   rows before replayed ones, so that churn cannot evict a banked record,
+   but the misses and the index pressure remain the author's bill. Keep
+   run-scoped values out of recorded nodes' params, or leave the node
+   `live`.
+
 ## Mechanism
 
 1. **Placement: daemon-side, at child dispatch.** The runtime already
@@ -84,8 +103,9 @@ else that determines behavior.
    Divergence checking gets its instrument for free: re-executing a `sealed`
    node and comparing against its record is the typed divergence proof from
    the determinism-classes note.
-5. **Retention**: the materialization-cache pattern — quota + LRU sweep
-   under the state authority, no reachability edges in v1. Evicting a
+5. **Retention**: the materialization-cache pattern — quota + sweep under
+   the state authority, pruning never-replayed rows (publication churn)
+   before the least-recently-replayed, no reachability edges in v1. Evicting a
    `recorded` record is honest loss: the next run executes live and is a
    different run, and evidence referencing the record hash detects the
    absence rather than silently absorbing it. Banked evidence that must pin

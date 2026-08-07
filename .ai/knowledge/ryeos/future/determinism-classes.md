@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-07T02:50:56Z:c31e22e55db592c38cec78fd458b37fdf58b5d2e1d43f91df33c565a3291bbf9:Y3rTKCxxXLzKvQJr0xukcUVXbEnomu8RReKsvkVKX2kY51c3hxkE5PFho0lSMpPIt7yXBz7YNYW86rHtQzjtAA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-07T07:17:23Z:8b9a8a4c9dad3ce19c615387560e8be0d684882cd8283b9fa492637d221b6fd3:XS0O30kLgqio9btbu9EAos9BT4lyiBzOFRTuJ/+t176LHOwraao+Kx21b+Kkb8HQKoKnlhNmdc4+gc7+g0Y7Bg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, replay, evidence, effects]
 version: "0.2.0"
@@ -31,6 +31,14 @@ Every effect an execution performs belongs to exactly one declared class:
   external mutation, interactive input. Permitted only where declared;
   evidence carries the class marker so no consumer mistakes it for
   reproducible fact.
+
+A class describes the *complete* observable behavior of its boundary, not
+just the returned value. `recorded` therefore demands **result
+completeness**: replay serves the record and executes nothing, so
+everything the effect does must live inside the recorded result. A boundary
+that also writes — workspace files, knowledge appends, any mutation outside
+the result envelope — is `live` no matter how deterministic its return
+value looks; recording it would make replay silently skip the writes.
 
 ## Declaration
 
