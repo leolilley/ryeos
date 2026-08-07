@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-07T09:13:37Z:59527e0e04fa23c2dd46c178d7d895543a7c95044fd4db1dc5ef169eadf37b44:i1EcvBKw04oExd0ehJu09HPNGJYHF9/Wtf3ULvne6z+MDEFwuWyRSxFm2vXSS9P6tyTQxd4e35P2ASC3W3EsBQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-07T09:49:08Z:230f79e067c921f4da82d07e33560574206a74bcf95677a15b3e6d688a6731e5:gAIELO9eUn46ibC3JxDX/XQ/HO8yiEcdzemX0J2bW7vaNdIy9OwnZWUX+1CmNzHyjEp7bAF59GfLG8EMRw/2Dw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, replay, provider, directive, evidence]
 version: "0.1.0"
@@ -109,6 +109,14 @@ IS the identity check.
   by construction (its only effect is its response), and message content
   must be run-stable — a timestamp interpolated into a prompt is the
   run-scoped-params footgun with a token bill attached.
+- Records exist only on ledger-backed routes (first live smoke,
+  2026-08-07): publication binds to the accounting reservation, so an
+  advisory-only route banks nothing and the runtime warns at
+  construction. Financially attributed identity is part of the record's
+  proof, not an inconvenience — a route worth replaying is a route worth
+  accounting for. A replayed turn is likewise exempt from the
+  fail-closed usage snapshot: it has no usage by construction, and its
+  accounting fact is `replayed_from` in the durable turn evidence.
 
 ## Retention
 
