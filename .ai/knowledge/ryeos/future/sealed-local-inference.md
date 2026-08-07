@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-07T09:52:47Z:d2c0e0be6462f95c71bfeaabe457c945a12f14ecf7f7dc1d1557bd4e1144f53e:Q1H8/iZXE7ORHe4ZqG9O9J0vMJbgkGK0nspN9RRKBiK6Cw0faON3ukCuXZAvEgf7YC0hz1DshuMA5wbKxUPRBA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-07T09:55:51Z:b002b2b8fc89fb8753c945528f0ba6fa303f0f1bffc09dffad1c1aba88f77256:gpOhtXTlaC4QJUw+ujS4br3lCaWfi1/895JnlaQ2RAYk+W9Lu85U04Cpgow2GP0/ktP8XOclYCwy1gLZERIzCg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, inference, tinygrad, sealed, replay, arc]
 version: "0.1.0"
@@ -143,8 +143,11 @@ KV-prefix sharing.
    the framed-streaming protocol, its tree and its JIT/BEAM caches either
    pinned as realizations or declared live (the ambient-content
    discipline applies to caches exactly as it did to the interpreter).
-5. **Generation-state capsules** — checkpoint/fork/resume with segment
-   economics.
+5. **Generation-state capsules** — designed:
+   `knowledge:ryeos/future/generation-state-capsules`. Park/resume/fork
+   at declared token boundaries, KV through the weights-tier store,
+   prefix cache unified as the degenerate checkpoint, foreign-identity
+   capsules refused with replay as the graceful path.
 6. **Sealed training runs** (later) — data manifests as realizations,
    seeded runs, campaign-as-eval; parallelism nondeterminism honestly
    classed (`sealed` single-device or deterministic-reduction, `recorded`
