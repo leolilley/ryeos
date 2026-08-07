@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-07T08:08:24Z:59df498ef517d861127d8167c4e9ef1d0a8e4445a9be435e25f145505e87c6ff:Nb4OzQCSdZ3bBUjcn5cj5i4gWRsalHI06C0rNN5I/OHpPsOuVgvzk7ujawdjXIq0LiHV9zbIZOCvNAOI0vrfBA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-07T08:12:43Z:9f384c308cd9108043c04fd67caef95c7433f8e67624e9147fe8467cd7356cc0:J/JlQmKC4nweBoYxseAoh/nk0iZIsWVMolnLdXkjK5P5k7i+PoifUC9Ua8pPjCH3nAu7FYhY75/jHbSAuwynAQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, replay, provider, directive, evidence]
 version: "0.1.0"
@@ -64,10 +64,33 @@ boundary. Three candidate placements:
    *index* over evidence that already exists, and capture costs nothing
    new. Replay then needs only the serve path.
 
-Leaning: (3) for capture if the persisted turn shape proves sufficient,
-with (2)'s validation posture for publication; (1) only if streaming proves
-the others unworkable. The decision needs a code-level audit of what turn
-events durably carry today — that audit is increment 0.
+**DECIDED (increment-0 audit, 2026-08-07): placement (2), and its hard
+part already exists.** The audit found:
+
+- (3) fails on facts: the durable turn evidence (`cognition_out`) carries
+  the conversational fold — assistant content, tool_calls, reasoning,
+  token counts, provider accounting — not the request as sent. Resume
+  re-derives requests from the sealed program; a record identity must be
+  computed over what was *actually* sent, or a request-assembly bug
+  becomes an identity the instrument can never see.
+- (2)'s identity and validation crossing are already built. The
+  spend-bound machinery prepares one immutable request — exact body
+  bytes, digested once (`PreparedProviderRequest.request_digest` over
+  method, url, header names, `body_sha256`, output ceiling; credential
+  value excluded) — and the reserve RPC already carries that digest to
+  the daemon, which durably retains it as a NOT NULL ledger column.
+  Record publication therefore binds to the reservation row: no
+  reservation with that digest, no record, and settlement reconciles
+  usage on the same row. A lying runtime cannot bank a response for a
+  request the daemon never saw reserved.
+- (1) is unnecessary: no proxy, the streaming hot path stays put.
+
+What capture still needs: the response-as-consumed (the folded event
+fields are a projection of it), submitted through a new record-publication
+callback validated against the reservation ledger. Stored request bytes
+are optional CAS blobs for divergence forensics only — replay never needs
+them, because the runtime re-prepares and re-digests, and the digest match
+IS the identity check.
 
 ## Replay semantics
 
@@ -127,10 +150,12 @@ on the same keys rather than replacing the machinery.
 
 ## Increments
 
-0. Audit what directive turn evidence durably carries today; decide
-   placement (3) vs (2) vs (1) from what exists rather than from taste.
-1. Canonical request identity (schema-tagged digest, shared derivation on
-   both sides of whatever boundary placement selects).
+0. **DONE (2026-08-07)** — audited what turn evidence durably carries;
+   placement decided: (2), riding the existing reservation crossing (see
+   the placement section for the findings).
+1. Canonical request identity — collapses to reuse: the record key is the
+   existing `request_digest` scoped under the run's effective definition
+   digest. No new derivation machinery on either side of the wire.
 2. Record object + index (the node-record pattern: CAS object under the
    pinned authority, operational index rows as GC roots, shared retention
    lanes).
