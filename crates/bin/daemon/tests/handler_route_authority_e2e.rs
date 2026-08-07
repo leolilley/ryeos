@@ -186,6 +186,7 @@ fn anonymous_route_principal_is_denied_at_build_plan() {
         &verified,
         &serde_json::Value::Null,
         &ctx.execution_hints,
+        None,
     );
 
     let _ = fs::remove_dir_all(&project_dir);
@@ -231,6 +232,7 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
             &verified,
             &serde_json::Value::Null,
             &ctx.execution_hints,
+            None,
         )
         .expect("build_plan must succeed under fixed route-handler authority");
 

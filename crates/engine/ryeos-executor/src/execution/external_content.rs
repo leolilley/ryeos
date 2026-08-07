@@ -396,6 +396,233 @@ pub(crate) fn bind_external_realizations(
     }))
 }
 
+/// Dependency bytes for plan-build verification, sourced from the sealed
+/// realization set the dispatched child will execute under.
+///
+/// Plan build runs in the daemon, where the runtime's read-only realization
+/// mounts do not exist; the live project tree can differ from the sealed
+/// content without changing what executes. This source answers exactly like
+/// the mounts will: a path under a mount destination resolves to the
+/// manifest's CAS blob, a mount-covered path with no manifest entry resolves
+/// to nothing, and paths no mount covers stay with their live (or admitted
+/// project) bytes.
+pub(crate) struct SealedRealizationDependencyBytes {
+    authority: ryeos_state::PinnedStateAuthority,
+    guard: ryeos_state::CasMutationGuard,
+    cas: lillux::CasStore,
+    mounts: Vec<SealedRealizationMount>,
+}
+
+struct SealedRealizationMount {
+    /// Absolute mount destination under the launch's project root.
+    destination: PathBuf,
+    kind: ExternalContentKind,
+    /// Manifest path → (blob hash, exact size) for regular-file entries.
+    files: BTreeMap<String, (String, u64)>,
+}
+
+enum SealedPathLookup<'a> {
+    Uncovered,
+    Absent,
+    File { blob_hash: &'a str, size: u64 },
+}
+
+/// Resolve one absolute path against the mount table. With nested mounts the
+/// most specific destination answers for its subtree, mirroring how mount
+/// layering composes at execution.
+fn locate_sealed_path<'a>(
+    mounts: &'a [SealedRealizationMount],
+    absolute_path: &Path,
+) -> SealedPathLookup<'a> {
+    let mut best: Option<(&SealedRealizationMount, Option<String>)> = None;
+    for mount in mounts {
+        let key = match mount.kind {
+            ExternalContentKind::File => {
+                if absolute_path != mount.destination {
+                    continue;
+                }
+                Some(ryeos_engine::external_content::FILE_REALIZATION_ENTRY_PATH.to_string())
+            }
+            ExternalContentKind::Tree => match absolute_path.strip_prefix(&mount.destination) {
+                // The destination itself is the mounted directory, and a
+                // non-UTF-8 relative path can never name a manifest entry;
+                // both are covered without sealing a file.
+                Ok(relative) if relative.as_os_str().is_empty() => None,
+                Ok(relative) => relative.to_str().map(str::to_owned),
+                Err(_) => continue,
+            },
+        };
+        if best.as_ref().is_none_or(|(current, _)| {
+            mount.destination.as_os_str().len() > current.destination.as_os_str().len()
+        }) {
+            best = Some((mount, key));
+        }
+    }
+    match best {
+        None => SealedPathLookup::Uncovered,
+        Some((mount, Some(key))) => match mount.files.get(&key) {
+            Some((blob_hash, size)) => SealedPathLookup::File {
+                blob_hash: blob_hash.as_str(),
+                size: *size,
+            },
+            None => SealedPathLookup::Absent,
+        },
+        Some((_, None)) => SealedPathLookup::Absent,
+    }
+}
+
+impl ryeos_engine::project_content::SealedDependencyBytes for SealedRealizationDependencyBytes {
+    fn sealed_bytes(
+        &self,
+        absolute_path: &Path,
+        max_bytes: u64,
+    ) -> Result<
+        ryeos_engine::project_content::SealedDependencyContent,
+        ryeos_engine::error::EngineError,
+    > {
+        use ryeos_engine::project_content::SealedDependencyContent;
+        let internal = |error: anyhow::Error| {
+            ryeos_engine::error::EngineError::Internal(format!(
+                "sealed realization bytes for {}: {error:#}",
+                absolute_path.display()
+            ))
+        };
+        match locate_sealed_path(&self.mounts, absolute_path) {
+            SealedPathLookup::Uncovered => Ok(SealedDependencyContent::Uncovered),
+            SealedPathLookup::Absent => Ok(SealedDependencyContent::Absent),
+            SealedPathLookup::File { blob_hash, size } => {
+                if size > max_bytes {
+                    return Err(internal(anyhow::anyhow!(
+                        "sealed dependency is {size} bytes, over the {max_bytes}-byte ceiling"
+                    )));
+                }
+                self.authority
+                    .ensure_guard(&self.guard)
+                    .map_err(internal)?;
+                let bytes = ryeos_state::object_closure::load_exact_cas_blob_with_cas(
+                    &self.cas, blob_hash, max_bytes,
+                )
+                .map_err(internal)?;
+                self.authority
+                    .ensure_guard(&self.guard)
+                    .map_err(internal)?;
+                Ok(SealedDependencyContent::Sealed(bytes))
+            }
+        }
+    }
+}
+
+/// Sealed dependency source for one dispatched child's plan build, or `None`
+/// when live bytes are authoritative for this launch.
+///
+/// A dispatched child executes under its parent's sealed realization set
+/// unless it authors its own declaration. A declaring child's realization is
+/// captured fresh from the live tree at launch, so live bytes are exactly
+/// what will execute and no substitution applies. Fail-closed on broken
+/// lineage: a dispatching parent without an admitted capsule is an error,
+/// never an empty inheritance.
+pub(crate) fn sealed_dependency_bytes_for_child_dispatch(
+    state: &ryeos_app::state::AppState,
+    params: &super::runner::ExecutionParams,
+) -> anyhow::Result<Option<SealedRealizationDependencyBytes>> {
+    let Some(parent_thread_id) = params.parent_thread_id.as_deref() else {
+        return Ok(None);
+    };
+    let Some(admission) = params.resolved.root_admission.as_ref() else {
+        return Ok(None);
+    };
+    let engine = admission.request_engine();
+    let resolution = admission.resolution_output();
+    let roots = engine.resolution_roots(match params.provenance.project_authority() {
+        ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => None,
+        ryeos_state::objects::ExecutionProjectAuthority::LiveProject { .. }
+        | ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. } => {
+            Some(params.provenance.original_project_path().to_path_buf())
+        }
+    });
+    let contract = engine
+        .kinds
+        .get(&params.resolved.kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .and_then(|execution| execution.external_content.as_ref());
+    let declarer = declaring_authority(resolution, &roots)?;
+    if ryeos_engine::external_content::declarations_from_composed(
+        &resolution.composed.composed,
+        contract,
+        declarer,
+    )?
+    .is_some()
+    {
+        return Ok(None);
+    }
+    let realized = state
+        .state_store
+        .admitted_launch_capsule(parent_thread_id)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "dispatching parent {parent_thread_id} has no authoritative admitted launch capsule"
+            )
+        })?
+        .external_realization_set()?;
+    let Some(realized) = realized else {
+        return Ok(None);
+    };
+    if realized.is_empty() {
+        return Ok(None);
+    }
+    let authority = super::pinned_state_authority(state)?;
+    let guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&guard)?;
+    let cas = authority.cas_store()?;
+    let project_root = params.provenance.effective_path();
+    let mut mounts = Vec::with_capacity(realized.iter().len());
+    for entry in realized.iter() {
+        let closure =
+            ryeos_state::VerifiedExternalContentClosure::load(&cas, &entry.manifest_hash)?;
+        if closure.manifest().entry_count != entry.entry_count
+            || closure.manifest().total_bytes != entry.total_bytes
+        {
+            anyhow::bail!(
+                "external realization `{}` contradicts manifest {} statistics",
+                entry.id,
+                entry.manifest_hash
+            );
+        }
+        let files = closure
+            .manifest()
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.kind == ryeos_state::objects::ExternalContentManifestEntryKind::File
+            })
+            .map(|entry| {
+                (
+                    entry.path.clone(),
+                    (
+                        entry
+                            .blob_hash
+                            .clone()
+                            .expect("validated file entry has a blob hash"),
+                        entry.size.expect("validated file entry has a size"),
+                    ),
+                )
+            })
+            .collect();
+        mounts.push(SealedRealizationMount {
+            destination: project_root.join(&entry.mount),
+            kind: entry.kind,
+            files,
+        });
+    }
+    authority.ensure_guard(&guard)?;
+    Ok(Some(SealedRealizationDependencyBytes {
+        authority,
+        guard,
+        cas,
+        mounts,
+    }))
+}
+
 fn ensure_materialization_parent(
     root: &lillux::PinnedDirectory,
     relative: &str,
@@ -911,4 +1138,103 @@ fn open_file_parent<'a>(
         open_directory_relative(base, parent)?
     };
     Ok((parent, name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tree_mount(destination: &str, files: &[(&str, u64)]) -> SealedRealizationMount {
+        SealedRealizationMount {
+            destination: PathBuf::from(destination),
+            kind: ExternalContentKind::Tree,
+            files: files
+                .iter()
+                .map(|(path, size)| ((*path).to_owned(), (format!("hash-{path}"), *size)))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn sealed_path_lookup_answers_like_the_mount_table() {
+        let mounts = vec![
+            tree_mount(
+                "/p/.ai/tools/arc/lib",
+                &[("bfs.py", 10), ("deep/util.py", 20)],
+            ),
+            SealedRealizationMount {
+                destination: PathBuf::from("/p/.ai/tools/arc/featurize.py"),
+                kind: ExternalContentKind::File,
+                files: BTreeMap::from([(
+                    ryeos_engine::external_content::FILE_REALIZATION_ENTRY_PATH.to_owned(),
+                    ("hash-file".to_owned(), 5),
+                )]),
+            },
+        ];
+        assert!(matches!(
+            locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/lib/bfs.py")),
+            SealedPathLookup::File {
+                blob_hash: "hash-bfs.py",
+                size: 10
+            }
+        ));
+        assert!(matches!(
+            locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/lib/deep/util.py")),
+            SealedPathLookup::File {
+                blob_hash: "hash-deep/util.py",
+                size: 20
+            }
+        ));
+        // A file-kind realization answers for exactly its mount path.
+        assert!(matches!(
+            locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/featurize.py")),
+            SealedPathLookup::File {
+                blob_hash: "hash-file",
+                size: 5
+            }
+        ));
+        // Covered but unsealed paths are absent at execution, never live.
+        assert!(matches!(
+            locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/lib/scratch.py")),
+            SealedPathLookup::Absent
+        ));
+        // Outside every mount, live bytes stay authoritative.
+        assert!(matches!(
+            locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/evidence.py")),
+            SealedPathLookup::Uncovered
+        ));
+        // A lexical prefix that is not a path-component prefix is uncovered.
+        assert!(matches!(
+            locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/libx.py")),
+            SealedPathLookup::Uncovered
+        ));
+    }
+
+    #[test]
+    fn nested_mounts_resolve_to_the_most_specific_destination() {
+        let mounts = vec![
+            tree_mount("/p/.ai/tools/arc", &[("lib/bfs.py", 1), ("run.py", 2)]),
+            tree_mount("/p/.ai/tools/arc/lib", &[("other.py", 3)]),
+        ];
+        // The inner mount owns its subtree: bfs.py is sealed only in the
+        // outer manifest, so under the inner mount it does not exist.
+        assert!(matches!(
+            locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/lib/bfs.py")),
+            SealedPathLookup::Absent
+        ));
+        assert!(matches!(
+            locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/lib/other.py")),
+            SealedPathLookup::File {
+                blob_hash: "hash-other.py",
+                size: 3
+            }
+        ));
+        assert!(matches!(
+            locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/run.py")),
+            SealedPathLookup::File {
+                blob_hash: "hash-run.py",
+                size: 2
+            }
+        ));
+    }
 }

@@ -94,7 +94,13 @@ pub fn import_dry_run(
     isolation: &IsolationRuntime,
     isolation_context: IsolationLaunchContext<'_>,
 ) -> Value {
-    let plan = match engine.build_plan(plan_ctx, verified, &json!({}), &ExecutionHints::default()) {
+    let plan = match engine.build_plan(
+        plan_ctx,
+        verified,
+        &json!({}),
+        &ExecutionHints::default(),
+        None,
+    ) {
         Ok(p) => p,
         Err(e) => {
             return json!({

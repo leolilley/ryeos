@@ -962,8 +962,10 @@ impl CheckedEngineGeneration<'_> {
         item: &VerifiedItem,
         parameters: &Value,
         hints: &ExecutionHints,
+        sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
     ) -> Result<ExecutionPlan, EngineError> {
-        self.engine.build_plan_current(ctx, item, parameters, hints)
+        self.engine
+            .build_plan_current(ctx, item, parameters, hints, sealed_content)
     }
 
     /// Resolve independent canonical items concurrently while retaining this
@@ -3064,14 +3066,19 @@ impl Engine {
     ///
     /// Checks execution scope on the principal before building.
     /// Uses system-only kind schemas and system+user trust.
+    /// `sealed_content`, when present, answers dependency verification for
+    /// paths an admitted realization covers; live bytes answer the rest.
     pub fn build_plan(
         &self,
         ctx: &PlanContext,
         item: &VerifiedItem,
         parameters: &Value,
         hints: &ExecutionHints,
+        sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
     ) -> Result<ExecutionPlan, EngineError> {
-        self.checked_bundle_generation(|| self.build_plan_current(ctx, item, parameters, hints))
+        self.checked_bundle_generation(|| {
+            self.build_plan_current(ctx, item, parameters, hints, sealed_content)
+        })
     }
 
     fn build_plan_current(
@@ -3080,6 +3087,7 @@ impl Engine {
         item: &VerifiedItem,
         parameters: &Value,
         hints: &ExecutionHints,
+        sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
     ) -> Result<ExecutionPlan, EngineError> {
         crate::scope::check_execution_scope(&ctx.requested_by)?;
 
@@ -3111,13 +3119,14 @@ impl Engine {
             node_trust_store: &self.node_trust_store,
             host_env: &self.host_env,
             project_authority: None,
-            sealed_content: None,
+            sealed_content,
         })
     }
 
     /// Build an execution plan whose root, executor chain, project config, and
     /// precedence probes are all sourced from one admitted project-content
-    /// authority.
+    /// authority. `sealed_content`, when present, overrides that authority for
+    /// dependency paths an admitted realization covers.
     pub fn build_plan_under_admitted_authority(
         &self,
         ctx: &PlanContext,
@@ -3126,6 +3135,7 @@ impl Engine {
         hints: &ExecutionHints,
         project_root: &Path,
         admitted: &AdmittedRequestAuthoritySnapshot,
+        sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
     ) -> Result<ExecutionPlan, EngineError> {
         self.checked_bundle_generation(|| {
             crate::scope::check_execution_scope(&ctx.requested_by)?;
@@ -3176,7 +3186,7 @@ impl Engine {
                 node_trust_store: &self.node_trust_store,
                 host_env: &self.host_env,
                 project_authority: Some((project_root, project_content)),
-                sealed_content: None,
+                sealed_content,
             })
         })
     }

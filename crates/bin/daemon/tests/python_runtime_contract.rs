@@ -149,7 +149,7 @@ fn run_tool_with_hints(
         .verify(&plan_ctx, resolved)
         .expect("verify tool (unsigned allowed)");
     let plan = engine
-        .build_plan(&plan_ctx, &verified, &params, &plan_ctx.execution_hints)
+        .build_plan(&plan_ctx, &verified, &params, &plan_ctx.execution_hints, None)
         .expect("build_plan walks to subprocess terminal");
 
     let app_root = isolation_app_root();

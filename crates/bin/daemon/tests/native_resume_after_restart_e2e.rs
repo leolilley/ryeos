@@ -143,6 +143,7 @@ fn build_subprocess_spec(project_dir: &Path) -> PlanSubprocessSpec {
             &verified,
             &serde_json::Value::Null,
             &ctx.execution_hints,
+            None,
         )
         .expect("plan builds");
 

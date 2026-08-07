@@ -31,6 +31,7 @@ use serde_json::Value;
 
 use crate::error::EngineError;
 use crate::item_resolution::parse_signature_header;
+use crate::project_content::SealedDependencyContent;
 use crate::runtime::{CompileContext, RuntimeHandler};
 use crate::trust::content_hash_after_signature;
 
@@ -229,15 +230,20 @@ fn walk_and_verify(
             // judged by the bytes the runtime will execute. Plan build runs
             // in the daemon, where that mount does not exist, so a live read
             // here would verify content the run never sees — and a live edit
-            // would refuse a launch whose executable bytes never changed.
+            // would refuse a launch whose executable bytes never changed. A
+            // covered path the sealed view holds no file for is skipped the
+            // same way: the mount replaces the whole subtree at execution,
+            // so the live file this walk found never executes.
             let bytes = match ctx
                 .sealed_content
                 .map(|sealed| sealed.sealed_bytes(&path, MAX_DEPENDENCY_FILE_BYTES))
                 .transpose()?
-                .flatten()
             {
-                Some(sealed) => sealed,
-                None => lillux::read_open_regular_file_bounded(file, MAX_DEPENDENCY_FILE_BYTES)?,
+                Some(SealedDependencyContent::Sealed(sealed)) => sealed,
+                Some(SealedDependencyContent::Absent) => return Ok(()),
+                Some(SealedDependencyContent::Uncovered) | None => {
+                    lillux::read_open_regular_file_bounded(file, MAX_DEPENDENCY_FILE_BYTES)?
+                }
             };
             aggregate_bytes = aggregate_bytes
                 .checked_add(bytes.len() as u64)
@@ -368,20 +374,41 @@ fn verify_admitted_project_dependencies(
         if !extension_set.contains(&suffix) {
             continue;
         }
-        if entry.size > MAX_DEPENDENCY_FILE_BYTES {
-            return Err(EngineError::InvalidRuntimeConfig {
-                path: base.join(&entry.relative_path).display().to_string(),
-                reason: format!(
-                    "verify_deps: admitted dependency exceeds {MAX_DEPENDENCY_FILE_BYTES} bytes"
-                ),
-            });
-        }
-        aggregate_bytes = aggregate_bytes.checked_add(entry.size).ok_or_else(|| {
-            EngineError::InvalidRuntimeConfig {
+        let absolute = base.join(&entry.relative_path);
+        // Realization mounts overlay the admitted project tree at execution,
+        // so a covered path is judged by its sealed bytes here too; the
+        // admitted project content answers only for uncovered paths.
+        let bytes = match ctx
+            .sealed_content
+            .map(|sealed| sealed.sealed_bytes(&absolute, MAX_DEPENDENCY_FILE_BYTES))
+            .transpose()?
+        {
+            Some(SealedDependencyContent::Sealed(sealed)) => sealed,
+            Some(SealedDependencyContent::Absent) => continue,
+            Some(SealedDependencyContent::Uncovered) | None => {
+                if entry.size > MAX_DEPENDENCY_FILE_BYTES {
+                    return Err(EngineError::InvalidRuntimeConfig {
+                        path: absolute.display().to_string(),
+                        reason: format!(
+                            "verify_deps: admitted dependency exceeds {MAX_DEPENDENCY_FILE_BYTES} bytes"
+                        ),
+                    });
+                }
+                let project_relative = prefix.join(&entry.relative_path);
+                project_content
+                    .read_file(&project_relative, MAX_DEPENDENCY_FILE_BYTES)?
+                    .ok_or_else(|| EngineError::InvalidRuntimeConfig {
+                        path: absolute.display().to_string(),
+                        reason: "verify_deps: admitted dependency disappeared".to_string(),
+                    })?
+            }
+        };
+        aggregate_bytes = aggregate_bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| EngineError::InvalidRuntimeConfig {
                 path: base.display().to_string(),
                 reason: "verify_deps: admitted dependency byte count overflow".to_string(),
-            }
-        })?;
+            })?;
         if aggregate_bytes > MAX_DEPENDENCY_AGGREGATE_BYTES {
             return Err(EngineError::InvalidRuntimeConfig {
                 path: base.display().to_string(),
@@ -390,19 +417,12 @@ fn verify_admitted_project_dependencies(
                 ),
             });
         }
-        let project_relative = prefix.join(&entry.relative_path);
-        let bytes = project_content
-            .read_file(&project_relative, MAX_DEPENDENCY_FILE_BYTES)?
-            .ok_or_else(|| EngineError::InvalidRuntimeConfig {
-                path: base.join(&entry.relative_path).display().to_string(),
-                reason: "verify_deps: admitted dependency disappeared".to_string(),
-            })?;
         let content =
             std::str::from_utf8(&bytes).map_err(|error| EngineError::InvalidRuntimeConfig {
-                path: base.join(&entry.relative_path).display().to_string(),
+                path: absolute.display().to_string(),
                 reason: format!("verify_deps: admitted dependency is not UTF-8: {error}"),
             })?;
-        verify_file_content(&base.join(&entry.relative_path), content, ctx)?;
+        verify_file_content(&absolute, content, ctx)?;
     }
     Ok(())
 }
@@ -615,5 +635,283 @@ mod tests {
             }
             other => panic!("expected InvalidRuntimeConfig, got {other:?}"),
         }
+    }
+
+    // ── Sealed dependency content (realization-covered paths) ───────────
+
+    use crate::project_content::{
+        AuthoritativeProjectContent, ProjectContentEntry, SealedDependencyBytes,
+    };
+
+    struct StubSealed {
+        map: HashMap<PathBuf, SealedDependencyContent>,
+    }
+
+    impl SealedDependencyBytes for StubSealed {
+        fn sealed_bytes(
+            &self,
+            absolute_path: &Path,
+            _max_bytes: u64,
+        ) -> Result<SealedDependencyContent, EngineError> {
+            Ok(self
+                .map
+                .get(absolute_path)
+                .cloned()
+                .unwrap_or(SealedDependencyContent::Uncovered))
+        }
+    }
+
+    /// One project-relative file table standing in for an admitted pinned
+    /// materialization.
+    struct StubProjectContent {
+        files: Vec<(PathBuf, Vec<u8>)>,
+    }
+
+    impl AuthoritativeProjectContent for StubProjectContent {
+        fn list_files(
+            &self,
+            prefix: &Path,
+            _recursive: bool,
+            _max_entries: usize,
+        ) -> Result<Vec<ProjectContentEntry>, EngineError> {
+            Ok(self
+                .files
+                .iter()
+                .filter_map(|(path, content)| {
+                    path.strip_prefix(prefix).ok().map(|relative| {
+                        ProjectContentEntry {
+                            relative_path: relative.to_path_buf(),
+                            content_hash: "unchecked-by-this-branch".to_owned(),
+                            size: content.len() as u64,
+                            normalized_mode: 0o644,
+                        }
+                    })
+                })
+                .collect())
+        }
+
+        fn read_file(
+            &self,
+            relative_path: &Path,
+            _max_bytes: u64,
+        ) -> Result<Option<Vec<u8>>, EngineError> {
+            Ok(self
+                .files
+                .iter()
+                .find(|(path, _)| path == relative_path)
+                .map(|(_, content)| content.clone()))
+        }
+
+        fn validates_file(
+            &self,
+            _relative_path: &Path,
+            _content_hash: &str,
+        ) -> Result<bool, EngineError> {
+            Ok(true)
+        }
+
+        fn validates_absence(&self, _relative_path: &Path) -> Result<bool, EngineError> {
+            Ok(true)
+        }
+    }
+
+    /// Registry with one signed `tool` kind owning `.py` under a `#`
+    /// signature envelope, so a verified file's header hash is enforced.
+    fn python_tool_registry() -> KindRegistry {
+        let schema_dir = TempDir::new().unwrap();
+        let sk = lillux::crypto::SigningKey::from_bytes(&[42u8; 32]);
+        let vk = sk.verifying_key();
+        let trust = TrustStore::from_signers(vec![crate::trust::TrustedSigner {
+            fingerprint: crate::trust::compute_fingerprint(&vk),
+            verifying_key: vk,
+            label: None,
+        }]);
+        let yaml = "\
+location:
+  directory: tools
+formats:
+  - extensions: [\".py\"]
+    parser: parser:ryeos/core/python/tool-header
+    signature:
+      prefix: \"#\"
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+effective_trust:
+  include_references: false
+resolution: []
+metadata:
+  rules:
+    name:
+      from: filename
+";
+        let kind_dir = schema_dir.path().join("tool");
+        std::fs::create_dir_all(&kind_dir).unwrap();
+        std::fs::write(
+            kind_dir.join("tool.kind-schema.yaml"),
+            lillux::signature::sign_content(yaml, &sk, "#", None),
+        )
+        .unwrap();
+        KindRegistry::load_base(&[schema_dir.path().to_path_buf()], &trust).unwrap()
+    }
+
+    /// A dependency whose signed header matches its body, and a live edit of
+    /// it whose body no longer matches.
+    fn signed_and_drifted() -> (String, String) {
+        let sk = lillux::crypto::SigningKey::from_bytes(&[7u8; 32]);
+        let signed = lillux::signature::sign_content("VALUE = 1\n", &sk, "#", None);
+        let drifted = format!("{signed}VALUE = 2\n");
+        (signed, drifted)
+    }
+
+    #[test]
+    fn sealed_bytes_replace_the_live_read_for_covered_paths() {
+        let kinds = python_tool_registry();
+        let tmp = TempDir::new().unwrap();
+        let tool = tmp.path().join("t.py");
+        std::fs::write(&tool, "x").unwrap();
+        let lib = tmp.path().join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let (signed, drifted) = signed_and_drifted();
+        let helper = lib.join("helper.py");
+        std::fs::write(&helper, &drifted).unwrap();
+
+        let chain = vec![make_intermediate(json!({}), tool)];
+        let parsers = empty_dispatcher();
+        let trust = empty_trust();
+        let roots = empty_roots();
+        let block = json!({"enabled": true, "scope": "tool_dir", "extensions": [".py"]});
+
+        // Live read: the drifted body contradicts its signed header.
+        let mut ctx = make_ctx(&chain, &kinds, &parsers, &trust, &roots);
+        let err = VerifyDepsHandler.apply(&block, &mut ctx).unwrap_err();
+        assert!(
+            matches!(err, EngineError::ContentHashMismatch { .. }),
+            "got {err:?}"
+        );
+
+        // Sealed bytes are what will execute; the live drift is invisible.
+        let stub = StubSealed {
+            map: HashMap::from([(
+                helper.clone(),
+                SealedDependencyContent::Sealed(signed.into_bytes()),
+            )]),
+        };
+        let mut ctx = make_ctx(&chain, &kinds, &parsers, &trust, &roots);
+        ctx.sealed_content = Some(&stub);
+        VerifyDepsHandler.apply(&block, &mut ctx).unwrap();
+    }
+
+    #[test]
+    fn sealed_absent_skips_a_file_the_sealed_view_holds_no_entry_for() {
+        let kinds = python_tool_registry();
+        let tmp = TempDir::new().unwrap();
+        let tool = tmp.path().join("t.py");
+        std::fs::write(&tool, "x").unwrap();
+        let lib = tmp.path().join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let (_, drifted) = signed_and_drifted();
+        let scratch = lib.join("scratch.py");
+        std::fs::write(&scratch, &drifted).unwrap();
+
+        let chain = vec![make_intermediate(json!({}), tool)];
+        let parsers = empty_dispatcher();
+        let trust = empty_trust();
+        let roots = empty_roots();
+        let block = json!({"enabled": true, "scope": "tool_dir", "extensions": [".py"]});
+
+        let stub = StubSealed {
+            map: HashMap::from([(scratch.clone(), SealedDependencyContent::Absent)]),
+        };
+        let mut ctx = make_ctx(&chain, &kinds, &parsers, &trust, &roots);
+        ctx.sealed_content = Some(&stub);
+        VerifyDepsHandler.apply(&block, &mut ctx).unwrap();
+    }
+
+    #[test]
+    fn uncovered_paths_verify_live_even_with_a_sealed_source_present() {
+        let kinds = python_tool_registry();
+        let tmp = TempDir::new().unwrap();
+        let tool = tmp.path().join("t.py");
+        std::fs::write(&tool, "x").unwrap();
+        let lib = tmp.path().join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let (_, drifted) = signed_and_drifted();
+        std::fs::write(lib.join("helper.py"), &drifted).unwrap();
+
+        let chain = vec![make_intermediate(json!({}), tool)];
+        let parsers = empty_dispatcher();
+        let trust = empty_trust();
+        let roots = empty_roots();
+        let block = json!({"enabled": true, "scope": "tool_dir", "extensions": [".py"]});
+
+        let stub = StubSealed {
+            map: HashMap::new(),
+        };
+        let mut ctx = make_ctx(&chain, &kinds, &parsers, &trust, &roots);
+        ctx.sealed_content = Some(&stub);
+        let err = VerifyDepsHandler.apply(&block, &mut ctx).unwrap_err();
+        assert!(
+            matches!(err, EngineError::ContentHashMismatch { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn sealed_bytes_override_admitted_project_content() {
+        let kinds = python_tool_registry();
+        let tmp = TempDir::new().unwrap();
+        let project_root = tmp.path().to_path_buf();
+        let tool = project_root.join("tools").join("t.py");
+        std::fs::create_dir_all(tool.parent().unwrap()).unwrap();
+        std::fs::write(&tool, "x").unwrap();
+        let (signed, drifted) = signed_and_drifted();
+        let admitted = StubProjectContent {
+            files: vec![
+                (
+                    PathBuf::from("tools/helper.py"),
+                    drifted.clone().into_bytes(),
+                ),
+                (
+                    PathBuf::from("tools/scratch.py"),
+                    drifted.clone().into_bytes(),
+                ),
+            ],
+        };
+
+        let chain = vec![make_intermediate(json!({}), tool)];
+        let parsers = empty_dispatcher();
+        let trust = empty_trust();
+        let roots = empty_roots();
+        let block = json!({"enabled": true, "scope": "tool_dir", "extensions": [".py"]});
+
+        // The admitted authority serves drifted bytes for both entries.
+        let mut ctx = make_ctx(&chain, &kinds, &parsers, &trust, &roots);
+        ctx.project_authority = Some((project_root.as_path(), &admitted));
+        let err = VerifyDepsHandler.apply(&block, &mut ctx).unwrap_err();
+        assert!(
+            matches!(err, EngineError::ContentHashMismatch { .. }),
+            "got {err:?}"
+        );
+
+        // A realization mount overlays both paths: one sealed clean, one
+        // holding no file at all. Neither drifted admitted entry is judged.
+        let stub = StubSealed {
+            map: HashMap::from([
+                (
+                    project_root.join("tools/helper.py"),
+                    SealedDependencyContent::Sealed(signed.into_bytes()),
+                ),
+                (
+                    project_root.join("tools/scratch.py"),
+                    SealedDependencyContent::Absent,
+                ),
+            ]),
+        };
+        let mut ctx = make_ctx(&chain, &kinds, &parsers, &trust, &roots);
+        ctx.project_authority = Some((project_root.as_path(), &admitted));
+        ctx.sealed_content = Some(&stub);
+        VerifyDepsHandler.apply(&block, &mut ctx).unwrap();
     }
 }

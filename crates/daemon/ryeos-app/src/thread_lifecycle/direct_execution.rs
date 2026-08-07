@@ -613,10 +613,12 @@ pub fn prepare_item_plan(
     isolation: &ryeos_engine::isolation::IsolationRuntime,
     lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
     live_access: Option<&ryeos_engine::isolation::IsolationLiveAccessAuthority>,
+    sealed_content: Option<&dyn ryeos_engine::project_content::SealedDependencyBytes>,
 ) -> Result<PreparedItemPlan> {
     engine.with_checked_bundle_generation(|_generation| {
         let verified = super::verified_execution_subject(engine, resolved)?;
-        let mut plan = super::build_execution_plan_for_request(engine, resolved, &verified)?;
+        let mut plan =
+            super::build_execution_plan_for_request(engine, resolved, &verified, sealed_content)?;
         let root_subject_source_identity =
             if resolved.resolved_item.source_space == ryeos_engine::contracts::ItemSpace::Bundle {
                 let ai = resolved

@@ -2085,13 +2085,24 @@ pub async fn run_and_wait(
     let wait_isolation_live_access_authority =
         params.provenance.isolation_live_access_authority()?;
     let engine = params.provenance.request_engine().clone();
-    let mut prepared_plan = thread_lifecycle::prepare_item_plan(
-        &engine,
-        &params.resolved,
-        state.isolation.as_ref(),
-        params.lifecycle_authority,
-        wait_isolation_live_access_authority.as_ref(),
-    )?;
+    // Block-scoped: the sealed-bytes source holds non-Send descriptor state
+    // and plan build is fully synchronous, so it must be statically dead
+    // before this future's next await point.
+    let mut prepared_plan = {
+        let sealed_dependency_bytes =
+            super::external_content::sealed_dependency_bytes_for_child_dispatch(&state, &params)
+                .context("derive sealed dependency bytes for child dispatch")?;
+        thread_lifecycle::prepare_item_plan(
+            &engine,
+            &params.resolved,
+            state.isolation.as_ref(),
+            params.lifecycle_authority,
+            wait_isolation_live_access_authority.as_ref(),
+            sealed_dependency_bytes
+                .as_ref()
+                .map(|sealed| sealed as &dyn ryeos_engine::project_content::SealedDependencyBytes),
+        )?
+    };
     let protocol = resolved_terminator_protocol(&engine, &params.resolved)?;
     let wait_cas_guard =
         ryeos_state::CasMutationGuard::shared_from_cas_root(&state.state_store.cas_root()?)
@@ -2774,13 +2785,24 @@ pub async fn run_detached(
     let bg_project_authority = params.provenance.project_authority().clone();
     let bg_isolation_live_access_authority = params.provenance.isolation_live_access_authority()?;
     let engine = params.provenance.request_engine().clone();
-    let mut prepared_plan = thread_lifecycle::prepare_item_plan(
-        &engine,
-        &params.resolved,
-        state.isolation.as_ref(),
-        params.lifecycle_authority,
-        bg_isolation_live_access_authority.as_ref(),
-    )?;
+    // Block-scoped: the sealed-bytes source holds non-Send descriptor state
+    // and plan build is fully synchronous, so it must be statically dead
+    // before this future's next await point.
+    let mut prepared_plan = {
+        let sealed_dependency_bytes =
+            super::external_content::sealed_dependency_bytes_for_child_dispatch(&state, &params)
+                .context("derive sealed dependency bytes for child dispatch")?;
+        thread_lifecycle::prepare_item_plan(
+            &engine,
+            &params.resolved,
+            state.isolation.as_ref(),
+            params.lifecycle_authority,
+            bg_isolation_live_access_authority.as_ref(),
+            sealed_dependency_bytes
+                .as_ref()
+                .map(|sealed| sealed as &dyn ryeos_engine::project_content::SealedDependencyBytes),
+        )?
+    };
     let protocol = resolved_terminator_protocol(&engine, &params.resolved)?;
     let bg_cas_guard =
         ryeos_state::CasMutationGuard::shared_from_cas_root(&state.state_store.cas_root()?)

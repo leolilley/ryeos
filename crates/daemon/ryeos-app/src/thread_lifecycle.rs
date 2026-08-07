@@ -6237,6 +6237,7 @@ pub(super) fn build_execution_plan_for_request(
     engine: &Engine,
     resolved: &ResolvedExecutionRequest,
     verified: &VerifiedItem,
+    sealed_content: Option<&dyn ryeos_engine::project_content::SealedDependencyBytes>,
 ) -> Result<ryeos_engine::contracts::ExecutionPlan> {
     match resolved
         .root_admission
@@ -6259,6 +6260,7 @@ pub(super) fn build_execution_plan_for_request(
                     &resolved.plan_context.execution_hints,
                     project_root,
                     authority,
+                    sealed_content,
                 )
                 .map_err(|e| anyhow!("plan build failed: {e}"))
         }
@@ -6278,6 +6280,7 @@ pub(super) fn build_execution_plan_for_request(
                 verified,
                 &resolved.parameters,
                 &resolved.plan_context.execution_hints,
+                sealed_content,
             )
             .map_err(|e| anyhow!("plan build failed: {e}")),
     }
@@ -6289,7 +6292,7 @@ pub fn validate_item(
     resolved: &ResolvedExecutionRequest,
 ) -> Result<ValidatedItem> {
     let verified = verified_execution_subject(engine, resolved)?;
-    let plan = build_execution_plan_for_request(engine, resolved, &verified)?;
+    let plan = build_execution_plan_for_request(engine, resolved, &verified, None)?;
 
     Ok(ValidatedItem {
         trust_class: verified.trust_class,
