@@ -5410,6 +5410,26 @@ impl StateDb {
         self.operational()?.cas_entries_by_state_summary()
     }
 
+    pub fn publish_effect_record(&self, cache_key: &str, record_hash: &str) -> anyhow::Result<()> {
+        self.operational()?.publish_effect_record(cache_key, record_hash)
+    }
+
+    pub fn lookup_effect_record(&self, cache_key: &str) -> anyhow::Result<Option<String>> {
+        self.operational()?.lookup_effect_record(cache_key)
+    }
+
+    pub fn touch_effect_record(&self, cache_key: &str) -> anyhow::Result<()> {
+        self.operational()?.touch_effect_record(cache_key)
+    }
+
+    pub fn list_effect_record_hashes(&self) -> anyhow::Result<Vec<String>> {
+        self.operational()?.list_effect_record_hashes()
+    }
+
+    pub fn delete_effect_records(&self, cache_keys: &[String]) -> anyhow::Result<usize> {
+        self.operational()?.delete_effect_records(cache_keys)
+    }
+
     pub fn record_admission_attestation(
         &self,
         record: &NewAdmissionAttestationRecord,

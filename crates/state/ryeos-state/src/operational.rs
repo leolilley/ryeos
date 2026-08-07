@@ -15,7 +15,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use crate::sqlite_schema;
 
 const OPERATIONAL_APP_ID: i32 = 0x5259_4f50; // "RYOP"
-const OPERATIONAL_SCHEMA_VERSION: i32 = 1;
+const OPERATIONAL_SCHEMA_VERSION: i32 = 2;
 pub const OPERATIONAL_DB_FILENAME: &str = "operational.sqlite3";
 pub(crate) const OPERATIONAL_INITIALIZED_FILENAME: &str = "operational.initialized";
 const OPERATIONAL_INITIALIZED_CONTENT: &[u8] = b"ryeos-operational-v1\n";
@@ -23,7 +23,7 @@ const OPERATIONAL_INITIALIZED_CONTENT: &[u8] = b"ryeos-operational-v1\n";
 const SCHEMA_SQL: &str = r#"
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
-PRAGMA user_version=1;
+PRAGMA user_version=2;
 
 CREATE TABLE cas_entries (
     hash TEXT NOT NULL,
@@ -103,6 +103,16 @@ CREATE INDEX idx_admission_attestations_policy ON admission_attestations(policy)
 CREATE INDEX idx_admission_attestations_issuer ON admission_attestations(issuer);
 CREATE INDEX idx_admission_attestations_subject_policy_claim_issuer
     ON admission_attestations(subject_hash, policy, claim, issuer);
+
+CREATE TABLE effect_records (
+    cache_key TEXT PRIMARY KEY,
+    record_hash TEXT NOT NULL,
+    produced_at TEXT NOT NULL,
+    last_replayed_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_effect_records_last_replayed ON effect_records(last_replayed_at);
+CREATE INDEX idx_effect_records_record_hash ON effect_records(record_hash);
 "#;
 
 fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
@@ -405,6 +415,35 @@ fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "effect_records",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "cache_key",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "record_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "produced_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "last_replayed_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -489,6 +528,18 @@ fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "idx_admission_attestations_subject_policy_claim_issuer",
                 table: "admission_attestations",
                 columns: &["subject_hash", "policy", "claim", "issuer"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_effect_records_last_replayed",
+                table: "effect_records",
+                columns: &["last_replayed_at"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_effect_records_record_hash",
+                table: "effect_records",
+                columns: &["record_hash"],
                 unique: false,
             },
         ],
@@ -1634,6 +1685,84 @@ impl OperationalDb {
             .context("failed to collect CAS entry attribution summary")
     }
 
+    /// Index one durable node effect record under its replay identity. The
+    /// record object must already be stored in CAS; the row is what makes it
+    /// findable at dispatch and what roots it against garbage collection.
+    /// Re-publication replaces: a newer settled result for the same identity
+    /// wins.
+    pub fn publish_effect_record(&self, cache_key: &str, record_hash: &str) -> Result<()> {
+        validate_canonical_hash("effect record cache key", cache_key)?;
+        validate_canonical_hash("effect record hash", record_hash)?;
+        let now = lillux::time::iso8601_now();
+        self.conn
+            .execute(
+                "INSERT INTO effect_records (cache_key, record_hash, produced_at, last_replayed_at)
+                 VALUES (?, ?, ?, ?)
+                 ON CONFLICT(cache_key) DO UPDATE SET
+                    record_hash = excluded.record_hash,
+                    produced_at = excluded.produced_at,
+                    last_replayed_at = excluded.last_replayed_at",
+                rusqlite::params![cache_key, record_hash, &now, &now],
+            )
+            .context("failed to publish effect record")?;
+        Ok(())
+    }
+
+    pub fn lookup_effect_record(&self, cache_key: &str) -> Result<Option<String>> {
+        validate_canonical_hash("effect record cache key", cache_key)?;
+        self.conn
+            .query_row(
+                "SELECT record_hash FROM effect_records WHERE cache_key = ?",
+                [cache_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to look up effect record")
+    }
+
+    /// Refresh the replay-recency signal the retention sweep orders by.
+    pub fn touch_effect_record(&self, cache_key: &str) -> Result<()> {
+        validate_canonical_hash("effect record cache key", cache_key)?;
+        let now = lillux::time::iso8601_now();
+        self.conn
+            .execute(
+                "UPDATE effect_records SET last_replayed_at = ? WHERE cache_key = ?",
+                rusqlite::params![&now, cache_key],
+            )
+            .context("failed to touch effect record")?;
+        Ok(())
+    }
+
+    /// Every indexed record hash. These are garbage-collection roots: a
+    /// record stays reachable exactly as long as its row exists, and
+    /// retention is row deletion followed by an ordinary sweep.
+    pub fn list_effect_record_hashes(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT record_hash FROM effect_records ORDER BY record_hash")
+            .context("failed to prepare effect record root query")?;
+        let rows = stmt
+            .query_map([], |row| row.get(0))
+            .context("failed to query effect record roots")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect effect record roots")
+    }
+
+    pub fn delete_effect_records(&self, cache_keys: &[String]) -> Result<usize> {
+        let mut deleted = 0usize;
+        for cache_key in cache_keys {
+            validate_canonical_hash("effect record cache key", cache_key)?;
+            deleted += self
+                .conn
+                .execute(
+                    "DELETE FROM effect_records WHERE cache_key = ?",
+                    [cache_key],
+                )
+                .context("failed to delete effect record")?;
+        }
+        Ok(deleted)
+    }
+
     pub fn record_admission_attestation(
         &self,
         record: &NewAdmissionAttestationRecord,
@@ -2383,8 +2512,37 @@ mod tests {
         assert_eq!(app_id, OPERATIONAL_APP_ID);
         assert_eq!(version, OPERATIONAL_SCHEMA_VERSION);
         assert_eq!(synchronous, 2, "SQLite FULL synchronous mode");
-        assert_eq!(tables, 4);
-        assert_eq!(indexes, 14);
+        assert_eq!(tables, 5);
+        assert_eq!(indexes, 16);
+    }
+
+    #[test]
+    fn effect_records_round_trip_and_replace_on_republication() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        let db = OperationalDb::open(&path).unwrap();
+        let key = "a".repeat(64);
+        let hash = "b".repeat(64);
+
+        assert!(db.lookup_effect_record(&key).unwrap().is_none());
+        db.publish_effect_record(&key, &hash).unwrap();
+        assert_eq!(
+            db.lookup_effect_record(&key).unwrap().as_deref(),
+            Some(hash.as_str())
+        );
+        assert_eq!(db.list_effect_record_hashes().unwrap(), vec![hash.clone()]);
+        db.touch_effect_record(&key).unwrap();
+
+        let newer = "c".repeat(64);
+        db.publish_effect_record(&key, &newer).unwrap();
+        assert_eq!(
+            db.lookup_effect_record(&key).unwrap().as_deref(),
+            Some(newer.as_str())
+        );
+
+        assert_eq!(db.delete_effect_records(&[key.clone()]).unwrap(), 1);
+        assert!(db.lookup_effect_record(&key).unwrap().is_none());
+        assert!(db.list_effect_record_hashes().unwrap().is_empty());
     }
 
     #[test]

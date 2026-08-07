@@ -610,6 +610,13 @@ fn inspect_operational_gc_roots(
             ryeos_state::CasEntryKind::Blob => roots.blob_hashes.push(entry.hash),
         }
     }
+    // Indexed effect records stay reachable exactly as long as their index
+    // rows exist; retention is row deletion, never a direct object delete.
+    roots.object_hashes.extend(
+        operational
+            .list_effect_record_hashes()
+            .context("collect durable effect record roots")?,
+    );
     Ok(roots)
 }
 

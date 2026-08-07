@@ -359,6 +359,14 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
             }
         }
     }
+    // Indexed effect records are replay authority: they stay reachable
+    // exactly as long as their index rows exist, and retention is row
+    // deletion followed by an ordinary sweep.
+    operational_object_roots.extend(
+        state_store
+            .with_state_db(|db| db.list_effect_record_hashes())
+            .context("read durable effect record roots before sweep")?,
+    );
     let operational_roots = gc::AdditionalCasRoots {
         object_hashes: operational_object_roots.into_iter().collect(),
         blob_hashes: operational_blob_roots.into_iter().collect(),

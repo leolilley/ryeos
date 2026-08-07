@@ -725,6 +725,11 @@ pub struct SpawnItemParams<'a> {
         Option<ryeos_engine::isolation::IsolationLiveAccessAuthority>,
     pub isolation_external_read_only_mounts:
         Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
+    /// Canonical JSON of the launch's sealed external realization set, or
+    /// `None` when the program realizes nothing. Injected per spawn so a
+    /// runtime references the identity it executes under without
+    /// re-observing any content.
+    pub external_realizations_env: Option<String>,
     /// Exact daemon socket requested by the verified callback channel, or
     /// `None` for a callback-free launch.
     pub isolation_daemon_socket_path: Option<&'a std::path::Path>,
@@ -762,6 +767,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItemAwaitingAtta
         isolation_project_authority,
         isolation_live_access_authority,
         isolation_external_read_only_mounts,
+        external_realizations_env,
         isolation_daemon_socket_path,
         thread_state_dir,
         is_resume,
@@ -874,6 +880,18 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItemAwaitingAtta
             builder = builder.with_typed_bindings(runtime_bindings)?;
 
             builder = builder.with_typed_bindings(protocol_env_bindings.iter().cloned())?;
+
+            // The sealed realization identity travels with the spawn: a
+            // runtime (or any tool it hosts) references the admitted set from
+            // here rather than re-observing content the contract forbids it
+            // to re-verify live.
+            if let Some(sealed) = &external_realizations_env {
+                builder = builder.with_typed_bindings([EnvBinding::new(
+                    "RYEOS_EXTERNAL_REALIZATIONS",
+                    sealed.clone(),
+                    EnvSourceDetail::PerSpawnDaemon,
+                )])?;
+            }
 
             if spec.execution.native_resume.is_some()
                 && let Some(resume_bindings) = resume_env_for_first_native_resume.take()
