@@ -783,6 +783,21 @@ pub struct ExecutionExternalContentDecl {
     pub allowed_roots: Vec<String>,
     /// Kind-local ceiling, additionally bounded by the substrate maximum.
     pub max_declarations: usize,
+    /// Grant to pin large-tier realizations. Absent means refused: an item
+    /// of this kind cannot bind a large-content manifest at all. The grant
+    /// is signed schema data — the tier's permission never lives in code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub large_content: Option<ExecutionLargeContentGrant>,
+}
+
+/// Kind-local terms for the large-content grant.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionLargeContentGrant {
+    /// Per-launch ceiling across this kind's large realizations; bounded by
+    /// (and defaulting to) the tier maximum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_total_bytes: Option<u64>,
 }
 
 /// Optional signed semantic validator for the complete effective value.
@@ -2395,6 +2410,19 @@ fn validate_execution_external_content_decl(
         return Err(EngineError::SchemaLoaderError {
             reason: format!(
                 "{display}: execution.external_content.allowed_roots must not be empty"
+            ),
+        });
+    }
+    if let Some(grant) = &declaration.large_content
+        && let Some(max_total_bytes) = grant.max_total_bytes
+        && (max_total_bytes == 0
+            || max_total_bytes > ryeos_state::objects::MAX_LARGE_CONTENT_TOTAL_BYTES)
+    {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: execution.external_content.large_content.max_total_bytes must be \
+                 within 1..={}",
+                ryeos_state::objects::MAX_LARGE_CONTENT_TOTAL_BYTES
             ),
         });
     }

@@ -19,6 +19,8 @@ use ryeos_engine::external_realization::{
     RealizedExternalContentSet,
 };
 
+use anyhow::Context as _;
+
 use super::PendingCasPublication;
 
 /// Descriptor-pinned materializations and their exact cache-generation
@@ -366,6 +368,53 @@ pub(crate) fn bind_external_realizations(
     let mut mounts = Vec::with_capacity(realized.iter().len());
     let mut leases = Vec::with_capacity(realized.iter().len());
     for entry in realized.iter() {
+        if let Some(manifest) = try_load_large_content_manifest(&cas, &entry.manifest_hash)? {
+            if manifest.entry_count != entry.entry_count
+                || manifest.total_bytes != entry.total_bytes
+            {
+                anyhow::bail!(
+                    "external realization `{}` contradicts manifest {} statistics",
+                    entry.id,
+                    entry.manifest_hash
+                );
+            }
+            if entry.kind == ExternalContentKind::File && !manifest.is_file_shaped() {
+                anyhow::bail!(
+                    "external realization `{}` is file-shaped but manifest {} is not",
+                    entry.id,
+                    entry.manifest_hash
+                );
+            }
+            // Large content never materialize-copies: every manifest entry
+            // binds the store's immutable file directly, leased for the
+            // spawn's lifetime. A tree shape is one mount per entry.
+            let store = authority.large_object_store()?;
+            let destination_root = project_path.join(&entry.mount);
+            for manifest_entry in &manifest.entries {
+                let leased = store
+                    .lease_object(&manifest_entry.file_sha256, manifest_entry.size)
+                    .with_context(|| {
+                        format!(
+                            "binding large object for `{}` at `{}`",
+                            entry.id, manifest_entry.path
+                        )
+                    })?;
+                let destination = match entry.kind {
+                    ExternalContentKind::File => destination_root.clone(),
+                    ExternalContentKind::Tree => destination_root.join(&manifest_entry.path),
+                };
+                let (source_path, source, lease) = leased.into_parts();
+                mounts.push(
+                    ryeos_engine::isolation::IsolationReadOnlyMountAuthority::new(
+                        source_path,
+                        destination,
+                        source,
+                    ),
+                );
+                leases.push(lease);
+            }
+            continue;
+        }
         let closure = ryeos_state::VerifiedExternalContentClosure::load(
             &cas,
             &entry.manifest_hash,
@@ -421,14 +470,20 @@ struct SealedRealizationMount {
     /// Absolute mount destination under the launch's project root.
     destination: PathBuf,
     kind: ExternalContentKind,
-    /// Manifest path → (blob hash, exact size) for regular-file entries.
+    /// Manifest path → (content hash, exact size) for regular-file entries.
     files: BTreeMap<String, (String, u64)>,
+    /// Whether hashes name large-object store files instead of CAS blobs.
+    large: bool,
 }
 
 enum SealedPathLookup<'a> {
     Uncovered,
     Absent,
-    File { blob_hash: &'a str, size: u64 },
+    File {
+        blob_hash: &'a str,
+        size: u64,
+        large: bool,
+    },
 }
 
 /// Resolve one absolute path against the mount table. With nested mounts the
@@ -468,6 +523,7 @@ fn locate_sealed_path<'a>(
             Some((blob_hash, size)) => SealedPathLookup::File {
                 blob_hash: blob_hash.as_str(),
                 size: *size,
+                large: mount.large,
             },
             None => SealedPathLookup::Absent,
         },
@@ -494,7 +550,11 @@ impl ryeos_engine::project_content::SealedDependencyBytes for SealedRealizationD
         match locate_sealed_path(&self.mounts, absolute_path) {
             SealedPathLookup::Uncovered => Ok(SealedDependencyContent::Uncovered),
             SealedPathLookup::Absent => Ok(SealedDependencyContent::Absent),
-            SealedPathLookup::File { blob_hash, size } => {
+            SealedPathLookup::File {
+                blob_hash,
+                size,
+                large,
+            } => {
                 if size > max_bytes {
                     return Err(internal(anyhow::anyhow!(
                         "sealed dependency is {size} bytes, over the {max_bytes}-byte ceiling"
@@ -503,10 +563,32 @@ impl ryeos_engine::project_content::SealedDependencyBytes for SealedRealizationD
                 self.authority
                     .ensure_guard(&self.guard)
                     .map_err(internal)?;
-                let bytes = ryeos_state::object_closure::load_exact_cas_blob_with_cas(
-                    &self.cas, blob_hash, max_bytes,
-                )
-                .map_err(internal)?;
+                let bytes = if large {
+                    // Large objects live in the store, not the CAS; a store
+                    // read is hash-verified here because sealed answers are
+                    // exact or refused, never trusted-at-rest.
+                    (|| -> anyhow::Result<Vec<u8>> {
+                        let store = self.authority.large_object_store()?;
+                        let leased = store.lease_object(blob_hash, size)?;
+                        let mut bytes = Vec::with_capacity(size as usize);
+                        use std::io::Read as _;
+                        leased.file().take(max_bytes.saturating_add(1)).read_to_end(&mut bytes)?;
+                        if bytes.len() as u64 != size
+                            || lillux::cas::sha256_hex(&bytes) != blob_hash
+                        {
+                            anyhow::bail!(
+                                "large object {blob_hash} contradicts its sealed identity"
+                            );
+                        }
+                        Ok(bytes)
+                    })()
+                    .map_err(internal)?
+                } else {
+                    ryeos_state::object_closure::load_exact_cas_blob_with_cas(
+                        &self.cas, blob_hash, max_bytes,
+                    )
+                    .map_err(internal)?
+                };
                 self.authority
                     .ensure_guard(&self.guard)
                     .map_err(internal)?;
@@ -581,6 +663,34 @@ pub(crate) fn sealed_dependency_bytes_for_child_dispatch(
     let project_root = params.provenance.effective_path();
     let mut mounts = Vec::with_capacity(realized.iter().len());
     for entry in realized.iter() {
+        if let Some(manifest) = try_load_large_content_manifest(&cas, &entry.manifest_hash)? {
+            if manifest.entry_count != entry.entry_count
+                || manifest.total_bytes != entry.total_bytes
+            {
+                anyhow::bail!(
+                    "external realization `{}` contradicts manifest {} statistics",
+                    entry.id,
+                    entry.manifest_hash
+                );
+            }
+            let files = manifest
+                .entries
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.path.clone(),
+                        (entry.file_sha256.clone(), entry.size),
+                    )
+                })
+                .collect();
+            mounts.push(SealedRealizationMount {
+                destination: project_root.join(&entry.mount),
+                kind: entry.kind,
+                files,
+                large: true,
+            });
+            continue;
+        }
         let closure =
             ryeos_state::VerifiedExternalContentClosure::load(&cas, &entry.manifest_hash)?;
         if closure.manifest().entry_count != entry.entry_count
@@ -616,6 +726,7 @@ pub(crate) fn sealed_dependency_bytes_for_child_dispatch(
             destination: project_root.join(&entry.mount),
             kind: entry.kind,
             files,
+            large: false,
         });
     }
     authority.ensure_guard(&guard)?;
@@ -842,6 +953,19 @@ impl RealizationStore for ExternalRealizationStore {
         let guard = self.authority.acquire_shared_guard()?;
         self.authority.ensure_guard(&guard)?;
         let cas = self.authority.cas_store()?;
+        if let Some(manifest) = try_load_large_content_manifest(&cas, manifest_hash)? {
+            let store = self.authority.large_object_store()?;
+            for entry in &manifest.entries {
+                if store.object_size(&entry.file_sha256)? != Some(entry.size) {
+                    anyhow::bail!(
+                        "large object {} for `{}` is not in the store at its sealed size",
+                        entry.file_sha256,
+                        entry.path
+                    );
+                }
+            }
+            return Ok(true);
+        }
         ryeos_state::VerifiedExternalContentClosure::load(&cas, manifest_hash).map(|_| true)
     }
 }
@@ -905,6 +1029,117 @@ impl ExternalContentBlobSink for GuardedCasBlobSink<'_> {
     }
 }
 
+/// Fetch `digest` and decode it as a large-content manifest, or `None` when
+/// the object is absent or is some other kind. Routing is data: the pinned
+/// manifest names its own tier.
+fn try_load_large_content_manifest(
+    cas: &lillux::CasStore,
+    digest: &str,
+) -> anyhow::Result<Option<ryeos_state::objects::ExternalLargeContentManifestObject>> {
+    let Some(value) = cas.get_object(digest)? else {
+        return Ok(None);
+    };
+    if value.get("kind").and_then(serde_json::Value::as_str)
+        != Some(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND)
+    {
+        return Ok(None);
+    }
+    Ok(Some(
+        ryeos_state::objects::ExternalLargeContentManifestObject::from_value(&value)?,
+    ))
+}
+
+/// Seal one pinned large-content declaration without touching any live tree:
+/// the manifest is already admitted content, so admission proves the grant,
+/// the shape, and store residency, then roots the manifest object.
+#[allow(clippy::too_many_arguments)]
+fn seal_pinned_large_realization(
+    declaration: &ryeos_engine::external_content::ExternalContentDeclaration,
+    digest: &str,
+    manifest: ryeos_state::objects::ExternalLargeContentManifestObject,
+    contract: Option<&ryeos_engine::kind_registry::ExecutionExternalContentDecl>,
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    cas: &lillux::CasStore,
+    sink: &mut GuardedCasBlobSink<'_>,
+    large_total: &mut u64,
+) -> anyhow::Result<RealizedExternalContent> {
+    let grant = contract
+        .and_then(|contract| contract.large_content.as_ref())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "external content `{}` pins a large-content manifest but its signed kind \
+                 declares no `execution.external_content.large_content` grant",
+                declaration.id
+            )
+        })?;
+    if declaration.locator.is_some() {
+        anyhow::bail!(
+            "external content `{}` pins a large-content manifest and must not carry a \
+             source locator: large bytes bind from the store, not from a live tree",
+            declaration.id
+        );
+    }
+    *large_total = large_total
+        .checked_add(manifest.total_bytes)
+        .ok_or_else(|| anyhow::anyhow!("large-content realization byte total overflow"))?;
+    let ceiling = grant
+        .max_total_bytes
+        .unwrap_or(ryeos_state::objects::MAX_LARGE_CONTENT_TOTAL_BYTES);
+    if *large_total > ceiling {
+        anyhow::bail!(
+            "large-content realizations total {large_total} bytes; this kind's grant admits \
+             {ceiling}"
+        );
+    }
+    match declaration.kind {
+        ExternalContentKind::File => {
+            if !manifest.is_file_shaped() {
+                anyhow::bail!(
+                    "external content `{}` declares kind file but manifest {digest} is not \
+                     file-shaped",
+                    declaration.id
+                );
+            }
+        }
+        ExternalContentKind::Tree => {}
+    }
+    let store = authority.large_object_store()?;
+    for entry in &manifest.entries {
+        match store.object_size(&entry.file_sha256)? {
+            Some(size) if size == entry.size => {}
+            Some(size) => anyhow::bail!(
+                "large object {} for `{}` is {size} bytes in the store; the manifest sealed {}",
+                entry.file_sha256,
+                entry.path,
+                entry.size
+            ),
+            None => anyhow::bail!(
+                "large object {} for `{}` is not in the store; ingest it before pinning",
+                entry.file_sha256,
+                entry.path
+            ),
+        }
+    }
+    let stored = sink
+        .staged_roots
+        .store_object_admitted(guard, cas, &manifest.to_value()?)?;
+    if stored != digest {
+        anyhow::bail!(
+            "large-content manifest {digest} re-stored as {stored}; canonical identity broke"
+        );
+    }
+    Ok(RealizedExternalContent {
+        id: declaration.id.clone(),
+        kind: declaration.kind,
+        mode: declaration.mode,
+        manifest_hash: digest.to_string(),
+        entry_count: manifest.entry_count,
+        total_bytes: manifest.total_bytes,
+        mount: declaration.mount.clone(),
+    })
+}
+
 /// Capture the effective declaration list and write its identity-only
 /// realization set into the reserved derived slot.
 pub(crate) fn capture_external_realizations(
@@ -953,19 +1188,45 @@ pub(crate) fn capture_external_realizations(
         reused_blobs: 0,
     };
 
+    let mut large_total = 0u64;
     for declaration in &declarations {
-        let base_path = resolve_named_root(engine, roots, &declaration.locator.root)?;
+        if declaration.mode == ryeos_engine::external_content::ExternalContentMode::Pinned
+            && let Some(digest) = declaration.digest.as_deref()
+            && let Some(large_manifest) = try_load_large_content_manifest(&cas, digest)?
+        {
+            let realized_entry = seal_pinned_large_realization(
+                declaration,
+                digest,
+                large_manifest,
+                contract,
+                &authority,
+                &guard,
+                &cas,
+                &mut sink,
+                &mut large_total,
+            )?;
+            realized.push(realized_entry);
+            continue;
+        }
+        let locator = declaration.locator.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "external content `{}` has no source locator and its digest does not \
+                 resolve to a large-content manifest; nothing can be captured",
+                declaration.id
+            )
+        })?;
+        let base_path = resolve_named_root(engine, roots, &locator.root)?;
         let base = lillux::PinnedDirectory::open(&base_path)?.ok_or_else(|| {
             anyhow::anyhow!(
                 "external content root `{}` is unavailable",
-                declaration.locator.root.label()
+                locator.root.label()
             )
         })?;
         let capture_policy =
             ExternalCapturePolicy::for_declaration(declaration, state.ignore_matcher.as_ref())?;
         let manifest = match declaration.kind {
             ExternalContentKind::Tree => {
-                let declared_root = open_directory_relative(&base, &declaration.locator.path)?;
+                let declared_root = open_directory_relative(&base, &locator.path)?;
                 let manifest = ryeos_engine::external_content::build_manifest(
                     &declared_root,
                     &declaration.exclude,
@@ -977,16 +1238,16 @@ pub(crate) fn capture_external_realizations(
                 manifest
             }
             ExternalContentKind::File => {
-                let (parent, name) = open_file_parent(&base, &declaration.locator.path)?;
+                let (parent, name) = open_file_parent(&base, &locator.path)?;
                 let file = parent.open_regular(OsStr::new(name), false)?.ok_or_else(|| {
                     anyhow::anyhow!(
                         "external content file `{}` is unavailable",
-                        declaration.locator.path
+                        locator.path
                     )
                 })?;
                 let manifest = ryeos_engine::external_content::build_file_manifest(
                     file,
-                    &declaration.locator.path,
+                    &locator.path,
                     &mut budget,
                     &mut sink,
                 )?;
@@ -1150,6 +1411,7 @@ mod tests {
 
     fn tree_mount(destination: &str, files: &[(&str, u64)]) -> SealedRealizationMount {
         SealedRealizationMount {
+            large: false,
             destination: PathBuf::from(destination),
             kind: ExternalContentKind::Tree,
             files: files
@@ -1167,6 +1429,7 @@ mod tests {
                 &[("bfs.py", 10), ("deep/util.py", 20)],
             ),
             SealedRealizationMount {
+                large: false,
                 destination: PathBuf::from("/p/.ai/tools/arc/featurize.py"),
                 kind: ExternalContentKind::File,
                 files: BTreeMap::from([(
@@ -1179,14 +1442,16 @@ mod tests {
             locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/lib/bfs.py")),
             SealedPathLookup::File {
                 blob_hash: "hash-bfs.py",
-                size: 10
+                size: 10,
+                large: false
             }
         ));
         assert!(matches!(
             locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/lib/deep/util.py")),
             SealedPathLookup::File {
                 blob_hash: "hash-deep/util.py",
-                size: 20
+                size: 20,
+                large: false
             }
         ));
         // A file-kind realization answers for exactly its mount path.
@@ -1194,7 +1459,8 @@ mod tests {
             locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/featurize.py")),
             SealedPathLookup::File {
                 blob_hash: "hash-file",
-                size: 5
+                size: 5,
+                large: false
             }
         ));
         // Covered but unsealed paths are absent at execution, never live.
@@ -1230,14 +1496,16 @@ mod tests {
             locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/lib/other.py")),
             SealedPathLookup::File {
                 blob_hash: "hash-other.py",
-                size: 3
+                size: 3,
+                large: false
             }
         ));
         assert!(matches!(
             locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/run.py")),
             SealedPathLookup::File {
                 blob_hash: "hash-run.py",
-                size: 2
+                size: 2,
+                large: false
             }
         ));
     }

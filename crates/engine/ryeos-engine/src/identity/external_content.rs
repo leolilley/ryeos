@@ -204,15 +204,18 @@ pub fn declarations_from_composed(
     }
     validate_declarations(&declarations, declarer)?;
     for declaration in &declarations {
+        let Some(locator) = &declaration.locator else {
+            continue;
+        };
         if !contract
             .allowed_roots
             .iter()
-            .any(|allowed| allowed == declaration.locator.root.contract_class())
+            .any(|allowed| allowed == locator.root.contract_class())
         {
             anyhow::bail!(
                 "external content `{}` names root `{}` which its signed kind does not permit",
                 declaration.id,
-                declaration.locator.root.label()
+                locator.root.label()
             );
         }
     }
@@ -236,7 +239,12 @@ pub struct ExternalContentLocator {
 pub struct ExternalContentDeclaration {
     pub id: String,
     pub kind: ExternalContentKind,
-    pub locator: ExternalContentLocator,
+    /// Live source to capture (and, for content-tier pins, to re-verify)
+    /// from. Absent only for pinned declarations whose digest resolves to a
+    /// large-content manifest: large bytes bind from the store, and there is
+    /// no live source to point at honestly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locator: Option<ExternalContentLocator>,
     pub mode: ExternalContentMode,
     /// Required when `mode` is `Pinned`, forbidden otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -259,7 +267,6 @@ pub struct ExternalContentDeclaration {
 impl ExternalContentDeclaration {
     pub fn validate(&self, declarer: DeclaringAuthority<'_>) -> anyhow::Result<()> {
         validate_declaration_id(&self.id)?;
-        validate_relative_path("external content locator path", &self.locator.path)?;
         validate_relative_path("external content mount target", &self.mount)?;
         if ryeos_state::project_sync::is_durable_content_capture_floor_excluded(&self.mount) {
             anyhow::bail!(
@@ -268,17 +275,38 @@ impl ExternalContentDeclaration {
             );
         }
 
-        if !self.locator.root.declarable_from(declarer) {
-            anyhow::bail!(
-                "an item admitted from {} may not declare external content under {}",
-                declarer.label(),
-                self.locator.root.label()
-            );
-        }
-        if let ExternalContentRoot::Bundle(name) = &self.locator.root
-            && name.is_empty()
-        {
-            anyhow::bail!("external content bundle root must name a bundle");
+        match &self.locator {
+            Some(locator) => {
+                validate_relative_path("external content locator path", &locator.path)?;
+                if !locator.root.declarable_from(declarer) {
+                    anyhow::bail!(
+                        "an item admitted from {} may not declare external content under {}",
+                        declarer.label(),
+                        locator.root.label()
+                    );
+                }
+                if let ExternalContentRoot::Bundle(name) = &locator.root
+                    && name.is_empty()
+                {
+                    anyhow::bail!("external content bundle root must name a bundle");
+                }
+            }
+            None => {
+                if self.mode != ExternalContentMode::Pinned || self.digest.is_none() {
+                    anyhow::bail!(
+                        "external content `{}` has no source locator; only a pinned \
+                         declaration with a digest may omit one",
+                        self.id
+                    );
+                }
+                if !self.exclude.is_empty() {
+                    anyhow::bail!(
+                        "external content `{}` has no source locator; exclusions apply \
+                         to captured sources only",
+                        self.id
+                    );
+                }
+            }
         }
 
         match (self.mode, self.digest.as_deref()) {
@@ -450,13 +478,20 @@ impl<'a> ExternalCapturePolicy<'a> {
         declaration: &ExternalContentDeclaration,
         admitted_ignore: &'a ryeos_state::ignore::IgnoreMatcher,
     ) -> anyhow::Result<Self> {
-        let locator_prefix = match declaration.locator.root {
+        let locator = declaration.locator.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "external content `{}` has no source locator; capture policy applies to \
+                 captured sources only",
+                declaration.id
+            )
+        })?;
+        let locator_prefix = match locator.root {
             ExternalContentRoot::ProjectAi => {
-                format!("{}/{}", crate::AI_DIR, declaration.locator.path)
+                format!("{}/{}", crate::AI_DIR, locator.path)
             }
             ExternalContentRoot::ProjectFiles
             | ExternalContentRoot::NodeFiles
-            | ExternalContentRoot::Bundle(_) => declaration.locator.path.clone(),
+            | ExternalContentRoot::Bundle(_) => locator.path.clone(),
         };
         if ryeos_state::project_sync::is_durable_content_capture_floor_excluded(&locator_prefix)
             || admitted_ignore.is_ignored(&locator_prefix)
@@ -1077,6 +1112,7 @@ mod tests {
             realization_derived: EXTERNAL_REALIZATIONS_DERIVED_KEY.to_string(),
             allowed_roots: allowed_roots.iter().map(|root| root.to_string()).collect(),
             max_declarations,
+            large_content: None,
         }
     }
 
@@ -1171,7 +1207,10 @@ mod tests {
         assert_eq!(declaration.kind, ExternalContentKind::Tree);
         assert_eq!(declaration.mode, ExternalContentMode::Pinned);
         assert_eq!(declaration.digest.as_deref(), Some(digest.as_str()));
-        assert_eq!(declaration.locator.root.label(), "project_files");
+        assert_eq!(
+            declaration.locator.as_ref().unwrap().root.label(),
+            "project_files"
+        );
         assert_eq!(declaration.mount, "vendor/sim");
     }
 

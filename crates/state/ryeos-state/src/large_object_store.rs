@@ -424,6 +424,27 @@ impl LargeObjectStore {
         })
     }
 
+    /// Hard-link a stored object into a caller-owned directory (same
+    /// filesystem, zero copy). `expected` must be the leased handle for the
+    /// object — the link is made from that exact inode, so a concurrent
+    /// republish can never splice a different file under the same name.
+    pub fn link_object_into(
+        &self,
+        file_sha256: &str,
+        target_directory: &lillux::PinnedDirectory,
+        target_name: &std::ffi::OsStr,
+        expected: &fs::File,
+    ) -> anyhow::Result<()> {
+        require_store_hash(file_sha256)?;
+        target_directory.link_regular_from(
+            target_name,
+            &self.objects,
+            OsStr::new(file_sha256),
+            expected,
+        )?;
+        Ok(())
+    }
+
     /// Lease-respecting, root-respecting eviction back under the byte
     /// budget, oldest recency first. Roots are the caller's reachability
     /// answer (every large object named by a manifest an admitted capsule
@@ -953,6 +974,28 @@ mod tests {
                 .any(|finding| matches!(finding, LargeObjectIntegrityFinding::MissingSidecar { .. })),
             "got: {findings:?}"
         );
+    }
+
+    #[test]
+    fn a_leased_object_hard_links_without_copying() {
+        let (dir, store) = store(8);
+        let ingested = store
+            .ingest_from_path(&write_source(&dir, "model.bin", &[4u8; 24]), None)
+            .unwrap();
+        let leased = store.lease_object(&ingested.file_sha256, 24).unwrap();
+        let target = lillux::PinnedDirectory::open_or_create(&dir.path().join("mount")).unwrap();
+        store
+            .link_object_into(
+                &ingested.file_sha256,
+                &target,
+                std::ffi::OsStr::new("shard-0"),
+                leased.file(),
+            )
+            .unwrap();
+        use std::os::unix::fs::MetadataExt as _;
+        let linked = fs::metadata(dir.path().join("mount/shard-0")).unwrap();
+        assert_eq!(linked.ino(), leased.file().metadata().unwrap().ino());
+        assert_eq!(linked.len(), 24);
     }
 
     #[test]
