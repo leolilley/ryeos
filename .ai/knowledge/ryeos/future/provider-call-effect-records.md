@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-07T08:12:43Z:9f384c308cd9108043c04fd67caef95c7433f8e67624e9147fe8467cd7356cc0:J/JlQmKC4nweBoYxseAoh/nk0iZIsWVMolnLdXkjK5P5k7i+PoifUC9Ua8pPjCH3nAu7FYhY75/jHbSAuwynAQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-07T08:22:22Z:121b13966a2c779fae91cc91e1dabce63e5f33e7cf3231ccf1a83a0e2a072850:vnNUrZaVCCLXeEHoj6MjVjz64X61U7FKxF15rzY+Sn/RBtLZWVx94KL1ryxPkKrdnVV+gDI3xq6yQzX/1mPNAw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, replay, provider, directive, evidence]
 version: "0.1.0"
@@ -153,12 +153,18 @@ on the same keys rather than replacing the machinery.
 0. **DONE (2026-08-07)** — audited what turn evidence durably carries;
    placement decided: (2), riding the existing reservation crossing (see
    the placement section for the findings).
-1. Canonical request identity — collapses to reuse: the record key is the
-   existing `request_digest` scoped under the run's effective definition
-   digest. No new derivation machinery on either side of the wire.
-2. Record object + index (the node-record pattern: CAS object under the
-   pinned authority, operational index rows as GC roots, shared retention
-   lanes).
+1. **DONE with 2** — the identity collapsed to reuse as predicted: the
+   daemon-side `provider_call_cache_key` is a schema-tagged digest over
+   (effective definition digest, request digest), and the record's
+   validation requires its cache key to answer for its own identity
+   fields, so a forged record cannot even decode.
+2. **DONE (`3c4ffd2de`)** — `provider_call_effect_record` CAS object
+   (4 MiB response ceiling, class-gated, provenance and settled
+   accounting carried) plus `provider_call_records` in the operational
+   ledger as schema v3: forward migration shares its DDL verbatim with
+   fresh init under the byte-for-byte assertion, a v1 store chains
+   through both migrations in one open, rows feed both GC gatherers as
+   roots, and retention reuses the never-replayed-first lanes.
 3. Capture for non-streaming calls behind the sealed opt-in declaration.
 4. Replay serve with provenance, billing nothing, consuming no
    reservation.
