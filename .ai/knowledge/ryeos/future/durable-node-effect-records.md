@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-07T03:26:07Z:634e8ccbc259c406fca50da93ff4302bb994876a9b93efd13cf559a0e3dd3a80:theVdF6g1QgSvOm7OXJ51Mvv5hshzA2tWsfDJRzQFqRvfqu+sCGcxoVbwsLt3xA/LPn5eWZM3ZgsQOfiW1NWAg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-07T03:31:55Z:d1f4a745fdb0278634fa3476e67cb90727b3c21768109e590a7f18bd419c60db:9UWOaLkWR/MCju1ssonGY+1PpWP/GYaZLB95cuRs+DvofM1oSraqej5W3aCtN78o4tywcb62dLjfrQzLrroGAg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, replay, cache, evidence, graph]
 version: "0.1.0"
@@ -132,8 +132,48 @@ else that determines behavior.
      resets operational state on install per the clean-cut law; losing the
      ledger degrades to live re-execution, the retention semantics already
      accepted above.
-3. Daemon dispatch interception: replay-or-execute-and-record, settlement
-   fence, `replayed_from` receipts (executor + runtime callback protocol).
+3. Daemon dispatch interception — fully mapped, ready to build:
+   - **Wire** (`ryeos-runtime/src/callback.rs`): optional
+     `effect_replay: Option<EffectReplayRequest { node, class }>` on
+     `DispatchActionRequest`. The runtime never names its own cache key —
+     a lying runtime could otherwise poison the index. The daemon-minted
+     callback capability already carries
+     `cap.effective_definition_digest` and `cap.item_ref`; those plus the
+     shared `ActionPayload` are the whole derivation input.
+   - **Shared derivation** (same file; lillux is a dependency): a
+     schema-tagged canonical-JSON seed
+     (`ryeos.node_effect_record.key.v1` over digest, root ref, node,
+     ActionPayload) → sha256. Identical by construction on both sides
+     because both hash the wire type, not a private value. In-run
+     `compute_cache_key` stays untouched — different scope, different key,
+     no compatibility to manage.
+   - **Handler** (`executor/src/execution/runtime_dispatch.rs`, inline
+     path only — the `thread == "detached"` branch at ~415 is excluded,
+     matching the definition-layer refusal): after capability and hook
+     preflight, when `effect_replay` is present and the cap carries a
+     digest — derive key, `lookup_effect_record`; on hit, load the object
+     (`GraphNodeEffectRecord::from_current_value`, verify stored
+     `cache_key` equals the derived key), `touch`, and return
+     `record.result` with `replayed_from: <hash>` injected; on miss, run
+     the normal inline dispatch, and on a successful envelope store the
+     object (CAS write under the pinned authority, then index row — a
+     crash between leaves an orphan the sweep collects) via
+     `publish_effect_record`. Crash-replay after publish is not a fence
+     violation for durable records: replaying the record is the intended
+     semantics, unlike the in-run cache whose checkpoint fence remains.
+   - **Envelopes**: the graph runtime's strict response parsers
+     (`runtimes/graph/src/dispatch.rs` — `SubprocessResultEnvelope`,
+     `NativeResultEnvelope`, both `deny_unknown_fields`) gain optional
+     `replayed_from`; only replay-requesting dispatches ever see it, so
+     no other runtime's parser is touched.
+   - **Runtime request + receipt**: `dispatch_action`
+     (`runtimes/graph/src/dispatch.rs:130`) takes the node's
+     `EffectClass` from its two call sites
+     (`walker/execution.rs:336,357`, where the node is in scope), sets
+     `effect_replay` for non-live classes, and threads `replayed_from`
+     from the envelope into the node receipt beside `cache_hit`.
+   - **Record loader**: a `state_store` helper following
+     `admitted_launch_capsule`'s load pattern.
 4. Retention sweep (pattern exists) + `field/runs` projection of replay
    provenance.
 5. Measure on ARC: re-solve a solved game; count replayed nodes and saved
