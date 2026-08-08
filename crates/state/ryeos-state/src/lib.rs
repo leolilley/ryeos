@@ -67,8 +67,9 @@ pub use operational::{
     AdmissionAttestationRecord, AdmissionAttestationState, CasEntriesByStateSummary,
     CasEntryAttribution, CasEntryKind, CasEntryState, FinishSyncJobAttempt,
     NewAdmissionAttestationRecord, NewCasEntryAttribution, NewSyncJob, NewSyncJobAttempt,
-    OperationalDb, SyncJobAttemptRecord, SyncJobAttemptState, SyncJobRecord, SyncJobState,
-    SyncJobUpdate,
+    OperationalDb, ReplayIndexKindV2, ReplayIndexRecordV2, ReplayLookupOutcomeV2,
+    ReplayPublishOutcomeV2, ReplayRecordVerificationV2, SyncJobAttemptRecord,
+    SyncJobAttemptState, SyncJobRecord, SyncJobState, SyncJobUpdate,
 };
 pub use project_materialization::PinnedProjectMaterialization;
 pub use projection::{

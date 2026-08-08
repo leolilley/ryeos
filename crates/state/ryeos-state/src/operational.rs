@@ -10,7 +10,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::sqlite_schema;
 
@@ -637,6 +637,66 @@ pub struct OperationalDb {
     _wal_file: Option<File>,
     _shm_file: Option<File>,
     _initialization_marker: Option<File>,
+}
+
+/// The two replay namespaces have identical mechanics but distinct retention
+/// and authority contracts. A closed enum selects SQL identifiers; callers
+/// can never supply table text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayIndexKindV2 {
+    GraphNode,
+    ProviderCall,
+}
+
+impl ReplayIndexKindV2 {
+    fn table(self) -> &'static str {
+        match self {
+            Self::GraphNode => "effect_records",
+            Self::ProviderCall => "provider_call_records",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayIndexRecordV2 {
+    pub cache_key: String,
+    pub answer_digest: String,
+    pub record_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayRecordVerificationV2 {
+    Verified,
+    Unavailable { reason: String },
+    IntegrityFailure { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayLookupOutcomeV2 {
+    Absent,
+    Present(ReplayIndexRecordV2),
+    Unavailable { reason: String },
+    IntegrityFailure { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayPublishOutcomeV2 {
+    Inserted {
+        record_hash: String,
+    },
+    Folded {
+        record_hash: String,
+    },
+    Unavailable {
+        reason: String,
+    },
+    IntegrityConflict {
+        existing_record_hash: String,
+        candidate_record_hash: String,
+    },
+    IntegrityFailure {
+        reason: String,
+    },
 }
 
 impl OperationalDb {
@@ -1826,6 +1886,157 @@ impl OperationalDb {
             .context("failed to collect CAS entry attribution summary")
     }
 
+    /// Read and verify one v2 replay row. Only a database-proven absence is an
+    /// executable miss. Once a row exists, unavailable or divergent CAS
+    /// evidence is surfaced distinctly and never collapses into `Absent`.
+    pub fn lookup_replay_record_v2(
+        &self,
+        kind: ReplayIndexKindV2,
+        cache_key: &str,
+        mut verify: impl FnMut(&ReplayIndexRecordV2) -> ReplayRecordVerificationV2,
+    ) -> Result<ReplayLookupOutcomeV2> {
+        validate_canonical_hash("replay v2 cache key", cache_key)?;
+        let sql = format!(
+            "SELECT cache_key, answer_digest, record_hash FROM {} WHERE cache_key = ?",
+            kind.table()
+        );
+        let indexed = self
+            .conn
+            .query_row(&sql, [cache_key], |row| {
+                Ok(ReplayIndexRecordV2 {
+                    cache_key: row.get(0)?,
+                    answer_digest: row.get(1)?,
+                    record_hash: row.get(2)?,
+                })
+            })
+            .optional()
+            .context("failed to look up replay v2 record")?;
+        let Some(indexed) = indexed else {
+            return Ok(ReplayLookupOutcomeV2::Absent);
+        };
+        if let Err(error) = validate_replay_index_record_v2(&indexed) {
+            return Ok(ReplayLookupOutcomeV2::IntegrityFailure {
+                reason: error.to_string(),
+            });
+        }
+        match verify(&indexed) {
+            ReplayRecordVerificationV2::Verified => {
+                let sql = format!(
+                    "UPDATE {} SET last_replayed_at = ? WHERE cache_key = ?",
+                    kind.table()
+                );
+                let now = lillux::time::iso8601_now();
+                self.conn
+                    .execute(&sql, rusqlite::params![&now, cache_key])
+                    .context("failed to touch verified replay v2 record")?;
+                Ok(ReplayLookupOutcomeV2::Present(indexed))
+            }
+            ReplayRecordVerificationV2::Unavailable { reason } => {
+                Ok(ReplayLookupOutcomeV2::Unavailable { reason })
+            }
+            ReplayRecordVerificationV2::IntegrityFailure { reason } => {
+                Ok(ReplayLookupOutcomeV2::IntegrityFailure { reason })
+            }
+        }
+    }
+
+    /// Atomically publish or fold an immutable v2 answer under one identity.
+    /// The candidate and any existing indexed object are verified through the
+    /// same caller-owned decoder while an immediate transaction serializes
+    /// all absent readers and publishers.
+    pub fn publish_replay_record_v2(
+        &self,
+        kind: ReplayIndexKindV2,
+        candidate: &ReplayIndexRecordV2,
+        mut verify: impl FnMut(&ReplayIndexRecordV2) -> ReplayRecordVerificationV2,
+    ) -> Result<ReplayPublishOutcomeV2> {
+        validate_replay_index_record_v2(candidate)?;
+        match verify(candidate) {
+            ReplayRecordVerificationV2::Verified => {}
+            ReplayRecordVerificationV2::Unavailable { reason } => {
+                return Ok(ReplayPublishOutcomeV2::Unavailable { reason });
+            }
+            ReplayRecordVerificationV2::IntegrityFailure { reason } => {
+                return Ok(ReplayPublishOutcomeV2::IntegrityFailure { reason });
+            }
+        }
+
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+            .context("begin immutable replay v2 publication")?;
+        let select = format!(
+            "SELECT cache_key, answer_digest, record_hash FROM {} WHERE cache_key = ?",
+            kind.table()
+        );
+        let existing = tx
+            .query_row(&select, [&candidate.cache_key], |row| {
+                Ok(ReplayIndexRecordV2 {
+                    cache_key: row.get(0)?,
+                    answer_digest: row.get(1)?,
+                    record_hash: row.get(2)?,
+                })
+            })
+            .optional()
+            .context("read immutable replay v2 publication slot")?;
+
+        let outcome = match existing {
+            None => {
+                let now = lillux::time::iso8601_now();
+                let insert = format!(
+                    "INSERT INTO {} \
+                     (cache_key, answer_digest, record_hash, produced_at, last_replayed_at) \
+                     VALUES (?, ?, ?, ?, ?)",
+                    kind.table()
+                );
+                tx.execute(
+                    &insert,
+                    rusqlite::params![
+                        &candidate.cache_key,
+                        &candidate.answer_digest,
+                        &candidate.record_hash,
+                        &now,
+                        &now,
+                    ],
+                )
+                .context("insert immutable replay v2 publication")?;
+                ReplayPublishOutcomeV2::Inserted {
+                    record_hash: candidate.record_hash.clone(),
+                }
+            }
+            Some(existing) => {
+                if let Err(error) = validate_replay_index_record_v2(&existing) {
+                    ReplayPublishOutcomeV2::IntegrityFailure {
+                        reason: error.to_string(),
+                    }
+                } else {
+                    match verify(&existing) {
+                        ReplayRecordVerificationV2::Verified
+                            if existing.answer_digest == candidate.answer_digest =>
+                        {
+                            ReplayPublishOutcomeV2::Folded {
+                                record_hash: existing.record_hash,
+                            }
+                        }
+                        ReplayRecordVerificationV2::Verified => {
+                            ReplayPublishOutcomeV2::IntegrityConflict {
+                                existing_record_hash: existing.record_hash,
+                                candidate_record_hash: candidate.record_hash.clone(),
+                            }
+                        }
+                        ReplayRecordVerificationV2::Unavailable { reason } => {
+                            ReplayPublishOutcomeV2::Unavailable { reason }
+                        }
+                        ReplayRecordVerificationV2::IntegrityFailure { reason } => {
+                            ReplayPublishOutcomeV2::IntegrityFailure { reason }
+                        }
+                    }
+                }
+            }
+        };
+        tx.commit()
+            .context("commit immutable replay v2 publication")?;
+        Ok(outcome)
+    }
+
     /// Index one durable node effect record under its replay identity. The
     /// record object must already be stored in CAS; the row is what makes it
     /// findable at dispatch and what roots it against garbage collection.
@@ -1942,11 +2153,7 @@ impl OperationalDb {
         Ok(deleted)
     }
 
-    pub fn publish_provider_call_record(
-        &self,
-        cache_key: &str,
-        record_hash: &str,
-    ) -> Result<()> {
+    pub fn publish_provider_call_record(&self, cache_key: &str, record_hash: &str) -> Result<()> {
         validate_canonical_hash("provider call record cache key", cache_key)?;
         validate_canonical_hash("provider call record hash", record_hash)?;
         let now = lillux::time::iso8601_now();
@@ -1995,9 +2202,7 @@ impl OperationalDb {
     pub fn list_provider_call_record_hashes(&self) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
-            .prepare_cached(
-                "SELECT record_hash FROM provider_call_records ORDER BY record_hash",
-            )
+            .prepare_cached("SELECT record_hash FROM provider_call_records ORDER BY record_hash")
             .context("failed to prepare provider call record root query")?;
         let rows = stmt
             .query_map([], |row| row.get(0))
@@ -2017,11 +2222,9 @@ impl OperationalDb {
     pub fn prune_provider_call_records(&self, max_rows: usize) -> Result<usize> {
         let count: i64 = self
             .conn
-            .query_row(
-                "SELECT COUNT(*) FROM provider_call_records",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM provider_call_records", [], |row| {
+                row.get(0)
+            })
             .context("failed to count provider call records")?;
         let excess = usize::try_from(count).unwrap_or(0).saturating_sub(max_rows);
         if excess == 0 {
@@ -2636,6 +2839,12 @@ fn validate_canonical_hash(label: &str, hash: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_replay_index_record_v2(record: &ReplayIndexRecordV2) -> Result<()> {
+    validate_canonical_hash("replay v2 cache key", &record.cache_key)?;
+    validate_canonical_hash("replay v2 answer digest", &record.answer_digest)?;
+    validate_canonical_hash("replay v2 record hash", &record.record_hash)
+}
+
 fn cas_entry_transition_allowed(current: CasEntryState, next: CasEntryState) -> bool {
     !matches!(
         (current, next),
@@ -2840,6 +3049,185 @@ mod tests {
         assert!(db.list_effect_record_hashes().unwrap().is_empty());
     }
 
+    fn install_replay_v2_fixture_schema(db: &OperationalDb) {
+        db.conn
+            .execute_batch(
+                "DROP INDEX idx_effect_records_last_replayed;
+                 DROP INDEX idx_effect_records_record_hash;
+                 DROP TABLE effect_records;
+                 CREATE TABLE effect_records (
+                    cache_key TEXT PRIMARY KEY,
+                    answer_digest TEXT NOT NULL,
+                    record_hash TEXT NOT NULL,
+                    produced_at TEXT NOT NULL,
+                    last_replayed_at TEXT NOT NULL
+                 );
+                 CREATE INDEX idx_effect_records_last_replayed
+                    ON effect_records(last_replayed_at);
+                 CREATE INDEX idx_effect_records_record_hash
+                    ON effect_records(record_hash);
+                 DROP INDEX idx_provider_call_records_last_replayed;
+                 DROP INDEX idx_provider_call_records_record_hash;
+                 DROP TABLE provider_call_records;
+                 CREATE TABLE provider_call_records (
+                    cache_key TEXT PRIMARY KEY,
+                    answer_digest TEXT NOT NULL,
+                    record_hash TEXT NOT NULL,
+                    produced_at TEXT NOT NULL,
+                    last_replayed_at TEXT NOT NULL
+                 );
+                 CREATE INDEX idx_provider_call_records_last_replayed
+                    ON provider_call_records(last_replayed_at);
+                 CREATE INDEX idx_provider_call_records_record_hash
+                    ON provider_call_records(record_hash);",
+            )
+            .unwrap();
+    }
+
+    fn replay_record(key: char, answer: char, object: char) -> ReplayIndexRecordV2 {
+        ReplayIndexRecordV2 {
+            cache_key: key.to_string().repeat(64),
+            answer_digest: answer.to_string().repeat(64),
+            record_hash: object.to_string().repeat(64),
+        }
+    }
+
+    #[test]
+    fn immutable_replay_v2_insert_fold_conflict_and_lookup_matrix() {
+        for kind in [
+            ReplayIndexKindV2::GraphNode,
+            ReplayIndexKindV2::ProviderCall,
+        ] {
+            let tempdir = tempfile::tempdir().unwrap();
+            let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+            let db = OperationalDb::open(&path).unwrap();
+            install_replay_v2_fixture_schema(&db);
+
+            let first = replay_record('a', 'b', 'c');
+            assert_eq!(
+                db.lookup_replay_record_v2(kind, &first.cache_key, |_| {
+                    ReplayRecordVerificationV2::Verified
+                })
+                .unwrap(),
+                ReplayLookupOutcomeV2::Absent
+            );
+            assert_eq!(
+                db.publish_replay_record_v2(kind, &first, |_| {
+                    ReplayRecordVerificationV2::Verified
+                })
+                .unwrap(),
+                ReplayPublishOutcomeV2::Inserted {
+                    record_hash: first.record_hash.clone()
+                }
+            );
+
+            let equivalent = replay_record('a', 'b', 'd');
+            assert_eq!(
+                db.publish_replay_record_v2(kind, &equivalent, |_| {
+                    ReplayRecordVerificationV2::Verified
+                })
+                .unwrap(),
+                ReplayPublishOutcomeV2::Folded {
+                    record_hash: first.record_hash.clone()
+                }
+            );
+            assert_eq!(
+                db.lookup_replay_record_v2(kind, &first.cache_key, |_| {
+                    ReplayRecordVerificationV2::Verified
+                })
+                .unwrap(),
+                ReplayLookupOutcomeV2::Present(first.clone())
+            );
+
+            let divergent = replay_record('a', 'e', 'f');
+            assert_eq!(
+                db.publish_replay_record_v2(kind, &divergent, |_| {
+                    ReplayRecordVerificationV2::Verified
+                })
+                .unwrap(),
+                ReplayPublishOutcomeV2::IntegrityConflict {
+                    existing_record_hash: first.record_hash.clone(),
+                    candidate_record_hash: divergent.record_hash,
+                }
+            );
+            assert_eq!(
+                db.lookup_replay_record_v2(kind, &first.cache_key, |_| {
+                    ReplayRecordVerificationV2::Unavailable {
+                        reason: "CAS temporarily unavailable".to_string(),
+                    }
+                })
+                .unwrap(),
+                ReplayLookupOutcomeV2::Unavailable {
+                    reason: "CAS temporarily unavailable".to_string()
+                }
+            );
+            assert_eq!(
+                db.lookup_replay_record_v2(kind, &first.cache_key, |_| {
+                    ReplayRecordVerificationV2::IntegrityFailure {
+                        reason: "indexed object is missing".to_string(),
+                    }
+                })
+                .unwrap(),
+                ReplayLookupOutcomeV2::IntegrityFailure {
+                    reason: "indexed object is missing".to_string()
+                }
+            );
+
+            let unavailable_candidate = replay_record('b', 'c', 'd');
+            assert_eq!(
+                db.publish_replay_record_v2(kind, &unavailable_candidate, |_| {
+                    ReplayRecordVerificationV2::Unavailable {
+                        reason: "CAS unavailable".to_string(),
+                    }
+                })
+                .unwrap(),
+                ReplayPublishOutcomeV2::Unavailable {
+                    reason: "CAS unavailable".to_string()
+                }
+            );
+            let same_key_candidate = replay_record('a', 'd', 'e');
+            assert_eq!(
+                db.publish_replay_record_v2(kind, &same_key_candidate, |record| {
+                    if record.record_hash == first.record_hash {
+                        ReplayRecordVerificationV2::IntegrityFailure {
+                            reason: "indexed object is corrupt".to_string(),
+                        }
+                    } else {
+                        ReplayRecordVerificationV2::Verified
+                    }
+                })
+                .unwrap(),
+                ReplayPublishOutcomeV2::IntegrityFailure {
+                    reason: "indexed object is corrupt".to_string()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn immutable_replay_v2_never_replaces_the_first_observation() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        let db = OperationalDb::open(&path).unwrap();
+        install_replay_v2_fixture_schema(&db);
+        let first = replay_record('a', 'b', 'c');
+        db.publish_replay_record_v2(ReplayIndexKindV2::GraphNode, &first, |_| {
+            ReplayRecordVerificationV2::Verified
+        })
+        .unwrap();
+        let equivalent = replay_record('a', 'b', 'd');
+        db.publish_replay_record_v2(ReplayIndexKindV2::GraphNode, &equivalent, |_| {
+            ReplayRecordVerificationV2::Verified
+        })
+        .unwrap();
+        let indexed = db
+            .lookup_replay_record_v2(ReplayIndexKindV2::GraphNode, &first.cache_key, |_| {
+                ReplayRecordVerificationV2::Verified
+            })
+            .unwrap();
+        assert_eq!(indexed, ReplayLookupOutcomeV2::Present(first));
+    }
+
     #[test]
     fn schema_sql_embeds_the_migration_ddl_verbatim() {
         // Fresh initialization and the forward migrations must produce the
@@ -2893,7 +3281,8 @@ mod tests {
                 .len(),
             1
         );
-        db.publish_effect_record(&"a".repeat(64), &"b".repeat(64)).unwrap();
+        db.publish_effect_record(&"a".repeat(64), &"b".repeat(64))
+            .unwrap();
         assert!(db.lookup_effect_record(&"a".repeat(64)).unwrap().is_some());
         db.publish_provider_call_record(&"e".repeat(64), &"f".repeat(64))
             .unwrap();
@@ -3000,7 +3389,8 @@ mod tests {
             ("b", "2026-01-01T00:00:00Z"),
             ("c", "2026-01-02T00:00:00Z"),
         ] {
-            db.publish_effect_record(&c.repeat(64), &c.repeat(64)).unwrap();
+            db.publish_effect_record(&c.repeat(64), &c.repeat(64))
+                .unwrap();
             db.conn
                 .execute(
                     "UPDATE effect_records SET last_replayed_at = ? WHERE cache_key = ?",
@@ -3012,7 +3402,10 @@ mod tests {
         assert_eq!(db.prune_effect_records(3).unwrap(), 0);
         assert_eq!(db.prune_effect_records(2).unwrap(), 1);
         let remaining = db.list_effect_record_hashes().unwrap();
-        assert!(!remaining.contains(&"b".repeat(64)), "oldest replay pruned first");
+        assert!(
+            !remaining.contains(&"b".repeat(64)),
+            "oldest replay pruned first"
+        );
         assert_eq!(remaining.len(), 2);
         assert_eq!(db.prune_effect_records(0).unwrap(), 2);
         assert!(db.list_effect_record_hashes().unwrap().is_empty());
@@ -3033,7 +3426,8 @@ mod tests {
             ("b", "2026-08-01T00:00:00Z", "2026-08-01T00:00:00Z"),
             ("c", "2026-08-02T00:00:00Z", "2026-08-02T00:00:00Z"),
         ] {
-            db.publish_effect_record(&c.repeat(64), &c.repeat(64)).unwrap();
+            db.publish_effect_record(&c.repeat(64), &c.repeat(64))
+                .unwrap();
             db.conn
                 .execute(
                     "UPDATE effect_records SET produced_at = ?, last_replayed_at = ?
