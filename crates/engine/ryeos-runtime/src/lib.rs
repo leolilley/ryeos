@@ -8,6 +8,7 @@ pub mod checkpoint;
 pub mod command;
 pub mod compiled_template;
 pub mod daemon_rpc;
+pub mod effect_answer;
 pub mod envelope;
 pub mod events;
 pub use ryeos_expression as expression;
@@ -45,6 +46,7 @@ pub use command::{
 };
 pub use compiled_template::{CompiledActionTemplate, CompiledJsonTemplate, CompiledTemplateError};
 pub use daemon_rpc::{DaemonRpcClient, RpcError, resolve_daemon_socket_path};
+pub use effect_answer::{NormalizedGraphNodeEffectV2, normalize_graph_node_effect_v2};
 pub use events::{
     CognitionInAssembler, CognitionInAssembly, CognitionInChunk, HOOK_FAILURE_SCHEMA,
     HOOK_OBSERVATION_SCHEMA, HookEvidenceDescriptor, HookFailedPayload, HookFailureClass,

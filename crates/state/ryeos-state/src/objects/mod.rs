@@ -17,6 +17,7 @@ pub mod admitted_launch_capsule;
 pub mod attestation;
 pub mod bundle_event;
 pub mod chain_state;
+pub mod effect_record_v2;
 pub mod execution_project_authority;
 pub mod item_source;
 pub mod live_input;
@@ -48,6 +49,14 @@ pub use bundle_event::{
     MAX_BUNDLE_EVENT_SERIALIZED_BYTES, hash_bundle_event, validate_bundle_identifier,
 };
 pub use chain_state::{ChainState, ChainStateBuilder, ChainThreadEntry};
+pub use effect_record_v2::{
+    DurableEffectClass, EFFECT_RECORD_SCHEMA_V2, GRAPH_EFFECT_KEY_SCHEMA_V2,
+    GraphEffectFirstObservationV2, GraphNodeEffectAnswerV2, GraphNodeEffectIdentityV2,
+    GraphNodeEffectRecordV2, PROVIDER_EFFECT_KEY_SCHEMA_V2, ProviderCallEffectAnswerV2,
+    ProviderCallEffectRecordV2, ProviderEffectFirstObservationV2, ProviderObservationClassV2,
+    ProviderRequestCoordinateV2, ProviderTransportCoordinateV2, PublicHeaderCoordinateV2,
+    RecordedProviderMessageV2, RecordedProviderToolCallV2,
+};
 pub use execution_project_authority::{
     ChildProjectAuthorityPolicy, EnvironmentAuthority, EnvironmentNameAuthority,
     ExecutionLaunchDriver, ExecutionLifecycleAuthority, ExecutionOwnershipAuthority,

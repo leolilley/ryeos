@@ -522,6 +522,23 @@ pub struct ProviderMessage {
     pub reasoning_content: Option<String>,
 }
 
+/// Construct the one durable semantic answer for a completed provider turn.
+/// Usage, request/response IDs, attempt/thread identity, and transport timing
+/// are observation evidence and therefore cannot enter this value.
+pub fn normalize_provider_call_effect_answer_v2(
+    message: &ProviderMessage,
+    finish_reason: Option<&str>,
+) -> anyhow::Result<ryeos_state::objects::ProviderCallEffectAnswerV2> {
+    let recorded_message = serde_json::from_value(serde_json::to_value(message)?)
+        .map_err(|error| anyhow::anyhow!("provider message is not record-safe: {error}"))?;
+    let answer = ryeos_state::objects::ProviderCallEffectAnswerV2 {
+        message: recorded_message,
+        finish_reason: finish_reason.map(str::to_string),
+    };
+    answer.validate()?;
+    Ok(answer)
+}
+
 #[derive(Debug, Clone)]
 #[allow(clippy::upper_case_acronyms)] // Usage is a domain term, not an acronym leak
 pub enum StreamEvent {
@@ -646,6 +663,40 @@ pub fn normalize_finish_reason(raw: Option<&str>) -> FinishReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_effect_answer_excludes_observation_texture() {
+        let message = ProviderMessage {
+            role: "assistant".to_string(),
+            content: Some(serde_json::json!("answer")),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: Some("reasoning".to_string()),
+        };
+        let first = normalize_provider_call_effect_answer_v2(&message, Some("stop")).unwrap();
+        let second = normalize_provider_call_effect_answer_v2(&message, Some("stop")).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.digest().unwrap(), second.digest().unwrap());
+        let value = serde_json::to_value(first).unwrap();
+        for observation_field in ["usage", "attempt_id", "thread_id", "response_id"] {
+            assert!(value.get(observation_field).is_none());
+        }
+    }
+
+    #[test]
+    fn provider_effect_answer_refuses_non_assistant_or_unsafe_finish_reason() {
+        let mut message = ProviderMessage {
+            role: "assistant".to_string(),
+            content: Some(serde_json::json!("answer")),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        };
+        message.role = "tool".to_string();
+        assert!(normalize_provider_call_effect_answer_v2(&message, Some("stop")).is_err());
+        message.role = "assistant".to_string();
+        assert!(normalize_provider_call_effect_answer_v2(&message, Some(" stop ")).is_err());
+    }
 
     #[test]
     fn return_nudge_parses_flag_and_custom_message_forms() {
