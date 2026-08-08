@@ -1695,6 +1695,11 @@ impl ObjectsClosureGetResponse {
                 "remote returned complete closure with missing/malformed/unsupported entries"
             );
         }
+        if !self.closure.large_object_hashes.is_empty() {
+            anyhow::bail!(
+                "remote CAS closure contains large-object edges that this transport cannot fetch"
+            );
+        }
         let object_hashes: std::collections::BTreeSet<&str> = self
             .closure
             .object_hashes
@@ -1795,6 +1800,7 @@ fn validate_closure_summary_against_request(
         .iter()
         .chain(closure.object_hashes.iter())
         .chain(closure.blob_hashes.iter())
+        .chain(closure.large_object_hashes.iter())
         .chain(closure.missing_objects.iter().map(|item| &item.hash))
         .chain(closure.missing_blobs.iter().map(|item| &item.hash))
         .chain(closure.malformed_objects.iter().map(|item| &item.hash))
@@ -1831,6 +1837,8 @@ pub struct ObjectsClosureSummary {
     pub complete: bool,
     pub object_hashes: Vec<String>,
     pub blob_hashes: Vec<String>,
+    #[serde(default)]
+    pub large_object_hashes: Vec<String>,
     pub missing_objects: Vec<ClosureMissingObject>,
     #[serde(default)]
     pub missing_blobs: Vec<ClosureMissingObject>,

@@ -501,6 +501,9 @@ pub fn run_gc_with_pinned_authority(
         }
         reachable.object_hashes.extend(closure.object_hashes);
         reachable.blob_hashes.extend(closure.blob_hashes);
+        reachable
+            .large_object_hashes
+            .extend(closure.large_object_hashes);
     }
     reachable
         .blob_hashes

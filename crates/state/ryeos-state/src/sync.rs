@@ -112,6 +112,13 @@ pub fn export_chain_pinned(
     let (chain_head_hash, reachable) =
         verified_chain_reachability_pinned(cas, refs_directory, chain_root_id, trust_store)?;
 
+    if !reachable.large_object_hashes.is_empty() {
+        anyhow::bail!(
+            "chain export contains {} large-object edge(s), but the CAS sync payload has no large-object transport",
+            reachable.large_object_hashes.len()
+        );
+    }
+
     let mut entries =
         Vec::with_capacity(reachable.object_hashes.len() + reachable.blob_hashes.len());
     let mut total_bytes = 0usize;

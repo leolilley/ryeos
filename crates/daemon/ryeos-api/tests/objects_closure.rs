@@ -137,6 +137,44 @@ async fn closure_get_enforces_blob_byte_budget() {
 }
 
 #[tokio::test]
+async fn closure_get_refuses_large_object_edges_instead_of_returning_a_partial_transport() {
+    let (_tmp, state) = test_state::build_test_state();
+    let cas = lillux::cas::CasStore::new(state.state_store.cas_root().unwrap());
+    let state = Arc::new(state);
+    let large_hash = "ab".repeat(32);
+    let manifest_hash = cas
+        .store_object(&json!({
+            "kind": ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND,
+            "schema": ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA,
+            "entries": [{
+                "path": "model.safetensors",
+                "file_sha256": large_hash,
+                "size": 5,
+                "chunk_size": ryeos_state::objects::MIN_LARGE_CONTENT_CHUNK_BYTES,
+                "chunk_hashes": ["cd".repeat(32)]
+            }],
+            "entry_count": 1,
+            "total_bytes": 5
+        }))
+        .unwrap();
+
+    let described =
+        objects_closure_describe::handle(request(manifest_hash.clone(), 16), Arc::clone(&state))
+            .await
+            .unwrap();
+    assert_eq!(described["large_object_hashes"], json!([large_hash]));
+
+    let error = objects_closure_get::handle(request(manifest_hash, 16), state)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("cannot transport 1 referenced large objects")
+    );
+}
+
+#[tokio::test]
 async fn closure_get_enforces_object_byte_budget() {
     let (_tmp, state) = test_state::build_test_state();
     let (snapshot_hash, _blob_hash, _blob) = store_fixture(&state);

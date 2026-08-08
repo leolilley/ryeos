@@ -21,6 +21,8 @@ pub struct ReachableSet {
     pub object_hashes: HashSet<String>,
     /// All reachable blob hashes (raw binary content).
     pub blob_hashes: HashSet<String>,
+    /// All reachable hashes in the distinct large-object store.
+    pub large_object_hashes: HashSet<String>,
     /// Number of distinct signed head records walked. This deliberately
     /// counts namespace-neutral heads and separately-owned heads even when
     /// multiple records target the same CAS object or project identity.
@@ -219,6 +221,7 @@ fn merge_object_closure(cas_root: &Path, roots: Vec<String>, set: &mut Reachable
     }
     set.object_hashes.extend(closure.object_hashes);
     set.blob_hashes.extend(closure.blob_hashes);
+    set.large_object_hashes.extend(closure.large_object_hashes);
     Ok(())
 }
 
@@ -239,6 +242,7 @@ fn merge_object_closure_with_cas(
     }
     set.object_hashes.extend(closure.object_hashes);
     set.blob_hashes.extend(closure.blob_hashes);
+    set.large_object_hashes.extend(closure.large_object_hashes);
     Ok(())
 }
 

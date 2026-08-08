@@ -212,6 +212,7 @@ pub(crate) fn closure_summary_json(
         "complete": report.is_complete(),
         "object_hashes": report.object_hashes.iter().cloned().collect::<Vec<_>>(),
         "blob_hashes": report.blob_hashes.iter().cloned().collect::<Vec<_>>(),
+        "large_object_hashes": report.large_object_hashes.iter().cloned().collect::<Vec<_>>(),
         "missing_objects": missing,
         "missing_blobs": missing_blobs,
         "malformed_objects": malformed,
@@ -222,6 +223,7 @@ pub(crate) fn closure_summary_json(
         value["counts"] = serde_json::json!({
             "objects": report.object_hashes.len(),
             "blobs": report.blob_hashes.len(),
+            "large_objects": report.large_object_hashes.len(),
             "missing_objects": report.missing_objects.len(),
             "missing_blobs": report.missing_blobs.len(),
             "malformed_objects": report.malformed_objects.len(),
