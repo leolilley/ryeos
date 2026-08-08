@@ -241,6 +241,135 @@ pub struct PublicHeaderCoordinateV2 {
     pub value_digest: String,
 }
 
+/// Bounded request projection a transport may report without naming any
+/// daemon-owned identity or credential value. Public and credential-bearing
+/// headers are different types so collision checks cannot depend on a list of
+/// magic names such as `authorization`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedProviderRequestProjectionV2 {
+    pub public_headers: Vec<PublicHeaderCoordinateV2>,
+    pub credential_header_names: Vec<String>,
+    pub body_sha256: String,
+    pub requested_output_ceiling: u64,
+}
+
+impl PreparedProviderRequestProjectionV2 {
+    pub fn new(
+        public_headers: impl IntoIterator<Item = (String, String)>,
+        credential_header_names: impl IntoIterator<Item = String>,
+        body_sha256: String,
+        requested_output_ceiling: u64,
+    ) -> anyhow::Result<Self> {
+        require_hex64("provider request body_sha256", &body_sha256)?;
+        if requested_output_ceiling == 0 {
+            bail!("provider request output ceiling must be positive");
+        }
+
+        let (public_headers, credential_header_names) =
+            provider_header_projection_v2(public_headers, credential_header_names)?;
+
+        Ok(Self {
+            public_headers,
+            credential_header_names,
+            body_sha256,
+            requested_output_ceiling,
+        })
+    }
+}
+
+pub fn provider_header_projection_v2(
+    public_headers: impl IntoIterator<Item = (String, String)>,
+    credential_header_names: impl IntoIterator<Item = String>,
+) -> anyhow::Result<(Vec<PublicHeaderCoordinateV2>, Vec<String>)> {
+    let mut credential_header_names = credential_header_names
+        .into_iter()
+        .map(|name| normalize_http_header_name(&name))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    credential_header_names.sort();
+    if credential_header_names
+        .windows(2)
+        .any(|names| names[0] == names[1])
+    {
+        bail!("provider credential header names must be unique");
+    }
+
+    let mut public_headers = public_headers
+        .into_iter()
+        .map(|(name, value)| {
+            let name = normalize_http_header_name(&name)?;
+            if value.contains(['\r', '\n']) {
+                bail!("provider public header `{name}` contains a line break");
+            }
+            Ok(PublicHeaderCoordinateV2 {
+                name,
+                value_digest: lillux::sha256_hex(value.as_bytes()),
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    public_headers.sort_by(|left, right| left.name.cmp(&right.name));
+    if public_headers
+        .windows(2)
+        .any(|headers| headers[0].name == headers[1].name)
+    {
+        bail!("provider public header names must be unique");
+    }
+    if let Some(collision) = public_headers
+        .iter()
+        .find(|header| credential_header_names.binary_search(&header.name).is_ok())
+    {
+        bail!(
+            "provider header `{}` is declared as both public and credential-bearing",
+            collision.name
+        );
+    }
+
+    Ok((public_headers, credential_header_names))
+}
+
+fn normalize_http_header_name(value: &str) -> anyhow::Result<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty()
+        || !normalized.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+    {
+        bail!("provider header name `{value}` is not a valid HTTP field name");
+    }
+    Ok(normalized)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderRequestAuthorityV2 {
+    pub outer_effective_definition_digest: String,
+    pub provider_family: String,
+    pub provider_config_hash: String,
+    pub provider_config_value_digest: String,
+    pub provider_id: String,
+    pub profile_id: Option<String>,
+    pub model_name: String,
+    pub credential_binding_hmac: String,
+    pub credential_authority_generation: String,
+    pub authority_digest: String,
+    pub admitted_effect_class: DurableEffectClass,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProviderTransportCoordinateV2 {
@@ -262,28 +391,105 @@ pub struct ProviderRequestCoordinateV2 {
     pub outer_effective_definition_digest: String,
     pub transport: ProviderTransportCoordinateV2,
     pub provider_family: String,
-    pub provider_config_digest: String,
+    pub provider_config_hash: String,
+    pub provider_config_value_digest: String,
     pub provider_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
     pub model_name: String,
     pub public_headers: Vec<PublicHeaderCoordinateV2>,
+    pub credential_header_names: Vec<String>,
     pub body_sha256: String,
     pub requested_output_ceiling: u64,
     pub credential_binding_hmac: String,
-    pub authority_generation: u64,
+    pub credential_authority_generation: String,
     pub authority_digest: String,
     pub admitted_effect_class: DurableEffectClass,
 }
 
 impl ProviderRequestCoordinateV2 {
+    pub fn build(
+        authority: ProviderRequestAuthorityV2,
+        transport: ProviderTransportCoordinateV2,
+        request: PreparedProviderRequestProjectionV2,
+    ) -> anyhow::Result<Self> {
+        let transport = match transport {
+            ProviderTransportCoordinateV2::RemoteHttp { method, url } => {
+                let method = method.trim().to_ascii_uppercase();
+                if method.is_empty()
+                    || !method.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric()
+                            || matches!(
+                                byte,
+                                b'!' | b'#'
+                                    | b'$'
+                                    | b'%'
+                                    | b'&'
+                                    | b'\''
+                                    | b'*'
+                                    | b'+'
+                                    | b'-'
+                                    | b'.'
+                                    | b'^'
+                                    | b'_'
+                                    | b'`'
+                                    | b'|'
+                                    | b'~'
+                            )
+                    })
+                {
+                    bail!("provider remote method is not a valid HTTP token");
+                }
+                let parsed = url::Url::parse(&url)
+                    .map_err(|error| anyhow::anyhow!("invalid provider remote URL: {error}"))?;
+                if !matches!(parsed.scheme(), "http" | "https") {
+                    bail!("provider remote URL must use http or https");
+                }
+                if !parsed.username().is_empty() || parsed.password().is_some() {
+                    bail!("provider remote URL cannot contain user information");
+                }
+                if parsed.fragment().is_some() {
+                    bail!("provider remote URL cannot contain a fragment");
+                }
+                ProviderTransportCoordinateV2::RemoteHttp {
+                    method,
+                    url: parsed.to_string(),
+                }
+            }
+            local @ ProviderTransportCoordinateV2::AdmittedLocalWorker { .. } => local,
+        };
+        let coordinate = Self {
+            outer_effective_definition_digest: authority.outer_effective_definition_digest,
+            transport,
+            provider_family: authority.provider_family,
+            provider_config_hash: authority.provider_config_hash,
+            provider_config_value_digest: authority.provider_config_value_digest,
+            provider_id: authority.provider_id,
+            profile_id: authority.profile_id,
+            model_name: authority.model_name,
+            public_headers: request.public_headers,
+            credential_header_names: request.credential_header_names,
+            body_sha256: request.body_sha256,
+            requested_output_ceiling: request.requested_output_ceiling,
+            credential_binding_hmac: authority.credential_binding_hmac,
+            credential_authority_generation: authority.credential_authority_generation,
+            authority_digest: authority.authority_digest,
+            admitted_effect_class: authority.admitted_effect_class,
+        };
+        coordinate.validate()?;
+        Ok(coordinate)
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
         for (field, digest) in [
             (
                 "outer_effective_definition_digest",
                 &self.outer_effective_definition_digest,
             ),
-            ("provider_config_digest", &self.provider_config_digest),
+            (
+                "provider_config_value_digest",
+                &self.provider_config_value_digest,
+            ),
             ("body_sha256", &self.body_sha256),
             ("credential_binding_hmac", &self.credential_binding_hmac),
             ("authority_digest", &self.authority_digest),
@@ -295,8 +501,13 @@ impl ProviderRequestCoordinateV2 {
         }
         for (field, value) in [
             ("provider_family", &self.provider_family),
+            ("provider_config_hash", &self.provider_config_hash),
             ("provider_id", &self.provider_id),
             ("model_name", &self.model_name),
+            (
+                "credential_authority_generation",
+                &self.credential_authority_generation,
+            ),
         ] {
             super::validate_trimmed_control_free(
                 &format!("provider request coordinate {field}"),
@@ -327,12 +538,41 @@ impl ProviderRequestCoordinateV2 {
             }
             previous = Some(&header.name);
         }
+        let mut previous: Option<&str> = None;
+        for header in &self.credential_header_names {
+            if normalize_http_header_name(header)? != *header {
+                bail!("provider credential header names must be normalized lowercase");
+            }
+            if previous.is_some_and(|prior| prior >= header.as_str()) {
+                bail!("provider credential header names must be sorted and unique");
+            }
+            if self
+                .public_headers
+                .binary_search_by(|candidate| candidate.name.cmp(header))
+                .is_ok()
+            {
+                bail!("provider public and credential header names collide");
+            }
+            previous = Some(header);
+        }
         match &self.transport {
             ProviderTransportCoordinateV2::RemoteHttp { method, url } => {
                 super::validate_trimmed_control_free("provider remote method", method, false)?;
                 super::validate_trimmed_control_free("provider remote URL", url, false)?;
                 if method.bytes().any(|byte| byte.is_ascii_lowercase()) {
                     bail!("provider remote method must be normalized uppercase ASCII");
+                }
+                let normalized = url::Url::parse(url)
+                    .map_err(|error| anyhow::anyhow!("invalid provider remote URL: {error}"))?;
+                if normalized.as_str() != url {
+                    bail!("provider remote URL must be canonical");
+                }
+                if !matches!(normalized.scheme(), "http" | "https")
+                    || !normalized.username().is_empty()
+                    || normalized.password().is_some()
+                    || normalized.fragment().is_some()
+                {
+                    bail!("provider remote URL violates remote transport policy");
                 }
                 if self.admitted_effect_class == DurableEffectClass::Sealed {
                     bail!("remote provider transport cannot claim sealed effect class");
@@ -669,28 +909,42 @@ mod tests {
 
     #[test]
     fn provider_coordinate_moves_for_public_behavior_and_refuses_remote_sealed() {
-        let mut coordinate = ProviderRequestCoordinateV2 {
+        let authority = ProviderRequestAuthorityV2 {
             outer_effective_definition_digest: "11".repeat(32),
-            transport: ProviderTransportCoordinateV2::RemoteHttp {
-                method: "POST".to_string(),
-                url: "https://example.invalid/v1/chat".to_string(),
-            },
             provider_family: "openai_compatible".to_string(),
-            provider_config_digest: "22".repeat(32),
+            provider_config_hash: "resolved-config-hash".to_string(),
+            provider_config_value_digest: "22".repeat(32),
             provider_id: "example".to_string(),
             profile_id: None,
             model_name: "model".to_string(),
-            public_headers: vec![PublicHeaderCoordinateV2 {
-                name: "content-type".to_string(),
-                value_digest: "33".repeat(32),
-            }],
-            body_sha256: "44".repeat(32),
-            requested_output_ceiling: 1024,
             credential_binding_hmac: "55".repeat(32),
-            authority_generation: 1,
+            credential_authority_generation: "credential-generation-1".to_string(),
             authority_digest: "66".repeat(32),
             admitted_effect_class: DurableEffectClass::Recorded,
         };
+        let request = PreparedProviderRequestProjectionV2::new(
+            [("Content-Type".to_string(), "application/json".to_string())],
+            ["Authorization".to_string()],
+            "44".repeat(32),
+            1024,
+        )
+        .unwrap();
+        let mut coordinate = ProviderRequestCoordinateV2::build(
+            authority,
+            ProviderTransportCoordinateV2::RemoteHttp {
+                method: "post".to_string(),
+                url: "https://example.invalid:443/v1/chat".to_string(),
+            },
+            request,
+        )
+        .unwrap();
+        assert!(matches!(
+            &coordinate.transport,
+            ProviderTransportCoordinateV2::RemoteHttp { method, url }
+                if method == "POST" && url == "https://example.invalid/v1/chat"
+        ));
+        assert_eq!(coordinate.public_headers[0].name, "content-type");
+        assert_eq!(coordinate.credential_header_names, ["authorization"]);
         let original = coordinate.cache_key().unwrap();
         coordinate.model_name = "other".to_string();
         assert_ne!(coordinate.cache_key().unwrap(), original);
@@ -702,5 +956,94 @@ mod tests {
                 .to_string()
                 .contains("remote")
         );
+    }
+
+    #[test]
+    fn provider_coordinate_key_covers_every_authoritative_dimension() {
+        let base = || {
+            ProviderRequestCoordinateV2::build(
+                ProviderRequestAuthorityV2 {
+                    outer_effective_definition_digest: "11".repeat(32),
+                    provider_family: "chat_completions".to_string(),
+                    provider_config_hash: "resolved-config-hash".to_string(),
+                    provider_config_value_digest: "22".repeat(32),
+                    provider_id: "route".to_string(),
+                    profile_id: Some("profile".to_string()),
+                    model_name: "model".to_string(),
+                    credential_binding_hmac: "33".repeat(32),
+                    credential_authority_generation: "credential-generation-7".to_string(),
+                    authority_digest: "44".repeat(32),
+                    admitted_effect_class: DurableEffectClass::Recorded,
+                },
+                ProviderTransportCoordinateV2::RemoteHttp {
+                    method: "POST".to_string(),
+                    url: "https://example.invalid/v1".to_string(),
+                },
+                PreparedProviderRequestProjectionV2::new(
+                    [("x-mode".to_string(), "fast".to_string())],
+                    ["x-secret".to_string()],
+                    "55".repeat(32),
+                    2048,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let expected = base().cache_key().unwrap();
+        let mut mutations: Vec<Box<dyn Fn(&mut ProviderRequestCoordinateV2)>> = vec![
+            Box::new(|value| value.provider_config_hash = "other-config-hash".to_string()),
+            Box::new(|value| value.provider_config_value_digest = "66".repeat(32)),
+            Box::new(|value| value.credential_binding_hmac = "77".repeat(32)),
+            Box::new(|value| value.model_name = "other".to_string()),
+            Box::new(|value| value.body_sha256 = "88".repeat(32)),
+            Box::new(|value| value.requested_output_ceiling += 1),
+            Box::new(|value| value.public_headers[0].value_digest = "99".repeat(32)),
+            Box::new(|value| {
+                value.credential_authority_generation = "credential-generation-8".to_string()
+            }),
+            Box::new(|value| {
+                value.transport = ProviderTransportCoordinateV2::RemoteHttp {
+                    method: "POST".to_string(),
+                    url: "https://other.invalid/v1".to_string(),
+                }
+            }),
+            Box::new(|value| {
+                value.transport = ProviderTransportCoordinateV2::AdmittedLocalWorker {
+                    worker_ref: "provider_worker:local/qwen".to_string(),
+                    effective_definition_digest: "aa".repeat(32),
+                    capsule_hash: "bb".repeat(32),
+                    execution_realization_hash: "cc".repeat(32),
+                }
+            }),
+        ];
+        for mutate in mutations.drain(..) {
+            let mut changed = base();
+            mutate(&mut changed);
+            assert_ne!(changed.cache_key().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn provider_header_partition_is_case_insensitive_and_secret_free() {
+        let error = PreparedProviderRequestProjectionV2::new(
+            [("Authorization".to_string(), "public-value".to_string())],
+            ["authorization".to_string()],
+            "11".repeat(32),
+            1,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("both public and credential"));
+
+        let secret = "this-secret-must-not-appear";
+        let request = PreparedProviderRequestProjectionV2::new(
+            [("X-Public".to_string(), "visible-behavior".to_string())],
+            ["X-Credential".to_string()],
+            "11".repeat(32),
+            1,
+        )
+        .unwrap();
+        let encoded = serde_json::to_string(&request.public_headers).unwrap();
+        assert!(!encoded.contains("visible-behavior"));
+        assert!(!encoded.contains(secret));
     }
 }

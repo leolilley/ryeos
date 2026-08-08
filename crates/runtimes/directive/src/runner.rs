@@ -1041,8 +1041,9 @@ impl Runner {
                         // prepared request under this sealed program; billing
                         // nothing and consuming no reservation is the point.
                         let replayed = self.lookup_provider_call_replay(&prepared).await;
-                        turn_replayed_from =
-                            replayed.as_ref().map(|(record_hash, _)| record_hash.clone());
+                        turn_replayed_from = replayed
+                            .as_ref()
+                            .map(|(record_hash, _)| record_hash.clone());
                         let call = if let Some((record_hash, response)) = replayed {
                             tracing::info!(
                                 %record_hash,
@@ -1079,21 +1080,23 @@ impl Runner {
                             // Ledger admission: verify → reserve → (release on a
                             // pre-issue signal) → mark issued. No provider request
                             // may start unless the issue is durably proven.
-                            let ledger_attempt = if let Some(authority) = ledger_authority.as_ref() {
-                                let verified = match crate::spend_verifier::verify_prepared_spend_bound(
-                                    &prepared,
-                                    authority,
-                                    &self.provider_config,
-                                    self.context_window,
-                                    self.execution.max_provider_output_tokens_per_turn,
-                                ) {
-                                    Ok(verified) => verified,
-                                    Err(error) => {
-                                        break Err(anyhow::anyhow!(
-                                            "provider_spend_bound_unverified: {error:#}"
-                                        ));
-                                    }
-                                };
+                            let ledger_attempt = if let Some(authority) = ledger_authority.as_ref()
+                            {
+                                let verified =
+                                    match crate::spend_verifier::verify_prepared_spend_bound(
+                                        &prepared,
+                                        authority,
+                                        &self.provider_config,
+                                        self.context_window,
+                                        self.execution.max_provider_output_tokens_per_turn,
+                                    ) {
+                                        Ok(verified) => verified,
+                                        Err(error) => {
+                                            break Err(anyhow::anyhow!(
+                                                "provider_spend_bound_unverified: {error:#}"
+                                            ));
+                                        }
+                                    };
                                 match self
                                     .admit_ledger_attempt(
                                         turn,
@@ -1234,7 +1237,11 @@ impl Runner {
                                     }) = &call
                                 {
                                     self.publish_provider_call_record_best_effort(
-                                        &ledger, turn, attempt_number, &prepared, response,
+                                        &ledger,
+                                        turn,
+                                        attempt_number,
+                                        &prepared,
+                                        response,
                                     )
                                     .await;
                                 }
@@ -5996,6 +6003,8 @@ mod tests {
             method: reqwest::Method::POST,
             url: "http://localhost/chat/completions".to_string(),
             header_names: vec![],
+            public_headers_v2: vec![],
+            credential_header_names_v2: vec![],
             body_sha256: body_sha256.clone(),
             body_bytes,
             requested_output_tokens: Some(1_024),

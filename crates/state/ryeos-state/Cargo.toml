@@ -24,6 +24,7 @@ libc = { workspace = true }
 chrono = { workspace = true }
 sha2 = { workspace = true }
 rand = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

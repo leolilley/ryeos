@@ -2886,6 +2886,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tracing",
+ "url",
 ]
 
 [[package]]

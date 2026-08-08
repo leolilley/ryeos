@@ -384,6 +384,8 @@ mod tests {
             method: reqwest::Method::POST,
             url: "http://localhost/chat/completions".to_string(),
             header_names: vec!["Accept".to_string(), "Content-Type".to_string()],
+            public_headers_v2: vec![],
+            credential_header_names_v2: vec![],
             body_bytes,
             body_sha256: body_sha256.clone(),
             requested_output_tokens,

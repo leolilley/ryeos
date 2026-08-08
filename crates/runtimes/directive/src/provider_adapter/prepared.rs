@@ -35,6 +35,14 @@ pub struct PreparedProviderRequest {
     /// Non-secret header names bound into `request_digest` (the auth header
     /// NAME is included, its value excluded), sorted.
     pub header_names: Vec<String>,
+    /// Behavior-bearing public headers for provider effect identity. Values
+    /// are committed by digest; credential-bearing headers remain a separate
+    /// name-only set so secret values can never enter durable evidence.
+    #[allow(dead_code)] // consumed when effect-record v2 activates
+    pub public_headers_v2:
+        Vec<ryeos_state::objects::effect_record_v2::PublicHeaderCoordinateV2>,
+    #[allow(dead_code)] // consumed when effect-record v2 activates
+    pub credential_header_names_v2: Vec<String>,
     /// Exact serialized body bytes; transport sends these bytes verbatim.
     pub body_bytes: Vec<u8>,
     pub body_sha256: String,
@@ -267,6 +275,14 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
         headers.push(("Content-Type".to_string(), "application/json".to_string()));
     }
 
+    let (public_headers_v2, credential_header_names_v2) =
+        ryeos_state::objects::effect_record_v2::provider_header_projection_v2(
+            headers.iter().cloned(),
+            credential
+                .as_ref()
+                .map(|credential| credential.header_name.clone()),
+        )?;
+
     let mut header_names: Vec<String> = headers.iter().map(|(name, _)| name.clone()).collect();
     if let Some(credential) = &credential {
         header_names.push(credential.header_name.clone());
@@ -307,6 +323,8 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
         method: reqwest::Method::POST,
         url,
         header_names,
+        public_headers_v2,
+        credential_header_names_v2,
         body_bytes,
         body_sha256,
         requested_output_tokens,
@@ -419,6 +437,21 @@ mod tests {
         assert_eq!(disabled_body["thinking"]["type"], "off");
         assert_ne!(provider_default.body_sha256, disabled.body_sha256);
         assert_ne!(provider_default.request_digest, disabled.request_digest);
+    }
+
+    #[test]
+    fn prepared_v2_headers_commit_public_values_without_secret_values() {
+        let prepared = prepare(None);
+        let accept = prepared
+            .public_headers_v2
+            .iter()
+            .find(|header| header.name == "accept")
+            .expect("default Accept header is projected");
+        assert_eq!(
+            accept.value_digest,
+            lillux::sha256_hex(b"text/event-stream")
+        );
+        assert!(prepared.credential_header_names_v2.is_empty());
     }
 
     #[test]
