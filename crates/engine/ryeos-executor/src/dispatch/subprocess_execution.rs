@@ -1323,7 +1323,7 @@ fn effect_class_strength(class: &str) -> Option<u8> {
 /// result and executes nothing, so recording would make every replay silently
 /// skip the writes. An item that declares nothing constrains nothing: the
 /// node author's covenant governs alone, exactly as before this check.
-fn enforce_item_effect_class(
+pub(super) fn enforce_item_effect_class(
     item_ref: &str,
     composed: Option<&serde_json::Value>,
     requested: Option<&str>,

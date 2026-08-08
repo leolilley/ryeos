@@ -37,6 +37,102 @@ struct EffectReplayIdentity {
     class: String,
 }
 
+/// Exact, threadless callee admission captured before a durable-effect lookup.
+///
+/// The preflight owns the verified/composed subject and selected route.  A
+/// cache miss consumes this same value through dispatch; it is never reduced
+/// to a public digest and resolved a second time.
+struct PreparedEffectDispatch {
+    context: crate::executor::ExecutionContext,
+    preflight: crate::dispatch::RootDispatchPreflight,
+}
+
+fn callback_execution_context(
+    params: &DispatchActionParams,
+    state: &AppState,
+    thread_auth: &ThreadAuthState,
+    dispatch_caps: &[String],
+    child_provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+) -> Result<crate::executor::ExecutionContext> {
+    use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, ProjectContext};
+
+    let callback_subject_authority = child_provenance.subject_resolution_authority();
+    let callback_project_context = if matches!(
+        callback_subject_authority,
+        ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
+    ) {
+        ProjectContext::None
+    } else {
+        ProjectContext::LocalPath {
+            path: child_provenance.effective_path().to_path_buf(),
+        }
+    };
+    let site_id = state.threads.site_id();
+    let plan_ctx = PlanContext {
+        requested_by: EffectivePrincipal::Local(ryeos_engine::contracts::Principal {
+            fingerprint: thread_auth.acting_principal.clone(),
+            scopes: dispatch_caps.to_vec(),
+        }),
+        project_context: callback_project_context,
+        subject_resolution_authority: callback_subject_authority,
+        current_site_id: site_id.to_string(),
+        origin_site_id: site_id.to_string(),
+        execution_hints: Default::default(),
+        validate_only: false,
+    };
+    Ok(crate::executor::ExecutionContext {
+        principal_fingerprint: thread_auth.acting_principal.clone(),
+        caller_scopes: dispatch_caps.to_vec(),
+        // Use the parent's per-request engine — never the daemon engine.
+        engine: child_provenance.request_engine().clone(),
+        plan_ctx,
+        requested_call: params.action.call.clone(),
+    })
+}
+
+fn prepare_effect_dispatch(
+    params: &DispatchActionParams,
+    state: &AppState,
+    thread_auth: &ThreadAuthState,
+    dispatch_caps: &[String],
+    child_provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+) -> Result<PreparedEffectDispatch> {
+    if params.action.thread != "inline" {
+        anyhow::bail!("durable effect replay is only valid for inline callback actions");
+    }
+    let root = ryeos_engine::canonical_ref::CanonicalRef::parse(&params.action.item_id)
+        .with_context(|| format!("invalid callback item_id '{}'", params.action.item_id))?;
+    let context =
+        callback_execution_context(params, state, thread_auth, dispatch_caps, child_provenance)?;
+    let project_binding = ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
+        &context.engine,
+        &context.plan_ctx,
+        child_provenance,
+    )?;
+    let preflight = crate::dispatch::preflight_root_dispatch(
+        &params.action.item_id,
+        root.kind.as_str(),
+        &params.action.params,
+        &params.action.ref_bindings,
+        None,
+        None,
+        &project_binding,
+        &context,
+        state,
+        None,
+    )
+    .map_err(anyhow::Error::new)?;
+    crate::dispatch::enforce_preflight_effect_class(
+        &preflight,
+        params
+            .effect_replay
+            .as_ref()
+            .map(|effect| effect.class.as_str()),
+    )
+    .map_err(anyhow::Error::new)?;
+    Ok(PreparedEffectDispatch { context, preflight })
+}
+
 pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     let params: DispatchActionParams =
         serde_json::from_value(params.clone()).context("invalid runtime.dispatch_action params")?;
@@ -114,11 +210,27 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         "thread auth token validated: using server-side principal",
     );
 
+    // Resolve and admit the exact callee before a durable-effect lookup.  A
+    // miss carries this same prepared subject into dispatch, closing the
+    // resolve-again race.  The v1 lookup remains active until the v2 epoch
+    // cutover; this preparatory slice changes no record schema or key.
+    let prepared_effect_dispatch = params
+        .effect_replay
+        .as_ref()
+        .map(|_| {
+            prepare_effect_dispatch(
+                &params,
+                state,
+                &thread_auth,
+                &dispatch_caps,
+                &child_provenance,
+            )
+        })
+        .transpose()?;
+
     // Durable-class replay: derive the identity daemon-side, serve the
-    // record when one exists, and otherwise execute and record. Everything
-    // here is best-effort — replay is a substitution for execution, never a
-    // precondition of it, so any failure in this block degrades to a normal
-    // live dispatch.
+    // record when one exists, and otherwise execute and record. The v1
+    // best-effort failure semantics are removed only at the clean activation.
     let replay_identity = derive_effect_replay_identity(&params, &cap);
     if let Some(identity) = &replay_identity
         && let Some(response) = try_replay_effect_record(state, identity)
@@ -137,6 +249,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         dispatch_caps,
         &caller_thread.chain_root_id,
         child_provenance,
+        prepared_effect_dispatch,
     )
     .await;
     if let (Ok(response), Some(identity)) = (&result, &replay_identity) {
@@ -605,6 +718,7 @@ async fn handle_execute(
     dispatch_caps: Vec<String>,
     authoritative_chain_root_id: &str,
     child_provenance: ryeos_app::execution_provenance::ExecutionProvenance,
+    prepared_effect_dispatch: Option<PreparedEffectDispatch>,
 ) -> Result<Value> {
     // V5.4 P2 — strict typed callback contract requires every leaf
     // dispatcher reachable from a callback to emit
@@ -685,46 +799,23 @@ async fn handle_execute(
     // `tool:ryeos/knowledge/compose` → `knowledge:<ref>`) must see the same
     // effective caps that `enforce_callback_caps` checked at this boundary.
     let caller_scopes = dispatch_caps.clone();
-    let site_id = state.threads.site_id();
 
     let root_canonical =
         ryeos_engine::canonical_ref::CanonicalRef::parse(&params.action.item_id)
             .with_context(|| format!("invalid callback item_id '{}'", params.action.item_id))?;
 
-    use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, ProjectContext};
-    let callback_subject_authority = child_provenance.subject_resolution_authority();
-    let callback_project_context = if matches!(
-        callback_subject_authority,
-        ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
-    ) {
-        ProjectContext::None
-    } else {
-        ProjectContext::LocalPath {
-            path: child_provenance.effective_path().to_path_buf(),
-        }
-    };
-    let plan_ctx = PlanContext {
-        requested_by: EffectivePrincipal::Local(ryeos_engine::contracts::Principal {
-            fingerprint: caller_principal_id.clone(),
-            scopes: caller_scopes.clone(),
-        }),
-        project_context: callback_project_context,
-        subject_resolution_authority: callback_subject_authority,
-        current_site_id: site_id.to_string(),
-        origin_site_id: site_id.to_string(),
-        execution_hints: Default::default(),
-        validate_only: false,
-    };
-    let exec_ctx = crate::executor::ExecutionContext {
-        principal_fingerprint: caller_principal_id.clone(),
-        caller_scopes,
-        // Use the parent's per-request engine — never the daemon engine.
-        engine: child_provenance.request_engine().clone(),
-        plan_ctx,
-        // Method selector from the graph node's action `call` block — the
-        // single source of truth for method dispatch (resolver + arg
-        // validation both read it). `None` → the kind's default method.
-        requested_call: params.action.call.clone(),
+    let (exec_ctx, prepared_preflight) = match prepared_effect_dispatch {
+        Some(prepared) => (prepared.context, Some(prepared.preflight)),
+        None => (
+            callback_execution_context(
+                &params,
+                state,
+                thread_auth,
+                &caller_scopes,
+                &child_provenance,
+            )?,
+            None,
+        ),
     };
 
     let hook_ledger = if let Some(identity) = params.hook_dispatch.as_ref() {
@@ -800,6 +891,15 @@ async fn handle_execute(
                 cap.thread_id
             ))
         })?;
+    let (prepared_verified, prepared_admission, prepared_dispatch_evidence) =
+        match prepared_preflight {
+            Some(preflight) => (
+                Some(preflight.requested_subject),
+                preflight.root_admission,
+                Some(preflight.root_dispatch_evidence),
+            ),
+            None => (None, None, None),
+        };
     let dispatch_req = crate::dispatch::DispatchRequest {
         // Callback `thread=inline` is the unary leaf protocol. Persist the
         // execution dispatch vocabulary independently: the caller waits for
@@ -819,8 +919,8 @@ async fn handle_execute(
         usage_subject: None,
         usage_subject_asserted_by: None,
         previous_thread_id: None,
-        root_admission: None,
-        root_dispatch_evidence: None,
+        root_admission: prepared_admission,
+        root_dispatch_evidence: prepared_dispatch_evidence,
         parent_execution_context: Some(parent_execution_context_from_capability(cap)),
         requested_effect_class: params
             .effect_replay
@@ -833,8 +933,21 @@ async fn handle_execute(
     // we await `dispatch::dispatch` directly. The previous
     // `Handle::current().block_on(...)` was a panic/deadlock risk on
     // the P3b hot path (a runtime-thread blocking on its own runtime).
-    let result =
-        crate::dispatch::dispatch(&params.action.item_id, &dispatch_req, &exec_ctx, state).await;
+    let result = match prepared_verified {
+        Some(verified) => {
+            crate::dispatch::dispatch_verified(
+                &params.action.item_id,
+                verified,
+                &dispatch_req,
+                &exec_ctx,
+                state,
+            )
+            .await
+        }
+        None => {
+            crate::dispatch::dispatch(&params.action.item_id, &dispatch_req, &exec_ctx, state).await
+        }
+    };
     if let Err(err) = &result {
         // C0: attribute a content-hash mismatch to its resolution source. A
         // `LiveFs` run means the dispatched item's bytes were re-signed on disk

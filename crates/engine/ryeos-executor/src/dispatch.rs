@@ -4673,6 +4673,39 @@ pub struct RootDispatchPreflight {
     pub root_dispatch_evidence: RootDispatchEvidence,
 }
 
+/// Enforce the caller's durable-effect claim against the exact composed
+/// subject captured by [`preflight_root_dispatch`].  This check belongs at
+/// the pre-contact boundary: a replay lookup must never bypass a callee whose
+/// signed ceiling was lowered after an earlier execution was banked.
+pub fn enforce_preflight_effect_class(
+    preflight: &RootDispatchPreflight,
+    requested_effect_class: Option<&str>,
+) -> Result<(), DispatchError> {
+    let admission = preflight.root_admission.as_ref().ok_or_else(|| {
+        DispatchError::Internal(anyhow::anyhow!(
+            "exact dispatch preflight has no root admission"
+        ))
+    })?;
+    subprocess_execution::enforce_item_effect_class(
+        &admission
+            .verified_subject()
+            .resolved
+            .canonical_ref
+            .to_string(),
+        Some(&admission.resolution_output().composed.composed),
+        requested_effect_class,
+    )
+    .map_err(|error| DispatchError::SchemaMisconfigured {
+        kind: admission
+            .verified_subject()
+            .resolved
+            .canonical_ref
+            .kind
+            .clone(),
+        detail: error.to_string(),
+    })
+}
+
 impl RootDispatchPreflight {
     fn rebind_requested_subject(&mut self, requested_subject: VerifiedItem) {
         self.root_dispatch_evidence
