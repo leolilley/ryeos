@@ -4,4 +4,3 @@ description: "Engine foundation: kind schemas, handlers, parsers, services, tool
 requires_kinds: []
 runtime_authority:
   project_snapshots: [status, log, show, create]
-  large_content: [ingest, scrub]

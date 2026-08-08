@@ -408,12 +408,6 @@ pub(crate) async fn dispatch_runtime_method(
         "runtime.bundle_events_materialize_attachment" => {
             handle_bundle_events_materialize_attachment(&clean_params, state, callback_cap.as_ref())
         }
-        "runtime.ingest_large_content" => {
-            handle_runtime_ingest_large_content(&clean_params, state, callback_cap.as_ref())
-        }
-        "runtime.scrub_large_content" => {
-            handle_runtime_scrub_large_content(&clean_params, state, callback_cap.as_ref())
-        }
         "runtime.vault_put" => {
             handle_runtime_vault_put(&clean_params, state, callback_cap.as_ref())
         }
@@ -567,7 +561,6 @@ fn is_running_runtime_mutation(method: &str) -> bool {
             | "runtime.request_continuation"
             | "runtime.author_item"
             | "runtime.project_snapshot"
-            | "runtime.ingest_large_content"
             | "runtime.vault_put"
             | "runtime.vault_delete"
             | "runtime.bundle_events_append"
@@ -1288,39 +1281,6 @@ fn handle_bundle_events_materialize_attachment(
     .context("failed to encode bundle_events.materialize_attachment result")
 }
 
-fn handle_runtime_ingest_large_content(
-    params: &serde_json::Value,
-    state: &AppState,
-    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
-) -> Result<serde_json::Value> {
-    let cap = cap.ok_or_else(|| anyhow::anyhow!("missing callback capability"))?;
-    let params: ryeos_app::large_content_service::RuntimeLargeContentIngestParams =
-        serde_json::from_value(params.clone())
-            .context("invalid runtime.ingest_large_content params")?;
-    ryeos_app::large_content_service::RuntimeLargeContentService::ingest(
-        &state.state_store,
-        &state.authorizer,
-        cap,
-        params,
-    )
-}
-
-fn handle_runtime_scrub_large_content(
-    params: &serde_json::Value,
-    state: &AppState,
-    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
-) -> Result<serde_json::Value> {
-    let cap = cap.ok_or_else(|| anyhow::anyhow!("missing callback capability"))?;
-    let params: ryeos_app::large_content_service::RuntimeLargeContentScrubParams =
-        serde_json::from_value(params.clone())
-            .context("invalid runtime.scrub_large_content params")?;
-    ryeos_app::large_content_service::RuntimeLargeContentService::scrub(
-        &state.state_store,
-        &state.authorizer,
-        cap,
-        params,
-    )
-}
 
 fn handle_runtime_vault_put(
     params: &serde_json::Value,

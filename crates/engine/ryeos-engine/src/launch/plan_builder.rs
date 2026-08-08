@@ -71,8 +71,6 @@ struct RuntimeSourceAuthorityDecls {
     item_authoring: Vec<RuntimeSourceItemAuthorDecl>,
     #[serde(default)]
     project_snapshots: Vec<RuntimeSourceProjectSnapshotOperation>,
-    #[serde(default)]
-    large_content: Vec<RuntimeSourceLargeContentOperation>,
 }
 
 #[allow(dead_code)]
@@ -117,14 +115,6 @@ enum RuntimeSourceProjectSnapshotOperation {
     Log,
     Show,
     Create,
-}
-
-#[allow(dead_code)]
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-enum RuntimeSourceLargeContentOperation {
-    Ingest,
-    Scrub,
 }
 
 #[allow(dead_code)]

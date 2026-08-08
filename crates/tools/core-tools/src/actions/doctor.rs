@@ -149,7 +149,6 @@ fn check_manifest(source: &Path) -> CheckResult {
                 "runtime_vault",
                 "item_authoring",
                 "project_snapshots",
-                "large_content",
             ]
             .into_iter()
             .find(|f| msg.contains(&format!("unknown field `{f}`")));
@@ -161,7 +160,7 @@ fn check_manifest(source: &Path) -> CheckResult {
                         "error": format!(
                             "manifest.source.yaml declares `{field}` as a top-level field"
                         ),
-                        "remedy": "nest bundle_events / runtime_vault / item_authoring / project_snapshots / large_content under a single `runtime_authority:` block",
+                        "remedy": "nest bundle_events / runtime_vault / item_authoring / project_snapshots under a single `runtime_authority:` block",
                         "serde_error": msg,
                     }),
                 );

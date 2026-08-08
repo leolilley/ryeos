@@ -22,7 +22,6 @@ pub mod remote_descriptor;
 pub mod runtime_owned;
 pub mod sign;
 pub mod sign_bundle;
-pub mod content_ingest;
 pub mod snapshot;
 pub mod trust;
 pub mod vault;

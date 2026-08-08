@@ -28,8 +28,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::manifest::{
-    BundleEventDecl, BundleEventOperation, ItemAuthorDecl, LargeContentOperation,
-    ProjectSnapshotOperation, RuntimeAuthorityDecls, RuntimeVaultDecl, RuntimeVaultOperation,
+    BundleEventDecl, BundleEventOperation, ItemAuthorDecl, ProjectSnapshotOperation,
+    RuntimeAuthorityDecls, RuntimeVaultDecl, RuntimeVaultOperation,
 };
 
 /// Capability `kind` segment for bundle-event authority.
@@ -38,8 +38,6 @@ pub const CAP_KIND_BUNDLE_EVENTS: &str = "bundle-events";
 pub const CAP_KIND_RUNTIME_VAULT: &str = "vault";
 /// Capability `kind` segment for project-snapshot authority.
 pub const CAP_KIND_PROJECT_SNAPSHOTS: &str = "project-snapshots";
-/// Capability `kind` segment for large-content authority.
-pub const CAP_KIND_LARGE_CONTENT: &str = "large-content";
 
 /// The `(verb, kind)` surfaces a signed manifest can mint into, derived once from
 /// the runtime-authority families themselves so this classification cannot drift
@@ -57,9 +55,6 @@ fn authority_surfaces() -> &'static [(&'static str, &'static str)] {
         }
         for op in ProjectSnapshotOperation::ALL {
             surfaces.push((op.cap_verb(), CAP_KIND_PROJECT_SNAPSHOTS));
-        }
-        for op in LargeContentOperation::ALL {
-            surfaces.push((op.cap_verb(), CAP_KIND_LARGE_CONTENT));
         }
         // `author` intentionally reserves every item kind: the capability shape
         // is `ryeos.author.<kind>.<bare-id>`, so no composed grant may self-mint
@@ -126,20 +121,6 @@ impl ProjectSnapshotOperation {
     }
 }
 
-impl LargeContentOperation {
-    /// Every variant, so cap construction and reserved-surface derivation stay
-    /// exhaustive as the enum grows.
-    pub const ALL: &'static [LargeContentOperation] =
-        &[LargeContentOperation::Ingest, LargeContentOperation::Scrub];
-
-    /// The capability `verb` this operation authorizes.
-    pub fn cap_verb(&self) -> &'static str {
-        match self {
-            LargeContentOperation::Ingest => "ingest",
-            LargeContentOperation::Scrub => "scrub",
-        }
-    }
-}
 
 /// Build the bundle-event capability for `op` on `bundle_id`/`event_kind`.
 pub fn bundle_event_cap(op: &BundleEventOperation, bundle_id: &str, event_kind: &str) -> String {
@@ -168,12 +149,6 @@ pub fn item_author_cap(kind: &str, namespace: &str) -> String {
 
 /// Build the daemon-mediated capability for one snapshot operation against the
 /// exact live project already bound into the callback capability.
-/// Build the large-content capability for `op` on the node's store. The
-/// scope is the single node store; content semantics never enter the cap.
-pub fn large_content_cap(op: &LargeContentOperation) -> String {
-    canonical_cap(CAP_KIND_LARGE_CONTENT, "store", op.cap_verb())
-}
-
 pub fn project_snapshot_cap(op: &ProjectSnapshotOperation) -> String {
     canonical_cap(CAP_KIND_PROJECT_SNAPSHOTS, "live", op.cap_verb())
 }
@@ -216,7 +191,6 @@ impl RuntimeAuthorityDecls {
             && self.runtime_vault.is_empty()
             && self.item_authoring.is_empty()
             && self.project_snapshots.is_empty()
-            && self.large_content.is_empty()
     }
 
     /// The full set of caps this manifest grants `bundle_id` as an authority
@@ -235,7 +209,6 @@ impl RuntimeAuthorityDecls {
             caps.extend(decl.runtime_authority_caps());
         }
         caps.extend(self.project_snapshots.iter().map(project_snapshot_cap));
-        caps.extend(self.large_content.iter().map(large_content_cap));
         caps
     }
 
@@ -405,8 +378,6 @@ pub struct RuntimeAuthorityRequirements {
     pub item_authoring: Vec<ItemAuthorRequirement>,
     #[serde(default)]
     pub project_snapshots: Vec<ProjectSnapshotOperation>,
-    #[serde(default)]
-    pub large_content: Vec<LargeContentOperation>,
 }
 
 /// One bundle-event requirement: an event kind plus the operations the item
@@ -469,7 +440,6 @@ impl RuntimeAuthorityRequirements {
             && self.runtime_vault.is_empty()
             && self.item_authoring.is_empty()
             && self.project_snapshots.is_empty()
-            && self.large_content.is_empty()
     }
 
     /// Whether the item declares any manifest-backed runtime authority at all —
@@ -492,7 +462,6 @@ impl RuntimeAuthorityRequirements {
             caps.extend(req.requested_caps());
         }
         caps.extend(self.project_snapshots.iter().map(project_snapshot_cap));
-        caps.extend(self.large_content.iter().map(large_content_cap));
         caps
     }
 

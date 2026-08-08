@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-07T12:10:17Z:4a1c46552c2aeed8a6ed665c49ba408b12f0e5ea4a7fbc3f95bdb9e3855f7577:msjOOuTyVZZ8C1G6ZREl+MywbnAh/ExtZaXLivbmOfaqnQcAN9FNvjYTt688gOrvpRnKLtd4p9/WbxUp7sOFCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-08T05:45:35Z:6b0c74b42ed2ad3dca5d87e291f3f467c563175db03ce8ae40513b455411665a:TRTEweMIJHrai5C9K0rkQNX/pMRwFWWuKS+DIYaNb+HsPKEFGwwwMazflp83DcuDW5UiA6ITI5noC1W53TpOBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: core
 version: 0.5.0
 description: 'Engine foundation: kind schemas, handlers, parsers, services, tools'
@@ -20,6 +20,3 @@ runtime_authority:
   - log
   - show
   - create
-  large_content:
-  - ingest
-  - scrub
