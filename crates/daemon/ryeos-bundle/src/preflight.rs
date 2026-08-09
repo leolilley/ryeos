@@ -278,10 +278,37 @@ fn preflight_verify_bundle_in_context_inner(
         schema_roots.push(bundle_kinds.clone());
     }
     if schema_roots.is_empty() {
-        bail!(
-            "preflight: no kind schemas in installed bundles or candidate bundle ({})",
-            bundle_kinds.display()
-        );
+        // A bundle may be purely mechanical: a signed executable payload and
+        // a manifest-owned declaration such as an isolation backend. It has
+        // no authored items and therefore no honest kind dependency merely
+        // to make preflight boot. Verify the complete signed manifest first,
+        // then admit only the closed manifest/payload layout. Any authored
+        // item namespace still requires an explicit kind dependency and is
+        // refused here rather than being silently ignored.
+        let trust_store =
+            TrustStore::load(None, node_config_root).context("preflight: load node trust store")?;
+        if trust_store.is_empty() {
+            bail!(
+                "preflight: node trust store is empty — run `ryeos init` to \
+                 pin the platform author key, or `ryeos trust pin <fingerprint>` \
+                 to pin a third-party publisher"
+            );
+        }
+        ryeos_engine::binary_resolver::verify_bundle_executor_manifest(source_path, &trust_store)
+            .context("preflight: verify node-authorized bundle executables")?;
+        match expected_bundle_name {
+            Some(expected_bundle_name) => verify_manifest_signature_for_bundle_name(
+                &ai_dir,
+                source_path,
+                expected_bundle_name,
+                &trust_store,
+                check_source_mtime,
+            ),
+            None => verify_manifest_signature(&ai_dir, source_path, &trust_store),
+        }
+        .context("preflight: bundle manifest verification")?;
+        validate_manifest_only_control_tree(&ai_dir)?;
+        return Ok(PreflightReport::default());
     }
 
     let trust_store =
@@ -531,6 +558,37 @@ fn preflight_verify_bundle_in_context_inner(
         );
     }
     Ok(PreflightReport { warnings })
+}
+
+/// Refuse an item namespace when no kind schema is in the exact dependency
+/// closure. Manifest-only bundles may contain only their signed manifest and
+/// content-addressed executable payload machinery.
+fn validate_manifest_only_control_tree(ai_dir: &Path) -> Result<()> {
+    const ALLOWED: &[&str] = &[
+        "bin",
+        "manifest.source.yaml",
+        "manifest.yaml",
+        "objects",
+        "refs",
+    ];
+    for entry in
+        fs::read_dir(ai_dir).with_context(|| format!("read control tree {}", ai_dir.display()))?
+    {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_str().ok_or_else(|| {
+            anyhow::anyhow!(
+                "preflight: manifest-only bundle contains a non-UTF-8 control-tree entry"
+            )
+        })?;
+        if !ALLOWED.contains(&name) {
+            bail!(
+                "preflight: manifest-only bundle contains undeclared item namespace `{name}`; \
+                 declare the owning kind in requires_kinds or uses_kinds"
+            );
+        }
+    }
+    Ok(())
 }
 
 pub fn verify_manifest_signature(
@@ -1977,6 +2035,49 @@ description: "fixed parser handler for preflight tests"
 
         verify_manifest_signature(&layout.ai_dir, &layout.source, &ts)
             .expect("authoring verification must use the signed declaration");
+    }
+
+    #[test]
+    fn preflight_accepts_a_closed_manifest_only_bundle_without_kind_dependencies() {
+        let layout = BundleLayout::new("mechanical-payload");
+        layout.write_signed_manifest(
+            "name: mechanical-payload\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\n",
+        );
+
+        let report = preflight_verify_bundle_report_in_context(
+            &layout.source,
+            &[],
+            &layout.node_config_root,
+            Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
+        )
+        .expect("a signed manifest-only bundle needs no synthetic kind dependency");
+
+        assert!(report.is_clean());
+    }
+
+    #[test]
+    fn preflight_refuses_an_item_namespace_without_its_kind_dependency() {
+        let layout = BundleLayout::new("undeclared-items");
+        layout.write_signed_manifest(
+            "name: undeclared-items\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\n",
+        );
+        fs::create_dir_all(layout.ai_dir.join("workers")).unwrap();
+        fs::write(layout.ai_dir.join("workers/demo.yaml"), "category: demo\n").unwrap();
+
+        let error = preflight_verify_bundle_report_in_context(
+            &layout.source,
+            &[],
+            &layout.node_config_root,
+            Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
+        )
+        .expect_err("an undeclared item namespace must not be silently ignored");
+
+        assert!(
+            error
+                .to_string()
+                .contains("undeclared item namespace `workers`"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[test]

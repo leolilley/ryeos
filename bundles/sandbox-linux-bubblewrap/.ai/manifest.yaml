@@ -1,0 +1,32 @@
+# ryeos:signed:2026-08-09T22:41:30Z:ab314a8ad90c08072c0f2101bc872b153cafd824a6f9edfafaafbc47e3df8cde:7GFV4TgfGtK4uo6egdCiCzq0UJuzbrRbe+XxtJj5Zg6zbqV5lvep/RkMLNyeJP64f9mPdJvPG1aYQwuHWOD4Bw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+name: sandbox-linux-bubblewrap
+version: 0.1.0
+description: Linux process confinement using a signed bundled Bubblewrap launcher
+provides_kinds: []
+requires_kinds: []
+uses_kinds: []
+isolation_backends:
+- id: linux-bubblewrap
+  protocol: ryeos.isolation-adapter/v1
+  targets:
+  - x86_64-unknown-linux-gnu
+  - aarch64-unknown-linux-gnu
+  adapter: ryeos-bubblewrap-adapter
+  artifacts:
+    launcher: bwrap
+  capabilities:
+  - filesystem.private_root
+  - filesystem.fd_read_only
+  - filesystem.fd_writable
+  - filesystem.ordered_overlays
+  - filesystem.project_workspace_cow
+  - filesystem.workspace_delta
+  - filesystem.private_tmp
+  - devices.minimal
+  - environment.exact
+  - network.host
+  - network.isolated
+  - process.host_pid_namespace
+  - process.target_pid_reporting
+  - lifecycle.shared_process_group
+  - ipc.target_unix_stream
