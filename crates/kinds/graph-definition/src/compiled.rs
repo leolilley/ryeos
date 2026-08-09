@@ -1,16 +1,21 @@
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context as _, Result, bail};
+use ryeos_engine::hooks::EffectiveHookPlan;
 use ryeos_runtime::{
     CompilationLimits, CompiledActionTemplate, CompiledExpression, CompiledHook,
-    CompiledJsonTemplate, CompiledTemplate, ExpressionCondition, Reference, ReferenceSegment,
-    ReferenceSet, compile_condition_for, compile_template_for,
+    CompiledJsonTemplate, CompiledTemplate, EvaluationContext, EvaluationLimits, EvaluationSession,
+    ExpressionCondition, Reference, ReferenceSegment, ReferenceSet, compile_condition_for,
+    compile_effective_hook_plan, compile_template_for,
 };
 
-use crate::model::{EdgeSpec, GraphConfig, GraphNode, NodeType};
+use crate::{EdgeSpec, GraphConfig, GraphNode, NodeType};
 
+/// Immutable executable sidecar produced by the graph kind's one admission
+/// compiler. It is transient process state, never a second serialized graph
+/// contract.
 #[derive(Debug, Clone)]
-pub(crate) struct CompiledGraph {
+pub struct CompiledGraph {
     nodes: HashMap<String, CompiledNode>,
     hooks: Vec<CompiledHook>,
 }
@@ -18,22 +23,17 @@ pub(crate) struct CompiledGraph {
 impl CompiledGraph {
     pub(crate) fn compile_effective(
         config: &GraphConfig,
-        plan: &ryeos_engine::hooks::EffectiveHookPlan,
-    ) -> Result<Self> {
-        Self::compile_with(config, |limits| {
-            ryeos_runtime::compile_effective_hook_plan(plan, limits)
-                .context("compile captured effective graph hooks")
-        })
-    }
-
-    fn compile_with(
-        config: &GraphConfig,
-        compile_admitted_hooks: impl FnOnce(&CompilationLimits) -> Result<Vec<CompiledHook>>,
+        plan: &EffectiveHookPlan,
     ) -> Result<Self> {
         let limits = CompilationLimits::default();
         if let Some(state) = config.state.as_ref() {
-            crate::evaluation::validate_runtime_value(state, "config.state")
-                .context("validate authored graph state bounds")?;
+            EvaluationSession::with_context(
+                &EvaluationContext::new(),
+                &EvaluationLimits::default(),
+            )
+            .validate_value(state, "config.state")
+            .map_err(|error| anyhow::anyhow!(error))
+            .context("validate authored graph state bounds")?;
         }
         let input_properties = config
             .config_schema
@@ -47,7 +47,6 @@ impl CompiledGraph {
                     .collect::<HashSet<_>>()
             });
         let mut nodes = HashMap::with_capacity(config.nodes.len());
-
         for (name, node) in &config.nodes {
             validate_iteration_variable(name, node)?;
             let compiled = CompiledNode::compile(name, node, &limits, input_properties.as_ref())
@@ -55,28 +54,28 @@ impl CompiledGraph {
             nodes.insert(name.clone(), compiled);
         }
 
-        let hooks = compile_admitted_hooks(&limits)?;
+        let hooks = compile_effective_hook_plan(plan, &limits)
+            .context("compile captured effective graph hooks")?;
         for (index, hook) in hooks.iter().enumerate() {
             let field = format!("hook[{index}] (id={})", hook.id());
             for reference in hook.references().iter() {
                 validate_input_reference(&field, reference, input_properties.as_ref())?;
             }
         }
-
         Ok(Self { nodes, hooks })
     }
 
-    pub(crate) fn node(&self, name: &str) -> &CompiledNode {
+    pub fn node(&self, name: &str) -> &CompiledNode {
         self.nodes
             .get(name)
             .unwrap_or_else(|| panic!("compiled graph missing source node `{name}`"))
     }
 
-    pub(crate) fn hooks(&self) -> &[CompiledHook] {
+    pub fn hooks(&self) -> &[CompiledHook] {
         &self.hooks
     }
 
-    pub(crate) fn references(&self) -> impl Iterator<Item = &Reference> {
+    pub fn references(&self) -> impl Iterator<Item = &Reference> {
         self.nodes
             .values()
             .flat_map(|node| node.references.iter())
@@ -85,13 +84,13 @@ impl CompiledGraph {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct CompiledNode {
-    pub(crate) action: Option<CompiledActionTemplate>,
-    pub(crate) assign: Option<CompiledJsonTemplate>,
-    pub(crate) output: Option<CompiledJsonTemplate>,
-    pub(crate) over: Option<CompiledTemplate>,
-    pub(crate) facets: Option<CompiledJsonTemplate>,
-    pub(crate) next: Option<CompiledEdgeSpec>,
+pub struct CompiledNode {
+    pub action: Option<CompiledActionTemplate>,
+    pub assign: Option<CompiledJsonTemplate>,
+    pub output: Option<CompiledJsonTemplate>,
+    pub over: Option<CompiledTemplate>,
+    pub facets: Option<CompiledJsonTemplate>,
+    pub next: Option<CompiledEdgeSpec>,
     references: ReferenceSet,
 }
 
@@ -109,11 +108,13 @@ impl CompiledNode {
         } else {
             None
         };
-        let state_roots = allowed_roots(false, None);
-        let action_roots = allowed_roots(false, foreach_root);
+        let state_roots = allowed_roots(false, false, None);
+        // `_dispatch` becomes available only after this node's action has
+        // returned daemon-owned dispatch evidence.
+        let action_roots = allowed_roots(false, false, foreach_root);
         let result_available = node.action.is_some();
-        let assign_roots = allowed_roots(result_available, foreach_root);
-        let action_condition_roots = allowed_roots(result_available, None);
+        let assign_roots = allowed_roots(result_available, result_available, foreach_root);
+        let action_condition_roots = allowed_roots(result_available, result_available, None);
 
         let action = node
             .action
@@ -132,7 +133,6 @@ impl CompiledNode {
                 Ok::<_, anyhow::Error>(compiled)
             })
             .transpose()?;
-
         let assign = node
             .assign
             .as_ref()
@@ -148,7 +148,6 @@ impl CompiledNode {
                 Ok::<_, anyhow::Error>(compiled)
             })
             .transpose()?;
-
         let output = node
             .output
             .as_ref()
@@ -164,7 +163,6 @@ impl CompiledNode {
                 Ok::<_, anyhow::Error>(compiled)
             })
             .transpose()?;
-
         let over = node
             .over
             .as_ref()
@@ -180,10 +178,6 @@ impl CompiledNode {
                 Ok::<_, anyhow::Error>(compiled)
             })
             .transpose()?;
-
-        // A detached node folds facets into the compiled callback action. A
-        // follow-fanout stamps them separately, so compile them as a standalone
-        // tree as well and retain them on the action-side root contract.
         let facets = node
             .facets
             .as_ref()
@@ -241,7 +235,7 @@ impl CompiledNode {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum CompiledEdgeSpec {
+pub enum CompiledEdgeSpec {
     Unconditional {
         to: String,
     },
@@ -303,7 +297,7 @@ impl CompiledEdgeSpec {
         }
     }
 
-    pub(crate) fn references(&self) -> &ReferenceSet {
+    fn references(&self) -> &ReferenceSet {
         match self {
             Self::Unconditional { .. } => empty_references(),
             Self::Conditional { references, .. } => references,
@@ -317,22 +311,29 @@ fn empty_references() -> &'static ReferenceSet {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct CompiledConditionalEdge {
-    pub(crate) condition: CompiledCondition,
-    pub(crate) to: String,
+pub struct CompiledConditionalEdge {
+    pub condition: CompiledCondition,
+    pub to: String,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum CompiledCondition {
+pub enum CompiledCondition {
     Default,
     Constant(bool),
     Expression(CompiledExpression),
 }
 
-fn allowed_roots(include_result: bool, foreach_root: Option<&str>) -> HashSet<&str> {
+fn allowed_roots(
+    include_result: bool,
+    include_dispatch: bool,
+    foreach_root: Option<&str>,
+) -> HashSet<&str> {
     let mut roots = HashSet::from(["state", "inputs", "_execution", "_run"]);
     if include_result {
         roots.insert("result");
+    }
+    if include_dispatch {
+        roots.insert("_dispatch");
     }
     if let Some(root) = foreach_root {
         roots.insert(root);
@@ -348,18 +349,21 @@ fn validate_references(
 ) -> Result<()> {
     for reference in references.iter() {
         if !allowed_roots.contains(reference.root()) {
+            let mut roots = allowed_roots.iter().copied().collect::<Vec<_>>();
+            roots.sort_unstable();
             bail!(
-                "{field}: expression root `{}` is not available here; allowed roots are {}",
+                "{field}: expression root `{}` is unavailable; allowed roots are {}",
                 reference.root(),
-                sorted_roots(allowed_roots).join(", ")
+                roots.join(", ")
             );
         }
-        if matches!(reference.root(), "state" | "inputs" | "_execution" | "_run")
-            && matches!(
-                reference.segments().first(),
-                Some(ReferenceSegment::Index(_))
-            )
-        {
+        if matches!(
+            reference.root(),
+            "state" | "inputs" | "_execution" | "_run" | "_dispatch"
+        ) && matches!(
+            reference.segments().first(),
+            Some(ReferenceSegment::Index(_))
+        ) {
             bail!(
                 "{field}: expression root `{}` is an object and cannot be indexed by number",
                 reference.root()
@@ -382,7 +386,6 @@ fn validate_input_reference(
         return Ok(());
     };
     let Some(ReferenceSegment::Key(key)) = reference.segments().first() else {
-        // Bare `inputs` and dynamic indexing cannot be resolved statically.
         return Ok(());
     };
     if !properties.contains(key.as_str()) {
@@ -391,13 +394,7 @@ fn validate_input_reference(
     Ok(())
 }
 
-fn sorted_roots<'a>(roots: &HashSet<&'a str>) -> Vec<&'a str> {
-    let mut roots = roots.iter().copied().collect::<Vec<_>>();
-    roots.sort_unstable();
-    roots
-}
-
-fn validate_iteration_variable(node_name: &str, node: &GraphNode) -> Result<()> {
+fn validate_iteration_variable(name: &str, node: &GraphNode) -> Result<()> {
     let Some(variable) = node.r#as.as_deref() else {
         return Ok(());
     };
@@ -407,136 +404,22 @@ fn validate_iteration_variable(node_name: &str, node: &GraphNode) -> Result<()> 
         .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
     let valid_rest = bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
     if !valid_start || !valid_rest {
-        bail!(
-            "node `{node_name}` iteration variable `{variable}` must match [A-Za-z_][A-Za-z0-9_]*"
-        );
+        bail!("node `{name}` iteration variable `{variable}` has an invalid rye-expr name");
     }
     if matches!(
         variable,
-        "true" | "false" | "null" | "in" | "state" | "inputs" | "result" | "_execution" | "_run"
+        "true"
+            | "false"
+            | "null"
+            | "in"
+            | "state"
+            | "inputs"
+            | "result"
+            | "_execution"
+            | "_run"
+            | "_dispatch"
     ) {
-        bail!("node `{node_name}` iteration variable `{variable}` is reserved by rye-expr/1");
+        bail!("node `{name}` iteration variable `{variable}` is reserved by rye-expr/1");
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ryeos_engine::hooks::ExpressionCondition;
-    use ryeos_runtime::{HookDefinition, HookLayer, HookResultMode, HookSources};
-    use serde_json::json;
-
-    fn hook(id: &str) -> HookDefinition {
-        HookDefinition {
-            id: id.to_string(),
-            event: "graph_started".to_string(),
-            result: HookResultMode::Discard,
-            condition: ExpressionCondition::Absent,
-            action: json!({"item_id": "tool:test/noop"}),
-        }
-    }
-
-    #[test]
-    fn graph_compiles_all_layers_and_drops_raw_hook_definitions() {
-        let raw = r#"
-version: "1.0.0"
-category: test
-config:
-  start: done
-  hooks:
-    - {id: authored, event: graph_started, result: discard, action: {item_id: "tool:test/noop"}}
-  nodes:
-    done: {node_type: return}
-"#;
-        let graph = crate::model::GraphDefinition::from_yaml_effective_fixture_with_hook_sources(
-            raw,
-            None,
-            HookSources {
-                builtin: vec![hook("builtin")],
-                infrastructure: vec![hook("infra")],
-                context: vec![hook("context")],
-                operator: vec![hook("operator")],
-                project: vec![hook("project")],
-                ..HookSources::default()
-            },
-        )
-        .unwrap();
-
-        assert!(graph.config.hooks.is_empty());
-        assert_eq!(
-            graph
-                .compiled
-                .hooks()
-                .iter()
-                .map(CompiledHook::layer)
-                .collect::<Vec<_>>(),
-            vec![
-                HookLayer::Authored,
-                HookLayer::Builtin,
-                HookLayer::Infrastructure,
-                HookLayer::Context,
-                HookLayer::Operator,
-                HookLayer::Project,
-            ]
-        );
-    }
-
-    #[test]
-    fn graph_rejects_statically_non_boolean_condition() {
-        let raw = r#"
-version: "1.0.0"
-category: test
-config:
-  start: choose
-  nodes:
-    choose:
-      node_type: gate
-      next:
-        type: conditional
-        branches:
-          - {when: "1", to: done}
-    done: {node_type: return}
-"#;
-
-        let error = crate::model::GraphDefinition::from_yaml(raw, None).unwrap_err();
-        let error = format!("{error:#}");
-
-        assert!(error.contains("expected bool"));
-    }
-
-    #[test]
-    fn known_object_context_roots_reject_numeric_first_segment() {
-        for expression in [
-            "inputs[0] == null",
-            "state[0] == null",
-            "_run[0] == null",
-            "_execution[0] == null",
-        ] {
-            let raw = format!(
-                r#"
-version: "1.0.0"
-category: test
-config:
-  start: choose
-  nodes:
-    choose:
-      node_type: gate
-      next:
-        type: conditional
-        branches:
-          - when: '{expression}'
-            to: done
-    done: {{node_type: return}}
-"#
-            );
-
-            let error = crate::model::GraphDefinition::from_yaml(&raw, None).unwrap_err();
-            let error = format!("{error:#}");
-            assert!(
-                error.contains("cannot be indexed by number"),
-                "{expression}: {error}"
-            );
-        }
-    }
 }

@@ -565,7 +565,7 @@ fn spawn_dispatch_launch_inner(
             root_admission: Some(root_admission.clone()),
             root_dispatch_evidence: Some(root_dispatch_evidence),
             parent_execution_context: None,
-            requested_effect_class: None,
+            effect_authority: None,
         };
 
         let dispatched = match launch_handoff.as_ref() {

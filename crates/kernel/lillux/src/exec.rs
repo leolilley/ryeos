@@ -56,6 +56,12 @@ pub struct SubprocessRequest {
 pub struct SubprocessLimits {
     /// Maximum number of file descriptors the subprocess may open.
     pub max_open_files: Option<u64>,
+    /// Maximum virtual address space inherited by the subprocess tree.
+    pub max_address_space_bytes: Option<u64>,
+    /// Maximum CPU seconds for each process in the subprocess tree.
+    pub max_cpu_seconds: Option<u64>,
+    /// Maximum processes/threads available to the subprocess OS account.
+    pub max_processes: Option<u64>,
     /// Maximum stdout bytes retained by the node. Lillux continues draining
     /// the pipe after this threshold, but terminates the supervised workload
     /// and reports an explicit output-limit outcome.
@@ -1219,6 +1225,73 @@ impl Drop for ProcessAwaitingAttachment {
 }
 
 impl RunningProcess {
+    /// Return the bounded tail currently captured from stderr without waiting
+    /// for, signalling, or otherwise changing the process lifecycle.
+    ///
+    /// This is intentionally a fixed-size diagnostic view. Protocol owners
+    /// can use it when a separate control channel fails, while the ordinary
+    /// `wait`/`abort` boundary remains the sole owner of process settlement.
+    pub fn stderr_diagnostic_tail(&self) -> Option<String> {
+        const DIAGNOSTIC_TAIL_BYTES: usize = 2 * 1024;
+
+        let capture = self
+            .stderr_capture
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if capture.bytes.is_empty() {
+            return None;
+        }
+        let start = capture.bytes.len().saturating_sub(DIAGNOSTIC_TAIL_BYTES);
+        let body = String::from_utf8_lossy(&capture.bytes[start..]);
+        if capture.truncated || start != 0 {
+            Some(format!(
+                "… (bounded stderr tail; earlier bytes omitted)\n{body}"
+            ))
+        } else {
+            Some(body.into_owned())
+        }
+    }
+
+    /// Wait up to `timeout` for a natural process exit without terminating a
+    /// still-running process. Ownership is returned unchanged on timeout.
+    ///
+    /// Protocols with a separate control channel use this after channel EOF:
+    /// a naturally exited child can be settled with its captured output,
+    /// while a child that merely dropped the channel remains available for
+    /// the caller's ordinary abort policy.
+    pub fn wait_for_natural_exit(mut self, timeout: Duration) -> Result<SubprocessResult, Self> {
+        let Some(deadline) = Instant::now().checked_add(timeout) else {
+            return Err(self);
+        };
+        loop {
+            match poll_wrapper(&mut self.child) {
+                Ok(WrapperPoll::ExitedUnreaped) => {
+                    self.kill_supervised_processes();
+                    return match self.child.wait() {
+                        Ok(status) => {
+                            self.wrapper_reaped = true;
+                            Ok(self.completed_result(status))
+                        }
+                        Err(error) => Ok(self.wait_error_result(error)),
+                    };
+                }
+                #[cfg(not(target_os = "linux"))]
+                Ok(WrapperPoll::ExitedReaped(status)) => {
+                    self.wrapper_reaped = true;
+                    self.kill_supervised_processes();
+                    return Ok(self.completed_result(status));
+                }
+                Ok(WrapperPoll::Running) => {
+                    if Instant::now() >= deadline {
+                        return Err(self);
+                    }
+                    thread::sleep(PROCESS_POLL_INTERVAL);
+                }
+                Err(error) => return Ok(self.wait_error_result(error)),
+            }
+        }
+    }
+
     fn validate_attachment_release_ready(&mut self) -> Result<(), String> {
         let stdout_truncated = self
             .stdout_capture
@@ -3657,14 +3730,17 @@ pub fn validate_subprocess_limits(limits: Option<&SubprocessLimits>) -> Result<(
     validate_output_retention_limits(limits)?;
     #[cfg(unix)]
     {
-        validated_max_open_files(limits).map(|_| ())
+        validated_rlimits(limits).map(|_| ())
     }
     #[cfg(not(unix))]
     {
-        if let Some(max_open_files) = limits.and_then(|limits| limits.max_open_files) {
-            return Err(format!(
-                "max_open_files {max_open_files} is unsupported on this platform"
-            ));
+        if limits.is_some_and(|limits| {
+            limits.max_open_files.is_some()
+                || limits.max_address_space_bytes.is_some()
+                || limits.max_cpu_seconds.is_some()
+                || limits.max_processes.is_some()
+        }) {
+            return Err("subprocess kernel limits are unsupported on this platform".to_string());
         }
         Ok(())
     }
@@ -3684,16 +3760,25 @@ pub fn configure_subprocess_limits(
     {
         use std::os::unix::process::CommandExt;
 
-        let max_open_files = validated_max_open_files(limits)?;
-        if let Some(max_open_files) = max_open_files {
+        let installed = validated_rlimits(limits)?;
+        if installed.iter().any(Option::is_some) {
             unsafe {
                 command.pre_exec(move || {
-                    let limit = libc::rlimit {
-                        rlim_cur: max_open_files,
-                        rlim_max: max_open_files,
-                    };
-                    if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
-                        return Err(std::io::Error::last_os_error());
+                    for (resource, value) in [
+                        (libc::RLIMIT_NOFILE, installed[0]),
+                        (libc::RLIMIT_AS, installed[1]),
+                        (libc::RLIMIT_CPU, installed[2]),
+                        (libc::RLIMIT_NPROC, installed[3]),
+                    ] {
+                        if let Some(value) = value {
+                            let limit = libc::rlimit {
+                                rlim_cur: value,
+                                rlim_max: value,
+                            };
+                            if libc::setrlimit(resource, &limit) != 0 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                        }
                     }
                     Ok(())
                 });
@@ -3725,40 +3810,62 @@ fn validate_output_retention_limits(limits: Option<&SubprocessLimits>) -> Result
 }
 
 #[cfg(unix)]
-fn validated_max_open_files(
+fn validated_rlimits(
     limits: Option<&SubprocessLimits>,
-) -> Result<Option<libc::rlim_t>, String> {
-    let Some(max_open_files) = limits.and_then(|limits| limits.max_open_files) else {
-        return Ok(None);
-    };
-    let platform_limit = max_open_files as libc::rlim_t;
-    if platform_limit as u128 != max_open_files as u128 {
-        return Err(format!(
-            "max_open_files {max_open_files} cannot be represented on this platform"
-        ));
+) -> Result<[Option<libc::rlim_t>; 4], String> {
+    let values = limits.map_or([None; 4], |limits| {
+        [
+            limits.max_open_files,
+            limits.max_address_space_bytes,
+            limits.max_cpu_seconds,
+            limits.max_processes,
+        ]
+    });
+    let names = [
+        "max_open_files",
+        "max_address_space_bytes",
+        "max_cpu_seconds",
+        "max_processes",
+    ];
+    let resources = [
+        libc::RLIMIT_NOFILE,
+        libc::RLIMIT_AS,
+        libc::RLIMIT_CPU,
+        libc::RLIMIT_NPROC,
+    ];
+    let mut output = [None; 4];
+    for index in 0..values.len() {
+        let Some(value) = values[index] else { continue };
+        if value == 0 {
+            return Err(format!("{} must be positive", names[index]));
+        }
+        let platform_limit = value as libc::rlim_t;
+        if platform_limit as u128 != value as u128 || platform_limit == libc::RLIM_INFINITY {
+            return Err(format!(
+                "{} {value} must be finite and representable",
+                names[index]
+            ));
+        }
+        let mut parent_limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if unsafe { libc::getrlimit(resources[index], &mut parent_limit) } != 0 {
+            return Err(format!(
+                "failed to inspect parent {} limit: {}",
+                names[index],
+                std::io::Error::last_os_error()
+            ));
+        }
+        if parent_limit.rlim_max != libc::RLIM_INFINITY && platform_limit > parent_limit.rlim_max {
+            return Err(format!(
+                "{} {value} exceeds parent hard limit {}",
+                names[index], parent_limit.rlim_max
+            ));
+        }
+        output[index] = Some(platform_limit);
     }
-    if platform_limit == libc::RLIM_INFINITY {
-        return Err("max_open_files must be finite".to_string());
-    }
-
-    let mut parent_limit = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut parent_limit) } != 0 {
-        return Err(format!(
-            "failed to inspect parent RLIMIT_NOFILE: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    if parent_limit.rlim_max != libc::RLIM_INFINITY && platform_limit > parent_limit.rlim_max {
-        return Err(format!(
-            "max_open_files {max_open_files} exceeds parent hard limit {}",
-            parent_limit.rlim_max
-        ));
-    }
-
-    Ok(Some(platform_limit))
+    Ok(output)
 }
 
 #[cfg(all(test, not(unix)))]

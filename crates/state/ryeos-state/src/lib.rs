@@ -17,10 +17,12 @@ pub mod external_content;
 pub mod gc;
 pub mod head_cache;
 pub mod ignore;
+pub mod large_object_store;
 pub mod locators;
 pub mod object_closure;
 pub mod objects;
 pub mod operational;
+mod pending_publication;
 pub mod project_discovery;
 pub mod project_materialization;
 pub mod project_sync;
@@ -35,7 +37,6 @@ pub mod sqlite_schema;
 pub mod state_db;
 pub mod sync;
 pub mod verify;
-pub mod large_object_store;
 
 pub use admission::{AdmissionRequest, AdmissionResult, admit_root};
 pub use bundle_events::{
@@ -51,8 +52,18 @@ pub use bundle_projection::{
     BundleProjectionCursor, BundleProjectionDb, BundleProjectionSyncReport,
 };
 pub use chain::{AppendResult, CreateResult, ReadSnapshotResult, SnapshotUpdate};
-pub use external_content::VerifiedExternalContentClosure;
+pub use external_content::{
+    ExternalCapturePolicy, ExternalContentBlobSink, ExternalLargeContentSink,
+    LargeContentCaptureBounds, LargeContentCapturePolicy, LaunchCaptureBudget, MAX_CAPTURE_BYTES,
+    MAX_CAPTURE_DEPTH, MAX_CAPTURE_ENTRIES, MAX_CAPTURE_FILE_BYTES, VerifiedExternalContentClosure,
+    capture_file, capture_large_file, capture_large_tree, capture_tree,
+};
 pub use head_cache::{CachedHead, HeadCache};
+pub use large_object_store::{
+    IngestedLargeObject, LargeObjectIntegrityFinding, LargeObjectScrubReport,
+    LargeObjectStagingSweepReport, LargeObjectStore, LargeObjectSweepReport, LeasedLargeObject,
+    PinnedLargeObjectSourceIdentity,
+};
 pub use locators::ThreadLocator;
 pub use objects::{
     Attestation, BundleEventAttachment, BundleEventAttribution, BundleEventObject,
@@ -67,10 +78,11 @@ pub use operational::{
     AdmissionAttestationRecord, AdmissionAttestationState, CasEntriesByStateSummary,
     CasEntryAttribution, CasEntryKind, CasEntryState, FinishSyncJobAttempt,
     NewAdmissionAttestationRecord, NewCasEntryAttribution, NewSyncJob, NewSyncJobAttempt,
-    OperationalDb, ReplayIndexKindV2, ReplayIndexRecordV2, ReplayLookupOutcomeV2,
-    ReplayPublishOutcomeV2, ReplayRecordVerificationV2, SyncJobAttemptRecord,
+    OperationalDb, ReplayIndexActivationRequired, ReplayIndexNamespace, ReplayIndexRecord,
+    ReplayLookupOutcome, ReplayPublishOutcome, ReplayRecordVerification, SyncJobAttemptRecord,
     SyncJobAttemptState, SyncJobRecord, SyncJobState, SyncJobUpdate,
 };
+pub use pending_publication::PendingCasPublication;
 pub use project_materialization::PinnedProjectMaterialization;
 pub use projection::{
     ChainRetentionProjection, DueTerminalChain, DueTerminalChainCursor, ProjectionDb,

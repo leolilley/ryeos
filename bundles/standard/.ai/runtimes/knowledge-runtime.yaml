@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-05T07:04:40Z:71608cd7a574867d45ef541c6d9c9f4e0feb0fe6b917f552c959940579df4e23:SXMkpdQvxccQTX6c6n2T2vQ20eQvbijrVAQA2peTvEKugCvSOuRcATYIo2enZh+bwX9h3PkRkQtS1VUnkR3BCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-08T14:31:50Z:09458d2d4b28979490a887e5830262d15660a3aece126cdaf3ff42a293f121a9:531OWn/8VRBHQmckYteWIue6dwonAMtnYUP1Xv3VzOq0pJA6UU4s1mlS+8Y90EEomBtiD9zunnTycd7RCWJwDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: knowledge
 default: true
@@ -19,7 +19,14 @@ launch_contract:
   preparation:
     kind: none
   config_inputs: {}
+  execution_dependencies:
+    max_dependencies: 0
+    allowed_kinds: []
+    allowed_spaces: []
+    allowed_trust: []
   financial_authority:
+    kind: none
+  external_effect_authority:
     kind: none
   secret_policy:
     max_requirements: 0

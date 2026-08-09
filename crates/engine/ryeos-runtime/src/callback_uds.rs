@@ -255,14 +255,14 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
-    async fn provider_attempt_reserve(
+    async fn provider_attempt_prepare(
         &self,
         _thread_id: &str,
         mut params: Value,
     ) -> Result<Value, CallbackError> {
         self.inject_callback_token(&mut params);
         self.rpc
-            .request("runtime.provider_attempt_reserve", params)
+            .request("runtime.provider_attempt_prepare", params)
             .await
             .map_err(Self::map_rpc_error)
     }
@@ -311,6 +311,42 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         self.inject_callback_token(&mut params);
         self.rpc
             .request("runtime.provider_attempt_get", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn provider_attempt_local_stream_start(
+        &self,
+        _thread_id: &str,
+        mut params: Value,
+    ) -> Result<Value, CallbackError> {
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.provider_attempt_local_stream_start", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn provider_attempt_local_stream_next(
+        &self,
+        _thread_id: &str,
+        mut params: Value,
+    ) -> Result<Value, CallbackError> {
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.provider_attempt_local_stream_next", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn provider_attempt_local_stream_control(
+        &self,
+        _thread_id: &str,
+        mut params: Value,
+    ) -> Result<Value, CallbackError> {
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.provider_attempt_local_stream_control", params)
             .await
             .map_err(Self::map_rpc_error)
     }
@@ -372,40 +408,6 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         self.inject_callback_token(&mut request);
         self.rpc
             .request("runtime.vault_put", request)
-            .await
-            .map_err(Self::map_rpc_error)
-    }
-
-    async fn publish_provider_call_record(
-        &self,
-        thread_id: &str,
-        mut request: Value,
-    ) -> Result<Value, CallbackError> {
-        request["thread_id"] = json!(thread_id);
-        self.inject_callback_token(&mut request);
-        self.rpc
-            .request_with_timeout(
-                "runtime.publish_provider_call_record",
-                request,
-                Some(crate::daemon_rpc::DEFAULT_RPC_TIMEOUT),
-            )
-            .await
-            .map_err(Self::map_rpc_error)
-    }
-
-    async fn lookup_provider_call_record(
-        &self,
-        thread_id: &str,
-        mut request: Value,
-    ) -> Result<Value, CallbackError> {
-        request["thread_id"] = json!(thread_id);
-        self.inject_callback_token(&mut request);
-        self.rpc
-            .request_with_timeout(
-                "runtime.lookup_provider_call_record",
-                request,
-                Some(crate::daemon_rpc::DEFAULT_RPC_TIMEOUT),
-            )
             .await
             .map_err(Self::map_rpc_error)
     }
@@ -658,7 +660,7 @@ mod tests {
                 launch_window: None,
             },
             hook_dispatch: Some(identity.clone()),
-            effect_replay: None,
+            effect_dispatch: None,
         };
 
         let (params, inline) =
@@ -686,7 +688,7 @@ mod tests {
                 launch_window: None,
             },
             hook_dispatch: None,
-            effect_replay: None,
+            effect_dispatch: None,
         };
 
         let (params, _) = UdsRuntimeClient::serialize_dispatch_action_request(request).unwrap();

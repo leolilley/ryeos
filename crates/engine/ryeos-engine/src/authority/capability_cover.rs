@@ -64,9 +64,15 @@ mod tests {
     fn wildcard_children_require_provable_language_inclusion() {
         assert!(capability_pattern_covers("a.b.*", "a.b.*"));
         assert!(capability_pattern_covers("a.*", "a.b.*"));
-        assert!(capability_pattern_covers("ryeos.execute.tool.arc/*", "ryeos.execute.tool.arc/x*"));
+        assert!(capability_pattern_covers(
+            "ryeos.execute.tool.arc/*",
+            "ryeos.execute.tool.arc/x*"
+        ));
         // A parent `?` narrows to one character and must never cover `*`.
-        assert!(!capability_pattern_covers("ryeos.get.vault.?", "ryeos.get.vault.*"));
+        assert!(!capability_pattern_covers(
+            "ryeos.get.vault.?",
+            "ryeos.get.vault.*"
+        ));
         // Interior parent wildcards cannot prove coverage of a child pattern.
         assert!(!capability_pattern_covers("a.*.c", "a.b.*"));
         // A child `?` under a non-star parent fails closed.

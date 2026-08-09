@@ -1234,6 +1234,13 @@ fn attach_admitted_launch_capsule(
         );
     }
     state_authority.ensure_guard(cas_guard)?;
+    capsule
+        .verify_retained_execution_realization(
+            &state_authority.cas_store()?,
+            &state_authority.large_object_store()?,
+            state_authority.trust_store(),
+        )
+        .context("verify admitted execution realization before thread birth")?;
     let expected_hash = capsule.content_hash()?;
     let stored_hash = state_authority
         .cas_store()?
@@ -1258,6 +1265,13 @@ fn load_admitted_launch_capsule(
         .ok_or_else(|| anyhow!("admitted launch capsule is missing from CAS: {capsule_hash}"))?;
     let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(value)
         .context("decode supported admitted launch capsule")?;
+    capsule
+        .verify_retained_execution_realization(
+            &state_authority.cas_store()?,
+            &state_authority.large_object_store()?,
+            state_authority.trust_store(),
+        )
+        .context("verify retained admitted execution realization")?;
     if capsule.content_hash()? != capsule_hash {
         bail!("admitted launch capsule object hash is not canonical: {capsule_hash}");
     }
@@ -7015,9 +7029,9 @@ impl StateStore {
             .context("store canonical state manifest")?;
         let state_digest = format!("sha256:{manifest_hash}");
         let manifest_ref = format!("cas:{manifest_hash}");
-        let event_payload = ryeos_state::objects::StateAnchorMilestoneV2 {
+        let event_payload = ryeos_state::objects::StateAnchorMilestone {
             kind: "state_anchor".to_string(),
-            payload: ryeos_state::objects::StateAnchorPayloadV2 {
+            payload: ryeos_state::objects::StateAnchorPayload {
                 schema_version: ryeos_state::objects::STATE_ANCHOR_SCHEMA_VERSION,
                 label: params.anchor.label.clone(),
                 state_digest: state_digest.clone(),
@@ -9154,6 +9168,13 @@ impl StateStore {
         if &capsule.project_authority != child_project_authority {
             bail!("detached launch capsule contradicts selected child project authority");
         }
+        capsule
+            .verify_retained_execution_realization(
+                &self.state_authority.cas_store()?,
+                &self.state_authority.large_object_store()?,
+                self.state_authority.trust_store(),
+            )
+            .context("verify detached admitted execution realization")?;
         self.state_authority.ensure_guard(permit.cas_guard())?;
         let expected_capsule_hash = capsule.content_hash()?;
         let admitted_launch_capsule_hash = self
@@ -10460,8 +10481,8 @@ mod tests {
                                 idempotency_key: None,
                                 correlation_id: None,
                                 causation_id: None,
-                                attribution:
-                                    ryeos_state::objects::BundleEventAttribution::default(),
+                                attribution: ryeos_state::objects::BundleEventAttribution::default(
+                                ),
                                 attachments: vec![],
                             },
                         )
@@ -11651,6 +11672,17 @@ mod tests {
                 result: ryeos_runtime::envelope::hook_dispatch_integrity_failure(
                     "child dispatcher refused the admitted request",
                 ),
+                dispatch: ryeos_runtime::callback_contract::RuntimeDispatchEvidence {
+                    source: ryeos_runtime::callback_contract::RuntimeDispatchSource::Executed,
+                    effect_class:
+                        ryeos_runtime::callback_contract::RuntimeDispatchEffectClass::Live,
+                    action_digest: "7".repeat(64),
+                    effect_identity: None,
+                    publication:
+                        ryeos_runtime::callback_contract::RuntimeDispatchPublication::NotApplicable,
+                    record_hash: None,
+                    replayed_from: None,
+                },
             })
             .unwrap();
         store

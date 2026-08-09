@@ -331,6 +331,7 @@ mod tests {
                 verified_code: &[],
                 verified_command: None,
                 external_read_only_mounts: &[],
+                target_channel: None,
                 item_ref: "tool:test",
                 thread_id: "env-probe-test",
             },

@@ -171,6 +171,8 @@ fn prospective_node_config_validator(
 }
 
 fn main() -> Result<()> {
+    ryeos_app::provider_object_contracts::install()
+        .context("install application object contracts")?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -724,7 +726,15 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                 ryeos_app::execution_identity_probe::boot_node_execution_identity(
                     &state_store,
                     &identity,
-                );
+                    &build,
+                )?;
+            let persistent_sessions = match node_config_snapshot.persistent_session_policy.as_ref()
+            {
+                Some(policy) => ryeos_app::persistent_session::PersistentSessionPool::with_limits(
+                    policy.limits.clone(),
+                )?,
+                None => ryeos_app::persistent_session::PersistentSessionPool::disabled(),
+            };
 
             let mut app_state = AppState {
                 config: Arc::new(config.clone()),
@@ -751,9 +761,7 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                     ext.insert(ui_state);
                     ext.insert(route_diagnostics);
                     ext.insert(prospective_node_config_validator);
-                    if let Some(node_execution_identity) = node_execution_identity {
-                        ext.insert(node_execution_identity);
-                    }
+                    ext.insert(node_execution_identity);
                     Arc::new(ext)
                 },
                 write_barrier: Arc::new(write_barrier),
@@ -788,6 +796,7 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                     }
                 },
                 accounting,
+                persistent_sessions: Arc::new(persistent_sessions),
             };
             let admission_store = app_state.state_store.clone();
             tokio::spawn(async move {
@@ -2657,6 +2666,9 @@ async fn run_service_standalone(
         // Standalone service invocations perform no paid launches; hard
         // admission is uniformly unavailable here.
         accounting: None,
+        persistent_sessions: Arc::new(
+            ryeos_app::persistent_session::PersistentSessionPool::disabled(),
+        ),
     };
 
     let ctx = ExecutionContext {

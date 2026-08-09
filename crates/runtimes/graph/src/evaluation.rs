@@ -39,8 +39,68 @@ pub(crate) struct ExpressionScope<'a> {
     result: Option<&'a Value>,
     execution: Option<&'a Value>,
     run: Option<Value>,
+    dispatch: Option<&'a ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
     foreach: Option<(&'a str, &'a Value)>,
     limits: EvaluationLimits,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_runtime::CompilationLimits;
+    use ryeos_runtime::callback_contract::{
+        RuntimeDispatchEffectClass, RuntimeDispatchEvidence, RuntimeDispatchPublication,
+        RuntimeDispatchSource,
+    };
+
+    fn live_dispatch() -> RuntimeDispatchEvidence {
+        RuntimeDispatchEvidence {
+            source: RuntimeDispatchSource::Executed,
+            effect_class: RuntimeDispatchEffectClass::Live,
+            action_digest: "a".repeat(64),
+            effect_identity: None,
+            publication: RuntimeDispatchPublication::NotApplicable,
+            record_hash: None,
+            replayed_from: None,
+        }
+    }
+
+    #[test]
+    fn post_dispatch_scope_exposes_exact_run_and_dispatch_evidence() {
+        let source = json!({
+            "run": "${_run}",
+            "dispatch": "${_dispatch}",
+            "answer": "${result.answer}",
+        });
+        let compiled = CompiledJsonTemplate::compile(
+            &source,
+            "test.post_dispatch",
+            &CompilationLimits::default(),
+        )
+        .unwrap();
+        let state = json!({});
+        let inputs = json!({});
+        let result = json!({"answer": 7});
+        let dispatch = live_dispatch();
+        let rendered = ExpressionScope::new(&state, &inputs, None, Some("run-1"))
+            .with_run_identity("graph:test/solve", &"d".repeat(64))
+            .with_result(&result)
+            .with_dispatch(&dispatch)
+            .render_json(&compiled)
+            .unwrap();
+
+        assert_eq!(rendered["run"]["graph_run_id"], "run-1");
+        assert_eq!(rendered["run"]["definition_ref"], "graph:test/solve");
+        assert_eq!(
+            rendered["run"]["effective_definition_digest"],
+            "d".repeat(64)
+        );
+        assert_eq!(
+            rendered["dispatch"],
+            serde_json::to_value(dispatch).unwrap()
+        );
+        assert_eq!(rendered["answer"], 7);
+    }
 }
 
 impl<'a> ExpressionScope<'a> {
@@ -56,6 +116,7 @@ impl<'a> ExpressionScope<'a> {
             result: None,
             execution,
             run: graph_run_id.map(|id| json!({"graph_run_id": id})),
+            dispatch: None,
             foreach: None,
             limits: EvaluationLimits::default(),
         }
@@ -64,6 +125,39 @@ impl<'a> ExpressionScope<'a> {
     pub(crate) fn with_result(mut self, result: &'a Value) -> Self {
         self.result = Some(result);
         self
+    }
+
+    pub(crate) fn with_run_identity(
+        mut self,
+        definition_ref: &str,
+        effective_definition_digest: &str,
+    ) -> Self {
+        if let Some(run) = self.run.as_mut().and_then(Value::as_object_mut) {
+            run.insert("definition_ref".to_owned(), json!(definition_ref));
+            run.insert(
+                "effective_definition_digest".to_owned(),
+                json!(effective_definition_digest),
+            );
+        }
+        self
+    }
+
+    pub(crate) fn with_dispatch(
+        mut self,
+        dispatch: &'a ryeos_runtime::callback_contract::RuntimeDispatchEvidence,
+    ) -> Self {
+        self.dispatch = Some(dispatch);
+        self
+    }
+
+    pub(crate) fn with_dispatch_option(
+        self,
+        dispatch: Option<&'a ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
+    ) -> Self {
+        match dispatch {
+            Some(dispatch) => self.with_dispatch(dispatch),
+            None => self,
+        }
     }
 
     pub(crate) fn with_foreach(mut self, name: &'a str, item: &'a Value) -> Self {
@@ -107,6 +201,12 @@ impl<'a> ExpressionScope<'a> {
         }
         if let Some(run) = self.run.as_ref() {
             context.insert("_run", run);
+        }
+        let dispatch_value;
+        if let Some(dispatch) = self.dispatch {
+            dispatch_value = serde_json::to_value(dispatch)
+                .expect("typed dispatch evidence is infallibly serializable");
+            context.insert("_dispatch", &dispatch_value);
         }
         if let Some((name, item)) = self.foreach {
             context.insert(name, item);

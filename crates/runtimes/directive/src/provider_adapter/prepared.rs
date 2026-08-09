@@ -29,32 +29,45 @@ pub struct PreparedCredential {
 
 /// One immutable provider request: everything transport needs, nothing it
 /// may recompute.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PreparedProviderTransport {
+    RemoteHttp {
+        method: reqwest::Method,
+        url: String,
+    },
+    AdmittedLocalWorker {
+        execute: String,
+    },
+}
+
 pub struct PreparedProviderRequest {
-    pub method: reqwest::Method,
-    pub url: String,
+    pub transport: PreparedProviderTransport,
     /// Non-secret header names bound into `request_digest` (the auth header
     /// NAME is included, its value excluded), sorted.
     pub header_names: Vec<String>,
     /// Behavior-bearing public headers for provider effect identity. Values
     /// are committed by digest; credential-bearing headers remain a separate
     /// name-only set so secret values can never enter durable evidence.
-    #[allow(dead_code)] // consumed when effect-record v2 activates
-    pub public_headers_v2:
-        Vec<ryeos_state::objects::effect_record_v2::PublicHeaderCoordinateV2>,
-    #[allow(dead_code)] // consumed when effect-record v2 activates
-    pub credential_header_names_v2: Vec<String>,
+    #[allow(dead_code)] // consumed by durable provider-effect publication
+    pub public_header_coordinates: Vec<ryeos_provider_contract::PublicHeaderCoordinate>,
+    #[allow(dead_code)] // consumed by durable provider-effect publication
+    pub credential_header_names: Vec<String>,
     /// Exact serialized body bytes; transport sends these bytes verbatim.
     pub body_bytes: Vec<u8>,
     pub body_sha256: String,
     /// Effective provider-native output-token limit read back from the
     /// rendered body via the signed output-limit schema path.
     pub requested_output_tokens: Option<u64>,
+    /// Exact effective runtime ceiling, independent of whether the provider
+    /// protocol renders that ceiling into a native request field.
+    pub requested_output_ceiling: u64,
     /// Credential frozen at prepare time (env read happens HERE, not at send).
     pub credential: Option<PreparedCredential>,
     /// Static non-auth headers sent with the request.
     pub headers: Vec<(String, String)>,
     /// sha256 hex over canonical JSON of
-    /// `{method, url, sorted header names, body_sha256, requested_output_tokens}`.
+    /// the secret-free prepared request projection. The admitted transport is
+    /// committed separately by the daemon-derived provider coordinate.
     pub request_digest: String,
     /// Content-free request-shape telemetry captured while rendering the exact
     /// bytes above. Safe to log: lengths, counts, and a tool-schema digest only.
@@ -152,25 +165,35 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
         )
     };
 
-    let stream_url = provider.extra.get("stream_url").and_then(|v| v.as_str());
-    // Resolve {model} template in base_url (e.g. gemini profiles use
-    // `{model}:streamGenerateContent`). Stream URL semantics:
-    //   - None        → default to "/chat/completions"
-    //   - Some("")    → base_url is the full endpoint; do not append
-    //   - Some(other) → append (with leading slash if needed)
-    let base_resolved = provider.base_url.replace("{model}", model);
-    let url = match stream_url {
-        Some("") => base_resolved,
-        Some(su) => format!(
-            "{}{}",
-            base_resolved.trim_end_matches('/'),
-            if su.starts_with('/') {
-                su.to_string()
-            } else {
-                format!("/{}", su)
+    let transport = match &provider.transport {
+        ryeos_directive_core::ProviderTransportConfig::RemoteHttp { base_url } => {
+            let stream_url = provider.extra.get("stream_url").and_then(|v| v.as_str());
+            // Resolve {model} template in base_url (e.g. gemini profiles use
+            // `{model}:streamGenerateContent`).
+            let base_resolved = base_url.replace("{model}", model);
+            let url = match stream_url {
+                Some("") => base_resolved,
+                Some(su) => format!(
+                    "{}{}",
+                    base_resolved.trim_end_matches('/'),
+                    if su.starts_with('/') {
+                        su.to_string()
+                    } else {
+                        format!("/{}", su)
+                    }
+                ),
+                None => format!("{}/chat/completions", base_resolved.trim_end_matches('/')),
+            };
+            PreparedProviderTransport::RemoteHttp {
+                method: reqwest::Method::POST,
+                url,
             }
-        ),
-        None => format!("{}/chat/completions", base_resolved.trim_end_matches('/')),
+        }
+        ryeos_directive_core::ProviderTransportConfig::AdmittedLocalWorker { execute, .. } => {
+            PreparedProviderTransport::AdmittedLocalWorker {
+                execute: execute.clone(),
+            }
+        }
     };
 
     let mut body = build_request_body(
@@ -259,24 +282,26 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
         None => None,
     };
 
-    let mut headers: Vec<(String, String)> = provider
-        .headers
-        .iter()
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect();
-    headers.push(("Accept".to_string(), "text/event-stream".to_string()));
-    // Raw-bytes transport must declare the content type itself (the old
-    // `.json(&body)` path added it implicitly, without overriding a signed
-    // provider header).
-    if !headers
-        .iter()
-        .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-    {
-        headers.push(("Content-Type".to_string(), "application/json".to_string()));
+    let mut headers: Vec<(String, String)> = match &transport {
+        PreparedProviderTransport::RemoteHttp { .. } => provider
+            .headers
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect(),
+        PreparedProviderTransport::AdmittedLocalWorker { .. } => Vec::new(),
+    };
+    if matches!(&transport, PreparedProviderTransport::RemoteHttp { .. }) {
+        headers.push(("Accept".to_string(), "text/event-stream".to_string()));
+        if !headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        {
+            headers.push(("Content-Type".to_string(), "application/json".to_string()));
+        }
     }
 
-    let (public_headers_v2, credential_header_names_v2) =
-        ryeos_state::objects::effect_record_v2::provider_header_projection_v2(
+    let (public_header_coordinates, credential_header_names) =
+        ryeos_provider_contract::header_projection(
             headers.iter().cloned(),
             credential
                 .as_ref()
@@ -289,13 +314,14 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
     }
     header_names.sort();
 
-    let request_digest = ryeos_accounting::rpc::prepared_request_digest_from_parts(
-        "POST",
-        &url,
-        &header_names,
-        &body_sha256,
-        requested_output_tokens,
-    );
+    let requested_output_ceiling = execution.max_provider_output_tokens_per_turn;
+    let request_digest = ryeos_provider_contract::PreparedRequestProjection::from_coordinates(
+        public_header_coordinates.clone(),
+        credential_header_names.clone(),
+        body_sha256.clone(),
+        requested_output_ceiling,
+    )?
+    .digest()?;
     #[cfg(feature = "latency-profiling")]
     let request_metrics = PreparedRequestMetrics {
         prepare_duration_us: u64::try_from(prepare_started.elapsed().as_micros())
@@ -320,14 +346,14 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
     let request_metrics = PreparedRequestMetrics::default();
 
     Ok(PreparedProviderRequest {
-        method: reqwest::Method::POST,
-        url,
+        transport,
         header_names,
-        public_headers_v2,
-        credential_header_names_v2,
+        public_header_coordinates,
+        credential_header_names,
         body_bytes,
         body_sha256,
         requested_output_tokens,
+        requested_output_ceiling,
         credential,
         headers,
         request_digest,
@@ -355,7 +381,10 @@ mod tests {
     fn provider() -> ProviderConfig {
         serde_json::from_value(json!({
             "family": "chat_completions",
-            "base_url": "https://example.invalid",
+            "transport": {
+                "kind": "remote_http",
+                "base_url": "https://example.invalid"
+            },
             "schemas": {
                 "output_limit": {
                     "path": "max_tokens",
@@ -440,10 +469,10 @@ mod tests {
     }
 
     #[test]
-    fn prepared_v2_headers_commit_public_values_without_secret_values() {
+    fn prepared_headers_commit_public_values_without_secret_values() {
         let prepared = prepare(None);
         let accept = prepared
-            .public_headers_v2
+            .public_header_coordinates
             .iter()
             .find(|header| header.name == "accept")
             .expect("default Accept header is projected");
@@ -451,7 +480,7 @@ mod tests {
             accept.value_digest,
             lillux::sha256_hex(b"text/event-stream")
         );
-        assert!(prepared.credential_header_names_v2.is_empty());
+        assert!(prepared.credential_header_names.is_empty());
     }
 
     #[test]

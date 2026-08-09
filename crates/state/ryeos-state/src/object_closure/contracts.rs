@@ -16,7 +16,7 @@ pub(super) struct ContractLinks {
 }
 
 impl ContractLinks {
-    fn leaf() -> Self {
+    pub(super) fn leaf() -> Self {
         Self {
             object_edges: Vec::new(),
             blob_hashes: Vec::new(),
@@ -24,7 +24,7 @@ impl ContractLinks {
         }
     }
 
-    fn finish(mut self) -> Self {
+    pub(super) fn finish(mut self) -> Self {
         self.object_edges.sort_by(|left, right| {
             (&left.hash, &left.expected, &left.history_graph).cmp(&(
                 &right.hash,
@@ -52,20 +52,23 @@ struct ObjectContract {
 }
 
 pub(super) const CURRENT_OBJECT_KINDS: &[&str] = &[
+    "admitted_execution_realization",
     "admitted_launch_capsule",
     "attestation",
     "bundle_event",
     "chain_state",
+    "dispatch_effect_record",
     "execution_identity",
+    "external_content_binding",
     "external_content_manifest",
     "external_large_content_manifest",
-    "graph_node_effect_record",
     "item_source",
+    "observed_execution_realization",
+    "persistent_session_capsule",
     "project_file",
     "project_snapshot",
     "project_snapshot_policy",
     "project_tree",
-    "provider_call_effect_record",
     "source_manifest",
     "state_manifest",
     "thread_event",
@@ -73,6 +76,11 @@ pub(super) const CURRENT_OBJECT_KINDS: &[&str] = &[
 ];
 
 const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
+    ObjectContract {
+        kind: crate::objects::ADMITTED_EXECUTION_REALIZATION_KIND,
+        validate: validate_admitted_execution_realization,
+        links: links_admitted_execution_realization,
+    },
     ObjectContract {
         kind: "admitted_launch_capsule",
         validate: validate_admitted_launch_capsule,
@@ -94,9 +102,19 @@ const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
         links: links_chain_state,
     },
     ObjectContract {
+        kind: crate::objects::EFFECT_RECORD_KIND,
+        validate: validate_dispatch_effect_record,
+        links: links_dispatch_effect_record,
+    },
+    ObjectContract {
         kind: crate::objects::EXECUTION_IDENTITY_KIND,
         validate: validate_execution_identity,
         links: links_leaf,
+    },
+    ObjectContract {
+        kind: crate::objects::EXTERNAL_CONTENT_BINDING_KIND,
+        validate: validate_external_content_binding,
+        links: links_external_content_binding,
     },
     ObjectContract {
         kind: crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND,
@@ -109,14 +127,19 @@ const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
         links: links_external_large_content_manifest,
     },
     ObjectContract {
-        kind: crate::objects::GRAPH_NODE_EFFECT_RECORD_KIND,
-        validate: validate_graph_node_effect_record,
-        links: links_leaf,
-    },
-    ObjectContract {
         kind: "item_source",
         validate: validate_item_source,
         links: links_item_source,
+    },
+    ObjectContract {
+        kind: crate::objects::OBSERVED_EXECUTION_REALIZATION_KIND,
+        validate: validate_observed_execution_realization,
+        links: links_observed_execution_realization,
+    },
+    ObjectContract {
+        kind: crate::objects::PERSISTENT_SESSION_CAPSULE_KIND,
+        validate: validate_persistent_session_capsule,
+        links: links_persistent_session_capsule,
     },
     ObjectContract {
         kind: "project_file",
@@ -137,11 +160,6 @@ const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
         kind: "project_tree",
         validate: validate_project_tree,
         links: links_project_tree,
-    },
-    ObjectContract {
-        kind: crate::objects::PROVIDER_CALL_EFFECT_RECORD_KIND,
-        validate: validate_provider_call_effect_record,
-        links: links_leaf,
     },
     ObjectContract {
         kind: "source_manifest",
@@ -178,7 +196,7 @@ pub(super) fn decode(value: &Value) -> anyhow::Result<Option<ContractLinks>> {
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("missing object kind"))?;
     let Some(contract) = contract(kind) else {
-        return Ok(None);
+        return super::decode_registered(value);
     };
     (contract.validate)(value).with_context(|| format!("invalid {kind} object"))?;
     let links = (contract.links)(value)
@@ -196,13 +214,17 @@ pub(super) fn links(value: &Value) -> Result<Option<ContractLinks>, String> {
         .and_then(Value::as_str)
         .ok_or_else(|| "missing object kind".to_string())?;
     let Some(contract) = contract(kind) else {
-        return Ok(None);
+        return super::links_registered(value);
     };
     (contract.links)(value).map(|links| Some(links.finish()))
 }
 
 fn validate_admitted_launch_capsule(value: &Value) -> anyhow::Result<()> {
     crate::objects::AdmittedLaunchCapsule::from_current_value(value.clone()).map(|_| ())
+}
+
+fn validate_admitted_execution_realization(value: &Value) -> anyhow::Result<()> {
+    crate::objects::AdmittedExecutionRealization::from_current_value(value).map(|_| ())
 }
 
 fn validate_attestation(value: &Value) -> anyhow::Result<()> {
@@ -227,16 +249,24 @@ fn validate_external_content_manifest(value: &Value) -> anyhow::Result<()> {
     crate::objects::ExternalContentManifestObject::from_value(value).map(|_| ())
 }
 
+fn validate_external_content_binding(value: &Value) -> anyhow::Result<()> {
+    crate::objects::ExternalContentBinding::from_value(value).map(|_| ())
+}
+
 fn validate_external_large_content_manifest(value: &Value) -> anyhow::Result<()> {
     crate::objects::ExternalLargeContentManifestObject::from_value(value).map(|_| ())
 }
 
-fn validate_graph_node_effect_record(value: &Value) -> anyhow::Result<()> {
-    crate::objects::GraphNodeEffectRecord::from_current_value(value).map(|_| ())
+fn validate_dispatch_effect_record(value: &Value) -> anyhow::Result<()> {
+    crate::objects::DispatchEffectRecord::from_current_value(value).map(|_| ())
 }
 
 fn validate_item_source(value: &Value) -> anyhow::Result<()> {
     crate::objects::ItemSource::from_value(value).map(|_| ())
+}
+
+fn validate_observed_execution_realization(value: &Value) -> anyhow::Result<()> {
+    crate::objects::ObservedExecutionRealization::from_current_value(value).map(|_| ())
 }
 
 fn validate_project_file(value: &Value) -> anyhow::Result<()> {
@@ -255,8 +285,8 @@ fn validate_project_tree(value: &Value) -> anyhow::Result<()> {
     crate::objects::ProjectTree::from_value(value).map(|_| ())
 }
 
-fn validate_provider_call_effect_record(value: &Value) -> anyhow::Result<()> {
-    crate::objects::ProviderCallEffectRecord::from_current_value(value).map(|_| ())
+fn validate_persistent_session_capsule(value: &Value) -> anyhow::Result<()> {
+    crate::objects::AdmittedPersistentSessionCapsule::from_current_value(value).map(|_| ())
 }
 
 fn validate_source_manifest(value: &Value) -> anyhow::Result<()> {
@@ -278,6 +308,119 @@ fn validate_thread_snapshot(value: &Value) -> anyhow::Result<()> {
 
 fn links_leaf(_value: &Value) -> Result<ContractLinks, String> {
     Ok(ContractLinks::leaf())
+}
+
+fn links_dispatch_effect_record(value: &Value) -> Result<ContractLinks, String> {
+    let mut links = ContractLinks::leaf();
+    let subject = value
+        .get("identity")
+        .and_then(|identity| identity.get("subject"))
+        .ok_or_else(|| "dispatch_effect_record missing identity.subject".to_string())?;
+    super::push_required_object_edge(
+        subject,
+        "admission_evidence_hash",
+        ExpectedObject::Any,
+        None,
+        &mut links.object_edges,
+    )?;
+    let observation = value
+        .get("first_observation")
+        .ok_or_else(|| "dispatch_effect_record missing first_observation".to_string())?;
+    push_execution_observation_edges(observation, &mut links)?;
+    Ok(links)
+}
+
+fn links_admitted_execution_realization(value: &Value) -> Result<ContractLinks, String> {
+    let realization = crate::objects::AdmittedExecutionRealization::from_current_value(value)
+        .map_err(|error| error.to_string())?;
+    let mut links = ContractLinks::leaf();
+    super::push_typed_hash(
+        &realization.substrate_identity_hash,
+        ExpectedObject::Kind(crate::objects::EXECUTION_IDENTITY_KIND),
+        None,
+        &mut links.object_edges,
+    )?;
+    super::push_typed_hash(
+        &realization.substrate_attestation_hash,
+        ExpectedObject::Kind("attestation"),
+        None,
+        &mut links.object_edges,
+    )?;
+    push_execution_component_edges(&realization.components, &mut links)?;
+    Ok(links)
+}
+
+fn links_observed_execution_realization(value: &Value) -> Result<ContractLinks, String> {
+    let realization = crate::objects::ObservedExecutionRealization::from_current_value(value)
+        .map_err(|error| error.to_string())?;
+    let mut links = ContractLinks::leaf();
+    super::push_typed_hash(
+        &realization.admitted_realization_hash,
+        ExpectedObject::Kind(crate::objects::ADMITTED_EXECUTION_REALIZATION_KIND),
+        None,
+        &mut links.object_edges,
+    )?;
+    push_execution_component_edges(&realization.components, &mut links)?;
+    Ok(links)
+}
+
+fn push_execution_component_edges(
+    components: &[crate::objects::ExecutionComponentReference],
+    links: &mut ContractLinks,
+) -> Result<(), String> {
+    for component in components {
+        match &component.material {
+            crate::objects::ExecutionComponentStorage::CasObject {
+                hash,
+                expected_kind,
+            } => {
+                let expected = contract(expected_kind)
+                    .map(|contract| ExpectedObject::Kind(contract.kind))
+                    .ok_or_else(|| {
+                        format!(
+                            "execution component `{}` expects unsupported object kind `{expected_kind}`",
+                            component.role
+                        )
+                    })?;
+                super::push_typed_hash(hash, expected, None, &mut links.object_edges)?;
+            }
+            crate::objects::ExecutionComponentStorage::CasBlob { hash } => {
+                links.blob_hashes.push(hash.clone());
+            }
+            crate::objects::ExecutionComponentStorage::LargeObject { hash, .. } => {
+                links.large_object_hashes.push(hash.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn push_execution_observation_edges(
+    observation: &Value,
+    links: &mut ContractLinks,
+) -> Result<(), String> {
+    super::push_optional_object_edge(
+        observation,
+        "execution_identity_attestation_hash",
+        ExpectedObject::Kind("attestation"),
+        None,
+        &mut links.object_edges,
+    )?;
+    super::push_optional_object_edge(
+        observation,
+        "admitted_execution_realization_hash",
+        ExpectedObject::Kind(crate::objects::ADMITTED_EXECUTION_REALIZATION_KIND),
+        None,
+        &mut links.object_edges,
+    )?;
+    super::push_optional_object_edge(
+        observation,
+        "observed_execution_realization_hash",
+        ExpectedObject::Kind(crate::objects::OBSERVED_EXECUTION_REALIZATION_KIND),
+        None,
+        &mut links.object_edges,
+    )?;
+    Ok(())
 }
 
 fn links_attestation(value: &Value) -> Result<ContractLinks, String> {
@@ -366,6 +509,13 @@ pub(super) const EXTERNAL_MANIFEST_KINDS: &[&str] = &[
 
 fn links_admitted_launch_capsule(value: &Value) -> Result<ContractLinks, String> {
     let mut links = ContractLinks::leaf();
+    super::push_required_object_edge(
+        value,
+        "execution_realization_hash",
+        ExpectedObject::Kind(crate::objects::ADMITTED_EXECUTION_REALIZATION_KIND),
+        None,
+        &mut links.object_edges,
+    )?;
     let project_authority = value
         .get("project_authority")
         .and_then(Value::as_object)
@@ -414,6 +564,60 @@ fn links_admitted_launch_capsule(value: &Value) -> Result<ContractLinks, String>
             &mut links.blob_hashes,
         )?;
     }
+    if let Some(sessions) = execution_closure
+        .get("prepared_runtime_launch")
+        .and_then(|launch| launch.get("admitted_sessions"))
+    {
+        let sessions = sessions
+            .as_object()
+            .ok_or_else(|| "admitted launch sessions must be an object".to_owned())?;
+        for hash in sessions.values() {
+            let hash = hash
+                .as_str()
+                .ok_or_else(|| "admitted launch session hash must be a string".to_owned())?;
+            super::push_typed_hash(
+                hash,
+                ExpectedObject::Kind(crate::objects::PERSISTENT_SESSION_CAPSULE_KIND),
+                None,
+                &mut links.object_edges,
+            )?;
+        }
+    }
+    Ok(links)
+}
+
+fn links_persistent_session_capsule(value: &Value) -> Result<ContractLinks, String> {
+    let mut links = ContractLinks::leaf();
+    super::push_required_object_edge(
+        value,
+        "execution_realization_hash",
+        ExpectedObject::Kind(crate::objects::ADMITTED_EXECUTION_REALIZATION_KIND),
+        None,
+        &mut links.object_edges,
+    )?;
+    for hash in super::persistent_session_external_realization_manifest_hashes(value)? {
+        super::push_typed_hash(
+            &hash,
+            ExpectedObject::OneOf(EXTERNAL_MANIFEST_KINDS),
+            None,
+            &mut links.object_edges,
+        )?;
+    }
+    let execution_closure = value
+        .get("execution_closure")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "persistent_session_capsule missing execution_closure object".to_owned())?;
+    let command = execution_closure
+        .get("command")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "persistent_session_capsule missing command object".to_owned())?;
+    if command.get("authority").and_then(Value::as_str) == Some("content_addressed") {
+        super::push_required_hash(
+            &Value::Object(command.clone()),
+            "executable_blob_hash",
+            &mut links.blob_hashes,
+        )?;
+    }
     Ok(links)
 }
 
@@ -436,7 +640,7 @@ fn links_thread_event(value: &Value) -> Result<ContractLinks, String> {
     if value.get("event_type").and_then(Value::as_str) == Some("milestone")
         && value.pointer("/payload/kind").and_then(Value::as_str) == Some("state_anchor")
     {
-        let anchor = crate::objects::StateAnchorMilestoneV2::from_value(
+        let anchor = crate::objects::StateAnchorMilestone::from_value(
             value
                 .get("payload")
                 .cloned()
@@ -515,12 +719,35 @@ fn links_external_content_manifest(value: &Value) -> Result<ContractLinks, Strin
     Ok(links)
 }
 
+fn links_external_content_binding(value: &Value) -> Result<ContractLinks, String> {
+    let binding = crate::objects::ExternalContentBinding::from_value(value)
+        .map_err(|error| format!("invalid external-content binding: {error:#}"))?;
+    let mut links = ContractLinks::leaf();
+    if binding.state == crate::objects::ExternalContentBindingState::Active {
+        let expected = match binding.manifest_kind.as_str() {
+            crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND => {
+                ExpectedObject::Kind(crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND)
+            }
+            crate::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND => {
+                ExpectedObject::Kind(crate::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND)
+            }
+            _ => return Err("external-content binding has unsupported manifest kind".to_owned()),
+        };
+        links.object_edges.push(ObjectEdge {
+            hash: binding.manifest_hash,
+            expected,
+            history_graph: None,
+        });
+    }
+    Ok(links)
+}
+
 fn links_external_large_content_manifest(value: &Value) -> Result<ContractLinks, String> {
     let manifest = crate::objects::ExternalLargeContentManifestObject::from_value(value)
         .map_err(|error| format!("invalid external large-content manifest: {error:#}"))?;
     Ok(ContractLinks {
         object_edges: Vec::new(),
-        blob_hashes: Vec::new(),
+        blob_hashes: manifest.referenced_blobs(),
         large_object_hashes: manifest.referenced_large_objects(),
     })
 }

@@ -106,10 +106,10 @@ impl EffectiveValidatorRegistry {
                     .into_iter()
                     .collect(),
             },
-            ancestor_refs: resolution
+            ancestor_requested_ids: resolution
                 .ancestors
                 .iter()
-                .map(|ancestor| ancestor.resolved_ref.clone())
+                .map(|ancestor| ancestor.requested_id.clone())
                 .collect(),
         });
         match run_handler_subprocess(
@@ -119,8 +119,12 @@ impl EffectiveValidatorRegistry {
             launch_runtime,
         )? {
             HandlerResponse::EffectiveValidate {
-                response: EffectiveValidateResponse::Valid { normalized },
-            } => EffectiveValidationSuccess::from_normalized(&normalized),
+                response:
+                    EffectiveValidateResponse::Valid {
+                        normalized,
+                        effect_authorizations,
+                    },
+            } => EffectiveValidationSuccess::from_normalized(&normalized, effect_authorizations),
             HandlerResponse::EffectiveValidate {
                 response: EffectiveValidateResponse::Invalid { code, message },
             } => Err(EngineError::EffectiveValidationRejected {

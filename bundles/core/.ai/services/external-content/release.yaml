@@ -1,0 +1,7 @@
+# ryeos:signed:2026-08-09T05:54:17Z:39491f58778be72e4428fcbc51d226fe0a2de0ebc6f103d01c023cb6ca8a4409:rAFUISG/JZx0w588Lr4N7sIUYg++AWJz8Gex7LJoN0FSDwzQrnRpXHGKdXN71J0ls74aeDfMOy42fsftO/0qAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.release
+required_caps: ["ryeos.execute.service.external-content/release"]
+schema:
+  binding_id: string
+description: "Release a permanent external-content consumer binding for future launch admission"

@@ -351,13 +351,10 @@ pub struct DispatchRequest<'a> {
     /// consumed only if schema-driven dispatch reaches a managed, method, or
     /// terminal subprocess launch; in-process services ignore it.
     pub parent_execution_context: Option<ParentExecutionContext>,
-    /// Durable effect class the caller declared for this dispatch
-    /// (`recorded` | `sealed`), from a graph node's `effects:` declaration.
-    /// After resolution the dispatched item's own composed `effects` field is
-    /// checked against it: a caller may not claim a stronger class than the
-    /// item vouches for itself. `None` means no durable class was requested
-    /// and no check applies.
-    pub requested_effect_class: Option<String>,
+    /// Exact kind-validator grant selected at the callback boundary. Generic
+    /// dispatch consumes only its admitted mechanical identity. `None` means
+    /// live dispatch.
+    pub effect_authority: Option<ryeos_effect_contract::PreparedEffectDispatchAuthority>,
 }
 
 /// Check the schema-derived `DispatchCapabilities` for the matched
@@ -1468,10 +1465,9 @@ fn method_config_revalidation_context(
     node_trusted_keys_dir: &Path,
 ) -> Option<(Option<PathBuf>, Option<String>, String)> {
     let project_root = engine_roots
-        .ordered
-        .iter()
-        .find(|root| root.space == ryeos_engine::contracts::ItemSpace::Project)
-        .and_then(|root| root.ai_root.parent())
+        .authoritative_project_root()
+        .ok()
+        .flatten()
         .map(Path::to_path_buf);
     let loader =
         verified_loader_for_method_runtime(engine_roots, node_config_root, node_trusted_keys_dir)
@@ -1677,26 +1673,13 @@ fn verified_loader_for_method_runtime_under_authority(
     )>,
 ) -> anyhow::Result<ryeos_runtime::verified_loader::VerifiedLoader> {
     let project_root = engine_roots
-        .ordered
-        .iter()
-        .find(|r| r.space == ryeos_engine::contracts::ItemSpace::Project)
-        .map(|r| {
-            r.ai_root
-                .parent()
-                .map(|pp| pp.to_path_buf())
-                .unwrap_or_else(|| r.ai_root.clone())
-        });
+        .authoritative_project_root()?
+        .map(Path::to_path_buf);
 
     let bundle_roots: Vec<PathBuf> = engine_roots
-        .ordered
-        .iter()
-        .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::Bundle)
-        .map(|r| {
-            r.ai_root
-                .parent()
-                .map(|pp| pp.to_path_buf())
-                .unwrap_or_else(|| r.ai_root.clone())
-        })
+        .authoritative_bundle_roots()?
+        .into_iter()
+        .map(Path::to_path_buf)
         .collect();
 
     match (project_root, project_authority) {
@@ -1752,6 +1735,12 @@ pub(crate) async fn dispatch_method(
     state: &AppState,
     launch_handoff: Option<&crate::execution::launch::LaunchHandoff>,
 ) -> Result<Value, DispatchError> {
+    if request.effect_authority.is_some() {
+        return Err(DispatchError::SchemaMisconfigured {
+            kind: kind.to_owned(),
+            detail: "method execution does not advertise the admitted dispatch-subject contract required for durable effects".to_string(),
+        });
+    }
     // 1. Validate args against the method's spec. Args come from the single
     // source of truth (`ctx.requested_call`), same as the preflight below.
     let validated_args = validate_method_args(ctx.requested_args(), method_name, method_decl)?;
@@ -2259,15 +2248,10 @@ pub(crate) async fn dispatch_method(
 
         // 9. Resolve the native executor path and spawn via lillux.
         let bundle_roots: Vec<std::path::PathBuf> = engine_roots
-            .ordered
-            .iter()
-            .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::Bundle)
-            .map(|r| {
-                r.ai_root
-                    .parent()
-                    .map(|pp| pp.to_path_buf())
-                    .unwrap_or(r.ai_root.clone())
-            })
+            .authoritative_bundle_roots()
+            .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?
+            .into_iter()
+            .map(Path::to_path_buf)
             .collect();
         let cache_root = state
             .config
@@ -2462,6 +2446,7 @@ pub(crate) async fn dispatch_method(
                     verified_code: &[],
                     verified_command: Some(&isolation_verified_command),
                     external_read_only_mounts: &[],
+                    target_channel: None,
                     item_ref: &runtime_item_ref_string,
                     thread_id: &thread_id,
                 },
@@ -2850,6 +2835,12 @@ pub async fn dispatch_service(
         TerminatorDecl::InProcess {
             registry: InProcessRegistryKind::Services,
         } => {
+            if request.effect_authority.is_some() {
+                return Err(DispatchError::SchemaMisconfigured {
+                    kind: canonical.kind.clone(),
+                    detail: "in-process service execution does not advertise the admitted dispatch-subject contract required for durable effects".to_string(),
+                });
+            }
             let verified = match verified {
                 Some(verified) => verified,
                 None => service_executor::resolve_and_verify(
@@ -3186,7 +3177,7 @@ async fn dispatch_via_method_executor(
         root_admission: request.root_admission.clone(),
         root_dispatch_evidence: request.root_dispatch_evidence.clone(),
         parent_execution_context: request.parent_execution_context.clone(),
-        requested_effect_class: request.requested_effect_class.clone(),
+        effect_authority: request.effect_authority.clone(),
     };
 
     // Re-enter the shared dispatch loop on the target ref. Boxed: this closes
@@ -3290,7 +3281,8 @@ pub(crate) fn mint_runtime_capability_caps(
             }
             let ai_dir = authoritative_runtime_authority_ai_dir(
                 resolved_item,
-                &engine.bundle_roots,
+                &effective_bundle_id,
+                engine,
                 &engine.node_trust_store,
             )?;
             ryeos_bundle::manifest::load_verified_manifest(
@@ -3375,6 +3367,16 @@ fn authoritative_project_runtime_authority_ai_dir(
     resolved_item: &ResolvedItem,
     project_root: &Path,
 ) -> Result<PathBuf, String> {
+    if resolved_item.source_space != ryeos_engine::contracts::ItemSpace::Project
+        || resolved_item.source_root != ryeos_engine::contracts::ItemSourceRoot::Project
+    {
+        return Err(format!(
+            "project runtime capability requirements need exact Project source provenance; \
+             found {:?} in {} space",
+            resolved_item.source_root,
+            resolved_item.source_space.as_str()
+        ));
+    }
     let canonical_project = std::fs::canonicalize(project_root).map_err(|err| {
         format!(
             "canonicalize runtime-authority project {}: {err}",
@@ -3416,7 +3418,8 @@ fn authoritative_project_runtime_authority_ai_dir(
 /// directory for manifest loading.
 fn authoritative_runtime_authority_ai_dir(
     resolved_item: &ResolvedItem,
-    installed_bundle_roots: &[PathBuf],
+    expected_bundle_id: &str,
+    engine: &ryeos_engine::engine::Engine,
     node_trust_store: &ryeos_engine::trust::TrustStore,
 ) -> Result<PathBuf, String> {
     if resolved_item.source_space != ryeos_engine::contracts::ItemSpace::Bundle {
@@ -3426,6 +3429,30 @@ fn authoritative_runtime_authority_ai_dir(
             resolved_item.source_space.as_str()
         ));
     }
+
+    let ryeos_engine::contracts::ItemSourceRoot::Bundle { name } = &resolved_item.source_root
+    else {
+        return Err(format!(
+            "runtime capability requirements need exact Bundle source provenance; found {:?}",
+            resolved_item.source_root
+        ));
+    };
+    if name != expected_bundle_id {
+        return Err(format!(
+            "runtime-authority item ref names bundle {expected_bundle_id}, but typed source \
+             provenance names bundle {name}"
+        ));
+    }
+    let bundle_root = engine.registered_bundle_root(name).ok_or_else(|| {
+        format!("typed runtime-authority bundle {name} is absent from the admitted generation")
+    })?;
+    let ai_dir = bundle_root.join(ryeos_engine::AI_DIR);
+    let canonical_ai_dir = std::fs::canonicalize(&ai_dir).map_err(|err| {
+        format!(
+            "canonicalize typed runtime-authority bundle root {}: {err}",
+            ai_dir.display()
+        )
+    })?;
 
     let source_metadata = std::fs::symlink_metadata(&resolved_item.source_path).map_err(|err| {
         format!(
@@ -3446,40 +3473,13 @@ fn authoritative_runtime_authority_ai_dir(
             resolved_item.source_path.display()
         )
     })?;
-    let mut matching_ai_dirs = Vec::new();
-    for bundle_root in installed_bundle_roots {
-        let ai_dir = bundle_root.join(ryeos_engine::AI_DIR);
-        let Ok(canonical_ai_dir) = std::fs::canonicalize(&ai_dir) else {
-            // An unrelated unavailable registration must not prevent a valid
-            // installed bundle from being identified. If no root matches, the
-            // final error still fails closed and names the source item.
-            continue;
-        };
-        if canonical_source.starts_with(&canonical_ai_dir)
-            && !matching_ai_dirs
-                .iter()
-                .any(|existing| existing == &canonical_ai_dir)
-        {
-            matching_ai_dirs.push(canonical_ai_dir);
-        }
+    if !canonical_source.starts_with(&canonical_ai_dir) {
+        return Err(format!(
+            "runtime-authority item {} contradicts typed bundle root {}",
+            resolved_item.source_path.display(),
+            canonical_ai_dir.display()
+        ));
     }
-
-    let ai_dir = match matching_ai_dirs.as_slice() {
-        [ai_dir] => ai_dir.clone(),
-        [] => {
-            return Err(format!(
-                "runtime-authority item {} is not inside a registered installed bundle root",
-                resolved_item.source_path.display()
-            ));
-        }
-        _ => {
-            return Err(format!(
-                "runtime-authority item {} ambiguously belongs to multiple registered installed \
-                 bundle roots",
-                resolved_item.source_path.display()
-            ));
-        }
-    };
 
     // Re-read once, pin it to the bytes that produced ResolvedItem metadata,
     // and verify the signature solely with persistent node trust. This keeps a
@@ -3525,7 +3525,7 @@ fn authoritative_runtime_authority_ai_dir(
         ));
     }
 
-    Ok(ai_dir)
+    Ok(canonical_ai_dir)
 }
 
 /// Tool-path entry point: source the `requires` block from the resolved item's
@@ -3705,7 +3705,7 @@ pub fn dispatch_daemon_owned(
     let root_admission = request.root_admission.clone();
     let root_dispatch_evidence = request.root_dispatch_evidence.clone();
     let parent_execution_context = request.parent_execution_context.clone();
-    let requested_effect_class = request.requested_effect_class.clone();
+    let effect_authority = request.effect_authority.clone();
     let ctx = ExecutionContext {
         principal_fingerprint: ctx.principal_fingerprint.clone(),
         caller_scopes: ctx.caller_scopes.clone(),
@@ -3735,7 +3735,7 @@ pub fn dispatch_daemon_owned(
             root_admission,
             root_dispatch_evidence,
             parent_execution_context,
-            requested_effect_class,
+            effect_authority,
         };
         let result = Box::pin(dispatch_inner(
             &item_ref, None, None, &request, &ctx, &state, None,
@@ -4420,15 +4420,10 @@ pub async fn admit_launch_contract(
         strip_binary_ref_prefix(&runtime.yaml.binary_ref)?
     );
     let bundle_roots = roots
-        .ordered
-        .iter()
-        .filter(|root| root.space == ryeos_engine::contracts::ItemSpace::Bundle)
-        .map(|root| {
-            root.ai_root
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| root.ai_root.clone())
-        })
+        .authoritative_bundle_roots()
+        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?
+        .into_iter()
+        .map(Path::to_path_buf)
         .collect::<Vec<_>>();
     let attestation_engine = ctx.engine.clone();
     let attestation_executor_ref = executor_ref.clone();
@@ -4671,6 +4666,7 @@ pub struct RootDispatchPreflight {
     pub requested_subject: VerifiedItem,
     pub root_admission: Option<ryeos_app::thread_lifecycle::RootExecutionAdmission>,
     pub root_dispatch_evidence: RootDispatchEvidence,
+    pub effect_class_ceiling: Option<ryeos_effect_contract::EffectClass>,
 }
 
 /// Enforce the caller's durable-effect claim against the exact composed
@@ -4679,31 +4675,75 @@ pub struct RootDispatchPreflight {
 /// signed ceiling was lowered after an earlier execution was banked.
 pub fn enforce_preflight_effect_class(
     preflight: &RootDispatchPreflight,
-    requested_effect_class: Option<&str>,
+    requested_effect_class: Option<ryeos_effect_contract::EffectClass>,
 ) -> Result<(), DispatchError> {
-    let admission = preflight.root_admission.as_ref().ok_or_else(|| {
-        DispatchError::Internal(anyhow::anyhow!(
-            "exact dispatch preflight has no root admission"
-        ))
-    })?;
-    subprocess_execution::enforce_item_effect_class(
-        &admission
-            .verified_subject()
-            .resolved
-            .canonical_ref
-            .to_string(),
-        Some(&admission.resolution_output().composed.composed),
-        requested_effect_class,
-    )
-    .map_err(|error| DispatchError::SchemaMisconfigured {
-        kind: admission
-            .verified_subject()
-            .resolved
-            .canonical_ref
-            .kind
-            .clone(),
-        detail: error.to_string(),
-    })
+    let Some(requested) = requested_effect_class else {
+        return Ok(());
+    };
+    let ceiling =
+        preflight
+            .effect_class_ceiling
+            .ok_or_else(|| DispatchError::LaunchPolicyForbidden {
+                code: "durable_effect_subject_ineligible".to_string(),
+                message: format!(
+                    "`{}` has no signed durable-effect ceiling",
+                    preflight.requested_subject.resolved.canonical_ref
+                ),
+                binding: None,
+            })?;
+    if !ceiling.permits(requested) {
+        return Err(DispatchError::LaunchPolicyForbidden {
+            code: "durable_effect_ceiling_exceeded".to_string(),
+            message: format!(
+                "dispatch requests {} semantics but `{}` admits only {}",
+                requested.as_str(),
+                preflight.requested_subject.resolved.canonical_ref,
+                ceiling.as_str(),
+            ),
+            binding: None,
+        });
+    }
+    Ok(())
+}
+
+fn effect_class_ceiling_for_admission(
+    engine: &ryeos_engine::engine::Engine,
+    admission: &ryeos_app::thread_lifecycle::RootExecutionAdmission,
+) -> Result<Option<ryeos_effect_contract::EffectClass>, DispatchError> {
+    let kind = &admission.verified_subject().resolved.canonical_ref.kind;
+    let declaration = engine
+        .kinds
+        .get(kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .and_then(|execution| execution.effect_class_ceiling.as_ref());
+    let Some(declaration) = declaration else {
+        return Ok(None);
+    };
+    let mut value = &admission.resolution_output().composed.composed;
+    for segment in &declaration.path {
+        let Some(next) = value.get(segment) else {
+            return Ok(None);
+        };
+        value = next;
+    }
+    let class = value
+        .as_str()
+        .ok_or_else(|| DispatchError::SchemaMisconfigured {
+            kind: kind.clone(),
+            detail: format!(
+                "signed effect-class projection `{}` resolved to a non-string value",
+                declaration.path.join(".")
+            ),
+        })?;
+    match class {
+        "live" => Ok(None),
+        "recorded" => Ok(Some(ryeos_effect_contract::EffectClass::Recorded)),
+        "sealed" => Ok(Some(ryeos_effect_contract::EffectClass::Sealed)),
+        other => Err(DispatchError::SchemaMisconfigured {
+            kind: kind.clone(),
+            detail: format!("signed effect-class projection contains unknown class `{other}`"),
+        }),
+    }
 }
 
 impl RootDispatchPreflight {
@@ -4810,11 +4850,13 @@ fn finish_root_dispatch_preflight(
     };
     let root_dispatch_evidence =
         RootDispatchEvidence::new(applicability, &requested_subject, &root_admission);
+    let effect_class_ceiling = effect_class_ceiling_for_admission(&ctx.engine, &root_admission)?;
     Ok(RootDispatchPreflight {
         class,
         requested_subject,
         root_admission: Some(root_admission),
         root_dispatch_evidence,
+        effect_class_ceiling,
     })
 }
 
@@ -6239,6 +6281,7 @@ metadata:
                 admitted_subject_ref: admitted.resolved.canonical_ref.clone(),
                 admitted_subject_digest: admitted.resolved.raw_content_digest.clone(),
             },
+            effect_class_ceiling: None,
         };
 
         preflight.rebind_requested_subject(wrapper.clone());
@@ -7518,7 +7561,9 @@ requires:
             launch_augmentations: Vec::new(),
             hooks: None,
             external_content: None,
+            persistent_session: None,
             effective_validator: None,
+            effect_class_ceiling: None,
         }
     }
 

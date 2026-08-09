@@ -505,6 +505,10 @@ mod tests {
             resolved_ref: "tool:test".to_owned(),
             kind: "tool".to_owned(),
             source_path: source,
+            source_space: crate::contracts::ItemSpace::Project,
+            source_root: crate::contracts::ItemSourceRoot::Search {
+                label: "test".to_owned(),
+            },
             parsed,
         }
     }
@@ -678,14 +682,14 @@ mod tests {
                 .files
                 .iter()
                 .filter_map(|(path, content)| {
-                    path.strip_prefix(prefix).ok().map(|relative| {
-                        ProjectContentEntry {
+                    path.strip_prefix(prefix)
+                        .ok()
+                        .map(|relative| ProjectContentEntry {
                             relative_path: relative.to_path_buf(),
                             content_hash: "unchecked-by-this-branch".to_owned(),
                             size: content.len() as u64,
                             normalized_mode: 0o644,
-                        }
-                    })
+                        })
                 })
                 .collect())
         }

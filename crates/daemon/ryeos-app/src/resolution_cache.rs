@@ -1880,6 +1880,13 @@ mod tests {
             resolved_ref: "tool:x".into(),
             source_path,
             source_space: space,
+            source_root: match space {
+                ItemSpace::Project => ryeos_engine::contracts::ItemSourceRoot::Project,
+                ItemSpace::Bundle => ryeos_engine::contracts::ItemSourceRoot::Bundle {
+                    name: "fixture".to_owned(),
+                },
+                ItemSpace::Node => ryeos_engine::contracts::ItemSourceRoot::Node,
+            },
             trust_class: match space {
                 ItemSpace::Project => TrustClass::TrustedProject,
                 ItemSpace::Bundle => TrustClass::TrustedBundle,

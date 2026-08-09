@@ -2346,7 +2346,9 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 name = "ryeos-accounting"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "lillux",
+ "ryeos-provider-contract",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2376,9 +2378,11 @@ dependencies = [
  "ryeos-app",
  "ryeos-bundle",
  "ryeos-directive-core",
+ "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-executor",
  "ryeos-handler-protocol",
+ "ryeos-provider-contract",
  "ryeos-runtime",
  "ryeos-scheduler",
  "ryeos-state",
@@ -2417,8 +2421,10 @@ dependencies = [
  "rusqlite",
  "ryeos-accounting",
  "ryeos-bundle",
+ "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-isolation-protocol",
+ "ryeos-provider-contract",
  "ryeos-runtime",
  "ryeos-scheduler",
  "ryeos-state",
@@ -2602,6 +2608,7 @@ dependencies = [
  "anyhow",
  "lillux",
  "ryeos-accounting",
+ "ryeos-effect-contract",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2625,6 +2632,7 @@ dependencies = [
  "ryeos-accounting",
  "ryeos-directive-core",
  "ryeos-engine",
+ "ryeos-provider-contract",
  "ryeos-runtime",
  "ryeos-state",
  "ryeos-tracing",
@@ -2640,6 +2648,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-effect-contract"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "lillux",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ryeos-engine"
 version = "0.1.0"
 dependencies = [
@@ -2651,6 +2670,7 @@ dependencies = [
  "lillux",
  "regex",
  "ryeos-accounting",
+ "ryeos-effect-contract",
  "ryeos-expression",
  "ryeos-handler-protocol",
  "ryeos-isolation-protocol",
@@ -2679,6 +2699,7 @@ dependencies = [
  "ryeos-accounting",
  "ryeos-app",
  "ryeos-bundle",
+ "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-handler-protocol",
  "ryeos-isolation-protocol",
@@ -2711,6 +2732,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ryeos-bundle",
+ "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-expression",
  "ryeos-runtime",
@@ -2753,6 +2775,7 @@ dependencies = [
  "base64",
  "regex",
  "ryeos-directive-core",
+ "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-graph-definition",
  "ryeos-handler-protocol",
@@ -2765,6 +2788,7 @@ dependencies = [
 name = "ryeos-handler-protocol"
 version = "0.1.0"
 dependencies = [
+ "ryeos-effect-contract",
  "serde",
  "serde_json",
 ]
@@ -2822,6 +2846,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-provider-contract"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "lillux",
+ "ryeos-effect-contract",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "ryeos-runtime"
 version = "0.5.76"
 dependencies = [
@@ -2834,6 +2871,7 @@ dependencies = [
  "regex",
  "rmp-serde",
  "ryeos-accounting",
+ "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-expression",
  "ryeos-state",
@@ -2879,6 +2917,7 @@ dependencies = [
  "rand 0.8.6",
  "rusqlite",
  "ryeos-accounting",
+ "ryeos-effect-contract",
  "ryeos-tracing",
  "serde",
  "serde_json",
@@ -2989,10 +3028,12 @@ dependencies = [
  "ryeos-api",
  "ryeos-app",
  "ryeos-core-tools",
+ "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-executor",
  "ryeos-isolation-protocol",
  "ryeos-node",
+ "ryeos-provider-contract",
  "ryeos-runtime",
  "ryeos-scheduler",
  "ryeos-state",

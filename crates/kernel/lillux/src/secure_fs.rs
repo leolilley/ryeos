@@ -724,6 +724,30 @@ impl PinnedDirectory {
         }
     }
 
+    /// Capacity observed through this exact filesystem descriptor.
+    ///
+    /// Storage policy remains caller-owned; this is only the descriptor-safe
+    /// primitive needed to enforce a caller's budget without resolving an
+    /// ambient pathname after admission.
+    pub fn filesystem_capacity(&self) -> Result<FilesystemCapacity> {
+        #[cfg(not(unix))]
+        anyhow::bail!("descriptor-relative filesystem capacity is unavailable on this platform");
+        #[cfg(unix)]
+        {
+            let mut stats = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+            if unsafe { libc::fstatvfs(self.directory.as_raw_fd(), stats.as_mut_ptr()) } != 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("read descriptor-relative filesystem capacity");
+            }
+            let stats = unsafe { stats.assume_init() };
+            let fragment_size = stats.f_frsize as u64;
+            Ok(FilesystemCapacity {
+                total_bytes: (stats.f_blocks as u64).saturating_mul(fragment_size),
+                available_bytes: (stats.f_bavail as u64).saturating_mul(fragment_size),
+            })
+        }
+    }
+
     /// Linux descriptor-rooted child pathname for APIs (notably SQLite) that
     /// cannot accept an already-open directory handle. The child remains bound
     /// to this directory inode even if its ordinary pathname is replaced.
@@ -1108,10 +1132,7 @@ impl PinnedDirectory {
                     Some(libc::ENOENT) => Ok(None),
                     Some(libc::EINVAL) => Ok(None),
                     _ => Err(error).with_context(|| {
-                        format!(
-                            "read symlink target {}",
-                            self.path.join(name).display()
-                        )
+                        format!("read symlink target {}", self.path.join(name).display())
                     }),
                 };
             }
@@ -2335,6 +2356,12 @@ impl PinnedDirectory {
         #[cfg(unix)]
         sync_open_directory_tree(&self.path, &self.directory)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FilesystemCapacity {
+    pub total_bytes: u64,
+    pub available_bytes: u64,
 }
 
 #[cfg(target_os = "linux")]

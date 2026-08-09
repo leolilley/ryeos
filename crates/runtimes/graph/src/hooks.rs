@@ -71,7 +71,7 @@ fn build_dispatcher(callback: CallbackClient, thread_id: String) -> HookDispatch
                     project_path,
                     action: payload,
                     hook_dispatch: Some(hook_dispatch),
-                    effect_replay: None,
+                    effect_dispatch: None,
                 })
                 .await?;
             // Hooks run on the leaf result only — the parent-thread snapshot has

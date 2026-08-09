@@ -69,6 +69,11 @@ pub struct CallbackCapability {
     /// configured hook roots before the runtime starts. Empty is deny-all for
     /// hook dispatch while remaining valid for ordinary callbacks.
     pub hook_dispatch_authorizations: Vec<HookDispatchAuthorization>,
+    /// Kind-validator effect grants captured from the finalized program before
+    /// the runtime starts. Empty is deny-all. Runtime input may select only an
+    /// opaque `authorization_id`; every other identity dimension comes from
+    /// this server-side list.
+    pub effect_dispatch_authorizations: Vec<ryeos_effect_contract::AdmittedEffectAuthorization>,
     /// Parent thread's resolved hard limits, serialized by the launcher. The
     /// daemon passes this through out-of-band on callback-dispatched child
     /// launches so runtimes cannot spoof parent budget inheritance.
@@ -182,6 +187,7 @@ impl CallbackCapabilityStore {
             root_raw_content_digest,
             effective_definition_digest,
             hook_dispatch_authorizations: Vec::new(),
+            effect_dispatch_authorizations: Vec::new(),
             hard_limits,
             depth,
             accounting_scope: None,
@@ -213,6 +219,28 @@ impl CallbackCapabilityStore {
             }
             None => false,
         }
+    }
+
+    pub fn set_effect_dispatch_authorizations(
+        &self,
+        token: &str,
+        authorizations: Vec<ryeos_effect_contract::AdmittedEffectAuthorization>,
+    ) -> Result<bool> {
+        let mut prior: Option<&str> = None;
+        for authorization in &authorizations {
+            authorization.validate()?;
+            if prior.is_some_and(|value| value >= authorization.authorization_id.as_str()) {
+                bail!("effect dispatch authorizations must be sorted and unique by id");
+            }
+            prior = Some(&authorization.authorization_id);
+        }
+        Ok(match self.capabilities.lock().unwrap().get_mut(token) {
+            Some(cap) => {
+                cap.effect_dispatch_authorizations = authorizations;
+                true
+            }
+            None => false,
+        })
     }
 
     /// Bind the minting thread's accounting scope to a freshly-minted cap.
@@ -851,6 +879,7 @@ mod tests {
             root_raw_content_digest: "0".repeat(64),
             effective_definition_digest: None,
             hook_dispatch_authorizations: Vec::new(),
+            effect_dispatch_authorizations: Vec::new(),
             hard_limits: serde_json::Value::Null,
             depth: 0,
             accounting_scope: None,

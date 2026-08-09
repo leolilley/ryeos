@@ -603,6 +603,7 @@ impl NeverResultExt for Result<std::convert::Infallible, String> {
 struct PreparedLaunch {
     launcher_fd: RawFd,
     lifecycle: PreparedLaunchLifecycle,
+    target_channel_source: Option<RawFd>,
     inherited_fds: BTreeSet<RawFd>,
     arguments: Vec<String>,
     retained_files: Vec<File>,
@@ -646,6 +647,21 @@ fn prepare_launch(request: &AdapterLaunchRequest) -> Result<PreparedLaunch, Stri
     for authority in &request.authorities {
         validate_inherited_fd(authority.inherited_fd as RawFd, "plan authority")?;
     }
+    let target_channel_source = request
+        .plan
+        .target_channel
+        .as_ref()
+        .map(|channel| {
+            let authority = request
+                .authorities
+                .iter()
+                .find(|authority| authority.id == channel.source)
+                .ok_or_else(|| "target channel source disappeared after validation".to_owned())?;
+            let fd = authority.inherited_fd as RawFd;
+            validate_connected_unix_stream(fd)?;
+            Ok::<RawFd, String>(fd)
+        })
+        .transpose()?;
     for descriptor in request.artifacts.values().copied() {
         validate_inherited_fd(descriptor as RawFd, "isolation artifact")?;
     }
@@ -790,6 +806,7 @@ fn prepare_launch(request: &AdapterLaunchRequest) -> Result<PreparedLaunch, Stri
     Ok(PreparedLaunch {
         launcher_fd,
         lifecycle,
+        target_channel_source,
         inherited_fds,
         arguments,
         retained_files,
@@ -803,7 +820,7 @@ fn exec_launcher(mut prepared: PreparedLaunch) -> Result<std::convert::Infallibl
     prepared.inherited_fds.insert(argument_fd);
     // Keep auxiliary descriptors owned until exec. Their fd numbers are
     // embedded in the sealed Bubblewrap argument vector.
-    let _retained_files = prepared.retained_files;
+    let _retained_files = std::mem::take(&mut prepared.retained_files);
 
     if let PreparedLaunchLifecycle::AwaitAttachment {
         release_keepalive_fd,
@@ -813,10 +830,25 @@ fn exec_launcher(mut prepared: PreparedLaunch) -> Result<std::convert::Infallibl
         prepared.inherited_fds.remove(&release_keepalive_fd);
         close_fd(release_keepalive_fd);
     }
+    relocate_target_channel(&mut prepared)?;
     seal_descriptor_boundary(prepared.launcher_fd, &prepared.inherited_fds)?;
 
     let error = exact_launcher_command(prepared.launcher_fd, argument_fd).exec();
     Err(format!("exec exact Bubblewrap launcher: {error}"))
+}
+
+fn relocate_target_channel(prepared: &mut PreparedLaunch) -> Result<(), String> {
+    if let Some(source_fd) = prepared.target_channel_source.take() {
+        if unsafe { libc::dup2(source_fd, libc::STDIN_FILENO) } < 0 {
+            return Err(format!(
+                "relocate target channel onto stdin: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        prepared.inherited_fds.remove(&source_fd);
+        close_fd(source_fd);
+    }
+    Ok(())
 }
 
 /// Retain a child-side attachment-release writer until Bubblewrap exits.
@@ -1072,6 +1104,7 @@ fn supported_capabilities() -> BTreeSet<IsolationCapability> {
         IsolationCapability::ProcessHostPidNamespace,
         IsolationCapability::ProcessTargetPidReporting,
         IsolationCapability::LifecycleSharedProcessGroup,
+        IsolationCapability::IpcTargetUnixStream,
     ])
 }
 
@@ -1189,6 +1222,40 @@ fn close_fd(fd: RawFd) {
     }
 }
 
+fn validate_connected_unix_stream(fd: RawFd) -> Result<(), String> {
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        return Err(format!(
+            "inspect target channel descriptor {fd}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if stat.st_mode & libc::S_IFMT != libc::S_IFSOCK {
+        return Err("target channel is not an AF_UNIX socket".to_owned());
+    }
+    let table = std::fs::read_to_string("/proc/net/unix")
+        .map_err(|error| format!("inspect target channel Unix-socket table: {error}"))?;
+    let row = table
+        .lines()
+        .skip(1)
+        .map(|line| line.split_whitespace().collect::<Vec<_>>())
+        .find(|columns| {
+            columns.len() >= 7 && columns[6].parse::<u64>().ok() == Some(stat.st_ino)
+        })
+        .ok_or_else(|| "target channel is not present in the AF_UNIX socket table".to_owned())?;
+    let socket_type = libc::c_int::from_str_radix(row[4], 16)
+        .map_err(|error| format!("decode target channel socket type: {error}"))?;
+    if socket_type != libc::SOCK_STREAM {
+        return Err("target channel is not a SOCK_STREAM socket".to_owned());
+    }
+    let state = u8::from_str_radix(row[5], 16)
+        .map_err(|error| format!("decode target channel socket state: {error}"))?;
+    if state != 3 {
+        return Err("target channel is not connected".to_owned());
+    }
+    Ok(())
+}
+
 fn fail_process(message: &str) -> ! {
     eprintln!("ryeos-bubblewrap-adapter: {message}");
     std::process::exit(125)
@@ -1202,7 +1269,7 @@ mod tests {
     use ryeos_isolation_protocol::{
         IsolationAuthority, IsolationAuthorityId, IsolationAuthorityPurpose,
         IsolationDeviceSurface, IsolationEnvironment, IsolationMount, IsolationPath, IsolationPlan,
-        IsolationTarget,
+        IsolationTarget, IsolationTargetChannel,
     };
 
     fn valid_inspection_request() -> AdapterInspectionRequest {
@@ -1262,6 +1329,7 @@ mod tests {
                     },
                 ],
                 project_workspace: None,
+                target_channel: None,
                 environment: IsolationEnvironment {
                     values: BTreeMap::from([
                         ("API_TOKEN".to_string(), "secret-token".to_string()),
@@ -1485,6 +1553,82 @@ mod tests {
                 .into_iter()
                 .all(|descriptor| !prepared.inherited_fds.contains(&descriptor))
         );
+    }
+
+    #[test]
+    fn target_channel_requires_a_connected_stream_and_relocates_to_fd_zero() {
+        use std::os::unix::net::UnixStream;
+
+        let (mut request, mut handles) = valid_launch_request();
+        request.lifecycle = AdapterLaunchLifecycle::Run;
+        let (worker, daemon) = UnixStream::pair().unwrap();
+        let source = IsolationAuthorityId::new("session-channel").unwrap();
+        request.plan.target_channel = Some(IsolationTargetChannel {
+            source: source.clone(),
+            target_fd: 0,
+            env_name: "RYEOS_SESSION_FD".to_owned(),
+        });
+        request
+            .plan
+            .environment
+            .values
+            .insert("RYEOS_SESSION_FD".to_owned(), "0".to_owned());
+        request.authorities.push(IsolationAuthority {
+            id: source,
+            inherited_fd: worker.as_raw_fd() as u32,
+            purpose: IsolationAuthorityPurpose::TargetDuplexChannel,
+        });
+        let prepared = prepare_launch(&request).unwrap();
+        assert_eq!(prepared.target_channel_source, Some(worker.as_raw_fd()));
+
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            let mut prepared = prepared;
+            let source_fd = worker.as_raw_fd();
+            let mut source_stat: libc::stat = unsafe { std::mem::zeroed() };
+            let source_ok = unsafe { libc::fstat(source_fd, &mut source_stat) } == 0;
+            let ok = relocate_target_channel(&mut prepared).is_ok()
+                && prepared.target_channel_source.is_none()
+                && !prepared.inherited_fds.contains(&source_fd);
+            let mut target_stat: libc::stat = unsafe { std::mem::zeroed() };
+            let target_ok = unsafe { libc::fstat(0, &mut target_stat) } == 0
+                && source_stat.st_dev == target_stat.st_dev
+                && source_stat.st_ino == target_stat.st_ino;
+            let source_closed = unsafe { libc::fcntl(source_fd, libc::F_GETFD) } < 0;
+            unsafe {
+                libc::_exit(i32::from(!(source_ok && ok && target_ok && source_closed)))
+            };
+        }
+        handles.clear();
+        drop(worker);
+        drop(daemon);
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert!(libc::WIFEXITED(status));
+        assert_eq!(libc::WEXITSTATUS(status), 0);
+
+        let (mut regular_request, _regular_handles) = valid_launch_request();
+        regular_request.lifecycle = AdapterLaunchLifecycle::Run;
+        let regular = File::open("/dev/null").unwrap();
+        let source = IsolationAuthorityId::new("session-channel").unwrap();
+        regular_request.plan.target_channel = Some(IsolationTargetChannel {
+            source: source.clone(),
+            target_fd: 0,
+            env_name: "RYEOS_SESSION_FD".to_owned(),
+        });
+        regular_request
+            .plan
+            .environment
+            .values
+            .insert("RYEOS_SESSION_FD".to_owned(), "0".to_owned());
+        regular_request.authorities.push(IsolationAuthority {
+            id: source,
+            inherited_fd: regular.as_raw_fd() as u32,
+            purpose: IsolationAuthorityPurpose::TargetDuplexChannel,
+        });
+        let error = prepare_launch(&regular_request).unwrap_err();
+        assert!(error.contains("target channel") && error.contains("socket"));
     }
 
     #[test]

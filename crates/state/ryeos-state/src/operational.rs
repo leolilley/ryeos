@@ -15,7 +15,8 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, Transactio
 use crate::sqlite_schema;
 
 const OPERATIONAL_APP_ID: i32 = 0x5259_4f50; // "RYOP"
-const OPERATIONAL_SCHEMA_VERSION: i32 = 3;
+const OPERATIONAL_SCHEMA_VERSION: i32 = 4;
+const REPLAY_INDEX_EPOCH: i32 = 3;
 pub const OPERATIONAL_DB_FILENAME: &str = "operational.sqlite3";
 pub(crate) const OPERATIONAL_INITIALIZED_FILENAME: &str = "operational.initialized";
 const OPERATIONAL_INITIALIZED_CONTENT: &[u8] = b"ryeos-operational-v1\n";
@@ -23,7 +24,7 @@ const OPERATIONAL_INITIALIZED_CONTENT: &[u8] = b"ryeos-operational-v1\n";
 const SCHEMA_SQL: &str = r#"
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
-PRAGMA user_version=3;
+PRAGMA user_version=4;
 
 CREATE TABLE cas_entries (
     hash TEXT NOT NULL,
@@ -104,25 +105,26 @@ CREATE INDEX idx_admission_attestations_issuer ON admission_attestations(issuer)
 CREATE INDEX idx_admission_attestations_subject_policy_claim_issuer
     ON admission_attestations(subject_hash, policy, claim, issuer);
 
-CREATE TABLE effect_records (
-    cache_key TEXT PRIMARY KEY,
+CREATE TABLE replay_records (
+    namespace TEXT NOT NULL,
+    cache_key TEXT NOT NULL,
+    answer_digest TEXT NOT NULL,
     record_hash TEXT NOT NULL,
     produced_at TEXT NOT NULL,
-    last_replayed_at TEXT NOT NULL
+    last_replayed_at TEXT NOT NULL,
+    PRIMARY KEY (namespace, cache_key)
 );
 
-CREATE INDEX idx_effect_records_last_replayed ON effect_records(last_replayed_at);
-CREATE INDEX idx_effect_records_record_hash ON effect_records(record_hash);
+CREATE INDEX idx_replay_records_retention
+    ON replay_records(namespace, last_replayed_at, produced_at, cache_key);
+CREATE INDEX idx_replay_records_record_hash ON replay_records(record_hash);
 
-CREATE TABLE provider_call_records (
-    cache_key TEXT PRIMARY KEY,
-    record_hash TEXT NOT NULL,
-    produced_at TEXT NOT NULL,
-    last_replayed_at TEXT NOT NULL
+CREATE TABLE replay_index_epoch (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    epoch INTEGER NOT NULL CHECK (epoch > 0)
 );
 
-CREATE INDEX idx_provider_call_records_last_replayed ON provider_call_records(last_replayed_at);
-CREATE INDEX idx_provider_call_records_record_hash ON provider_call_records(record_hash);
+INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 3);
 "#;
 
 /// Schema-v2 additions, applied verbatim by the v1→v2 forward migration. A
@@ -131,6 +133,7 @@ CREATE INDEX idx_provider_call_records_record_hash ON provider_call_records(reco
 const EFFECT_RECORDS_DDL: &str = r#"
 CREATE TABLE effect_records (
     cache_key TEXT PRIMARY KEY,
+    answer_digest TEXT NOT NULL,
     record_hash TEXT NOT NULL,
     produced_at TEXT NOT NULL,
     last_replayed_at TEXT NOT NULL
@@ -145,6 +148,7 @@ CREATE INDEX idx_effect_records_record_hash ON effect_records(record_hash);
 const PROVIDER_CALL_RECORDS_DDL: &str = r#"
 CREATE TABLE provider_call_records (
     cache_key TEXT PRIMARY KEY,
+    answer_digest TEXT NOT NULL,
     record_hash TEXT NOT NULL,
     produced_at TEXT NOT NULL,
     last_replayed_at TEXT NOT NULL
@@ -152,6 +156,40 @@ CREATE TABLE provider_call_records (
 
 CREATE INDEX idx_provider_call_records_last_replayed ON provider_call_records(last_replayed_at);
 CREATE INDEX idx_provider_call_records_record_hash ON provider_call_records(record_hash);
+"#;
+
+/// The global operational layout can advance without translating runtime-only
+/// replay authority. A predecessor store receives only this marker; ordinary
+/// open then refuses until the operator explicitly recreates the two replay
+/// indexes under the current epoch.
+const REPLAY_INDEX_EPOCH_MARKER_DDL: &str = r#"
+CREATE TABLE replay_index_epoch (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    epoch INTEGER NOT NULL CHECK (epoch > 0)
+);
+
+INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 2);
+"#;
+
+const REPLAY_INDEX_RESET_DDL: &str = r#"
+DROP TABLE effect_records;
+DROP TABLE provider_call_records;
+
+CREATE TABLE replay_records (
+    namespace TEXT NOT NULL,
+    cache_key TEXT NOT NULL,
+    answer_digest TEXT NOT NULL,
+    record_hash TEXT NOT NULL,
+    produced_at TEXT NOT NULL,
+    last_replayed_at TEXT NOT NULL,
+    PRIMARY KEY (namespace, cache_key)
+);
+
+CREATE INDEX idx_replay_records_retention
+    ON replay_records(namespace, last_replayed_at, produced_at, cache_key);
+CREATE INDEX idx_replay_records_record_hash ON replay_records(record_hash);
+
+UPDATE replay_index_epoch SET epoch = 3 WHERE singleton = 1;
 "#;
 
 fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
@@ -455,12 +493,24 @@ fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
                 ],
             },
             sqlite_schema::TableSpec {
-                name: "effect_records",
+                name: "replay_records",
                 columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "namespace",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
                     sqlite_schema::ColumnSpec {
                         name: "cache_key",
                         col_type: "TEXT",
                         pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "answer_digest",
+                        col_type: "TEXT",
+                        pk: false,
                         not_null: true,
                     },
                     sqlite_schema::ColumnSpec {
@@ -484,29 +534,17 @@ fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
                 ],
             },
             sqlite_schema::TableSpec {
-                name: "provider_call_records",
+                name: "replay_index_epoch",
                 columns: &[
                     sqlite_schema::ColumnSpec {
-                        name: "cache_key",
-                        col_type: "TEXT",
+                        name: "singleton",
+                        col_type: "INTEGER",
                         pk: true,
-                        not_null: true,
+                        not_null: false,
                     },
                     sqlite_schema::ColumnSpec {
-                        name: "record_hash",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "produced_at",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "last_replayed_at",
-                        col_type: "TEXT",
+                        name: "epoch",
+                        col_type: "INTEGER",
                         pk: false,
                         not_null: true,
                     },
@@ -599,26 +637,14 @@ fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
                 unique: false,
             },
             sqlite_schema::IndexSpec {
-                name: "idx_effect_records_last_replayed",
-                table: "effect_records",
-                columns: &["last_replayed_at"],
+                name: "idx_replay_records_retention",
+                table: "replay_records",
+                columns: &["namespace", "last_replayed_at", "produced_at", "cache_key"],
                 unique: false,
             },
             sqlite_schema::IndexSpec {
-                name: "idx_effect_records_record_hash",
-                table: "effect_records",
-                columns: &["record_hash"],
-                unique: false,
-            },
-            sqlite_schema::IndexSpec {
-                name: "idx_provider_call_records_last_replayed",
-                table: "provider_call_records",
-                columns: &["last_replayed_at"],
-                unique: false,
-            },
-            sqlite_schema::IndexSpec {
-                name: "idx_provider_call_records_record_hash",
-                table: "provider_call_records",
+                name: "idx_replay_records_record_hash",
+                table: "replay_records",
                 columns: &["record_hash"],
                 unique: false,
             },
@@ -639,48 +665,57 @@ pub struct OperationalDb {
     _initialization_marker: Option<File>,
 }
 
-/// The two replay namespaces have identical mechanics but distinct retention
-/// and authority contracts. A closed enum selects SQL identifiers; callers
-/// can never supply table text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReplayIndexKindV2 {
-    GraphNode,
-    ProviderCall,
-}
+/// Opaque owner-chosen replay namespace. State validates and stores this key
+/// but assigns it no domain meaning; retention and strict object decoding stay
+/// with the owner above state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayIndexNamespace(String);
 
-impl ReplayIndexKindV2 {
-    fn table(self) -> &'static str {
-        match self {
-            Self::GraphNode => "effect_records",
-            Self::ProviderCall => "provider_call_records",
+impl ReplayIndexNamespace {
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > 128
+            || !value.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'.' | b'_' | b'-')
+            })
+        {
+            anyhow::bail!("replay namespace is not canonical: {value}");
         }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReplayIndexRecordV2 {
+pub struct ReplayIndexRecord {
     pub cache_key: String,
     pub answer_digest: String,
     pub record_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReplayRecordVerificationV2 {
+pub enum ReplayRecordVerification {
     Verified,
     Unavailable { reason: String },
     IntegrityFailure { reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReplayLookupOutcomeV2 {
+pub enum ReplayLookupOutcome {
     Absent,
-    Present(ReplayIndexRecordV2),
+    Present(ReplayIndexRecord),
     Unavailable { reason: String },
     IntegrityFailure { reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReplayPublishOutcomeV2 {
+pub enum ReplayPublishOutcome {
     Inserted {
         record_hash: String,
     },
@@ -698,6 +733,24 @@ pub enum ReplayPublishOutcomeV2 {
         reason: String,
     },
 }
+
+#[derive(Debug)]
+pub struct ReplayIndexActivationRequired {
+    pub stored: i32,
+    pub current: i32,
+}
+
+impl std::fmt::Display for ReplayIndexActivationRequired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "operational replay indexes use predecessor epoch {}, current epoch is {}; stop the daemon and run `ryeos node replay-reset --confirm-discard-replay-indexes`",
+            self.stored, self.current
+        )
+    }
+}
+
+impl std::error::Error for ReplayIndexActivationRequired {}
 
 impl OperationalDb {
     /// Open the stable store at its protocol-owned runtime-state path.
@@ -811,6 +864,25 @@ impl OperationalDb {
     /// migrating it.
     pub fn open_existing_current(path: &Path) -> Result<Self> {
         let db = Self::open_existing_owned(path)?;
+        assert_integrity(&db.conn, path)?;
+        Ok(db)
+    }
+
+    /// Explicit clean-cut activation for runtime-only replay indexes.
+    ///
+    /// This path is intentionally unavailable through ordinary open. The
+    /// caller must already have stopped the daemon and obtained node-state
+    /// ownership. It preserves every other operational table and recreates
+    /// only graph/provider replay rows under the current immutable schema.
+    pub fn open_for_explicit_replay_reset(path: &Path) -> Result<Self> {
+        let (directory, name) = pin_operational_parent(path, false)?;
+        let directory_lock = directory.lock_exclusive()?;
+        let db = Self::open_in_pinned_directory(
+            &directory,
+            &name,
+            OperationalOpenMode::ExistingReplayReset,
+            directory_lock,
+        )?;
         assert_integrity(&db.conn, path)?;
         Ok(db)
     }
@@ -958,6 +1030,8 @@ impl OperationalDb {
         if !mode.is_read_only() {
             migrate_forward_if_owned(&conn, &path)?;
         }
+        assert_operational_identity(&conn, &path)?;
+        enforce_replay_index_epoch(&conn, &path, mode.permits_replay_reset())?;
         assert_current(&conn, &path)?;
         let journal_mode: String = conn
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -1089,6 +1163,7 @@ enum OperationalOpenMode {
     CreateOrOpen,
     ExistingReadWrite,
     ExistingReadOnly,
+    ExistingReplayReset,
 }
 
 impl OperationalOpenMode {
@@ -1102,6 +1177,10 @@ impl OperationalOpenMode {
 
     fn is_read_only(self) -> bool {
         matches!(self, Self::ExistingReadOnly)
+    }
+
+    fn permits_replay_reset(self) -> bool {
+        matches!(self, Self::ExistingReplayReset)
     }
 }
 
@@ -1439,6 +1518,21 @@ fn migrate_forward_if_owned(conn: &Connection, path: &Path) -> Result<()> {
                     "operational schema migrated v2 → v3 (provider call records)"
                 );
             }
+            3 => {
+                let tx = conn
+                    .unchecked_transaction()
+                    .context("begin operational schema-4 replay epoch marker migration")?;
+                tx.execute_batch(REPLAY_INDEX_EPOCH_MARKER_DDL)
+                    .context("install predecessor replay-index epoch marker")?;
+                tx.pragma_update(None, "user_version", OPERATIONAL_SCHEMA_VERSION)
+                    .context("stamp operational schema 4")?;
+                tx.commit()
+                    .context("commit operational schema-4 replay epoch marker migration")?;
+                tracing::warn!(
+                    path = %path.display(),
+                    "operational replay indexes require explicit clean-cut activation"
+                );
+            }
             other => {
                 anyhow::bail!(
                     "operational schema version {other} has no forward migration in {}",
@@ -1447,6 +1541,80 @@ fn migrate_forward_if_owned(conn: &Connection, path: &Path) -> Result<()> {
             }
         }
     }
+}
+
+fn replay_index_epoch(conn: &Connection) -> Result<i32> {
+    conn.query_row(
+        "SELECT epoch FROM replay_index_epoch WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )
+    .context("read operational replay-index epoch")
+}
+
+fn assert_operational_identity(conn: &Connection, path: &Path) -> Result<()> {
+    let application_id: i32 = conn
+        .query_row("PRAGMA application_id", [], |row| row.get(0))
+        .context("read operational application id")?;
+    if application_id != OPERATIONAL_APP_ID {
+        anyhow::bail!(
+            "operational database application_id mismatch in {}: stored={application_id}, expected={OPERATIONAL_APP_ID}",
+            path.display()
+        );
+    }
+    let version: i32 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .context("read operational schema version")?;
+    if version != OPERATIONAL_SCHEMA_VERSION {
+        anyhow::bail!(
+            "operational schema version mismatch in {}: stored={version}, expected={OPERATIONAL_SCHEMA_VERSION}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn enforce_replay_index_epoch(conn: &Connection, path: &Path, explicit_reset: bool) -> Result<()> {
+    let stored = replay_index_epoch(conn)?;
+    if stored == REPLAY_INDEX_EPOCH {
+        return Ok(());
+    }
+    if stored > REPLAY_INDEX_EPOCH {
+        anyhow::bail!(
+            "operational replay-index epoch in {} is newer than this binary: stored={stored}, current={REPLAY_INDEX_EPOCH}",
+            path.display()
+        );
+    }
+    if !explicit_reset {
+        return Err(ReplayIndexActivationRequired {
+            stored,
+            current: REPLAY_INDEX_EPOCH,
+        }
+        .into());
+    }
+    if stored != REPLAY_INDEX_EPOCH - 1 {
+        anyhow::bail!(
+            "operational replay-index epoch {stored} is not the proven predecessor of {REPLAY_INDEX_EPOCH}; refusing explicit reset of {}",
+            path.display()
+        );
+    }
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .context("verify operational database before replay-index reset")?;
+    if integrity != "ok" {
+        anyhow::bail!(
+            "operational database integrity check failed before replay-index reset for {}: {integrity}",
+            path.display()
+        );
+    }
+    let tx = conn
+        .unchecked_transaction()
+        .context("begin explicit replay-index reset")?;
+    tx.execute_batch(REPLAY_INDEX_RESET_DDL)
+        .context("recreate current replay indexes")?;
+    tx.commit().context("commit explicit replay-index reset")?;
+    tracing::warn!(database = %path.display(), "explicitly discarded predecessor replay indexes");
+    Ok(())
 }
 
 fn assert_current(conn: &Connection, path: &Path) -> Result<()> {
@@ -1886,110 +2054,109 @@ impl OperationalDb {
             .context("failed to collect CAS entry attribution summary")
     }
 
-    /// Read and verify one v2 replay row. Only a database-proven absence is an
+    /// Read and verify one current replay row. Only a database-proven absence is an
     /// executable miss. Once a row exists, unavailable or divergent CAS
     /// evidence is surfaced distinctly and never collapses into `Absent`.
-    pub fn lookup_replay_record_v2(
+    pub fn lookup_replay_record(
         &self,
-        kind: ReplayIndexKindV2,
+        namespace: &ReplayIndexNamespace,
         cache_key: &str,
-        mut verify: impl FnMut(&ReplayIndexRecordV2) -> ReplayRecordVerificationV2,
-    ) -> Result<ReplayLookupOutcomeV2> {
-        validate_canonical_hash("replay v2 cache key", cache_key)?;
-        let sql = format!(
-            "SELECT cache_key, answer_digest, record_hash FROM {} WHERE cache_key = ?",
-            kind.table()
-        );
+        mut verify: impl FnMut(&ReplayIndexRecord) -> ReplayRecordVerification,
+    ) -> Result<ReplayLookupOutcome> {
+        validate_canonical_hash("replay cache key", cache_key)?;
         let indexed = self
             .conn
-            .query_row(&sql, [cache_key], |row| {
-                Ok(ReplayIndexRecordV2 {
-                    cache_key: row.get(0)?,
-                    answer_digest: row.get(1)?,
-                    record_hash: row.get(2)?,
-                })
-            })
+            .query_row(
+                "SELECT cache_key, answer_digest, record_hash FROM replay_records
+                 WHERE namespace = ?1 AND cache_key = ?2",
+                rusqlite::params![namespace.as_str(), cache_key],
+                |row| {
+                    Ok(ReplayIndexRecord {
+                        cache_key: row.get(0)?,
+                        answer_digest: row.get(1)?,
+                        record_hash: row.get(2)?,
+                    })
+                },
+            )
             .optional()
-            .context("failed to look up replay v2 record")?;
+            .context("failed to look up replay record")?;
         let Some(indexed) = indexed else {
-            return Ok(ReplayLookupOutcomeV2::Absent);
+            return Ok(ReplayLookupOutcome::Absent);
         };
-        if let Err(error) = validate_replay_index_record_v2(&indexed) {
-            return Ok(ReplayLookupOutcomeV2::IntegrityFailure {
+        if let Err(error) = validate_replay_index_record(&indexed) {
+            return Ok(ReplayLookupOutcome::IntegrityFailure {
                 reason: error.to_string(),
             });
         }
         match verify(&indexed) {
-            ReplayRecordVerificationV2::Verified => {
-                let sql = format!(
-                    "UPDATE {} SET last_replayed_at = ? WHERE cache_key = ?",
-                    kind.table()
-                );
+            ReplayRecordVerification::Verified => {
                 let now = lillux::time::iso8601_now();
                 self.conn
-                    .execute(&sql, rusqlite::params![&now, cache_key])
-                    .context("failed to touch verified replay v2 record")?;
-                Ok(ReplayLookupOutcomeV2::Present(indexed))
+                    .execute(
+                        "UPDATE replay_records SET last_replayed_at = ?1
+                         WHERE namespace = ?2 AND cache_key = ?3",
+                        rusqlite::params![&now, namespace.as_str(), cache_key],
+                    )
+                    .context("failed to touch verified replay record")?;
+                Ok(ReplayLookupOutcome::Present(indexed))
             }
-            ReplayRecordVerificationV2::Unavailable { reason } => {
-                Ok(ReplayLookupOutcomeV2::Unavailable { reason })
+            ReplayRecordVerification::Unavailable { reason } => {
+                Ok(ReplayLookupOutcome::Unavailable { reason })
             }
-            ReplayRecordVerificationV2::IntegrityFailure { reason } => {
-                Ok(ReplayLookupOutcomeV2::IntegrityFailure { reason })
+            ReplayRecordVerification::IntegrityFailure { reason } => {
+                Ok(ReplayLookupOutcome::IntegrityFailure { reason })
             }
         }
     }
 
-    /// Atomically publish or fold an immutable v2 answer under one identity.
+    /// Atomically publish or fold an immutable answer under one identity.
     /// The candidate and any existing indexed object are verified through the
     /// same caller-owned decoder while an immediate transaction serializes
     /// all absent readers and publishers.
-    pub fn publish_replay_record_v2(
+    pub fn publish_replay_record(
         &self,
-        kind: ReplayIndexKindV2,
-        candidate: &ReplayIndexRecordV2,
-        mut verify: impl FnMut(&ReplayIndexRecordV2) -> ReplayRecordVerificationV2,
-    ) -> Result<ReplayPublishOutcomeV2> {
-        validate_replay_index_record_v2(candidate)?;
+        namespace: &ReplayIndexNamespace,
+        candidate: &ReplayIndexRecord,
+        mut verify: impl FnMut(&ReplayIndexRecord) -> ReplayRecordVerification,
+    ) -> Result<ReplayPublishOutcome> {
+        validate_replay_index_record(candidate)?;
         match verify(candidate) {
-            ReplayRecordVerificationV2::Verified => {}
-            ReplayRecordVerificationV2::Unavailable { reason } => {
-                return Ok(ReplayPublishOutcomeV2::Unavailable { reason });
+            ReplayRecordVerification::Verified => {}
+            ReplayRecordVerification::Unavailable { reason } => {
+                return Ok(ReplayPublishOutcome::Unavailable { reason });
             }
-            ReplayRecordVerificationV2::IntegrityFailure { reason } => {
-                return Ok(ReplayPublishOutcomeV2::IntegrityFailure { reason });
+            ReplayRecordVerification::IntegrityFailure { reason } => {
+                return Ok(ReplayPublishOutcome::IntegrityFailure { reason });
             }
         }
 
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
-            .context("begin immutable replay v2 publication")?;
-        let select = format!(
-            "SELECT cache_key, answer_digest, record_hash FROM {} WHERE cache_key = ?",
-            kind.table()
-        );
+            .context("begin immutable replay publication")?;
         let existing = tx
-            .query_row(&select, [&candidate.cache_key], |row| {
-                Ok(ReplayIndexRecordV2 {
-                    cache_key: row.get(0)?,
-                    answer_digest: row.get(1)?,
-                    record_hash: row.get(2)?,
-                })
-            })
+            .query_row(
+                "SELECT cache_key, answer_digest, record_hash FROM replay_records
+                 WHERE namespace = ?1 AND cache_key = ?2",
+                rusqlite::params![namespace.as_str(), &candidate.cache_key],
+                |row| {
+                    Ok(ReplayIndexRecord {
+                        cache_key: row.get(0)?,
+                        answer_digest: row.get(1)?,
+                        record_hash: row.get(2)?,
+                    })
+                },
+            )
             .optional()
-            .context("read immutable replay v2 publication slot")?;
+            .context("read immutable replay publication slot")?;
 
         let outcome = match existing {
             None => {
                 let now = lillux::time::iso8601_now();
-                let insert = format!(
-                    "INSERT INTO {} \
-                     (cache_key, answer_digest, record_hash, produced_at, last_replayed_at) \
-                     VALUES (?, ?, ?, ?, ?)",
-                    kind.table()
-                );
                 tx.execute(
-                    &insert,
+                    "INSERT INTO replay_records
+                     (namespace, cache_key, answer_digest, record_hash, produced_at, last_replayed_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     rusqlite::params![
+                        namespace.as_str(),
                         &candidate.cache_key,
                         &candidate.answer_digest,
                         &candidate.record_hash,
@@ -1997,107 +2164,58 @@ impl OperationalDb {
                         &now,
                     ],
                 )
-                .context("insert immutable replay v2 publication")?;
-                ReplayPublishOutcomeV2::Inserted {
+                .context("insert immutable replay publication")?;
+                ReplayPublishOutcome::Inserted {
                     record_hash: candidate.record_hash.clone(),
                 }
             }
             Some(existing) => {
-                if let Err(error) = validate_replay_index_record_v2(&existing) {
-                    ReplayPublishOutcomeV2::IntegrityFailure {
+                if let Err(error) = validate_replay_index_record(&existing) {
+                    ReplayPublishOutcome::IntegrityFailure {
                         reason: error.to_string(),
                     }
                 } else {
                     match verify(&existing) {
-                        ReplayRecordVerificationV2::Verified
+                        ReplayRecordVerification::Verified
                             if existing.answer_digest == candidate.answer_digest =>
                         {
-                            ReplayPublishOutcomeV2::Folded {
+                            ReplayPublishOutcome::Folded {
                                 record_hash: existing.record_hash,
                             }
                         }
-                        ReplayRecordVerificationV2::Verified => {
-                            ReplayPublishOutcomeV2::IntegrityConflict {
+                        ReplayRecordVerification::Verified => {
+                            ReplayPublishOutcome::IntegrityConflict {
                                 existing_record_hash: existing.record_hash,
                                 candidate_record_hash: candidate.record_hash.clone(),
                             }
                         }
-                        ReplayRecordVerificationV2::Unavailable { reason } => {
-                            ReplayPublishOutcomeV2::Unavailable { reason }
+                        ReplayRecordVerification::Unavailable { reason } => {
+                            ReplayPublishOutcome::Unavailable { reason }
                         }
-                        ReplayRecordVerificationV2::IntegrityFailure { reason } => {
-                            ReplayPublishOutcomeV2::IntegrityFailure { reason }
+                        ReplayRecordVerification::IntegrityFailure { reason } => {
+                            ReplayPublishOutcome::IntegrityFailure { reason }
                         }
                     }
                 }
             }
         };
-        tx.commit()
-            .context("commit immutable replay v2 publication")?;
+        tx.commit().context("commit immutable replay publication")?;
         Ok(outcome)
-    }
-
-    /// Index one durable node effect record under its replay identity. The
-    /// record object must already be stored in CAS; the row is what makes it
-    /// findable at dispatch and what roots it against garbage collection.
-    /// Re-publication replaces: a newer settled result for the same identity
-    /// wins.
-    pub fn publish_effect_record(&self, cache_key: &str, record_hash: &str) -> Result<()> {
-        validate_canonical_hash("effect record cache key", cache_key)?;
-        validate_canonical_hash("effect record hash", record_hash)?;
-        let now = lillux::time::iso8601_now();
-        self.conn
-            .execute(
-                "INSERT INTO effect_records (cache_key, record_hash, produced_at, last_replayed_at)
-                 VALUES (?, ?, ?, ?)
-                 ON CONFLICT(cache_key) DO UPDATE SET
-                    record_hash = excluded.record_hash,
-                    produced_at = excluded.produced_at,
-                    last_replayed_at = excluded.last_replayed_at",
-                rusqlite::params![cache_key, record_hash, &now, &now],
-            )
-            .context("failed to publish effect record")?;
-        Ok(())
-    }
-
-    pub fn lookup_effect_record(&self, cache_key: &str) -> Result<Option<String>> {
-        validate_canonical_hash("effect record cache key", cache_key)?;
-        self.conn
-            .query_row(
-                "SELECT record_hash FROM effect_records WHERE cache_key = ?",
-                [cache_key],
-                |row| row.get(0),
-            )
-            .optional()
-            .context("failed to look up effect record")
-    }
-
-    /// Refresh the replay-recency signal the retention sweep orders by.
-    pub fn touch_effect_record(&self, cache_key: &str) -> Result<()> {
-        validate_canonical_hash("effect record cache key", cache_key)?;
-        let now = lillux::time::iso8601_now();
-        self.conn
-            .execute(
-                "UPDATE effect_records SET last_replayed_at = ? WHERE cache_key = ?",
-                rusqlite::params![&now, cache_key],
-            )
-            .context("failed to touch effect record")?;
-        Ok(())
     }
 
     /// Every indexed record hash. These are garbage-collection roots: a
     /// record stays reachable exactly as long as its row exists, and
     /// retention is row deletion followed by an ordinary sweep.
-    pub fn list_effect_record_hashes(&self) -> Result<Vec<String>> {
+    pub fn list_replay_record_hashes(&self) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
-            .prepare_cached("SELECT record_hash FROM effect_records ORDER BY record_hash")
-            .context("failed to prepare effect record root query")?;
+            .prepare_cached("SELECT record_hash FROM replay_records ORDER BY record_hash")
+            .context("failed to prepare replay record root query")?;
         let rows = stmt
             .query_map([], |row| row.get(0))
-            .context("failed to query effect record roots")?;
+            .context("failed to query replay record roots")?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to collect effect record roots")
+            .context("failed to collect replay record roots")
     }
 
     /// Retention: drop records beyond `max_rows`, never-replayed rows first
@@ -2113,119 +2231,19 @@ impl OperationalDb {
     /// a row un-roots its object; the ordinary CAS sweep reclaims the
     /// bytes. Losing a record is never a correctness event — the next run
     /// executes live and is a different run.
-    pub fn prune_effect_records(&self, max_rows: usize) -> Result<usize> {
+    pub fn prune_replay_records(
+        &self,
+        namespace: &ReplayIndexNamespace,
+        max_rows: usize,
+    ) -> Result<usize> {
         let count: i64 = self
             .conn
-            .query_row("SELECT COUNT(*) FROM effect_records", [], |row| row.get(0))
-            .context("failed to count effect records")?;
-        let excess = usize::try_from(count).unwrap_or(0).saturating_sub(max_rows);
-        if excess == 0 {
-            return Ok(0);
-        }
-        let deleted = self
-            .conn
-            .execute(
-                "DELETE FROM effect_records WHERE cache_key IN (
-                    SELECT cache_key FROM effect_records
-                    ORDER BY (last_replayed_at != produced_at) ASC,
-                             last_replayed_at ASC,
-                             cache_key ASC
-                    LIMIT ?
-                )",
-                [excess as i64],
-            )
-            .context("failed to prune effect records")?;
-        Ok(deleted)
-    }
-
-    pub fn delete_effect_records(&self, cache_keys: &[String]) -> Result<usize> {
-        let mut deleted = 0usize;
-        for cache_key in cache_keys {
-            validate_canonical_hash("effect record cache key", cache_key)?;
-            deleted += self
-                .conn
-                .execute(
-                    "DELETE FROM effect_records WHERE cache_key = ?",
-                    [cache_key],
-                )
-                .context("failed to delete effect record")?;
-        }
-        Ok(deleted)
-    }
-
-    pub fn publish_provider_call_record(&self, cache_key: &str, record_hash: &str) -> Result<()> {
-        validate_canonical_hash("provider call record cache key", cache_key)?;
-        validate_canonical_hash("provider call record hash", record_hash)?;
-        let now = lillux::time::iso8601_now();
-        self.conn
-            .execute(
-                "INSERT INTO provider_call_records (cache_key, record_hash, produced_at, last_replayed_at)
-                 VALUES (?, ?, ?, ?)
-                 ON CONFLICT(cache_key) DO UPDATE SET
-                    record_hash = excluded.record_hash,
-                    produced_at = excluded.produced_at,
-                    last_replayed_at = excluded.last_replayed_at",
-                rusqlite::params![cache_key, record_hash, &now, &now],
-            )
-            .context("failed to publish provider call record")?;
-        Ok(())
-    }
-
-    pub fn lookup_provider_call_record(&self, cache_key: &str) -> Result<Option<String>> {
-        validate_canonical_hash("provider call record cache key", cache_key)?;
-        self.conn
             .query_row(
-                "SELECT record_hash FROM provider_call_records WHERE cache_key = ?",
-                [cache_key],
+                "SELECT COUNT(*) FROM replay_records WHERE namespace = ?1",
+                [namespace.as_str()],
                 |row| row.get(0),
             )
-            .optional()
-            .context("failed to look up provider call record")
-    }
-
-    /// Refresh the replay-recency signal the retention sweep orders by.
-    pub fn touch_provider_call_record(&self, cache_key: &str) -> Result<()> {
-        validate_canonical_hash("provider call record cache key", cache_key)?;
-        let now = lillux::time::iso8601_now();
-        self.conn
-            .execute(
-                "UPDATE provider_call_records SET last_replayed_at = ? WHERE cache_key = ?",
-                rusqlite::params![&now, cache_key],
-            )
-            .context("failed to touch provider call record")?;
-        Ok(())
-    }
-
-    /// Every indexed record hash. These are garbage-collection roots: a
-    /// record stays reachable exactly as long as its row exists, and
-    /// retention is row deletion followed by an ordinary sweep.
-    pub fn list_provider_call_record_hashes(&self) -> Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT record_hash FROM provider_call_records ORDER BY record_hash")
-            .context("failed to prepare provider call record root query")?;
-        let rows = stmt
-            .query_map([], |row| row.get(0))
-            .context("failed to query provider call record roots")?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to collect provider call record roots")
-    }
-
-    /// Retention: drop records beyond `max_rows`, never-replayed rows first
-    /// (oldest publication first), then the least-recently-replayed — the
-    /// same lanes as effect-record retention, for the same reason: a
-    /// run-scoped request param publishes a one-shot row per call whose
-    /// recency is newer than a banked record's last genuine replay, and
-    /// recency order alone would evict the proven records and keep the
-    /// junk. Losing a record is never a correctness event — the next run
-    /// pays the provider and is a different run.
-    pub fn prune_provider_call_records(&self, max_rows: usize) -> Result<usize> {
-        let count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM provider_call_records", [], |row| {
-                row.get(0)
-            })
-            .context("failed to count provider call records")?;
+            .context("failed to count replay records")?;
         let excess = usize::try_from(count).unwrap_or(0).saturating_sub(max_rows);
         if excess == 0 {
             return Ok(0);
@@ -2233,30 +2251,36 @@ impl OperationalDb {
         let deleted = self
             .conn
             .execute(
-                "DELETE FROM provider_call_records WHERE cache_key IN (
-                    SELECT cache_key FROM provider_call_records
+                "DELETE FROM replay_records
+                 WHERE namespace = ?1 AND cache_key IN (
+                    SELECT cache_key FROM replay_records
+                    WHERE namespace = ?1
                     ORDER BY (last_replayed_at != produced_at) ASC,
                              last_replayed_at ASC,
                              cache_key ASC
-                    LIMIT ?
+                    LIMIT ?2
                 )",
-                [excess as i64],
+                rusqlite::params![namespace.as_str(), excess as i64],
             )
-            .context("failed to prune provider call records")?;
+            .context("failed to prune replay records")?;
         Ok(deleted)
     }
 
-    pub fn delete_provider_call_records(&self, cache_keys: &[String]) -> Result<usize> {
+    pub fn delete_replay_records(
+        &self,
+        namespace: &ReplayIndexNamespace,
+        cache_keys: &[String],
+    ) -> Result<usize> {
         let mut deleted = 0usize;
         for cache_key in cache_keys {
-            validate_canonical_hash("provider call record cache key", cache_key)?;
+            validate_canonical_hash("replay record cache key", cache_key)?;
             deleted += self
                 .conn
                 .execute(
-                    "DELETE FROM provider_call_records WHERE cache_key = ?",
-                    [cache_key],
+                    "DELETE FROM replay_records WHERE namespace = ?1 AND cache_key = ?2",
+                    rusqlite::params![namespace.as_str(), cache_key],
                 )
-                .context("failed to delete provider call record")?;
+                .context("failed to delete replay record")?;
         }
         Ok(deleted)
     }
@@ -2839,10 +2863,10 @@ fn validate_canonical_hash(label: &str, hash: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_replay_index_record_v2(record: &ReplayIndexRecordV2) -> Result<()> {
-    validate_canonical_hash("replay v2 cache key", &record.cache_key)?;
-    validate_canonical_hash("replay v2 answer digest", &record.answer_digest)?;
-    validate_canonical_hash("replay v2 record hash", &record.record_hash)
+fn validate_replay_index_record(record: &ReplayIndexRecord) -> Result<()> {
+    validate_canonical_hash("replay cache key", &record.cache_key)?;
+    validate_canonical_hash("replay answer digest", &record.answer_digest)?;
+    validate_canonical_hash("replay record hash", &record.record_hash)
 }
 
 fn cas_entry_transition_allowed(current: CasEntryState, next: CasEntryState) -> bool {
@@ -3016,188 +3040,131 @@ mod tests {
         assert_eq!(app_id, OPERATIONAL_APP_ID);
         assert_eq!(version, OPERATIONAL_SCHEMA_VERSION);
         assert_eq!(synchronous, 2, "SQLite FULL synchronous mode");
-        assert_eq!(tables, 6);
-        assert_eq!(indexes, 18);
+        assert_eq!(tables, 7);
+        assert_eq!(indexes, 16);
+        assert_eq!(replay_index_epoch(&db.conn).unwrap(), REPLAY_INDEX_EPOCH);
     }
 
-    #[test]
-    fn effect_records_round_trip_and_replace_on_republication() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
-        let db = OperationalDb::open(&path).unwrap();
-        let key = "a".repeat(64);
-        let hash = "b".repeat(64);
-
-        assert!(db.lookup_effect_record(&key).unwrap().is_none());
-        db.publish_effect_record(&key, &hash).unwrap();
-        assert_eq!(
-            db.lookup_effect_record(&key).unwrap().as_deref(),
-            Some(hash.as_str())
-        );
-        assert_eq!(db.list_effect_record_hashes().unwrap(), vec![hash.clone()]);
-        db.touch_effect_record(&key).unwrap();
-
-        let newer = "c".repeat(64);
-        db.publish_effect_record(&key, &newer).unwrap();
-        assert_eq!(
-            db.lookup_effect_record(&key).unwrap().as_deref(),
-            Some(newer.as_str())
-        );
-
-        assert_eq!(db.delete_effect_records(&[key.clone()]).unwrap(), 1);
-        assert!(db.lookup_effect_record(&key).unwrap().is_none());
-        assert!(db.list_effect_record_hashes().unwrap().is_empty());
-    }
-
-    fn install_replay_v2_fixture_schema(db: &OperationalDb) {
-        db.conn
-            .execute_batch(
-                "DROP INDEX idx_effect_records_last_replayed;
-                 DROP INDEX idx_effect_records_record_hash;
-                 DROP TABLE effect_records;
-                 CREATE TABLE effect_records (
-                    cache_key TEXT PRIMARY KEY,
-                    answer_digest TEXT NOT NULL,
-                    record_hash TEXT NOT NULL,
-                    produced_at TEXT NOT NULL,
-                    last_replayed_at TEXT NOT NULL
-                 );
-                 CREATE INDEX idx_effect_records_last_replayed
-                    ON effect_records(last_replayed_at);
-                 CREATE INDEX idx_effect_records_record_hash
-                    ON effect_records(record_hash);
-                 DROP INDEX idx_provider_call_records_last_replayed;
-                 DROP INDEX idx_provider_call_records_record_hash;
-                 DROP TABLE provider_call_records;
-                 CREATE TABLE provider_call_records (
-                    cache_key TEXT PRIMARY KEY,
-                    answer_digest TEXT NOT NULL,
-                    record_hash TEXT NOT NULL,
-                    produced_at TEXT NOT NULL,
-                    last_replayed_at TEXT NOT NULL
-                 );
-                 CREATE INDEX idx_provider_call_records_last_replayed
-                    ON provider_call_records(last_replayed_at);
-                 CREATE INDEX idx_provider_call_records_record_hash
-                    ON provider_call_records(record_hash);",
-            )
-            .unwrap();
-    }
-
-    fn replay_record(key: char, answer: char, object: char) -> ReplayIndexRecordV2 {
-        ReplayIndexRecordV2 {
+    fn replay_record(key: char, answer: char, object: char) -> ReplayIndexRecord {
+        ReplayIndexRecord {
             cache_key: key.to_string().repeat(64),
             answer_digest: answer.to_string().repeat(64),
             record_hash: object.to_string().repeat(64),
         }
     }
 
+    fn namespace(value: &str) -> ReplayIndexNamespace {
+        ReplayIndexNamespace::new(value).unwrap()
+    }
+
+    fn publish_verified(
+        db: &OperationalDb,
+        namespace: &ReplayIndexNamespace,
+        record: &ReplayIndexRecord,
+    ) -> ReplayPublishOutcome {
+        db.publish_replay_record(namespace, record, |_| ReplayRecordVerification::Verified)
+            .unwrap()
+    }
+
     #[test]
-    fn immutable_replay_v2_insert_fold_conflict_and_lookup_matrix() {
-        for kind in [
-            ReplayIndexKindV2::GraphNode,
-            ReplayIndexKindV2::ProviderCall,
-        ] {
+    fn immutable_replay_insert_fold_conflict_and_lookup_matrix() {
+        for kind in [&namespace("dispatch.effect"), &namespace("provider.call")] {
             let tempdir = tempfile::tempdir().unwrap();
             let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
             let db = OperationalDb::open(&path).unwrap();
-            install_replay_v2_fixture_schema(&db);
-
             let first = replay_record('a', 'b', 'c');
             assert_eq!(
-                db.lookup_replay_record_v2(kind, &first.cache_key, |_| {
-                    ReplayRecordVerificationV2::Verified
+                db.lookup_replay_record(kind, &first.cache_key, |_| {
+                    ReplayRecordVerification::Verified
                 })
                 .unwrap(),
-                ReplayLookupOutcomeV2::Absent
+                ReplayLookupOutcome::Absent
             );
             assert_eq!(
-                db.publish_replay_record_v2(kind, &first, |_| {
-                    ReplayRecordVerificationV2::Verified
-                })
-                .unwrap(),
-                ReplayPublishOutcomeV2::Inserted {
+                db.publish_replay_record(kind, &first, |_| { ReplayRecordVerification::Verified })
+                    .unwrap(),
+                ReplayPublishOutcome::Inserted {
                     record_hash: first.record_hash.clone()
                 }
             );
 
             let equivalent = replay_record('a', 'b', 'd');
             assert_eq!(
-                db.publish_replay_record_v2(kind, &equivalent, |_| {
-                    ReplayRecordVerificationV2::Verified
+                db.publish_replay_record(kind, &equivalent, |_| {
+                    ReplayRecordVerification::Verified
                 })
                 .unwrap(),
-                ReplayPublishOutcomeV2::Folded {
+                ReplayPublishOutcome::Folded {
                     record_hash: first.record_hash.clone()
                 }
             );
             assert_eq!(
-                db.lookup_replay_record_v2(kind, &first.cache_key, |_| {
-                    ReplayRecordVerificationV2::Verified
+                db.lookup_replay_record(kind, &first.cache_key, |_| {
+                    ReplayRecordVerification::Verified
                 })
                 .unwrap(),
-                ReplayLookupOutcomeV2::Present(first.clone())
+                ReplayLookupOutcome::Present(first.clone())
             );
 
             let divergent = replay_record('a', 'e', 'f');
             assert_eq!(
-                db.publish_replay_record_v2(kind, &divergent, |_| {
-                    ReplayRecordVerificationV2::Verified
+                db.publish_replay_record(kind, &divergent, |_| {
+                    ReplayRecordVerification::Verified
                 })
                 .unwrap(),
-                ReplayPublishOutcomeV2::IntegrityConflict {
+                ReplayPublishOutcome::IntegrityConflict {
                     existing_record_hash: first.record_hash.clone(),
                     candidate_record_hash: divergent.record_hash,
                 }
             );
             assert_eq!(
-                db.lookup_replay_record_v2(kind, &first.cache_key, |_| {
-                    ReplayRecordVerificationV2::Unavailable {
+                db.lookup_replay_record(kind, &first.cache_key, |_| {
+                    ReplayRecordVerification::Unavailable {
                         reason: "CAS temporarily unavailable".to_string(),
                     }
                 })
                 .unwrap(),
-                ReplayLookupOutcomeV2::Unavailable {
+                ReplayLookupOutcome::Unavailable {
                     reason: "CAS temporarily unavailable".to_string()
                 }
             );
             assert_eq!(
-                db.lookup_replay_record_v2(kind, &first.cache_key, |_| {
-                    ReplayRecordVerificationV2::IntegrityFailure {
+                db.lookup_replay_record(kind, &first.cache_key, |_| {
+                    ReplayRecordVerification::IntegrityFailure {
                         reason: "indexed object is missing".to_string(),
                     }
                 })
                 .unwrap(),
-                ReplayLookupOutcomeV2::IntegrityFailure {
+                ReplayLookupOutcome::IntegrityFailure {
                     reason: "indexed object is missing".to_string()
                 }
             );
 
             let unavailable_candidate = replay_record('b', 'c', 'd');
             assert_eq!(
-                db.publish_replay_record_v2(kind, &unavailable_candidate, |_| {
-                    ReplayRecordVerificationV2::Unavailable {
+                db.publish_replay_record(kind, &unavailable_candidate, |_| {
+                    ReplayRecordVerification::Unavailable {
                         reason: "CAS unavailable".to_string(),
                     }
                 })
                 .unwrap(),
-                ReplayPublishOutcomeV2::Unavailable {
+                ReplayPublishOutcome::Unavailable {
                     reason: "CAS unavailable".to_string()
                 }
             );
             let same_key_candidate = replay_record('a', 'd', 'e');
             assert_eq!(
-                db.publish_replay_record_v2(kind, &same_key_candidate, |record| {
+                db.publish_replay_record(kind, &same_key_candidate, |record| {
                     if record.record_hash == first.record_hash {
-                        ReplayRecordVerificationV2::IntegrityFailure {
+                        ReplayRecordVerification::IntegrityFailure {
                             reason: "indexed object is corrupt".to_string(),
                         }
                     } else {
-                        ReplayRecordVerificationV2::Verified
+                        ReplayRecordVerification::Verified
                     }
                 })
                 .unwrap(),
-                ReplayPublishOutcomeV2::IntegrityFailure {
+                ReplayPublishOutcome::IntegrityFailure {
                     reason: "indexed object is corrupt".to_string()
                 }
             );
@@ -3205,44 +3172,44 @@ mod tests {
     }
 
     #[test]
-    fn immutable_replay_v2_never_replaces_the_first_observation() {
+    fn immutable_replay_never_replaces_the_first_observation() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
         let db = OperationalDb::open(&path).unwrap();
-        install_replay_v2_fixture_schema(&db);
         let first = replay_record('a', 'b', 'c');
-        db.publish_replay_record_v2(ReplayIndexKindV2::GraphNode, &first, |_| {
-            ReplayRecordVerificationV2::Verified
+        db.publish_replay_record(&namespace("dispatch.effect"), &first, |_| {
+            ReplayRecordVerification::Verified
         })
         .unwrap();
         let equivalent = replay_record('a', 'b', 'd');
-        db.publish_replay_record_v2(ReplayIndexKindV2::GraphNode, &equivalent, |_| {
-            ReplayRecordVerificationV2::Verified
+        db.publish_replay_record(&namespace("dispatch.effect"), &equivalent, |_| {
+            ReplayRecordVerification::Verified
         })
         .unwrap();
         let indexed = db
-            .lookup_replay_record_v2(ReplayIndexKindV2::GraphNode, &first.cache_key, |_| {
-                ReplayRecordVerificationV2::Verified
+            .lookup_replay_record(&namespace("dispatch.effect"), &first.cache_key, |_| {
+                ReplayRecordVerification::Verified
             })
             .unwrap();
-        assert_eq!(indexed, ReplayLookupOutcomeV2::Present(first));
+        assert_eq!(indexed, ReplayLookupOutcome::Present(first));
     }
 
     #[test]
-    fn schema_sql_embeds_the_migration_ddl_verbatim() {
-        // Fresh initialization and the forward migrations must produce the
-        // exact same schema; each shared block is asserted byte-for-byte.
-        assert!(SCHEMA_SQL.contains(EFFECT_RECORDS_DDL.trim()));
-        assert!(SCHEMA_SQL.contains(PROVIDER_CALL_RECORDS_DDL.trim()));
+    fn fresh_schema_declares_only_the_current_replay_epoch() {
+        assert!(SCHEMA_SQL.contains("answer_digest TEXT NOT NULL"));
+        assert!(SCHEMA_SQL.contains("VALUES (1, 3)"));
+        assert!(!SCHEMA_SQL.contains("VALUES (1, 2)"));
     }
 
     #[test]
-    fn a_v1_store_migrates_forward_in_place() {
+    fn predecessor_store_refuses_until_only_replay_indexes_are_reset() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
         {
-            // Rewind a fresh store to the exact v1 shape: no effect_records,
-            // stamped v1, with real v1-era rows that must survive.
+            // Rewind a fresh store to the exact schema-1 shape. Forward
+            // migration reconstructs the predecessor replay tables and
+            // installs only the predecessor epoch marker; ordinary open must
+            // still refuse until the explicit clean cut.
             let db = OperationalDb::open(&path).unwrap();
             db.record_cas_entry(&NewCasEntryAttribution {
                 hash: "d".repeat(64),
@@ -3256,78 +3223,98 @@ mod tests {
             .unwrap();
             db.conn
                 .execute_batch(
-                    "DROP INDEX idx_provider_call_records_last_replayed;
-                     DROP INDEX idx_provider_call_records_record_hash;
-                     DROP TABLE provider_call_records;
-                     DROP INDEX idx_effect_records_last_replayed;
-                     DROP INDEX idx_effect_records_record_hash;
-                     DROP TABLE effect_records;
+                    "DROP INDEX idx_replay_records_retention;
+                     DROP INDEX idx_replay_records_record_hash;
+                     DROP TABLE replay_records;
+                     DROP TABLE replay_index_epoch;
                      PRAGMA user_version=1;",
                 )
                 .unwrap();
         }
 
-        let db = OperationalDb::open(&path).unwrap();
+        let error = OperationalDb::open(&path)
+            .err()
+            .expect("predecessor replay epoch must refuse");
+        assert!(
+            error
+                .downcast_ref::<ReplayIndexActivationRequired>()
+                .is_some()
+        );
+        let db = OperationalDb::open_for_explicit_replay_reset(&path).unwrap();
         let version: i32 = db
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, OPERATIONAL_SCHEMA_VERSION);
-        // Pre-migration rows survive; both migrated tables are fully usable
-        // — a v1 store chains through v2 to the current version in one open.
+        // Non-replay operational rows survive. The two runtime-only replay
+        // indexes are current and empty; no predecessor row is translated.
         assert_eq!(
             db.list_cas_entries_by_state(CasEntryState::Mirrored)
                 .unwrap()
                 .len(),
             1
         );
-        db.publish_effect_record(&"a".repeat(64), &"b".repeat(64))
-            .unwrap();
-        assert!(db.lookup_effect_record(&"a".repeat(64)).unwrap().is_some());
-        db.publish_provider_call_record(&"e".repeat(64), &"f".repeat(64))
-            .unwrap();
-        assert!(
-            db.lookup_provider_call_record(&"e".repeat(64))
-                .unwrap()
-                .is_some()
-        );
+        assert_eq!(replay_index_epoch(&db.conn).unwrap(), REPLAY_INDEX_EPOCH);
+        assert!(db.list_replay_record_hashes().unwrap().is_empty());
     }
 
     #[test]
-    fn a_v2_store_migrates_forward_in_place() {
+    fn replay_reset_discards_predecessor_rows_instead_of_translating_them() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
         {
-            // Rewind a fresh store to the exact v2 shape: no
-            // provider_call_records, stamped v2, with a v2-era effect record
-            // that must survive.
+            // Rewind a fresh store to the exact predecessor replay-table
+            // shape with a row that must be discarded, never decoded or
+            // translated.
             let db = OperationalDb::open(&path).unwrap();
-            db.publish_effect_record(&"a".repeat(64), &"b".repeat(64))
-                .unwrap();
             db.conn
                 .execute_batch(
-                    "DROP INDEX idx_provider_call_records_last_replayed;
-                     DROP INDEX idx_provider_call_records_record_hash;
-                     DROP TABLE provider_call_records;
-                     PRAGMA user_version=2;",
+                    "DROP INDEX idx_replay_records_retention;
+                     DROP INDEX idx_replay_records_record_hash;
+                     DROP TABLE replay_records;
+                     DROP TABLE replay_index_epoch;
+                     CREATE TABLE effect_records (
+                        cache_key TEXT PRIMARY KEY,
+                        answer_digest TEXT NOT NULL,
+                        record_hash TEXT NOT NULL,
+                        produced_at TEXT NOT NULL,
+                        last_replayed_at TEXT NOT NULL
+                     );
+                     CREATE INDEX idx_effect_records_last_replayed ON effect_records(last_replayed_at);
+                     CREATE INDEX idx_effect_records_record_hash ON effect_records(record_hash);
+                     INSERT INTO effect_records VALUES (
+                        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                        '2026-01-01T00:00:00Z',
+                        '2026-01-01T00:00:00Z'
+                     );
+                     CREATE TABLE provider_call_records (
+                        cache_key TEXT PRIMARY KEY,
+                        answer_digest TEXT NOT NULL,
+                        record_hash TEXT NOT NULL,
+                        produced_at TEXT NOT NULL,
+                        last_replayed_at TEXT NOT NULL
+                     );
+                     CREATE INDEX idx_provider_call_records_last_replayed
+                        ON provider_call_records(last_replayed_at);
+                     CREATE INDEX idx_provider_call_records_record_hash
+                        ON provider_call_records(record_hash);
+                     PRAGMA user_version=3;",
                 )
                 .unwrap();
         }
 
-        let db = OperationalDb::open(&path).unwrap();
-        let version: i32 = db
-            .conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, OPERATIONAL_SCHEMA_VERSION);
-        assert!(db.lookup_effect_record(&"a".repeat(64)).unwrap().is_some());
-        db.publish_provider_call_record(&"e".repeat(64), &"f".repeat(64))
-            .unwrap();
+        let error = OperationalDb::open(&path)
+            .err()
+            .expect("predecessor replay epoch must refuse");
         assert!(
-            db.lookup_provider_call_record(&"e".repeat(64))
-                .unwrap()
+            error
+                .downcast_ref::<ReplayIndexActivationRequired>()
                 .is_some()
         );
+        let db = OperationalDb::open_for_explicit_replay_reset(&path).unwrap();
+        assert!(db.list_replay_record_hashes().unwrap().is_empty());
     }
 
     #[test]
@@ -3336,43 +3323,75 @@ mod tests {
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
         let db = OperationalDb::open(&path).unwrap();
 
-        let key = "a".repeat(64);
-        let hash = "b".repeat(64);
-        assert!(db.lookup_provider_call_record(&key).unwrap().is_none());
-        db.publish_provider_call_record(&key, &hash).unwrap();
+        let record = replay_record('a', 'b', 'c');
+        let key = record.cache_key.clone();
+        let hash = record.record_hash.clone();
         assert_eq!(
-            db.lookup_provider_call_record(&key).unwrap().as_deref(),
-            Some(hash.as_str())
+            db.lookup_replay_record(&namespace("provider.call"), &key, |_| {
+                ReplayRecordVerification::Verified
+            })
+            .unwrap(),
+            ReplayLookupOutcome::Absent
         );
+        publish_verified(&db, &namespace("provider.call"), &record);
         assert_eq!(
-            db.list_provider_call_record_hashes().unwrap(),
-            vec![hash.clone()]
+            db.lookup_replay_record(&namespace("provider.call"), &key, |_| {
+                ReplayRecordVerification::Verified
+            })
+            .unwrap(),
+            ReplayLookupOutcome::Present(record)
         );
-        db.touch_provider_call_record(&key).unwrap();
-        assert_eq!(db.delete_provider_call_records(&[key.clone()]).unwrap(), 1);
-        assert!(db.lookup_provider_call_record(&key).unwrap().is_none());
+        assert_eq!(db.list_replay_record_hashes().unwrap(), vec![hash.clone()]);
+        assert_eq!(
+            db.delete_replay_records(&namespace("provider.call"), &[key.clone()])
+                .unwrap(),
+            1
+        );
+        assert!(db.list_replay_record_hashes().unwrap().is_empty());
 
         // One banked record replayed long ago, two fresh never-replayed
         // rows: the never-replayed lane prunes first even though its
         // recency is newer.
-        for (c, produced, replayed) in [
-            ("a", "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"),
-            ("b", "2026-08-01T00:00:00Z", "2026-08-01T00:00:00Z"),
-            ("c", "2026-08-02T00:00:00Z", "2026-08-02T00:00:00Z"),
+        for (key_char, answer_char, object_char, produced, replayed) in [
+            (
+                'a',
+                'd',
+                'a',
+                "2026-01-01T00:00:00Z",
+                "2026-01-02T00:00:00Z",
+            ),
+            (
+                'b',
+                'e',
+                'b',
+                "2026-08-01T00:00:00Z",
+                "2026-08-01T00:00:00Z",
+            ),
+            (
+                'c',
+                'f',
+                'c',
+                "2026-08-02T00:00:00Z",
+                "2026-08-02T00:00:00Z",
+            ),
         ] {
-            db.publish_provider_call_record(&c.repeat(64), &c.repeat(64))
-                .unwrap();
+            let record = replay_record(key_char, answer_char, object_char);
+            publish_verified(&db, &namespace("provider.call"), &record);
             db.conn
                 .execute(
-                    "UPDATE provider_call_records SET produced_at = ?, last_replayed_at = ?
-                     WHERE cache_key = ?",
-                    rusqlite::params![produced, replayed, c.repeat(64)],
+                    "UPDATE replay_records SET produced_at = ?, last_replayed_at = ?
+                     WHERE namespace = ? AND cache_key = ?",
+                    rusqlite::params![produced, replayed, "provider.call", record.cache_key],
                 )
                 .unwrap();
         }
-        assert_eq!(db.prune_provider_call_records(1).unwrap(), 2);
         assert_eq!(
-            db.list_provider_call_record_hashes().unwrap(),
+            db.prune_replay_records(&namespace("provider.call"), 1)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.list_replay_record_hashes().unwrap(),
             vec!["a".repeat(64)]
         );
     }
@@ -3384,31 +3403,44 @@ mod tests {
         let db = OperationalDb::open(&path).unwrap();
         // Wall-clock stamps are second-granular, so recency is set
         // explicitly: `b` is oldest, `a` newest.
-        for (c, at) in [
-            ("a", "2026-01-03T00:00:00Z"),
-            ("b", "2026-01-01T00:00:00Z"),
-            ("c", "2026-01-02T00:00:00Z"),
+        for (key_char, answer_char, object_char, at) in [
+            ('a', 'd', 'a', "2026-01-03T00:00:00Z"),
+            ('b', 'e', 'b', "2026-01-01T00:00:00Z"),
+            ('c', 'f', 'c', "2026-01-02T00:00:00Z"),
         ] {
-            db.publish_effect_record(&c.repeat(64), &c.repeat(64))
-                .unwrap();
+            let record = replay_record(key_char, answer_char, object_char);
+            publish_verified(&db, &namespace("dispatch.effect"), &record);
             db.conn
                 .execute(
-                    "UPDATE effect_records SET last_replayed_at = ? WHERE cache_key = ?",
-                    rusqlite::params![at, c.repeat(64)],
+                    "UPDATE replay_records SET last_replayed_at = ?
+                     WHERE namespace = ? AND cache_key = ?",
+                    rusqlite::params![at, "dispatch.effect", record.cache_key],
                 )
                 .unwrap();
         }
 
-        assert_eq!(db.prune_effect_records(3).unwrap(), 0);
-        assert_eq!(db.prune_effect_records(2).unwrap(), 1);
-        let remaining = db.list_effect_record_hashes().unwrap();
+        assert_eq!(
+            db.prune_replay_records(&namespace("dispatch.effect"), 3)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.prune_replay_records(&namespace("dispatch.effect"), 2)
+                .unwrap(),
+            1
+        );
+        let remaining = db.list_replay_record_hashes().unwrap();
         assert!(
             !remaining.contains(&"b".repeat(64)),
             "oldest replay pruned first"
         );
         assert_eq!(remaining.len(), 2);
-        assert_eq!(db.prune_effect_records(0).unwrap(), 2);
-        assert!(db.list_effect_record_hashes().unwrap().is_empty());
+        assert_eq!(
+            db.prune_replay_records(&namespace("dispatch.effect"), 0)
+                .unwrap(),
+            2
+        );
+        assert!(db.list_replay_record_hashes().unwrap().is_empty());
     }
 
     #[test]
@@ -3421,24 +3453,46 @@ mod tests {
         // NEWER than the banked record's last replay. Recency order alone
         // would evict the banked record first; the never-replayed lane must
         // go first instead.
-        for (c, produced, replayed) in [
-            ("a", "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"),
-            ("b", "2026-08-01T00:00:00Z", "2026-08-01T00:00:00Z"),
-            ("c", "2026-08-02T00:00:00Z", "2026-08-02T00:00:00Z"),
+        for (key_char, answer_char, object_char, produced, replayed) in [
+            (
+                'a',
+                'd',
+                'a',
+                "2026-01-01T00:00:00Z",
+                "2026-01-02T00:00:00Z",
+            ),
+            (
+                'b',
+                'e',
+                'b',
+                "2026-08-01T00:00:00Z",
+                "2026-08-01T00:00:00Z",
+            ),
+            (
+                'c',
+                'f',
+                'c',
+                "2026-08-02T00:00:00Z",
+                "2026-08-02T00:00:00Z",
+            ),
         ] {
-            db.publish_effect_record(&c.repeat(64), &c.repeat(64))
-                .unwrap();
+            let record = replay_record(key_char, answer_char, object_char);
+            publish_verified(&db, &namespace("dispatch.effect"), &record);
             db.conn
                 .execute(
-                    "UPDATE effect_records SET produced_at = ?, last_replayed_at = ?
-                     WHERE cache_key = ?",
-                    rusqlite::params![produced, replayed, c.repeat(64)],
+                    "UPDATE replay_records SET produced_at = ?, last_replayed_at = ?
+                     WHERE namespace = ? AND cache_key = ?",
+                    rusqlite::params![produced, replayed, "dispatch.effect", record.cache_key],
                 )
                 .unwrap();
         }
 
-        assert_eq!(db.prune_effect_records(1).unwrap(), 2);
-        let remaining = db.list_effect_record_hashes().unwrap();
+        assert_eq!(
+            db.prune_replay_records(&namespace("dispatch.effect"), 1)
+                .unwrap(),
+            2
+        );
+        let remaining = db.list_replay_record_hashes().unwrap();
         assert_eq!(remaining, vec!["a".repeat(64)]);
     }
 

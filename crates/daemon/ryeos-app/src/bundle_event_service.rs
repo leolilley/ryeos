@@ -405,9 +405,7 @@ fn effective_bundle_id(cap: &CallbackCapability) -> anyhow::Result<String> {
     // No capability-lane operation may touch it, regardless of grants — the
     // reservation is what makes admission events evidence rather than claims.
     if bundle_id == crate::admission_events::ADMISSION_BUNDLE_ID {
-        anyhow::bail!(
-            "bundle id `{bundle_id}` is reserved for daemon-authored admission history"
-        );
+        anyhow::bail!("bundle id `{bundle_id}` is reserved for daemon-authored admission history");
     }
     Ok(bundle_id)
 }
@@ -488,6 +486,7 @@ mod tests {
             root_raw_content_digest: "0".repeat(64),
             effective_definition_digest: None,
             hook_dispatch_authorizations: Vec::new(),
+            effect_dispatch_authorizations: Vec::new(),
             hard_limits: serde_json::Value::Null,
             depth: 0,
             accounting_scope: None,

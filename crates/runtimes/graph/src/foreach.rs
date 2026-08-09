@@ -3,10 +3,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Map, Value};
 
-use crate::compiled_graph::CompiledNode;
 use crate::context::ExecutionContext;
 use crate::evaluation::{ExpressionScope, validate_runtime_value};
 use crate::model::{DispatchObservation, ErrorRecord, GraphNode, GraphToolCallStatus, RetryConfig};
+use ryeos_graph_definition::CompiledNode;
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::{RuntimeCost, RuntimeCostError};
 use ryeos_runtime::events::RuntimeEventType;
@@ -276,9 +276,15 @@ async fn dispatch_item_with_retry(
     let mut attempt = 0u32;
     loop {
         attempt += 1;
-        let outcome =
-            crate::dispatch::dispatch_action(client, action, thread_id, project_path, None, exec_ctx)
-                .await;
+        let outcome = crate::dispatch::dispatch_action(
+            client,
+            action,
+            thread_id,
+            project_path,
+            None,
+            exec_ctx,
+        )
+        .await;
         let retryable = match &outcome {
             Err(error) => error.retryable,
             Ok(crate::dispatch::ActionOutcome::Failure(failure)) => failure.retryable,
@@ -496,6 +502,7 @@ pub async fn run_foreach_sequential(
             execution.as_ref(),
             Some(graph_run_id),
         )
+        .with_run_identity(definition_ref, effective_definition_digest)
         .with_foreach(var, item);
 
         let action = match &compiled.action {
@@ -568,13 +575,19 @@ pub async fn run_foreach_sequential(
                     // Foreach items never request replay; the aggregate
                     // refuses durable classes at the definition layer.
                     replayed_from: _,
+                    dispatch,
                 } = success;
                 if let Err(error) = add_cost(&mut total_cost, cost) {
                     statuses.push(GraphToolCallStatus::IntegrityFailed);
                     let observation_error = retain_observation(
                         &mut observations,
                         &mut observation_budget,
-                        DispatchObservation::child_only(item_dispatch_id.clone(), child_thread_id),
+                        DispatchObservation::from_success(
+                            item_dispatch_id.clone(),
+                            child_thread_id,
+                            &val,
+                            dispatch.clone(),
+                        ),
                     )
                     .err();
                     limit_error = Some(match observation_error {
@@ -593,7 +606,12 @@ pub async fn run_foreach_sequential(
                     let observation_error = retain_observation(
                         &mut observations,
                         &mut observation_budget,
-                        DispatchObservation::child_only(item_dispatch_id.clone(), child_thread_id),
+                        DispatchObservation::from_success(
+                            item_dispatch_id.clone(),
+                            child_thread_id,
+                            &val,
+                            dispatch.clone(),
+                        ),
                     )
                     .err();
                     let history_error = retain_error(
@@ -636,6 +654,7 @@ pub async fn run_foreach_sequential(
                         item_dispatch_id.clone(),
                         child_thread_id,
                         &val,
+                        dispatch.clone(),
                     ),
                 ) {
                     statuses.push(GraphToolCallStatus::IntegrityFailed);
@@ -655,8 +674,10 @@ pub async fn run_foreach_sequential(
                         execution.as_ref(),
                         Some(graph_run_id),
                     )
+                    .with_run_identity(definition_ref, effective_definition_digest)
                     .with_foreach(var, item)
                     .with_result(&val)
+                    .with_dispatch_option(dispatch.as_ref())
                     .render_json(assign)
                     {
                         Ok(value) => {
@@ -729,6 +750,7 @@ pub async fn run_foreach_sequential(
                     cost,
                     child_thread_id,
                     integrity,
+                    dispatch,
                     ..
                 } = failure;
                 if let Err(error) = add_cost(&mut total_cost, cost) {
@@ -736,7 +758,11 @@ pub async fn run_foreach_sequential(
                     let observation_error = retain_observation(
                         &mut observations,
                         &mut observation_budget,
-                        DispatchObservation::child_only(item_dispatch_id.clone(), child_thread_id),
+                        DispatchObservation::from_failure(
+                            item_dispatch_id.clone(),
+                            child_thread_id,
+                            dispatch.clone(),
+                        ),
                     )
                     .err();
                     limit_error = Some(match observation_error {
@@ -754,7 +780,11 @@ pub async fn run_foreach_sequential(
                     let observation_error = retain_observation(
                         &mut observations,
                         &mut observation_budget,
-                        DispatchObservation::child_only(item_dispatch_id.clone(), child_thread_id),
+                        DispatchObservation::from_failure(
+                            item_dispatch_id.clone(),
+                            child_thread_id,
+                            dispatch.clone(),
+                        ),
                     )
                     .err();
                     limit_error = Some(match observation_error {
@@ -771,7 +801,11 @@ pub async fn run_foreach_sequential(
                 if let Err(error) = retain_observation(
                     &mut observations,
                     &mut observation_budget,
-                    DispatchObservation::child_only(item_dispatch_id.clone(), child_thread_id),
+                    DispatchObservation::from_failure(
+                        item_dispatch_id.clone(),
+                        child_thread_id,
+                        dispatch,
+                    ),
                 ) {
                     limit_error = Some(format!(
                         "foreach node `{current_node}` observation history exceeded rye-expr/1 aggregate bounds: {error}"
@@ -852,6 +886,7 @@ enum ParallelItem {
         cost: Option<RuntimeCost>,
         item_id: String,
         child_thread_id: Option<String>,
+        dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
     },
     Failure {
         diagnostic: String,
@@ -860,6 +895,7 @@ enum ParallelItem {
         item_id: Option<String>,
         child_thread_id: Option<String>,
         integrity: bool,
+        dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
     },
 }
 
@@ -942,6 +978,7 @@ pub async fn run_foreach_parallel(
             };
             let mut rendered =
                 match ExpressionScope::new(state, inputs, Some(&execution), Some(graph_run_id))
+                    .with_run_identity(definition_ref, effective_definition_digest)
                     .with_foreach(var, item)
                     .render_action(action)
                 {
@@ -956,6 +993,7 @@ pub async fn run_foreach_parallel(
                             item_id: None,
                             child_thread_id: None,
                             integrity: false,
+                            dispatch: None,
                         }));
                         if !continue_on_error {
                             break;
@@ -984,6 +1022,7 @@ pub async fn run_foreach_parallel(
                         .map(str::to_string),
                     child_thread_id: None,
                     integrity: true,
+                    dispatch: None,
                 }));
                 break;
             }
@@ -1020,6 +1059,7 @@ pub async fn run_foreach_parallel(
                             cost,
                             child_thread_id,
                             replayed_from: _,
+                            dispatch,
                         } = success;
                         if let Err(error) = validate_runtime_value(
                             &result,
@@ -1034,6 +1074,7 @@ pub async fn run_foreach_parallel(
                                 item_id: Some(item_dispatch_id),
                                 child_thread_id,
                                 integrity: true,
+                                dispatch,
                             }
                         } else {
                             ParallelItem::Success {
@@ -1041,6 +1082,7 @@ pub async fn run_foreach_parallel(
                                 cost,
                                 item_id: item_dispatch_id,
                                 child_thread_id,
+                                dispatch,
                             }
                         }
                     }
@@ -1050,6 +1092,7 @@ pub async fn run_foreach_parallel(
                             cost,
                             child_thread_id,
                             integrity,
+                            dispatch,
                             ..
                         } = failure;
                         ParallelItem::Failure {
@@ -1062,6 +1105,7 @@ pub async fn run_foreach_parallel(
                             item_id: Some(item_dispatch_id),
                             child_thread_id,
                             integrity,
+                            dispatch,
                         }
                     }
                     Err(error) => ParallelItem::Failure {
@@ -1073,6 +1117,7 @@ pub async fn run_foreach_parallel(
                         item_id: None,
                         child_thread_id: None,
                         integrity: false,
+                        dispatch: None,
                     },
                 };
                 (outcome, retried.callback_warnings)
@@ -1101,13 +1146,19 @@ pub async fn run_foreach_parallel(
                     cost,
                     item_id,
                     child_thread_id,
+                    dispatch,
                 }) => {
                     if let Err(error) = add_cost(&mut total_cost, cost) {
                         statuses.push(GraphToolCallStatus::IntegrityFailed);
                         let observation_error = retain_observation(
                             &mut observations,
                             &mut observation_budget,
-                            DispatchObservation::child_only(item_id, child_thread_id),
+                            DispatchObservation::from_success(
+                                item_id,
+                                child_thread_id,
+                                &value,
+                                dispatch.clone(),
+                            ),
                         )
                         .err();
                         if limit_error.is_none() {
@@ -1126,7 +1177,12 @@ pub async fn run_foreach_parallel(
                         let _ = retain_observation(
                             &mut observations,
                             &mut observation_budget,
-                            DispatchObservation::child_only(item_id, child_thread_id),
+                            DispatchObservation::from_success(
+                                item_id,
+                                child_thread_id,
+                                &value,
+                                dispatch.clone(),
+                            ),
                         );
                         statuses.push(GraphToolCallStatus::Ok);
                         continue;
@@ -1136,7 +1192,12 @@ pub async fn run_foreach_parallel(
                         let _ = retain_observation(
                             &mut observations,
                             &mut observation_budget,
-                            DispatchObservation::child_only(item_id, child_thread_id),
+                            DispatchObservation::from_success(
+                                item_id,
+                                child_thread_id,
+                                &value,
+                                dispatch.clone(),
+                            ),
                         );
                         let _ = retain_error(
                             &mut errors,
@@ -1157,7 +1218,12 @@ pub async fn run_foreach_parallel(
                     if let Err(error) = retain_observation(
                         &mut observations,
                         &mut observation_budget,
-                        DispatchObservation::from_success(item_id, child_thread_id, &value),
+                        DispatchObservation::from_success(
+                            item_id,
+                            child_thread_id,
+                            &value,
+                            dispatch,
+                        ),
                     ) {
                         statuses.push(GraphToolCallStatus::IntegrityFailed);
                         limit_error = Some(format!(
@@ -1175,6 +1241,7 @@ pub async fn run_foreach_parallel(
                     item_id,
                     child_thread_id,
                     integrity,
+                    dispatch,
                 }) => {
                     let diagnostic_limit_failure =
                         diagnostic.starts_with(PARALLEL_DIAGNOSTIC_LIMIT_FAILURE);
@@ -1184,7 +1251,11 @@ pub async fn run_foreach_parallel(
                             &mut observations,
                             &mut observation_budget,
                             item_id.and_then(|item_id| {
-                                DispatchObservation::child_only(item_id, child_thread_id)
+                                DispatchObservation::from_failure(
+                                    item_id,
+                                    child_thread_id,
+                                    dispatch.clone(),
+                                )
                             }),
                         )
                         .err();
@@ -1218,7 +1289,11 @@ pub async fn run_foreach_parallel(
                             &mut observations,
                             &mut observation_budget,
                             item_id.and_then(|item_id| {
-                                DispatchObservation::child_only(item_id, child_thread_id)
+                                DispatchObservation::from_failure(
+                                    item_id,
+                                    child_thread_id,
+                                    dispatch.clone(),
+                                )
                             }),
                         );
                         continue;
@@ -1227,7 +1302,7 @@ pub async fn run_foreach_parallel(
                         &mut observations,
                         &mut observation_budget,
                         item_id.and_then(|item_id| {
-                            DispatchObservation::child_only(item_id, child_thread_id)
+                            DispatchObservation::from_failure(item_id, child_thread_id, dispatch)
                         }),
                     ) {
                         limit_error = Some(format!(

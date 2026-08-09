@@ -54,6 +54,7 @@ fn validate_exact_resolution_wire(value: &Value) -> std::result::Result<(), Stri
                 "resolved_ref",
                 "source_path",
                 "source_space",
+                "source_root",
                 "trust_class",
                 "signer_fingerprint",
                 "alias_resolution",
@@ -167,6 +168,7 @@ struct SealedResolvedItem {
     kind: String,
     source_path: PathBuf,
     source_space: ItemSpace,
+    source_root: ItemSourceRoot,
     resolved_from: String,
     shadowed: Vec<SealedShadowedCandidate>,
     probed_absent: Vec<ryeos_engine::contracts::ProbedAbsence>,
@@ -237,6 +239,7 @@ impl SealedResolvedItem {
             kind: resolved.kind.clone(),
             source_path: resolved.source_path.clone(),
             source_space: resolved.source_space,
+            source_root: resolved.source_root.clone(),
             resolved_from: resolved.resolved_from.clone(),
             shadowed: resolved
                 .shadowed
@@ -342,6 +345,7 @@ impl SealedResolvedItem {
             kind: self.kind.clone(),
             source_path: materialized_source,
             source_space: self.source_space,
+            source_root: self.source_root.clone(),
             resolved_from: self.resolved_from.clone(),
             shadowed: self
                 .shadowed
@@ -926,6 +930,7 @@ impl SealedRootExecutionRequest {
                 kind: "graph".to_string(),
                 source_path: PathBuf::from("/synthetic/storage-fixture.yaml"),
                 source_space: ItemSpace::Project,
+                source_root: ItemSourceRoot::Project,
                 resolved_from: "storage_test_fixture".to_string(),
                 shadowed: Vec::new(),
                 probed_absent: Vec::new(),
@@ -962,6 +967,7 @@ impl SealedRootExecutionRequest {
                     resolved_ref: canonical_item_ref,
                     source_path: PathBuf::from("/synthetic/storage-fixture.yaml"),
                     source_space: ItemSpace::Project,
+                    source_root: ItemSourceRoot::Project,
                     trust_class: ResolutionTrustClass::Unsigned,
                     signer_fingerprint: None,
                     alias_resolution: None,

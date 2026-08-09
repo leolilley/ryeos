@@ -7,9 +7,10 @@ use ryeos_directive_core::{
     SnapshotItemSpace, SnapshotTrustClass, VerifiedConfigItem, prepare_directive_launch,
 };
 use ryeos_handler_protocol::{
-    ConfigMergeModeWire, FinancialAuthorityDeclWire, FinancialAuthorityResultWire, HandlerResponse,
-    ItemSpaceWire, LaunchConfigContributorWire, LaunchConfigInputDeclWire,
-    LaunchConfigSnapshotWire, LaunchDiagnosticScalarWire, LaunchPrepareError,
+    ConfigMergeModeWire, ExternalEffectAuthorityDeclWire, ExternalEffectAuthorityResultWire,
+    FinancialAuthorityDeclWire, FinancialAuthorityResultWire, HandlerResponse, ItemSpaceWire,
+    LaunchConfigContributorWire, LaunchConfigInputDeclWire, LaunchConfigSnapshotWire,
+    LaunchDiagnosticScalarWire, LaunchExecutionDependencyRequestWire, LaunchPrepareError,
     LaunchPrepareErrorClass, LaunchPrepareRequest, LaunchPrepareResponse, LaunchPrepareSuccess,
     LaunchSecretOriginWire, LaunchSecretRequirement, RuntimeFactKindWire, TrustClassWire,
     ValidateLaunchPreparerConfigRequest, ValidateLaunchPreparerConfigResponse,
@@ -27,6 +28,7 @@ const ALLOWED_SECRET_NAMES: &[&str] = &[
 // A 64-byte lowercase SHA-256 hex string occupies 66 bytes as canonical JSON:
 // one byte for each surrounding quote plus the 64-byte value.
 const SHA256_HEX_CANONICAL_JSON_BYTES: u32 = 66;
+const PROVIDER_TRANSPORT_DEPENDENCY: &str = "provider_transport";
 
 pub fn prepare(request: LaunchPrepareRequest) -> HandlerResponse {
     HandlerResponse::LaunchPrepare {
@@ -134,6 +136,70 @@ fn prepare_inner(
     })
     .map_err(domain_error)?;
 
+    let admitted_effect_class = match request
+        .primary
+        .composed
+        .composed
+        .get("effects")
+        .and_then(serde_json::Value::as_str)
+    {
+        None | Some("live") => None,
+        Some("recorded") => Some(ryeos_effect_contract::EffectClass::Recorded),
+        Some("sealed") => Some(ryeos_effect_contract::EffectClass::Sealed),
+        Some(value) => {
+            return Err(wire_error(
+                "directive_effect_class_invalid",
+                format!("directive effect class `{value}` is not supported"),
+                LaunchPrepareErrorClass::Configuration,
+                None,
+            ));
+        }
+    };
+    if admitted_effect_class.is_some_and(|requested| {
+        !prepared
+            .snapshot
+            .provider
+            .transport
+            .effect_class_ceiling()
+            .permits(requested)
+    }) {
+        return Err(wire_error(
+            "directive_effect_class_exceeds_provider_boundary",
+            "directive effect class exceeds the selected provider transport's admitted boundary",
+            LaunchPrepareErrorClass::Configuration,
+            Some(MODEL_BINDING),
+        ));
+    }
+    let family_value =
+        serde_json::to_value(prepared.snapshot.provider.family).map_err(|error| {
+            wire_error(
+                "provider_family_serialize_failed",
+                format!("could not serialize provider family: {error}"),
+                LaunchPrepareErrorClass::Internal,
+                None,
+            )
+        })?;
+    let provider_family = family_value.as_str().ok_or_else(|| {
+        wire_error(
+            "provider_family_serialize_failed",
+            "provider family did not serialize as a string",
+            LaunchPrepareErrorClass::Internal,
+            None,
+        )
+    })?;
+    let external_effect_authority = ryeos_effect_contract::AdmittedExternalEffectAuthority {
+        authority_family: provider_family.to_owned(),
+        admitted_effect_class,
+    };
+    external_effect_authority.validate().map_err(|error| {
+        wire_error(
+            "external_effect_authority_invalid",
+            error.to_string(),
+            LaunchPrepareErrorClass::Internal,
+            None,
+        )
+    })?;
+
     if prepared
         .required_secret
         .as_ref()
@@ -157,6 +223,21 @@ fn prepare_inner(
     })?;
     let mut runtime_data = BTreeMap::new();
     runtime_data.insert(PROVIDER_SNAPSHOT_KEY.to_string(), snapshot);
+
+    let execution_dependencies = prepared
+        .snapshot
+        .provider
+        .transport
+        .admitted_local_worker_ref()
+        .map(|item_ref| {
+            BTreeMap::from([(
+                PROVIDER_TRANSPORT_DEPENDENCY.to_string(),
+                LaunchExecutionDependencyRequestWire {
+                    item_ref: item_ref.to_string(),
+                },
+            )])
+        })
+        .unwrap_or_default();
 
     let required_secrets = prepared
         .required_secret
@@ -184,8 +265,17 @@ fn prepare_inner(
         runtime_data,
         required_secrets,
         runtime_facts: prepared.runtime_facts,
-        financial_authority: FinancialAuthorityResultWire::ProviderAccountingAuthorityV1 {
-            authority,
+        execution_dependencies,
+        financial_authority: FinancialAuthorityResultWire::Accounting { authority },
+        external_effect_authority: ExternalEffectAuthorityResultWire::External {
+            authority: serde_json::to_value(external_effect_authority).map_err(|error| {
+                wire_error(
+                    "external_effect_authority_serialize_failed",
+                    error.to_string(),
+                    LaunchPrepareErrorClass::Internal,
+                    None,
+                )
+            })?,
         },
     })
 }
@@ -504,9 +594,30 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
         }
         _ => return Err("execution must be the optional deep-merged execution item".into()),
     }
-    if request.financial_authority != FinancialAuthorityDeclWire::ProviderAccountingAuthorityV1 {
-        return Err("financial_authority must declare provider_accounting_authority_v1".into());
+    if request.financial_authority != FinancialAuthorityDeclWire::Accounting {
+        return Err("financial_authority must declare accounting".into());
     }
+    if request.external_effect_authority != ExternalEffectAuthorityDeclWire::External {
+        return Err("external_effect_authority must declare external".into());
+    }
+    if request.execution_dependencies.max_dependencies != 1 {
+        return Err("execution_dependencies.max_dependencies must be 1".into());
+    }
+    exact_strings(
+        "execution_dependencies.allowed_kinds",
+        &request.execution_dependencies.allowed_kinds,
+        &["worker"],
+    )?;
+    exact_values(
+        "execution_dependencies.allowed_spaces",
+        &request.execution_dependencies.allowed_spaces,
+        &[ItemSpaceWire::Bundle],
+    )?;
+    exact_trust_values(
+        "execution_dependencies.allowed_trust",
+        &request.execution_dependencies.allowed_trust,
+        &[TrustClassWire::TrustedBundle],
+    )?;
 
     if request.secret_policy.max_requirements != 4 {
         return Err("secret_policy.max_requirements must be 4".into());
@@ -754,7 +865,10 @@ mod tests {
         provider
             .validate(" deepseek")
             .expect("validate DeepSeek provider");
-        assert_eq!(provider.base_url, "https://api.deepseek.com");
+        assert_eq!(
+            provider.transport.remote_base_url(),
+            Some("https://api.deepseek.com")
+        );
         assert_eq!(provider.auth.env_var.as_deref(), Some("DEEPSEEK_API_KEY"));
         let reasoning = provider
             .schemas

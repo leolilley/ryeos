@@ -94,6 +94,8 @@ pub struct ChainIntermediate {
     pub resolved_ref: String,
     pub kind: String,
     pub source_path: PathBuf,
+    pub source_space: crate::contracts::ItemSpace,
+    pub source_root: crate::contracts::ItemSourceRoot,
     pub parsed: Value,
 }
 
@@ -580,19 +582,59 @@ pub fn compile_with_handlers(
         );
     }
 
-    // 1. Validate every key up-front: must be ignored or claimed by a
-    //    registered handler. This is a single pass over the chain
-    //    that fails loud BEFORE any handler runs (no partial
-    //    mutations on misconfiguration).
+    // 1. Validate every key up-front against the schema of the chain
+    //    element that authored it. Executor chains may cross kinds (for
+    //    example, a worker whose terminal executor is a tool); borrowing the
+    //    root kind's ignored keys or handler declarations would either reject
+    //    valid terminal metadata or, worse, let one kind smuggle a block that
+    //    only another kind owns. The explicit registry remains the mechanical
+    //    implementation set. Empty test registries without loaded kind
+    //    schemas retain the uniform-policy path used by the focused compiler
+    //    fixtures below.
     for intermediate in chain {
         let Some(obj) = intermediate.parsed.as_object() else {
             continue;
         };
+        let kind_runtime = kinds
+            .get(&intermediate.kind)
+            .map(|schema| {
+                schema.runtime().ok_or_else(|| EngineError::SchemaLoaderError {
+                reason: format!(
+                    "kind `{}` has no runtime block while compiling executor-chain item `{}`",
+                    intermediate.kind, intermediate.resolved_ref
+                ),
+            })
+            })
+            .transpose()?;
+        if let Some(spec) = kind_runtime {
+            for declaration in &spec.handlers {
+                if registry.get(&declaration.type_).is_none() {
+                    return Err(EngineError::SchemaLoaderError {
+                        reason: format!(
+                            "kind `{}` declares runtime handler `{}` which is not registered",
+                            intermediate.kind, declaration.type_
+                        ),
+                    });
+                }
+            }
+        }
         for key in obj.keys() {
-            if ignored_keys.iter().any(|k| k == key) {
+            let (ignored, claimed) = match kind_runtime {
+                Some(spec) => (
+                    spec.ignored_keys.iter().any(|candidate| candidate == key),
+                    spec.handlers
+                        .iter()
+                        .any(|declaration| declaration.type_ == *key),
+                ),
+                None => (
+                    ignored_keys.iter().any(|candidate| candidate == key),
+                    registry.get(key).is_some(),
+                ),
+            };
+            if ignored {
                 continue;
             }
-            if registry.get(key).is_none() {
+            if !claimed || registry.get(key).is_none() {
                 return Err(EngineError::UnknownRuntimeBlock {
                     key: key.clone(),
                     kind: intermediate.kind.clone(),
@@ -627,10 +669,23 @@ pub fn compile_with_handlers(
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| {
-                    c.parsed
+                    let present = c
+                        .parsed
                         .as_object()
                         .map(|o| o.contains_key(key))
-                        .unwrap_or(false)
+                        .unwrap_or(false);
+                    if !present {
+                        return false;
+                    }
+                    kinds
+                        .get(&c.kind)
+                        .and_then(|schema| schema.runtime())
+                        .map(|spec| {
+                            spec.handlers
+                                .iter()
+                                .any(|declaration| declaration.type_ == key)
+                        })
+                        .unwrap_or(true)
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -706,6 +761,13 @@ pub fn compile_with_handlers(
     let (cmd, verified_command) = if cmd_expanded.starts_with("bin:") {
         let resolved = crate::binary_resolver::resolve_runtime_binary_command_ref(
             &cmd_expanded,
+            &chain
+                .first()
+                .ok_or_else(|| EngineError::NoRuntimeConfig {
+                    chain: chain_str.to_vec(),
+                })?
+                .source_root,
+            chain[0].source_space,
             root_source_path,
             roots,
             node_trust_ref,

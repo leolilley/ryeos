@@ -47,8 +47,9 @@ use crate::runtime_registry::{
     RuntimeFactKind, RuntimeRegistry,
 };
 use ryeos_handler_protocol::{
-    ConfigMergeModeWire, FinancialAuthorityDeclWire, HandlerRequest, HandlerResponse,
-    ItemSpaceWire, LaunchConfigInputDeclWire, LaunchSecretPolicyDeclWire, RefBindingDeclWire,
+    ConfigMergeModeWire, ExternalEffectAuthorityDeclWire, FinancialAuthorityDeclWire,
+    HandlerRequest, HandlerResponse, ItemSpaceWire, LaunchConfigInputDeclWire,
+    LaunchExecutionDependencyPolicyWire, LaunchSecretPolicyDeclWire, RefBindingDeclWire,
     RuntimeFactDeclWire, RuntimeFactKindWire, TrustClassWire, ValidateComposerConfigRequest,
     ValidateLaunchPreparerConfigRequest, ValidateLaunchPreparerConfigResponse,
     ValidateParserConfigRequest,
@@ -716,12 +717,38 @@ fn launch_preparer_validation_request(
         },
         required_runtime_data: contract.required_runtime_data.clone(),
         runtime_facts,
+        execution_dependencies: LaunchExecutionDependencyPolicyWire {
+            max_dependencies: contract.execution_dependencies.max_dependencies,
+            allowed_kinds: contract.execution_dependencies.allowed_kinds.clone(),
+            allowed_spaces: contract
+                .execution_dependencies
+                .allowed_spaces
+                .iter()
+                .copied()
+                .map(item_space_wire)
+                .collect(),
+            allowed_trust: contract
+                .execution_dependencies
+                .allowed_trust
+                .iter()
+                .copied()
+                .map(trust_class_wire)
+                .collect(),
+        },
         financial_authority: match contract.financial_authority {
             crate::runtime_registry::FinancialAuthorityDecl::None => {
                 FinancialAuthorityDeclWire::None
             }
-            crate::runtime_registry::FinancialAuthorityDecl::ProviderAccountingAuthorityV1 => {
-                FinancialAuthorityDeclWire::ProviderAccountingAuthorityV1
+            crate::runtime_registry::FinancialAuthorityDecl::Accounting => {
+                FinancialAuthorityDeclWire::Accounting
+            }
+        },
+        external_effect_authority: match contract.external_effect_authority {
+            crate::runtime_registry::ExternalEffectAuthorityDecl::None => {
+                ExternalEffectAuthorityDeclWire::None
+            }
+            crate::runtime_registry::ExternalEffectAuthorityDecl::External => {
+                ExternalEffectAuthorityDeclWire::External
             }
         },
     }
@@ -1947,6 +1974,7 @@ composed_value_contract:
                 mode: LifecycleMode::DetachedOk,
             },
             callback_channel: CallbackChannel::None,
+            session: None,
         }
     }
 
@@ -2028,6 +2056,7 @@ composed_value_contract:
                 mode: LifecycleMode::DetachedOk,
             },
             callback_channel: CallbackChannel::None,
+            session: None,
         };
 
         let synthetic_ref = CanonicalRef::parse("tool:synthetic/test").unwrap();

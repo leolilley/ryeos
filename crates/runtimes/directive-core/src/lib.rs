@@ -98,7 +98,7 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub category: Option<String>,
     pub family: ProtocolFamily,
-    pub base_url: String,
+    pub transport: ProviderTransportConfig,
     #[serde(default)]
     pub auth: AuthConfig,
     #[serde(default)]
@@ -131,7 +131,7 @@ pub struct ProviderProfile {
     #[serde(default)]
     pub family: Option<ProtocolFamily>,
     #[serde(default)]
-    pub base_url: Option<String>,
+    pub transport: Option<ProviderTransportConfig>,
     #[serde(default)]
     pub auth: Option<AuthConfig>,
     #[serde(default)]
@@ -146,6 +146,91 @@ pub struct ProviderProfile {
     pub body_template: Option<Value>,
     #[serde(default)]
     pub body_extra: Option<Value>,
+}
+
+/// Provider-domain transport selection. The remote and admitted-worker paths
+/// are mechanically distinct and therefore form a closed enum; provider IDs,
+/// URL spelling, and pricing never infer this choice.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderTransportConfig {
+    RemoteHttp {
+        base_url: String,
+    },
+    AdmittedLocalWorker {
+        execute: String,
+        effect_class_ceiling: ryeos_effect_contract::EffectClass,
+    },
+}
+
+impl ProviderTransportConfig {
+    pub fn remote_base_url(&self) -> Option<&str> {
+        match self {
+            Self::RemoteHttp { base_url } => Some(base_url),
+            Self::AdmittedLocalWorker { .. } => None,
+        }
+    }
+
+    pub fn admitted_local_worker_ref(&self) -> Option<&str> {
+        match self {
+            Self::AdmittedLocalWorker { execute, .. } => Some(execute),
+            Self::RemoteHttp { .. } => None,
+        }
+    }
+
+    /// Maximum durable call semantics currently proven by this transport.
+    /// Sealed local execution requires retained qualification evidence and
+    /// cannot be minted by authored provider configuration alone.
+    pub const fn effect_class_ceiling(&self) -> ryeos_effect_contract::EffectClass {
+        match self {
+            Self::RemoteHttp { .. } | Self::AdmittedLocalWorker { .. } => {
+                ryeos_effect_contract::EffectClass::Recorded
+            }
+        }
+    }
+
+    fn validate(&self, context: &str) -> Result<()> {
+        match self {
+            Self::RemoteHttp { base_url } => {
+                if base_url.trim().is_empty() {
+                    bail!("provider config{context} has an empty remote base_url");
+                }
+                let probe = base_url.replace("{model}", "transport-probe");
+                let parsed = Url::parse(&probe).map_err(|error| {
+                    anyhow::anyhow!(
+                        "provider config{context} has an invalid remote base_url: {error}"
+                    )
+                })?;
+                if !matches!(parsed.scheme(), "http" | "https")
+                    || !parsed.username().is_empty()
+                    || parsed.password().is_some()
+                    || parsed.fragment().is_some()
+                {
+                    bail!("provider config{context} remote transport violates URL policy");
+                }
+            }
+            Self::AdmittedLocalWorker {
+                execute,
+                effect_class_ceiling,
+            } => {
+                if execute.is_empty()
+                    || execute.len() > 512
+                    || !execute.contains(':')
+                    || execute.bytes().any(|byte| {
+                        byte.is_ascii_whitespace() || byte.is_ascii_control() || byte == b'\\'
+                    })
+                {
+                    bail!("provider config{context} worker ref is not canonical");
+                }
+                if *effect_class_ceiling != ryeos_effect_contract::EffectClass::Recorded {
+                    bail!(
+                        "provider config{context} admitted worker cannot claim sealed effects without qualification evidence"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -951,9 +1036,14 @@ impl ProviderConfig {
             {
                 bail!("provider '{provider_id}' setup validation is incomplete");
             }
+            let base_url = self.transport.remote_base_url().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "provider '{provider_id}' admitted worker cannot declare HTTP setup validation"
+                )
+            })?;
             validate_setup_endpoint(
                 provider_id,
-                &self.base_url,
+                base_url,
                 validation,
                 setup.credential.is_some(),
             )?;
@@ -1017,9 +1107,12 @@ impl ProviderConfig {
                 _ => {}
             }
             if let Some(validation) = &setup.validation {
+                let base_url = effective.transport.remote_base_url().ok_or_else(|| {
+                    anyhow::anyhow!("provider '{provider_id}' admitted worker cannot declare HTTP setup validation")
+                })?;
                 validate_setup_endpoint(
                     provider_id,
-                    &effective.base_url,
+                    base_url,
                     validation,
                     setup.credential.is_some(),
                 )?;
@@ -1053,9 +1146,7 @@ impl ProviderConfig {
     }
 
     pub fn validate(&self, context: &str) -> Result<()> {
-        if self.base_url.trim().is_empty() {
-            bail!("provider config{context} has an empty base_url");
-        }
+        self.transport.validate(context)?;
         if self.body_template.is_none() {
             bail!("provider config{context} has no body_template");
         }
@@ -1068,6 +1159,15 @@ impl ProviderConfig {
         if self.auth.env_var.is_some() != self.auth.header_name.is_some() {
             bail!(
                 "provider config{context}: auth.env_var and auth.header_name must both be set or both be absent"
+            );
+        }
+        if matches!(
+            &self.transport,
+            ProviderTransportConfig::AdmittedLocalWorker { .. }
+        ) && (self.auth.env_var.is_some() || !self.headers.is_empty())
+        {
+            bail!(
+                "provider config{context}: admitted worker transport cannot carry HTTP auth or headers"
             );
         }
         if self
@@ -1410,8 +1510,8 @@ impl ProviderConfig {
         if let Some(family) = profile.family {
             resolved.family = family;
         }
-        if let Some(base_url) = &profile.base_url {
-            resolved.base_url = base_url.clone();
+        if let Some(transport) = &profile.transport {
+            resolved.transport = transport.clone();
         }
         if let Some(auth) = &profile.auth {
             resolved.auth = auth.clone();
@@ -2250,7 +2350,9 @@ mod reasoning_tests {
         let provider = ProviderConfig {
             category: None,
             family: ProtocolFamily::ChatCompletions,
-            base_url: "https://example.invalid".to_string(),
+            transport: ProviderTransportConfig::RemoteHttp {
+                base_url: "https://example.invalid".to_string(),
+            },
             auth: AuthConfig::default(),
             headers: HashMap::new(),
             schemas: None,
@@ -2291,7 +2393,7 @@ mod reasoning_tests {
     fn launch_provider() -> ProviderConfig {
         serde_json::from_value(serde_json::json!({
             "family": "chat_completions",
-            "base_url": "https://example.invalid",
+            "transport": {"kind": "remote_http", "base_url": "https://example.invalid"},
             "schemas": {
                 "streaming": {"mode": "delta_merge"},
                 "output_limit": {
@@ -2506,5 +2608,27 @@ mod shipped_provider_config_tests {
                 .validate(&format!(" for shipped model {model}"))
                 .unwrap_or_else(|error| panic!("invalid shipped DeepSeek config: {error:#}"));
         }
+    }
+
+    #[test]
+    fn admitted_local_worker_is_recorded_only_until_qualification_exists() {
+        let value: serde_json::Value = serde_yaml::from_str(include_str!(
+            "../../../../bundles/standard/.ai/config/ryeos-runtime/model-providers/local-tinygrad.yaml"
+        ))
+        .expect("shipped local worker provider YAML");
+        let provider: ProviderConfig =
+            serde_json::from_value(value.clone()).expect("shipped local worker provider config");
+        provider
+            .validate(" for shipped local worker")
+            .expect("recorded local worker provider must be admissible");
+
+        let mut unqualified = value;
+        unqualified["transport"]["effect_class_ceiling"] = serde_json::json!("sealed");
+        let unqualified: ProviderConfig = serde_json::from_value(unqualified)
+            .expect("sealed claim remains a syntactically typed effect class");
+        let error = unqualified
+            .validate(" for unqualified local worker")
+            .expect_err("authored local worker config cannot mint sealed evidence");
+        assert!(error.to_string().contains("qualification evidence"));
     }
 }

@@ -8,4 +8,5 @@ requires_kinds:
   - runtime
   - service
   - tool
+  - worker
 uses_kinds: []

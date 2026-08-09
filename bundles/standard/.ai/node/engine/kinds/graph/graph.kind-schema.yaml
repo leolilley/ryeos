@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-07T01:40:51Z:c750e10bdb3da4f039c208ab268d3f7871faaaac34f504571c96bb1aca899805:87TrcClQ7NZZgS9p1EaJHvNdepBI7FEOR+H0sjbe8fNbUEYw40VQjAbH9np5Xy3DwcEHK9+SjcuTymnEfXwkAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-08T14:31:39Z:9fd2f6f2fe461a94734ba682814c56f24b31bd29779d38adb7b5676c44402d63:omdNZZHs4+ZK3GCaxGnMFZ+Pn8veNQRcuyF/i6aQvAU4o6Ath2NSQ6gKNT809j3aweVzebpOBOHV6XiaSahuAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/graph"
 version: "1.0.0"
 location:
@@ -63,7 +63,7 @@ execution:
   # realized set into the effective digest; descendants inherit it.
   external_content:
     realization_derived: effective_external_realizations
-    allowed_roots: [project_ai, project_files]
+    allowed_roots: [project_files]
     max_declarations: 4
   effective_validator:
     handler: handler:ryeos/core/graph-effective-validator

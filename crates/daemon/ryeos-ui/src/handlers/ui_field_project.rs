@@ -406,8 +406,8 @@ fn add_admission_facts(
         let payload = &record.event.payload;
         let text = |key: &str| payload.get(key).and_then(Value::as_str).unwrap_or("");
         let id = format!("admission:{}", record.event_hash);
-        let recorded = record.event.event_type
-            == ryeos_app::admission_events::ADMISSION_RECORDED_EVENT_TYPE;
+        let recorded =
+            record.event.event_type == ryeos_app::admission_events::ADMISSION_RECORDED_EVENT_TYPE;
         let non_empty = |value: &str| Some(value.to_string()).filter(|s| !s.is_empty());
         builder.add_entity(FieldFactEntity {
             id: id.clone(),
@@ -718,15 +718,14 @@ mod tests {
                 resolution,
             },
         )]);
-        let facts =
-            project_facts(
-                graph,
-                "project:test".to_string(),
-                &projections,
-                Vec::new(),
-                None,
-            )
-            .unwrap();
+        let facts = project_facts(
+            graph,
+            "project:test".to_string(),
+            &projections,
+            Vec::new(),
+            None,
+        )
+        .unwrap();
         let encoded = serde_json::to_string(&facts).unwrap();
         assert_eq!(
             facts.schema_version,

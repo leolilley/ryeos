@@ -61,55 +61,22 @@ pub struct DispatchActionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_dispatch: Option<HookDispatchIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effect_replay: Option<EffectReplayRequest>,
+    pub effect_dispatch: Option<EffectDispatchRequest>,
 }
 
-/// Replay eligibility for a durable-class node action.
+/// Opaque authorization selected by a kind runtime for one dispatch.
 ///
-/// The runtime declares only the node name and its authored class; it never
-/// names a cache key. The daemon derives the key itself from the callback
-/// capability's digest and root ref plus the action payload on this same
-/// request, so a runtime cannot bind a result to an identity it does not
-/// hold.
+/// The callback capability contains the complete admitted authorization. The
+/// runtime can select an ID but cannot assert a class, policy digest, source
+/// identity, cache key, or callee coordinate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct EffectReplayRequest {
-    pub node: String,
-    /// `sealed` or `recorded`; a `live` node never sends this request.
-    pub class: String,
+pub struct EffectDispatchRequest {
+    pub authorization_id: String,
 }
 
-/// Replay identity for one node action: the daemon-side derivation both ends
-/// share. Hashing the wire `ActionPayload` — not either side's private value
-/// — makes the key identical by construction wherever it is computed.
-pub fn node_effect_cache_key(
-    effective_definition_digest: &str,
-    root_ref: &str,
-    node: &str,
-    action: &ActionPayload,
-) -> anyhow::Result<String> {
-    #[derive(Serialize)]
-    struct Seed<'a> {
-        schema: &'static str,
-        effective_definition_digest: &'a str,
-        root_ref: &'a str,
-        node: &'a str,
-        action: &'a ActionPayload,
-    }
-    let value = serde_json::to_value(Seed {
-        schema: "ryeos.node_effect_record.key.v1",
-        effective_definition_digest,
-        root_ref,
-        node,
-        action,
-    })?;
-    let canonical = lillux::cas::canonical_json(&value)?;
-    Ok(lillux::sha256_hex(canonical.as_bytes()))
-}
-
-/// Canonical digest of the exact dispatched action, stored on the record so
-/// a record can be audited against the action that produced it.
-pub fn node_effect_action_digest(action: &ActionPayload) -> anyhow::Result<String> {
+/// Canonical digest of the exact wire action admitted for dispatch.
+pub fn dispatch_action_digest(action: &ActionPayload) -> anyhow::Result<String> {
     let value = serde_json::to_value(action)?;
     let canonical = lillux::cas::canonical_json(&value)?;
     Ok(lillux::sha256_hex(canonical.as_bytes()))
@@ -576,32 +543,6 @@ pub trait RuntimeCallbackAPI: Send + Sync {
     async fn dispatch_action(&self, request: DispatchActionRequest)
     -> Result<Value, CallbackError>;
 
-    /// Publish one provider-call effect record for daemon validation.
-    /// Transports without a daemon record store refuse by default; every
-    /// caller treats an error as record loss, never as turn failure.
-    async fn publish_provider_call_record(
-        &self,
-        _thread_id: &str,
-        _request: Value,
-    ) -> Result<Value, CallbackError> {
-        Err(CallbackError::Transport(anyhow::anyhow!(
-            "provider-call record publication is unsupported by this callback transport"
-        )))
-    }
-
-    /// Ask the daemon for a banked record answering this request preimage.
-    /// Transports without a daemon record store refuse by default; every
-    /// caller treats an error as a miss and executes live.
-    async fn lookup_provider_call_record(
-        &self,
-        _thread_id: &str,
-        _request: Value,
-    ) -> Result<Value, CallbackError> {
-        Err(CallbackError::Transport(anyhow::anyhow!(
-            "provider-call record lookup is unsupported by this callback transport"
-        )))
-    }
-
     async fn attach_process(&self, thread_id: &str, pid: u32) -> Result<Value, CallbackError>;
 
     async fn mark_running(&self, thread_id: &str) -> Result<Value, CallbackError>;
@@ -725,7 +666,6 @@ pub trait RuntimeCallbackAPI: Send + Sync {
         )))
     }
 
-
     async fn claim_commands(&self, thread_id: &str) -> Result<Value, CallbackError>;
 
     /// Report a claimed command as `completed` or `rejected`. `command_id` is the
@@ -777,14 +717,14 @@ pub trait RuntimeCallbackAPI: Send + Sync {
     ///
     /// Defaults refuse: a directive test must provide explicit accounting
     /// behavior — a missing method never silently degrades into settled mode.
-    async fn provider_attempt_reserve(
+    async fn provider_attempt_prepare(
         &self,
         _thread_id: &str,
         _params: Value,
     ) -> Result<Value, CallbackError> {
         Err(CallbackError::ActionFailed {
             code: "unsupported".to_string(),
-            message: "provider_attempt_reserve is only supported by the daemon UDS client"
+            message: "provider_attempt_prepare is only supported by the daemon UDS client"
                 .to_string(),
             retryable: false,
         })
@@ -837,6 +777,48 @@ pub trait RuntimeCallbackAPI: Send + Sync {
         Err(CallbackError::ActionFailed {
             code: "unsupported".to_string(),
             message: "provider_attempt_get is only supported by the daemon UDS client".to_string(),
+            retryable: false,
+        })
+    }
+
+    async fn provider_attempt_local_stream_start(
+        &self,
+        _thread_id: &str,
+        _params: Value,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message:
+                "provider_attempt_local_stream_start is only supported by the daemon UDS client"
+                    .to_string(),
+            retryable: false,
+        })
+    }
+
+    async fn provider_attempt_local_stream_next(
+        &self,
+        _thread_id: &str,
+        _params: Value,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message:
+                "provider_attempt_local_stream_next is only supported by the daemon UDS client"
+                    .to_string(),
+            retryable: false,
+        })
+    }
+
+    async fn provider_attempt_local_stream_control(
+        &self,
+        _thread_id: &str,
+        _params: Value,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message:
+                "provider_attempt_local_stream_control is only supported by the daemon UDS client"
+                    .to_string(),
             retryable: false,
         })
     }
@@ -1046,7 +1028,7 @@ mod tests {
                 },
                 context_hash: "context-digest".to_string(),
             }),
-            effect_replay: None,
+            effect_dispatch: None,
         };
 
         let wire = serde_json::to_value(&request).unwrap();

@@ -77,6 +77,10 @@ impl std::fmt::Debug for PreparedManagedLaunchSkeleton {
                 "has_financial_authority",
                 &self.prepared.financial_authority.is_some(),
             )
+            .field(
+                "has_external_effect_authority",
+                &self.prepared.external_effect_authority.is_some(),
+            )
             .finish()
     }
 }
@@ -528,8 +532,11 @@ mod tests {
                 required_secrets: Vec::new(),
                 runtime_facts: Default::default(),
                 binding_records: Default::default(),
+                execution_dependencies: Default::default(),
+                admitted_sessions: Default::default(),
                 config_contributors: Vec::new(),
                 financial_authority: None,
+                external_effect_authority: None,
             },
         }
     }
@@ -724,8 +731,11 @@ mod tests {
                     required_secrets: Vec::new(),
                     runtime_facts: Default::default(),
                     binding_records: Default::default(),
+                    execution_dependencies: Default::default(),
+                    admitted_sessions: Default::default(),
                     config_contributors: Vec::new(),
                     financial_authority: None,
+                    external_effect_authority: None,
                 },
             },
             1,
@@ -744,8 +754,11 @@ mod tests {
                     required_secrets: Vec::new(),
                     runtime_facts: Default::default(),
                     binding_records: Default::default(),
+                    execution_dependencies: Default::default(),
+                    admitted_sessions: Default::default(),
                     config_contributors: Vec::new(),
                     financial_authority: None,
+                    external_effect_authority: None,
                 },
             },
             1,
@@ -757,8 +770,11 @@ mod tests {
                     required_secrets: Vec::new(),
                     runtime_facts: Default::default(),
                     binding_records: Default::default(),
+                    execution_dependencies: Default::default(),
+                    admitted_sessions: Default::default(),
                     config_contributors: Vec::new(),
                     financial_authority: None,
+                    external_effect_authority: None,
                 },
             },
             1,
@@ -785,8 +801,11 @@ mod tests {
                 }],
                 runtime_facts: Default::default(),
                 binding_records: Default::default(),
+                execution_dependencies: Default::default(),
+                admitted_sessions: Default::default(),
                 config_contributors: Vec::new(),
                 financial_authority: None,
+                external_effect_authority: None,
             },
         };
         let debug = format!("{skeleton:?}");

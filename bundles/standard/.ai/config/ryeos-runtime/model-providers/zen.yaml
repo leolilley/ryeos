@@ -1,7 +1,9 @@
-# ryeos:signed:2026-07-23T15:25:30Z:b58ce68a47b2aa42b491d55f1a22c02118ade89bd51e5c0689569953ff470e17:qsUG6SGST8BNagJoa370ZO91JaaMzdI+4UXGDfwJoKPeLhnDoRGpZAV1XeABGIZ+bKUZHfL0+e1WIv5LKnzdDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-08T14:31:40Z:dd6696d44607178704dd5b09a78a2afb6f685a3b25dfa24bdd1eb315b5ab7fae:IhCmPfht6HhSaEQ8HHKX6GzkDJNwMrhwayHquSVe2OgR3ZNBLLxFnUuy2U+f2PbzWebfU4MfQiPOn2THOlysCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
-base_url: "https://opencode.ai/zen/v1"
+transport:
+  kind: remote_http
+  base_url: "https://opencode.ai/zen/v1"
 auth:
   env_var: ZEN_API_KEY
   header_name: Authorization
@@ -92,7 +94,9 @@ profiles:
   - name: anthropic
     match: ["claude-*"]
     family: anthropic_messages
-    base_url: "https://opencode.ai/zen/v1/messages"
+    transport:
+      kind: remote_http
+      base_url: "https://opencode.ai/zen/v1/messages"
     auth:
       env_var: ZEN_API_KEY
       header_name: x-api-key
@@ -167,7 +171,9 @@ profiles:
   - name: gemini
     match: ["gemini-*"]
     family: google_generate_content
-    base_url: "https://opencode.ai/zen/v1/models/{model}:streamGenerateContent?alt=sse"
+    transport:
+      kind: remote_http
+      base_url: "https://opencode.ai/zen/v1/models/{model}:streamGenerateContent?alt=sse"
     auth:
       env_var: ZEN_API_KEY
       header_name: x-goog-api-key

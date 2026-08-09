@@ -428,7 +428,7 @@ fn capture_and_finalize_fresh_effective_program_once(
         materialization,
     )?;
     let mut resolution = resolution;
-    let captured_external = super::external_content::capture_external_realizations(
+    let captured_external = ryeos_app::external_content_admission::admit_external_realizations(
         state,
         engine,
         kind,
@@ -464,7 +464,9 @@ fn capture_and_finalize_with_hook_snapshots(
     trust_store: &ryeos_engine::trust::TrustStore,
     materialization: Option<&ryeos_app::resolution_cache::ResolutionMaterializationBinding>,
     snapshots: &LaunchConfigSnapshotSet,
-    external_realization: Option<&super::external_content::CapturedExternalRealizations>,
+    external_realization: Option<
+        &ryeos_app::external_content_admission::AdmittedExternalRealizations,
+    >,
 ) -> Result<FinalizedEffectiveProgram, DispatchError> {
     let hook_contract = engine
         .kinds

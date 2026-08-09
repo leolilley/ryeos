@@ -121,7 +121,6 @@ impl ProjectSnapshotOperation {
     }
 }
 
-
 /// Build the bundle-event capability for `op` on `bundle_id`/`event_kind`.
 pub fn bundle_event_cap(op: &BundleEventOperation, bundle_id: &str, event_kind: &str) -> String {
     canonical_cap(

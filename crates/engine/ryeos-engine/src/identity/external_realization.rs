@@ -97,8 +97,7 @@ pub fn prove_external_realizations(
     let proof = ExternalRealizationProof::new(realized)?;
     if proof.revalidate(store) != RealizationProofStatus::Current {
         return Err(EngineError::Internal(
-            "external content realization is unavailable from verified CAS authority"
-                .to_string(),
+            "external content realization is unavailable from verified CAS authority".to_string(),
         ));
     }
     Ok(proof)
@@ -145,10 +144,10 @@ mod tests {
 
     #[test]
     fn a_set_is_canonically_ordered_regardless_of_capture_order() {
-        let first = RealizedExternalContentSet::new(vec![realized("b", 'b'), realized("a", 'a')])
-            .unwrap();
-        let second = RealizedExternalContentSet::new(vec![realized("a", 'a'), realized("b", 'b')])
-            .unwrap();
+        let first =
+            RealizedExternalContentSet::new(vec![realized("b", 'b'), realized("a", 'a')]).unwrap();
+        let second =
+            RealizedExternalContentSet::new(vec![realized("a", 'a'), realized("b", 'b')]).unwrap();
         assert_eq!(first, second);
         assert_eq!(
             identity_digest_for_test(&first),
@@ -158,9 +157,11 @@ mod tests {
 
     #[test]
     fn a_missing_realization_is_not_current() {
-        let proof =
-            prove_external_realizations(RealizedExternalContentSet::new(vec![realized("a", 'a')]).unwrap(), &Present)
-                .unwrap();
+        let proof = prove_external_realizations(
+            RealizedExternalContentSet::new(vec![realized("a", 'a')]).unwrap(),
+            &Present,
+        )
+        .unwrap();
         assert_eq!(proof.revalidate(&Present), RealizationProofStatus::Current);
         assert_eq!(
             proof.revalidate(&Absent),
@@ -173,12 +174,16 @@ mod tests {
         let mut moved = realized("a", 'a');
         moved.mount = "elsewhere".to_string();
 
-        let original =
-            prove_external_realizations(RealizedExternalContentSet::new(vec![realized("a", 'a')]).unwrap(), &Present)
-                .unwrap();
-        let relocated =
-            prove_external_realizations(RealizedExternalContentSet::new(vec![moved]).unwrap(), &Present)
-                .unwrap();
+        let original = prove_external_realizations(
+            RealizedExternalContentSet::new(vec![realized("a", 'a')]).unwrap(),
+            &Present,
+        )
+        .unwrap();
+        let relocated = prove_external_realizations(
+            RealizedExternalContentSet::new(vec![moved]).unwrap(),
+            &Present,
+        )
+        .unwrap();
 
         // Identical bytes mounted elsewhere are a different program.
         assert_ne!(
@@ -188,8 +193,7 @@ mod tests {
     }
 
     fn identity_digest_for_test(value: &RealizedExternalContentSet) -> String {
-        let canonical =
-            lillux::cas::canonical_json(&serde_json::to_value(value).unwrap()).unwrap();
+        let canonical = lillux::cas::canonical_json(&serde_json::to_value(value).unwrap()).unwrap();
         lillux::cas::sha256_hex(canonical.as_bytes())
     }
 }

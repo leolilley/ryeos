@@ -5566,9 +5566,8 @@ impl RuntimeDb {
             let mut statement = self
                 .conn
                 .prepare("SELECT thread_id, claim_id, claimed_by FROM thread_launch_claim")?;
-            let mapped = statement.query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?;
+            let mapped =
+                statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
             for row in mapped {
                 rows.push(row?);
             }
@@ -10204,11 +10203,13 @@ mod tests {
     fn startup_sweep_clears_only_dead_generation_claims() {
         let (_tmp, db) = fresh_db();
         assert_eq!(
-            db.claim_thread_launch("t-dead", "c-dead", "daemon-old").unwrap(),
+            db.claim_thread_launch("t-dead", "c-dead", "daemon-old")
+                .unwrap(),
             LaunchClaimOutcome::Claimed
         );
         assert_eq!(
-            db.claim_thread_launch("t-live", "c-live", "daemon-current").unwrap(),
+            db.claim_thread_launch("t-live", "c-live", "daemon-current")
+                .unwrap(),
             LaunchClaimOutcome::Claimed
         );
 
@@ -10222,14 +10223,19 @@ mod tests {
         assert!(db.get_launch_claim("t-live").unwrap().is_some());
         assert!(db.get_launch_claim("t-dead").unwrap().is_none());
         assert_eq!(
-            db.claim_thread_launch("t-dead", "c-new", "daemon-current").unwrap(),
+            db.claim_thread_launch("t-dead", "c-new", "daemon-current")
+                .unwrap(),
             LaunchClaimOutcome::Claimed
         );
         let reclaimed = db.get_launch_claim("t-dead").unwrap().expect("reclaimed");
         assert_eq!(reclaimed.owner.monotonic_launch_epoch, 2);
 
         // Idempotent: a second sweep finds nothing.
-        assert!(db.clear_stale_launch_claims("daemon-current").unwrap().is_empty());
+        assert!(
+            db.clear_stale_launch_claims("daemon-current")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -10247,7 +10253,8 @@ mod tests {
         assert_eq!(cleared.len(), 1);
         assert_eq!(cleared[0].dead_generation, "<malformed owner>");
         assert_eq!(
-            db.claim_thread_launch("t-junk", "c-new", "daemon-current").unwrap(),
+            db.claim_thread_launch("t-junk", "c-new", "daemon-current")
+                .unwrap(),
             LaunchClaimOutcome::Claimed
         );
     }

@@ -21,11 +21,16 @@ pub fn validate(request: EffectiveValidateRequest) -> HandlerResponse {
         derived: request.composed.derived.into_iter().collect(),
         policy_facts: request.composed.policy_facts.into_iter().collect(),
     };
-    match ryeos_graph_definition::validate_effective_graph(&view) {
-        Ok(summary) => HandlerResponse::EffectiveValidate {
+    match ryeos_graph_definition::validate_effective_graph(
+        &request.canonical_ref,
+        &view,
+        &request.ancestor_requested_ids,
+    ) {
+        Ok(validation) => HandlerResponse::EffectiveValidate {
             response: EffectiveValidateResponse::Valid {
-                normalized: serde_json::to_value(summary)
+                normalized: serde_json::to_value(validation.summary)
                     .expect("validation summary is serializable"),
+                effect_authorizations: validation.effect_authorizations,
             },
         },
         Err(error) => invalid("invalid_effective_graph", error.to_string()),
@@ -109,14 +114,18 @@ mod tests {
                     serde_json::json!([]),
                 )]),
             },
-            ancestor_refs: vec!["graph:test/base".to_string()],
+            ancestor_requested_ids: Vec::new(),
         }
     }
 
     #[test]
     fn handler_accepts_the_complete_composed_graph_and_returns_normalized_summary() {
         let HandlerResponse::EffectiveValidate {
-            response: EffectiveValidateResponse::Valid { normalized },
+            response:
+                EffectiveValidateResponse::Valid {
+                    normalized,
+                    effect_authorizations,
+                },
         } = validate(request())
         else {
             panic!("effective graph should validate");
@@ -125,6 +134,7 @@ mod tests {
             normalized["schema"],
             ryeos_graph_definition::GRAPH_EFFECTIVE_VALIDATION_SCHEMA
         );
+        assert!(effect_authorizations.is_empty());
         assert_eq!(normalized["node_count"], 1);
         assert_eq!(normalized["edge_count"], 0);
     }

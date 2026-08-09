@@ -270,6 +270,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
                     .as_ref()
                     .map(|bound| bound.mounts())
                     .unwrap_or(&[]),
+                target_channel: None,
                 item_ref: &isolation_item_ref,
                 thread_id,
             },

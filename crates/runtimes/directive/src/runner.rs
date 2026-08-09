@@ -15,8 +15,8 @@ use crate::resume::ResumeState;
 use ryeos_accounting::{
     AttemptBudgetState, BillableDimension, ChargeReconciliationAuthority, HexDigest,
     ProviderAccountingAuthority, ProviderAttemptGetParams, ProviderAttemptMarkIssuedParams,
-    ProviderAttemptReleaseUnissuedParams, ProviderAttemptReserveParams,
-    ProviderAttemptReserveResponse, ProviderAttemptSettleParams, ReconciliationReason,
+    ProviderAttemptPrepareParams, ProviderAttemptPrepareResponse,
+    ProviderAttemptReleaseUnissuedParams, ProviderAttemptSettleParams, ReconciliationReason,
     SpendAccounting, SpendBoundAuthority, TokenAccounting, UnitCount, VerifiedPreparedSpendBound,
 };
 use ryeos_runtime::callback_client::CallbackClient;
@@ -125,7 +125,7 @@ pub enum State {
     Streaming {
         // The full sequence of streamed events, kept for diagnostic
         // counts. Real per-delta `cognition_out` persistence already
-        // happened inside `provider_adapter::call_provider_streaming`,
+        // happened inside the prepared provider streaming transport,
         // and the typed assistant message (text + tool_calls) was
         // pushed onto `self.messages` before this state runs.
         events: Vec<StreamEvent>,
@@ -277,11 +277,18 @@ struct LedgerAttempt {
     request_hash: String,
     /// Sealed authority digest echoed back by the reserve transition.
     authority_digest: HexDigest,
+    coordinate: ryeos_provider_contract::RequestCoordinate,
 }
 
 /// Outcome of ledger admission for one physical attempt.
 #[derive(Debug)]
 enum LedgerAdmission {
+    /// A verified immutable provider answer exists. No reservation or provider
+    /// contact is permitted for this attempt.
+    Replayed {
+        record_hash: String,
+        response: crate::provider_adapter::http::AdapterResponse,
+    },
     /// Reserved and durably issued: the exact prepared bytes may be sent.
     Admitted(LedgerAttempt),
     /// The daemon durably denied the reservation (insufficient budget).
@@ -421,7 +428,6 @@ fn retry_backoff(
 /// exact fingerprint recovers the recorded operation, while replaying it
 /// with different prepared bytes is an integrity conflict daemon-side.
 #[allow(clippy::too_many_arguments)] // one field per bound fact, by design
-use ryeos_accounting::rpc::provider_attempt_request_hash;
 
 /// Truncate a settlement diagnostic to the shared RPC bound (char-safe).
 fn bound_diagnostic(text: &str) -> String {
@@ -676,12 +682,6 @@ impl Runner {
         let effective_caps = harness.effective_caps().to_vec();
         let dispatcher = Dispatcher::new(tools.clone(), effective_caps);
 
-        if provider_effects_recorded && financial_authority.is_none() {
-            tracing::warn!(
-                "directive declares a durable effects class but its provider route has no \
-                 spend authority; calls cannot bind to a reservation and will bank no records"
-            );
-        }
         Self {
             messages: initial_messages,
             tools,
@@ -887,7 +887,14 @@ impl Runner {
         // Hard budget mode is only meaningful when the daemon reservation
         // ledger backs the route. main.rs enforces this at startup; this is
         // the fail-closed backstop for alternate construction paths.
-        let mut state = if self.execution.accounting.budget_mode
+        let mut state = if self.provider_effects_recorded && ledger_authority.is_none() {
+            State::Errored {
+                error: "external_effect_authority_invalid: recorded provider calls require a \
+                        Paid or ExplicitlyFree sealed financial authority so replay evidence can \
+                        be published only at the terminal accounting boundary"
+                    .to_string(),
+            }
+        } else if self.execution.accounting.budget_mode
             == crate::directive::AccountingBudgetMode::Hard
             && ledger_authority.is_none()
         {
@@ -1036,11 +1043,98 @@ impl Runner {
                                 Ok(prepared) => prepared,
                                 Err(error) => break Err(error),
                             };
-                        // Replay serve: consult the record store before any
-                        // reservation. A served record answers the identical
-                        // prepared request under this sealed program; billing
-                        // nothing and consuming no reservation is the point.
-                        let replayed = self.lookup_provider_call_replay(&prepared).await;
+                        // The daemon owns the atomic replay-or-reserve
+                        // boundary. Only its proven replay may bypass contact;
+                        // transport failure is never interpreted as a miss.
+                        let mut ledger_attempt = None;
+                        let replayed = if let Some(authority) = ledger_authority.as_ref() {
+                            let verified = match crate::spend_verifier::verify_prepared_spend_bound(
+                                &prepared,
+                                authority,
+                                &self.provider_config,
+                                self.context_window,
+                                self.execution.max_provider_output_tokens_per_turn,
+                            ) {
+                                Ok(verified) => verified,
+                                Err(error) => {
+                                    break Err(anyhow::anyhow!(
+                                        "provider_spend_bound_unverified: {error:#}"
+                                    ));
+                                }
+                            };
+                            match self
+                                .admit_ledger_attempt(
+                                    turn,
+                                    attempt_number,
+                                    &prepared,
+                                    authority,
+                                    verified,
+                                    &cancel_flag,
+                                    &interrupt_flag,
+                                )
+                                .await
+                            {
+                                Ok(LedgerAdmission::Replayed {
+                                    record_hash,
+                                    response,
+                                }) => Some((record_hash, response)),
+                                Ok(LedgerAdmission::Admitted(ledger)) => {
+                                    last_attempt_id = Some(ledger.attempt_id.clone());
+                                    ledger_attempt = Some(ledger);
+                                    None
+                                }
+                                Ok(LedgerAdmission::Denied) => {
+                                    break Err(anyhow::anyhow!(
+                                        "budget_exceeded: the daemon ledger denied the provider \
+                                         attempt reservation (insufficient available balance for \
+                                         the route maximum); zero provider requests"
+                                    ));
+                                }
+                                Ok(LedgerAdmission::CancelledBeforeIssue) => {
+                                    break Ok(crate::provider_adapter::StreamOutcome::Cancelled {
+                                        attempt:
+                                            crate::provider_adapter::streaming::CutAttemptState {
+                                                usage: None,
+                                                generation_header_id: None,
+                                                response_id: None,
+                                                requested_output_tokens: prepared
+                                                    .requested_output_tokens,
+                                                observed_output: Default::default(),
+                                            },
+                                    });
+                                }
+                                Ok(LedgerAdmission::InterruptedBeforeIssue) => {
+                                    break Ok(crate::provider_adapter::StreamOutcome::Interrupted {
+                                        partial_message: ProviderMessage {
+                                            role: "assistant".to_string(),
+                                            content: None,
+                                            tool_calls: None,
+                                            tool_call_id: None,
+                                            reasoning_content: None,
+                                        },
+                                        events: Vec::new(),
+                                        attempt:
+                                            crate::provider_adapter::streaming::CutAttemptState {
+                                                usage: None,
+                                                generation_header_id: None,
+                                                response_id: None,
+                                                requested_output_tokens: prepared
+                                                    .requested_output_tokens,
+                                                observed_output: Default::default(),
+                                            },
+                                    });
+                                }
+                                Ok(LedgerAdmission::ReleasedByDaemon { detail }) => {
+                                    break Err(anyhow::anyhow!(
+                                        "provider_attempt_released_before_issue: {detail}; \
+                                         zero provider connections"
+                                    ));
+                                }
+                                Err(error) => break Err(error),
+                            }
+                        } else {
+                            None
+                        };
                         turn_replayed_from = replayed
                             .as_ref()
                             .map(|(record_hash, _)| record_hash.clone());
@@ -1077,103 +1171,33 @@ impl Runner {
                                 events: Vec::new(),
                             })
                         } else {
-                            // Ledger admission: verify → reserve → (release on a
-                            // pre-issue signal) → mark issued. No provider request
-                            // may start unless the issue is durably proven.
-                            let ledger_attempt = if let Some(authority) = ledger_authority.as_ref()
-                            {
-                                let verified =
-                                    match crate::spend_verifier::verify_prepared_spend_bound(
-                                        &prepared,
-                                        authority,
-                                        &self.provider_config,
-                                        self.context_window,
-                                        self.execution.max_provider_output_tokens_per_turn,
-                                    ) {
-                                        Ok(verified) => verified,
-                                        Err(error) => {
-                                            break Err(anyhow::anyhow!(
-                                                "provider_spend_bound_unverified: {error:#}"
-                                            ));
-                                        }
-                                    };
-                                match self
-                                    .admit_ledger_attempt(
-                                        turn,
-                                        attempt_number,
-                                        &prepared,
-                                        authority,
-                                        verified,
-                                        &cancel_flag,
-                                        &interrupt_flag,
-                                    )
-                                    .await
-                                {
-                                    Ok(LedgerAdmission::Admitted(ledger)) => {
-                                        last_attempt_id = Some(ledger.attempt_id.clone());
-                                        Some(ledger)
-                                    }
-                                    Ok(LedgerAdmission::Denied) => {
-                                        // Terminal directive error — the ledger
-                                        // durably recorded the denial; the retry
-                                        // loop must not spin against it.
-                                        break Err(anyhow::anyhow!(
-                                            "budget_exceeded: the daemon ledger denied the provider \
-                                             attempt reservation (insufficient available balance for \
-                                             the route maximum); zero provider requests"
-                                        ));
-                                    }
-                                    Ok(LedgerAdmission::CancelledBeforeIssue) => {
-                                        break Ok(crate::provider_adapter::StreamOutcome::Cancelled {
-                                            attempt:
-                                                crate::provider_adapter::streaming::CutAttemptState {
-                                                    usage: None,
-                                                    generation_header_id: None,
-                                                    response_id: None,
-                                                    requested_output_tokens: prepared
-                                                        .requested_output_tokens,
-                                                    observed_output: Default::default(),
-                                                },
-                                        });
-                                    }
-                                    Ok(LedgerAdmission::InterruptedBeforeIssue) => {
-                                        break Ok(crate::provider_adapter::StreamOutcome::Interrupted {
-                                            partial_message: ProviderMessage {
-                                                role: "assistant".to_string(),
-                                                content: None,
-                                                tool_calls: None,
-                                                tool_call_id: None,
-                                                reasoning_content: None,
-                                            },
-                                            events: Vec::new(),
-                                            attempt:
-                                                crate::provider_adapter::streaming::CutAttemptState {
-                                                    usage: None,
-                                                    generation_header_id: None,
-                                                    response_id: None,
-                                                    requested_output_tokens: prepared
-                                                        .requested_output_tokens,
-                                                    observed_output: Default::default(),
-                                                },
-                                        });
-                                    }
-                                    Ok(LedgerAdmission::ReleasedByDaemon { detail }) => {
-                                        break Err(anyhow::anyhow!(
-                                            "provider_attempt_released_before_issue: {detail}; \
-                                             zero provider connections"
-                                        ));
-                                    }
-                                    Err(error) => break Err(error),
-                                }
-                            } else {
-                                None
-                            };
                             // Send the exact prepared bytes.
-                            let call = crate::provider_adapter::send_prepared_streaming(
-                                &call_input,
-                                &prepared,
-                            )
-                            .await;
+                            let call = match &prepared.transport {
+                                crate::provider_adapter::PreparedProviderTransport::RemoteHttp {
+                                    ..
+                                } => crate::provider_adapter::send_prepared_streaming(
+                                    &call_input,
+                                    &prepared,
+                                )
+                                .await,
+                                crate::provider_adapter::PreparedProviderTransport::AdmittedLocalWorker {
+                                    ..
+                                } => match ledger_attempt.as_ref() {
+                                    Some(ledger) => {
+                                        crate::provider_adapter::send_prepared_local_streaming(
+                                            &call_input,
+                                            &prepared,
+                                            &ledger.attempt_id,
+                                            &ledger.request_hash,
+                                            &ledger.coordinate,
+                                        )
+                                        .await
+                                    }
+                                    None => Err(anyhow::anyhow!(
+                                        "admitted local worker transport requires a durably-issued accounting attempt"
+                                    )),
+                                },
+                            };
                             // One terminal daemon settlement per issued attempt,
                             // BEFORE retry classification: a retry is a NEW attempt
                             // and may only be admitted after its predecessor's
@@ -1221,29 +1245,28 @@ impl Runner {
                                     ledger_usage,
                                     ledger_diag.as_deref(),
                                 );
-                                if let Err(settle_error) =
-                                    self.settle_ledger_attempt(&ledger, spend, tokens).await
+                                let answer = match &call {
+                                    Ok(crate::provider_adapter::StreamOutcome::Completed {
+                                        response,
+                                        ..
+                                    }) => match crate::directive::normalize_provider_call_answer(
+                                        &response.message,
+                                        response.finish_reason.as_deref(),
+                                    ) {
+                                        Ok(answer) => Some(answer),
+                                        Err(error) => break Err(error),
+                                    },
+                                    _ => None,
+                                };
+                                if let Err(settle_error) = self
+                                    .settle_ledger_attempt(&ledger, spend, tokens, answer)
+                                    .await
                                 {
                                     // Terminal settlement unprovable: no retry,
                                     // fail-safe termination.
                                     break Err(anyhow::anyhow!(
                                         "provider_attempt_settlement_unprovable: {settle_error:#}"
                                     ));
-                                }
-                                if stream_completed
-                                    && let Ok(crate::provider_adapter::StreamOutcome::Completed {
-                                        response,
-                                        ..
-                                    }) = &call
-                                {
-                                    self.publish_provider_call_record_best_effort(
-                                        &ledger,
-                                        turn,
-                                        attempt_number,
-                                        &prepared,
-                                        response,
-                                    )
-                                    .await;
                                 }
                             }
                             call
@@ -2834,7 +2857,7 @@ impl Runner {
                                             project_path: proj,
                                             action: payload,
                                             hook_dispatch: Some(hook_dispatch),
-                                            effect_replay: None,
+                                            effect_dispatch: None,
                                         },
                                     )
                                     .await?;
@@ -3278,7 +3301,7 @@ impl Runner {
                             launch_window: None,
                         },
                         hook_dispatch: None,
-                        effect_replay: None,
+                        effect_dispatch: None,
                     }))
                 }
             }
@@ -3461,60 +3484,94 @@ impl Runner {
     ) -> anyhow::Result<LedgerAdmission> {
         use std::sync::atomic::Ordering;
 
-        let request_hash = provider_attempt_request_hash(
-            &self.thread_id,
-            turn,
-            attempt_number,
-            &self.config_hash,
-            &self.provider_id,
-            &self.model_name,
-            prepared.requested_output_tokens,
-            authority.authority_digest.as_str(),
-            &prepared.body_sha256,
-        );
-        let reserve_params = ProviderAttemptReserveParams {
+        let prepare_params = ProviderAttemptPrepareParams {
             thread_id: self.thread_id.clone(),
             turn,
             attempt_number,
-            request_hash: request_hash.clone(),
-            config_hash: self.config_hash.clone(),
+            transport: match &prepared.transport {
+                crate::provider_adapter::PreparedProviderTransport::RemoteHttp { method, url } => {
+                    ryeos_provider_contract::PreparedTransportIntent::RemoteHttp {
+                        method: method.as_str().to_owned(),
+                        url: url.clone(),
+                    }
+                }
+                crate::provider_adapter::PreparedProviderTransport::AdmittedLocalWorker {
+                    execute,
+                } => ryeos_provider_contract::PreparedTransportIntent::AdmittedLocalWorker {
+                    execute: execute.clone(),
+                },
+            },
+            request: ryeos_provider_contract::PreparedRequestProjection::from_coordinates(
+                prepared.public_header_coordinates.clone(),
+                prepared.credential_header_names.clone(),
+                prepared.body_sha256.clone(),
+                prepared.requested_output_ceiling,
+            )?,
             verified_bound: verified,
         };
-        let response = self.reserve_with_recovery(&reserve_params).await?;
-        if response.state == AttemptBudgetState::ReservationDenied {
-            return Ok(LedgerAdmission::Denied);
-        }
-        if response.state != AttemptBudgetState::Reserved {
-            // A replayed record of an attempt this coordinate already drove
-            // to another state — never reissue it.
-            anyhow::bail!(
-                "provider attempt reservation returned unexpected state `{}` for attempt {}",
-                response.state.as_str(),
-                response.attempt_id
-            );
-        }
-        if response.authority_digest != authority.authority_digest {
+        let response = self.prepare_with_recovery(&prepare_params).await?;
+        let (attempt_id, request_hash, coordinate, response_authority_digest, execution_budget_id) =
+            match response {
+                ProviderAttemptPrepareResponse::Replay {
+                    record_hash,
+                    answer,
+                } => {
+                    let message: ProviderMessage =
+                        serde_json::from_value(serde_json::to_value(answer.message)?)?;
+                    return Ok(LedgerAdmission::Replayed {
+                        record_hash,
+                        response: crate::provider_adapter::http::AdapterResponse {
+                            message,
+                            usage: None,
+                            finish_reason: answer.finish_reason,
+                            generation_header_id: None,
+                            response_id: None,
+                            requested_output_tokens: prepared.requested_output_tokens,
+                            observed_output: Default::default(),
+                        },
+                    });
+                }
+                ProviderAttemptPrepareResponse::ReservationDenied { .. } => {
+                    return Ok(LedgerAdmission::Denied);
+                }
+                ProviderAttemptPrepareResponse::Reserved {
+                    attempt_id,
+                    request_hash,
+                    coordinate,
+                    authority_digest,
+                    execution_budget_id,
+                    ..
+                } => (
+                    attempt_id,
+                    request_hash,
+                    coordinate,
+                    authority_digest,
+                    execution_budget_id,
+                ),
+            };
+        if response_authority_digest != authority.authority_digest {
             anyhow::bail!(
                 "daemon reservation authority digest {} contradicts the sealed launch \
                  authority {}",
-                response.authority_digest.as_str(),
+                response_authority_digest.as_str(),
                 authority.authority_digest.as_str()
             );
         }
         if let Some(scope) = &self.accounting_scope
-            && response.execution_budget_id != scope.execution_budget_id
+            && execution_budget_id != scope.execution_budget_id
         {
             anyhow::bail!(
                 "daemon reservation execution budget `{}` contradicts the sealed launch \
                  scope `{}`",
-                response.execution_budget_id,
+                execution_budget_id,
                 scope.execution_budget_id
             );
         }
         let ledger = LedgerAttempt {
-            attempt_id: response.attempt_id,
+            attempt_id,
             request_hash,
-            authority_digest: response.authority_digest,
+            authority_digest: response_authority_digest,
+            coordinate,
         };
         // A signal in the reserve→issue window releases rather than crossing
         // the issue boundary: once issued, even a never-sent request is
@@ -3579,24 +3636,28 @@ impl Runner {
         }
     }
 
-    /// Reserve with bounded exact-retry lost-reply recovery. The daemon mints
-    /// the attempt ID, so before a first successful reply there is no state
-    /// read available — exhausting the retries means the reservation commit
-    /// is unprovable and the attempt must fail with zero provider requests.
-    async fn reserve_with_recovery(
+    /// Prepare replay-or-reservation with bounded exact retry. The daemon owns
+    /// the atomic lookup/absence decision and reservation crossing, so a
+    /// transport error can never be interpreted as a replay miss.
+    async fn prepare_with_recovery(
         &self,
-        params: &ProviderAttemptReserveParams,
-    ) -> anyhow::Result<ProviderAttemptReserveResponse> {
+        params: &ProviderAttemptPrepareParams,
+    ) -> anyhow::Result<ProviderAttemptPrepareResponse> {
         let mut last_error: Option<String> = None;
         for retry in 0..=LEDGER_RPC_RETRIES {
-            let reserve_result = self.callback.provider_attempt_reserve(params).await;
-            match reserve_result {
+            let prepare_result = self.callback.provider_attempt_prepare(params).await;
+            match prepare_result {
                 Ok(response) => {
-                    if response.replayed {
+                    if matches!(
+                        &response,
+                        ProviderAttemptPrepareResponse::Reserved { replayed: true, .. }
+                            | ProviderAttemptPrepareResponse::ReservationDenied {
+                                replayed: true,
+                                ..
+                            }
+                    ) {
                         tracing::warn!(
-                            attempt_id = %response.attempt_id,
-                            "reservation reply was lost; exact idempotent retry recovered the \
-                             recorded reservation"
+                            "provider-attempt prepare reply was lost; exact retry recovered the recorded outcome"
                         );
                     }
                     return Ok(response);
@@ -3605,7 +3666,7 @@ impl Runner {
                     tracing::warn!(
                         retry,
                         error = %error,
-                        "provider_attempt_reserve failed; retrying the exact same reservation"
+                        "provider_attempt_prepare failed; retrying the exact same preparation"
                     );
                     last_error = Some(error.to_string());
                     if retry < LEDGER_RPC_RETRIES {
@@ -3615,7 +3676,7 @@ impl Runner {
             }
         }
         Err(anyhow::anyhow!(
-            "reservation commit unprovable after {} attempts, zero provider requests: {}",
+            "provider-attempt preparation unprovable after {} attempts, zero provider requests: {}",
             LEDGER_RPC_RETRIES + 1,
             last_error.unwrap_or_else(|| "no error recorded".to_string())
         ))
@@ -3699,135 +3760,31 @@ impl Runner {
     /// Settle the issued attempt with bounded exact-retry recovery, then a
     /// recorded-state read. A terminal settlement that cannot be proven is an
     /// error — the caller must fail safe without admitting a retry.
-    /// Ask the daemon for a banked record answering this exact prepared
-    /// request. Any transport error or miss means live execution; a hit is
-    /// billed nothing, consumes no reservation, and reconstructs the
-    /// response with `usage: None` — a replayed call has no provider usage,
-    /// and pretending otherwise would double-report history as spend.
-    async fn lookup_provider_call_replay(
-        &self,
-        prepared: &crate::provider_adapter::PreparedProviderRequest,
-    ) -> Option<(String, crate::provider_adapter::http::AdapterResponse)> {
-        if !self.provider_effects_recorded {
-            return None;
-        }
-        let request = serde_json::json!({
-            "envelope": {
-                "method": "POST",
-                "url": prepared.url,
-                "header_names": prepared.header_names,
-                "requested_output_tokens": prepared.requested_output_tokens,
-            },
-            "body_sha256": prepared.body_sha256,
-        });
-        let value = match self.callback.lookup_provider_call_record(request).await {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::debug!(%error, "provider record lookup unavailable; executing live");
-                return None;
-            }
-        };
-        if value.get("stored").and_then(serde_json::Value::as_bool) != Some(true) {
-            return None;
-        }
-        let record_hash = value.get("record_hash")?.as_str()?.to_string();
-        let response_value = value.get("response")?;
-        let message: ProviderMessage =
-            match serde_json::from_value(response_value.get("message")?.clone()) {
-                Ok(message) => message,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        %record_hash,
-                        "banked provider record message failed to decode; executing live"
-                    );
-                    return None;
-                }
-            };
-        let finish_reason = response_value
-            .get("finish_reason")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
-        Some((
-            record_hash,
-            crate::provider_adapter::http::AdapterResponse {
-                message,
-                usage: None,
-                finish_reason,
-                generation_header_id: None,
-                response_id: None,
-                requested_output_tokens: prepared.requested_output_tokens,
-                observed_output: Default::default(),
-            },
-        ))
-    }
-
-    /// Submit one settled, completed provider call for daemon-validated
-    /// record publication. Best-effort by contract: record loss is honest
-    /// loss — a failed publication warns and the run proceeds, and the next
-    /// identical run simply pays the provider again. The daemon re-derives
-    /// every digest and the effect class from its own state; this request
-    /// carries only preimages and the response as consumed.
-    async fn publish_provider_call_record_best_effort(
-        &self,
-        ledger: &LedgerAttempt,
-        turn: u32,
-        attempt_number: u32,
-        prepared: &crate::provider_adapter::PreparedProviderRequest,
-        response: &crate::provider_adapter::http::AdapterResponse,
-    ) {
-        if !self.provider_effects_recorded {
-            return;
-        }
-        let request = serde_json::json!({
-            "attempt_id": ledger.attempt_id,
-            "intent": {
-                "turn": turn,
-                "attempt_number": attempt_number,
-                "config_hash": self.config_hash,
-                "provider_id": self.provider_id,
-                "model_name": self.model_name,
-                "requested_output_tokens": prepared.requested_output_tokens,
-                "authority_digest": ledger.authority_digest.as_str(),
-            },
-            "envelope": {
-                "method": "POST",
-                "url": prepared.url,
-                "header_names": prepared.header_names,
-                "requested_output_tokens": prepared.requested_output_tokens,
-            },
-            "body_sha256": prepared.body_sha256,
-            "response": {
-                "message": response.message,
-                "usage": response.usage,
-                "finish_reason": response.finish_reason,
-            },
-            "provider_accounting": response.usage,
-        });
-        if let Err(error) = self.callback.publish_provider_call_record(request).await {
-            tracing::warn!(
-                %error,
-                turn,
-                attempt_number,
-                "provider call record publication failed; continuing without a record"
-            );
-        }
-    }
-
     async fn settle_ledger_attempt(
         &self,
         ledger: &LedgerAttempt,
         spend: SpendAccounting,
         tokens: TokenAccounting,
+        answer: Option<ryeos_provider_contract::ProviderCallAnswer>,
     ) -> anyhow::Result<()> {
         let params = ProviderAttemptSettleParams {
             thread_id: self.thread_id.clone(),
             attempt_id: ledger.attempt_id.clone(),
             request_hash: ledger.request_hash.clone(),
             authority_digest: ledger.authority_digest.clone(),
+            coordinate: ledger.coordinate.clone(),
             spend,
             tokens,
+            answer,
         };
+        let required_publication = params
+            .answer
+            .as_ref()
+            .filter(|_| params.coordinate.admitted_effect_class.is_some())
+            .map(|answer| {
+                Ok::<_, anyhow::Error>((params.coordinate.cache_key()?, answer.digest()?))
+            })
+            .transpose()?;
         let mut last_error: Option<String> = None;
         for retry in 0..=LEDGER_RPC_RETRIES {
             let settlement_result = self.callback.provider_attempt_settle(&params).await;
@@ -3845,6 +3802,12 @@ impl Runner {
                             attempt_id = %ledger.attempt_id,
                             "settlement reply was lost; exact idempotent retry recovered the \
                              recorded terminal transition"
+                        );
+                    }
+                    if required_publication.is_some() && response.publication.is_none() {
+                        anyhow::bail!(
+                            "provider attempt {} reached financial terminal state without durable answer publication",
+                            ledger.attempt_id
                         );
                     }
                     return Ok(());
@@ -3874,6 +3837,20 @@ impl Runner {
             Ok(Some(record))
                 if record.state.is_terminal() && record.request_hash == params.request_hash =>
             {
+                if let Some((cache_key, answer_digest)) = required_publication.as_ref() {
+                    let proof = record.publication_proof.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "terminal settlement for attempt {} is unbanked",
+                            ledger.attempt_id
+                        )
+                    })?;
+                    if &proof.cache_key != cache_key || &proof.answer_digest != answer_digest {
+                        anyhow::bail!(
+                            "terminal settlement publication proof contradicts attempt {}",
+                            ledger.attempt_id
+                        );
+                    }
+                }
                 tracing::warn!(
                     attempt_id = %ledger.attempt_id,
                     state = record.state.as_str(),
@@ -4553,7 +4530,9 @@ mod tests {
         let provider = crate::directive::ProviderConfig {
             category: None,
             family: crate::directive::ProtocolFamily::ChatCompletions,
-            base_url: "http://localhost".to_string(),
+            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+                base_url: "http://localhost".to_string(),
+            },
             auth: Default::default(),
             headers: Default::default(),
             schemas: None,
@@ -4639,7 +4618,9 @@ mod tests {
         let provider = crate::directive::ProviderConfig {
             category: None,
             family: crate::directive::ProtocolFamily::ChatCompletions,
-            base_url: "http://localhost".to_string(),
+            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+                base_url: "http://localhost".to_string(),
+            },
             auth: Default::default(),
             headers: Default::default(),
             schemas: None,
@@ -4694,7 +4675,9 @@ mod tests {
         let provider = crate::directive::ProviderConfig {
             category: None,
             family: crate::directive::ProtocolFamily::ChatCompletions,
-            base_url: "http://localhost".to_string(),
+            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+                base_url: "http://localhost".to_string(),
+            },
             auth: Default::default(),
             headers: Default::default(),
             schemas: None,
@@ -4754,7 +4737,9 @@ mod tests {
         let provider = crate::directive::ProviderConfig {
             category: None,
             family: crate::directive::ProtocolFamily::ChatCompletions,
-            base_url: "http://localhost".to_string(),
+            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+                base_url: "http://localhost".to_string(),
+            },
             auth: Default::default(),
             headers: Default::default(),
             schemas: None,
@@ -4823,7 +4808,9 @@ mod tests {
         let provider = crate::directive::ProviderConfig {
             category: None,
             family: crate::directive::ProtocolFamily::ChatCompletions,
-            base_url: "http://localhost".to_string(),
+            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+                base_url: "http://localhost".to_string(),
+            },
             auth: Default::default(),
             headers: Default::default(),
             schemas: None,
@@ -4923,7 +4910,7 @@ mod tests {
     }
 
     #[test]
-    fn hook_dispatch_result_rejects_legacy_or_contradictory_runtime_status() {
+    fn hook_dispatch_result_rejects_noncanonical_or_contradictory_runtime_status() {
         for envelope in [
             json!({
                 "success": false,
@@ -5003,7 +4990,9 @@ mod tests {
         let provider = crate::directive::ProviderConfig {
             category: None,
             family: crate::directive::ProtocolFamily::ChatCompletions,
-            base_url: "http://localhost".to_string(),
+            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+                base_url: "http://localhost".to_string(),
+            },
             auth: Default::default(),
             headers: Default::default(),
             schemas: None,
@@ -5070,7 +5059,9 @@ mod tests {
         let provider = crate::directive::ProviderConfig {
             category: None,
             family: crate::directive::ProtocolFamily::ChatCompletions,
-            base_url: "http://localhost".to_string(),
+            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+                base_url: "http://localhost".to_string(),
+            },
             auth: Default::default(),
             headers: Default::default(),
             schemas: None,
@@ -5141,7 +5132,9 @@ mod tests {
         let provider = crate::directive::ProviderConfig {
             category: None,
             family: crate::directive::ProtocolFamily::ChatCompletions,
-            base_url: "http://localhost".to_string(),
+            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+                base_url: "http://localhost".to_string(),
+            },
             auth: Default::default(),
             headers: Default::default(),
             schemas: None,
@@ -5203,7 +5196,9 @@ mod tests {
         let provider = crate::directive::ProviderConfig {
             category: None,
             family: crate::directive::ProtocolFamily::ChatCompletions,
-            base_url: "http://localhost".to_string(),
+            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+                base_url: "http://localhost".to_string(),
+            },
             auth: Default::default(),
             headers: Default::default(),
             schemas: None,
@@ -5426,18 +5421,8 @@ mod tests {
 
     #[test]
     fn request_hash_is_stable_and_body_sensitive() {
-        let hash = |body_sha256: &str| {
-            provider_attempt_request_hash(
-                "T-test",
-                3,
-                2,
-                "cfg-hash",
-                "route",
-                "model",
-                Some(8_192),
-                "a".repeat(64).as_str(),
-                body_sha256,
-            )
+        let hash = |coordinate_key: &str| {
+            ryeos_accounting::rpc::provider_attempt_request_hash("T-test", 3, 2, coordinate_key)
         };
         assert_eq!(hash("bodybody"), hash("bodybody"), "same inputs, same hash");
         assert_ne!(
@@ -5446,17 +5431,7 @@ mod tests {
             "changed body changes hash"
         );
         assert_ne!(
-            provider_attempt_request_hash(
-                "T-test",
-                3,
-                3, // different attempt number
-                "cfg-hash",
-                "route",
-                "model",
-                Some(8_192),
-                "a".repeat(64).as_str(),
-                "bodybody",
-            ),
+            ryeos_accounting::rpc::provider_attempt_request_hash("T-test", 3, 3, "bodybody",),
             hash("bodybody"),
             "changed coordinate changes hash"
         );
@@ -5868,7 +5843,7 @@ mod tests {
             Ok(Value::Null)
         }
 
-        async fn provider_attempt_reserve(
+        async fn provider_attempt_prepare(
             &self,
             _thread_id: &str,
             params: Value,
@@ -5878,14 +5853,24 @@ mod tests {
             if should_error {
                 return Err(Self::transport_err("reserve"));
             }
-            Ok(json!({
+            let outcome = if self.reserve_state == AttemptBudgetState::ReservationDenied {
+                "reservation_denied"
+            } else {
+                "reserved"
+            };
+            let mut response = json!({
+                "outcome": outcome,
                 "attempt_id": "A-daemon-1",
-                "state": self.reserve_state,
-                "reserved": "0.5",
+                "request_hash": "rh-1",
+                "coordinate": test_coordinate_value(&self.authority_digest),
                 "authority_digest": self.authority_digest,
                 "execution_budget_id": "B-exec-1",
                 "replayed": replayed,
-            }))
+            });
+            if outcome == "reserved" {
+                response["reserved"] = json!("0.5");
+            }
+            Ok(response)
         }
 
         async fn provider_attempt_mark_issued(
@@ -5947,7 +5932,9 @@ mod tests {
         let provider = crate::directive::ProviderConfig {
             category: None,
             family: crate::directive::ProtocolFamily::ChatCompletions,
-            base_url: "http://localhost".to_string(),
+            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+                base_url: "http://localhost".to_string(),
+            },
             auth: Default::default(),
             headers: Default::default(),
             schemas: None,
@@ -6000,17 +5987,28 @@ mod tests {
         let body_bytes = br#"{"messages":[]}"#.to_vec();
         let body_sha256 = lillux::cas::sha256_hex(&body_bytes);
         crate::provider_adapter::PreparedProviderRequest {
-            method: reqwest::Method::POST,
-            url: "http://localhost/chat/completions".to_string(),
+            transport: crate::provider_adapter::PreparedProviderTransport::RemoteHttp {
+                method: reqwest::Method::POST,
+                url: "http://localhost/chat/completions".to_string(),
+            },
             header_names: vec![],
-            public_headers_v2: vec![],
-            credential_header_names_v2: vec![],
+            public_header_coordinates: vec![],
+            credential_header_names: vec![],
             body_sha256: body_sha256.clone(),
             body_bytes,
             requested_output_tokens: Some(1_024),
+            requested_output_ceiling: 1_024,
             credential: None,
             headers: vec![],
-            request_digest: lillux::cas::sha256_hex(body_sha256.as_bytes()),
+            request_digest: ryeos_provider_contract::PreparedRequestProjection::from_coordinates(
+                vec![],
+                vec![],
+                body_sha256,
+                1_024,
+            )
+            .unwrap()
+            .digest()
+            .unwrap(),
             request_metrics: Default::default(),
         }
     }
@@ -6030,21 +6028,31 @@ mod tests {
         }
     }
 
+    fn test_coordinate_value(authority_digest: &str) -> Value {
+        json!({
+            "outer_effective_definition_digest": "11".repeat(32),
+            "transport": {"kind": "remote_http", "method": "POST", "url": "https://provider.invalid/v1"},
+            "provider_family": "chat_completions",
+            "provider_config_hash": "cfg",
+            "provider_config_value_digest": "22".repeat(32),
+            "provider_id": "route",
+            "model_name": "model",
+            "public_headers": [],
+            "credential_header_names": [],
+            "body_sha256": "33".repeat(32),
+            "requested_output_ceiling": 1024,
+            "credential_binding_hmac": "44".repeat(32),
+            "credential_authority_generation": "generation",
+            "authority_digest": authority_digest,
+            "admitted_effect_class": null
+        })
+    }
+
     fn test_request_hash(
-        authority: &ryeos_accounting::ProviderAccountingAuthority,
-        prepared: &crate::provider_adapter::PreparedProviderRequest,
+        _authority: &ryeos_accounting::ProviderAccountingAuthority,
+        _prepared: &crate::provider_adapter::PreparedProviderRequest,
     ) -> String {
-        provider_attempt_request_hash(
-            "T-test",
-            1,
-            1,
-            "test_hash",
-            "route",
-            "model",
-            prepared.requested_output_tokens,
-            authority.authority_digest.as_str(),
-            &prepared.body_sha256,
-        )
+        "rh-1".to_string()
     }
 
     fn unset_flag() -> Arc<AtomicBool> {
@@ -6356,6 +6364,10 @@ mod tests {
             attempt_id: "A-daemon-1".to_string(),
             request_hash: "rh-1".to_string(),
             authority_digest: authority.authority_digest.clone(),
+            coordinate: serde_json::from_value(test_coordinate_value(
+                authority.authority_digest.as_str(),
+            ))
+            .unwrap(),
         }
     }
 
@@ -6372,6 +6384,7 @@ mod tests {
                 &test_ledger_attempt(&authority),
                 SpendAccounting::ExplicitlyFree,
                 TokenAccounting::Unavailable,
+                None,
             )
             .await
             .unwrap();
@@ -6404,6 +6417,7 @@ mod tests {
                     diagnostic: "test".to_string(),
                 },
                 TokenAccounting::Unavailable,
+                None,
             )
             .await
             .unwrap();
@@ -6429,6 +6443,7 @@ mod tests {
                 &test_ledger_attempt(&authority),
                 SpendAccounting::ExplicitlyFree,
                 TokenAccounting::Unavailable,
+                None,
             )
             .await
             .unwrap_err();

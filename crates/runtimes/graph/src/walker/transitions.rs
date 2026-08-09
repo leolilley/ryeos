@@ -44,7 +44,7 @@ pub(super) fn foreach_failure_summary(node: &str, errors: &[ErrorRecord]) -> Str
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     use crate::model::{NodeType, RetryConfig};
 
@@ -78,7 +78,7 @@ mod tests {
             start: "start".to_string(),
             max_steps: 100,
             on_error,
-            nodes: HashMap::new(),
+            nodes: BTreeMap::new(),
             hooks: Vec::new(),
             config_schema: None,
             env_requires: Vec::new(),

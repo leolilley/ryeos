@@ -17,30 +17,31 @@ pub mod admitted_launch_capsule;
 pub mod attestation;
 pub mod bundle_event;
 pub mod chain_state;
-pub mod effect_record_v2;
+pub mod effect_record;
+pub mod execution_identity;
 pub mod execution_project_authority;
+pub mod execution_realization;
+pub mod external_content_binding;
+pub mod external_content_manifest;
+pub mod external_large_content_manifest;
 pub mod item_source;
 pub mod live_input;
+pub mod persistent_session_capsule;
 pub mod project_file;
 pub mod project_snapshot;
 pub mod project_snapshot_policy;
 pub mod project_tree;
 pub mod source_manifest;
 pub mod state_anchor;
-pub mod external_content_manifest;
-pub mod external_large_content_manifest;
-pub mod execution_identity;
-pub mod graph_node_effect_record;
-pub mod provider_call_effect_record;
 pub mod state_manifest;
 pub mod thread_event;
 pub mod thread_snapshot;
 
 pub use admitted_launch_capsule::{
     ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION, AdmittedAccountingScope, AdmittedDirectCommandClosure,
-    AdmittedExecutionClosure, AdmittedLaunchArtifactIdentity, AdmittedLaunchCapsule,
-    DirectExecutableIdentity, DirectRootSourceIdentity, DirectRuntimeIdentity,
-    DirectRuntimeSourceSpace,
+    AdmittedExecutionClosure, AdmittedLaunchArtifactIdentity, AdmittedLaunchAuthority,
+    AdmittedLaunchCapsule, DirectExecutableIdentity, DirectRootSourceIdentity,
+    DirectRuntimeIdentity, DirectRuntimeSourceSpace,
 };
 pub use attestation::Attestation;
 pub use bundle_event::{
@@ -49,13 +50,17 @@ pub use bundle_event::{
     MAX_BUNDLE_EVENT_SERIALIZED_BYTES, hash_bundle_event, validate_bundle_identifier,
 };
 pub use chain_state::{ChainState, ChainStateBuilder, ChainThreadEntry};
-pub use effect_record_v2::{
-    DurableEffectClass, EFFECT_RECORD_SCHEMA_V2, GRAPH_EFFECT_KEY_SCHEMA_V2,
-    GraphEffectFirstObservationV2, GraphNodeEffectAnswerV2, GraphNodeEffectIdentityV2,
-    GraphNodeEffectRecordV2, PROVIDER_EFFECT_KEY_SCHEMA_V2, ProviderCallEffectAnswerV2,
-    ProviderCallEffectRecordV2, ProviderEffectFirstObservationV2, ProviderObservationClassV2,
-    ProviderRequestCoordinateV2, ProviderTransportCoordinateV2, PublicHeaderCoordinateV2,
-    RecordedProviderMessageV2, RecordedProviderToolCallV2,
+pub use effect_record::{
+    AdmittedDispatchSubject, AdmittedEffectAuthorization, DispatchEffectAnswer,
+    DispatchEffectIdentity, DispatchEffectRecord, EFFECT_KEY_SCHEMA, EFFECT_RECORD_KIND,
+    EFFECT_RECORD_SCHEMA_VERSION, EffectClass, EffectFirstObservation, RECORDABLE_EFFECT_CLASSES,
+    canonical_value_digest,
+};
+pub use execution_identity::{
+    EXECUTION_IDENTITY_ATTESTATION_CLAIM, EXECUTION_IDENTITY_ATTESTATION_POLICY,
+    EXECUTION_IDENTITY_KIND, EXECUTION_IDENTITY_SCHEMA_VERSION, ExecutionCpuIdentity,
+    ExecutionIdentity, ExecutionOperatingSystemIdentity, ExecutionSubstrateBuild,
+    MAX_EXECUTION_IDENTITY_BYTES,
 };
 pub use execution_project_authority::{
     ChildProjectAuthorityPolicy, EnvironmentAuthority, EnvironmentNameAuthority,
@@ -65,26 +70,15 @@ pub use execution_project_authority::{
     OperationalProjectAuthorityTransition, PinnedChildProjectRealization, PinnedProjectRealization,
     PinnedTerminalPublication,
 };
-pub use item_source::ItemSource;
-pub use live_input::{LiveInput, LiveInputIntent};
-pub use project_file::ProjectFile;
-pub use project_snapshot::ProjectSnapshot;
-pub use project_snapshot_policy::ProjectSnapshotPolicy;
-pub use project_tree::ProjectTree;
-pub use source_manifest::SourceManifest;
-pub use state_anchor::{STATE_ANCHOR_SCHEMA_VERSION, StateAnchorMilestoneV2, StateAnchorPayloadV2};
-pub use graph_node_effect_record::{
-    GRAPH_NODE_EFFECT_RECORD_KIND, GRAPH_NODE_EFFECT_RECORD_SCHEMA_VERSION,
-    GraphNodeEffectRecord, MAX_EFFECT_RECORD_RESULT_BYTES, RECORDABLE_EFFECT_CLASSES,
+pub use execution_realization::{
+    ADMITTED_EXECUTION_REALIZATION_KIND, AdmittedExecutionRealization,
+    EXECUTION_REALIZATION_SCHEMA_VERSION, ExecutionComponentReference, ExecutionComponentStorage,
+    MAX_EXECUTION_COMPONENTS, MAX_EXECUTION_PROPERTIES, MAX_EXECUTION_REALIZATION_BYTES,
+    OBSERVED_EXECUTION_REALIZATION_KIND, ObservedExecutionRealization,
 };
-pub use provider_call_effect_record::{
-    MAX_PROVIDER_CALL_RESPONSE_BYTES, PROVIDER_CALL_EFFECT_RECORD_KIND,
-    PROVIDER_CALL_EFFECT_RECORD_SCHEMA_VERSION, ProviderCallEffectRecord,
-    provider_call_cache_key,
-};
-pub use execution_identity::{
-    EXECUTION_IDENTITY_KIND, EXECUTION_IDENTITY_SCHEMA_VERSION, ExecutionDeviceIdentity,
-    ExecutionIdentity, ExecutionInterpreterIdentity, MAX_EXECUTION_IDENTITY_BYTES,
+pub use external_content_binding::{
+    EXTERNAL_CONTENT_BINDING_KIND, EXTERNAL_CONTENT_BINDING_SCHEMA, ExternalContentBinding,
+    ExternalContentBindingState,
 };
 pub use external_content_manifest::{
     EXTERNAL_CONTENT_MANIFEST_KIND, EXTERNAL_CONTENT_TREE_SCHEMA,
@@ -97,11 +91,25 @@ pub use external_content_manifest::{
     MAX_REALIZATION_CLAIMED_BYTES, MAX_SYMLINK_TARGET_BYTES,
 };
 pub use external_large_content_manifest::{
-    EXTERNAL_LARGE_CONTENT_MANIFEST_KIND, EXTERNAL_LARGE_CONTENT_SCHEMA, ExternalLargeContentManifestEntry,
-    ExternalLargeContentManifestObject, MAX_LARGE_CONTENT_CHUNK_BYTES, MAX_LARGE_CONTENT_FILE_BYTES,
-    MAX_LARGE_CONTENT_MANIFEST_BYTES, MAX_LARGE_CONTENT_MANIFEST_ENTRIES, MAX_LARGE_CONTENT_TOTAL_BYTES,
-    MIN_LARGE_CONTENT_CHUNK_BYTES, LARGE_CONTENT_CHUNK_BYTES,
+    EXTERNAL_LARGE_CONTENT_MANIFEST_KIND, EXTERNAL_LARGE_CONTENT_SCHEMA,
+    ExternalLargeContentManifestEntry, ExternalLargeContentManifestObject,
+    LARGE_CONTENT_CHUNK_BYTES, MAX_LARGE_CONTENT_CHUNK_BYTES, MAX_LARGE_CONTENT_FILE_BYTES,
+    MAX_LARGE_CONTENT_MANIFEST_BYTES, MAX_LARGE_CONTENT_MANIFEST_ENTRIES,
+    MAX_LARGE_CONTENT_TOTAL_BYTES, MIN_LARGE_CONTENT_CHUNK_BYTES, load_if_large_content_manifest,
 };
+pub use item_source::ItemSource;
+pub use live_input::{LiveInput, LiveInputIntent};
+pub use persistent_session_capsule::{
+    AdmittedPersistentSessionCapsule, MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES,
+    PERSISTENT_SESSION_CAPSULE_KIND, PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
+    PersistentSessionAuthority, PersistentSessionLifecycleContract, PersistentSessionWireContract,
+};
+pub use project_file::ProjectFile;
+pub use project_snapshot::ProjectSnapshot;
+pub use project_snapshot_policy::ProjectSnapshotPolicy;
+pub use project_tree::ProjectTree;
+pub use source_manifest::SourceManifest;
+pub use state_anchor::{STATE_ANCHOR_SCHEMA_VERSION, StateAnchorMilestone, StateAnchorPayload};
 pub use state_manifest::{
     MAX_STATE_MANIFEST_OBJECTS, STATE_MANIFEST_KIND, STATE_MANIFEST_SCHEMA_VERSION, StateManifest,
     StateManifestBlob,

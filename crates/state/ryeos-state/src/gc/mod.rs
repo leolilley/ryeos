@@ -18,6 +18,7 @@ pub mod event_log;
 pub mod lock;
 pub mod retention;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -207,8 +208,22 @@ pub struct GcResult {
     pub roots_walked: usize,
     pub reachable_objects: usize,
     pub reachable_blobs: usize,
+    #[serde(default)]
+    pub reachable_large_objects: usize,
     pub deleted_objects: usize,
     pub deleted_blobs: usize,
+    #[serde(default)]
+    pub inspected_large_objects: usize,
+    #[serde(default)]
+    pub deleted_large_objects: usize,
+    #[serde(default)]
+    pub deleted_large_object_staging_files: usize,
+    #[serde(default)]
+    pub preserved_rooted_large_objects: usize,
+    #[serde(default)]
+    pub preserved_leased_large_objects: usize,
+    #[serde(default)]
+    pub freed_large_object_bytes: u64,
     /// Abandoned files from an interrupted CAS atomic publication.
     pub deleted_cas_staging_files: usize,
     pub deleted_runtime_files: usize,
@@ -257,6 +272,10 @@ pub struct GcResult {
     pub freed_bytes: u64,
     pub compaction: Option<CompactionResult>,
     pub duration_ms: u64,
+    /// Internal mark answer consumed by the daemon-owned large-object sweep.
+    /// It is not part of the service result or persisted GC event schema.
+    #[serde(skip)]
+    pub reachable_large_object_hashes: BTreeSet<String>,
 }
 
 /// Durable operational CAS roots that are not yet represented by signed refs.
@@ -508,6 +527,9 @@ pub fn run_gc_with_pinned_authority(
     reachable
         .blob_hashes
         .extend(staged_roots.blob_hashes.iter().cloned());
+    reachable
+        .large_object_hashes
+        .extend(staged_roots.large_object_hashes.iter().cloned());
     for hash in &additional_roots.blob_hashes {
         if !lillux::valid_hash(hash) || hash.bytes().any(|byte| byte.is_ascii_uppercase()) {
             anyhow::bail!("invalid additional GC blob root: {hash}");
@@ -520,9 +542,12 @@ pub fn run_gc_with_pinned_authority(
     result.roots_walked = reachable.authoritative_root_count
         + operational_roots.len()
         + staged_roots.blob_hashes.len()
+        + staged_roots.large_object_hashes.len()
         + additional_roots.blob_hashes.len();
     result.reachable_objects = reachable.object_hashes.len();
     result.reachable_blobs = reachable.blob_hashes.len();
+    result.reachable_large_objects = reachable.large_object_hashes.len();
+    result.reachable_large_object_hashes = reachable.large_object_hashes.iter().cloned().collect();
 
     sweep_sharded_directory(
         authority.cas_directory(),

@@ -490,6 +490,7 @@ fn resolve_executor_chain(
         };
         let source_path = resolution.winner_path;
         let source_space = resolution.winner_space;
+        let source_root = resolution.winner_root_identity;
         let matched_ext = resolution.matched_ext;
 
         let source_format = kind_schema
@@ -545,35 +546,19 @@ fn resolve_executor_chain(
 
         if runtime_identity.is_none() {
             let bundle_identity = if source_space == crate::contracts::ItemSpace::Bundle {
-                let ai = source_path
-                    .ancestors()
-                    .find(|path| path.file_name().is_some_and(|name| name == crate::AI_DIR))
-                    .ok_or_else(|| {
-                        EngineError::Internal(format!(
-                            "bundle runtime source has no .ai ancestor: {}",
-                            source_path.display()
-                        ))
-                    })?;
-                let bundle_root = ai.parent().ok_or_else(|| {
-                    EngineError::Internal(format!(
-                        "bundle runtime .ai path has no root: {}",
-                        source_path.display()
-                    ))
+                let registered =
+                    roots.authoritative_root(&source_root, source_space, Some(&source_path))?;
+                let bundle_root = registered.content_root.as_deref().ok_or_else(|| {
+                    EngineError::Internal("typed bundle root lost content authority".to_owned())
                 })?;
-                let expected_name = roots
-                    .ordered
-                    .iter()
-                    .find(|root| {
-                        root.space == crate::contracts::ItemSpace::Bundle
-                            && root.ai_root == bundle_root.join(crate::AI_DIR)
-                    })
-                    .and_then(|root| root.label.strip_prefix("bundle:"))
-                    .ok_or_else(|| {
-                        EngineError::Internal(format!(
-                            "runtime source bundle is absent from registered resolution roots: {}",
-                            bundle_root.display()
-                        ))
-                    })?;
+                let crate::contracts::ItemSourceRoot::Bundle {
+                    name: expected_name,
+                } = &source_root
+                else {
+                    return Err(EngineError::Internal(
+                        "bundle runtime source lacks typed bundle identity".to_owned(),
+                    ));
+                };
                 node_trust_store
                     .map(|trust| {
                         verify_bundle_source_manifest_identity(bundle_root, expected_name, trust)
@@ -617,6 +602,8 @@ fn resolve_executor_chain(
             resolved_ref: resolved_id.clone(),
             kind: ref_.kind.clone(),
             source_path: source_path.clone(),
+            source_space,
+            source_root,
             parsed: parsed.clone(),
         });
 
@@ -785,68 +772,6 @@ fn resolve_terminal_executor_with_project_authority(
     })
 }
 
-// ── Runtime registry construction ───────────────────────────────────────
-
-/// Build the per-request `RuntimeHandlerRegistry` from the kind
-/// schema's `runtime.handlers` declaration. Each declared handler key
-/// must be backed by a registered builtin; an unknown key is a hard
-/// `SchemaLoaderError`.
-fn build_runtime_registry(
-    spec: &crate::kind_registry::RuntimeSpec,
-) -> Result<RuntimeHandlerRegistry, EngineError> {
-    use std::sync::Arc;
-
-    let mut registry = RuntimeHandlerRegistry::new();
-    for decl in &spec.handlers {
-        match decl.type_.as_str() {
-            crate::runtime::handlers::runtime_config::KEY => {
-                registry.register(Arc::new(
-                    crate::runtime::handlers::runtime_config::RuntimeConfigHandler,
-                ));
-            }
-            crate::runtime::handlers::env_config::KEY => {
-                registry.register(Arc::new(
-                    crate::runtime::handlers::env_config::EnvConfigHandler,
-                ));
-            }
-            crate::runtime::handlers::config_resolve::KEY => {
-                registry.register(Arc::new(
-                    crate::runtime::handlers::config_resolve::ConfigResolveHandler,
-                ));
-            }
-            crate::runtime::handlers::verify_deps::KEY => {
-                registry.register(Arc::new(
-                    crate::runtime::handlers::verify_deps::VerifyDepsHandler,
-                ));
-            }
-            crate::runtime::handlers::execution_params::KEY => {
-                registry.register(Arc::new(
-                    crate::runtime::handlers::execution_params::ExecutionParamsHandler,
-                ));
-            }
-            crate::runtime::handlers::native_async::KEY => {
-                registry.register(Arc::new(
-                    crate::runtime::handlers::native_async::NativeAsyncHandler,
-                ));
-            }
-            crate::runtime::handlers::native_resume::KEY => {
-                registry.register(Arc::new(
-                    crate::runtime::handlers::native_resume::NativeResumeHandler,
-                ));
-            }
-            other => {
-                return Err(EngineError::SchemaLoaderError {
-                    reason: format!(
-                        "kind schema declares runtime handler `{other}` which is not \
-                         registered in the engine's RuntimeHandlerRegistry"
-                    ),
-                });
-            }
-        }
-    }
-    Ok(registry)
-}
-
 // ── Plan builder ────────────────────────────────────────────────────────
 
 /// Build an execution plan from a verified item.
@@ -859,6 +784,10 @@ fn build_runtime_registry(
 /// 5. Computes a cache key
 pub struct BuildPlanInput<'a> {
     pub item: &'a VerifiedItem,
+    /// Exact signature-stripped root bytes captured at admission. When
+    /// present, root parsing uses only these bytes and never reopens the audit
+    /// pathname carried by `item`.
+    pub root_source: Option<&'a str>,
     pub parameters: &'a serde_json::Value,
     pub hints: &'a ExecutionHints,
     pub ctx: &'a PlanContext,
@@ -886,6 +815,7 @@ pub struct BuildPlanInput<'a> {
 pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineError> {
     let BuildPlanInput {
         item,
+        root_source,
         parameters,
         hints,
         ctx,
@@ -907,7 +837,23 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
     // intermediate (Step 2a below). Kept outside the inner scope so
     // `root_parsed` is available after validation.
     let root_parsed = {
-        let content = match project_authority {
+        if let Some(content) = root_source {
+            let actual = crate::item_resolution::content_hash(content);
+            if actual != resolved.raw_content_digest {
+                return Err(EngineError::ContentHashMismatch {
+                    canonical_ref: canonical_ref.clone(),
+                    expected: resolved.raw_content_digest.clone(),
+                    actual,
+                });
+            }
+            parsers.dispatch(
+                &resolved.source_format.parser,
+                content,
+                Some(&resolved.source_path),
+                &resolved.source_format.signature,
+            )?
+        } else {
+            let content = match project_authority {
             Some((project_root, project_content))
                 if resolved.source_space == crate::contracts::ItemSpace::Project =>
             {
@@ -955,20 +901,21 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
                 ))
             })?,
         };
-        let actual = crate::item_resolution::content_hash(&content);
-        if actual != resolved.content_hash {
-            return Err(EngineError::ContentHashMismatch {
-                canonical_ref: canonical_ref.clone(),
-                expected: resolved.content_hash.clone(),
-                actual,
-            });
+            let actual = crate::item_resolution::content_hash(&content);
+            if actual != resolved.content_hash {
+                return Err(EngineError::ContentHashMismatch {
+                    canonical_ref: canonical_ref.clone(),
+                    expected: resolved.content_hash.clone(),
+                    actual,
+                });
+            }
+            parsers.dispatch(
+                &resolved.source_format.parser,
+                &content,
+                Some(&resolved.source_path),
+                &resolved.source_format.signature,
+            )?
         }
-        parsers.dispatch(
-            &resolved.source_format.parser,
-            &content,
-            Some(&resolved.source_path),
-            &resolved.source_format.signature,
-        )?
     };
 
     // Step 1a: Requested/root items MUST declare a non-null executor_id —
@@ -1024,6 +971,8 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         resolved_ref: canonical_ref.clone(),
         kind: resolved.kind.clone(),
         source_path: resolved.source_path.clone(),
+        source_space: resolved.source_space,
+        source_root: resolved.source_root.clone(),
         parsed: root_parsed,
     };
     terminal.intermediates.insert(0, root_intermediate);
@@ -1082,7 +1031,10 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
                     resolved.kind,
                 ),
             })?;
-    let registry = build_runtime_registry(runtime_spec)?;
+    // A chain may cross kinds. `compile_with_handlers` applies each
+    // intermediate's own signed runtime policy, while this registry supplies
+    // the complete meaning-blind implementation set those policies may name.
+    let registry = RuntimeHandlerRegistry::with_builtins();
     let root_trust_class = widen_root_trust_class(item.trust_class, item.resolved.source_space);
     let spec = compile_with_handlers(
         &terminal.intermediates,
@@ -1468,6 +1420,7 @@ metadata:
             kind: kind.to_string(),
             source_path,
             source_space: ItemSpace::Project,
+            source_root: crate::contracts::ItemSourceRoot::Project,
             resolved_from: "test".to_string(),
             shadowed: vec![],
             probed_absent: vec![],
@@ -1605,6 +1558,7 @@ config:
 
         let plan = build_plan(BuildPlanInput {
             item: &item,
+            root_source: None,
             parameters: &json!({"key": "value"}),
             hints: &ExecutionHints::default(),
             ctx: &ctx,
@@ -1657,6 +1611,7 @@ config:
 
         let err = build_plan(BuildPlanInput {
             item: &item,
+            root_source: None,
             parameters: &json!(null),
             hints: &ExecutionHints::default(),
             ctx: &ctx,
@@ -1727,6 +1682,7 @@ config:
 
         let err = build_plan(BuildPlanInput {
             item: &item,
+            root_source: None,
             parameters: &json!(null),
             hints: &ExecutionHints::default(),
             ctx: &ctx,
@@ -1773,6 +1729,7 @@ config:
 
         let err = build_plan(BuildPlanInput {
             item: &item,
+            root_source: None,
             parameters: &json!(null),
             hints: &ExecutionHints::default(),
             ctx: &ctx,
@@ -1824,6 +1781,143 @@ config:
         ]
     }
 
+    fn live_kind_registry() -> KindRegistry {
+        let trust = crate::test_support::live_trust_store();
+        let roots = [
+            crate::test_support::core_bundle_root()
+                .join(crate::AI_DIR)
+                .join("node/engine/kinds"),
+            crate::test_support::standard_bundle_root()
+                .join(crate::AI_DIR)
+                .join("node/engine/kinds"),
+        ];
+        KindRegistry::load_base(&roots, &trust).unwrap()
+    }
+
+    #[test]
+    fn cross_kind_chain_uses_each_intermediate_runtime_policy() {
+        let config_block = json!({
+            "command": "/bin/true",
+            "args": [],
+            "timeout_secs": 10
+        });
+        let intermediates = vec![
+            RChainIntermediate {
+                executor_id: "@subprocess".into(),
+                resolved_ref: "worker:test/session".into(),
+                kind: "worker".into(),
+                source_path: PathBuf::from("/bundle/.ai/workers/test/session.yaml"),
+                source_space: crate::contracts::ItemSpace::Project,
+                source_root: crate::contracts::ItemSourceRoot::Search {
+                    label: "test".to_owned(),
+                },
+                parsed: json!({
+                    "category": "test",
+                    "version": "1.0.0",
+                    "executor_id": "@subprocess",
+                    "external_content": [],
+                    "config": config_block,
+                }),
+            },
+            RChainIntermediate {
+                executor_id: "terminal".into(),
+                resolved_ref: "tool:ryeos/core/subprocess/execute".into(),
+                kind: "tool".into(),
+                source_path: PathBuf::from("/bundle/.ai/tools/ryeos/core/subprocess/execute.yaml"),
+                source_space: crate::contracts::ItemSpace::Project,
+                source_root: crate::contracts::ItemSourceRoot::Search {
+                    label: "test".to_owned(),
+                },
+                parsed: json!({
+                    "category": "ryeos/core/subprocess",
+                    "version": "1.0.0",
+                    "executor_id": null,
+                    "description": "terminal",
+                    "terminal_executor": {"kind": "subprocess"},
+                    "config_schema": {"type": "object"},
+                }),
+            },
+        ];
+        let registry = RuntimeHandlerRegistry::with_builtins();
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
+        let kinds = live_kind_registry();
+        let trust = TrustStore::empty();
+        let roots = empty_roots();
+        let spec = compile_with_handlers(
+            &intermediates,
+            &PathBuf::from("/bundle/.ai/workers/test/session.yaml"),
+            &["@subprocess".into(), "terminal".into()],
+            &[],
+            &registry,
+            &json!(null),
+            &HashMap::new(),
+            &HostEnvBindings::default(),
+            None,
+            &parsers,
+            &kinds,
+            &trust,
+            &trust,
+            &roots,
+            ResolutionTrustClass::TrustedBundle,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(spec.cmd, "/bin/true");
+    }
+
+    #[test]
+    fn one_kind_cannot_borrow_another_kinds_ignored_keys() {
+        let intermediates = vec![RChainIntermediate {
+            executor_id: "@subprocess".into(),
+            resolved_ref: "worker:test/session".into(),
+            kind: "worker".into(),
+            source_path: PathBuf::from("/bundle/.ai/workers/test/session.yaml"),
+            source_space: crate::contracts::ItemSpace::Project,
+            source_root: crate::contracts::ItemSourceRoot::Search {
+                label: "test".to_owned(),
+            },
+            parsed: json!({
+                "category": "test",
+                "version": "1.0.0",
+                "executor_id": "@subprocess",
+                "external_content": [],
+                "config": {"command": "/bin/true"},
+                "terminal_executor": {"kind": "subprocess"},
+            }),
+        }];
+        let registry = RuntimeHandlerRegistry::with_builtins();
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
+        let kinds = live_kind_registry();
+        let trust = TrustStore::empty();
+        let roots = empty_roots();
+        let error = compile_with_handlers(
+            &intermediates,
+            &PathBuf::from("/bundle/.ai/workers/test/session.yaml"),
+            &["@subprocess".into()],
+            &[],
+            &registry,
+            &json!(null),
+            &HashMap::new(),
+            &HostEnvBindings::default(),
+            None,
+            &parsers,
+            &kinds,
+            &trust,
+            &trust,
+            &roots,
+            ResolutionTrustClass::TrustedBundle,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            EngineError::UnknownRuntimeBlock { ref key, ref kind, .. }
+                if key == "terminal_executor" && kind == "worker"
+        ));
+    }
+
     // ── Test: no runtime config errors ──────────────────────────────────
 
     #[test]
@@ -1833,6 +1927,10 @@ config:
             resolved_ref: "tool:test".into(),
             kind: "tool".into(),
             source_path: PathBuf::from("/test.py"),
+            source_space: crate::contracts::ItemSpace::Project,
+            source_root: crate::contracts::ItemSourceRoot::Search {
+                label: "test".to_owned(),
+            },
             parsed: json!({}),
         }];
         let registry = RuntimeHandlerRegistry::with_builtins();
@@ -1878,6 +1976,10 @@ config:
                 resolved_ref: "tool:a".into(),
                 kind: "tool".into(),
                 source_path: PathBuf::from("/a.yaml"),
+                source_space: crate::contracts::ItemSpace::Project,
+                source_root: crate::contracts::ItemSourceRoot::Search {
+                    label: "test".to_owned(),
+                },
                 parsed: json!({ "config": config_block }),
             },
             RChainIntermediate {
@@ -1885,6 +1987,10 @@ config:
                 resolved_ref: "tool:b".into(),
                 kind: "tool".into(),
                 source_path: PathBuf::from("/b.yaml"),
+                source_space: crate::contracts::ItemSpace::Project,
+                source_root: crate::contracts::ItemSourceRoot::Search {
+                    label: "test".to_owned(),
+                },
                 parsed: json!({ "config": config_block }),
             },
         ];
@@ -1939,6 +2045,10 @@ config:
             resolved_ref: "tool:test".into(),
             kind: "tool".into(),
             source_path: PathBuf::from("/test.yaml"),
+            source_space: crate::contracts::ItemSpace::Project,
+            source_root: crate::contracts::ItemSourceRoot::Search {
+                label: "test".to_owned(),
+            },
             parsed: json!({ "config": config_block }),
         }];
         let registry = RuntimeHandlerRegistry::with_builtins();
@@ -1985,6 +2095,10 @@ config:
             resolved_ref: "tool:runtime".into(),
             kind: "tool".into(),
             source_path: PathBuf::from("/runtime.yaml"),
+            source_space: crate::contracts::ItemSpace::Project,
+            source_root: crate::contracts::ItemSourceRoot::Search {
+                label: "test".to_owned(),
+            },
             parsed: json!({ "config": config_block }),
         }];
         let registry = RuntimeHandlerRegistry::with_builtins();
@@ -2041,6 +2155,10 @@ config:
             resolved_ref: "tool:test".into(),
             kind: "tool".into(),
             source_path: PathBuf::from("/test.yaml"),
+            source_space: crate::contracts::ItemSpace::Project,
+            source_root: crate::contracts::ItemSourceRoot::Search {
+                label: "test".to_owned(),
+            },
             parsed: json!({
                 "config": {"command": "/bin/true", "timeout_secs": 1},
                 "totally_made_up_block_xyz": {"enabled": true}
@@ -2148,6 +2266,7 @@ config:
 
         let err = build_plan(BuildPlanInput {
             item: &item,
+            root_source: None,
             parameters: &json!(null),
             hints: &ExecutionHints::default(),
             ctx: &ctx,
@@ -2347,6 +2466,7 @@ category: ryeos/core/subprocess\n";
         // 5. Build plan — this walks the full 3-hop chain
         let plan = build_plan(BuildPlanInput {
             item: &item,
+            root_source: None,
             parameters: &json!({"message": "hello"}),
             hints: &ExecutionHints::default(),
             ctx: &ctx,

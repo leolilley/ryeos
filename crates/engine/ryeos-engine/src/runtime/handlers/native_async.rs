@@ -363,6 +363,10 @@ mod tests {
             resolved_ref: "widget:demo".into(),
             kind: "widget".into(),
             source_path: PathBuf::from("/tmp/demo.yaml"),
+            source_space: crate::contracts::ItemSpace::Project,
+            source_root: crate::contracts::ItemSourceRoot::Search {
+                label: "test".to_owned(),
+            },
             parsed: json!({ "native_async": block.clone() }),
         }];
         let chain = chain_override.unwrap_or(chain);
@@ -566,6 +570,10 @@ mod tests {
                 resolved_ref: "widget:my/app/item".into(),
                 kind: "widget".into(),
                 source_path: PathBuf::from("/tmp/item.yaml"),
+                source_space: crate::contracts::ItemSpace::Project,
+                source_root: crate::contracts::ItemSourceRoot::Search {
+                    label: "test".to_owned(),
+                },
                 parsed: json!({}),
             },
             ChainIntermediate {
@@ -573,6 +581,10 @@ mod tests {
                 resolved_ref: "widget:my/runtimes/native".into(),
                 kind: "widget".into(),
                 source_path: PathBuf::from("/tmp/runtime.yaml"),
+                source_space: crate::contracts::ItemSpace::Project,
+                source_root: crate::contracts::ItemSourceRoot::Search {
+                    label: "test".to_owned(),
+                },
                 parsed: json!({ "native_async": block.clone() }),
             },
         ];
@@ -597,6 +609,10 @@ mod tests {
                 resolved_ref: "widget:my/app/item".into(),
                 kind: "widget".into(),
                 source_path: PathBuf::from("/tmp/item.yaml"),
+                source_space: crate::contracts::ItemSpace::Project,
+                source_root: crate::contracts::ItemSourceRoot::Search {
+                    label: "test".to_owned(),
+                },
                 parsed: json!({}),
             },
             ChainIntermediate {
@@ -604,6 +620,10 @@ mod tests {
                 resolved_ref: "widget:my/runtimes/native".into(),
                 kind: "widget".into(),
                 source_path: PathBuf::from("/tmp/runtime.yaml"),
+                source_space: crate::contracts::ItemSpace::Project,
+                source_root: crate::contracts::ItemSourceRoot::Search {
+                    label: "test".to_owned(),
+                },
                 parsed: json!({ "native_async": block.clone() }),
             },
         ];

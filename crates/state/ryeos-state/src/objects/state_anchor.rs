@@ -1,7 +1,7 @@
 //! Durable state-anchor milestone contract.
 //!
 //! State anchors are daemon-authored indexed events, not generic domain
-//! payloads. This module is the one v2 writer/reader contract used by event
+//! payloads. This module is the single current writer/reader contract used by event
 //! publication, trace, closure discovery, and execution-field projection.
 
 use anyhow::{Result, bail};
@@ -12,7 +12,7 @@ pub const STATE_ANCHOR_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct StateAnchorPayloadV2 {
+pub struct StateAnchorPayload {
     pub schema_version: u32,
     pub label: String,
     pub state_digest: String,
@@ -23,9 +23,9 @@ pub struct StateAnchorPayloadV2 {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct StateAnchorMilestoneV2 {
+pub struct StateAnchorMilestone {
     pub kind: String,
-    pub payload: StateAnchorPayloadV2,
+    pub payload: StateAnchorPayload,
     pub graph_run_id: String,
     pub definition_ref: String,
     pub effective_definition_digest: String,
@@ -33,7 +33,7 @@ pub struct StateAnchorMilestoneV2 {
     pub step: u32,
 }
 
-impl StateAnchorMilestoneV2 {
+impl StateAnchorMilestone {
     pub fn from_value(value: Value) -> Result<Self> {
         let anchor: Self = serde_json::from_value(value)?;
         anchor.validate()?;
@@ -129,14 +129,14 @@ mod tests {
 
     #[test]
     fn current_contract_round_trips_and_predecessor_is_rejected() {
-        let parsed = StateAnchorMilestoneV2::from_value(anchor(STATE_ANCHOR_SCHEMA_VERSION))
+        let parsed = StateAnchorMilestone::from_value(anchor(STATE_ANCHOR_SCHEMA_VERSION))
             .expect("v2 anchor");
         assert_eq!(
-            StateAnchorMilestoneV2::from_value(parsed.to_value().unwrap()).unwrap(),
+            StateAnchorMilestone::from_value(parsed.to_value().unwrap()).unwrap(),
             parsed
         );
         assert!(
-            StateAnchorMilestoneV2::from_value(anchor(STATE_ANCHOR_SCHEMA_VERSION - 1))
+            StateAnchorMilestone::from_value(anchor(STATE_ANCHOR_SCHEMA_VERSION - 1))
                 .unwrap_err()
                 .to_string()
                 .contains("not the exact current contract")
@@ -147,10 +147,10 @@ mod tests {
     fn identity_and_manifest_commitment_are_required() {
         let mut value = anchor(STATE_ANCHOR_SCHEMA_VERSION);
         value["effective_definition_digest"] = json!("not-a-digest");
-        assert!(StateAnchorMilestoneV2::from_value(value).is_err());
+        assert!(StateAnchorMilestone::from_value(value).is_err());
 
         let mut value = anchor(STATE_ANCHOR_SCHEMA_VERSION);
         value["payload"]["state_digest"] = json!(format!("sha256:{}", "c".repeat(64)));
-        assert!(StateAnchorMilestoneV2::from_value(value).is_err());
+        assert!(StateAnchorMilestone::from_value(value).is_err());
     }
 }

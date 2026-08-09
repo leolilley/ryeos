@@ -1,326 +1,17 @@
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use ryeos_graph_definition::EffectClass;
+#[cfg(test)]
+use ryeos_graph_definition::GraphFile;
+pub use ryeos_graph_definition::{
+    EdgeSpec, ErrorMode, GraphConfig, GraphNode, NodeType, RetryConfig,
+};
 use ryeos_runtime::envelope::RuntimeCost;
 use ryeos_runtime::events::RuntimeEventType;
 
-/// Default total node-transition budget for one graph run.
-pub(crate) const DEFAULT_GRAPH_MAX_STEPS: u32 = 100;
-/// One graph step publishes one durable node receipt. Keep the authored hard
-/// ceiling below the per-thread artifact collection ceiling, leaving room for
-/// terminal transcript/output artifacts as well.
-pub const MAX_GRAPH_STEPS: u32 = 500;
-/// A continuation segment cannot exceed the graph's cumulative transition
-/// ceiling. Keeping one limit avoids admitting a segment shape the full run
-/// can never execute.
-pub(crate) const MAX_GRAPH_SEGMENT_STEPS: u32 = MAX_GRAPH_STEPS;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GraphConfig {
-    pub start: String,
-    #[serde(default = "default_max_steps")]
-    pub max_steps: u32,
-    #[serde(default)]
-    pub on_error: ErrorMode,
-    #[serde(default)]
-    pub nodes: HashMap<String, GraphNode>,
-    /// Authored observer hooks fired at graph lifecycle events
-    /// (`graph_started`, `graph_step_completed`, `graph_completed`). Typed with
-    /// the same `HookDefinition` vocabulary directives use — one hook grammar
-    /// across runtimes. Each matching hook's action dispatches through the same
-    /// callback path a node action uses (effective_caps enforced, cost accrued,
-    /// braid-visible). Hooks observe; they do not steer the walk.
-    #[serde(default)]
-    pub hooks: Vec<ryeos_runtime::HookDefinition>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_schema: Option<Value>,
-    #[serde(default)]
-    pub env_requires: Vec<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_state"
-    )]
-    pub state: Option<Value>,
-    /// Per-thread step budget. When set and a run reaches it without hitting a
-    /// terminal node, the walker checkpoints and cuts a machine continuation
-    /// successor (which resumes mid-graph in a fresh thread) instead of running
-    /// to `max_steps`. `step` stays cumulative across the chain; `max_steps`
-    /// remains the hard total ceiling. `None` = no segmentation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub segment_steps: Option<u32>,
-}
-
-fn default_max_steps() -> u32 {
-    DEFAULT_GRAPH_MAX_STEPS
-}
-
-fn deserialize_state<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = Value::deserialize(deserializer)?;
-    if value.is_object() {
-        Ok(Some(value))
-    } else {
-        Err(serde::de::Error::custom(
-            "`config.state` must be a mapping; omit the field when no initial state is needed",
-        ))
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-#[derive(Default)]
-pub enum ErrorMode {
-    #[default]
-    Fail,
-    Continue,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GraphNode {
-    #[serde(default)]
-    pub node_type: NodeType,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub action: Option<Value>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_assign"
-    )]
-    pub assign: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next: Option<EdgeSpec>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_error: Option<String>,
-    #[serde(default)]
-    pub cache_result: bool,
-    /// Determinism class for durable cross-run replay; shared with the
-    /// static definition so the two decoders cannot drift. `live` (default)
-    /// is skipped on the wire, keeping existing checkpoints byte-stable.
-    #[serde(default, skip_serializing_if = "EffectClass::is_live")]
-    pub effects: EffectClass,
-    /// FOLLOW node: instead of dispatching the action inline, the daemon launches
-    /// it as a detached child and suspends this graph until the child's whole
-    /// continuation chain reaches terminal, then resumes with its result. Only
-    /// valid on an action node, and never cacheable (the result does not exist at
-    /// suspend time). Validated in `validation.rs`.
-    #[serde(default)]
-    pub follow: bool,
-    /// DETACH node: launch the action as a detached, lineage-linked child
-    /// (fire-and-forget) and CONTINUE — unlike `follow`, the graph does not
-    /// suspend or wait for the child's result. The node's result is the spawned
-    /// `{child_thread_id}`. The child is lineage-linked (a cancel/kill cascade
-    /// reaches it, it appears in `threads.children`) and inherits the parent's
-    /// depth+1 and hard limits. With `over:`, this is a lineage-preserving fanout
-    /// — the fleet fix. Only valid on an action node; mutually exclusive with
-    /// `follow`; never cacheable. Validated in `validation.rs`.
-    #[serde(default)]
-    pub detach: bool,
-    /// Cohort/fleet tags stamped on a `detach` child at spawn — a map of
-    /// `key: "<template>"` rendered per iteration
-    /// (e.g. `{fleet: "${_run.graph_run_id}", game: "${item}"}`), so a detached child
-    /// is tagged by construction with no post-launch race. Ignored without
-    /// `detach`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub facets: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub over: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub r#as: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub collect: Option<String>,
-    #[serde(default)]
-    pub parallel: bool,
-    /// Fanout width. On a plain foreach this bounds concurrent dispatch
-    /// tasks. On a `detach: true` foreach it is the LAUNCH WINDOW: detached
-    /// spawns return immediately, so the daemon keeps at most this many
-    /// child chains launched-and-live at once and admits the next queued
-    /// child when a live one reaches a hard terminal.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_concurrency: Option<usize>,
-    /// Return-node output template. A YAML scalar deserializes to a
-    /// `Value::String` and a YAML map/list to `Value::Object`/`Array`; the
-    /// compiled rye-expr/1 template tree recursively preserves native
-    /// whole-expression values.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output: Option<Value>,
-    #[serde(default)]
-    pub env_requires: Vec<String>,
-    /// Per-step dispatch retry. When a dispatch fails and attempts remain, the
-    /// walker sleeps the backoff and re-dispatches — each attempt consuming a
-    /// walker step and the attempt count riding the checkpoint. Only valid on
-    /// action nodes (incl. foreach); rejected on `follow` nodes. Validated in
-    /// `validation.rs`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retry: Option<RetryConfig>,
-}
-
-fn deserialize_assign<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = Value::deserialize(deserializer)?;
-    if value.is_object() {
-        Ok(Some(value))
-    } else {
-        Err(serde::de::Error::custom(
-            "`assign` must be a mapping; omit the field when no assignment is needed",
-        ))
-    }
-}
-
-impl GraphNode {
-    pub fn is_cacheable(&self) -> bool {
-        self.cache_result
-    }
-
-    /// Class governing durable cross-run replay of this node's action.
-    pub fn effect_class(&self) -> EffectClass {
-        self.effects
-    }
-
-    pub fn foreach_var(&self) -> &str {
-        self.r#as.as_deref().unwrap_or("item")
-    }
-
-    /// Fold the node's `detach` dispatch mode into a cloned action: set
-    /// `thread: "detached"` and carry the node's `facets:` templates so they
-    /// render alongside the action (per iteration under `over:`, with the
-    /// item variable in scope) and the daemon stamps them on the child at
-    /// spawn. No-op unless `detach: true`.
-    ///
-    /// Every action clone site that dispatches (plain action node, sequential
-    /// foreach, parallel foreach) must route through this fold BEFORE
-    /// compilation — `dispatch_action` defaults a missing `thread` to
-    /// `"inline"`, and the callback boundary rejects an inline dispatch of a
-    /// thread-run kind, so a site that skips the fold fails the node.
-    pub fn fold_detach_into_action(&self, action: &mut Value) {
-        if !self.detach {
-            return;
-        }
-        if let Some(obj) = action.as_object_mut() {
-            obj.insert(
-                ryeos_runtime::callback::action_keys::THREAD.to_string(),
-                Value::String("detached".to_string()),
-            );
-            if let Some(facets) = &self.facets {
-                obj.insert(
-                    ryeos_runtime::callback::action_keys::FACETS.to_string(),
-                    facets.clone(),
-                );
-            }
-        }
-    }
-}
-
-/// Maximum authored delay for any one graph retry backoff (five minutes).
-pub const MAX_RETRY_BACKOFF_MS: u64 = 300_000;
-
-/// Per-step retry policy on an action node.
-///
-/// `attempts` is the TOTAL number of dispatches including the first, so
-/// `attempts: 3` means one initial dispatch plus up to two retries. The
-/// backoff before the retry that follows a failed attempt `n` (1-based) is
-/// `backoff_ms * 2^(n-1)`, capped at `max_backoff_ms` when set. Bounds
-/// (`attempts` 1..=10, delay fields within `MAX_RETRY_BACKOFF_MS`, and
-/// `max_backoff_ms` >= `backoff_ms`)
-/// are enforced in `validation.rs`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct RetryConfig {
-    pub attempts: u32,
-    pub backoff_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_backoff_ms: Option<u64>,
-}
-
-impl RetryConfig {
-    /// Backoff before the retry that follows `failed_attempt` (1-based: the
-    /// number of the attempt that just failed). Exponential, capped.
-    pub fn delay_ms(&self, failed_attempt: u32) -> u64 {
-        // `failed_attempt` is validated to be at least 1; the shift exponent is
-        // clamped so a pathological attempt count can never overflow the shift.
-        let exp = failed_attempt.saturating_sub(1).min(63);
-        let grown = self.backoff_ms.saturating_mul(1u64 << exp);
-        let authored = match self.max_backoff_ms {
-            Some(cap) => grown.min(cap),
-            None => grown,
-        };
-        // Defense in depth for programmatically constructed definitions that
-        // have not passed graph validation.
-        authored.min(MAX_RETRY_BACKOFF_MS)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-#[derive(Default)]
-pub enum NodeType {
-    #[default]
-    Action,
-    Return,
-    Foreach,
-    Gate,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum EdgeSpec {
-    Unconditional { to: String },
-    Conditional { branches: Vec<ConditionalEdge> },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConditionalEdge {
-    #[serde(
-        default,
-        skip_serializing_if = "ryeos_runtime::ExpressionCondition::is_absent"
-    )]
-    pub when: ryeos_runtime::ExpressionCondition,
-    pub to: String,
-}
-
-/// Strict executable shape of the graph's finalized composed value.
-///
-/// The generic composer and graph effective validator run before launch. The
-/// runtime parses that same admitted composed value and checks its effective
-/// digest and captured hook plan before executing it. `requires` remains on
-/// the strict runtime shape so malformed or divergent capability declarations
-/// fail before the first graph step.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GraphFile {
-    #[serde(default)]
-    extends: Option<String>,
-    version: String,
-    category: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    description: Option<String>,
-    config: GraphConfig,
-    /// Unified capability requirements (`requires.capabilities`): `declared`
-    /// (self-asserted action authority, composed into effective_caps) and
-    /// `manifest` (runtime callback authority minted from the signed manifest).
-    /// `deny_unknown_fields` makes the removed top-level `permissions:` fail
-    /// to parse.
-    #[serde(default)]
-    requires: Option<ryeos_bundle::runtime_authority::RuntimeRequires>,
-    /// Item-level external content declaration. Validated, captured, and
-    /// realized by the engine before this runtime ever launches; the runtime
-    /// sees the realization as read-only mounts, so the declaration itself is
-    /// opaque here — named only so the strict decode admits it.
-    #[serde(default)]
-    #[allow(dead_code)]
-    external_content: Option<serde_json::Value>,
-}
+#[cfg(test)]
+pub const MAX_RETRY_BACKOFF_MS: u64 = ryeos_graph_definition::MAX_RETRY_BACKOFF_MS;
+pub const MAX_GRAPH_STEPS: u32 = ryeos_graph_definition::MAX_GRAPH_STEPS;
 
 #[derive(Debug, Clone)]
 pub struct GraphDefinition {
@@ -343,7 +34,7 @@ pub struct GraphDefinition {
     pub config: GraphConfig,
     /// Immutable execution sidecar compiled once from the strict source shape.
     /// The walker never parses expressions or scans templates at runtime.
-    pub(crate) compiled: crate::compiled_graph::CompiledGraph,
+    pub(crate) compiled: ryeos_graph_definition::CompiledGraph,
     /// Self-asserted action authority in the finalized composed graph
     /// (`requires.capabilities.declared`). Launch admission narrows this
     /// against the manifest and binds the result into callback authority; the
@@ -372,49 +63,24 @@ impl GraphDefinition {
                 "effective graph digest mismatch: envelope={expected_digest}, runtime={observed}"
             );
         }
-        ryeos_graph_definition::validate_effective_graph(&resolution.composed)?;
-        let mut file: GraphFile = serde_json::from_value(resolution.composed.composed.clone())?;
-        validate_extends_provenance(
-            file.extends.as_deref(),
-            resolution
-                .ancestors
-                .iter()
-                .map(|ancestor| ancestor.requested_id.as_str()),
+        let ancestor_requested_ids = resolution
+            .ancestors
+            .iter()
+            .map(|ancestor| ancestor.requested_id.clone())
+            .collect::<Vec<_>>();
+        let prepared = ryeos_graph_definition::prepare_effective_graph(
+            &resolution.root.resolved_ref,
+            &resolution.composed,
+            &ancestor_requested_ids,
         )?;
-        let plan_value = resolution
-            .composed
-            .derived
-            .get(ryeos_engine::hooks::EFFECTIVE_HOOK_PLAN_DERIVED_KEY)
-            .ok_or_else(|| anyhow::anyhow!("effective graph has no captured hook plan"))?;
-        let plan = ryeos_engine::hooks::EffectiveHookPlan::from_value(plan_value)
-            .map_err(|error| anyhow::anyhow!(error))?;
-        if plan.authored.hooks != file.config.hooks {
-            anyhow::bail!("effective graph authored hooks differ from captured hook plan");
-        }
-        let runtime_capability_requirements = match file.requires {
-            Some(requires) => {
-                let caps = requires.capabilities;
-                ryeos_bundle::runtime_authority::validate_runtime_capability_requirements(&caps)
-                    .map_err(|error| anyhow::anyhow!("invalid `requires.capabilities`: {error}"))?;
-                Some(caps)
-            }
-            None => None,
-        };
-        let declared_permissions = runtime_capability_requirements
-            .as_ref()
-            .map(|caps| caps.declared.clone())
-            .unwrap_or_default();
-        let compiled =
-            crate::compiled_graph::CompiledGraph::compile_effective(&file.config, &plan)?;
+        let mut file = prepared.file;
+        let runtime_capability_requirements = prepared.runtime_capability_requirements;
+        let declared_permissions = prepared.declared_permissions;
+        let compiled = prepared.compiled;
         // The captured, admitted plan is the only executable hook authority.
         // Do not retain a second raw authored copy in the live runtime model.
         file.config.hooks.clear();
-        let canonical =
-            ryeos_engine::canonical_ref::CanonicalRef::parse(&resolution.root.resolved_ref)
-                .map_err(|error| anyhow::anyhow!("invalid resolved graph ref: {error}"))?;
-        if canonical.kind != "graph" {
-            anyhow::bail!("effective graph root has kind `{}`", canonical.kind);
-        }
+        let canonical = prepared.canonical_ref;
         // `category` is required and strictly decoded as authored metadata,
         // but canonical execution identity comes from the admitted root ref.
         let _ = &file.category;
@@ -596,6 +262,9 @@ impl GraphDefinition {
                 resolved_ref: definition_ref,
                 source_path: file_path.unwrap_or("fixture.yaml").into(),
                 source_space: ryeos_engine::contracts::ItemSpace::Bundle,
+                source_root: ryeos_engine::contracts::ItemSourceRoot::Bundle {
+                    name: "fixture".to_owned(),
+                },
                 trust_class: TrustClass::TrustedBundle,
                 signer_fingerprint: Some("f".repeat(64)),
                 alias_resolution: None,
@@ -623,29 +292,6 @@ impl GraphDefinition {
         };
         let digest = resolution.effective_definition_digest()?;
         Self::from_effective_resolution(&resolution, &digest, file_path)
-    }
-}
-
-fn validate_extends_provenance<'a>(
-    declared: Option<&str>,
-    mut ancestor_requested_ids: impl DoubleEndedIterator<Item = &'a str>,
-) -> anyhow::Result<()> {
-    // Extends resolution is deepest-first, so the final admitted ancestor is
-    // the root's immediate parent. `requested_id` deliberately preserves the
-    // exact authored spelling, including aliases.
-    match (declared, ancestor_requested_ids.next_back()) {
-        (None, None) => Ok(()),
-        (Some(_), None) => {
-            anyhow::bail!("effective graph declares `extends` but has no admitted ancestor")
-        }
-        (None, Some(_)) => {
-            anyhow::bail!("effective graph has admitted ancestors but declares no `extends`")
-        }
-        (Some(declared), Some(parent)) if declared == parent => Ok(()),
-        (Some(declared), Some(parent)) => anyhow::bail!(
-            "effective graph `extends` provenance mismatch: composed={declared}, admitted={}",
-            parent
-        ),
     }
 }
 
@@ -797,6 +443,8 @@ pub struct NodeReceipt {
     /// the daemon substituted a recorded result for execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replayed_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
     pub elapsed_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -815,27 +463,17 @@ pub struct NodeReceipt {
 pub(crate) struct DispatchObservation {
     pub(crate) item_id: String,
     pub(crate) child_thread_id: Option<String>,
+    pub(crate) dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
     pub(crate) milestones: Vec<Value>,
     pub(crate) state_anchors: Vec<Value>,
 }
 
 impl DispatchObservation {
-    pub(crate) fn child_only(
-        item_id: impl Into<String>,
-        child_thread_id: Option<String>,
-    ) -> Option<Self> {
-        child_thread_id.map(|child_thread_id| Self {
-            item_id: item_id.into(),
-            child_thread_id: Some(child_thread_id),
-            milestones: Vec::new(),
-            state_anchors: Vec::new(),
-        })
-    }
-
     pub(crate) fn from_success(
         item_id: impl Into<String>,
         child_thread_id: Option<String>,
         result: &Value,
+        dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
     ) -> Option<Self> {
         let milestones = result
             .get("milestones")
@@ -847,14 +485,37 @@ impl DispatchObservation {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        if child_thread_id.is_none() && milestones.is_empty() && state_anchors.is_empty() {
+        if child_thread_id.is_none()
+            && dispatch.is_none()
+            && milestones.is_empty()
+            && state_anchors.is_empty()
+        {
             None
         } else {
             Some(Self {
                 item_id: item_id.into(),
                 child_thread_id,
+                dispatch,
                 milestones,
                 state_anchors,
+            })
+        }
+    }
+
+    pub(crate) fn from_failure(
+        item_id: impl Into<String>,
+        child_thread_id: Option<String>,
+        dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
+    ) -> Option<Self> {
+        if child_thread_id.is_none() && dispatch.is_none() {
+            None
+        } else {
+            Some(Self {
+                item_id: item_id.into(),
+                child_thread_id,
+                dispatch,
+                milestones: Vec::new(),
+                state_anchors: Vec::new(),
             })
         }
     }
@@ -868,6 +529,8 @@ pub struct FanoutReceiptSummary {
     pub expected: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub results: Option<Vec<Value>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dispatches: Vec<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
 }
 
 #[cfg(test)]
@@ -881,8 +544,9 @@ mod tests {
     use ryeos_engine::resolution::{
         KindComposedView, ResolutionOutput, ResolutionStepName, ResolvedAncestor, TrustClass,
     };
+    use ryeos_graph_definition::EffectClass;
     use serde_json::json;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::path::PathBuf;
 
     fn resolution_node(
@@ -896,6 +560,9 @@ mod tests {
             resolved_ref: resolved_ref.to_string(),
             source_path: PathBuf::from(format!("/diagnostic/{digest_byte}.yaml")),
             source_space: ItemSpace::Bundle,
+            source_root: ryeos_engine::contracts::ItemSourceRoot::Bundle {
+                name: "fixture".to_owned(),
+            },
             trust_class: TrustClass::TrustedBundle,
             signer_fingerprint: Some("f".repeat(64)),
             alias_resolution: None,
@@ -1001,26 +668,6 @@ mod tests {
     }
 
     #[test]
-    fn effective_extends_matches_immediate_admitted_parent() {
-        validate_extends_provenance(
-            Some("@base"),
-            ["graph:test/grandparent", "@base"].into_iter(),
-        )
-        .unwrap();
-        validate_extends_provenance(None, std::iter::empty()).unwrap();
-    }
-
-    #[test]
-    fn effective_extends_rejects_missing_or_divergent_provenance() {
-        assert!(validate_extends_provenance(Some("graph:test/base"), std::iter::empty()).is_err());
-        assert!(validate_extends_provenance(None, ["graph:test/base"].into_iter()).is_err());
-        assert!(
-            validate_extends_provenance(Some("graph:test/other"), ["graph:test/base"].into_iter(),)
-                .is_err()
-        );
-    }
-
-    #[test]
     fn unknown_top_level_field_rejects() {
         let yaml = r#"
 version: "1.0.0"
@@ -1049,6 +696,7 @@ config:
                     "restore": {"value": 1}
                 }]
             }),
+            None,
         )
         .unwrap();
         assert_eq!(observation.milestones.len(), 1);
@@ -1608,11 +1256,11 @@ config:
             "external_content": [{
                 "id": "sim",
                 "kind": "tree",
-                "locator": {"root": "project_ai", "path": "tools/lib"},
+                "locator": {"root": "project_files", "path": "tools/lib"},
                 "mode": "pinned",
                 "digest": "f".repeat(64),
                 "exclude": ["__pycache__"],
-                "mount": ".ai/tools/lib"
+                "mount": "tools/lib"
             }]
         }))
         .expect("strict decode admits the engine-owned declaration");
@@ -1628,8 +1276,7 @@ config:
         .unwrap();
         assert_eq!(node.effect_class(), EffectClass::Recorded);
 
-        // Absent means live, and live stays off the wire, so checkpoints
-        // written before the field existed remain byte-stable.
+        // Absent means live, and canonical live nodes omit the default field.
         let node: GraphNode = serde_json::from_value(json!({})).unwrap();
         assert!(node.effect_class().is_live());
         let wire = serde_json::to_value(&node).unwrap();

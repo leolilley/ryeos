@@ -31,8 +31,8 @@ where
 pub const RECOVERY_PROTOCOL_GENERATION: u32 = 1;
 const PENDING_SCHEMA: u32 = 1;
 const GENERATION_SCHEMA: u32 = 1;
-const STAGED_ROOTS_SCHEMA: u32 = 1;
-const DURABLE_UPLOAD_SCHEMA: u32 = 1;
+const STAGED_ROOTS_SCHEMA: u32 = 2;
+const DURABLE_UPLOAD_SCHEMA: u32 = 2;
 const REMOTE_PULL_JOURNAL_KEY: &str = "remote-pull-journal.key";
 static UNIQUE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -197,6 +197,7 @@ struct StagedCasRootsRecord {
     created_at: String,
     object_hashes: BTreeSet<String>,
     blob_hashes: BTreeSet<String>,
+    large_object_hashes: BTreeSet<String>,
 }
 
 /// Typed, canonical publication namespace bound to one durable upload stage.
@@ -208,6 +209,9 @@ pub enum DurableCasPublicationKey {
     ProjectHead {
         principal_key: String,
         project_hash: String,
+    },
+    ExternalContentImport {
+        request_digest: String,
     },
 }
 
@@ -221,6 +225,14 @@ impl DurableCasPublicationKey {
         Ok(key)
     }
 
+    pub fn external_content_import(request_digest: &str) -> Result<Self> {
+        let key = Self::ExternalContentImport {
+            request_digest: request_digest.to_owned(),
+        };
+        key.validate()?;
+        Ok(key)
+    }
+
     fn validate(&self) -> Result<()> {
         match self {
             Self::ProjectHead {
@@ -229,6 +241,9 @@ impl DurableCasPublicationKey {
             } => {
                 validate_hash("durable upload project principal key", principal_key)?;
                 validate_hash("durable upload project hash", project_hash)
+            }
+            Self::ExternalContentImport { request_digest } => {
+                validate_hash("external-content import request digest", request_digest)
             }
         }
     }
@@ -251,12 +266,14 @@ struct DurableCasUploadRecord {
     created_at: String,
     object_hashes: BTreeSet<String>,
     blob_hashes: BTreeSet<String>,
+    large_object_hashes: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct StagedCasRootHashes {
     pub object_hashes: Vec<String>,
     pub blob_hashes: Vec<String>,
+    pub large_object_hashes: Vec<String>,
 }
 
 /// Durable temporary GC roots for async CAS staging. The OS lock remains held
@@ -469,6 +486,17 @@ impl DurableCasUploadStage {
         Ok(())
     }
 
+    pub fn ensure_protects_large_object(&self, hash: &str) -> Result<()> {
+        self.ensure_active()?;
+        validate_hash("durable staged large-object root", hash)?;
+        if !self.record.large_object_hashes.contains(hash) {
+            anyhow::bail!(
+                "large-object root {hash} was not imported under this staging capability"
+            );
+        }
+        Ok(())
+    }
+
     pub fn protect_cas_closure<'a, O, B>(
         &mut self,
         cas_mutation_guard: &CasMutationGuard,
@@ -503,6 +531,21 @@ impl DurableCasUploadStage {
         Ok(())
     }
 
+    pub fn protect_large_object_hash(
+        &mut self,
+        cas_mutation_guard: &CasMutationGuard,
+        hash: &str,
+    ) -> Result<()> {
+        self.ensure_active()?;
+        self.recovery.ensure_guard(cas_mutation_guard)?;
+        validate_hash("durable staged large-object root", hash)?;
+        if self.record.large_object_hashes.insert(hash.to_owned()) {
+            self.recovery
+                .write_durable_upload(&self.directory, &self.record)?;
+        }
+        Ok(())
+    }
+
     pub fn finish_admitted(
         &mut self,
         cas_mutation_guard: &CasMutationGuard,
@@ -518,6 +561,7 @@ impl DurableCasUploadStage {
         self.record.admitted_at = Some(lillux::time::iso8601_now());
         self.record.object_hashes.clear();
         self.record.blob_hashes.clear();
+        self.record.large_object_hashes.clear();
         self.recovery
             .write_durable_upload(&self.directory, &self.record)?;
         if let Err(error) = self
@@ -666,6 +710,20 @@ impl StagedCasRootLease {
         self.recovery.ensure_guard(cas_mutation_guard)?;
         validate_hash("staged CAS blob root", hash)?;
         if self.record.blob_hashes.insert(hash.to_string()) {
+            self.recovery
+                .write_staged_roots(&self.directory, &self.record)?;
+        }
+        Ok(())
+    }
+
+    pub fn protect_large_object_hash_admitted(
+        &mut self,
+        cas_mutation_guard: &CasMutationGuard,
+        hash: &str,
+    ) -> Result<()> {
+        self.recovery.ensure_guard(cas_mutation_guard)?;
+        validate_hash("staged large-object root", hash)?;
+        if self.record.large_object_hashes.insert(hash.to_owned()) {
             self.recovery
                 .write_staged_roots(&self.directory, &self.record)?;
         }
@@ -1506,6 +1564,7 @@ impl RecoveryStore {
             created_at: lillux::time::iso8601_now(),
             object_hashes: BTreeSet::new(),
             blob_hashes: BTreeSet::new(),
+            large_object_hashes: BTreeSet::new(),
         };
         self.write_staged_roots(&staged_directory, &record)?;
         Ok(StagedCasRootLease {
@@ -1558,6 +1617,7 @@ impl RecoveryStore {
             created_at: lillux::time::iso8601_now(),
             object_hashes: BTreeSet::new(),
             blob_hashes: BTreeSet::new(),
+            large_object_hashes: BTreeSet::new(),
         };
         self.write_durable_upload(&durable_directory, &record)?;
         Ok(DurableCasUploadStage {
@@ -1715,6 +1775,7 @@ impl RecoveryStore {
         }
         let mut object_hashes = BTreeSet::new();
         let mut blob_hashes = BTreeSet::new();
+        let mut large_object_hashes = BTreeSet::new();
         for record_entry in records {
             let lease_id = record_entry
                 .path
@@ -1759,6 +1820,7 @@ impl RecoveryStore {
                 self.read_staged_roots_file(record_entry.file.try_clone()?, &record_entry.path)?;
             object_hashes.extend(record.object_hashes);
             blob_hashes.extend(record.blob_hashes);
+            large_object_hashes.extend(record.large_object_hashes);
         }
         for (_name, lock_entry) in locks {
             #[cfg(unix)]
@@ -1776,10 +1838,15 @@ impl RecoveryStore {
             #[cfg(not(unix))]
             anyhow::bail!("staged CAS root locking is unavailable on this platform");
         }
-        self.collect_durable_upload_roots(&mut object_hashes, &mut blob_hashes)?;
+        self.collect_durable_upload_roots(
+            &mut object_hashes,
+            &mut blob_hashes,
+            &mut large_object_hashes,
+        )?;
         Ok(StagedCasRootHashes {
             object_hashes: object_hashes.into_iter().collect(),
             blob_hashes: blob_hashes.into_iter().collect(),
+            large_object_hashes: large_object_hashes.into_iter().collect(),
         })
     }
 
@@ -1791,11 +1858,17 @@ impl RecoveryStore {
     pub fn inspect_staged_cas_root_hashes_read_only(&self) -> Result<StagedCasRootHashes> {
         let mut object_hashes = BTreeSet::new();
         let mut blob_hashes = BTreeSet::new();
+        let mut large_object_hashes = BTreeSet::new();
         let Some(directory) = self.open_child_directory("staged-cas-roots")? else {
-            self.collect_durable_upload_roots(&mut object_hashes, &mut blob_hashes)?;
+            self.collect_durable_upload_roots(
+                &mut object_hashes,
+                &mut blob_hashes,
+                &mut large_object_hashes,
+            )?;
             return Ok(StagedCasRootHashes {
                 object_hashes: object_hashes.into_iter().collect(),
                 blob_hashes: blob_hashes.into_iter().collect(),
+                large_object_hashes: large_object_hashes.into_iter().collect(),
             });
         };
 
@@ -1818,14 +1891,20 @@ impl RecoveryStore {
             }
             object_hashes.extend(record.object_hashes);
             blob_hashes.extend(record.blob_hashes);
+            large_object_hashes.extend(record.large_object_hashes);
         }
         if let Some((_name, orphan)) = locks.into_iter().next() {
             anyhow::bail!("orphan staged CAS root lock: {}", orphan.path.display());
         }
-        self.collect_durable_upload_roots(&mut object_hashes, &mut blob_hashes)?;
+        self.collect_durable_upload_roots(
+            &mut object_hashes,
+            &mut blob_hashes,
+            &mut large_object_hashes,
+        )?;
         Ok(StagedCasRootHashes {
             object_hashes: object_hashes.into_iter().collect(),
             blob_hashes: blob_hashes.into_iter().collect(),
+            large_object_hashes: large_object_hashes.into_iter().collect(),
         })
     }
 
@@ -2187,6 +2266,7 @@ impl RecoveryStore {
         &self,
         object_hashes: &mut BTreeSet<String>,
         blob_hashes: &mut BTreeSet<String>,
+        large_object_hashes: &mut BTreeSet<String>,
     ) -> Result<()> {
         let Some(directory) = self.open_child_directory("durable-cas-uploads")? else {
             return Ok(());
@@ -2213,6 +2293,7 @@ impl RecoveryStore {
             }
             object_hashes.extend(record.object_hashes);
             blob_hashes.extend(record.blob_hashes);
+            large_object_hashes.extend(record.large_object_hashes);
         }
         if let Some((_name, orphan)) = locks.into_iter().next() {
             anyhow::bail!("orphan durable CAS upload lock: {}", orphan.path.display());
@@ -2239,6 +2320,9 @@ impl RecoveryStore {
         }
         for hash in &record.blob_hashes {
             validate_hash("staged CAS blob root", hash)?;
+        }
+        for hash in &record.large_object_hashes {
+            validate_hash("staged large-object root", hash)?;
         }
         let value = serde_json::to_value(record)?;
         let bytes = lillux::canonical_json(&value).context("canonicalize staged CAS roots")?;
@@ -2372,7 +2456,10 @@ fn validate_durable_upload_record(record: &DurableCasUploadRecord) -> Result<()>
             validate_hash("durable upload admitted target", hash)?;
             crate::objects::parse_canonical_timestamp(admitted_at)
                 .context("durable upload admitted_at is not canonical")?;
-            if !record.object_hashes.is_empty() || !record.blob_hashes.is_empty() {
+            if !record.object_hashes.is_empty()
+                || !record.blob_hashes.is_empty()
+                || !record.large_object_hashes.is_empty()
+            {
                 anyhow::bail!("admitted durable upload receipt still carries staging roots");
             }
         }
@@ -2385,6 +2472,9 @@ fn validate_durable_upload_record(record: &DurableCasUploadRecord) -> Result<()>
     }
     for hash in &record.blob_hashes {
         validate_hash("durable staged blob root", hash)?;
+    }
+    for hash in &record.large_object_hashes {
+        validate_hash("durable staged large-object root", hash)?;
     }
     Ok(())
 }

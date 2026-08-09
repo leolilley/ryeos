@@ -194,8 +194,25 @@ pub struct EngineContext {
     /// When present it must match the plan's serialized verified-command
     /// identity; dispatch never reopens that command by pathname.
     pub isolation_verified_command: Option<crate::isolation::IsolationDescriptorBoundCommand>,
-    pub isolation_external_read_only_mounts:
-        Vec<crate::isolation::IsolationReadOnlyMountAuthority>,
+    pub isolation_external_read_only_mounts: Vec<crate::isolation::IsolationReadOnlyMountAuthority>,
+    /// One daemon-created connected duplex channel with a signed target
+    /// environment binding. This is deliberately distinct from generic
+    /// inherited descriptors and cannot be supplied as a raw fd.
+    pub isolation_target_channel: Option<crate::isolation::IsolationTargetChannelAuthority>,
+    /// Explicit daemon-owned execution workspace used only by isolation.
+    /// This does not change item-resolution authority or project semantics;
+    /// it gives projectless admitted mechanics (for example a persistent
+    /// session) one bounded mount namespace for retained read-only content.
+    pub isolation_workspace: Option<PathBuf>,
+    /// Daemon-owned mechanical limits applied to this exact subprocess tree.
+    /// Kind semantics stay outside the engine; the admitted capsule supplies
+    /// these generic kernel ceilings for reusable sessions.
+    pub subprocess_limits: Option<lillux::SubprocessLimits>,
+    /// Already-open descriptors deliberately inherited by the child.  The
+    /// descriptor numbers are paired with signed protocol environment
+    /// bindings before this context is constructed; no ambient descriptor is
+    /// inherited.
+    pub inherited_fds: Vec<Arc<std::fs::File>>,
     pub thread_id: String,
     pub chain_root_id: String,
     pub current_site_id: String,

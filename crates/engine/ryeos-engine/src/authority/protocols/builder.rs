@@ -351,6 +351,7 @@ mod tests {
                 mode: LifecycleMode::Managed,
             },
             callback_channel: CallbackChannel::Http,
+            session: None,
         }
     }
 
@@ -382,6 +383,7 @@ mod tests {
                 mode: LifecycleMode::Managed,
             },
             callback_channel: CallbackChannel::None,
+            session: None,
         }
     }
 
@@ -465,6 +467,7 @@ mod tests {
                     resolved_ref: "runtime:ryeos/core/test-runtime".to_string(),
                     source_path: PathBuf::from("/project/.ai/runtimes/ryeos/core/runtime.yaml"),
                     source_space: crate::contracts::ItemSpace::Project,
+                    source_root: crate::contracts::ItemSourceRoot::Project,
                     trust_class: TrustClass::Unsigned,
                     signer_fingerprint: None,
                     alias_resolution: None,

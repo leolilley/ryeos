@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 ryeos-handler-protocol = { workspace = true }
+ryeos-effect-contract = { workspace = true }
 ryeos-directive-core = { workspace = true }
 ryeos-engine = { workspace = true }
 ryeos-graph-definition = { workspace = true }

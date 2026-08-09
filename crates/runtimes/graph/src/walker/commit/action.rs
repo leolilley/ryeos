@@ -25,6 +25,7 @@ impl Walker {
             child_thread_id,
             cache_hit,
             replayed_from,
+            dispatch,
             cache_write_key,
             elapsed_ms,
             cost,
@@ -52,9 +53,12 @@ impl Walker {
         // happened, but are deliberately deferred until assignment and
         // branch evaluation have both succeeded. They therefore cannot
         // make an expression-failed transition look committed.
-        if let Some(observation) =
-            DispatchObservation::from_success(item_id.to_string(), child_thread_id.clone(), result)
-        {
+        if let Some(observation) = DispatchObservation::from_success(
+            item_id.to_string(),
+            child_thread_id.clone(),
+            result,
+            dispatch.clone(),
+        ) {
             if let Err(error) = self
                 .emit_dispatch_observation(graph_run_id, current, step, &observation)
                 .await
@@ -117,6 +121,7 @@ impl Walker {
             result_hash: Some(result_hash),
             cache_hit,
             replayed_from,
+            dispatch: dispatch.clone(),
             elapsed_ms,
             error: None,
             cost: cost.clone(),

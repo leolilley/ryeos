@@ -5,6 +5,19 @@ use ryeos_runtime::envelope::RuntimeResultStatus;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+fn live_dispatch_response(result: Value) -> Value {
+    json!({
+        "thread": {},
+        "result": result,
+        "dispatch": {
+            "source": "executed",
+            "effect_class": "live",
+            "action_digest": "ab".repeat(32),
+            "publication": "not_applicable"
+        }
+    })
+}
+
 struct MockClient {
     results: Mutex<Vec<Value>>,
     /// Commands handed back on the FIRST `claim_commands`, then drained empty.
@@ -43,7 +56,7 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for MockClient {
         // requires `{thread, result}` shape; preserve any caller-
         // supplied leaf by wrapping it under `result`.
         if results.is_empty() {
-            Ok(json!({"thread": {}, "result": {}}))
+            Ok(live_dispatch_response(json!({})))
         } else {
             let result = results.remove(0);
             if result.get("__retryable_dispatch_error").is_some() {
@@ -53,7 +66,7 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for MockClient {
                     retryable: true,
                 })
             } else {
-                Ok(json!({"thread": {}, "result": result}))
+                Ok(live_dispatch_response(result))
             }
         }
     }
@@ -2365,6 +2378,7 @@ fn step_outcome_action_ok_captures_fields() {
         child_thread_id: None,
         cache_hit: false,
         replayed_from: None,
+        dispatch: None,
         cache_write_key: None,
         elapsed_ms: 42,
         cost: None,
@@ -2443,6 +2457,7 @@ fn step_outcome_foreach_done_captures_count() {
         item_id: "tool:test/echo".to_string(),
         cost: None,
         observations: Vec::new(),
+        elapsed_ms: 42,
     }));
     match outcome {
         StepOutcome::ForeachDone(outcome) => {
@@ -2540,7 +2555,7 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for RecordingMockClient {
         self.dispatch_requests.lock().unwrap().push(request);
         let mut results = self.dispatch_results.lock().unwrap();
         if results.is_empty() {
-            Ok(json!({"thread": {}, "result": {}}))
+            Ok(live_dispatch_response(json!({})))
         } else {
             let result = results.remove(0);
             if result.get("__retryable_dispatch_error").is_some() {
@@ -2550,7 +2565,7 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for RecordingMockClient {
                     retryable: true,
                 })
             } else {
-                Ok(json!({"thread": {}, "result": result}))
+                Ok(live_dispatch_response(result))
             }
         }
     }

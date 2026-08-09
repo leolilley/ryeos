@@ -58,6 +58,7 @@ pub struct ActionFailure {
     /// or cost provenance is invalid. Such failures cannot be authored around
     /// with `on_error`, because doing so could settle after losing accounting.
     pub integrity: bool,
+    pub dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -107,6 +108,10 @@ pub struct ActionSuccess {
     /// daemon substituted a recorded result for execution. Flows into the
     /// node receipt so replay provenance is inspectable per step.
     pub replayed_from: Option<String>,
+    /// Daemon-owned dispatch provenance. Follow-resume outcomes do not pass
+    /// through the unary callback boundary and therefore carry `None` here;
+    /// unary, retry, and foreach actions always carry it.
+    pub dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
 }
 
 impl ActionSuccess {
@@ -120,8 +125,62 @@ impl ActionSuccess {
             cost: None,
             child_thread_id: None,
             replayed_from: None,
+            dispatch: None,
         }
     }
+}
+
+fn build_action_payload(
+    action: &Value,
+) -> Result<ryeos_runtime::callback::ActionPayload, ActionDispatchError> {
+    let item_id = action.get("item_id").and_then(Value::as_str).unwrap_or("");
+    let ref_bindings = action
+        .get("ref_bindings")
+        .ok_or_else(|| anyhow::anyhow!("action `{item_id}` is missing required `ref_bindings`"))
+        .and_then(|value| {
+            serde_json::from_value::<BTreeMap<String, String>>(value.clone())
+                .map_err(|error| anyhow::anyhow!("invalid `ref_bindings` for `{item_id}`: {error}"))
+        })?;
+    let call = match action.get("call") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            serde_json::from_value::<ryeos_runtime::callback::MethodCall>(value.clone()).map_err(
+                |error| anyhow::anyhow!("invalid `call` block for `{item_id}`: {error}"),
+            )?,
+        ),
+    };
+    let launch_window = match action.get("launch_window") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            serde_json::from_value::<ryeos_runtime::callback::LaunchWindow>(value.clone())
+                .map_err(|error| {
+                    anyhow::anyhow!("invalid `launch_window` for `{item_id}`: {error}")
+                })?,
+        ),
+    };
+    Ok(ryeos_runtime::callback::ActionPayload {
+        operation_id: action
+            .get("operation_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        item_id: item_id.to_owned(),
+        ref_bindings,
+        params: action.get("params").cloned().unwrap_or_else(|| json!({})),
+        thread: action
+            .get("thread")
+            .and_then(Value::as_str)
+            .unwrap_or("inline")
+            .to_owned(),
+        call,
+        facets: action.get("facets").cloned(),
+        launch_window,
+    })
+}
+
+pub(crate) fn rendered_action_digest(action: &Value) -> Result<String, ActionDispatchError> {
+    Ok(ryeos_runtime::callback::dispatch_action_digest(
+        &build_action_payload(action)?,
+    )?)
 }
 
 #[tracing::instrument(
@@ -137,75 +196,21 @@ pub async fn dispatch_action(
     action: &Value,
     thread_id: &str,
     project_path: &str,
-    effect_replay: Option<ryeos_runtime::callback::EffectReplayRequest>,
+    effect_dispatch: Option<ryeos_runtime::callback::EffectDispatchRequest>,
     _exec_ctx: Option<&ExecutionContext>,
 ) -> Result<ActionOutcome, ActionDispatchError> {
     let action = action.clone();
 
     let item_id = action.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
     tracing::Span::current().record("tool_name", item_id);
-    let params = action.get("params").cloned().unwrap_or(json!({}));
-    let ref_bindings = action
-        .get("ref_bindings")
-        .ok_or_else(|| anyhow::anyhow!("action `{item_id}` is missing required `ref_bindings`"))
-        .and_then(|value| {
-            serde_json::from_value::<BTreeMap<String, String>>(value.clone())
-                .map_err(|e| anyhow::anyhow!("invalid `ref_bindings` for `{item_id}`: {e}"))
-        })?;
-    let thread = action
-        .get("thread")
-        .and_then(|v| v.as_str())
-        .unwrap_or("inline");
-
-    // Optional method selector. The node's `call: { method, args }` block
-    // (already rendered by the walker) maps onto the daemon's
-    // method dispatch. Absent (or explicit `null`, for parity with how
-    // `/execute` deserializes `Option<MethodCall>`) → the leaf takes the
-    // kind's default method. A malformed `call` is a node authoring error,
-    // surfaced loudly.
-    let call = match action.get("call") {
-        None => None,
-        Some(v) if v.is_null() => None,
-        Some(call_val) => Some(
-            serde_json::from_value::<ryeos_runtime::callback::MethodCall>(call_val.clone())
-                .map_err(|e| anyhow::anyhow!("invalid `call` block for `{item_id}`: {e}"))?,
-        ),
-    };
-
-    // Cohort/fleet facets ride the action Value (the walker sets them from the
-    // node's rendered `facets:`); the daemon stamps them on a detached child.
-    let facets = action.get("facets").cloned();
-
-    // Bounded-fanout window (the foreach runners set it for a `detach` node
-    // with `max_concurrency`); malformed is an authoring/plumbing error,
-    // surfaced loudly.
-    let launch_window = match action.get("launch_window") {
-        None => None,
-        Some(v) if v.is_null() => None,
-        Some(v) => Some(
-            serde_json::from_value::<ryeos_runtime::callback::LaunchWindow>(v.clone())
-                .map_err(|e| anyhow::anyhow!("invalid `launch_window` for `{item_id}`: {e}"))?,
-        ),
-    };
+    let payload = build_action_payload(&action)?;
 
     let request = ryeos_runtime::callback::DispatchActionRequest {
         thread_id: thread_id.to_string(),
         project_path: project_path.to_string(),
-        action: ryeos_runtime::callback::ActionPayload {
-            operation_id: action
-                .get("operation_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            item_id: item_id.to_string(),
-            ref_bindings,
-            params,
-            thread: thread.to_string(),
-            call,
-            facets,
-            launch_window,
-        },
+        action: payload,
         hook_dispatch: None,
-        effect_replay,
+        effect_dispatch,
     };
 
     let response = client
@@ -242,8 +247,17 @@ pub async fn dispatch_action(
         Some(_) => (None, Some("runtime thread_id is not a string".to_string())),
     };
 
+    response
+        .dispatch
+        .validate()
+        .map_err(|error| ActionDispatchError {
+            diagnostic: format!("invalid daemon dispatch evidence: {error:#}"),
+            retryable: false,
+        })?;
+    let daemon_dispatch = response.dispatch;
     match classify_envelope_for_item(response.result, item_id) {
         ActionOutcome::Failure(mut failure) => {
+            failure.dispatch = Some(daemon_dispatch);
             if let Some(error) = child_thread_id_error {
                 failure
                     .diagnostic
@@ -276,6 +290,18 @@ pub async fn dispatch_action(
             Ok(ActionOutcome::Failure(failure))
         }
         ActionOutcome::Success(mut success) => {
+            if success.replayed_from != daemon_dispatch.replayed_from {
+                return Ok(ActionOutcome::Failure(ActionFailure {
+                    diagnostic: "leaf replay marker contradicts daemon dispatch evidence"
+                        .to_owned(),
+                    cost: success.cost,
+                    retryable: false,
+                    child_thread_id: None,
+                    integrity: true,
+                    dispatch: Some(daemon_dispatch),
+                }));
+            }
+            success.dispatch = Some(daemon_dispatch);
             if let Some(error) = child_thread_id_error {
                 return Ok(ActionOutcome::Failure(ActionFailure {
                     diagnostic: format!("invalid dispatched child identity: {error}"),
@@ -283,6 +309,7 @@ pub async fn dispatch_action(
                     retryable: false,
                     child_thread_id: None,
                     integrity: true,
+                    dispatch: success.dispatch,
                 }));
             }
             success.child_thread_id = child_thread_id;
@@ -311,6 +338,7 @@ pub async fn dispatch_action(
                     retryable: false,
                     child_thread_id: success.child_thread_id,
                     integrity: false,
+                    dispatch: success.dispatch,
                 }));
             }
             Ok(ActionOutcome::Success(success))
@@ -571,6 +599,7 @@ fn classify_follow_envelope_with_projection(
             cost,
             child_thread_id: Some(envelope_child_thread_id),
             replayed_from: None,
+            dispatch: None,
         })
     } else {
         let structured_failure = parse_runtime_failure(&result);
@@ -615,6 +644,7 @@ fn classify_follow_envelope_with_projection(
                 && runtime_failure_contract_error.is_none(),
             child_thread_id,
             integrity: runtime_failure_contract_error.is_some(),
+            dispatch: None,
         })
     };
 
@@ -732,6 +762,7 @@ fn classify_native_runtime_envelope(
                 retryable: false,
                 child_thread_id: None,
                 integrity: true,
+                dispatch: None,
             });
         }
     };
@@ -751,6 +782,7 @@ fn classify_native_runtime_envelope(
                 cost,
                 child_thread_id: None,
                 replayed_from,
+                dispatch: None,
             }),
             Err(diagnostic) => malformed_native_runtime_failure(diagnostic, cost),
         }
@@ -774,6 +806,7 @@ fn classify_native_runtime_envelope(
                 && runtime_failure_contract_error.is_none(),
             child_thread_id: structured_failure.map(|failure| failure.diagnostic_locator.thread_id),
             integrity: runtime_failure_contract_error.is_some(),
+            dispatch: None,
         })
     }
 }
@@ -788,6 +821,7 @@ fn malformed_native_runtime_failure(
         retryable: false,
         child_thread_id: None,
         integrity: true,
+        dispatch: None,
     })
 }
 
@@ -801,6 +835,7 @@ fn classify_subprocess_envelope(value: Value) -> ActionOutcome {
                 retryable: false,
                 child_thread_id: None,
                 integrity: true,
+                dispatch: None,
             });
         }
     };
@@ -817,6 +852,7 @@ fn classify_subprocess_envelope(value: Value) -> ActionOutcome {
             cost: None,
             child_thread_id: None,
             replayed_from,
+            dispatch: None,
         })
     } else {
         ActionOutcome::Failure(ActionFailure {
@@ -825,6 +861,7 @@ fn classify_subprocess_envelope(value: Value) -> ActionOutcome {
             retryable: false,
             child_thread_id: None,
             integrity: false,
+            dispatch: None,
         })
     }
 }
@@ -1062,6 +1099,20 @@ mod tests {
         CallbackClient::from_inner(inner, "T-test", "/project", "tat-test")
     }
 
+    fn live_dispatch_value() -> Value {
+        serde_json::to_value(ryeos_runtime::callback_contract::RuntimeDispatchEvidence {
+            source: ryeos_runtime::callback_contract::RuntimeDispatchSource::Executed,
+            effect_class: ryeos_runtime::callback_contract::RuntimeDispatchEffectClass::Live,
+            action_digest: "a".repeat(64),
+            effect_identity: None,
+            publication:
+                ryeos_runtime::callback_contract::RuntimeDispatchPublication::NotApplicable,
+            record_hash: None,
+            replayed_from: None,
+        })
+        .unwrap()
+    }
+
     struct MockClient {
         results: Mutex<Vec<Value>>,
         child_thread_id: Option<String>,
@@ -1090,9 +1141,10 @@ mod tests {
             _request: DispatchActionRequest,
         ) -> Result<Value, CallbackError> {
             let mut results = self.results.lock().unwrap();
-            // Strict typed contract: wrap leaf in `{thread, result}`.
+            // Strict typed contract: daemon evidence is always present and
+            // separate from the authored leaf result.
             if results.is_empty() {
-                Ok(json!({"thread": {}, "result": {}}))
+                Ok(json!({"thread": {}, "result": {}, "dispatch": live_dispatch_value()}))
             } else {
                 Ok(json!({
                     "thread": self
@@ -1101,6 +1153,7 @@ mod tests {
                         .map(|id| json!({"thread_id": id}))
                         .unwrap_or_else(|| json!({})),
                     "result": results.remove(0),
+                    "dispatch": live_dispatch_value(),
                 }))
             }
         }
@@ -1203,7 +1256,11 @@ mod tests {
             request: DispatchActionRequest,
         ) -> Result<Value, CallbackError> {
             *self.last.lock().unwrap() = Some(request.action);
-            Ok(json!({"thread": {}, "result": {}}))
+            Ok(json!({
+                "thread": {},
+                "result": {},
+                "dispatch": live_dispatch_value(),
+            }))
         }
         async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
             Ok(json!({}))

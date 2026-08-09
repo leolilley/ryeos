@@ -39,6 +39,8 @@ ryeos-node = { workspace = true }
 ryeos-state = { workspace = true }
 ryeos-scheduler = { workspace = true }
 ryeos-accounting = { workspace = true }
+ryeos-provider-contract = { workspace = true }
+ryeos-effect-contract = { workspace = true }
 ryeos-app = { workspace = true }
 ryeos-executor = { workspace = true }
 ryeos-api = { workspace = true }

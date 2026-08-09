@@ -397,7 +397,7 @@ async fn execute_prepared_item_ref(
         root_admission: None,
         root_dispatch_evidence: None,
         parent_execution_context: None,
-        requested_effect_class: None,
+        effect_authority: None,
     };
 
     let result = ryeos_executor::dispatch::dispatch_verified_with_handler_context(

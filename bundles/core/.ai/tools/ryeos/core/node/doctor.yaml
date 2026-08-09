@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-27T09:00:07Z:88fb8de29298ae117e960d6fe0a328580e94cf49282b13904a9d52d9a88f7d45:y+/ZEBoisuIPIAzIF0Qh+v/+MLcec9uaspI/uPPaJ0QK9OOGMgm6LeFdvXHHhTrO/xS7n8HDVPIdPVzaV+qXCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-09T05:54:23Z:88fb8de29298ae117e960d6fe0a328580e94cf49282b13904a9d52d9a88f7d45:y+/ZEBoisuIPIAzIF0Qh+v/+MLcec9uaspI/uPPaJ0QK9OOGMgm6LeFdvXHHhTrO/xS7n8HDVPIdPVzaV+qXCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/node"
 name: "doctor"
 executor_id: "@subprocess"

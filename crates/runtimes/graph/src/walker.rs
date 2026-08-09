@@ -11,8 +11,6 @@ use crate::edges;
 use crate::evaluation::{ExpressionScope, validate_runtime_value};
 use crate::foreach;
 use crate::model::*;
-#[cfg(test)]
-use crate::validation::analyze_graph;
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::checkpoint::CheckpointWriter;
 use ryeos_runtime::events::RuntimeEventType;
@@ -431,36 +429,6 @@ impl Walker {
 
     fn record_warning(&self, warning: String) {
         self.warnings.lock().unwrap().push(warning);
-    }
-
-    #[cfg(test)]
-    pub fn validate(&self) -> GraphResult {
-        let result = analyze_graph(&self.graph);
-        GraphResult {
-            success: result.errors.is_empty(),
-            graph_id: self.graph.graph_id.clone(),
-            definition_ref: self.graph.definition_ref.clone(),
-            effective_definition_digest: self.graph.effective_definition_digest.clone(),
-            graph_run_id: String::new(),
-            status: if result.errors.is_empty() {
-                GraphRunStatus::Valid
-            } else {
-                GraphRunStatus::Invalid
-            },
-            steps: 0,
-            state: json!({}),
-            result: Some(json!({
-                "errors": result.errors,
-                "warnings": result.warnings,
-                "node_count": self.graph.config.nodes.len(),
-            })),
-            errors_suppressed: None,
-            errors: None,
-            error: None,
-            cost: None,
-            node_costs: Vec::new(),
-            hook_costs: Vec::new(),
-        }
     }
 
     #[tracing::instrument(
@@ -1152,6 +1120,10 @@ impl Walker {
                         Some(&execution),
                         Some(graph_run_id),
                     )
+                    .with_run_identity(
+                        &self.graph.definition_ref,
+                        &self.graph.effective_definition_digest,
+                    )
                     .render_json(output)
                     {
                         Ok(output) => Some(output),
@@ -1186,6 +1158,10 @@ impl Walker {
                     inputs,
                     Some(&execution),
                     Some(graph_run_id),
+                    Some((
+                        &self.graph.definition_ref,
+                        &self.graph.effective_definition_digest,
+                    )),
                 ) {
                     Ok(target) => StepOutcome::GateTaken(GateTakenOutcome { target }),
                     Err(error) => StepOutcome::ExpressionFailed(ExpressionFailedOutcome {
@@ -1234,6 +1210,10 @@ impl Walker {
                     inputs,
                     Some(&execution),
                     Some(graph_run_id),
+                )
+                .with_run_identity(
+                    &self.graph.definition_ref,
+                    &self.graph.effective_definition_digest,
                 )
                 .render_template(over)
                 {
@@ -1452,6 +1432,10 @@ impl Walker {
                     inputs,
                     Some(&execution),
                     Some(graph_run_id),
+                    Some((
+                        &self.graph.definition_ref,
+                        &self.graph.effective_definition_digest,
+                    )),
                 ) {
                     Ok(next) => next,
                     Err(error) => {
@@ -1483,6 +1467,7 @@ impl Walker {
                     item_id: foreach_item_id,
                     cost,
                     observations,
+                    elapsed_ms: start.elapsed().as_millis() as u64,
                 }))
             }
 

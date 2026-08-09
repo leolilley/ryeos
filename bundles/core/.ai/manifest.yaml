@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-08T05:45:35Z:6b0c74b42ed2ad3dca5d87e291f3f467c563175db03ce8ae40513b455411665a:TRTEweMIJHrai5C9K0rkQNX/pMRwFWWuKS+DIYaNb+HsPKEFGwwwMazflp83DcuDW5UiA6ITI5noC1W53TpOBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-09T05:54:24Z:6a2315bda1e70750cc686e1ececcbc2286cc9d4b7a8270160a31930e6f6e9909:cqqSqJwZh5GZvxyCNaKvFTs96E/RF2Y0qST34YcJPmPBckvacdYFDyzlf9hp4k70hZm4Law5JNn6adAnFoIbCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: core
 version: 0.5.0
 description: 'Engine foundation: kind schemas, handlers, parsers, services, tools'
@@ -12,6 +12,7 @@ provides_kinds:
 - service
 - streaming_tool
 - tool
+- worker
 requires_kinds: []
 uses_kinds: []
 runtime_authority:

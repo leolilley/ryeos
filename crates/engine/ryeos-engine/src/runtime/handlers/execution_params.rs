@@ -105,6 +105,10 @@ mod tests {
             resolved_ref: "tool:mytool".into(),
             kind: "tool".into(),
             source_path: PathBuf::from("/tmp/fake.yaml"),
+            source_space: crate::contracts::ItemSpace::Project,
+            source_root: crate::contracts::ItemSourceRoot::Search {
+                label: "test".to_owned(),
+            },
             parsed: json!({ "execution_params": block.clone() }),
         }];
         let parsers = dispatcher_with_canonical_bundle_descriptors();

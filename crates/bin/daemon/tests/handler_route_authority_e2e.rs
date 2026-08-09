@@ -242,6 +242,7 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
             .expect("load disabled isolation fixture"),
     );
     let engine_ctx = EngineContext {
+        isolation_target_channel: None,
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
@@ -261,6 +262,9 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
         }],
         isolation_verified_command: None,
         isolation_external_read_only_mounts: Vec::new(),
+        isolation_workspace: None,
+        subprocess_limits: None,
+        inherited_fds: Vec::new(),
         thread_id: "thread:test".into(),
         chain_root_id: "chain:test".into(),
         current_site_id: "site:test".into(),

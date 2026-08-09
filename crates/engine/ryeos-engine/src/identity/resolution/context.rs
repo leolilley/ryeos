@@ -13,7 +13,9 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use crate::canonical_ref::CanonicalRef;
-use crate::contracts::{ItemSpace, ProbedAbsence, TrustClass as ContractTrustClass};
+use crate::contracts::{
+    ItemSourceRoot, ItemSpace, ProbedAbsence, TrustClass as ContractTrustClass,
+};
 use crate::error::{EngineError, ParseErrKind};
 use crate::item_resolution::ResolutionRoots;
 use crate::kind_registry::KindRegistry;
@@ -37,6 +39,7 @@ use super::types::{
 pub(crate) struct LoadedItem {
     pub source_path: PathBuf,
     pub source_space: ItemSpace,
+    pub source_root: ItemSourceRoot,
     pub trust_class: TrustClass,
     pub signer_fingerprint: Option<String>,
     pub raw_content: String,
@@ -70,6 +73,7 @@ impl LoadedItem {
             resolved_ref,
             source_path: self.source_path,
             source_space: self.source_space,
+            source_root: self.source_root,
             trust_class: self.trust_class,
             signer_fingerprint: self.signer_fingerprint,
             alias_resolution,
@@ -193,6 +197,7 @@ impl<'a> ResolutionContext<'a> {
             resolved_ref: current_ref.to_string(),
             source_path: root_loaded.source_path.clone(),
             source_space: root_loaded.source_space,
+            source_root: root_loaded.source_root.clone(),
             trust_class: root_loaded.trust_class,
             signer_fingerprint: root_loaded.signer_fingerprint.clone(),
             alias_resolution: None,
@@ -432,6 +437,7 @@ pub(crate) fn load_item_at(
     Ok(LoadedItem {
         source_path: raw.source_path,
         source_space: raw.source_space,
+        source_root: raw.source_root,
         trust_class: raw.trust_class,
         signer_fingerprint: raw.signer_fingerprint,
         raw_content: raw.raw_content,
@@ -453,6 +459,7 @@ pub(crate) fn load_item_at(
 pub(crate) struct RawLoadedItem {
     pub source_path: PathBuf,
     pub source_space: ItemSpace,
+    pub source_root: ItemSourceRoot,
     pub winner_ai_root: PathBuf,
     pub matched_ext: String,
     pub trust_class: TrustClass,
@@ -598,6 +605,7 @@ pub(crate) fn load_item_raw(
         probed_absent: result.probed_absent,
         source_path: result.winner_path,
         source_space: result.winner_space,
+        source_root: result.winner_root_identity,
         winner_ai_root: result.winner_ai_root,
         matched_ext: result.matched_ext,
         trust_class,

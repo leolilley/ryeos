@@ -63,10 +63,29 @@ impl Walker {
             result_hash: None,
             cache_hit: false,
             replayed_from: None,
+            dispatch: None,
             elapsed_ms: *elapsed_ms,
             error: Some(diagnostic.clone()),
             cost: cost.clone(),
-            fanout: None,
+            fanout: Some(crate::model::FanoutReceiptSummary {
+                statuses: statuses
+                    .iter()
+                    .map(|status| match status {
+                        GraphToolCallStatus::Ok => FanoutItemStatus::Completed,
+                        _ => FanoutItemStatus::Failed,
+                    })
+                    .collect(),
+                failed: statuses
+                    .iter()
+                    .filter(|status| **status != GraphToolCallStatus::Ok)
+                    .count(),
+                expected: *total_items,
+                results: None,
+                dispatches: observations
+                    .iter()
+                    .filter_map(|observation| observation.dispatch.clone())
+                    .collect(),
+            }),
         };
         self.write_node_receipt_or_warn(graph_run_id, receipt).await;
         self.emit_graph_step_completed(

@@ -104,6 +104,7 @@ fn walk(
             resolved_ref: ref_.to_string(),
             source_path: source_path.clone(),
             source_space: loaded.source_space,
+            source_root: loaded.source_root,
             trust_class: loaded.trust_class,
             signer_fingerprint: loaded.signer_fingerprint,
             alias_resolution: alias_hop,

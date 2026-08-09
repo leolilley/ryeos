@@ -71,6 +71,10 @@ impl Walker {
                     inputs,
                     Some(&execution),
                     Some(graph_run_id),
+                    Some((
+                        &self.graph.definition_ref,
+                        &self.graph.effective_definition_digest,
+                    )),
                 );
                 return match next {
                     Ok(Some(n)) => StepOutcome::ActionOk(Box::new(ActionOkOutcome {
@@ -81,6 +85,7 @@ impl Walker {
                         child_thread_id: None,
                         cache_hit: false,
                         replayed_from: None,
+                        dispatch: None,
                         cache_write_key: None,
                         elapsed_ms: start.elapsed().as_millis() as u64,
                         cost: None,
@@ -120,6 +125,10 @@ impl Walker {
 
         let mut rendered_action =
             match ExpressionScope::new(state, inputs, Some(&execution), Some(graph_run_id))
+                .with_run_identity(
+                    &self.graph.definition_ref,
+                    &self.graph.effective_definition_digest,
+                )
                 .render_action(action)
             {
                 Ok(value) => value,
@@ -271,10 +280,9 @@ impl Walker {
         // A durable-class node asks the daemon to replay its recorded result
         // or record this one. Only the node name and authored class travel;
         // the daemon derives the identity itself.
-        let effect_replay = (!node.effect_class().is_live()).then(|| {
-            ryeos_runtime::callback::EffectReplayRequest {
-                node: current.to_string(),
-                class: node.effect_class().as_str().to_string(),
+        let effect_dispatch = (!node.effect_class().is_live()).then(|| {
+            ryeos_runtime::callback::EffectDispatchRequest {
+                authorization_id: format!("node:{current}"),
             }
         });
         let outcome: Result<dispatch::ActionOutcome, dispatch::ActionDispatchError> = if let Some(
@@ -336,11 +344,36 @@ impl Walker {
                         retryable: false,
                         child_thread_id: None,
                         integrity: true,
+                        dispatch: None,
                     }))
                 } else {
-                    Ok(dispatch::ActionOutcome::Success(
-                        dispatch::ActionSuccess::bare(cached),
-                    ))
+                    let action_digest = match dispatch::rendered_action_digest(&rendered_action) {
+                        Ok(digest) => digest,
+                        Err(error) => {
+                            return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
+                                item_id: Some(dispatched_item_id),
+                                error: format!(
+                                    "failed to derive cache-hit dispatch identity for node `{current}`: {error}"
+                                ),
+                                elapsed_ms: elapsed,
+                                cost: None,
+                                effects: ExpressionFailureEffects::default(),
+                            });
+                        }
+                    };
+                    let mut success = dispatch::ActionSuccess::bare(cached);
+                    success.dispatch = Some(
+                        ryeos_runtime::callback_contract::RuntimeDispatchEvidence {
+                            source: ryeos_runtime::callback_contract::RuntimeDispatchSource::ExecutionCache,
+                            effect_class: ryeos_runtime::callback_contract::RuntimeDispatchEffectClass::Live,
+                            action_digest,
+                            effect_identity: None,
+                            publication: ryeos_runtime::callback_contract::RuntimeDispatchPublication::NotApplicable,
+                            record_hash: None,
+                            replayed_from: None,
+                        },
+                    );
+                    Ok(dispatch::ActionOutcome::Success(success))
                 }
             } else {
                 match dispatch::dispatch_action(
@@ -348,7 +381,7 @@ impl Walker {
                     &rendered_action,
                     &self.thread_id,
                     &self.project_path,
-                    effect_replay.clone(),
+                    effect_dispatch.clone(),
                     Some(exec_ctx),
                 )
                 .await
@@ -370,7 +403,7 @@ impl Walker {
                 &rendered_action,
                 &self.thread_id,
                 &self.project_path,
-                effect_replay,
+                effect_dispatch,
                 Some(exec_ctx),
             )
             .await
@@ -395,6 +428,7 @@ impl Walker {
                         elapsed_ms: elapsed,
                         // Transport failed before the child returned — no cost.
                         cost: None,
+                        dispatch: None,
                     });
                 }
                 StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
@@ -413,10 +447,13 @@ impl Walker {
                         error: failure.diagnostic,
                         elapsed_ms: elapsed,
                         cost: failure.cost,
-                        effects: ExpressionFailureEffects::action(DispatchObservation::child_only(
-                            dispatched_item_id,
-                            failure.child_thread_id,
-                        )),
+                        effects: ExpressionFailureEffects::action(
+                            DispatchObservation::from_failure(
+                                dispatched_item_id,
+                                failure.child_thread_id,
+                                failure.dispatch.clone(),
+                            ),
+                        ),
                     });
                 }
                 // Authored retry is an attempt budget, not blanket permission.
@@ -433,11 +470,13 @@ impl Walker {
                         delay_ms: rc.delay_ms(failed_attempt),
                         elapsed_ms: elapsed,
                         cost: failure.cost,
+                        dispatch: failure.dispatch,
                     });
                 }
-                let observation = DispatchObservation::child_only(
+                let observation = DispatchObservation::from_failure(
                     dispatched_item_id.clone(),
                     failure.child_thread_id,
+                    failure.dispatch,
                 );
                 StepOutcome::LeafSoftError(LeafSoftErrorOutcome {
                     item_id: dispatched_item_id,
@@ -455,6 +494,7 @@ impl Walker {
                     cost,
                     child_thread_id,
                     replayed_from,
+                    dispatch,
                 } = success;
                 if let Err(error) = validate_runtime_shape(&val, "graph action result") {
                     return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
@@ -464,16 +504,21 @@ impl Walker {
                         ),
                         elapsed_ms: elapsed,
                         cost,
-                        effects: ExpressionFailureEffects::action(DispatchObservation::child_only(
-                            dispatched_item_id,
-                            child_thread_id,
-                        )),
+                        effects: ExpressionFailureEffects::action(
+                            DispatchObservation::from_success(
+                                dispatched_item_id,
+                                child_thread_id,
+                                &val,
+                                dispatch,
+                            ),
+                        ),
                     });
                 }
                 let dispatch_observation = DispatchObservation::from_success(
                     dispatched_item_id.clone(),
                     child_thread_id.clone(),
                     &val,
+                    dispatch.clone(),
                 );
                 // Finish every expression before publishing transition effects.
                 // Assign values all read the unchanged pre-node state; only after
@@ -486,7 +531,12 @@ impl Walker {
                         Some(&execution),
                         Some(graph_run_id),
                     )
+                    .with_run_identity(
+                        &self.graph.definition_ref,
+                        &self.graph.effective_definition_digest,
+                    )
                     .with_result(&val)
+                    .with_dispatch_option(dispatch.as_ref())
                     .render_json(assign)
                     {
                         Ok(value) => Some(value),
@@ -531,6 +581,11 @@ impl Walker {
                     &val,
                     Some(&execution),
                     Some(graph_run_id),
+                    Some((
+                        &self.graph.definition_ref,
+                        &self.graph.effective_definition_digest,
+                    )),
+                    dispatch.as_ref(),
                 ) {
                     Ok(next) => next,
                     Err(error) => {
@@ -554,6 +609,7 @@ impl Walker {
                     child_thread_id,
                     cache_hit,
                     replayed_from,
+                    dispatch,
                     cache_write_key,
                     elapsed_ms: elapsed,
                     cost,
@@ -607,6 +663,10 @@ impl Walker {
                 .as_ref()
                 .expect("validated follow fanout has compiled over expression");
             match ExpressionScope::new(state, inputs, Some(execution), Some(graph_run_id))
+                .with_run_identity(
+                    &self.graph.definition_ref,
+                    &self.graph.effective_definition_digest,
+                )
                 .render_template(over)
             {
                 Ok(Value::Array(items)) => items,
@@ -742,6 +802,8 @@ impl Walker {
                     execution,
                     graph_run_id,
                     &results,
+                    &self.graph.definition_ref,
+                    &self.graph.effective_definition_digest,
                 ) {
                     Ok(next) => next,
                     Err(FanoutNextError::Expression(error)) => {
@@ -793,6 +855,8 @@ impl Walker {
                 execution,
                 graph_run_id,
                 &[],
+                &self.graph.definition_ref,
+                &self.graph.effective_definition_digest,
             ) {
                 Ok(next) => next,
                 Err(FanoutNextError::Expression(error)) => {
@@ -857,6 +921,10 @@ impl Walker {
         let mut launch_budget = RuntimeJsonArrayBudget::new("follow fanout launch cohort");
         for (index, item) in over.iter().enumerate() {
             let scope = ExpressionScope::new(state, inputs, Some(execution), Some(graph_run_id))
+                .with_run_identity(
+                    &self.graph.definition_ref,
+                    &self.graph.effective_definition_digest,
+                )
                 .with_foreach(&var, item);
             let mut action = match scope.render_action(
                 compiled
@@ -1037,13 +1105,15 @@ impl Walker {
 
 #[allow(clippy::too_many_arguments)]
 fn evaluate_fanout_next(
-    compiled: &crate::compiled_graph::CompiledNode,
+    compiled: &ryeos_graph_definition::CompiledNode,
     node: &GraphNode,
     state: &Value,
     inputs: &Value,
     execution: &Value,
     graph_run_id: &str,
     results: &[Value],
+    definition_ref: &str,
+    effective_definition_digest: &str,
 ) -> Result<Option<String>, FanoutNextError> {
     validate_runtime_array_shape(results, "follow fanout branch results")
         .map_err(FanoutNextError::Integrity)?;
@@ -1067,6 +1137,8 @@ fn evaluate_fanout_next(
         &result,
         Some(execution),
         Some(graph_run_id),
+        Some((definition_ref, effective_definition_digest)),
+        None,
     )
     .map_err(FanoutNextError::Expression)
 }

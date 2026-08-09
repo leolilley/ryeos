@@ -68,15 +68,29 @@ pub struct FinalizationAuthorityProof {
 #[derive(Debug)]
 pub struct EffectiveValidationSuccess {
     normalized_digest: String,
+    effect_authorizations: Vec<ryeos_effect_contract::EffectAuthorizationProjection>,
 }
 
 impl EffectiveValidationSuccess {
-    pub(crate) fn from_normalized(normalized: &serde_json::Value) -> Result<Self, EngineError> {
-        let canonical = lillux::cas::canonical_json(normalized).map_err(|error| {
+    pub(crate) fn from_normalized(
+        normalized: &serde_json::Value,
+        effect_authorizations: Vec<ryeos_effect_contract::EffectAuthorizationProjection>,
+    ) -> Result<Self, EngineError> {
+        ryeos_effect_contract::validate_authorization_projections(&effect_authorizations).map_err(
+            |error| {
+                EngineError::Internal(format!("invalid effect authorization projection: {error}"))
+            },
+        )?;
+        let validation = serde_json::json!({
+            "normalized": normalized,
+            "effect_authorizations": &effect_authorizations,
+        });
+        let canonical = lillux::cas::canonical_json(&validation).map_err(|error| {
             EngineError::Internal(format!("canonicalize validation result: {error}"))
         })?;
         Ok(Self {
             normalized_digest: lillux::cas::sha256_hex(canonical.as_bytes()),
+            effect_authorizations,
         })
     }
 
@@ -85,6 +99,7 @@ impl EffectiveValidationSuccess {
     pub(crate) fn no_declared_validator() -> Self {
         Self {
             normalized_digest: lillux::cas::sha256_hex(b"ryeos.no_declared_effective_validator.v1"),
+            effect_authorizations: Vec::new(),
         }
     }
 }
@@ -92,9 +107,26 @@ impl EffectiveValidationSuccess {
 /// Lock a fully augmented resolution after its kind-declared semantic
 /// validator has succeeded.
 pub fn lock_validated_effective_program(
-    resolution: ResolutionOutput,
+    mut resolution: ResolutionOutput,
     validation: EffectiveValidationSuccess,
 ) -> Result<ValidatedEffectiveProgramCandidate, EngineError> {
+    if resolution
+        .composed
+        .derived
+        .contains_key(ryeos_effect_contract::EFFECT_AUTHORIZATIONS_DERIVED_KEY)
+    {
+        return Err(EngineError::Internal(format!(
+            "composed view attempted to pre-populate reserved derived value `{}`",
+            ryeos_effect_contract::EFFECT_AUTHORIZATIONS_DERIVED_KEY
+        )));
+    }
+    if !validation.effect_authorizations.is_empty() {
+        resolution.composed.derived.insert(
+            ryeos_effect_contract::EFFECT_AUTHORIZATIONS_DERIVED_KEY.to_string(),
+            serde_json::to_value(&validation.effect_authorizations)
+                .map_err(|error| EngineError::Internal(error.to_string()))?,
+        );
+    }
     let binding = candidate_binding(&resolution, &validation.normalized_digest)?;
     Ok(ValidatedEffectiveProgramCandidate {
         resolution,
@@ -138,9 +170,11 @@ pub fn prove_finalization_authority(
         .get(crate::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY)
         .map(ryeos_state::objects::ExternalContentRealizationSet::from_value)
         .transpose()
-        .map_err(|error| EngineError::Internal(format!(
-            "invalid external realization set at finalization: {error}"
-        )))?;
+        .map_err(|error| {
+            EngineError::Internal(format!(
+                "invalid external realization set at finalization: {error}"
+            ))
+        })?;
     // A composed view that declares external content commits that declaration
     // into identity. Finalizing without a realization would admit a program
     // whose identity names dependencies it never captured — the launch path
@@ -169,8 +203,7 @@ pub fn prove_finalization_authority(
         }
         (None, Some(_)) => {
             return Err(EngineError::Internal(
-                "external realization proof does not belong to this effective program"
-                    .to_string(),
+                "external realization proof does not belong to this effective program".to_string(),
             ));
         }
         (Some(captured), Some((proof, store))) => {
@@ -261,6 +294,9 @@ mod tests {
                 resolved_ref: "graph:test/program".to_string(),
                 source_path: PathBuf::from("/diagnostic/program.yaml"),
                 source_space: ItemSpace::Bundle,
+                source_root: crate::contracts::ItemSourceRoot::Bundle {
+                    name: "fixture".to_string(),
+                },
                 trust_class: TrustClass::TrustedBundle,
                 signer_fingerprint: Some("f".repeat(64)),
                 alias_resolution: None,
@@ -363,8 +399,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let node_root = crate::item_resolution::ResolutionRoot {
             space: ItemSpace::Node,
+            identity: crate::contracts::ItemSourceRoot::Node,
             label: "node".to_string(),
             ai_root: temp.path().join(".ai"),
+            content_root: Some(temp.path().to_path_buf()),
         };
         let roots = ResolutionRoots {
             ordered: vec![node_root.clone()],

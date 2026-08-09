@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-05T07:04:40Z:c2d6296dafbc164c816f5b82636726ed56b813d3678844d35742295e36a42ce9:ZTHNBdKsoxxh8/RbIXJ25IcPberlb0Ajwcd+313kCldJwkmvPG96/upC0jFKgdTnXJSNpzzj+r4Rkoms1MaBDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-08T14:31:50Z:c6e9482bd96cbf9c3f6c22e0fbe82640b5189598f5cfe052203bf02962a457e8:QqnIbiWYoxbGwxCwtWRdjCLed7Ds1Ansqp4nNcNiakbxDVlXDMJUbj4K0VugTWR+LgIaLLqTpkrDPDL+wIhSDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: directive
 default: true
@@ -69,8 +69,18 @@ launch_contract:
         - trusted_bundle
         - trusted_project
         - trusted_node
+  execution_dependencies:
+    max_dependencies: 1
+    allowed_kinds:
+      - worker
+    allowed_spaces:
+      - bundle
+    allowed_trust:
+      - trusted_bundle
   financial_authority:
-    kind: provider_accounting_authority_v1
+    kind: accounting
+  external_effect_authority:
+    kind: external
   secret_policy:
     max_requirements: 4
     allowed_names:

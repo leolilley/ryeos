@@ -336,7 +336,9 @@ mod tests {
         ProviderConfig {
             category: None,
             family: crate::directive::ProtocolFamily::ChatCompletions,
-            base_url: "http://localhost".to_string(),
+            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+                base_url: "http://localhost".to_string(),
+            },
             auth: Default::default(),
             headers: Default::default(),
             schemas: None,
@@ -381,17 +383,28 @@ mod tests {
         let body_bytes = serde_json::to_vec(&body).unwrap();
         let body_sha256 = lillux::cas::sha256_hex(&body_bytes);
         PreparedProviderRequest {
-            method: reqwest::Method::POST,
-            url: "http://localhost/chat/completions".to_string(),
+            transport: crate::provider_adapter::PreparedProviderTransport::RemoteHttp {
+                method: reqwest::Method::POST,
+                url: "http://localhost/chat/completions".to_string(),
+            },
             header_names: vec!["Accept".to_string(), "Content-Type".to_string()],
-            public_headers_v2: vec![],
-            credential_header_names_v2: vec![],
+            public_header_coordinates: vec![],
+            credential_header_names: vec![],
             body_bytes,
             body_sha256: body_sha256.clone(),
             requested_output_tokens,
+            requested_output_ceiling: OUTPUT_CEILING,
             credential: None,
             headers: vec![],
-            request_digest: lillux::cas::sha256_hex(body_sha256.as_bytes()),
+            request_digest: ryeos_provider_contract::PreparedRequestProjection::from_coordinates(
+                vec![],
+                vec![],
+                body_sha256,
+                OUTPUT_CEILING,
+            )
+            .unwrap()
+            .digest()
+            .unwrap(),
             request_metrics: Default::default(),
         }
     }

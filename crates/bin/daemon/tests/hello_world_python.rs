@@ -276,6 +276,7 @@ fn daemon_executes_python_hello_world_end_to_end() {
 
     let (app_root, isolation) = isolation_context();
     let engine_ctx = EngineContext {
+        isolation_target_channel: None,
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
@@ -295,6 +296,9 @@ fn daemon_executes_python_hello_world_end_to_end() {
         }],
         isolation_verified_command: None,
         isolation_external_read_only_mounts: Vec::new(),
+        isolation_workspace: None,
+        subprocess_limits: None,
+        inherited_fds: Vec::new(),
         thread_id: "thread:test".into(),
         chain_root_id: "chain:test".into(),
         current_site_id: "site:test".into(),
@@ -401,6 +405,7 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
 
     let (app_root, isolation) = isolation_context();
     let engine_ctx = EngineContext {
+        isolation_target_channel: None,
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
@@ -420,6 +425,9 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
         }],
         isolation_verified_command: None,
         isolation_external_read_only_mounts: Vec::new(),
+        isolation_workspace: None,
+        subprocess_limits: None,
+        inherited_fds: Vec::new(),
         thread_id: "thread:test".into(),
         chain_root_id: "chain:test".into(),
         current_site_id: "site:test".into(),
@@ -516,6 +524,7 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
 
     let (app_root, isolation) = isolation_context();
     let engine_ctx = EngineContext {
+        isolation_target_channel: None,
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
@@ -535,6 +544,9 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
         }],
         isolation_verified_command: None,
         isolation_external_read_only_mounts: Vec::new(),
+        isolation_workspace: None,
+        subprocess_limits: None,
+        inherited_fds: Vec::new(),
         thread_id: "thread:test".into(),
         chain_root_id: "chain:test".into(),
         current_site_id: "site:test".into(),

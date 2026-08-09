@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-14T23:18:43Z:d9ceeb209e055ba68a434d42399d82bb456b6362b1fc68e699d3da29a19c647f:n1sDmJRa5ThSuHZ2fz5sJ7XuMvmrqUxALN4MWhNKlaTTOtu/pceqeEaxvGJmwQD8LTIIOGHOd3OcK6dKChcqDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-09T05:54:20Z:d9ceeb209e055ba68a434d42399d82bb456b6362b1fc68e699d3da29a19c647f:n1sDmJRa5ThSuHZ2fz5sJ7XuMvmrqUxALN4MWhNKlaTTOtu/pceqeEaxvGJmwQD8LTIIOGHOd3OcK6dKChcqDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.sync-project-ai
 required_caps: ["ryeos.execute.service.remote/sync-project-ai"]

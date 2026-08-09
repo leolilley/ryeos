@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-07T07:32:40Z:b405941e01e17b008f18d107fbc76f081a6d7f4bea1b167574039d96e643b7e6:PIUm3hBQh5X4ckQUCbhp4USVfSElZN3Pdu95jjZ8BpHNupYwVPPiGgVEiX3fWpT0IPuZ6G2iM4pMQRcOVBECDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-09T05:54:05Z:e06a341375f99afb310118e9da4b07633157e3f1a948f58c680caf69611c7a3f:N+BwZQXdmLyHPIZUNTo6g4AZZOG9aA/TTN4WESCUAAm6RBlTjf2fMGmQItlWP0OtIXb71lTIvcnB0qUZKtpjAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
 version: "1.0.0"
 location:
@@ -8,6 +8,11 @@ effective_trust:
   include_references: false
 resolution: []
 execution:
+  # Kind-owned location of the author's durable-effect ceiling. Generic
+  # dispatch consumes only this signed mechanical projection; it never names
+  # or interprets the tool document's `effects` field directly.
+  effect_class_ceiling:
+    path: [effects]
   terminator:
     kind: subprocess
     protocol: protocol:ryeos/core/tool_callback
@@ -62,8 +67,7 @@ composed_value_contract:
     # than the item declares here — a tool that writes outside its result
     # envelope declares `live`, and no graph node can then record it, because
     # replay serves the stored result and would silently skip the writes.
-    # Absent means the item makes no claim and the caller's declaration is
-    # governed by the author covenant alone.
+    # Absent means live/ineligible. Durable replay is never inferred.
     effects:
       type: single
       prim: string

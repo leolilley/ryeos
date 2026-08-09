@@ -96,6 +96,7 @@ fn resolve_item_for_corpus_from_authority(
         resolved_ref: item.to_string(),
         source_path: raw.source_path.clone(),
         source_space: raw.source_space,
+        source_root: raw.source_root.clone(),
         trust_class: raw.trust_class,
         signer_fingerprint: raw.signer_fingerprint.clone(),
         alias_resolution: None,

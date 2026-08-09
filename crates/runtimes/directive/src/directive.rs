@@ -9,11 +9,12 @@ use serde_json::Value;
 pub use ryeos_directive_core::{
     AssistantToolCallsPlacement, MessageSchemas, ModelRoutingConfig, ModelSpec, OutputLimitConfig,
     OutputLimitSemantics, PricingConfig, ProtocolFamily, ProviderAccountingConfig, ProviderConfig,
-    ProviderProfile, ReasoningConfig, ReasoningEffortSchemaConfig, ReasoningMode,
-    ReasoningModeSchemaConfig, ReasoningModeValues, ReasoningSchemaConfig, ReportedCostUnit,
-    SamplingConfig, SchemasConfig, StreamErrorConfig, StreamMetadataConfig, StreamPaths,
-    StreamUsageConfig, StreamingConfig, StreamingMode, SystemMessageConfig, SystemMessageMode,
-    TextPlacement, ToolResultConfig, ToolResultWrapMode, ToolSchemaConfig, UsageAggregation,
+    ProviderProfile, ProviderTransportConfig, ReasoningConfig, ReasoningEffortSchemaConfig,
+    ReasoningMode, ReasoningModeSchemaConfig, ReasoningModeValues, ReasoningSchemaConfig,
+    ReportedCostUnit, SamplingConfig, SchemasConfig, StreamErrorConfig, StreamMetadataConfig,
+    StreamPaths, StreamUsageConfig, StreamingConfig, StreamingMode, SystemMessageConfig,
+    SystemMessageMode, TextPlacement, ToolResultConfig, ToolResultWrapMode, ToolSchemaConfig,
+    UsageAggregation,
 };
 
 /// Typed runtime view of a directive's effective header *after* the
@@ -525,13 +526,13 @@ pub struct ProviderMessage {
 /// Construct the one durable semantic answer for a completed provider turn.
 /// Usage, request/response IDs, attempt/thread identity, and transport timing
 /// are observation evidence and therefore cannot enter this value.
-pub fn normalize_provider_call_effect_answer_v2(
+pub fn normalize_provider_call_answer(
     message: &ProviderMessage,
     finish_reason: Option<&str>,
-) -> anyhow::Result<ryeos_state::objects::ProviderCallEffectAnswerV2> {
+) -> anyhow::Result<ryeos_provider_contract::ProviderCallAnswer> {
     let recorded_message = serde_json::from_value(serde_json::to_value(message)?)
         .map_err(|error| anyhow::anyhow!("provider message is not record-safe: {error}"))?;
-    let answer = ryeos_state::objects::ProviderCallEffectAnswerV2 {
+    let answer = ryeos_provider_contract::ProviderCallAnswer {
         message: recorded_message,
         finish_reason: finish_reason.map(str::to_string),
     };
@@ -673,8 +674,8 @@ mod tests {
             tool_call_id: None,
             reasoning_content: Some("reasoning".to_string()),
         };
-        let first = normalize_provider_call_effect_answer_v2(&message, Some("stop")).unwrap();
-        let second = normalize_provider_call_effect_answer_v2(&message, Some("stop")).unwrap();
+        let first = normalize_provider_call_answer(&message, Some("stop")).unwrap();
+        let second = normalize_provider_call_answer(&message, Some("stop")).unwrap();
         assert_eq!(first, second);
         assert_eq!(first.digest().unwrap(), second.digest().unwrap());
         let value = serde_json::to_value(first).unwrap();
@@ -693,9 +694,9 @@ mod tests {
             reasoning_content: None,
         };
         message.role = "tool".to_string();
-        assert!(normalize_provider_call_effect_answer_v2(&message, Some("stop")).is_err());
+        assert!(normalize_provider_call_answer(&message, Some("stop")).is_err());
         message.role = "assistant".to_string();
-        assert!(normalize_provider_call_effect_answer_v2(&message, Some(" stop ")).is_err());
+        assert!(normalize_provider_call_answer(&message, Some(" stop ")).is_err());
     }
 
     #[test]
@@ -756,7 +757,7 @@ hooks:
         let error = serde_yaml::from_str::<DirectiveHeader>(
             r#"
 hooks:
-  - id: legacy
+  - id: noncanonical
     event: after_step
     result: control
     condition: {path: turn, op: gte, value: 2}

@@ -294,10 +294,13 @@ pub(crate) async fn dispatch_runtime_method(
         "runtime.poll_input"
             | "runtime.author_item"
             | "runtime.project_snapshot"
-            | "runtime.provider_attempt_reserve"
+            | "runtime.provider_attempt_prepare"
             | "runtime.provider_attempt_mark_issued"
             | "runtime.provider_attempt_settle"
             | "runtime.provider_attempt_release_unissued"
+            | "runtime.provider_attempt_local_stream_start"
+            | "runtime.provider_attempt_local_stream_next"
+            | "runtime.provider_attempt_local_stream_control"
     ) {
         // runtime.poll_input drains staged operator inputs and persists them as
         // durable `cognition_in` for the running thread. Require BOTH proofs the
@@ -319,7 +322,9 @@ pub(crate) async fn dispatch_runtime_method(
             method,
             "runtime.author_item"
                 | "runtime.project_snapshot"
+                | "runtime.provider_attempt_prepare"
                 | "runtime.provider_attempt_mark_issued"
+                | "runtime.provider_attempt_local_stream_start"
         ) {
             validated_thread_auth = Some(thread_auth);
         }
@@ -380,12 +385,6 @@ pub(crate) async fn dispatch_runtime_method(
     match method {
         "runtime.dispatch_action" => {
             ryeos_executor::execution::runtime_dispatch::handle(params, state).await
-        }
-        "runtime.publish_provider_call_record" => {
-            ryeos_executor::execution::provider_record::handle(params, state).await
-        }
-        "runtime.lookup_provider_call_record" => {
-            ryeos_executor::execution::provider_record::handle_lookup(params, state).await
         }
         "runtime.spawn_follow_child" => {
             Box::pin(ryeos_executor::execution::spawn_follow_child::handle(
@@ -470,13 +469,22 @@ pub(crate) async fn dispatch_runtime_method(
             handle_attach_process(&clean_params, state, peer, owner).await
         }
         "runtime.poll_input" => handle_poll_input(&clean_params, state),
-        "runtime.provider_attempt_reserve" => {
+        "runtime.provider_attempt_prepare" => {
             let cap = callback_cap.as_ref().ok_or_else(|| {
-                anyhow!("provider_attempt_reserve requires a callback capability")
+                anyhow!("provider_attempt_prepare requires a callback capability")
             })?;
             let owner = callback_launch_owner
-                .ok_or_else(|| anyhow!("provider_attempt_reserve requires a launch owner"))?;
-            accounting::handle_provider_attempt_reserve(&clean_params, state, cap, owner)
+                .ok_or_else(|| anyhow!("provider_attempt_prepare requires a launch owner"))?;
+            let thread_auth = validated_thread_auth.as_ref().ok_or_else(|| {
+                anyhow!("provider_attempt_prepare requires validated thread authority")
+            })?;
+            accounting::handle_provider_attempt_prepare(
+                &clean_params,
+                state,
+                cap,
+                owner,
+                thread_auth,
+            )
         }
         "runtime.provider_attempt_mark_issued" => {
             let cap = callback_cap.as_ref().ok_or_else(|| {
@@ -518,6 +526,27 @@ pub(crate) async fn dispatch_runtime_method(
                 .ok_or_else(|| anyhow!("provider_attempt_get requires a callback capability"))?;
             accounting::handle_provider_attempt_get(&clean_params, state, cap)
         }
+        "runtime.provider_attempt_local_stream_start" => {
+            let cap = callback_cap.as_ref().ok_or_else(|| {
+                anyhow!("provider_attempt_local_stream_start requires a callback capability")
+            })?;
+            validated_thread_auth.as_ref().ok_or_else(|| {
+                anyhow!("provider_attempt_local_stream_start requires validated thread authority")
+            })?;
+            accounting::handle_provider_attempt_local_stream_start(&clean_params, state, cap)
+        }
+        "runtime.provider_attempt_local_stream_next" => {
+            let cap = callback_cap.as_ref().ok_or_else(|| {
+                anyhow!("provider_attempt_local_stream_next requires a callback capability")
+            })?;
+            accounting::handle_provider_attempt_local_stream_next(&clean_params, state, cap).await
+        }
+        "runtime.provider_attempt_local_stream_control" => {
+            let cap = callback_cap.as_ref().ok_or_else(|| {
+                anyhow!("provider_attempt_local_stream_control requires a callback capability")
+            })?;
+            accounting::handle_provider_attempt_local_stream_control(&clean_params, state, cap)
+        }
         other => anyhow::bail!("unknown runtime method: {other}"),
     }
 }
@@ -555,8 +584,6 @@ fn is_running_runtime_mutation(method: &str) -> bool {
         "runtime.append_event"
             | "runtime.append_events"
             | "runtime.dispatch_action"
-            | "runtime.publish_provider_call_record"
-            | "runtime.lookup_provider_call_record"
             | "runtime.spawn_follow_child"
             | "runtime.request_continuation"
             | "runtime.author_item"
@@ -569,8 +596,9 @@ fn is_running_runtime_mutation(method: &str) -> bool {
             | "runtime.publish_state_anchor"
             | "runtime.submit_command"
             | "runtime.poll_input"
-            | "runtime.provider_attempt_reserve"
+            | "runtime.provider_attempt_prepare"
             | "runtime.provider_attempt_mark_issued"
+            | "runtime.provider_attempt_local_stream_start"
     )
 }
 
@@ -582,6 +610,7 @@ fn is_stop_completion_method(method: &str) -> bool {
             | "runtime.complete_command"
             | "runtime.provider_attempt_settle"
             | "runtime.provider_attempt_release_unissued"
+            | "runtime.provider_attempt_local_stream_control"
     )
 }
 
@@ -601,6 +630,7 @@ fn is_sensitive_runtime_read_method(method: &str) -> bool {
             | "runtime.bundle_events_scan"
             | "runtime.vault_get"
             | "runtime.vault_list"
+            | "runtime.provider_attempt_local_stream_next"
     )
 }
 
@@ -1281,7 +1311,6 @@ fn handle_bundle_events_materialize_attachment(
     .context("failed to encode bundle_events.materialize_attachment result")
 }
 
-
 fn handle_runtime_vault_put(
     params: &serde_json::Value,
     state: &AppState,
@@ -1842,6 +1871,8 @@ mod tests {
                 commands: vec![],
                 hosted_node_policies: vec![],
                 command_registration_policy: Default::default(),
+                external_content_import_policy: None,
+                persistent_session_policy: None,
             }),
             node_history_policy: Arc::new(
                 ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
@@ -1858,6 +1889,9 @@ mod tests {
             ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
             vault_fingerprint: None,
             accounting: None,
+            persistent_sessions: Arc::new(
+                ryeos_app::persistent_session::PersistentSessionPool::new(),
+            ),
         };
 
         (tmpdir, state)
@@ -2779,8 +2813,10 @@ mod tests {
                 "required_secrets": [],
                 "runtime_facts": {},
                 "binding_records": {},
+                "execution_dependencies": {},
                 "config_contributors": [],
                 "financial_authority": null,
+                "external_effect_authority": null,
             }),
             runtime_descriptor_document: runtime_document,
             protocol_descriptor_document: protocol_document,
@@ -2984,8 +3020,10 @@ mod tests {
                         "required_secrets": [],
                         "runtime_facts": {},
                         "binding_records": {},
+                        "execution_dependencies": {},
                         "config_contributors": [],
                         "financial_authority": null,
+                        "external_effect_authority": null,
                     }),
                     runtime_descriptor_document: runtime_document,
                     protocol_descriptor_document: protocol_document,

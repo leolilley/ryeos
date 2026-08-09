@@ -98,6 +98,9 @@ pub struct ExecutionParams {
     /// tool subprocesses use it to persist operational lineage before spawn so
     /// parent stop/kill cascades cannot miss them.
     pub parent_thread_id: Option<String>,
+    /// Kind-neutral durable-effect authority selected and bounded before this
+    /// exact terminal launch was prepared.
+    pub effect_authority: Option<ryeos_effect_contract::PreparedEffectDispatchAuthority>,
 }
 
 /// Tracks execution state for explicit cleanup, with a conservative Drop net.
@@ -1375,6 +1378,274 @@ pub struct WaitResult {
     /// The `--debug-raw` block (resolved cmd/args/cwd/env keys + exit code and
     /// size-limited raw stdout/stderr), present only when the flag was set.
     pub debug: Option<Value>,
+    /// Present only for an admitted durable callback dispatch. Live callback
+    /// provenance is added by the callback boundary, which owns the exact
+    /// wire action digest even when no effect authorization exists.
+    pub dispatch_effect: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
+}
+
+/// Waiting for a durable dispatch can either execute a fresh child or return
+/// the immutable answer without creating a child thread.
+pub enum WaitOutcome {
+    Executed(WaitResult),
+    Replayed {
+        result: Value,
+        dispatch: ryeos_runtime::callback_contract::RuntimeDispatchEvidence,
+    },
+}
+
+fn runtime_effect_class(
+    class: ryeos_effect_contract::EffectClass,
+) -> ryeos_runtime::callback_contract::RuntimeDispatchEffectClass {
+    match class {
+        ryeos_effect_contract::EffectClass::Recorded => {
+            ryeos_runtime::callback_contract::RuntimeDispatchEffectClass::Recorded
+        }
+        ryeos_effect_contract::EffectClass::Sealed => {
+            ryeos_runtime::callback_contract::RuntimeDispatchEffectClass::Sealed
+        }
+    }
+}
+
+fn verify_dispatch_effect_record(
+    authority: &ryeos_state::PinnedStateAuthority,
+    indexed: &ryeos_state::ReplayIndexRecord,
+) -> ryeos_state::ReplayRecordVerification {
+    let value = match authority
+        .cas_store()
+        .and_then(|cas| cas.get_object(&indexed.record_hash))
+    {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            return ryeos_state::ReplayRecordVerification::IntegrityFailure {
+                reason: format!(
+                    "indexed dispatch-effect record {} is missing from CAS",
+                    indexed.record_hash
+                ),
+            };
+        }
+        Err(error) => {
+            return ryeos_state::ReplayRecordVerification::Unavailable {
+                reason: format!(
+                    "could not read indexed dispatch-effect record {}: {error:#}",
+                    indexed.record_hash
+                ),
+            };
+        }
+    };
+    let record = match ryeos_effect_contract::DispatchEffectRecord::from_current_value(&value) {
+        Ok(record) => record,
+        Err(error) => {
+            return ryeos_state::ReplayRecordVerification::IntegrityFailure {
+                reason: format!(
+                    "indexed dispatch-effect record {} is invalid: {error:#}",
+                    indexed.record_hash
+                ),
+            };
+        }
+    };
+    if record.cache_key != indexed.cache_key || record.answer_digest != indexed.answer_digest {
+        return ryeos_state::ReplayRecordVerification::IntegrityFailure {
+            reason: format!(
+                "indexed dispatch-effect row contradicts record {}",
+                indexed.record_hash
+            ),
+        };
+    }
+    let evidence_hash = &record.identity.subject.admission_evidence_hash;
+    let evidence = match authority
+        .cas_store()
+        .and_then(|cas| cas.get_object(evidence_hash))
+    {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            return ryeos_state::ReplayRecordVerification::IntegrityFailure {
+                reason: format!(
+                    "dispatch-effect record {} names missing admission evidence {evidence_hash}",
+                    indexed.record_hash
+                ),
+            };
+        }
+        Err(error) => {
+            return ryeos_state::ReplayRecordVerification::Unavailable {
+                reason: format!("could not read admission evidence {evidence_hash}: {error:#}"),
+            };
+        }
+    };
+    match ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(evidence).and_then(
+        |capsule| {
+            let observed = capsule.content_hash()?;
+            if observed != *evidence_hash {
+                anyhow::bail!(
+                    "admission evidence content hash {observed} contradicts {evidence_hash}"
+                );
+            }
+            Ok(())
+        },
+    ) {
+        Ok(()) => ryeos_state::ReplayRecordVerification::Verified,
+        Err(error) => ryeos_state::ReplayRecordVerification::IntegrityFailure {
+            reason: format!("dispatch-effect admission evidence is invalid: {error:#}"),
+        },
+    }
+}
+
+fn admitted_subject_from_capsule(
+    resolved: &ResolvedExecutionRequest,
+    capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+    ceiling: ryeos_effect_contract::EffectClass,
+) -> Result<ryeos_effect_contract::AdmittedDispatchSubject> {
+    let effective_definition_digest = capsule
+        .exact_program
+        .get("effective_definition_digest")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            anyhow::anyhow!("admitted dispatch capsule has no effective-definition digest")
+        })?
+        .to_string();
+    let execution_closure_digest = ryeos_effect_contract::canonical_value_digest(
+        &serde_json::to_value(&capsule.execution_closure)?,
+    )?;
+    let content_identity_digest = ryeos_effect_contract::canonical_value_digest(
+        &serde_json::to_value(&capsule.artifact_identity)?,
+    )?;
+    let subject = ryeos_effect_contract::AdmittedDispatchSubject {
+        subject_ref: resolved.item_ref.clone(),
+        effective_definition_digest,
+        execution_closure_digest,
+        admission_evidence_hash: capsule.content_hash()?,
+        content_identity_digest,
+        effect_class_ceiling: ceiling,
+    };
+    subject.validate()?;
+    Ok(subject)
+}
+
+fn load_verified_dispatch_effect_record(
+    authority: &ryeos_state::PinnedStateAuthority,
+    indexed: &ryeos_state::ReplayIndexRecord,
+) -> Result<ryeos_effect_contract::DispatchEffectRecord> {
+    if !matches!(
+        verify_dispatch_effect_record(authority, indexed),
+        ryeos_state::ReplayRecordVerification::Verified
+    ) {
+        anyhow::bail!("dispatch-effect record lost verification after indexed lookup");
+    }
+    let value = authority
+        .cas_store()?
+        .get_object(&indexed.record_hash)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "verified dispatch-effect record {} disappeared",
+                indexed.record_hash
+            )
+        })?;
+    ryeos_effect_contract::DispatchEffectRecord::from_current_value(&value)
+}
+
+struct DispatchEffectPublication {
+    record_hash: String,
+    publication: ryeos_runtime::callback_contract::RuntimeDispatchPublication,
+}
+
+fn publish_dispatch_effect_record(
+    state: &AppState,
+    identity: ryeos_effect_contract::DispatchEffectIdentity,
+    response: &Value,
+    produced_by_thread: &str,
+) -> Result<DispatchEffectPublication> {
+    let normalized = ryeos_runtime::normalize_dispatch_effect(response)
+        .context("durable dispatch completed without a replay-safe answer")?;
+    let cache_key = identity.cache_key()?;
+    let answer_digest = normalized.answer.digest()?;
+    let capsule = state
+        .state_store
+        .admitted_launch_capsule(produced_by_thread)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "durable dispatch producer {produced_by_thread} has no admitted launch capsule"
+            )
+        })?;
+    let state_authority = state
+        .state_store
+        .with_state_db(|db| db.pinned_authority())?;
+    let realization = capsule.verify_retained_execution_realization(
+        &state_authority.cas_store()?,
+        &state_authority.large_object_store()?,
+        state_authority.trust_store(),
+    )?;
+    let identity_value = state_authority
+        .cas_store()?
+        .get_object(&realization.substrate_identity_hash)?
+        .ok_or_else(|| anyhow::anyhow!("dispatch execution substrate identity is missing"))?;
+    let substrate_identity =
+        ryeos_state::objects::ExecutionIdentity::from_current_value(&identity_value)?;
+    let record = ryeos_effect_contract::DispatchEffectRecord {
+        schema: ryeos_effect_contract::EFFECT_RECORD_SCHEMA_VERSION,
+        kind: ryeos_effect_contract::EFFECT_RECORD_KIND.to_string(),
+        cache_key: cache_key.clone(),
+        identity,
+        answer_digest: answer_digest.clone(),
+        answer: normalized.answer,
+        first_observation: ryeos_effect_contract::EffectFirstObservation {
+            produced_by_thread: produced_by_thread.to_string(),
+            response_digest: normalized.observed_response_digest,
+            observed_at: lillux::time::iso8601_now(),
+            execution_identity_digest: Some(substrate_identity.identity_digest()?),
+            execution_identity_attestation_hash: Some(
+                realization.substrate_attestation_hash.clone(),
+            ),
+            admitted_execution_realization_hash: Some(capsule.execution_realization_hash),
+            observed_execution_realization_hash: None,
+        },
+    };
+    let value = record.to_value()?;
+    let authority = super::pinned_state_authority(state)?;
+    let guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&guard)?;
+    let record_hash = authority
+        .cas_store()?
+        .store_object(&value)
+        .context("dispatch-effect CAS publication is unavailable")?;
+    authority.ensure_guard(&guard)?;
+    let candidate = ryeos_state::ReplayIndexRecord {
+        cache_key,
+        answer_digest,
+        record_hash,
+    };
+    let replay_namespace =
+        ryeos_state::ReplayIndexNamespace::new(ryeos_effect_contract::EFFECT_REPLAY_NAMESPACE)?;
+    let outcome = state.state_store.with_state_db(|db| {
+        db.publish_replay_record(&replay_namespace, &candidate, |indexed| {
+            verify_dispatch_effect_record(&authority, indexed)
+        })
+    })?;
+    match outcome {
+        ryeos_state::ReplayPublishOutcome::Inserted { record_hash } => {
+            Ok(DispatchEffectPublication {
+                record_hash,
+                publication: ryeos_runtime::callback_contract::RuntimeDispatchPublication::Inserted,
+            })
+        }
+        ryeos_state::ReplayPublishOutcome::Folded { record_hash } => {
+            Ok(DispatchEffectPublication {
+                record_hash,
+                publication: ryeos_runtime::callback_contract::RuntimeDispatchPublication::Folded,
+            })
+        }
+        ryeos_state::ReplayPublishOutcome::Unavailable { reason } => {
+            anyhow::bail!("dispatch-effect index is unavailable: {reason}")
+        }
+        ryeos_state::ReplayPublishOutcome::IntegrityConflict {
+            existing_record_hash,
+            candidate_record_hash,
+        } => anyhow::bail!(
+            "dispatch-effect answer conflict: existing={existing_record_hash}, candidate={candidate_record_hash}"
+        ),
+        ryeos_state::ReplayPublishOutcome::IntegrityFailure { reason } => {
+            anyhow::bail!("dispatch-effect index integrity failure: {reason}")
+        }
+    }
 }
 
 /// Result of a detached execution launch.
@@ -1645,7 +1916,7 @@ fn admitted_root_launch_metadata(
         Some(runtime_ref) => runtime_ref.clone(),
         None => prepared_plan.runtime_ref()?.to_owned(),
     };
-    let (finalized_program, external_publication) =
+    let (finalized_program, mut external_publication) =
         finalize_direct_effective_program(state, params)?;
     let sealed = SealedRootExecutionRequest::capture_finalized(
         &params.resolved,
@@ -1695,6 +1966,19 @@ fn admitted_root_launch_metadata(
     };
     let admitted_artifact_identity =
         prepared_plan.admitted_artifact_identity(&params.resolved, protocol)?;
+    let (realization_contract_ref, realization_contract_digest) = match &admitted_artifact_identity
+    {
+        ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+            runtime_identity,
+            ..
+        } => (
+            runtime_identity.runtime_ref.clone(),
+            runtime_identity.runtime_content_hash.clone(),
+        ),
+        ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime { .. } => {
+            anyhow::bail!("direct launch produced a managed runtime artifact identity")
+        }
+    };
     let direct_executable_identity = match &admitted_artifact_identity {
         ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
             executable_identity,
@@ -1724,12 +2008,25 @@ fn admitted_root_launch_metadata(
         &params.provenance.request_engine().node_trust_store,
         admitted_project_root,
     )?;
-    let metadata = ryeos_app::launch_metadata::RuntimeLaunchMetadata::default()
+    let mut metadata = ryeos_app::launch_metadata::RuntimeLaunchMetadata::default()
         .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::DirectItemExecutor)
         .with_admitted_artifact_identity(admitted_artifact_identity)
         .with_admitted_execution_closure(execution_closure)
         .with_resume_context(resume)
         .with_sealed_root_request(sealed);
+    let realization_admission = super::execution_realization::admit_or_verify(
+        state,
+        &metadata,
+        finalized_program.resolution(),
+        finalized_program.effective_definition_digest().as_str(),
+        &realization_contract_ref,
+        &realization_contract_digest,
+        external_publication.as_mut(),
+    )?;
+    if external_publication.is_none() {
+        external_publication = realization_admission.publication;
+    }
+    metadata = metadata.with_execution_realization_hash(realization_admission.hash);
     metadata.validate()?;
     let bound_external = super::external_content::bind_external_realizations(
         state,
@@ -1801,7 +2098,7 @@ fn finalize_direct_effective_program(
         })
         .transpose()?
         .flatten();
-    let captured_external = super::external_content::capture_external_realizations(
+    let captured_external = ryeos_app::external_content_admission::admit_external_realizations(
         state,
         engine,
         &params.resolved.kind,
@@ -1832,8 +2129,7 @@ fn finalize_direct_effective_program(
             .as_ref()
             .map(|captured| captured.finalization_evidence()),
     )?;
-    let finalized =
-        ryeos_engine::effective_program::finalize_effective_program(candidate, proof)?;
+    let finalized = ryeos_engine::effective_program::finalize_effective_program(candidate, proof)?;
     Ok((
         finalized,
         captured_external.and_then(|captured| captured.into_publication()),
@@ -1892,15 +2188,15 @@ fn recovered_direct_protocol(
         );
     }
     if let ryeos_state::objects::DirectExecutableIdentity::BundleExecutor {
-        provider_manifest_signer_fingerprint,
+        executor_manifest_signer_fingerprint,
         ..
     } = executable_identity
         && !engine
             .node_trust_store
-            .is_trusted(provider_manifest_signer_fingerprint)
+            .is_trusted(executor_manifest_signer_fingerprint)
     {
         bail!(
-            "admitted direct executable provider signer is no longer trusted: {provider_manifest_signer_fingerprint}"
+            "admitted direct executable bundle signer is no longer trusted: {executor_manifest_signer_fingerprint}"
         );
     }
     let header = lillux::signature::parse_signature_line(
@@ -2050,7 +2346,7 @@ pub async fn run_and_wait(
     state: AppState,
     mut params: ExecutionParams,
     launch_handoff: Option<&super::launch::LaunchHandoff>,
-) -> Result<WaitResult> {
+) -> Result<WaitOutcome> {
     let mut guard = ExecutionGuard::new(state.clone());
 
     // Pre-mint and reserve the launch ID before its row is published. An SSE
@@ -2114,6 +2410,77 @@ pub async fn run_and_wait(
         &mut prepared_plan,
         protocol,
     )?;
+    let dispatch_effect_identity = if let Some(prepared) = params.effect_authority.as_ref() {
+        prepared.validate()?;
+        let capsule = wait_launch_metadata
+            .admitted_launch_capsule()?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "durable dispatch subject `{}` produced no admission capsule",
+                    params.resolved.item_ref
+                )
+            })?;
+        let subject = admitted_subject_from_capsule(
+            &params.resolved,
+            &capsule,
+            prepared.subject_effect_class_ceiling,
+        )?;
+        let identity = ryeos_effect_contract::DispatchEffectIdentity {
+            authorization: prepared.authorization.clone(),
+            action_digest: prepared.action_digest.clone(),
+            subject,
+        };
+        identity.validate()?;
+        let cache_key = identity.cache_key()?;
+        let authority = super::pinned_state_authority(&state)?;
+        let replay_namespace =
+            ryeos_state::ReplayIndexNamespace::new(ryeos_effect_contract::EFFECT_REPLAY_NAMESPACE)?;
+        let lookup = state.state_store.with_state_db(|db| {
+            db.lookup_replay_record(&replay_namespace, &cache_key, |indexed| {
+                verify_dispatch_effect_record(&authority, indexed)
+            })
+        })?;
+        match lookup {
+            ryeos_state::ReplayLookupOutcome::Absent => Some(identity),
+            ryeos_state::ReplayLookupOutcome::Present(indexed) => {
+                let record = load_verified_dispatch_effect_record(&authority, &indexed)?;
+                if record.identity != identity {
+                    anyhow::bail!(
+                        "verified dispatch-effect record {} contradicts the current admitted identity",
+                        indexed.record_hash
+                    );
+                }
+                let result = record.answer.replay_leaf_envelope(&indexed.record_hash)?;
+                release_tree_publication(
+                    tree_publication.take(),
+                    "dispatch-effect replay without child launch",
+                );
+                drop(wait_cas_guard);
+                guard.cleanup();
+                let effect_identity = identity.cache_key()?;
+                return Ok(WaitOutcome::Replayed {
+                    result,
+                    dispatch: ryeos_runtime::callback_contract::RuntimeDispatchEvidence {
+                        source: ryeos_runtime::callback_contract::RuntimeDispatchSource::EffectRecord,
+                        effect_class: runtime_effect_class(identity.authorization.class),
+                        action_digest: identity.action_digest.clone(),
+                        effect_identity: Some(effect_identity),
+                        publication: ryeos_runtime::callback_contract::RuntimeDispatchPublication::NotApplicable,
+                        record_hash: Some(indexed.record_hash.clone()),
+                        replayed_from: Some(indexed.record_hash),
+                    },
+                });
+            }
+            ryeos_state::ReplayLookupOutcome::Unavailable { reason } => {
+                anyhow::bail!("dispatch-effect lookup is unavailable: {reason}")
+            }
+            ryeos_state::ReplayLookupOutcome::IntegrityFailure { reason } => {
+                anyhow::bail!("dispatch-effect replay integrity failure: {reason}")
+            }
+        }
+    } else {
+        None
+    };
     let created = state
         .threads
         .create_root_thread_with_events_and_launch_metadata(
@@ -2307,6 +2674,7 @@ pub async fn run_and_wait(
         .as_ref()
         .map(|bound| bound.sealed_set_env().to_string());
     let spawn_workspace_lifeline = guard.temp_dir.clone();
+    let wait_node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
     let spawn_handle = task::spawn_blocking(move || {
         let _spawn_workspace_lifeline = spawn_workspace_lifeline;
         thread_lifecycle::spawn_item(thread_lifecycle::SpawnItemParams {
@@ -2322,6 +2690,9 @@ pub async fn run_and_wait(
             isolation_project_authority: wait_isolation_project_authority,
             isolation_live_access_authority: wait_isolation_live_access_authority,
             isolation_external_read_only_mounts: wait_external_mounts,
+            isolation_node_trusted_keys_dir: wait_node_trusted_keys_dir,
+            isolation_workspace: None,
+            inherited_fds: Vec::new(),
             external_realizations_env: wait_external_sealed_env,
             isolation_daemon_socket_path: wait_isolation_daemon_socket_path.as_deref(),
             thread_state_dir: Some(thread_state_dir.as_path()),
@@ -2724,14 +3095,37 @@ pub async fn run_and_wait(
     };
 
     let result = state.threads.build_execute_result(&finalized.thread_id)?;
-
+    let result_value = serde_json::to_value(&result).unwrap_or(json!(null));
+    let dispatch_effect = if let Some(identity) = dispatch_effect_identity {
+        let action_digest = identity.action_digest.clone();
+        let effect_class = runtime_effect_class(identity.authorization.class);
+        let effect_identity = identity.cache_key()?;
+        let response = json!({
+            "thread": &finalized,
+            "result": &result_value,
+        });
+        let publication =
+            publish_dispatch_effect_record(&state, identity, &response, &finalized.thread_id)?;
+        Some(ryeos_runtime::callback_contract::RuntimeDispatchEvidence {
+            source: ryeos_runtime::callback_contract::RuntimeDispatchSource::Executed,
+            effect_class,
+            action_digest,
+            effect_identity: Some(effect_identity),
+            publication: publication.publication,
+            record_hash: Some(publication.record_hash),
+            replayed_from: None,
+        })
+    } else {
+        None
+    };
     guard.cleanup();
 
-    Ok(WaitResult {
+    Ok(WaitOutcome::Executed(WaitResult {
         finalized_thread: finalized,
-        result: serde_json::to_value(&result).unwrap_or(json!(null)),
+        result: result_value,
         debug: debug_block,
-    })
+        dispatch_effect,
+    }))
 }
 
 /// Launch a detached execution (returns immediately, runs in background).
@@ -3246,6 +3640,7 @@ async fn dispatch_detached_bg_task(
         }
     }
 
+    let bg_node_trusted_keys_dir = bg_state.config.runtime_root().trusted_keys_dir();
     let spawn_result = task::spawn_blocking(move || {
         let _spawn_workspace_lifeline = spawn_workspace_lifeline;
         let project_root = match &res_for_spawn.plan_context.project_context {
@@ -3269,6 +3664,9 @@ async fn dispatch_detached_bg_task(
             isolation_project_authority: bg_isolation_project_authority,
             isolation_live_access_authority: bg_isolation_live_access_authority,
             isolation_external_read_only_mounts: bg_external_mounts,
+            isolation_node_trusted_keys_dir: bg_node_trusted_keys_dir,
+            isolation_workspace: None,
+            inherited_fds: Vec::new(),
             external_realizations_env: bg_external_sealed_env,
             isolation_daemon_socket_path: isolation_daemon_socket_path_for_spawn.as_deref(),
             thread_state_dir: Some(thread_state_dir.as_path()),
@@ -4255,6 +4653,7 @@ pub fn execution_params_from_sealed_root_request(
         // The created row already carries any operational parent link. This
         // reconstruction must not try to attach it a second time at launch.
         parent_thread_id: None,
+        effect_authority: None,
     })
 }
 
@@ -4843,7 +5242,7 @@ mod tests {
     }
 
     #[test]
-    fn live_localpath_record_selects_live_authority_without_legacy_snapshot_hints() {
+    fn live_localpath_record_selects_live_authority_without_snapshot_hints() {
         let project = tempfile::tempdir().unwrap();
         let project_path = project.path().to_path_buf();
         let resume = resume_record(
@@ -4881,7 +5280,7 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        resume.original_snapshot_hash = Some("legacy-hint-must-not-win".into());
+        resume.original_snapshot_hash = Some("non_authoritative_hint_must_not_win".into());
 
         match decide_resume_provenance(&resume) {
             ResumeProvenanceDecision::PinnedLocalSnapshot {

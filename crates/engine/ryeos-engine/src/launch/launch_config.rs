@@ -1500,8 +1500,10 @@ mod tests {
         ResolutionRoots {
             ordered: vec![ResolutionRoot {
                 space: ItemSpace::Project,
+                identity: crate::contracts::ItemSourceRoot::Project,
                 label: "project".to_string(),
                 ai_root: project_root.join(crate::AI_DIR),
+                content_root: Some(project_root.to_path_buf()),
             }],
         }
     }

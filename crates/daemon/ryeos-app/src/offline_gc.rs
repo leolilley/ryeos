@@ -152,6 +152,8 @@ fn run_offline_thread_history_gc_inner(
     options: &OfflineThreadHistoryGcOptions,
     mut observer: Option<&mut dyn FnMut(&OfflineThreadHistoryGcProgress)>,
 ) -> Result<OfflineThreadHistoryGcReport> {
+    crate::provider_object_contracts::install()
+        .context("install application object contracts for offline GC")?;
     publish_progress(
         &mut observer,
         OfflineThreadHistoryGcPhase::CapturingAuthority,
@@ -288,6 +290,25 @@ fn run_offline_thread_history_gc_inner(
                 .handoff_cas_object_roots()
                 .context("collect durable handoff CAS roots before offline CAS sweep")?,
         );
+        if runtime_directory
+            .open_regular(
+                std::ffi::OsStr::new(crate::accounting_db::ACCOUNTING_INITIALIZED_FILENAME),
+                true,
+            )?
+            .is_some()
+        {
+            let accounting =
+                crate::accounting_db::AccountingDb::open_at_pinned_runtime_state_dir_with_lock(
+                    &runtime_directory,
+                    runtime_directory_lock.clone(),
+                )
+                .context("open established accounting evidence for offline CAS sweep")?;
+            roots.object_hashes.extend(
+                accounting
+                    .provider_evidence_object_roots()
+                    .context("collect durable provider evidence roots before offline CAS sweep")?,
+            );
+        }
         roots.object_hashes.sort();
         roots.object_hashes.dedup();
         Some(roots)
@@ -614,13 +635,8 @@ fn inspect_operational_gc_roots(
     // rows exist; retention is row deletion, never a direct object delete.
     roots.object_hashes.extend(
         operational
-            .list_effect_record_hashes()
-            .context("collect durable effect record roots")?,
-    );
-    roots.object_hashes.extend(
-        operational
-            .list_provider_call_record_hashes()
-            .context("collect durable provider call record roots")?,
+            .list_replay_record_hashes()
+            .context("collect durable replay record roots")?,
     );
     Ok(roots)
 }
@@ -687,7 +703,76 @@ fn discard_scheduler_fire_journals(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_effect_contract::EffectClass;
+    use ryeos_provider_contract::{
+        AdmittedLocalWorkerFinal, AdmittedLocalWorkerUsage, FirstObservation,
+        LocalWorkerObservation, ObservationClass, PreparedRequestProjection, ProviderCallAnswer,
+        ProviderCallRecord, RecordedMessage, RequestAuthority, RequestCoordinate,
+        TransportCoordinate,
+    };
     use tempfile::TempDir;
+
+    fn local_coordinate() -> RequestCoordinate {
+        RequestCoordinate::build(
+            RequestAuthority {
+                outer_effective_definition_digest: "1".repeat(64),
+                provider_family: "chat_completions".to_owned(),
+                provider_config_hash: "provider-config".to_owned(),
+                provider_config_value_digest: "2".repeat(64),
+                provider_id: "local-tinygrad".to_owned(),
+                profile_id: None,
+                model_name: "qwen3-0.6b".to_owned(),
+                credential_binding_hmac: "3".repeat(64),
+                credential_authority_generation: "none".to_owned(),
+                authority_digest: "4".repeat(64),
+                admitted_effect_class: Some(EffectClass::Recorded),
+            },
+            TransportCoordinate::AdmittedLocalWorker {
+                worker_ref: "worker:standard/local-tinygrad".to_owned(),
+                effective_definition_digest: "5".repeat(64),
+                capsule_hash: "6".repeat(64),
+                execution_realization_hash: "7".repeat(64),
+            },
+            PreparedRequestProjection::new(
+                std::iter::empty(),
+                std::iter::empty(),
+                "8".repeat(64),
+                16,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn local_terminal() -> AdmittedLocalWorkerFinal {
+        AdmittedLocalWorkerFinal {
+            answer: ProviderCallAnswer {
+                message: RecordedMessage {
+                    role: "assistant".to_owned(),
+                    content: Some(serde_json::Value::String("done".to_owned())),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+                finish_reason: Some("stop".to_owned()),
+            },
+            usage: AdmittedLocalWorkerUsage {
+                input_tokens: 5,
+                output_tokens: 1,
+                reasoning_tokens: None,
+            },
+            response_id: Some("response-1".to_owned()),
+        }
+    }
+
+    fn write_object(cas_root: &Path, value: &serde_json::Value) -> String {
+        let canonical = lillux::canonical_json(value).unwrap();
+        let hash = lillux::sha256_hex(canonical.as_bytes());
+        let path = lillux::shard_path(cas_root, "objects", &hash, ".json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        lillux::atomic_write(&path, canonical.as_bytes()).unwrap();
+        hash
+    }
 
     #[test]
     fn incompatible_runtime_accounting_is_explicitly_unavailable_not_zero() {
@@ -710,6 +795,76 @@ mod tests {
         };
         assert_eq!(accounting.total_rows(), Some(5));
         assert_eq!(serde_json::to_value(accounting).unwrap()["status"], "exact");
+    }
+
+    #[test]
+    fn offline_gc_closure_knows_provider_records_and_local_observations() {
+        crate::provider_object_contracts::install().unwrap();
+        let coordinate = local_coordinate();
+        let terminal = local_terminal();
+        let observation = LocalWorkerObservation {
+            schema: ryeos_provider_contract::LOCAL_WORKER_OBSERVATION_SCHEMA_VERSION,
+            kind: ryeos_provider_contract::LOCAL_WORKER_OBSERVATION_KIND.to_owned(),
+            attempt_id: "attempt-1".to_owned(),
+            request_hash: "d".repeat(64),
+            coordinate_key: coordinate.cache_key().unwrap(),
+            capsule_hash: "6".repeat(64),
+            admitted_execution_realization_hash: "7".repeat(64),
+            observed_execution_realization_hash: None,
+            observed_at: "2026-08-09T00:00:00.000Z".to_owned(),
+            terminal_digest: terminal.digest().unwrap(),
+            terminal: terminal.clone(),
+            execution_identity_digest: "9".repeat(64),
+            execution_identity_attestation_hash: "a".repeat(64),
+        };
+        let answer_digest = terminal.answer.digest().unwrap();
+        let record = ProviderCallRecord {
+            schema: ryeos_provider_contract::PROVIDER_CALL_RECORD_SCHEMA_VERSION,
+            kind: ryeos_provider_contract::PROVIDER_CALL_RECORD_KIND.to_owned(),
+            cache_key: coordinate.cache_key().unwrap(),
+            coordinate,
+            answer_digest: answer_digest.clone(),
+            answer: terminal.answer,
+            first_observation: FirstObservation {
+                produced_by_thread: "T-local".to_owned(),
+                attempt_id: "attempt-1".to_owned(),
+                response_digest: answer_digest,
+                observed_at: "2026-08-09T00:00:00.000Z".to_owned(),
+                observation_class: ObservationClass::DaemonWorkerObserved,
+                provider_accounting: serde_json::json!({
+                    "input_tokens": 5,
+                    "output_tokens": 1,
+                }),
+                execution_identity_digest: Some("9".repeat(64)),
+                execution_identity_attestation_hash: Some("a".repeat(64)),
+                admitted_execution_realization_hash: Some("7".repeat(64)),
+                observed_execution_realization_hash: None,
+            },
+        };
+
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join("cas");
+        let observation_hash = write_object(&cas_root, &observation.to_value().unwrap());
+        let record_hash = write_object(&cas_root, &record.to_value().unwrap());
+        let report = ryeos_state::object_closure::collect_object_closure(
+            &cas_root,
+            [observation_hash.clone(), record_hash.clone()],
+        )
+        .unwrap();
+
+        assert!(report.unsupported_objects.is_empty(), "{report:?}");
+        assert!(report.malformed_objects.is_empty(), "{report:?}");
+        assert!(report.object_hashes.contains(&observation_hash));
+        assert!(report.object_hashes.contains(&record_hash));
+        let missing = report
+            .missing_objects
+            .iter()
+            .map(|entry| entry.hash.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            missing,
+            std::collections::BTreeSet::from(["6".repeat(64), "7".repeat(64), "a".repeat(64),])
+        );
     }
 
     #[test]

@@ -2,9 +2,8 @@
 //!
 //! Contiguous read-only files named by whole-file sha256, living under the
 //! pinned state authority beside the CAS — mmap-ready, never
-//! materialize-copied. The tier is semantically blind: model weights are
-//! its motivating consumer, but nothing here knows what a byte means, and
-//! checkpoints, datasets, or oversized runtime trees ride identically. Bytes enter only through streaming ingest
+//! materialize-copied. The tier is semantically blind: nothing here knows
+//! what a byte means. Bytes enter only through streaming ingest
 //! (hash-while-write with a fixed-size chunk trail, resumable after a
 //! crash), publication is atomic and immutable (0444), and eviction follows
 //! the standing lane discipline: manifest-reachable roots and leased
@@ -25,11 +24,11 @@ use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, bail};
+use anyhow::bail;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::objects::{MAX_LARGE_CONTENT_FILE_BYTES, LARGE_CONTENT_CHUNK_BYTES};
+use crate::objects::{LARGE_CONTENT_CHUNK_BYTES, MAX_LARGE_CONTENT_FILE_BYTES};
 
 pub const LARGE_OBJECT_SIDECAR_SCHEMA: &str = "ryeos.large_object_sidecar.v1";
 
@@ -38,7 +37,6 @@ pub const LARGE_OBJECT_SIDECAR_SCHEMA: &str = "ryeos.large_object_sidecar.v1";
 /// re-pin re-ingests.
 pub const DEFAULT_LARGE_OBJECT_STORE_BUDGET_BYTES: u64 = 512 * 1024 * 1024 * 1024;
 
-const STORE_VERSION_DIR: &str = "v1";
 const OBJECTS_DIR: &str = "objects";
 const SIDECARS_DIR: &str = "sidecars";
 const STAGING_DIR: &str = ".staging";
@@ -60,6 +58,29 @@ pub struct LargeObjectSidecar {
     pub chunk_hashes: Vec<String>,
 }
 
+impl LargeObjectSidecar {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != LARGE_OBJECT_SIDECAR_SCHEMA {
+            bail!("large-object sidecar schema is not current");
+        }
+        require_store_hash(&self.file_sha256)?;
+        if self.size == 0 || self.size > MAX_LARGE_CONTENT_FILE_BYTES {
+            bail!("large-object sidecar size is outside the admitted bounds");
+        }
+        if self.chunk_size == 0 || !self.chunk_size.is_power_of_two() {
+            bail!("large-object sidecar chunk size is not a positive power of two");
+        }
+        let expected_chunks = self.size.div_ceil(self.chunk_size);
+        if self.chunk_hashes.len() as u64 != expected_chunks {
+            bail!("large-object sidecar chunk count contradicts its size");
+        }
+        for hash in &self.chunk_hashes {
+            require_store_hash(hash)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestedLargeObject {
     pub file_sha256: String,
@@ -70,6 +91,20 @@ pub struct IngestedLargeObject {
     pub deduplicated: bool,
     /// Bytes accepted from a previous interrupted ingest of the same source.
     pub resumed_bytes: u64,
+}
+
+/// Identity selected by the descriptor-owning traversal before ingest.
+///
+/// The store receives the already-open regular file as the read authority and
+/// compares these coordinates with that descriptor before reading. It then
+/// compares the complete descriptor metadata again after the stream. A path
+/// is deliberately absent: state mechanics must never reopen ambient source
+/// names or infer node capture policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PinnedLargeObjectSourceIdentity {
+    pub containing_device: u64,
+    pub inode: u64,
+    pub size: u64,
 }
 
 pub struct LeasedLargeObject {
@@ -94,6 +129,7 @@ impl LeasedLargeObject {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LargeObjectSweepReport {
+    pub inspected_objects: usize,
     pub total_bytes_before: u64,
     pub total_bytes_after: u64,
     pub evicted: Vec<(String, u64)>,
@@ -101,17 +137,41 @@ pub struct LargeObjectSweepReport {
     pub retained_leased: usize,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LargeObjectStagingSweepReport {
+    pub files: usize,
+    pub bytes: u64,
+}
+
 /// One integrity defect surfaced by scrub. Findings are evidence, not
 /// logs: a scrub that returns any is reporting substrate damage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "finding", rename_all = "snake_case")]
 pub enum LargeObjectIntegrityFinding {
-    MissingSidecar { file_sha256: String },
-    MalformedSidecar { file_sha256: String, error: String },
-    SizeMismatch { file_sha256: String, sidecar: u64, actual: u64 },
-    ChunkMismatch { file_sha256: String, chunk_index: u64 },
-    FileHashMismatch { file_sha256: String, computed: String },
-    UnreadableObject { file_sha256: String, error: String },
+    MissingSidecar {
+        file_sha256: String,
+    },
+    MalformedSidecar {
+        file_sha256: String,
+        error: String,
+    },
+    SizeMismatch {
+        file_sha256: String,
+        sidecar: u64,
+        actual: u64,
+    },
+    ChunkMismatch {
+        file_sha256: String,
+        chunk_index: u64,
+    },
+    FileHashMismatch {
+        file_sha256: String,
+        computed: String,
+    },
+    UnreadableObject {
+        file_sha256: String,
+        error: String,
+    },
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -131,6 +191,27 @@ pub struct LargeObjectStore {
 }
 
 impl LargeObjectStore {
+    /// Open an existing store without creating any directory. This is the
+    /// read-only entry point used by maintenance dry-runs.
+    pub fn open_under(runtime_directory: &lillux::PinnedDirectory) -> anyhow::Result<Option<Self>> {
+        let Some(root) = runtime_directory.open_child_directory(OsStr::new("large-objects"))?
+        else {
+            return Ok(None);
+        };
+        let open = |name: &str| -> anyhow::Result<lillux::PinnedDirectory> {
+            root.open_child_directory(OsStr::new(name))?
+                .ok_or_else(|| anyhow::anyhow!("large-object store is missing {name}"))
+        };
+        Ok(Some(Self {
+            objects: open(OBJECTS_DIR)?,
+            sidecars: open(SIDECARS_DIR)?,
+            staging: open(STAGING_DIR)?,
+            locks: open(LOCKS_DIR)?,
+            leases: open(LEASES_DIR)?,
+            chunk_bytes: LARGE_CONTENT_CHUNK_BYTES,
+        }))
+    }
+
     /// Open (creating on first use) the store under an already-pinned state
     /// runtime directory — the same trust root the CAS hangs from.
     pub fn open_or_create_under(
@@ -149,9 +230,7 @@ impl LargeObjectStore {
         if chunk_bytes == 0 {
             bail!("large-object store chunk size must be positive");
         }
-        let root = runtime_directory
-            .open_or_create_child(OsStr::new("large-objects"), 0o700)?
-            .open_or_create_child(OsStr::new(STORE_VERSION_DIR), 0o700)?;
+        let root = runtime_directory.open_or_create_child(OsStr::new("large-objects"), 0o700)?;
         Ok(Self {
             objects: root.open_or_create_child(OsStr::new(OBJECTS_DIR), 0o700)?,
             sidecars: root.open_or_create_child(OsStr::new(SIDECARS_DIR), 0o700)?,
@@ -164,6 +243,27 @@ impl LargeObjectStore {
 
     pub fn chunk_bytes(&self) -> u64 {
         self.chunk_bytes
+    }
+
+    pub fn filesystem_capacity(&self) -> anyhow::Result<lillux::FilesystemCapacity> {
+        self.objects.filesystem_capacity()
+    }
+
+    pub fn total_stored_bytes(&self) -> anyhow::Result<u64> {
+        let mut total = 0_u64;
+        for entry in self.objects.entries_no_follow()? {
+            if entry.entry_type != lillux::PinnedEntryType::Regular {
+                anyhow::bail!("large-object namespace contains a non-regular entry");
+            }
+            let file = self
+                .objects
+                .open_regular(&entry.name, false)?
+                .ok_or_else(|| anyhow::anyhow!("large object disappeared during accounting"))?;
+            total = total
+                .checked_add(file.metadata()?.len())
+                .ok_or_else(|| anyhow::anyhow!("large-object store byte count overflow"))?;
+        }
+        Ok(total)
     }
 
     /// Size of a stored object, or `None` when absent. Presence checks for
@@ -184,7 +284,60 @@ impl LargeObjectStore {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         let sidecar: LargeObjectSidecar = serde_json::from_slice(&bytes)?;
+        sidecar.validate()?;
+        let canonical = lillux::canonical_json(&serde_json::to_value(&sidecar)?)?;
+        if canonical.as_bytes() != bytes {
+            bail!("large-object sidecar is not canonically encoded");
+        }
+        if sidecar.file_sha256 != file_sha256 {
+            bail!("large-object sidecar identity contradicts its store key");
+        }
         Ok(Some(sidecar))
+    }
+
+    /// Prove that an immutable object and its canonical sidecar are resident
+    /// at the expected content identity and size.
+    pub fn verify_resident_object(
+        &self,
+        file_sha256: &str,
+        expected_size: u64,
+    ) -> anyhow::Result<LargeObjectSidecar> {
+        let size = self
+            .object_size(file_sha256)?
+            .ok_or_else(|| anyhow::anyhow!("large object {file_sha256} is absent"))?;
+        if size != expected_size {
+            bail!("large object {file_sha256} is {size} bytes; expected {expected_size}");
+        }
+        let sidecar = self
+            .sidecar(file_sha256)?
+            .ok_or_else(|| anyhow::anyhow!("large object {file_sha256} has no sidecar"))?;
+        if sidecar.size != expected_size {
+            bail!("large-object sidecar size contradicts retained bytes");
+        }
+        Ok(sidecar)
+    }
+
+    pub fn verify_manifest_commitment(
+        &self,
+        entry: &crate::objects::ExternalLargeContentManifestEntry,
+    ) -> anyhow::Result<()> {
+        let file_sha256 = entry.file_sha256.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("large-object verification requires a large file entry")
+        })?;
+        let size = entry
+            .size
+            .ok_or_else(|| anyhow::anyhow!("large-object manifest entry has no size"))?;
+        let chunk_size = entry
+            .chunk_size
+            .ok_or_else(|| anyhow::anyhow!("large-object manifest entry has no chunk size"))?;
+        let sidecar = self.verify_resident_object(file_sha256, size)?;
+        if sidecar.chunk_size != chunk_size || sidecar.chunk_hashes != entry.chunk_hashes {
+            bail!(
+                "large object {} sidecar contradicts its admitted manifest",
+                file_sha256
+            );
+        }
+        Ok(())
     }
 
     /// Stream one source file into the store. Identity is born here: the
@@ -192,40 +345,64 @@ impl LargeObjectStore {
     /// an interrupted ingest of the same source picks up where it stopped,
     /// after byte-verifying the staged prefix against the source so a
     /// changed source can never publish a spliced file.
-    pub fn ingest_from_path(
+    pub fn ingest_open_regular(
         &self,
-        source_path: &Path,
+        mut source: fs::File,
+        expected_source: PinnedLargeObjectSourceIdentity,
+        source_label: &str,
         expected_sha256: Option<&str>,
     ) -> anyhow::Result<IngestedLargeObject> {
         if let Some(expected) = expected_sha256 {
             require_store_hash(expected)?;
         }
-        let mut source = fs::File::open(source_path)
-            .with_context(|| format!("opening large-content source {}", source_path.display()))?;
-        let metadata = source.metadata()?;
-        if !metadata.is_file() {
-            bail!("large-content source {} is not a regular file", source_path.display());
+        if source_label.is_empty() || source_label.len() > 4_096 {
+            bail!("large-content source label is empty or unbounded");
         }
+        #[cfg(not(unix))]
+        {
+            let _ = (&mut source, expected_source, source_label);
+            bail!("descriptor-pinned large-object ingest is unavailable on this platform");
+        }
+        #[cfg(unix)]
+        let metadata = {
+            use std::os::unix::fs::MetadataExt as _;
+            let metadata = source.metadata()?;
+            if !metadata.file_type().is_file() {
+                bail!("large-content source {source_label} is not a regular file");
+            }
+            if metadata.dev() != expected_source.containing_device
+                || metadata.ino() != expected_source.inode
+                || metadata.len() != expected_source.size
+            {
+                bail!(
+                    "large-content source {source_label} descriptor does not match its admitted inode identity"
+                );
+            }
+            metadata
+        };
         let source_len = metadata.len();
         if source_len == 0 {
-            bail!("large-content source {} is empty; large content is never an empty file", source_path.display());
+            bail!(
+                "large-content source {source_label} is empty; large content is never an empty file"
+            );
         }
         if source_len > MAX_LARGE_CONTENT_FILE_BYTES {
             bail!(
-                "large-content source {} is {source_len} bytes; the per-file bound is {MAX_LARGE_CONTENT_FILE_BYTES}",
-                source_path.display()
+                "large-content source {source_label} is {source_len} bytes; the per-file bound is {MAX_LARGE_CONTENT_FILE_BYTES}"
             );
         }
 
-        // Staging identity: same absolute source + same length resumes; the
-        // prefix comparison below is what actually vouches for the bytes.
-        let staging_key = lillux::cas::sha256_hex(
-            format!("{}\n{}", source_path.display(), source_len).as_bytes(),
-        );
+        // The opaque staging identity contains no source pathname. Matching
+        // descriptor coordinates make an interrupted read resumable; the
+        // byte-for-byte prefix comparison below remains the content proof.
+        let staging_key = staging_key_for_source(expected_source);
         let staging_name = OsString::from(format!("ingest-{staging_key}"));
-        let lock = self
-            .locks
-            .open_regular_create(OsStr::new(&format!("ingest-{staging_key}")), true, false, 0o600)?;
+        let lock = self.locks.open_regular_create(
+            OsStr::new(&format!("ingest-{staging_key}")),
+            true,
+            false,
+            0o600,
+        )?;
         flock_exclusive_blocking(&lock)?;
 
         let mut staged = self
@@ -266,7 +443,7 @@ impl LargeObjectStore {
             if copied > source_len {
                 bail!(
                     "large-content source {} grew during ingest; refusing to publish moving bytes",
-                    source_path.display()
+                    source_label
                 );
             }
             staged.write_all(&buffer[..read])?;
@@ -275,8 +452,25 @@ impl LargeObjectStore {
         if copied != source_len {
             bail!(
                 "large-content source {} shrank during ingest: staged {copied} of {source_len} bytes",
-                source_path.display()
+                source_label
             );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let after = source.metadata()?;
+            let unchanged = metadata.dev() == after.dev()
+                && metadata.ino() == after.ino()
+                && metadata.size() == after.size()
+                && metadata.mtime() == after.mtime()
+                && metadata.mtime_nsec() == after.mtime_nsec()
+                && metadata.ctime() == after.ctime()
+                && metadata.ctime_nsec() == after.ctime_nsec()
+                && metadata.mode() == after.mode()
+                && copied == after.size();
+            if !unchanged {
+                bail!("large-content source {source_label} changed during ingest");
+            }
         }
         staged.sync_all()?;
         let (file_sha256, chunk_hashes) = hasher.finish();
@@ -286,7 +480,7 @@ impl LargeObjectStore {
             bail!(
                 "large-content source {} hashed to {file_sha256}, expected {expected}; \
                  staging retained for inspection",
-                source_path.display()
+                source_label
             );
         }
 
@@ -343,7 +537,11 @@ impl LargeObjectStore {
             Err(error) => {
                 // A concurrent ingest of identical bytes may have published
                 // first; losing that race is dedup, not failure.
-                if self.objects.open_regular(OsStr::new(file_sha256), false)?.is_some() {
+                if self
+                    .objects
+                    .open_regular(OsStr::new(file_sha256), false)?
+                    .is_some()
+                {
                     let _ = self.staging.remove_if_same(staging_name, staged);
                     return Ok(false);
                 }
@@ -356,15 +554,22 @@ impl LargeObjectStore {
     }
 
     fn publish_sidecar(&self, sidecar: &LargeObjectSidecar) -> anyhow::Result<()> {
+        sidecar.validate()?;
         let bytes = lillux::canonical_json(&serde_json::to_value(sidecar)?)?.into_bytes();
         if self
             .sidecars
             .atomic_create_regular(OsStr::new(&sidecar.file_sha256), &bytes, 0o444)?
             .is_none()
         {
-            // Already present from an earlier publication of the same
-            // object; the content is a pure function of the object bytes
-            // and chunk size, so presence is success.
+            let existing = self
+                .sidecar(&sidecar.file_sha256)?
+                .ok_or_else(|| anyhow::anyhow!("concurrent sidecar publication disappeared"))?;
+            if existing != *sidecar {
+                bail!(
+                    "existing sidecar for {} diverges from the computed commitment",
+                    sidecar.file_sha256
+                );
+            }
         }
         self.sidecars.sync()?;
         Ok(())
@@ -397,10 +602,9 @@ impl LargeObjectStore {
         // The lease was acquired after opening; re-open and require the same
         // inode so an eviction that raced the acquisition is detected rather
         // than serving a deleted (or republished) file.
-        let second = self
-            .objects
-            .open_regular(name, false)?
-            .ok_or_else(|| anyhow::anyhow!("large object {file_sha256} was evicted while binding"))?;
+        let second = self.objects.open_regular(name, false)?.ok_or_else(|| {
+            anyhow::anyhow!("large object {file_sha256} was evicted while binding")
+        })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt as _;
@@ -454,18 +658,34 @@ impl LargeObjectStore {
         budget_bytes: u64,
         roots: &BTreeSet<String>,
     ) -> anyhow::Result<LargeObjectSweepReport> {
+        self.sweep_to_budget_with_mode(budget_bytes, roots, false)
+    }
+
+    /// Plan or execute a lease-aware sweep. Dry-run acquires no new lease
+    /// files and removes nothing; it reports the exact unleased candidates it
+    /// would evict in the same order as a live sweep.
+    pub fn sweep_to_budget_with_mode(
+        &self,
+        budget_bytes: u64,
+        roots: &BTreeSet<String>,
+        dry_run: bool,
+    ) -> anyhow::Result<LargeObjectSweepReport> {
         let mut report = LargeObjectSweepReport::default();
         let mut candidates = Vec::new();
         for entry in self.objects.entries_no_follow()? {
             if entry.entry_type != lillux::PinnedEntryType::Regular {
-                continue;
+                anyhow::bail!("large-object namespace contains a non-regular entry");
             }
-            let Some(name) = entry.name.to_str().map(str::to_owned) else {
-                continue;
-            };
+            let name = entry
+                .name
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("large-object namespace contains a non-UTF8 name"))?
+                .to_owned();
+            require_store_hash(&name)?;
             let Some(file) = self.objects.open_regular(OsStr::new(&name), false)? else {
                 continue;
             };
+            report.inspected_objects = report.inspected_objects.saturating_add(1);
             let bytes = file.metadata()?.len();
             report.total_bytes_before = report.total_bytes_before.saturating_add(bytes);
             if roots.contains(&name) {
@@ -488,11 +708,24 @@ impl LargeObjectStore {
             if report.total_bytes_after <= budget_bytes {
                 break;
             }
-            let lease = self
-                .leases
-                .open_regular_create(OsStr::new(&name), true, false, 0o600)?;
+            let lease = match self.leases.open_regular(OsStr::new(&name), false)? {
+                Some(lease) => lease,
+                None if dry_run => {
+                    report.total_bytes_after = report.total_bytes_after.saturating_sub(bytes);
+                    report.evicted.push((name, bytes));
+                    continue;
+                }
+                None => self
+                    .leases
+                    .open_regular_create(OsStr::new(&name), true, false, 0o600)?,
+            };
             if !flock_exclusive_nonblocking(&lease)? {
                 report.retained_leased += 1;
+                continue;
+            }
+            if dry_run {
+                report.total_bytes_after = report.total_bytes_after.saturating_sub(bytes);
+                report.evicted.push((name, bytes));
                 continue;
             }
             let Some(object) = self.objects.open_regular(OsStr::new(&name), false)? else {
@@ -509,27 +742,62 @@ impl LargeObjectStore {
         Ok(report)
     }
 
+    /// Whether an execution currently holds a shared lease on this object.
+    /// Absence of a lease file means unleased; inspection never creates store
+    /// state.
+    pub fn object_is_leased(&self, file_sha256: &str) -> anyhow::Result<bool> {
+        require_store_hash(file_sha256)?;
+        let Some(lease) = self.leases.open_regular(OsStr::new(file_sha256), false)? else {
+            return Ok(false);
+        };
+        Ok(!flock_exclusive_nonblocking(&lease)?)
+    }
+
     /// Remove staging leftovers from ingests that died. Safe at any time:
     /// live ingests hold their staging lock exclusively.
     pub fn sweep_abandoned_staging(&self) -> anyhow::Result<usize> {
-        let mut removed = 0usize;
+        Ok(self.sweep_abandoned_staging_with_mode(false)?.files)
+    }
+
+    /// Inspect or remove abandoned ingest files. A live ingest keeps its
+    /// matching lock held exclusively, so neither mode mistakes it for
+    /// reclaimable state.
+    pub fn sweep_abandoned_staging_with_mode(
+        &self,
+        dry_run: bool,
+    ) -> anyhow::Result<LargeObjectStagingSweepReport> {
+        let mut report = LargeObjectStagingSweepReport::default();
         for entry in self.staging.entries_no_follow()? {
             if entry.entry_type != lillux::PinnedEntryType::Regular {
-                continue;
+                anyhow::bail!("large-object staging namespace contains a non-regular entry");
             }
-            let lock = self
-                .locks
-                .open_regular_create(&entry.name, true, false, 0o600)?;
+            let lock = match self.locks.open_regular(&entry.name, false)? {
+                Some(lock) => lock,
+                None if dry_run => {
+                    if let Some(staged) = self.staging.open_regular(&entry.name, false)? {
+                        report.files = report.files.saturating_add(1);
+                        report.bytes = report.bytes.saturating_add(staged.metadata()?.len());
+                    }
+                    continue;
+                }
+                None => self
+                    .locks
+                    .open_regular_create(&entry.name, true, false, 0o600)?,
+            };
             if !flock_exclusive_nonblocking(&lock)? {
                 continue;
             }
             if let Some(staged) = self.staging.open_regular(&entry.name, false)? {
-                self.staging.remove_if_same(&entry.name, &staged)?;
-                removed += 1;
+                let bytes = staged.metadata()?.len();
+                if !dry_run {
+                    self.staging.remove_if_same(&entry.name, &staged)?;
+                }
+                report.files = report.files.saturating_add(1);
+                report.bytes = report.bytes.saturating_add(bytes);
             }
             drop(lock);
         }
-        Ok(removed)
+        Ok(report)
     }
 
     /// Re-derive every stored object's chunk trail and whole-file hash,
@@ -557,7 +825,10 @@ impl LargeObjectStore {
         Ok(report)
     }
 
-    pub fn scrub_object(&self, file_sha256: &str) -> anyhow::Result<Vec<LargeObjectIntegrityFinding>> {
+    pub fn scrub_object(
+        &self,
+        file_sha256: &str,
+    ) -> anyhow::Result<Vec<LargeObjectIntegrityFinding>> {
         require_store_hash(file_sha256)?;
         let mut findings = Vec::new();
         let lease = self
@@ -629,8 +900,11 @@ impl LargeObjectStore {
             });
         }
         if let Some(sidecar) = &sidecar {
-            for (index, (stored, derived)) in
-                sidecar.chunk_hashes.iter().zip(chunk_hashes.iter()).enumerate()
+            for (index, (stored, derived)) in sidecar
+                .chunk_hashes
+                .iter()
+                .zip(chunk_hashes.iter())
+                .enumerate()
             {
                 if stored != derived {
                     findings.push(LargeObjectIntegrityFinding::ChunkMismatch {
@@ -649,6 +923,16 @@ impl LargeObjectStore {
         }
         Ok(findings)
     }
+}
+
+fn staging_key_for_source(source: PinnedLargeObjectSourceIdentity) -> String {
+    lillux::cas::sha256_hex(
+        format!(
+            "{}\n{}\n{}",
+            source.containing_device, source.inode, source.size
+        )
+        .as_bytes(),
+    )
 }
 
 /// Streaming whole-file + fixed-chunk hashing over one pass of bytes.
@@ -692,7 +976,8 @@ impl ChunkedHasher {
 
     fn finish(mut self) -> (String, Vec<String>) {
         if self.chunk_filled > 0 || (self.any_bytes && self.chunk_hashes.is_empty()) {
-            self.chunk_hashes.push(format!("{:x}", self.chunk.finalize()));
+            self.chunk_hashes
+                .push(format!("{:x}", self.chunk.finalize()));
         }
         (format!("{:x}", self.whole.finalize()), self.chunk_hashes)
     }
@@ -797,13 +1082,36 @@ mod tests {
         path
     }
 
+    fn ingest(
+        store: &LargeObjectStore,
+        source: &Path,
+        expected_sha256: Option<&str>,
+    ) -> anyhow::Result<IngestedLargeObject> {
+        use std::os::unix::fs::MetadataExt as _;
+        let file = fs::File::open(source)?;
+        let metadata = file.metadata()?;
+        store.ingest_open_regular(
+            file,
+            PinnedLargeObjectSourceIdentity {
+                containing_device: metadata.dev(),
+                inode: metadata.ino(),
+                size: metadata.len(),
+            },
+            source
+                .file_name()
+                .and_then(OsStr::to_str)
+                .unwrap_or("test-source"),
+            expected_sha256,
+        )
+    }
+
     #[test]
     fn ingest_publishes_an_immutable_object_with_a_faithful_chunk_trail() {
         let (dir, store) = store(8);
         let bytes = b"0123456789abcdefXYZ".to_vec();
-        let source = write_source(&dir, "model.bin", &bytes);
+        let source = write_source(&dir, "payload.bin", &bytes);
 
-        let ingested = store.ingest_from_path(&source, None).unwrap();
+        let ingested = ingest(&store, &source, None).unwrap();
         assert_eq!(ingested.size, 19);
         assert_eq!(ingested.file_sha256, lillux::cas::sha256_hex(&bytes));
         assert_eq!(
@@ -822,7 +1130,7 @@ mod tests {
 
         // Identical bytes from another path dedup instead of re-publishing.
         let copy = write_source(&dir, "copy.bin", &bytes);
-        let again = store.ingest_from_path(&copy, None).unwrap();
+        let again = ingest(&store, &copy, None).unwrap();
         assert!(again.deduplicated);
         assert_eq!(again.file_sha256, ingested.file_sha256);
     }
@@ -831,19 +1139,23 @@ mod tests {
     fn an_interrupted_ingest_resumes_and_a_changed_source_restarts() {
         let (dir, store) = store(8);
         let bytes = vec![7u8; 41];
-        let source = write_source(&dir, "model.bin", &bytes);
+        let source = write_source(&dir, "payload.bin", &bytes);
 
         // Simulate a crash: a staged prefix left behind by a dead ingest.
-        let staging_key = lillux::cas::sha256_hex(
-            format!("{}\n{}", source.display(), bytes.len()).as_bytes(),
-        );
+        use std::os::unix::fs::MetadataExt as _;
+        let metadata = fs::metadata(&source).unwrap();
+        let staging_key = staging_key_for_source(PinnedLargeObjectSourceIdentity {
+            containing_device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.len(),
+        });
         let staged = dir
             .path()
-            .join("large-objects/v1/.staging")
+            .join("large-objects/.staging")
             .join(format!("ingest-{staging_key}"));
         fs::write(&staged, &bytes[..17]).unwrap();
 
-        let resumed = store.ingest_from_path(&source, None).unwrap();
+        let resumed = ingest(&store, &source, None).unwrap();
         assert_eq!(resumed.resumed_bytes, 17);
         assert_eq!(resumed.file_sha256, lillux::cas::sha256_hex(&bytes));
         assert!(store.scrub_object(&resumed.file_sha256).unwrap().is_empty());
@@ -851,16 +1163,19 @@ mod tests {
         // A staged prefix that no longer matches the source is discarded,
         // never spliced.
         let other = vec![9u8; 41];
-        let source2 = write_source(&dir, "model2.bin", &other);
-        let key2 = lillux::cas::sha256_hex(
-            format!("{}\n{}", source2.display(), other.len()).as_bytes(),
-        );
+        let source2 = write_source(&dir, "payload-2.bin", &other);
+        let metadata = fs::metadata(&source2).unwrap();
+        let key2 = staging_key_for_source(PinnedLargeObjectSourceIdentity {
+            containing_device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.len(),
+        });
         let staged2 = dir
             .path()
-            .join("large-objects/v1/.staging")
+            .join("large-objects/.staging")
             .join(format!("ingest-{key2}"));
         fs::write(&staged2, vec![1u8; 17]).unwrap();
-        let restarted = store.ingest_from_path(&source2, None).unwrap();
+        let restarted = ingest(&store, &source2, None).unwrap();
         assert_eq!(restarted.resumed_bytes, 0);
         assert_eq!(restarted.file_sha256, lillux::cas::sha256_hex(&other));
     }
@@ -868,9 +1183,8 @@ mod tests {
     #[test]
     fn an_expected_hash_mismatch_refuses_publication() {
         let (dir, store) = store(8);
-        let source = write_source(&dir, "model.bin", b"not the pinned bytes");
-        let error = store
-            .ingest_from_path(&source, Some(&"a".repeat(64)))
+        let source = write_source(&dir, "payload.bin", b"not the pinned bytes");
+        let error = ingest(&store, &source, Some(&"a".repeat(64)))
             .unwrap_err()
             .to_string();
         assert!(error.contains("expected"), "got: {error}");
@@ -885,15 +1199,9 @@ mod tests {
     #[test]
     fn leases_pin_objects_against_the_sweep_and_roots_are_untouchable() {
         let (dir, store) = store(8);
-        let kept = store
-            .ingest_from_path(&write_source(&dir, "kept.bin", &[1u8; 32]), None)
-            .unwrap();
-        let leased = store
-            .ingest_from_path(&write_source(&dir, "leased.bin", &[2u8; 32]), None)
-            .unwrap();
-        let doomed = store
-            .ingest_from_path(&write_source(&dir, "doomed.bin", &[3u8; 32]), None)
-            .unwrap();
+        let kept = ingest(&store, &write_source(&dir, "kept.bin", &[1u8; 32]), None).unwrap();
+        let leased = ingest(&store, &write_source(&dir, "leased.bin", &[2u8; 32]), None).unwrap();
+        let doomed = ingest(&store, &write_source(&dir, "doomed.bin", &[3u8; 32]), None).unwrap();
 
         let held = store.lease_object(&leased.file_sha256, 32).unwrap();
         assert_eq!(held.file().metadata().unwrap().len(), 32);
@@ -904,7 +1212,11 @@ mod tests {
         assert_eq!(report.retained_roots, 1);
         assert_eq!(report.retained_leased, 1);
         assert_eq!(
-            report.evicted.iter().map(|(hash, _)| hash.as_str()).collect::<Vec<_>>(),
+            report
+                .evicted
+                .iter()
+                .map(|(hash, _)| hash.as_str())
+                .collect::<Vec<_>>(),
             vec![doomed.file_sha256.as_str()]
         );
         assert_eq!(store.object_size(&doomed.file_sha256).unwrap(), None);
@@ -915,7 +1227,11 @@ mod tests {
         drop(held);
         let report = store.sweep_to_budget(0, &roots).unwrap();
         assert_eq!(
-            report.evicted.iter().map(|(hash, _)| hash.as_str()).collect::<Vec<_>>(),
+            report
+                .evicted
+                .iter()
+                .map(|(hash, _)| hash.as_str())
+                .collect::<Vec<_>>(),
             vec![leased.file_sha256.as_str()]
         );
     }
@@ -924,10 +1240,13 @@ mod tests {
     fn scrub_reports_corruption_and_a_missing_sidecar_honestly() {
         let (dir, store) = store(8);
         let bytes = vec![5u8; 24];
-        let ingested = store
-            .ingest_from_path(&write_source(&dir, "model.bin", &bytes), None)
-            .unwrap();
-        assert!(store.scrub_object(&ingested.file_sha256).unwrap().is_empty());
+        let ingested = ingest(&store, &write_source(&dir, "payload.bin", &bytes), None).unwrap();
+        assert!(
+            store
+                .scrub_object(&ingested.file_sha256)
+                .unwrap()
+                .is_empty()
+        );
         let clean = store.scrub_all().unwrap();
         assert_eq!(clean.objects_verified, 1);
         assert_eq!(clean.bytes_verified, 24);
@@ -937,7 +1256,7 @@ mod tests {
         // the test reopens with explicit permissions.
         let object_path = dir
             .path()
-            .join("large-objects/v1/objects")
+            .join("large-objects/objects")
             .join(&ingested.file_sha256);
         let mut permissions = fs::metadata(&object_path).unwrap().permissions();
         use std::os::unix::fs::PermissionsExt as _;
@@ -949,29 +1268,32 @@ mod tests {
 
         let findings = store.scrub_object(&ingested.file_sha256).unwrap();
         assert!(
-            findings
-                .iter()
-                .any(|finding| matches!(finding, LargeObjectIntegrityFinding::ChunkMismatch { chunk_index: 1, .. })),
+            findings.iter().any(|finding| matches!(
+                finding,
+                LargeObjectIntegrityFinding::ChunkMismatch { chunk_index: 1, .. }
+            )),
             "got: {findings:?}"
         );
         assert!(
-            findings
-                .iter()
-                .any(|finding| matches!(finding, LargeObjectIntegrityFinding::FileHashMismatch { .. })),
+            findings.iter().any(|finding| matches!(
+                finding,
+                LargeObjectIntegrityFinding::FileHashMismatch { .. }
+            )),
             "got: {findings:?}"
         );
 
         fs::remove_file(
             dir.path()
-                .join("large-objects/v1/sidecars")
+                .join("large-objects/sidecars")
                 .join(&ingested.file_sha256),
         )
         .unwrap();
         let findings = store.scrub_object(&ingested.file_sha256).unwrap();
         assert!(
-            findings
-                .iter()
-                .any(|finding| matches!(finding, LargeObjectIntegrityFinding::MissingSidecar { .. })),
+            findings.iter().any(|finding| matches!(
+                finding,
+                LargeObjectIntegrityFinding::MissingSidecar { .. }
+            )),
             "got: {findings:?}"
         );
     }
@@ -979,21 +1301,20 @@ mod tests {
     #[test]
     fn a_leased_object_hard_links_without_copying() {
         let (dir, store) = store(8);
-        let ingested = store
-            .ingest_from_path(&write_source(&dir, "model.bin", &[4u8; 24]), None)
-            .unwrap();
+        let ingested =
+            ingest(&store, &write_source(&dir, "payload.bin", &[4u8; 24]), None).unwrap();
         let leased = store.lease_object(&ingested.file_sha256, 24).unwrap();
         let target = lillux::PinnedDirectory::open_or_create(&dir.path().join("mount")).unwrap();
         store
             .link_object_into(
                 &ingested.file_sha256,
                 &target,
-                std::ffi::OsStr::new("shard-0"),
+                std::ffi::OsStr::new("segment-0"),
                 leased.file(),
             )
             .unwrap();
         use std::os::unix::fs::MetadataExt as _;
-        let linked = fs::metadata(dir.path().join("mount/shard-0")).unwrap();
+        let linked = fs::metadata(dir.path().join("mount/segment-0")).unwrap();
         assert_eq!(linked.ino(), leased.file().metadata().unwrap().ino());
         assert_eq!(linked.len(), 24);
     }
@@ -1002,7 +1323,7 @@ mod tests {
     fn abandoned_staging_is_reclaimed() {
         let (dir, store) = store(8);
         fs::write(
-            dir.path().join("large-objects/v1/.staging/ingest-deadbeef"),
+            dir.path().join("large-objects/.staging/ingest-deadbeef"),
             b"leftover",
         )
         .unwrap();

@@ -699,8 +699,10 @@ mod tests {
         let roots = ResolutionRoots {
             ordered: vec![ResolutionRoot {
                 space: ItemSpace::Project,
+                identity: crate::contracts::ItemSourceRoot::Project,
                 label: "project".to_string(),
                 ai_root: project_root.join(crate::AI_DIR),
+                content_root: Some(project_root.clone()),
             }],
         };
         let exact = TestProjectContent::default()
@@ -750,7 +752,9 @@ mod tests {
         let roots = ResolutionRoots {
             ordered: vec![ResolutionRoot {
                 space: ItemSpace::Node,
+                identity: crate::contracts::ItemSourceRoot::Node,
                 label: "node".to_string(),
+                content_root: ai_root.parent().map(Path::to_path_buf),
                 ai_root,
             }],
         };

@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 ryeos-engine = { workspace = true }
+ryeos-effect-contract = { workspace = true }
 ryeos-expression = { workspace = true }
 ryeos-bundle = { workspace = true }
 ryeos-runtime = { workspace = true }

@@ -13,12 +13,18 @@ use crate::authority::{BillableDimension, HexDigest};
 use crate::money::UsdNanos;
 use crate::state::{AttemptBudgetState, ChargeBasis, ReconciliationReason};
 
-pub const RUNTIME_PROVIDER_ATTEMPT_RESERVE: &str = "runtime.provider_attempt_reserve";
+pub const RUNTIME_PROVIDER_ATTEMPT_PREPARE: &str = "runtime.provider_attempt_prepare";
 pub const RUNTIME_PROVIDER_ATTEMPT_MARK_ISSUED: &str = "runtime.provider_attempt_mark_issued";
 pub const RUNTIME_PROVIDER_ATTEMPT_SETTLE: &str = "runtime.provider_attempt_settle";
 pub const RUNTIME_PROVIDER_ATTEMPT_RELEASE_UNISSUED: &str =
     "runtime.provider_attempt_release_unissued";
 pub const RUNTIME_PROVIDER_ATTEMPT_GET: &str = "runtime.provider_attempt_get";
+pub const RUNTIME_PROVIDER_ATTEMPT_LOCAL_STREAM_START: &str =
+    "runtime.provider_attempt_local_stream_start";
+pub const RUNTIME_PROVIDER_ATTEMPT_LOCAL_STREAM_NEXT: &str =
+    "runtime.provider_attempt_local_stream_next";
+pub const RUNTIME_PROVIDER_ATTEMPT_LOCAL_STREAM_CONTROL: &str =
+    "runtime.provider_attempt_local_stream_control";
 
 /// The verifier contract version both sides pin: the runtime's shared
 /// trusted verifier stamps it (as a digest) into every
@@ -30,6 +36,7 @@ pub const SPEND_VERIFIER_CONTRACT_V1: &str = "spend-verifier/v1";
 pub const MAX_DIAGNOSTIC_LEN: usize = 2048;
 /// Upper bound applied to retained provider raw decimal audit text.
 pub const MAX_RAW_DECIMAL_LEN: usize = 128;
+pub const MAX_LOCAL_PROVIDER_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
 fn validate_bounded(text: &str, what: &str, max: usize) -> Result<(), String> {
     if text.len() > max {
@@ -83,43 +90,55 @@ pub struct VerifiedPreparedSpendBound {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProviderAttemptReserveParams {
+pub struct ProviderAttemptPrepareParams {
     pub thread_id: String,
     pub turn: u32,
     pub attempt_number: u32,
-    /// Reservation intent hash (§9.3): binds coordinate, config hash, route
-    /// facts, output limit, proven maximum authority, and body digest.
-    pub request_hash: String,
-    pub config_hash: String,
+    pub transport: ryeos_provider_contract::PreparedTransportIntent,
+    pub request: ryeos_provider_contract::PreparedRequestProjection,
     pub verified_bound: VerifiedPreparedSpendBound,
 }
 
-impl ProviderAttemptReserveParams {
+impl ProviderAttemptPrepareParams {
     pub fn validate(&self) -> Result<(), String> {
-        if self.thread_id.is_empty() || self.request_hash.is_empty() || self.config_hash.is_empty()
-        {
-            return Err("reserve params must carry thread, request hash, config hash".to_string());
+        if self.thread_id.is_empty() {
+            return Err("prepare params must carry a thread".to_string());
         }
         if self.attempt_number == 0 || self.turn == 0 {
             return Err("turn and attempt_number are 1-based".to_string());
         }
+        self.request.validate().map_err(|error| error.to_string())?;
+        self.transport
+            .validate()
+            .map_err(|error| error.to_string())?;
         Ok(())
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProviderAttemptReserveResponse {
-    pub attempt_id: String,
-    /// `Reserved`, or `ReservationDenied` for a durable insufficient-budget
-    /// denial (no debit was created).
-    pub state: AttemptBudgetState,
-    pub reserved: UsdNanos,
-    pub authority_digest: HexDigest,
-    pub execution_budget_id: String,
-    /// True when this response was recovered from the recorded operation
-    /// rather than a fresh transition.
-    pub replayed: bool,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderAttemptPrepareResponse {
+    Replay {
+        record_hash: String,
+        answer: ryeos_provider_contract::ProviderCallAnswer,
+    },
+    Reserved {
+        attempt_id: String,
+        request_hash: String,
+        coordinate: ryeos_provider_contract::RequestCoordinate,
+        reserved: UsdNanos,
+        authority_digest: HexDigest,
+        execution_budget_id: String,
+        replayed: bool,
+    },
+    ReservationDenied {
+        attempt_id: String,
+        request_hash: String,
+        coordinate: ryeos_provider_contract::RequestCoordinate,
+        authority_digest: HexDigest,
+        execution_budget_id: String,
+        replayed: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,21 +214,34 @@ impl TokenAccounting {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderAttemptSettleParams {
     pub thread_id: String,
     pub attempt_id: String,
     pub request_hash: String,
     pub authority_digest: HexDigest,
+    pub coordinate: ryeos_provider_contract::RequestCoordinate,
     pub spend: SpendAccounting,
     pub tokens: TokenAccounting,
+    /// Canonical behavior answer when the provider completed successfully.
+    /// Absent for failed/cancelled/interrupted issued attempts, which settle
+    /// financially but cannot publish replay evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<ryeos_provider_contract::ProviderCallAnswer>,
 }
 
 impl ProviderAttemptSettleParams {
     pub fn validate(&self) -> Result<(), String> {
+        self.coordinate
+            .validate()
+            .map_err(|error| error.to_string())?;
         self.spend.validate()?;
-        self.tokens.validate()
+        self.tokens.validate().and_then(|()| {
+            self.answer.as_ref().map_or(Ok(()), |answer| {
+                answer.validate().map_err(|error| error.to_string())
+            })
+        })
     }
 }
 
@@ -221,6 +253,25 @@ pub struct ProviderAttemptSettleResponse {
     pub released: UsdNanos,
     pub charge_basis: ChargeBasis,
     pub replayed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<ProviderCallPublication>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderCallPublication {
+    Inserted { record_hash: String },
+    Folded { record_hash: String },
+}
+
+/// Durable proof that a recorded answer crossed the provider replay index.
+/// Terminal financial state without this tuple is explicitly unbanked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderCallPublicationProof {
+    pub cache_key: String,
+    pub answer_digest: String,
+    pub record_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,6 +297,151 @@ pub struct ProviderAttemptGetParams {
     pub attempt_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderAttemptLocalStreamStartParams {
+    pub thread_id: String,
+    pub attempt_id: String,
+    pub request_hash: String,
+    pub coordinate: ryeos_provider_contract::RequestCoordinate,
+    /// Exact UTF-8 JSON bytes prepared before reservation. This value is
+    /// transported only to the admitted local worker and is never retained in
+    /// the accounting ledger or effect record.
+    pub request_body: String,
+}
+
+impl ProviderAttemptLocalStreamStartParams {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.thread_id.is_empty() || self.attempt_id.is_empty() {
+            return Err("local stream start requires thread and attempt ids".to_string());
+        }
+        if !lillux::valid_hash(&self.request_hash) {
+            return Err("local stream request hash is not canonical".to_string());
+        }
+        if self.request_body.len() > MAX_LOCAL_PROVIDER_REQUEST_BYTES {
+            return Err("local stream request body exceeds its byte bound".to_string());
+        }
+        self.coordinate
+            .validate()
+            .map_err(|error| error.to_string())?;
+        if !matches!(
+            self.coordinate.transport,
+            ryeos_provider_contract::TransportCoordinate::AdmittedLocalWorker { .. }
+        ) {
+            return Err("local stream start requires an admitted-worker coordinate".to_string());
+        }
+        if lillux::sha256_hex(self.request_body.as_bytes()) != self.coordinate.body_sha256 {
+            return Err("local stream body contradicts its reserved digest".to_string());
+        }
+        serde_json::from_str::<serde_json::Value>(&self.request_body)
+            .map_err(|error| format!("local stream request body is not JSON: {error}"))?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderAttemptLocalStreamStartResponse {
+    Stream {
+        stream_id: String,
+    },
+    /// The exact contact is still running in this daemon generation, but this
+    /// runtime has no replayable semantic cursor for it. A fresh runtime polls
+    /// start until the daemon-retained terminal is available; it never
+    /// reattaches to a partially consumed event stream.
+    Pending {
+        retry_after_ms: u64,
+    },
+    Replay {
+        observation_hash: String,
+        terminal: ryeos_provider_contract::AdmittedLocalWorkerFinal,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderAttemptLocalStreamNextParams {
+    pub thread_id: String,
+    pub attempt_id: String,
+    pub request_hash: String,
+    pub stream_id: String,
+    pub after_sequence: u64,
+    pub wait_ms: u64,
+    pub max_events: u16,
+}
+
+impl ProviderAttemptLocalStreamNextParams {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.thread_id.is_empty()
+            || self.attempt_id.is_empty()
+            || !lillux::valid_hash(&self.request_hash)
+            || !lillux::valid_hash(&self.stream_id)
+            || self.wait_ms > 30_000
+            || self.max_events == 0
+            || self.max_events > 128
+        {
+            return Err("local stream poll is not canonical and bounded".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderAttemptLocalStreamEvent {
+    pub sequence: u64,
+    pub kind: ProviderAttemptLocalStreamEventKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAttemptLocalStreamEventKind {
+    Delta,
+    Final,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderAttemptLocalStreamNextResponse {
+    pub events: Vec<ProviderAttemptLocalStreamEvent>,
+    pub terminal: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAttemptLocalStreamControl {
+    Cancel,
+    Close,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderAttemptLocalStreamControlParams {
+    pub thread_id: String,
+    pub attempt_id: String,
+    pub request_hash: String,
+    pub stream_id: String,
+    pub action: ProviderAttemptLocalStreamControl,
+}
+
+impl ProviderAttemptLocalStreamControlParams {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.thread_id.is_empty()
+            || self.attempt_id.is_empty()
+            || !lillux::valid_hash(&self.request_hash)
+            || !lillux::valid_hash(&self.stream_id)
+        {
+            return Err("local stream control is not canonical".to_string());
+        }
+        Ok(())
+    }
+}
+
 /// Exact recorded state of one attempt, for lost-reply recovery reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -263,6 +459,8 @@ pub struct ProviderAttemptBudgetRecord {
     pub charge_basis: Option<ChargeBasis>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<ReconciliationReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_proof: Option<ProviderCallPublicationProof>,
 }
 
 /// Reservation intent hash (§9.3), shared between the runtime that reserves
@@ -275,50 +473,16 @@ pub fn provider_attempt_request_hash(
     thread_id: &str,
     turn: u32,
     attempt_number: u32,
-    config_hash: &str,
-    provider_id: &str,
-    model_name: &str,
-    requested_output_tokens: Option<u64>,
-    authority_digest: &str,
-    body_sha256: &str,
+    provider_coordinate_key: &str,
 ) -> String {
     let value = serde_json::json!({
         "thread_id": thread_id,
         "turn": turn,
         "attempt_number": attempt_number,
-        "config_hash": config_hash,
-        "provider_id": provider_id,
-        "model_name": model_name,
-        "requested_output_tokens": requested_output_tokens,
-        "authority_digest": authority_digest,
-        "body_sha256": body_sha256,
+        "provider_coordinate_key": provider_coordinate_key,
     });
     let canonical = lillux::cas::canonical_json(&value)
         .expect("request-hash input is plain scalar JSON and must canonicalize");
-    lillux::cas::sha256_hex(canonical.as_bytes())
-}
-
-/// The prepared provider request's digest (§9.2) from its non-secret parts:
-/// method, url, sorted header names, exact body digest, and the effective
-/// output ceiling. The runtime computes it at prepare time over what it will
-/// actually send; the daemon recomputes it from an echoed preimage, so a
-/// record's request identity is never runtime-named.
-pub fn prepared_request_digest_from_parts(
-    method: &str,
-    url: &str,
-    sorted_header_names: &[String],
-    body_sha256: &str,
-    requested_output_tokens: Option<u64>,
-) -> String {
-    let value = serde_json::json!({
-        "method": method,
-        "url": url,
-        "header_names": sorted_header_names,
-        "body_sha256": body_sha256,
-        "requested_output_tokens": requested_output_tokens,
-    });
-    let canonical = lillux::cas::canonical_json(&value)
-        .expect("request-digest input is plain scalar JSON and must canonicalize");
     lillux::cas::sha256_hex(canonical.as_bytes())
 }
 
@@ -328,27 +492,11 @@ mod tests {
 
     #[test]
     fn shared_derivations_are_deterministic_and_component_sensitive() {
-        let base = || {
-            provider_attempt_request_hash(
-                "T-1", 2, 1, "cfg", "openrouter", "gpt", Some(64), "auth", "body",
-            )
-        };
+        let base = || provider_attempt_request_hash("T-1", 2, 1, &"11".repeat(32));
         assert_eq!(base(), base());
         assert_ne!(
             base(),
-            provider_attempt_request_hash(
-                "T-1", 2, 1, "cfg", "openrouter", "gpt", Some(64), "auth", "other-body",
-            )
-        );
-
-        let names = vec!["Content-Type".to_string(), "x-api-key".to_string()];
-        let digest = || {
-            prepared_request_digest_from_parts("POST", "https://p/v1", &names, "body", Some(64))
-        };
-        assert_eq!(digest(), digest());
-        assert_ne!(
-            digest(),
-            prepared_request_digest_from_parts("POST", "https://p/v1", &names, "body", Some(65))
+            provider_attempt_request_hash("T-1", 2, 1, &"22".repeat(32))
         );
     }
 
@@ -357,13 +505,23 @@ mod tests {
     }
 
     #[test]
-    fn reserve_params_strict_decode() {
-        let params = ProviderAttemptReserveParams {
+    fn prepare_params_strict_decode() {
+        let request = ryeos_provider_contract::PreparedRequestProjection::from_coordinates(
+            vec![],
+            vec![],
+            "11".repeat(32),
+            64,
+        )
+        .unwrap();
+        let params = ProviderAttemptPrepareParams {
             thread_id: "T-1".to_string(),
             turn: 1,
             attempt_number: 1,
-            request_hash: "abc".to_string(),
-            config_hash: "cfg".to_string(),
+            transport: ryeos_provider_contract::PreparedTransportIntent::RemoteHttp {
+                method: "POST".to_string(),
+                url: "https://provider.invalid/v1".to_string(),
+            },
+            request,
             verified_bound: VerifiedPreparedSpendBound {
                 prepared_request_digest: digest_of("req"),
                 authority_digest: digest_of("auth"),
@@ -380,23 +538,32 @@ mod tests {
         };
         params.validate().unwrap();
         let mut value = serde_json::to_value(&params).unwrap();
-        let back: ProviderAttemptReserveParams = serde_json::from_value(value.clone()).unwrap();
+        let back: ProviderAttemptPrepareParams = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(back, params);
         value
             .as_object_mut()
             .unwrap()
             .insert("spurious".to_string(), serde_json::Value::Null);
-        assert!(serde_json::from_value::<ProviderAttemptReserveParams>(value).is_err());
+        assert!(serde_json::from_value::<ProviderAttemptPrepareParams>(value).is_err());
     }
 
     #[test]
     fn zero_based_coordinates_reject() {
-        let mut params = ProviderAttemptReserveParams {
+        let mut params = ProviderAttemptPrepareParams {
             thread_id: "T-1".to_string(),
             turn: 0,
             attempt_number: 1,
-            request_hash: "abc".to_string(),
-            config_hash: "cfg".to_string(),
+            transport: ryeos_provider_contract::PreparedTransportIntent::RemoteHttp {
+                method: "POST".to_string(),
+                url: "https://provider.invalid/v1".to_string(),
+            },
+            request: ryeos_provider_contract::PreparedRequestProjection::from_coordinates(
+                vec![],
+                vec![],
+                "11".repeat(32),
+                64,
+            )
+            .unwrap(),
             verified_bound: VerifiedPreparedSpendBound {
                 prepared_request_digest: digest_of("req"),
                 authority_digest: digest_of("auth"),

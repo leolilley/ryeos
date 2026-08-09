@@ -1,0 +1,20 @@
+# ryeos:signed:2026-08-09T05:54:08Z:0c509bbda400d773379aa547acebbdfa19e9ac550ca7c13085ded84ee80e7162:0CI4xRYbYAkVzwedhWuakNNs/x6IaQlIncJIlxjdQR0GFVK+jDDlzMbEOWxAmxaaE1E3RqUlpCdhnQXMuJ6nDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, import]
+description: Import external bytes through a node-admitted named root
+forms:
+  - slots:
+      - field: root
+      - field: path
+      - field: shape
+      - field: storage
+      - field: maximum_bytes
+  - slots:
+      - field: root
+      - field: path
+      - field: shape
+      - field: storage
+      - field: maximum_bytes
+      - field: expected_file_sha256
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/import

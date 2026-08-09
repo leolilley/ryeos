@@ -204,7 +204,7 @@ impl SchedulerContext for AppSchedulerContext {
             root_admission: Some(root_admission),
             root_dispatch_evidence: None,
             parent_execution_context: None,
-            requested_effect_class: None,
+            effect_authority: None,
         };
 
         ryeos_executor::dispatch::dispatch(&spec.item_ref, &dispatch_req, &exec_ctx, &self.0)

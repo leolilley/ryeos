@@ -132,6 +132,7 @@ impl Walker {
                         .count(),
                     expected: fanout.statuses.len(),
                     results: None,
+                    dispatches: Vec::new(),
                 });
         let receipt = NodeReceipt {
             node: current.to_string(),
@@ -141,6 +142,7 @@ impl Walker {
             result_hash,
             cache_hit: false,
             replayed_from: None,
+            dispatch: None,
             elapsed_ms,
             error: Some(error.clone()),
             cost: cost.clone(),
@@ -304,6 +306,7 @@ impl Walker {
             result_hash: None,
             cache_hit: false,
             replayed_from: None,
+            dispatch: None,
             elapsed_ms,
             error: Some(error.clone()),
             cost: cost.clone(),
@@ -363,6 +366,10 @@ impl Walker {
                     inputs,
                     Some(execution),
                     Some(graph_run_id),
+                    Some((
+                        &self.graph.definition_ref,
+                        &self.graph.effective_definition_digest,
+                    )),
                 ) {
                     Ok(Some(next_node)) => {
                         let next_step = step + 1;
@@ -495,6 +502,7 @@ impl Walker {
             result_hash: None,
             cache_hit: false,
             replayed_from: None,
+            dispatch: None,
             elapsed_ms,
             error: Some(error.clone()),
             cost: cost.clone(),
@@ -554,6 +562,10 @@ impl Walker {
                     inputs,
                     Some(execution),
                     Some(graph_run_id),
+                    Some((
+                        &self.graph.definition_ref,
+                        &self.graph.effective_definition_digest,
+                    )),
                 ) {
                     Ok(Some(next_node)) => {
                         let next_step = step + 1;

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::contracts::ItemSpace;
+use crate::contracts::{ItemSourceRoot, ItemSpace};
 
 fn deserialize_required_nullable<'de, D, T>(
     deserializer: D,
@@ -69,6 +69,9 @@ pub struct ResolvedAncestor {
     /// Typed resolution space. Policy must use this field rather than
     /// inferring space from `source_path` or `trust_class`.
     pub source_space: ItemSpace,
+    /// Typed identity of the winning registered/search root. Authority-bearing
+    /// consumers must use this field, never `source_path` or a string label.
+    pub source_root: ItemSourceRoot,
     /// Verified trust classification, kept distinct from source space.
     pub trust_class: TrustClass,
     /// Fingerprint declared by the verified signature envelope. Required for
@@ -369,7 +372,7 @@ impl ResolutionOutput {
         // seed with the realization slot removed, never a second
         // canonicalizer that could drift from this one.
         let composed = scope.composed_view(&self.composed);
-        let seed = EffectiveDefinitionSeedV2 {
+        let seed = EffectiveDefinitionSeed {
             schema: scope.schema_tag(),
             root: EffectiveContributorV1::try_from(&self.root)?,
             ancestors: self
@@ -457,7 +460,10 @@ impl DigestScope {
     /// `Effective` borrows the view unchanged. `Authored` clones it once and
     /// drops the realization slot, so the two scopes cannot disagree about
     /// anything except the environment they deliberately differ on.
-    fn composed_view<'a>(self, composed: &'a KindComposedView) -> std::borrow::Cow<'a, KindComposedView> {
+    fn composed_view<'a>(
+        self,
+        composed: &'a KindComposedView,
+    ) -> std::borrow::Cow<'a, KindComposedView> {
         match self {
             Self::Effective => std::borrow::Cow::Borrowed(composed),
             Self::Authored => {
@@ -477,7 +483,7 @@ pub const EXTERNAL_REALIZATIONS_DERIVED_KEY: &str =
 
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
-struct EffectiveDefinitionSeedV2<'a> {
+struct EffectiveDefinitionSeed<'a> {
     schema: &'static str,
     root: EffectiveContributorV1,
     ancestors: Vec<EffectiveContributorV1>,
@@ -493,17 +499,21 @@ struct EffectiveContributorV1 {
     canonical_ref: String,
     root_raw_content_digest: String,
     source_space: crate::contracts::ItemSpace,
+    source_root: ItemSourceRoot,
     trust_class: TrustClass,
     signer_fingerprint: Option<String>,
     added_by: ResolutionStepName,
 }
 
 impl EffectiveContributorV1 {
-    fn sort_key(&self) -> (&str, &str, &str, &str, &str, &str) {
+    fn sort_key(&self) -> (&str, &str, &str, &str, &str, &str, &str, &str) {
+        let (source_root_kind, source_root_name) = source_root_sort_key(&self.source_root);
         (
             &self.canonical_ref,
             &self.root_raw_content_digest,
             self.source_space.as_str(),
+            source_root_kind,
+            source_root_name,
             trust_class_name(self.trust_class),
             self.signer_fingerprint.as_deref().unwrap_or(""),
             resolution_step_name(self.added_by),
@@ -535,10 +545,20 @@ impl TryFrom<&ResolvedAncestor> for EffectiveContributorV1 {
             canonical_ref: value.resolved_ref.clone(),
             root_raw_content_digest: value.raw_content_digest.clone(),
             source_space: value.source_space,
+            source_root: value.source_root.clone(),
             trust_class: value.trust_class,
             signer_fingerprint: value.signer_fingerprint.clone(),
             added_by: value.added_by,
         })
+    }
+}
+
+fn source_root_sort_key(value: &ItemSourceRoot) -> (&'static str, &str) {
+    match value {
+        ItemSourceRoot::Project => ("project", ""),
+        ItemSourceRoot::Node => ("node", ""),
+        ItemSourceRoot::Bundle { name } => ("bundle", name),
+        ItemSourceRoot::Search { label } => ("search", label),
     }
 }
 
@@ -625,6 +645,7 @@ pub struct ResolutionDigestNode {
     pub requested_id: String,
     pub resolved_ref: String,
     pub source_space: ItemSpace,
+    pub source_root: ItemSourceRoot,
     pub trust_class: TrustClass,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub signer_fingerprint: Option<String>,
@@ -637,6 +658,7 @@ impl From<&ResolvedAncestor> for ResolutionDigestNode {
             requested_id: item.requested_id.clone(),
             resolved_ref: item.resolved_ref.clone(),
             source_space: item.source_space,
+            source_root: item.source_root.clone(),
             trust_class: item.trust_class,
             signer_fingerprint: item.signer_fingerprint.clone(),
             raw_content_digest: item.raw_content_digest.clone(),
@@ -693,6 +715,7 @@ pub struct ResolutionProvenanceNode {
     pub resolved_ref: String,
     pub source_path: PathBuf,
     pub source_space: ItemSpace,
+    pub source_root: ItemSourceRoot,
     pub trust_class: TrustClass,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub signer_fingerprint: Option<String>,
@@ -709,6 +732,7 @@ impl From<&ResolvedAncestor> for ResolutionProvenanceNode {
             resolved_ref: item.resolved_ref.clone(),
             source_path: item.source_path.clone(),
             source_space: item.source_space,
+            source_root: item.source_root.clone(),
             trust_class: item.trust_class,
             signer_fingerprint: item.signer_fingerprint.clone(),
             alias_resolution: item.alias_resolution.clone(),
@@ -937,6 +961,9 @@ mod tests {
             resolved_ref: "directive:x".to_string(),
             source_path: PathBuf::from("/x"),
             source_space: ItemSpace::Bundle,
+            source_root: crate::contracts::ItemSourceRoot::Bundle {
+                name: "fixture".to_string(),
+            },
             trust_class: trust,
             signer_fingerprint: matches!(
                 trust,
@@ -958,6 +985,9 @@ mod tests {
                 resolved_ref: resolved_ref.to_string(),
                 source_path: PathBuf::from(format!("/diagnostic/{digest_byte}")),
                 source_space: ItemSpace::Bundle,
+                source_root: crate::contracts::ItemSourceRoot::Bundle {
+                    name: "fixture".to_string(),
+                },
                 trust_class: TrustClass::TrustedBundle,
                 signer_fingerprint: Some("f".repeat(64)),
                 alias_resolution: None,

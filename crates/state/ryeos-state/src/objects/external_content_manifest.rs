@@ -29,9 +29,9 @@ pub const MAX_EXTERNAL_CONTENT_MANIFEST_BYTES: usize = 1024 * 1024;
 pub const MAX_EXTERNAL_CONTENT_FILE_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_EXTERNAL_CONTENT_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 /// Pure DoS sanity for byte claims on the tier-blind realization wire. The
-/// real byte policy is per-tier and lives where the manifest kind is known:
-/// the content caps above on the content manifest object and in the capture
-/// walk, the weights caps on the weights manifest object and at ingest.
+/// real byte policy is per storage tier and lives where the manifest kind is
+/// known: the content caps above on this object and in its capture walk, and
+/// the large-content caps on that manifest object and at ingest.
 pub const MAX_REALIZATION_CLAIMED_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 pub const MAX_EXTERNAL_CONTENT_PATH_BYTES: usize = 4096;
 pub const MAX_INLINE_SYMLINK_TARGET_BYTES: usize = 1024;
@@ -191,9 +191,7 @@ impl ExternalContentRealizationSet {
         for (index, left) in mounts.iter().enumerate() {
             for right in mounts.iter().skip(index + 1) {
                 if path_contains(left, right) || path_contains(right, left) {
-                    anyhow::bail!(
-                        "external realization mounts `{left}` and `{right}` overlap"
-                    );
+                    anyhow::bail!("external realization mounts `{left}` and `{right}` overlap");
                 }
             }
         }
@@ -238,7 +236,10 @@ impl ExternalContentManifestObject {
             anyhow::bail!("unexpected external content manifest kind: {}", self.kind);
         }
         if self.schema != EXTERNAL_CONTENT_TREE_SCHEMA {
-            anyhow::bail!("unexpected external content manifest schema: {}", self.schema);
+            anyhow::bail!(
+                "unexpected external content manifest schema: {}",
+                self.schema
+            );
         }
         if self.entry_count != self.entries.len() {
             anyhow::bail!("external content manifest entry count disagrees with its entries");
@@ -302,7 +303,10 @@ impl ExternalContentManifestObject {
                     let hash = entry.blob_hash.as_deref().ok_or_else(|| {
                         anyhow::anyhow!("manifest file entry `{}` has no blob", entry.path)
                     })?;
-                    crate::objects::thread_snapshot::validate_canonical_hash("external content blob_hash", hash)?;
+                    crate::objects::thread_snapshot::validate_canonical_hash(
+                        "external content blob_hash",
+                        hash,
+                    )?;
                     let size = entry.size.ok_or_else(|| {
                         anyhow::anyhow!("manifest file entry `{}` has no size", entry.path)
                     })?;
@@ -337,35 +341,46 @@ impl ExternalContentManifestObject {
                         anyhow::bail!("manifest symlink entry `{}` carries a blob", entry.path);
                     }
                     match (entry.target.as_deref(), entry.target_blob.as_deref()) {
-                    (Some(target), None) => {
-                        if target.is_empty()
-                            || target.as_bytes().contains(&0)
-                            || target.len() > MAX_INLINE_SYMLINK_TARGET_BYTES
-                        {
-                            anyhow::bail!(
-                                "manifest symlink entry `{}` has an invalid inline target",
-                                entry.path
-                            );
+                        (Some(target), None) => {
+                            if target.is_empty()
+                                || target.as_bytes().contains(&0)
+                                || target.len() > MAX_INLINE_SYMLINK_TARGET_BYTES
+                            {
+                                anyhow::bail!(
+                                    "manifest symlink entry `{}` has an invalid inline target",
+                                    entry.path
+                                );
+                            }
                         }
-                    }
-                    (None, Some(hash)) => {
-                        crate::objects::thread_snapshot::validate_canonical_hash("external content target_blob", hash)?;
-                    }
-                    (Some(_), Some(_)) => anyhow::bail!(
-                        "manifest symlink entry `{}` carries both an inline and a stored target",
-                        entry.path
-                    ),
-                    // A symlink without a target cannot be rebuilt, and a
-                    // realization that cannot be rebuilt is not one.
-                    (None, None) => anyhow::bail!(
-                        "manifest symlink entry `{}` cannot be reconstructed without a target",
-                        entry.path
-                    ),
+                        (None, Some(hash)) => {
+                            crate::objects::thread_snapshot::validate_canonical_hash(
+                                "external content target_blob",
+                                hash,
+                            )?;
+                        }
+                        (Some(_), Some(_)) => anyhow::bail!(
+                            "manifest symlink entry `{}` carries both an inline and a stored target",
+                            entry.path
+                        ),
+                        // A symlink without a target cannot be rebuilt, and a
+                        // realization that cannot be rebuilt is not one.
+                        (None, None) => anyhow::bail!(
+                            "manifest symlink entry `{}` cannot be reconstructed without a target",
+                            entry.path
+                        ),
                     }
                 }
             }
         }
         Ok(())
+    }
+
+    /// Whether this manifest can back a file-shaped realization: exactly one
+    /// regular-file entry at the shared fixed file path.
+    pub fn is_file_shaped(&self) -> bool {
+        self.entries.len() == 1
+            && self.entries[0].path == FILE_REALIZATION_ENTRY_PATH
+            && self.entries[0].kind == ExternalContentManifestEntryKind::File
     }
 
     /// Every blob this manifest needs in order to be materialized.
@@ -387,10 +402,7 @@ impl ExternalContentManifestObject {
 mod tests {
     use super::*;
 
-    fn entry(
-        path: &str,
-        kind: ExternalContentManifestEntryKind,
-    ) -> ExternalContentManifestEntry {
+    fn entry(path: &str, kind: ExternalContentManifestEntryKind) -> ExternalContentManifestEntry {
         ExternalContentManifestEntry {
             path: path.to_string(),
             kind,
@@ -414,7 +426,10 @@ mod tests {
 
     #[test]
     fn a_symlink_without_a_target_cannot_be_admitted() {
-        let object = manifest(vec![entry("link", ExternalContentManifestEntryKind::Symlink)]);
+        let object = manifest(vec![entry(
+            "link",
+            ExternalContentManifestEntryKind::Symlink,
+        )]);
         let error = object.validate().unwrap_err().to_string();
         assert!(error.contains("cannot be reconstructed"), "got: {error}");
     }
@@ -423,7 +438,10 @@ mod tests {
     fn entries_must_be_strictly_ordered_by_path_bytes() {
         let mut first = entry("b", ExternalContentManifestEntryKind::Dir);
         first.path = "b".to_string();
-        let object = manifest(vec![first, entry("a", ExternalContentManifestEntryKind::Dir)]);
+        let object = manifest(vec![
+            first,
+            entry("a", ExternalContentManifestEntryKind::Dir),
+        ]);
         let error = object.validate().unwrap_err().to_string();
         assert!(error.contains("strictly ordered"), "got: {error}");
     }
@@ -470,7 +488,10 @@ mod tests {
         assert_eq!(restored, set);
         // Construction ordered by id, and the ordering survives the wire.
         assert_eq!(
-            restored.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>(),
+            restored
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
             ["alpha", "beta"]
         );
     }

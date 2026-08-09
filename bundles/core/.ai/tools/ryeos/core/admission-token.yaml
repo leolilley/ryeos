@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-27T09:00:06Z:00e12d5e4efb4c299cd674a92b59bd76ee567fdfc675654730014e82bce948e7:5/g5MWgiZKoPXyPqLu242esMlzCndgiaxCxYeMNSLpv2veR6UVLHJ+fId/Y1Um12j+/+DIJChhPOaOXXxcsvAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-09T05:54:22Z:00e12d5e4efb4c299cd674a92b59bd76ee567fdfc675654730014e82bce948e7:5/g5MWgiZKoPXyPqLu242esMlzCndgiaxCxYeMNSLpv2veR6UVLHJ+fId/Y1Um12j+/+DIJChhPOaOXXxcsvAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 executor_id: "@subprocess"
 category: "ryeos/core"

@@ -8,6 +8,7 @@ pub(crate) mod admitted_trust;
 pub mod arch_check;
 pub mod cache;
 pub mod effective_program_projection;
+pub(crate) mod execution_realization;
 pub(crate) mod external_content;
 pub mod ingest;
 pub mod launch;
@@ -16,11 +17,11 @@ pub mod launch_envelope;
 pub mod launch_preparation;
 pub mod lillux_bridge;
 pub mod limits;
+pub mod persistent_session;
 pub(crate) mod prepared_launch_cache;
 pub(crate) mod process_attachment;
 pub mod project_source;
 pub mod runner;
-pub mod provider_record;
 pub mod runtime_dispatch;
 pub mod spawn_detached_child;
 pub mod spawn_follow_child;
@@ -143,23 +144,7 @@ where
 /// The recovery lease remains live across asynchronous launch; each synchronous
 /// mutation phase acquires the shared guard before its write permit and holds
 /// both through durable staged-root publication.
-pub(crate) struct PendingCasPublication {
-    authority: ryeos_state::PinnedStateAuthority,
-    staged_roots: Option<ryeos_state::StagedCasRootLease>,
-}
-
-impl PendingCasPublication {
-    fn publish(mut self) -> Result<()> {
-        let guard = self.authority.acquire_shared_guard()?;
-        self.authority.ensure_guard(&guard)?;
-        self.staged_roots
-            .as_mut()
-            .expect("pending CAS publication always owns staged roots")
-            .finish_admitted(&guard)?;
-        self.staged_roots.take();
-        Ok(())
-    }
-}
+pub(crate) type PendingCasPublication = ryeos_state::PendingCasPublication;
 
 /// A result snapshot whose newly-written closure remains a durable temporary
 /// GC root until the caller binds the snapshot into authoritative thread/head
@@ -182,27 +167,6 @@ impl PendingProjectResult {
         }
         self.quiesced.take();
         Ok(())
-    }
-}
-
-impl Drop for PendingCasPublication {
-    fn drop(&mut self) {
-        let Some(staged_roots) = self.staged_roots.as_mut() else {
-            return;
-        };
-        match self.authority.acquire_shared_guard() {
-            Ok(guard) => {
-                if let Err(error) = staged_roots.finish_admitted(&guard) {
-                    tracing::warn!(%error, "failed to discard staged CAS publication roots");
-                }
-            }
-            Err(error) => {
-                // Fail closed: keep the durable recovery roots and their lease
-                // record for GC rather than falling back to a path-rebound
-                // guard in `StagedCasRootLease::drop`.
-                tracing::warn!(%error, "abandoning staged CAS roots under pinned-authority failure");
-            }
-        }
     }
 }
 
@@ -364,10 +328,7 @@ pub(crate) fn capture_live_project_tree(
     Ok(StagedProjectTree {
         hash,
         policy_hash,
-        publication: PendingCasPublication {
-            authority,
-            staged_roots: Some(staged_roots),
-        },
+        publication: PendingCasPublication::new(authority, staged_roots),
     })
 }
 
@@ -381,33 +342,26 @@ pub(crate) fn capture_tree_project_snapshot(
     source: &str,
     mut publication: PendingCasPublication,
 ) -> Result<CapturedProjectGeneration> {
-    let guard = publication.authority.acquire_shared_guard()?;
-    publication.authority.ensure_guard(&guard)?;
+    let guard = publication.authority().acquire_shared_guard()?;
+    publication.authority().ensure_guard(&guard)?;
     let _permit = state
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
-    let cas = publication.authority.cas_store()?;
+    let cas = publication.authority().cas_store()?;
     ryeos_state::project_materialization::VerifiedProjectTreeClosure::load(
         &cas,
         &tree_hash,
         &policy_hash,
     )?;
     publication
-        .staged_roots
-        .as_mut()
-        .expect("pending CAS publication always owns staged roots")
+        .staged_roots_mut()
         .protect_object_hash_admitted(&guard, &tree_hash)?;
     publication
-        .staged_roots
-        .as_mut()
-        .expect("pending CAS publication always owns staged roots")
+        .staged_roots_mut()
         .protect_object_hash_admitted(&guard, &policy_hash)?;
     let hash = store_project_snapshot(
-        publication
-            .staged_roots
-            .as_mut()
-            .expect("pending CAS publication always owns staged roots"),
+        publication.staged_roots_mut(),
         &guard,
         &cas,
         tree_hash.clone(),
@@ -682,10 +636,7 @@ pub(crate) fn fold_back_outputs(
     else {
         return Ok((
             None,
-            PendingCasPublication {
-                authority: authority.try_clone()?,
-                staged_roots: Some(staged_roots),
-            },
+            PendingCasPublication::new(authority.try_clone()?, staged_roots),
         ));
     };
     let new_hash =
@@ -699,10 +650,7 @@ pub(crate) fn fold_back_outputs(
 
     Ok((
         Some(new_hash),
-        PendingCasPublication {
-            authority: authority.try_clone()?,
-            staged_roots: Some(staged_roots),
-        },
+        PendingCasPublication::new(authority.try_clone()?, staged_roots),
     ))
 }
 
@@ -781,11 +729,11 @@ pub(crate) fn store_foldback_snapshot(
         created_at: lillux::time::iso8601_now(),
         source: "workspace_foldback".to_string(),
     };
-    publication
-        .staged_roots
-        .as_mut()
-        .expect("pending foldback publication owns staged roots")
-        .store_object_admitted(cas_mutation_guard, &cas, &snapshot.to_value())
+    publication.staged_roots_mut().store_object_admitted(
+        cas_mutation_guard,
+        &cas,
+        &snapshot.to_value(),
+    )
 }
 
 /// Seal the exact generation visible at a synchronous runtime callback

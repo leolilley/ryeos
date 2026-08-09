@@ -216,6 +216,18 @@ pub(crate) fn validate_managed_current_trust(
         validate_resolution_digest(&policy, &binding.resolution)
             .with_context(|| format!("validate admitted ref binding `{name}`"))?;
     }
+    for (name, dependency) in &prepared.execution_dependencies {
+        dependency
+            .validate()
+            .with_context(|| format!("validate admitted execution dependency `{name}`"))?;
+        validate_primary_resolution(&policy, &dependency.resolution)
+            .with_context(|| format!("validate admitted execution dependency `{name}`"))?;
+        if dependency.canonical_ref != dependency.resolution.root.resolved_ref {
+            bail!(
+                "admitted execution dependency `{name}` canonical ref contradicts its resolution"
+            );
+        }
+    }
     for contributor in &prepared.config_contributors {
         validate_config_contributor(&policy, contributor)?;
     }

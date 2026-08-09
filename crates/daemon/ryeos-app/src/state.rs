@@ -134,6 +134,8 @@ pub struct AppState {
     /// open or verify — every hard-budget admission then fails closed while
     /// unrelated non-hard work continues.
     pub accounting: Option<Arc<crate::accounting_db::AccountingDb>>,
+    /// Meaning-blind daemon ownership for admitted persistent subprocesses.
+    pub persistent_sessions: Arc<crate::persistent_session::PersistentSessionPool>,
 }
 
 #[derive(Debug, Serialize)]

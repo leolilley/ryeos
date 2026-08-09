@@ -149,7 +149,13 @@ fn run_tool_with_hints(
         .verify(&plan_ctx, resolved)
         .expect("verify tool (unsigned allowed)");
     let plan = engine
-        .build_plan(&plan_ctx, &verified, &params, &plan_ctx.execution_hints, None)
+        .build_plan(
+            &plan_ctx,
+            &verified,
+            &params,
+            &plan_ctx.execution_hints,
+            None,
+        )
         .expect("build_plan walks to subprocess terminal");
 
     let app_root = isolation_app_root();
@@ -158,6 +164,7 @@ fn run_tool_with_hints(
             .expect("load disabled isolation fixture"),
     );
     let engine_ctx = EngineContext {
+        isolation_target_channel: None,
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
@@ -177,6 +184,9 @@ fn run_tool_with_hints(
         }],
         isolation_verified_command: None,
         isolation_external_read_only_mounts: Vec::new(),
+        isolation_workspace: None,
+        subprocess_limits: None,
+        inherited_fds: Vec::new(),
         thread_id: "thread:test".into(),
         chain_root_id: "chain:test".into(),
         current_site_id: "site:test".into(),

@@ -14,6 +14,7 @@ members = [
     "crates/runtimes/directive-core",
     "crates/runtimes/directive",
     "crates/engine/ryeos-accounting",
+    "crates/engine/ryeos-effect-contract",
     "crates/engine/ryeos-expression",
     "crates/kinds/graph-definition",
     "crates/engine/ryeos-engine",
@@ -22,6 +23,7 @@ members = [
     "crates/tools/handler-bins",
     "crates/engine/ryeos-handler-protocol",
     "crates/engine/ryeos-isolation-protocol",
+    "crates/engine/ryeos-provider-contract",
     "crates/runtimes/knowledge",
     "crates/engine/ryeos-runtime",
     "crates/state/ryeos-scheduler",
@@ -61,6 +63,7 @@ opt-level = 3
 # Internal crates
 lillux = { path = "crates/kernel/lillux" }
 ryeos-accounting = { path = "crates/engine/ryeos-accounting" }
+ryeos-effect-contract = { path = "crates/engine/ryeos-effect-contract" }
 ryeos-api = { path = "crates/daemon/ryeos-api" }
 ryeos-app = { path = "crates/daemon/ryeos-app" }
 ryeos-bundle = { path = "crates/daemon/ryeos-bundle" }
@@ -73,6 +76,7 @@ ryeos-engine = { path = "crates/engine/ryeos-engine" }
 ryeos-executor = { path = "crates/engine/ryeos-executor" }
 ryeos-handler-protocol = { path = "crates/engine/ryeos-handler-protocol" }
 ryeos-isolation-protocol = { path = "crates/engine/ryeos-isolation-protocol" }
+ryeos-provider-contract = { path = "crates/engine/ryeos-provider-contract" }
 ryeos-node = { path = "crates/daemon/ryeos-node" }
 ryeos-runtime = { path = "crates/engine/ryeos-runtime" }
 ryeos-scheduler = { path = "crates/state/ryeos-scheduler" }

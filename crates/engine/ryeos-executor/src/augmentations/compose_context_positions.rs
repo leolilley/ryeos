@@ -159,15 +159,10 @@ pub async fn run(
     );
 
     let bundle_roots: Vec<std::path::PathBuf> = engine_roots
-        .ordered
-        .iter()
-        .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::Bundle)
-        .map(|r| {
-            r.ai_root
-                .parent()
-                .map(|parent| parent.to_path_buf())
-                .unwrap_or_else(|| r.ai_root.clone())
-        })
+        .authoritative_bundle_roots()
+        .map_err(|error| LaunchAugmentationError::RuntimeRegistry(error.to_string()))?
+        .into_iter()
+        .map(std::path::Path::to_path_buf)
         .collect();
     let cache_root = state
         .config
@@ -811,6 +806,7 @@ pub async fn run(
                     verified_code: &[],
                     verified_command: Some(&isolation_verified_command),
                     external_read_only_mounts: &[],
+                    target_channel: None,
                     item_ref: &runtime_item_ref_string,
                     thread_id: &child_thread_id,
                 },
@@ -2431,6 +2427,8 @@ mod tests {
             commands: Vec::new(),
             hosted_node_policies: Vec::new(),
             command_registration_policy: Default::default(),
+            external_content_import_policy: None,
+            persistent_session_policy: None,
         };
         let state = ryeos_app::state::AppState {
             config: Arc::new(config),
@@ -2479,6 +2477,9 @@ mod tests {
             ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
             vault_fingerprint: None,
             accounting: None,
+            persistent_sessions: Arc::new(
+                ryeos_app::persistent_session::PersistentSessionPool::new(),
+            ),
         };
         (temp, state)
     }

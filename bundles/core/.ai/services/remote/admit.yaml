@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T05:13:13Z:8f8370fc8736e309b912c5c2d3864459b6723171df669844bf7311f03543ca54:JS14/Srdz/pynyeH5/4LR3s1NyWay9vjEvutwf4zOyYjLcOmPST8J0ixCt9R+2TtH+uZQmJCENP5E0LgQAj/Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-09T05:54:19Z:8f8370fc8736e309b912c5c2d3864459b6723171df669844bf7311f03543ca54:JS14/Srdz/pynyeH5/4LR3s1NyWay9vjEvutwf4zOyYjLcOmPST8J0ixCt9R+2TtH+uZQmJCENP5E0LgQAj/Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.admit
 required_caps: ["ryeos.execute.service.remote/admit"]

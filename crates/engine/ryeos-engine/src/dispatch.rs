@@ -388,8 +388,43 @@ pub struct RunningExecution {
 }
 
 impl RunningExecution {
+    /// Read the fixed-size diagnostic tail already captured by Lillux without
+    /// changing process ownership or settlement.
+    pub fn stderr_diagnostic_tail(&self) -> Option<String> {
+        self.running.stderr_diagnostic_tail()
+    }
+
+    /// Settle a process that exits naturally within `timeout`, or return the
+    /// still-running execution with ownership intact.
+    pub fn wait_for_natural_exit(
+        self,
+        timeout: std::time::Duration,
+    ) -> Result<ExecutionCompletion, Self> {
+        let Self { running, debug } = self;
+        match running.wait_for_natural_exit(timeout) {
+            Ok(result) => {
+                let rendered_debug = debug.map(|capture| capture.into_block(&result));
+                let mut completion = translate_result(result);
+                if let Some(rendered_debug) = rendered_debug {
+                    inject_debug(&mut completion, rendered_debug);
+                }
+                Ok(completion)
+            }
+            Err(running) => Err(Self { running, debug }),
+        }
+    }
+
     pub fn abort(self) {
         self.running.abort();
+    }
+
+    /// Terminate the complete supervised ownership unit and prove the wrapper
+    /// was reaped. Persistent pools use this form because cleanup is part of
+    /// their resource-accounting boundary, not a best-effort drop fallback.
+    pub fn abort_and_reap_checked(self) -> Result<(), EngineError> {
+        self.running
+            .abort_and_reap_checked()
+            .map_err(|reason| EngineError::ExecutionFailed { reason })
     }
 
     /// Block until the subprocess completes and return the completion.
@@ -470,6 +505,7 @@ fn isolation_plan_request(
                     })
                 }),
             external_read_only_mounts: &ctx.isolation_external_read_only_mounts,
+            target_channel: ctx.isolation_target_channel.as_ref(),
             item_ref,
             thread_id: &ctx.thread_id,
         },
@@ -504,6 +540,7 @@ fn isolation_plan_request_awaiting_attachment(
                     })
                 }),
             external_read_only_mounts: &ctx.isolation_external_read_only_mounts,
+            target_channel: ctx.isolation_target_channel.as_ref(),
             item_ref,
             thread_id: &ctx.thread_id,
         },
@@ -521,7 +558,11 @@ fn isolation_plan_request_parts<'a>(
     ),
     EngineError,
 > {
-    let request = spec_to_request(spec)?;
+    let mut request = spec_to_request(spec)?;
+    request.limits = ctx.subprocess_limits;
+    request
+        .inherited_fds
+        .extend(ctx.inherited_fds.iter().cloned());
     let mut verified_code = ctx.isolation_verified_code.clone();
     if let Some(command) = &spec.verified_command {
         let command = command.code();
@@ -529,25 +570,29 @@ fn isolation_plan_request_parts<'a>(
             verified_code.push(command.clone());
         }
     }
-    let project_path = match &ctx.project_context {
-        crate::contracts::ProjectContext::LocalPath { path } => path.as_path(),
-        crate::contracts::ProjectContext::None
-        | crate::contracts::ProjectContext::SnapshotHash { .. }
-        | crate::contracts::ProjectContext::ProjectRef { .. }
-            if !ctx.isolation.is_enforced() =>
-        {
-            // Disabled mode is an exact no-op. The value is never resolved or
-            // promoted into mount authority, but apply still accepts one
-            // uniform launch-context shape.
-            ctx.app_root.as_path()
-        }
-        crate::contracts::ProjectContext::None
-        | crate::contracts::ProjectContext::SnapshotHash { .. }
-        | crate::contracts::ProjectContext::ProjectRef { .. } => {
-            return Err(EngineError::IsolationPolicyRefused {
-                reason: "enforced executable plan requires an authoritative project context"
-                    .to_string(),
-            });
+    let project_path = if let Some(workspace) = ctx.isolation_workspace.as_deref() {
+        workspace
+    } else {
+        match &ctx.project_context {
+            crate::contracts::ProjectContext::LocalPath { path } => path.as_path(),
+            crate::contracts::ProjectContext::None
+            | crate::contracts::ProjectContext::SnapshotHash { .. }
+            | crate::contracts::ProjectContext::ProjectRef { .. }
+                if !ctx.isolation.is_enforced() =>
+            {
+                // Disabled mode is an exact no-op. The value is never resolved or
+                // promoted into mount authority, but apply still accepts one
+                // uniform launch-context shape.
+                ctx.app_root.as_path()
+            }
+            crate::contracts::ProjectContext::None
+            | crate::contracts::ProjectContext::SnapshotHash { .. }
+            | crate::contracts::ProjectContext::ProjectRef { .. } => {
+                return Err(EngineError::IsolationPolicyRefused {
+                    reason: "enforced executable plan requires an authoritative project context"
+                        .to_string(),
+                });
+            }
         }
     };
     Ok((request, project_path, verified_code))
@@ -646,6 +691,10 @@ mod tests {
             isolation_verified_code: Vec::new(),
             isolation_verified_command: None,
             isolation_external_read_only_mounts: Vec::new(),
+            isolation_target_channel: None,
+            isolation_workspace: None,
+            subprocess_limits: None,
+            inherited_fds: Vec::new(),
             thread_id: "thread:test".into(),
             chain_root_id: "chain:test".into(),
             current_site_id: "site:test".into(),

@@ -1,0 +1,10 @@
+# ryeos:signed:2026-08-09T05:54:17Z:56d467e37b8d06a8592a85a9362683753ef309a5dd45295624f42b73f72529bf:HCwZwQRQNmaZwMR0WSDaFOafWh1oG/rGYh8bYdPGmpnZNl7yDkQnFyx/GlHIbNplc+cwt6oE/n4RPHSbyMr8AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.bind
+required_caps: ["ryeos.execute.service.external-content/bind"]
+schema:
+  staging_id: string
+  request_digest: string
+  manifest_hash: string
+  consumer_ref: string
+description: "Bind a staged external-content manifest to one exact trusted bundle consumer"

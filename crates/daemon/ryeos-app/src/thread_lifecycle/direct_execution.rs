@@ -74,6 +74,52 @@ impl PreparedItemPlan {
             .ok_or_else(|| anyhow!("direct execution plan has no verified runtime identity"))
     }
 
+    /// Bind admitted behavior to its daemon-owned workspace. This mutation
+    /// happens before artifact identity and closure admission, so the exact
+    /// working directory is part of the retained execution plan.
+    pub fn bind_persistent_session_workspace(&mut self, workspace: &Path) -> Result<()> {
+        if !workspace.is_absolute()
+            || workspace
+                .components()
+                .enumerate()
+                .any(|(index, component)| {
+                    !matches!(
+                        (index, component),
+                        (0, std::path::Component::RootDir) | (_, std::path::Component::Normal(_))
+                    )
+                })
+        {
+            bail!("persistent-session workspace must be an absolute normalized path");
+        }
+        let spec = first_subprocess_spec_mut(&mut self.plan)?;
+        spec.cwd = Some(workspace.to_path_buf());
+        spec.timeout_secs = 0;
+        self.timeout_secs = 0;
+        Ok(())
+    }
+
+    /// Add the operational realization-set binding after recovering the
+    /// admitted plan. The session channel is carried separately as typed
+    /// isolation authority and never written into the authored subprocess
+    /// specification as a raw descriptor.
+    pub fn bind_persistent_session_spawn_environment(
+        &mut self,
+        external_realizations: Option<&str>,
+    ) -> Result<()> {
+        let spec = first_subprocess_spec_mut(&mut self.plan)?;
+        if let Some(realizations) = external_realizations {
+            spec.env.insert(
+                "RYEOS_EXTERNAL_REALIZATIONS".to_owned(),
+                realizations.to_owned(),
+            );
+            spec.env_sources.insert(
+                "RYEOS_EXTERNAL_REALIZATIONS".to_owned(),
+                RuntimeEnvSource::EnginePlan,
+            );
+        }
+        Ok(())
+    }
+
     pub fn admitted_artifact_identity(
         &self,
         resolved: &ResolvedExecutionRequest,
@@ -120,11 +166,13 @@ impl PreparedItemPlan {
                 match spec.verified_command.as_ref() {
                     Some(ryeos_engine::contracts::PlanVerifiedCommand::BundleExecutor {
                         code,
-                        provider,
+                        provider: executor_bundle,
                     }) => ryeos_state::objects::DirectExecutableIdentity::BundleExecutor {
                         content_hash: code.content_hash.clone(),
-                        provider_manifest_hash: provider.manifest_hash.clone(),
-                        provider_manifest_signer_fingerprint: provider.signer_fingerprint.clone(),
+                        executor_manifest_hash: executor_bundle.manifest_hash.clone(),
+                        executor_manifest_signer_fingerprint: executor_bundle
+                            .signer_fingerprint
+                            .clone(),
                     },
                     Some(ryeos_engine::contracts::PlanVerifiedCommand::CapturedContent {
                         code,
@@ -201,17 +249,16 @@ impl PreparedItemPlan {
                 stored.hash
             );
         }
-        let blob_path = lillux::cas::shard_path(cas.root(), "blobs", &stored.hash, "");
         let (blob, _) = cas
             .open_blob(&stored.hash)?
             .ok_or_else(|| anyhow!("admitted direct executable blob disappeared"))?;
         let cached_identity = ryeos_engine::isolation::IsolationVerifiedCode {
-            source_path: blob_path.clone(),
+            source_path: original.source_path.clone(),
             content_hash: stored.hash.clone(),
         };
         self.admitted_command =
             Some(isolation.bind_admitted_verified_command(cached_identity.clone(), blob)?);
-        spec.cmd = blob_path.display().to_string();
+        spec.cmd = original.source_path.display().to_string();
         match spec
             .verified_command
             .as_mut()
@@ -230,6 +277,7 @@ impl PreparedItemPlan {
                 protocol_descriptor_document,
                 command: ryeos_state::objects::AdmittedDirectCommandClosure::ContentAddressed {
                     executable_blob_hash: stored.hash,
+                    execution_path: original.source_path,
                 },
                 admitted_project_root: admitted_project_root.map(Path::to_path_buf),
             },
@@ -242,12 +290,43 @@ impl PreparedItemPlan {
         isolation: &ryeos_engine::isolation::IsolationRuntime,
         effective_project_root: Option<&Path>,
     ) -> Result<Self> {
+        Self::recover_from_direct_parts(
+            &capsule.execution_closure,
+            &capsule.artifact_identity,
+            cas,
+            isolation,
+            effective_project_root,
+        )
+    }
+
+    pub fn recover_from_persistent_session_capsule(
+        capsule: &ryeos_state::objects::AdmittedPersistentSessionCapsule,
+        cas: &lillux::cas::CasStore,
+        isolation: &ryeos_engine::isolation::IsolationRuntime,
+        effective_workspace: &Path,
+    ) -> Result<Self> {
+        Self::recover_from_direct_parts(
+            &capsule.execution_closure,
+            &capsule.artifact_identity,
+            cas,
+            isolation,
+            Some(effective_workspace),
+        )
+    }
+
+    fn recover_from_direct_parts(
+        execution_closure: &ryeos_state::objects::AdmittedExecutionClosure,
+        artifact_identity: &ryeos_state::objects::AdmittedLaunchArtifactIdentity,
+        cas: &lillux::cas::CasStore,
+        isolation: &ryeos_engine::isolation::IsolationRuntime,
+        effective_project_root: Option<&Path>,
+    ) -> Result<Self> {
         let ryeos_state::objects::AdmittedExecutionClosure::DirectItemExecutor {
             execution_plan,
             command,
             admitted_project_root,
             ..
-        } = &capsule.execution_closure
+        } = execution_closure
         else {
             bail!("direct recovery found a non-direct admitted execution closure");
         };
@@ -258,7 +337,7 @@ impl PreparedItemPlan {
             runtime_identity,
             root_subject_source_identity,
             ..
-        } = &capsule.artifact_identity
+        } = artifact_identity
         else {
             bail!("direct recovery found a non-direct admitted artifact identity");
         };
@@ -282,6 +361,7 @@ impl PreparedItemPlan {
         };
         let ryeos_state::objects::AdmittedDirectCommandClosure::ContentAddressed {
             executable_blob_hash,
+            execution_path,
         } = command
         else {
             bail!("node-policy direct execution is not restart-recoverable");
@@ -327,14 +407,17 @@ impl PreparedItemPlan {
             (
                 ryeos_state::objects::DirectExecutableIdentity::BundleExecutor {
                     content_hash,
-                    provider_manifest_hash,
-                    provider_manifest_signer_fingerprint,
+                    executor_manifest_hash,
+                    executor_manifest_signer_fingerprint,
                 },
-                ryeos_engine::contracts::PlanVerifiedCommand::BundleExecutor { code, provider },
+                ryeos_engine::contracts::PlanVerifiedCommand::BundleExecutor {
+                    code,
+                    provider: executor_bundle,
+                },
             ) => {
                 &code.content_hash == content_hash
-                    && &provider.manifest_hash == provider_manifest_hash
-                    && &provider.signer_fingerprint == provider_manifest_signer_fingerprint
+                    && &executor_bundle.manifest_hash == executor_manifest_hash
+                    && &executor_bundle.signer_fingerprint == executor_manifest_signer_fingerprint
             }
             (
                 ryeos_state::objects::DirectExecutableIdentity::CapturedContent { content_hash },
@@ -358,17 +441,16 @@ impl PreparedItemPlan {
         if serialized_command.code().content_hash != *executable_blob_hash {
             bail!("admitted direct execution plan command contradicts executable blob");
         }
-        let blob_path = lillux::cas::shard_path(cas.root(), "blobs", executable_blob_hash, "");
         let (blob, _) = cas
             .open_blob(executable_blob_hash)?
             .ok_or_else(|| anyhow!("admitted direct executable blob is unavailable"))?;
         let cached_identity = ryeos_engine::isolation::IsolationVerifiedCode {
-            source_path: blob_path.clone(),
+            source_path: execution_path.clone(),
             content_hash: executable_blob_hash.clone(),
         };
         let admitted_command =
             isolation.bind_admitted_verified_command(cached_identity.clone(), blob)?;
-        spec.cmd = blob_path.display().to_string();
+        spec.cmd = execution_path.display().to_string();
         match spec
             .verified_command
             .as_mut()
@@ -401,6 +483,86 @@ impl PreparedItemPlan {
             admitted_project_root,
             effective_project_root,
         )
+    }
+
+    /// Spawn a recovered persistent-session plan under projectless scratch
+    /// authority. The daemon pool, rather than thread state, owns the returned
+    /// running process; a daemon restart therefore reopens the capsule and
+    /// starts a fresh matching process.
+    pub fn spawn_persistent_session(
+        self,
+        state: &crate::state::AppState,
+        workspace: &Path,
+        external_mounts: Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
+        target_channel: ryeos_engine::isolation::IsolationTargetChannelAuthority,
+        lifecycle: &ryeos_state::objects::PersistentSessionLifecycleContract,
+        session_identity: &str,
+    ) -> Result<ryeos_engine::dispatch::RunningExecution> {
+        if session_identity.is_empty() || session_identity.len() > 128 {
+            bail!("persistent-session process identity is not canonical");
+        }
+        let roots = state.engine.resolution_roots(None);
+        let bundle_roots = roots
+            .ordered
+            .iter()
+            .filter(|root| root.space == ItemSpace::Bundle)
+            .map(|root| {
+                root.content_root.clone().ok_or_else(|| {
+                    anyhow!(
+                        "persistent-session isolation root `{}` has no registered content-root authority",
+                        root.label
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let context = EngineContext {
+            app_root: state.config.app_root.clone(),
+            isolation: state.isolation.clone(),
+            isolation_project_authority:
+                ryeos_engine::isolation::IsolationProjectAuthority::EphemeralScratch,
+            isolation_live_access_authority: None,
+            isolation_state_root: None,
+            isolation_checkpoint_dir: None,
+            isolation_daemon_socket_path: None,
+            isolation_bundle_roots: bundle_roots,
+            isolation_node_trusted_keys_dir: Some(state.config.runtime_root().trusted_keys_dir()),
+            isolation_verified_code: Vec::new(),
+            isolation_verified_command: self.admitted_command,
+            isolation_external_read_only_mounts: external_mounts,
+            isolation_target_channel: Some(target_channel),
+            isolation_workspace: Some(workspace.to_path_buf()),
+            subprocess_limits: Some(lillux::SubprocessLimits {
+                max_open_files: None,
+                max_address_space_bytes: Some(lifecycle.max_address_space_bytes),
+                max_cpu_seconds: Some(lifecycle.max_cpu_seconds),
+                max_processes: Some(lifecycle.real_uid_process_limit),
+                max_stdout_bytes: None,
+                max_stderr_bytes: None,
+            }),
+            inherited_fds: Vec::new(),
+            thread_id: session_identity.to_owned(),
+            chain_root_id: session_identity.to_owned(),
+            current_site_id: state.threads.site_id().to_owned(),
+            origin_site_id: state.threads.site_id().to_owned(),
+            upstream_site_id: None,
+            upstream_thread_id: None,
+            continuation_from_id: None,
+            requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
+                ryeos_engine::contracts::Principal {
+                    fingerprint: state.identity.fingerprint().to_owned(),
+                    scopes: Vec::new(),
+                },
+            ),
+            project_context: ProjectContext::None,
+            launch_mode: LaunchMode::Wait,
+        };
+        let pending = state
+            .engine
+            .spawn_plan(&context, &self.plan)
+            .map_err(|error| anyhow!("spawn persistent session: {error}"))?;
+        pending
+            .release_after_attachment()
+            .map_err(|error| anyhow!("release daemon-owned persistent session: {error}"))
     }
 }
 
@@ -621,24 +783,15 @@ pub fn prepare_item_plan(
             super::build_execution_plan_for_request(engine, resolved, &verified, sealed_content)?;
         let root_subject_source_identity =
             if resolved.resolved_item.source_space == ryeos_engine::contracts::ItemSpace::Bundle {
-                let ai = resolved
-                    .resolved_item
-                    .source_path
-                    .ancestors()
-                    .find(|path| {
-                        path.file_name()
-                            .is_some_and(|name| name == ryeos_engine::AI_DIR)
-                    })
-                    .ok_or_else(|| anyhow!("bundle item source has no .ai ancestor"))?;
-                let root = ai
-                    .parent()
-                    .ok_or_else(|| anyhow!("bundle .ai path has no root"))?;
-                let expected_name = engine
-                .registered_bundle_name_for_root(root)
-                .ok_or_else(|| {
+                let expected_name = match &resolved.resolved_item.source_root {
+                    ryeos_engine::contracts::ItemSourceRoot::Bundle { name } => name.as_str(),
+                    other => bail!(
+                        "bundle item has no registered typed source-root authority: {other:?}"
+                    ),
+                };
+                let root = engine.registered_bundle_root(expected_name).ok_or_else(|| {
                     anyhow!(
-                        "bundle item root is absent from the retained registered generation: {}",
-                        root.display()
+                        "bundle `{expected_name}` is absent from the retained registered generation"
                     )
                 })?;
                 let identity = ryeos_engine::plan_builder::verify_bundle_source_manifest_identity(
@@ -698,6 +851,72 @@ pub fn prepare_item_plan(
     })
 }
 
+/// Compile a direct plan from an engine-verified root carrier and the exact
+/// retained root bytes captured by an outer admitted launch.  The root path is
+/// provenance/parser context only; it is never reopened for program bytes.
+pub fn prepare_captured_item_plan(
+    engine: &Engine,
+    resolved: &ResolvedExecutionRequest,
+    verified: &VerifiedItem,
+    root_source: &str,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
+    sealed_content: Option<&dyn ryeos_engine::project_content::SealedDependencyBytes>,
+) -> Result<PreparedItemPlan> {
+    engine.with_checked_bundle_generation(|_generation| {
+        if verified.resolved.canonical_ref.to_string() != resolved.item_ref
+            || verified.resolved.raw_content_digest != resolved.root_raw_content_digest
+        {
+            bail!("captured direct-plan subject contradicts its request carrier");
+        }
+        let mut plan = engine.build_plan_from_captured_root(
+            &resolved.plan_context,
+            verified,
+            root_source,
+            &resolved.parameters,
+            &resolved.plan_context.execution_hints,
+            sealed_content,
+        )?;
+        let expected_name = match &verified.resolved.source_root {
+            ryeos_engine::contracts::ItemSourceRoot::Bundle { name } => name.as_str(),
+            other => bail!(
+                "captured bundle item has no registered typed source-root authority: {other:?}"
+            ),
+        };
+        let root = engine
+            .registered_bundle_root(expected_name)
+            .ok_or_else(|| {
+                anyhow!(
+                    "captured bundle `{expected_name}` is absent from the registered generation"
+                )
+            })?;
+        let identity = ryeos_engine::plan_builder::verify_bundle_source_manifest_identity(
+            root,
+            expected_name,
+            &engine.node_trust_store,
+        )?;
+        let root_subject_source_identity = ryeos_state::objects::DirectRootSourceIdentity::Bundle {
+            manifest_hash: identity.body_digest,
+            manifest_signer_fingerprint: identity.signer_fingerprint,
+        };
+        let spec = first_subprocess_spec_mut(&mut plan)?;
+        if spec.verified_command.is_none() {
+            let captured = isolation
+                .capture_verified_command(Path::new(&spec.cmd), None, None)
+                .map_err(|error| anyhow!("capture persistent-session executable: {error}"))?;
+            spec.verified_command = Some(
+                ryeos_engine::contracts::PlanVerifiedCommand::CapturedContent { code: captured },
+            );
+        }
+        let timeout_secs = spec.timeout_secs;
+        Ok(PreparedItemPlan {
+            plan,
+            timeout_secs,
+            root_subject_source_identity,
+            admitted_command: None,
+        })
+    })
+}
+
 /// Run the prepared engine plan's spawn phase.
 /// Returns a handle with pid/pgid that the daemon can persist before calling wait().
 ///
@@ -727,6 +946,15 @@ pub struct SpawnItemParams<'a> {
         Option<ryeos_engine::isolation::IsolationLiveAccessAuthority>,
     pub isolation_external_read_only_mounts:
         Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
+    /// Exact node trust-store root supplied by daemon configuration. Never
+    /// reconstructed from an application or bundle filesystem layout.
+    pub isolation_node_trusted_keys_dir: std::path::PathBuf,
+    /// Optional daemon-owned workspace for projectless admitted mechanics.
+    /// Ordinary item launches leave this absent and retain their project
+    /// context as the isolation root.
+    pub isolation_workspace: Option<std::path::PathBuf>,
+    /// Deliberately inherited, already-open protocol descriptors.
+    pub inherited_fds: Vec<std::sync::Arc<std::fs::File>>,
     /// Canonical JSON of the launch's sealed external realization set, or
     /// `None` when the program realizes nothing. Injected per spawn so a
     /// runtime references the identity it executes under without
@@ -769,6 +997,9 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItemAwaitingAtta
         isolation_project_authority,
         isolation_live_access_authority,
         isolation_external_read_only_mounts,
+        isolation_node_trusted_keys_dir,
+        isolation_workspace,
+        inherited_fds,
         external_realizations_env,
         isolation_daemon_socket_path,
         thread_state_dir,
@@ -915,11 +1146,15 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItemAwaitingAtta
         .ordered
         .iter()
         .filter(|root| root.space == ryeos_engine::contracts::ItemSpace::Bundle)
-        .filter_map(|root| root.ai_root.parent().map(std::path::Path::to_path_buf))
-        .collect();
-    let isolation_node_trusted_keys_dir = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config/keys/trusted");
+        .map(|root| {
+            root.content_root.clone().ok_or_else(|| {
+                anyhow!(
+                    "isolation root `{}` has no registered content-root authority",
+                    root.label
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let isolation_verified_code = plan
         .nodes
         .iter()
@@ -948,6 +1183,10 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItemAwaitingAtta
         isolation_verified_code,
         isolation_verified_command: prepared_plan.admitted_command,
         isolation_external_read_only_mounts,
+        isolation_target_channel: None,
+        isolation_workspace,
+        subprocess_limits: None,
+        inherited_fds,
         thread_id: thread_id.to_string(),
         chain_root_id: chain_root_id.to_string(),
         current_site_id: resolved.current_site_id.clone(),

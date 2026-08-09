@@ -142,7 +142,7 @@ pub fn parse_canonical_timestamp(value: &str) -> anyhow::Result<DateTime<Utc>> {
     Ok(timestamp)
 }
 
-pub(crate) fn validate_canonical_hash(label: &str, value: &str) -> anyhow::Result<()> {
+pub fn validate_canonical_hash(label: &str, value: &str) -> anyhow::Result<()> {
     if !lillux::valid_hash(value) || value.bytes().any(|byte| byte.is_ascii_uppercase()) {
         anyhow::bail!("{label} is not a canonical lowercase hash: {value}");
     }

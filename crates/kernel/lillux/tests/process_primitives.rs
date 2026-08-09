@@ -77,6 +77,59 @@ fn run_writes_stdin_to_child() {
 }
 
 #[test]
+fn running_process_exposes_only_a_bounded_stderr_diagnostic_tail() {
+    let mut request = sh(&[
+        "-c",
+        "printf prefix >&2; printf '%03000d' 0 >&2; printf diagnostic-tail >&2; sleep 2",
+    ]);
+    request.envs = path_env();
+    let running = spawn(request).expect("spawn diagnostic process");
+    let mut diagnostic = None;
+    for _ in 0..50 {
+        diagnostic = running.stderr_diagnostic_tail();
+        if diagnostic
+            .as_deref()
+            .is_some_and(|value| value.contains("diagnostic-tail"))
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let diagnostic = diagnostic.expect("captured stderr diagnostic");
+    assert!(diagnostic.contains("diagnostic-tail"));
+    assert!(!diagnostic.contains("prefix"));
+    assert!(diagnostic.len() < 2_200);
+    running.abort();
+}
+
+#[test]
+fn bounded_natural_exit_wait_preserves_running_ownership_or_returns_output() {
+    let mut exiting = sh(&["-c", "printf natural-exit >&2; exit 9"]);
+    exiting.envs = path_env();
+    let exited = match spawn(exiting)
+        .expect("spawn exiting process")
+        .wait_for_natural_exit(std::time::Duration::from_secs(2))
+    {
+        Ok(exited) => exited,
+        Err(running) => {
+            running.abort();
+            panic!("process did not exit within the bounded wait")
+        }
+    };
+    assert_eq!(exited.exit_code, 9);
+    assert!(exited.stderr.contains("natural-exit"));
+
+    let mut alive = sh(&["-c", "sleep 2"]);
+    alive.envs = path_env();
+    let running = spawn(alive).expect("spawn running process");
+    let running = match running.wait_for_natural_exit(std::time::Duration::from_millis(20)) {
+        Ok(_) => panic!("process exited before the bounded ownership check"),
+        Err(running) => running,
+    };
+    running.abort();
+}
+
+#[test]
 fn run_installs_max_open_files_before_exec() {
     let mut request = sh(&["-c", "ulimit -n"]);
     request.limits = Some(SubprocessLimits {
@@ -88,6 +141,48 @@ fn run_installs_max_open_files_before_exec() {
 
     assert!(result.success, "stderr: {}", result.stderr);
     assert_eq!(result.stdout.trim(), "64");
+}
+
+#[test]
+fn run_installs_memory_cpu_and_process_limits_before_exec() {
+    let mut request = sh(&[
+        "-c",
+        "printf '%s\\n' \"$(ulimit -v)\" \"$(ulimit -t)\" \"$(ulimit -u)\"",
+    ]);
+    request.limits = Some(SubprocessLimits {
+        max_address_space_bytes: Some(256 * 1024 * 1024),
+        max_cpu_seconds: Some(3),
+        max_processes: Some(512),
+        ..SubprocessLimits::default()
+    });
+
+    let result = run(request);
+
+    assert!(result.success, "stderr: {}", result.stderr);
+    assert_eq!(
+        result.stdout.lines().collect::<Vec<_>>(),
+        ["262144", "3", "512"]
+    );
+}
+
+#[test]
+fn validation_rejects_zero_kernel_resource_limits() {
+    for limits in [
+        SubprocessLimits {
+            max_address_space_bytes: Some(0),
+            ..SubprocessLimits::default()
+        },
+        SubprocessLimits {
+            max_cpu_seconds: Some(0),
+            ..SubprocessLimits::default()
+        },
+        SubprocessLimits {
+            max_processes: Some(0),
+            ..SubprocessLimits::default()
+        },
+    ] {
+        assert!(validate_subprocess_limits(Some(&limits)).is_err());
+    }
 }
 
 #[test]
@@ -369,6 +464,7 @@ fn inherited_stdio_retains_supervised_target_identity_and_cleanup() {
         max_open_files: Some(64),
         max_stdout_bytes: None,
         max_stderr_bytes: None,
+        ..SubprocessLimits::default()
     });
     let result = run_inherited_stdio(request);
 

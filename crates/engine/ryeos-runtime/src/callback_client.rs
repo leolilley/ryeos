@@ -233,15 +233,15 @@ impl CallbackClient {
     /// financial authority operations: they hard-fail when the callback
     /// channel is absent — an attempt whose reservation state cannot be
     /// proven must never reach a provider.
-    pub async fn provider_attempt_reserve(
+    pub async fn provider_attempt_prepare(
         &self,
-        params: &ryeos_accounting::ProviderAttemptReserveParams,
-    ) -> Result<ryeos_accounting::ProviderAttemptReserveResponse, CallbackError> {
+        params: &ryeos_accounting::ProviderAttemptPrepareParams,
+    ) -> Result<ryeos_accounting::ProviderAttemptPrepareResponse, CallbackError> {
         self.provider_attempt_call(
-            "provider_attempt_reserve",
+            "provider_attempt_prepare",
             params,
             |client, thread_id, value| async move {
-                client.provider_attempt_reserve(&thread_id, value).await
+                client.provider_attempt_prepare(&thread_id, value).await
             },
         )
         .await
@@ -308,6 +308,61 @@ impl CallbackClient {
         })
     }
 
+    pub async fn provider_attempt_local_stream_start(
+        &self,
+        params: &ryeos_accounting::ProviderAttemptLocalStreamStartParams,
+    ) -> Result<ryeos_accounting::ProviderAttemptLocalStreamStartResponse, CallbackError> {
+        self.provider_attempt_call(
+            "provider_attempt_local_stream_start",
+            params,
+            |client, thread_id, value| async move {
+                client
+                    .provider_attempt_local_stream_start(&thread_id, value)
+                    .await
+            },
+        )
+        .await
+    }
+
+    pub async fn provider_attempt_local_stream_next(
+        &self,
+        params: &ryeos_accounting::ProviderAttemptLocalStreamNextParams,
+    ) -> Result<ryeos_accounting::ProviderAttemptLocalStreamNextResponse, CallbackError> {
+        self.provider_attempt_call(
+            "provider_attempt_local_stream_next",
+            params,
+            |client, thread_id, value| async move {
+                client
+                    .provider_attempt_local_stream_next(&thread_id, value)
+                    .await
+            },
+        )
+        .await
+    }
+
+    pub async fn provider_attempt_local_stream_control(
+        &self,
+        params: &ryeos_accounting::ProviderAttemptLocalStreamControlParams,
+    ) -> Result<(), CallbackError> {
+        let value = self
+            .provider_attempt_call_raw_named(
+                "provider_attempt_local_stream_control",
+                params,
+                |client, thread_id, value| async move {
+                    client
+                        .provider_attempt_local_stream_control(&thread_id, value)
+                        .await
+                },
+            )
+            .await?;
+        if value.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Err(CallbackError::Transport(anyhow::anyhow!(
+                "invalid provider_attempt_local_stream_control response"
+            )));
+        }
+        Ok(())
+    }
+
     async fn provider_attempt_call<P, R, F, Fut>(
         &self,
         label: &str,
@@ -350,6 +405,28 @@ impl CallbackClient {
             CallbackError::Transport(anyhow::anyhow!("serialize {label} params: {e}"))
         })?;
         client.provider_attempt_get(&self.thread_id, value).await
+    }
+
+    async fn provider_attempt_call_raw_named<P, F, Fut>(
+        &self,
+        label: &str,
+        params: &P,
+        call: F,
+    ) -> Result<Value, CallbackError>
+    where
+        P: serde::Serialize,
+        F: FnOnce(Arc<dyn RuntimeCallbackAPI>, String, Value) -> Fut,
+        Fut: std::future::Future<Output = Result<Value, CallbackError>>,
+    {
+        let client = self.inner.as_ref().cloned().ok_or_else(|| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "callback {label} called without an inner UDS client (socket missing)"
+            ))
+        })?;
+        let value = serde_json::to_value(params).map_err(|error| {
+            CallbackError::Transport(anyhow::anyhow!("serialize {label} params: {error}"))
+        })?;
+        call(client, self.thread_id.clone(), value).await
     }
 
     /// Report this process's pid so the daemon records the runtime's process
@@ -636,47 +713,6 @@ impl CallbackClient {
         })?;
         client
             .vault_put(&self.thread_id, request)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))
-    }
-
-    /// Submit one provider-call effect record for daemon-validated
-    /// publication. Best-effort by contract at every call site: an error
-    /// here is record loss, never turn failure.
-    pub async fn publish_provider_call_record(&self, mut request: Value) -> Result<Value> {
-        let client = self.inner.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "callback publish_provider_call_record called without an inner UDS client"
-            )
-        })?;
-        if let Some(map) = request.as_object_mut() {
-            map.insert(
-                "project_path".to_string(),
-                serde_json::json!(self.project_path),
-            );
-        }
-        client
-            .publish_provider_call_record(&self.thread_id, request)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))
-    }
-
-    /// Ask the daemon for a banked record answering this request preimage.
-    /// Every error is a miss: the caller executes live.
-    pub async fn lookup_provider_call_record(&self, mut request: Value) -> Result<Value> {
-        let client = self.inner.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "callback lookup_provider_call_record called without an inner UDS client"
-            )
-        })?;
-        if let Some(map) = request.as_object_mut() {
-            map.insert(
-                "project_path".to_string(),
-                serde_json::json!(self.project_path),
-            );
-        }
-        client
-            .lookup_provider_call_record(&self.thread_id, request)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
@@ -1556,7 +1592,7 @@ mod tests {
                 launch_window: None,
             },
             hook_dispatch: None,
-            effect_replay: None,
+            effect_dispatch: None,
         };
         let err = client.dispatch_action(req).await.unwrap_err();
         let msg = err.to_string();

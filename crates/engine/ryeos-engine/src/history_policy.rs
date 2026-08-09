@@ -714,6 +714,9 @@ mod tests {
                 kind: "service".to_string(),
                 source_path: PathBuf::from("/bundle/.ai/services/test/example.yaml"),
                 source_space: ItemSpace::Bundle,
+                source_root: crate::contracts::ItemSourceRoot::Bundle {
+                    name: "core".to_string(),
+                },
                 resolved_from: "bundle:core".to_string(),
                 shadowed: Vec::new(),
                 probed_absent: Vec::new(),
@@ -755,6 +758,7 @@ mod tests {
             resolution: Vec::new(),
             effective_trust: Default::default(),
             execution: Some(ExecutionSchema {
+                effect_class_ceiling: None,
                 aliases: HashMap::new(),
                 alias_max_depth: 8,
                 terminator: None,
@@ -770,6 +774,7 @@ mod tests {
                 hooks: None,
                 external_content: None,
                 effective_validator: None,
+                persistent_session: None,
             }),
             composed_value_contract: crate::contracts::ValueShape::any_mapping(),
             composer: "handler:identity".to_string(),
@@ -1017,6 +1022,7 @@ mod tests {
                 resolved_ref: item.resolved.canonical_ref.to_string(),
                 source_path: item.resolved.source_path.clone(),
                 source_space: item.resolved.source_space,
+                source_root: item.resolved.source_root.clone(),
                 trust_class: ResolutionTrustClass::TrustedBundle,
                 signer_fingerprint: item.signer.as_ref().map(|signer| signer.0.clone()),
                 alias_resolution: None,

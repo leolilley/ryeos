@@ -21,20 +21,7 @@ struct DispatchActionParams {
     #[serde(default)]
     hook_dispatch: Option<ryeos_runtime::callback::HookDispatchIdentity>,
     #[serde(default)]
-    effect_replay: Option<ryeos_runtime::callback::EffectReplayRequest>,
-}
-
-/// Daemon-derived replay identity for one durable-class dispatch. Every
-/// component comes from the callback capability or the action payload on
-/// this request — the runtime's own words name only the node and class, so
-/// it cannot bind a result to an identity it does not hold.
-struct EffectReplayIdentity {
-    cache_key: String,
-    action_digest: String,
-    effective_definition_digest: String,
-    root_ref: String,
-    node: String,
-    class: String,
+    effect_dispatch: Option<ryeos_runtime::callback::EffectDispatchRequest>,
 }
 
 /// Exact, threadless callee admission captured before a durable-effect lookup.
@@ -45,6 +32,41 @@ struct EffectReplayIdentity {
 struct PreparedEffectDispatch {
     context: crate::executor::ExecutionContext,
     preflight: crate::dispatch::RootDispatchPreflight,
+    authority: ryeos_effect_contract::PreparedEffectDispatchAuthority,
+}
+
+fn selected_effect_authorization(
+    params: &DispatchActionParams,
+    cap: &ryeos_app::callback_token::CallbackCapability,
+) -> Result<Option<ryeos_effect_contract::AdmittedEffectAuthorization>> {
+    let Some(request) = params.effect_dispatch.as_ref() else {
+        return Ok(None);
+    };
+    let index = cap
+        .effect_dispatch_authorizations
+        .binary_search_by(|authorization| {
+            authorization
+                .authorization_id
+                .as_str()
+                .cmp(request.authorization_id.as_str())
+        })
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "effect dispatch authorization `{}` was not admitted for this launch",
+                request.authorization_id
+            )
+        })?;
+    let authorization = cap.effect_dispatch_authorizations[index].clone();
+    authorization.validate()?;
+    if cap.item_ref.as_deref() != Some(&authorization.source_definition_ref)
+        || cap.effective_definition_digest.as_deref()
+            != Some(&authorization.source_effective_definition_digest)
+    {
+        anyhow::bail!(
+            "effect dispatch authorization source identity contradicts its callback capability"
+        );
+    }
+    Ok(Some(authorization))
 }
 
 fn callback_execution_context(
@@ -96,6 +118,7 @@ fn prepare_effect_dispatch(
     thread_auth: &ThreadAuthState,
     dispatch_caps: &[String],
     child_provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+    authorization: ryeos_effect_contract::AdmittedEffectAuthorization,
 ) -> Result<PreparedEffectDispatch> {
     if params.action.thread != "inline" {
         anyhow::bail!("durable effect replay is only valid for inline callback actions");
@@ -122,15 +145,21 @@ fn prepare_effect_dispatch(
         None,
     )
     .map_err(anyhow::Error::new)?;
-    crate::dispatch::enforce_preflight_effect_class(
-        &preflight,
-        params
-            .effect_replay
-            .as_ref()
-            .map(|effect| effect.class.as_str()),
-    )
-    .map_err(anyhow::Error::new)?;
-    Ok(PreparedEffectDispatch { context, preflight })
+    crate::dispatch::enforce_preflight_effect_class(&preflight, Some(authorization.class))
+        .map_err(anyhow::Error::new)?;
+    let authority = ryeos_effect_contract::PreparedEffectDispatchAuthority {
+        authorization,
+        action_digest: ryeos_runtime::callback::dispatch_action_digest(&params.action)?,
+        subject_effect_class_ceiling: preflight.effect_class_ceiling.ok_or_else(|| {
+            anyhow::anyhow!("durable effect preflight lost its admitted subject ceiling")
+        })?,
+    };
+    authority.validate()?;
+    Ok(PreparedEffectDispatch {
+        context,
+        preflight,
+        authority,
+    })
 }
 
 pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
@@ -210,36 +239,21 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         "thread auth token validated: using server-side principal",
     );
 
-    // Resolve and admit the exact callee before a durable-effect lookup.  A
-    // miss carries this same prepared subject into dispatch, closing the
-    // resolve-again race.  The v1 lookup remains active until the v2 epoch
-    // cutover; this preparatory slice changes no record schema or key.
-    let prepared_effect_dispatch = params
-        .effect_replay
-        .as_ref()
-        .map(|_| {
+    // Resolve and admit the exact callee before a durable-effect lookup. A
+    // miss carries this same prepared subject through dispatch; terminal
+    // preparation completes the identity with the exact admitted capsule.
+    let prepared_effect_dispatch = selected_effect_authorization(&params, &cap)?
+        .map(|authorization| {
             prepare_effect_dispatch(
                 &params,
                 state,
                 &thread_auth,
                 &dispatch_caps,
                 &child_provenance,
+                authorization,
             )
         })
         .transpose()?;
-
-    // Durable-class replay: derive the identity daemon-side, serve the
-    // record when one exists, and otherwise execute and record. The v1
-    // best-effort failure semantics are removed only at the clean activation.
-    let replay_identity = derive_effect_replay_identity(&params, &cap);
-    if let Some(identity) = &replay_identity
-        && let Some(response) = try_replay_effect_record(state, identity)
-    {
-        drop(caller_thread);
-        drop(thread_auth);
-        return Ok(response);
-    }
-    let caller_thread_id = params.thread_id.clone();
 
     let result = handle_execute(
         params,
@@ -252,188 +266,9 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         prepared_effect_dispatch,
     )
     .await;
-    if let (Ok(response), Some(identity)) = (&result, &replay_identity) {
-        publish_effect_record_best_effort(state, identity, response, &caller_thread_id);
-    }
     drop(caller_thread);
     drop(thread_auth);
     result
-}
-
-fn derive_effect_replay_identity(
-    params: &DispatchActionParams,
-    cap: &ryeos_app::callback_token::CallbackCapability,
-) -> Option<EffectReplayIdentity> {
-    let request = params.effect_replay.as_ref()?;
-    // Detached children have no result at dispatch time; the definition
-    // layer already refuses the combination, so this is a belt.
-    if params.action.thread == "detached" {
-        return None;
-    }
-    if !ryeos_state::objects::RECORDABLE_EFFECT_CLASSES.contains(&request.class.as_str()) {
-        return None;
-    }
-    let digest = cap.effective_definition_digest.as_deref()?;
-    let root_ref = cap.item_ref.as_deref()?;
-    let cache_key = ryeos_runtime::callback::node_effect_cache_key(
-        digest,
-        root_ref,
-        &request.node,
-        &params.action,
-    )
-    .ok()?;
-    let action_digest =
-        ryeos_runtime::callback::node_effect_action_digest(&params.action).ok()?;
-    Some(EffectReplayIdentity {
-        cache_key,
-        action_digest,
-        effective_definition_digest: digest.to_string(),
-        root_ref: root_ref.to_string(),
-        node: request.node.clone(),
-        class: request.class.clone(),
-    })
-}
-
-/// Serve a stored record for this identity, or `None` to execute live.
-fn try_replay_effect_record(
-    state: &AppState,
-    identity: &EffectReplayIdentity,
-) -> Option<Value> {
-    let record_hash = state
-        .state_store
-        .with_state_db(|db| db.lookup_effect_record(&identity.cache_key))
-        .map_err(|error| tracing::warn!(%error, "effect record lookup failed"))
-        .ok()??;
-    let authority = super::pinned_state_authority(state)
-        .map_err(|error| tracing::warn!(%error, "effect replay has no state authority"))
-        .ok()?;
-    let value = authority
-        .cas_store()
-        .and_then(|cas| {
-            cas.get_object(&record_hash)?
-                .ok_or_else(|| anyhow::anyhow!("indexed effect record {record_hash} is missing"))
-        })
-        .map_err(|error| tracing::warn!(%error, "effect record load failed"))
-        .ok()?;
-    let record = ryeos_state::objects::GraphNodeEffectRecord::from_current_value(&value)
-        .map_err(|error| tracing::warn!(%error, "effect record decode failed"))
-        .ok()?;
-    if record.cache_key != identity.cache_key {
-        tracing::warn!(
-            record_hash,
-            "effect record does not answer for its indexed identity; executing live"
-        );
-        return None;
-    }
-    if let Err(error) = state
-        .state_store
-        .with_state_db(|db| db.touch_effect_record(&identity.cache_key))
-    {
-        tracing::warn!(%error, "effect record touch failed");
-    }
-    let mut response = record.result;
-    if let Some(result) = response.get_mut("result")
-        && let Some(envelope) = result.as_object_mut()
-    {
-        envelope.insert("replayed_from".to_string(), Value::String(record_hash));
-    }
-    Some(response)
-}
-
-/// Digest of the node's boot-attested execution identity, for record
-/// provenance. Absent when the probe did not run (tests, degraded boot) —
-/// records simply carry no coordinate.
-pub(crate) fn node_execution_identity_digest(
-    state: &ryeos_app::state::AppState,
-) -> Option<String> {
-    state
-        .extensions
-        .get::<ryeos_app::execution_identity_probe::NodeExecutionIdentity>()
-        .map(|identity| identity.digest.clone())
-}
-
-/// A response is recordable only when the leaf reports success: a non-null
-/// `error` in the envelope marks failure regardless of other fields, and a
-/// native envelope's `success` flag is authoritative when present.
-fn response_is_recordable(response: &Value) -> bool {
-    let Some(result) = response.get("result") else {
-        return false;
-    };
-    if result.get("error").is_some_and(|error| !error.is_null()) {
-        return false;
-    }
-    if let Some(success) = result.get("success").and_then(Value::as_bool) {
-        return success;
-    }
-    true
-}
-
-fn publish_effect_record_best_effort(
-    state: &AppState,
-    identity: &EffectReplayIdentity,
-    response: &Value,
-    caller_thread_id: &str,
-) {
-    if !response_is_recordable(response) {
-        return;
-    }
-    let produced_by_thread = response
-        .get("thread")
-        .and_then(Value::as_str)
-        .filter(|thread| !thread.is_empty())
-        .unwrap_or(caller_thread_id)
-        .to_string();
-    let record = ryeos_state::objects::GraphNodeEffectRecord {
-        schema: ryeos_state::objects::GRAPH_NODE_EFFECT_RECORD_SCHEMA_VERSION,
-        kind: ryeos_state::objects::GRAPH_NODE_EFFECT_RECORD_KIND.to_string(),
-        cache_key: identity.cache_key.clone(),
-        effective_definition_digest: identity.effective_definition_digest.clone(),
-        graph_id: identity.root_ref.clone(),
-        node: identity.node.clone(),
-        action_digest: identity.action_digest.clone(),
-        class: identity.class.clone(),
-        result: response.clone(),
-        produced_by_thread,
-        execution_identity: node_execution_identity_digest(state),
-    };
-    let value = match record.to_value() {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::warn!(%error, "effect record failed validation; not recorded");
-            return;
-        }
-    };
-    let stored = super::pinned_state_authority(state)
-        .and_then(|authority| {
-            let guard = authority.acquire_shared_guard()?;
-            authority.ensure_guard(&guard)?;
-            let cas = authority.cas_store()?;
-            let hash = cas.store_object(&value)?;
-            authority.ensure_guard(&guard)?;
-            Ok(hash)
-        })
-        .and_then(|hash| {
-            // The index row is the reachability root; writing it second means
-            // a crash between the two leaves an orphan object for the sweep,
-            // never a dangling root.
-            state
-                .state_store
-                .with_state_db(|db| db.publish_effect_record(&identity.cache_key, &hash))?;
-            Ok(hash)
-        });
-    match stored {
-        Ok(hash) => {
-            tracing::info!(
-                cache_key = %identity.cache_key,
-                record_hash = %hash,
-                node = %identity.node,
-                "published durable node effect record"
-            );
-        }
-        Err(error) => {
-            tracing::warn!(%error, "effect record publication failed");
-        }
-    }
 }
 
 fn hook_integrity(detail: impl Into<String>) -> anyhow::Error {
@@ -720,6 +555,7 @@ async fn handle_execute(
     child_provenance: ryeos_app::execution_provenance::ExecutionProvenance,
     prepared_effect_dispatch: Option<PreparedEffectDispatch>,
 ) -> Result<Value> {
+    let action_digest = ryeos_runtime::callback::dispatch_action_digest(&params.action)?;
     // V5.4 P2 — strict typed callback contract requires every leaf
     // dispatcher reachable from a callback to emit
     // `CallbackDispatchResponse { thread, result }`. The subprocess
@@ -804,8 +640,12 @@ async fn handle_execute(
         ryeos_engine::canonical_ref::CanonicalRef::parse(&params.action.item_id)
             .with_context(|| format!("invalid callback item_id '{}'", params.action.item_id))?;
 
-    let (exec_ctx, prepared_preflight) = match prepared_effect_dispatch {
-        Some(prepared) => (prepared.context, Some(prepared.preflight)),
+    let (exec_ctx, prepared_preflight, effect_authority) = match prepared_effect_dispatch {
+        Some(prepared) => (
+            prepared.context,
+            Some(prepared.preflight),
+            Some(prepared.authority),
+        ),
         None => (
             callback_execution_context(
                 &params,
@@ -814,6 +654,7 @@ async fn handle_execute(
                 &caller_scopes,
                 &child_provenance,
             )?,
+            None,
             None,
         ),
     };
@@ -900,6 +741,7 @@ async fn handle_execute(
             ),
             None => (None, None, None),
         };
+    let durable_effect_requested = effect_authority.is_some();
     let dispatch_req = crate::dispatch::DispatchRequest {
         // Callback `thread=inline` is the unary leaf protocol. Persist the
         // execution dispatch vocabulary independently: the caller waits for
@@ -922,10 +764,7 @@ async fn handle_execute(
         root_admission: prepared_admission,
         root_dispatch_evidence: prepared_dispatch_evidence,
         parent_execution_context: Some(parent_execution_context_from_capability(cap)),
-        requested_effect_class: params
-            .effect_replay
-            .as_ref()
-            .map(|replay| replay.class.clone()),
+        effect_authority,
     };
 
     // V5.4 P2.3 cleanup — async end-to-end: the UDS dispatcher is
@@ -947,7 +786,11 @@ async fn handle_execute(
         None => {
             crate::dispatch::dispatch(&params.action.item_id, &dispatch_req, &exec_ctx, state).await
         }
-    };
+    }
+    .and_then(|response| {
+        attach_runtime_dispatch_evidence(response, &action_digest, durable_effect_requested)
+            .map_err(crate::dispatch_error::DispatchError::Internal)
+    });
     if let Err(err) = &result {
         // C0: attribute a content-hash mismatch to its resolution source. A
         // `LiveFs` run means the dispatched item's bytes were re-signed on disk
@@ -973,13 +816,19 @@ async fn handle_execute(
                 >(response.clone())
                 {
                     Ok(_) => response,
-                    Err(error) => known_hook_dispatch_integrity_response(format!(
-                        "reserved hook dispatch `{dispatch_key}` returned an invalid callback response: {error}"
-                    )),
+                    Err(error) => known_hook_dispatch_integrity_response(
+                        format!(
+                            "reserved hook dispatch `{dispatch_key}` returned an invalid callback response: {error}"
+                        ),
+                        &action_digest,
+                    ),
                 },
-                Err(error) => known_hook_dispatch_integrity_response(format!(
-                    "reserved hook dispatch `{dispatch_key}` failed after reservation: {error:#}"
-                )),
+                Err(error) => known_hook_dispatch_integrity_response(
+                    format!(
+                        "reserved hook dispatch `{dispatch_key}` failed after reservation: {error:#}"
+                    ),
+                    &action_digest,
+                ),
             };
             let completed = state
                 .state_store
@@ -1009,10 +858,76 @@ async fn handle_execute(
     }
 }
 
-fn known_hook_dispatch_integrity_response(message: String) -> Value {
+fn attach_runtime_dispatch_evidence(
+    mut response: Value,
+    action_digest: &str,
+    durable_effect_requested: bool,
+) -> Result<Value> {
+    let object = response
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("callback dispatch response is not an object"))?;
+    match object.get("dispatch") {
+        Some(value) => {
+            let evidence: ryeos_runtime::callback_contract::RuntimeDispatchEvidence =
+                serde_json::from_value(value.clone())
+                    .context("decode daemon-owned dispatch evidence")?;
+            evidence.validate()?;
+            if evidence.action_digest != action_digest {
+                anyhow::bail!("callback dispatch evidence contradicts the exact wire action");
+            }
+            if !durable_effect_requested
+                && evidence.effect_class
+                    != ryeos_runtime::callback_contract::RuntimeDispatchEffectClass::Live
+            {
+                anyhow::bail!("live callback action returned durable dispatch evidence");
+            }
+            if durable_effect_requested
+                && evidence.effect_class
+                    == ryeos_runtime::callback_contract::RuntimeDispatchEffectClass::Live
+            {
+                anyhow::bail!("durable callback action returned live dispatch evidence");
+            }
+        }
+        None if durable_effect_requested => {
+            anyhow::bail!("durable callback action returned no dispatch evidence")
+        }
+        None => {
+            object.insert(
+                "dispatch".to_owned(),
+                serde_json::to_value(ryeos_runtime::callback_contract::RuntimeDispatchEvidence {
+                    source: ryeos_runtime::callback_contract::RuntimeDispatchSource::Executed,
+                    effect_class:
+                        ryeos_runtime::callback_contract::RuntimeDispatchEffectClass::Live,
+                    action_digest: action_digest.to_owned(),
+                    effect_identity: None,
+                    publication:
+                        ryeos_runtime::callback_contract::RuntimeDispatchPublication::NotApplicable,
+                    record_hash: None,
+                    replayed_from: None,
+                })?,
+            );
+        }
+    }
+    let parsed: ryeos_runtime::callback_contract::CallbackDispatchResponse =
+        serde_json::from_value(response.clone()).context("validate callback dispatch response")?;
+    parsed.dispatch.validate()?;
+    Ok(response)
+}
+
+fn known_hook_dispatch_integrity_response(message: String, action_digest: &str) -> Value {
     serde_json::to_value(ryeos_runtime::callback_contract::CallbackDispatchResponse {
         thread: Value::Null,
         result: ryeos_runtime::envelope::hook_dispatch_integrity_failure(&message),
+        dispatch: ryeos_runtime::callback_contract::RuntimeDispatchEvidence {
+            source: ryeos_runtime::callback_contract::RuntimeDispatchSource::Executed,
+            effect_class: ryeos_runtime::callback_contract::RuntimeDispatchEffectClass::Live,
+            action_digest: action_digest.to_owned(),
+            effect_identity: None,
+            publication:
+                ryeos_runtime::callback_contract::RuntimeDispatchPublication::NotApplicable,
+            record_hash: None,
+            replayed_from: None,
+        },
     })
     .expect("hook dispatch integrity response is infallibly serializable")
 }
@@ -1224,6 +1139,7 @@ mod tests {
             root_raw_content_digest: "0".repeat(64),
             effective_definition_digest: Some("1".repeat(64)),
             hook_dispatch_authorizations: Vec::new(),
+            effect_dispatch_authorizations: Vec::new(),
             hard_limits: serde_json::json!({"turns": 6, "tokens": 1000}),
             depth: 4,
             accounting_scope: None,

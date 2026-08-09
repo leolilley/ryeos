@@ -662,7 +662,7 @@ impl ExecutionAssembler {
             if let Some(error) = verification_error.as_deref() {
                 attrs.insert("manifest_verification_error".to_string(), json!(error));
             }
-            if conformance == FieldAnchorConformance::ContractV2 {
+            if conformance == FieldAnchorConformance::Contract {
                 let anchor_id = format!(
                     "anchor:{}:{}:{}",
                     event_ref.chain_root_id, event_ref.chain_seq, event_ref.event_hash
@@ -927,12 +927,11 @@ impl ExecutionAssembler {
         Option<String>,
     ) {
         let (conformance, _, _) = anchor_status_with_verifier(event, None);
-        if conformance != FieldAnchorConformance::ContractV2 || cas.is_none() {
+        if conformance != FieldAnchorConformance::Contract || cas.is_none() {
             return anchor_status_with_verifier(event, None);
         }
-        let anchor =
-            ryeos_state::objects::StateAnchorMilestoneV2::from_value(event.payload.clone())
-                .expect("conforming state anchor was parsed above");
+        let anchor = ryeos_state::objects::StateAnchorMilestone::from_value(event.payload.clone())
+            .expect("conforming state anchor was parsed above");
         let manifest_ref = anchor.payload.manifest_ref;
         let cache_key = format!(
             "{manifest_ref}\0{}\0{}",
@@ -1138,6 +1137,37 @@ impl ExecutionAssembler {
     fn add_artifact(&mut self, thread_id: &str, artifact: ThreadArtifactRecord) -> Result<()> {
         let id = format!("artifact:{thread_id}:{}", artifact.artifact_id);
         let metadata = artifact.metadata.unwrap_or(Value::Null);
+        let is_graph_receipt = artifact.artifact_type == "graph_node_receipt";
+        let dispatch = if is_graph_receipt {
+            self.validated_receipt_dispatch(
+                &id,
+                metadata.get("dispatch"),
+                "malformed_graph_receipt_dispatch",
+            )
+        } else {
+            None
+        };
+        let fanout_dispatches = if is_graph_receipt {
+            metadata
+                .get("fanout")
+                .and_then(|fanout| fanout.get("dispatches"))
+                .and_then(Value::as_array)
+                .map(|dispatches| {
+                    dispatches
+                        .iter()
+                        .filter_map(|value| {
+                            self.validated_receipt_dispatch(
+                                &id,
+                                Some(value),
+                                "malformed_graph_receipt_fanout_dispatch",
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let occurrence = metadata
             .get("graph_run_id")
             .and_then(Value::as_str)
@@ -1156,7 +1186,7 @@ impl ExecutionAssembler {
         }];
         self.builder.add_entity(FieldFactEntity {
             id: id.clone(),
-            kind: if artifact.artifact_type == "graph_node_receipt" {
+            kind: if is_graph_receipt {
                 "receipt"
             } else {
                 "artifact"
@@ -1182,6 +1212,8 @@ impl ExecutionAssembler {
                 "thread": self.thread_context(thread_id),
                 "artifact_type": artifact.artifact_type,
                 "uri": artifact.uri,
+                "dispatch": dispatch,
+                "fanout_dispatches": fanout_dispatches,
                 "metadata": bounded_inline_value(metadata),
             }),
             provenance: self.builder.provenance(evidence.clone()),
@@ -1209,6 +1241,33 @@ impl ExecutionAssembler {
             })?;
         }
         Ok(())
+    }
+
+    fn validated_receipt_dispatch(
+        &mut self,
+        receipt_id: &str,
+        value: Option<&Value>,
+        warning_code: &str,
+    ) -> Option<Value> {
+        let value = value?;
+        let projected = serde_json::from_value::<
+            ryeos_runtime::callback_contract::RuntimeDispatchEvidence,
+        >(value.clone())
+        .map_err(anyhow::Error::from)
+        .and_then(|dispatch| {
+            dispatch.validate()?;
+            serde_json::to_value(dispatch).map_err(anyhow::Error::from)
+        });
+        match projected {
+            Ok(projected) => Some(projected),
+            Err(error) => {
+                self.builder.warn(
+                    warning_code,
+                    format!("graph receipt `{receipt_id}` dispatch was not projected: {error}"),
+                );
+                None
+            }
+        }
     }
 
     fn add_result(
@@ -1833,14 +1892,14 @@ fn anchor_status_with_verifier(
         None | Some(Value::Null) => FieldManifestVerification::NotProvided,
         Some(_) => FieldManifestVerification::NotChecked,
     };
-    let anchor =
-        match ryeos_state::objects::StateAnchorMilestoneV2::from_value(event.payload.clone()) {
-            Ok(anchor) => anchor,
-            Err(_) => {
-                return (FieldAnchorConformance::Malformed, verification, None);
-            }
-        };
-    let conformance = FieldAnchorConformance::ContractV2;
+    let anchor = match ryeos_state::objects::StateAnchorMilestone::from_value(event.payload.clone())
+    {
+        Ok(anchor) => anchor,
+        Err(_) => {
+            return (FieldAnchorConformance::Malformed, verification, None);
+        }
+    };
+    let conformance = FieldAnchorConformance::Contract;
     let payload = serde_json::to_value(&anchor.payload)
         .expect("validated state-anchor payload must serialize");
     let mut verification_error = None;
@@ -2021,6 +2080,19 @@ mod tests {
             .thread_facets
             .insert("T-root".to_string(), BTreeMap::new());
         assembler
+    }
+
+    fn live_dispatch(byte: char) -> ryeos_runtime::callback_contract::RuntimeDispatchEvidence {
+        ryeos_runtime::callback_contract::RuntimeDispatchEvidence {
+            source: ryeos_runtime::callback_contract::RuntimeDispatchSource::Executed,
+            effect_class: ryeos_runtime::callback_contract::RuntimeDispatchEffectClass::Live,
+            action_digest: byte.to_string().repeat(64),
+            effect_identity: None,
+            publication:
+                ryeos_runtime::callback_contract::RuntimeDispatchPublication::NotApplicable,
+            record_hash: None,
+            replayed_from: None,
+        }
     }
 
     #[test]
@@ -2228,6 +2300,51 @@ mod tests {
     }
 
     #[test]
+    fn receipt_dispatch_evidence_is_validated_and_malformed_values_are_isolated() {
+        let mut assembler = assembler();
+        let unary = live_dispatch('a');
+        let fanout = live_dispatch('b');
+        assembler
+            .add_artifact(
+                "T-root",
+                ThreadArtifactRecord {
+                    artifact_id: 1,
+                    artifact_type: "graph_node_receipt".to_owned(),
+                    uri: "graph://runs/G-test/node-receipts/1".to_owned(),
+                    content_hash: Some("c".repeat(64)),
+                    metadata: Some(json!({
+                        "dispatch": unary,
+                        "fanout": {"dispatches": [fanout, {"source": "forged"}]},
+                    })),
+                },
+            )
+            .unwrap();
+        let facts = assembler.finish().unwrap();
+        let receipt = facts
+            .entities
+            .iter()
+            .find(|entity| entity.id == "artifact:T-root:1")
+            .expect("receipt fact");
+
+        assert_eq!(
+            receipt.attributes["dispatch"]["action_digest"],
+            "a".repeat(64)
+        );
+        assert_eq!(
+            receipt.attributes["fanout_dispatches"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert!(
+            facts
+                .warnings
+                .iter()
+                .any(|warning| { warning["code"] == "malformed_graph_receipt_fanout_dispatch" })
+        );
+    }
+
+    #[test]
     fn anchor_contract_and_manifest_status_are_independent() {
         assert_eq!(
             anchor_status(
@@ -2245,7 +2362,7 @@ mod tests {
                 .payload
             ),
             (
-                FieldAnchorConformance::ContractV2,
+                FieldAnchorConformance::Contract,
                 FieldManifestVerification::NotChecked
             )
         );
@@ -2320,7 +2437,7 @@ mod tests {
         assert_eq!(
             anchor_status_with_verifier(&anchor_event, Some(&cas)),
             (
-                FieldAnchorConformance::ContractV2,
+                FieldAnchorConformance::Contract,
                 FieldManifestVerification::Verified,
                 None
             )
@@ -2368,7 +2485,7 @@ mod tests {
         let anchor_event = state_anchor_event(1, payload);
         let (conformance, verification, error) =
             anchor_status_with_verifier(&anchor_event, Some(&cas));
-        assert_eq!(conformance, FieldAnchorConformance::ContractV2);
+        assert_eq!(conformance, FieldAnchorConformance::Contract);
         assert_eq!(verification, FieldManifestVerification::Failed);
         assert!(error.unwrap().contains("restore blob is missing"));
     }

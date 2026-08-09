@@ -542,6 +542,7 @@ fn inspect_isolation_backend(
                 max_open_files: Some(64),
                 max_stdout_bytes: Some(ryeos_isolation_protocol::MAX_RESPONSE_BYTES as u64),
                 max_stderr_bytes: Some(64 * 1024),
+                ..lillux::SubprocessLimits::default()
             }),
             inherited_fds: std::iter::once(adapter.clone())
                 .chain(artifact_handles.values().cloned())
@@ -811,7 +812,7 @@ fn build_engine_for_roots_with_isolation(
 
     let engine = Engine::new(kinds, parser_dispatcher, bundle_roots)
         .with_registered_bundle_roots(registered_bundle_roots.unwrap_or_default())
-        .with_node_config_ai_root(config.app_root.join(ryeos_engine::AI_DIR))
+        .with_node_config_root(config.app_root.clone())
         .with_isolation_generation(Arc::clone(&isolation))
         .with_trust_store(trust_store)
         .with_node_trust_store(node_trust_store)

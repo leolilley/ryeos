@@ -1737,7 +1737,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             root_admission: local_root_admission,
             root_dispatch_evidence: local_root_dispatch_evidence,
             parent_execution_context: None,
-            requested_effect_class: None,
+            effect_authority: None,
         };
 
         let dispatch_result = if lifecycle_authority.ownership

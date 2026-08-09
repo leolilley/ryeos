@@ -18,6 +18,7 @@ async-trait = { workspace = true }
 base64 = { workspace = true }
 lillux = { workspace = true }
 ryeos-accounting = { workspace = true }
+ryeos-effect-contract = { workspace = true }
 ryeos-engine = { workspace = true }
 ryeos-expression = { workspace = true }
 ryeos-state = { workspace = true }

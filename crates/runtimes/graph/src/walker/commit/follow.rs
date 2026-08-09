@@ -360,6 +360,7 @@ impl Walker {
             result_hash: Some(result_hash),
             cache_hit: false,
             replayed_from: None,
+            dispatch: None,
             elapsed_ms,
             error: diagnostic.clone(),
             cost: cost.clone(),
@@ -373,6 +374,7 @@ impl Walker {
                 // Results remain represented by result_hash; receipts do not have
                 // an explicit local-content policy permitting raw result persistence.
                 results: None,
+                dispatches: Vec::new(),
             }),
         };
         self.write_node_receipt_or_warn(graph_run_id, receipt).await;

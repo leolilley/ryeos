@@ -385,6 +385,15 @@ fn validate_protocol_descriptor(
         }
     }
 
+    if desc.session.is_some() {
+        crate::protocols::descriptor::validate_persistent_session_protocol(desc).map_err(
+            |detail| ProtocolError::MalformedYaml {
+                path: path.to_owned(),
+                detail,
+            },
+        )?;
+    }
+
     Ok(())
 }
 

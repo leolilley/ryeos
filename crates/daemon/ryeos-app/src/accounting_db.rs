@@ -45,9 +45,9 @@ use ryeos_accounting::{
     AttemptBudgetState, AuthorityHealth, BillableDimension, ChargeBasis,
     ChargeReconciliationAuthority, HexDigest, MAX_RAW_DECIMAL_LEN, MoneyError,
     PROVIDER_ATTEMPT_BUDGET_TRANSITION_VERSION, ProviderAccountingAuthority,
-    ProviderAttemptBudgetRecord, ProviderAttemptBudgetTransitionV1, ReconciliationReason,
-    SpendAccounting, SpendBoundAuthority, SpendBoundCertificate, SpendTariffDocument,
-    TokenAccounting, UsdNanos, VerifiedPreparedSpendBound, transition_id,
+    ProviderAttemptBudgetRecord, ProviderAttemptBudgetTransitionV1, ProviderCallPublicationProof,
+    ReconciliationReason, SpendAccounting, SpendBoundAuthority, SpendBoundCertificate,
+    SpendTariffDocument, TokenAccounting, UsdNanos, VerifiedPreparedSpendBound, transition_id,
 };
 use ryeos_state::sqlite_schema;
 
@@ -613,6 +613,29 @@ struct StoredReleaseResponse {
     state: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderLocalWorkerStartClaim {
+    pub daemon_generation_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderLocalWorkerObservationReference {
+    pub request_hash: String,
+    pub coordinate_key: String,
+    pub observation_key: String,
+    pub observation_hash: String,
+    pub terminal_digest: String,
+    pub answer_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExactAccountingOperation<T> {
+    pub value: T,
+    pub replayed: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Internal row types
 // ---------------------------------------------------------------------------
@@ -623,6 +646,8 @@ pub struct ReservationPublicationBinding {
     pub thread_id: String,
     pub state: AttemptBudgetState,
     pub request_hash: String,
+    pub turn: u32,
+    pub attempt_number: u32,
 }
 
 struct ReservationRow {
@@ -3293,6 +3318,13 @@ impl AccountingDb {
         if row.thread_id != thread_id {
             return Ok(None);
         }
+        let publication_proof = self
+            .load_operation(&conn, attempt_id, "provider_call_publication", 1)?
+            .map(|(_, response)| {
+                serde_json::from_str(&response)
+                    .context("decode provider-call publication proof on attempt read")
+            })
+            .transpose()?;
         Ok(Some(ProviderAttemptBudgetRecord {
             attempt_id: row.attempt_id,
             turn: row.turn,
@@ -3313,6 +3345,7 @@ impl AccountingDb {
                 .reconciliation_reason
                 .as_deref()
                 .and_then(ReconciliationReason::parse),
+            publication_proof,
         }))
     }
 }
@@ -4075,13 +4108,264 @@ impl AccountingDb {
         attempt_id: &str,
     ) -> Result<Option<ReservationPublicationBinding>> {
         let conn = self.lock_conn()?;
-        Ok(self
-            .load_reservation_by_id(&conn, attempt_id)?
-            .map(|row| ReservationPublicationBinding {
+        Ok(self.load_reservation_by_id(&conn, attempt_id)?.map(|row| {
+            ReservationPublicationBinding {
                 thread_id: row.thread_id,
                 state: row.state,
                 request_hash: row.request_hash,
-            }))
+                turn: row.turn,
+                attempt_number: row.attempt_number,
+            }
+        }))
+    }
+
+    /// Claim the one permitted admitted-local-worker contact for an issued
+    /// attempt. The daemon generation is recorded as the response, not the
+    /// request identity: a later daemon can prove the historical claim but
+    /// can never replace it or infer that contact is safe to repeat.
+    pub fn claim_provider_local_worker_start(
+        &self,
+        attempt_id: &str,
+        request_hash: &str,
+        coordinate_key: &str,
+        daemon_generation_id: &str,
+    ) -> Result<ExactAccountingOperation<ProviderLocalWorkerStartClaim>> {
+        let conn = self.lock_conn()?;
+        immediate_transaction(&conn, "claim provider local-worker contact", || {
+            let row = self
+                .load_reservation_by_id(&conn, attempt_id)?
+                .ok_or_else(|| anyhow::anyhow!("attempt {attempt_id} is absent"))?;
+            if row.request_hash != request_hash {
+                bail!("local-worker start request contradicts its reservation");
+            }
+            let request_digest = canonical_fingerprint(&serde_json::json!({
+                "request_hash": request_hash,
+                "coordinate_key": coordinate_key,
+            }))?;
+            if let Some((stored_digest, response)) =
+                self.load_operation(&conn, attempt_id, "local_worker_start", 1)?
+            {
+                if stored_digest != request_digest {
+                    bail!("local-worker start claim exists with divergent authority");
+                }
+                let value: ProviderLocalWorkerStartClaim =
+                    serde_json::from_str(&response).context("decode local-worker start claim")?;
+                self.bump_recovery_count(&conn, attempt_id, "local_worker_start", 1)?;
+                return Ok(ExactAccountingOperation {
+                    value,
+                    replayed: true,
+                });
+            }
+            if row.state != AttemptBudgetState::Issued {
+                bail!("only an issued attempt may claim local-worker contact");
+            }
+            if daemon_generation_id.is_empty() || daemon_generation_id.len() > 256 {
+                bail!("daemon generation id is not canonical and bounded");
+            }
+            let value = ProviderLocalWorkerStartClaim {
+                daemon_generation_id: daemon_generation_id.to_owned(),
+            };
+            self.insert_operation(
+                &conn,
+                attempt_id,
+                "local_worker_start",
+                1,
+                &request_digest,
+                &serde_json::to_string(&value)?,
+            )?;
+            Ok(ExactAccountingOperation {
+                value,
+                replayed: false,
+            })
+        })
+    }
+
+    /// Publish the immutable reference to a daemon-observed local terminal.
+    /// The CAS object is staged before this call; this row is the durable root
+    /// that permits the stage to be retired after commit.
+    pub fn confirm_provider_local_worker_observation(
+        &self,
+        attempt_id: &str,
+        reference: &ProviderLocalWorkerObservationReference,
+    ) -> Result<ExactAccountingOperation<ProviderLocalWorkerObservationReference>> {
+        let conn = self.lock_conn()?;
+        immediate_transaction(&conn, "confirm provider local-worker observation", || {
+            let row = self
+                .load_reservation_by_id(&conn, attempt_id)?
+                .ok_or_else(|| anyhow::anyhow!("attempt {attempt_id} is absent"))?;
+            if row.request_hash != reference.request_hash {
+                bail!("local-worker observation contradicts its reservation");
+            }
+            for (field, digest) in [
+                ("local-worker coordinate key", &reference.coordinate_key),
+                ("local-worker observation key", &reference.observation_key),
+                ("local-worker observation hash", &reference.observation_hash),
+                ("local-worker terminal digest", &reference.terminal_digest),
+                ("local-worker answer digest", &reference.answer_digest),
+            ] {
+                if !lillux::valid_hash(digest) {
+                    bail!("{field} is not a canonical digest");
+                }
+            }
+            if self
+                .load_operation(&conn, attempt_id, "local_worker_start", 1)?
+                .is_none()
+            {
+                bail!("local-worker observation has no preceding contact claim");
+            }
+            let request_digest = canonical_fingerprint(&serde_json::to_value(reference)?)?;
+            if let Some((stored_digest, response)) =
+                self.load_operation(&conn, attempt_id, "local_worker_observation", 1)?
+            {
+                if stored_digest != request_digest {
+                    bail!("local-worker observation diverges from the first terminal");
+                }
+                let value: ProviderLocalWorkerObservationReference =
+                    serde_json::from_str(&response)
+                        .context("decode local-worker observation reference")?;
+                self.bump_recovery_count(&conn, attempt_id, "local_worker_observation", 1)?;
+                return Ok(ExactAccountingOperation {
+                    value,
+                    replayed: true,
+                });
+            }
+            self.insert_operation(
+                &conn,
+                attempt_id,
+                "local_worker_observation",
+                1,
+                &request_digest,
+                &serde_json::to_string(reference)?,
+            )?;
+            Ok(ExactAccountingOperation {
+                value: reference.clone(),
+                replayed: false,
+            })
+        })
+    }
+
+    pub fn provider_local_worker_observation(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<ProviderLocalWorkerObservationReference>> {
+        let conn = self.lock_conn()?;
+        self.load_operation(&conn, attempt_id, "local_worker_observation", 1)?
+            .map(|(_, response)| {
+                serde_json::from_str(&response)
+                    .context("decode retained local-worker observation reference")
+            })
+            .transpose()
+    }
+
+    /// Confirm that recorded provider finality crossed the CAS replay index.
+    /// Financial settlement alone is never sufficient evidence publication.
+    pub fn confirm_provider_call_publication(
+        &self,
+        attempt_id: &str,
+        proof: &ProviderCallPublicationProof,
+    ) -> Result<ExactAccountingOperation<ProviderCallPublicationProof>> {
+        let conn = self.lock_conn()?;
+        immediate_transaction(&conn, "confirm provider-call publication", || {
+            let row = self
+                .load_reservation_by_id(&conn, attempt_id)?
+                .ok_or_else(|| anyhow::anyhow!("attempt {attempt_id} is absent"))?;
+            if !row.state.is_terminal() {
+                bail!("provider-call publication requires terminal accounting state");
+            }
+            for (field, digest) in [
+                ("provider call cache key", &proof.cache_key),
+                ("provider call answer digest", &proof.answer_digest),
+                ("provider call record hash", &proof.record_hash),
+            ] {
+                if !lillux::valid_hash(digest) {
+                    bail!("{field} is not a canonical digest");
+                }
+            }
+            let expected_request_hash = ryeos_accounting::rpc::provider_attempt_request_hash(
+                &row.thread_id,
+                row.turn,
+                row.attempt_number,
+                &proof.cache_key,
+            );
+            if expected_request_hash != row.request_hash {
+                bail!("provider publication proof contradicts its reservation coordinate");
+            }
+            let request_digest = canonical_fingerprint(&serde_json::to_value(proof)?)?;
+            if let Some((stored_digest, response)) =
+                self.load_operation(&conn, attempt_id, "provider_call_publication", 1)?
+            {
+                if stored_digest != request_digest {
+                    bail!("provider-call publication proof diverges from the first proof");
+                }
+                let value: ProviderCallPublicationProof = serde_json::from_str(&response)
+                    .context("decode provider-call publication proof")?;
+                self.bump_recovery_count(&conn, attempt_id, "provider_call_publication", 1)?;
+                return Ok(ExactAccountingOperation {
+                    value,
+                    replayed: true,
+                });
+            }
+            self.insert_operation(
+                &conn,
+                attempt_id,
+                "provider_call_publication",
+                1,
+                &request_digest,
+                &serde_json::to_string(proof)?,
+            )?;
+            Ok(ExactAccountingOperation {
+                value: proof.clone(),
+                replayed: false,
+            })
+        })
+    }
+
+    pub fn provider_call_publication_proof(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<ProviderCallPublicationProof>> {
+        let conn = self.lock_conn()?;
+        self.load_operation(&conn, attempt_id, "provider_call_publication", 1)?
+            .map(|(_, response)| {
+                serde_json::from_str(&response)
+                    .context("decode retained provider-call publication proof")
+            })
+            .transpose()
+    }
+
+    /// CAS objects retained by immutable provider-attempt evidence rows.
+    pub fn provider_evidence_object_roots(&self) -> Result<Vec<String>> {
+        let conn = self.lock_conn()?;
+        let mut statement = conn.prepare_cached(
+            "SELECT operation_kind, response_json FROM accounting_operation
+             WHERE operation_kind IN ('local_worker_observation', 'provider_call_publication')
+             ORDER BY attempt_id, operation_kind",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut roots = BTreeSet::new();
+        for row in rows {
+            let (kind, response) = row?;
+            let hash = match kind.as_str() {
+                "local_worker_observation" => {
+                    serde_json::from_str::<ProviderLocalWorkerObservationReference>(&response)
+                        .context("decode retained local-worker root")?
+                        .observation_hash
+                }
+                "provider_call_publication" => {
+                    serde_json::from_str::<ProviderCallPublicationProof>(&response)
+                        .context("decode retained provider-call root")?
+                        .record_hash
+                }
+                _ => unreachable!("query restricts operation kinds"),
+            };
+            if !lillux::valid_hash(&hash) {
+                bail!("accounting evidence row carries a malformed CAS root");
+            }
+            roots.insert(hash);
+        }
+        Ok(roots.into_iter().collect())
     }
 
     fn load_operation(
@@ -5846,6 +6130,123 @@ mod tests {
         assert_eq!(outcome.charge_basis, ChargeBasis::ExplicitlyFree);
         assert_amounts(&db, EXEC, "execution", "0", "0");
         assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn local_contact_observation_and_publication_are_immutable_crash_boundaries() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, Some("10"));
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let authority = free_authority("local-recorded");
+        let cache_key = "a".repeat(64);
+        let request_hash =
+            ryeos_accounting::rpc::provider_attempt_request_hash(THREAD, 1, 1, &cache_key);
+        let attempt_id = reserved_id(
+            &reserve(
+                &db,
+                THREAD,
+                GENERATION,
+                1,
+                1,
+                &request_hash,
+                &authority,
+                EXEC,
+                None,
+            )
+            .unwrap(),
+        );
+        issue(&db, &attempt_id, &request_hash).unwrap();
+
+        let observation = ProviderLocalWorkerObservationReference {
+            request_hash: request_hash.clone(),
+            coordinate_key: cache_key.clone(),
+            observation_key: "b".repeat(64),
+            observation_hash: "c".repeat(64),
+            terminal_digest: "d".repeat(64),
+            answer_digest: "e".repeat(64),
+        };
+        assert!(
+            db.confirm_provider_local_worker_observation(&attempt_id, &observation)
+                .unwrap_err()
+                .to_string()
+                .contains("preceding contact claim")
+        );
+
+        let claimed = db
+            .claim_provider_local_worker_start(&attempt_id, &request_hash, &cache_key, "daemon-one")
+            .unwrap();
+        assert!(!claimed.replayed);
+        let replayed = db
+            .claim_provider_local_worker_start(&attempt_id, &request_hash, &cache_key, "daemon-two")
+            .unwrap();
+        assert!(replayed.replayed);
+        assert_eq!(replayed.value.daemon_generation_id, "daemon-one");
+        assert!(
+            db.claim_provider_local_worker_start(
+                &attempt_id,
+                &request_hash,
+                &"f".repeat(64),
+                "daemon-one",
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("divergent authority")
+        );
+
+        assert!(
+            !db.confirm_provider_local_worker_observation(&attempt_id, &observation)
+                .unwrap()
+                .replayed
+        );
+        assert!(
+            db.confirm_provider_local_worker_observation(&attempt_id, &observation)
+                .unwrap()
+                .replayed
+        );
+        let mut divergent_observation = observation.clone();
+        divergent_observation.observation_hash = "1".repeat(64);
+        assert!(
+            db.confirm_provider_local_worker_observation(&attempt_id, &divergent_observation,)
+                .unwrap_err()
+                .to_string()
+                .contains("diverges from the first terminal")
+        );
+
+        settle(
+            &db,
+            &attempt_id,
+            &request_hash,
+            SpendAccounting::ExplicitlyFree,
+            &authority,
+        )
+        .unwrap();
+        let proof = ProviderCallPublicationProof {
+            cache_key,
+            answer_digest: observation.answer_digest.clone(),
+            record_hash: "2".repeat(64),
+        };
+        assert!(
+            !db.confirm_provider_call_publication(&attempt_id, &proof)
+                .unwrap()
+                .replayed
+        );
+        assert!(
+            db.confirm_provider_call_publication(&attempt_id, &proof)
+                .unwrap()
+                .replayed
+        );
+        let mut divergent_proof = proof.clone();
+        divergent_proof.record_hash = "3".repeat(64);
+        assert!(
+            db.confirm_provider_call_publication(&attempt_id, &divergent_proof)
+                .unwrap_err()
+                .to_string()
+                .contains("diverges from the first proof")
+        );
+        assert_eq!(
+            db.provider_evidence_object_roots().unwrap(),
+            vec![proof.record_hash, observation.observation_hash]
+        );
     }
 
     #[test]

@@ -1,0 +1,19 @@
+[package]
+name = "ryeos-provider-contract"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Provider request identity, replay answer, and observation contracts"
+
+[lib]
+name = "ryeos_provider_contract"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true }
+lillux = { workspace = true }
+ryeos-effect-contract = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }

@@ -1941,7 +1941,9 @@ impl PinnedStateAuthority {
 
     /// The large-content-tier large-object store, rooted beside the CAS under this
     /// exact pinned runtime generation.
-    pub fn large_object_store(&self) -> anyhow::Result<crate::large_object_store::LargeObjectStore> {
+    pub fn large_object_store(
+        &self,
+    ) -> anyhow::Result<crate::large_object_store::LargeObjectStore> {
         crate::large_object_store::LargeObjectStore::open_or_create_under(&self.runtime_directory)
     }
 
@@ -5416,60 +5418,46 @@ impl StateDb {
         self.operational()?.cas_entries_by_state_summary()
     }
 
-    pub fn publish_effect_record(&self, cache_key: &str, record_hash: &str) -> anyhow::Result<()> {
-        self.operational()?.publish_effect_record(cache_key, record_hash)
-    }
-
-    pub fn lookup_effect_record(&self, cache_key: &str) -> anyhow::Result<Option<String>> {
-        self.operational()?.lookup_effect_record(cache_key)
-    }
-
-    pub fn touch_effect_record(&self, cache_key: &str) -> anyhow::Result<()> {
-        self.operational()?.touch_effect_record(cache_key)
-    }
-
-    pub fn list_effect_record_hashes(&self) -> anyhow::Result<Vec<String>> {
-        self.operational()?.list_effect_record_hashes()
-    }
-
-    pub fn delete_effect_records(&self, cache_keys: &[String]) -> anyhow::Result<usize> {
-        self.operational()?.delete_effect_records(cache_keys)
-    }
-
-    pub fn prune_effect_records(&self, max_rows: usize) -> anyhow::Result<usize> {
-        self.operational()?.prune_effect_records(max_rows)
-    }
-
-    pub fn publish_provider_call_record(
+    pub fn lookup_replay_record(
         &self,
+        namespace: &crate::ReplayIndexNamespace,
         cache_key: &str,
-        record_hash: &str,
-    ) -> anyhow::Result<()> {
+        verify: impl FnMut(&crate::ReplayIndexRecord) -> crate::ReplayRecordVerification,
+    ) -> anyhow::Result<crate::ReplayLookupOutcome> {
         self.operational()?
-            .publish_provider_call_record(cache_key, record_hash)
+            .lookup_replay_record(namespace, cache_key, verify)
     }
 
-    pub fn lookup_provider_call_record(
+    pub fn publish_replay_record(
         &self,
-        cache_key: &str,
-    ) -> anyhow::Result<Option<String>> {
-        self.operational()?.lookup_provider_call_record(cache_key)
+        namespace: &crate::ReplayIndexNamespace,
+        candidate: &crate::ReplayIndexRecord,
+        verify: impl FnMut(&crate::ReplayIndexRecord) -> crate::ReplayRecordVerification,
+    ) -> anyhow::Result<crate::ReplayPublishOutcome> {
+        self.operational()?
+            .publish_replay_record(namespace, candidate, verify)
     }
 
-    pub fn touch_provider_call_record(&self, cache_key: &str) -> anyhow::Result<()> {
-        self.operational()?.touch_provider_call_record(cache_key)
+    pub fn list_replay_record_hashes(&self) -> anyhow::Result<Vec<String>> {
+        self.operational()?.list_replay_record_hashes()
     }
 
-    pub fn list_provider_call_record_hashes(&self) -> anyhow::Result<Vec<String>> {
-        self.operational()?.list_provider_call_record_hashes()
+    pub fn delete_replay_records(
+        &self,
+        namespace: &crate::ReplayIndexNamespace,
+        cache_keys: &[String],
+    ) -> anyhow::Result<usize> {
+        self.operational()?
+            .delete_replay_records(namespace, cache_keys)
     }
 
-    pub fn delete_provider_call_records(&self, cache_keys: &[String]) -> anyhow::Result<usize> {
-        self.operational()?.delete_provider_call_records(cache_keys)
-    }
-
-    pub fn prune_provider_call_records(&self, max_rows: usize) -> anyhow::Result<usize> {
-        self.operational()?.prune_provider_call_records(max_rows)
+    pub fn prune_replay_records(
+        &self,
+        namespace: &crate::ReplayIndexNamespace,
+        max_rows: usize,
+    ) -> anyhow::Result<usize> {
+        self.operational()?
+            .prune_replay_records(namespace, max_rows)
     }
 
     pub fn record_admission_attestation(

@@ -32,7 +32,7 @@ use base64::Engine as _;
 use lillux::crypto::VerifyingKey;
 use sha2::{Digest, Sha256};
 
-use crate::contracts::ItemSpace;
+use crate::contracts::{ItemSourceRoot, ItemSpace};
 use crate::error::EngineError;
 use crate::item_resolution::ResolutionRoots;
 use crate::resolution::TrustClass;
@@ -204,6 +204,8 @@ fn validate_captured_executable(_handle: &std::fs::File, path: &Path) -> Result<
 /// subprocess, not to the bundle that ships the binary.
 pub fn resolve_runtime_binary_command_ref(
     binary_ref: &str,
+    wrapper_source_root: &crate::contracts::ItemSourceRoot,
+    wrapper_source_space: ItemSpace,
     wrapper_source_path: &Path,
     roots: &ResolutionRoots,
     trust_store: &TrustStore,
@@ -219,19 +221,25 @@ pub fn resolve_runtime_binary_command_ref(
     let slash_count = rest.matches('/').count();
     match slash_count {
         0 => {
-            let (_bundle_name, bundle_root) =
-                registered_bundle_root_for_source(wrapper_source_path, roots).ok_or_else(|| {
-                    EngineError::InvalidBinPrefix {
+            let registered = roots
+                .authoritative_root(
+                    wrapper_source_root,
+                    wrapper_source_space,
+                    Some(wrapper_source_path),
+                )
+                .map_err(|error| EngineError::InvalidBinPrefix {
                     raw: binary_ref.to_string(),
-                    detail: format!(
-                        "cannot find registered bundle root containing {}",
-                        wrapper_source_path.display()
-                    ),
-                }
+                    detail: error.to_string(),
                 })?;
+            let bundle_root = registered.content_root.as_deref().ok_or_else(|| {
+                EngineError::InvalidBinPrefix {
+                    raw: binary_ref.to_string(),
+                    detail: "wrapper source has no registered content root".to_owned(),
+                }
+            })?;
             resolve_bundle_binary_ref(
                 binary_ref,
-                &bundle_root,
+                bundle_root,
                 |fp| trust_store.get(fp).map(|signer| signer.verifying_key),
                 root_trust_class,
             )
@@ -241,17 +249,33 @@ pub fn resolve_runtime_binary_command_ref(
             validate_bundle_name(target_bundle, binary_ref)?;
             validate_bin_name(bin_name, binary_ref)?;
 
-            let (source_name, source_root) = registered_bundle_root_for_source(wrapper_source_path, roots)
-                .ok_or_else(|| EngineError::InvalidBinPrefix {
+            let registered = roots
+                .authoritative_root(
+                    wrapper_source_root,
+                    wrapper_source_space,
+                    Some(wrapper_source_path),
+                )
+                .map_err(|error| EngineError::InvalidBinPrefix {
                     raw: binary_ref.to_string(),
-                    detail: format!(
-                        "qualified `bin:<bundle>/<name>` refs are only allowed from registered bundle items; {} is not under a registered bundle root",
-                        wrapper_source_path.display()
-                    ),
+                    detail: error.to_string(),
                 })?;
+            let crate::contracts::ItemSourceRoot::Bundle { name: source_name } =
+                wrapper_source_root
+            else {
+                return Err(EngineError::InvalidBinPrefix {
+                    raw: binary_ref.to_string(),
+                    detail: "qualified binary refs require typed bundle provenance".to_owned(),
+                });
+            };
+            let source_root = registered.content_root.as_deref().ok_or_else(|| {
+                EngineError::InvalidBinPrefix {
+                    raw: binary_ref.to_string(),
+                    detail: "wrapper bundle has no registered content root".to_owned(),
+                }
+            })?;
             let source_manifest = crate::plan_builder::verify_bundle_source_manifest_identity(
-                &source_root,
-                &source_name,
+                source_root,
+                source_name,
                 trust_store,
             )?;
             let (target_root, target_manifest) =
@@ -1201,24 +1225,6 @@ fn verify_installed_mode(
     Ok(())
 }
 
-fn registered_bundle_root_for_source(
-    source_path: &Path,
-    roots: &ResolutionRoots,
-) -> Option<(String, PathBuf)> {
-    roots
-        .ordered
-        .iter()
-        .filter(|root| root.space == ItemSpace::Bundle)
-        .filter_map(|root| {
-            let name = root.label.strip_prefix("bundle:")?;
-            let bundle_root = root.ai_root.parent()?.to_path_buf();
-            source_path
-                .starts_with(&bundle_root)
-                .then(|| (name.to_string(), bundle_root))
-        })
-        .next()
-}
-
 fn find_qualified_target_bundle(
     target_name: &str,
     roots: &ResolutionRoots,
@@ -1228,27 +1234,31 @@ fn find_qualified_target_bundle(
     let mut skipped = Vec::new();
     let mut matches = Vec::new();
 
-    for root in roots
-        .ordered
-        .iter()
-        .filter(|root| root.space == ItemSpace::Bundle)
-    {
-        let Some(bundle_root) = root.ai_root.parent().map(Path::to_path_buf) else {
+    for root in &roots.ordered {
+        let ItemSourceRoot::Bundle {
+            name: registered_name,
+        } = &root.identity
+        else {
             continue;
         };
+        let Some(bundle_root) = root.content_root.clone() else {
+            skipped.push(format!(
+                "registered bundle {registered_name:?} has no content authority"
+            ));
+            continue;
+        };
+        if root.space != ItemSpace::Bundle || root.ai_root != bundle_root.join(crate::AI_DIR) {
+            skipped.push(format!(
+                "registered bundle {registered_name:?} has incoherent typed roots"
+            ));
+            continue;
+        }
         searched.push(bundle_root.display().to_string());
         // Skip bundles whose signed manifest doesn't verify: an unverifiable
         // manifest can't be a trusted target, and one malformed/unsigned bundle
         // in the registered set must not break qualified resolution of others.
         // The reason is retained so a broken registration surfaces in the
         // not-found diagnostic rather than looking like a genuine absence.
-        let Some(registered_name) = root.label.strip_prefix("bundle:") else {
-            skipped.push(format!(
-                "registered bundle root has invalid label {:?}",
-                root.label
-            ));
-            continue;
-        };
         match crate::plan_builder::verify_bundle_source_manifest_identity(
             &bundle_root,
             registered_name,
@@ -1870,8 +1880,12 @@ mod tests {
                         .unwrap();
                     ResolutionRoot {
                         space: ItemSpace::Bundle,
+                        identity: crate::contracts::ItemSourceRoot::Bundle {
+                            name: name.to_owned(),
+                        },
                         label: format!("bundle:{name}"),
                         ai_root: root.join(crate::AI_DIR),
+                        content_root: Some((*root).to_path_buf()),
                     }
                 })
                 .collect(),
@@ -1948,6 +1962,10 @@ mod tests {
 
         let resolved = resolve_runtime_binary_command_ref(
             "bin:core/ryeos-core-tools",
+            &ItemSourceRoot::Bundle {
+                name: "authoring".to_owned(),
+            },
+            ItemSpace::Bundle,
             &wrapper,
             &roots,
             &trust_store_for(&fp, &key),
@@ -1978,6 +1996,10 @@ mod tests {
 
         let err = resolve_runtime_binary_command_ref(
             "bin:core/ryeos-core-tools",
+            &ItemSourceRoot::Bundle {
+                name: "authoring".to_owned(),
+            },
+            ItemSpace::Bundle,
             &wrapper,
             &roots,
             &trust_store_for(&fp, &key),
@@ -2007,6 +2029,10 @@ mod tests {
 
         let err = resolve_runtime_binary_command_ref(
             "bin:ryeos/core/ryeos-core-tools",
+            &ItemSourceRoot::Bundle {
+                name: "authoring".to_owned(),
+            },
+            ItemSpace::Bundle,
             &wrapper,
             &roots,
             &trust_store_for(&fp, &key),
@@ -2039,6 +2065,10 @@ mod tests {
 
         let err = resolve_runtime_binary_command_ref(
             "bin:core/ryeos-core-tools",
+            &ItemSourceRoot::Bundle {
+                name: "authoring".to_owned(),
+            },
+            ItemSpace::Bundle,
             &wrapper,
             &roots,
             &trust_store_for(&fp, &key),
@@ -2068,6 +2098,10 @@ mod tests {
 
         let resolved = resolve_runtime_binary_command_ref(
             "bin:local-tool",
+            &ItemSourceRoot::Bundle {
+                name: "authoring".to_owned(),
+            },
+            ItemSpace::Bundle,
             &wrapper,
             &roots,
             &trust_store_for(&fp, &key),
@@ -2099,6 +2133,10 @@ mod tests {
 
         let err = resolve_runtime_binary_command_ref(
             "bin:core/ryeos-core-tools",
+            &ItemSourceRoot::Bundle {
+                name: "authoring".to_owned(),
+            },
+            ItemSpace::Bundle,
             &wrapper,
             &roots,
             &trust_store_for(&fp, &key),
@@ -2153,6 +2191,10 @@ mod tests {
 
         let resolved = resolve_runtime_binary_command_ref(
             "bin:core/ryeos-core-tools",
+            &ItemSourceRoot::Bundle {
+                name: "authoring".to_owned(),
+            },
+            ItemSpace::Bundle,
             &wrapper,
             &roots,
             &trust_store_for(&fp, &key),

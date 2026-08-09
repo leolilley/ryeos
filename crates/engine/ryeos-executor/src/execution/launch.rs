@@ -1987,10 +1987,7 @@ fn stage_managed_executor_blob(
     }
     Ok((
         hash,
-        super::PendingCasPublication {
-            authority,
-            staged_roots: Some(staged_roots),
-        },
+        super::PendingCasPublication::new(authority, staged_roots),
     ))
 }
 
@@ -2534,15 +2531,12 @@ fn build_verified_loader_for_thread(
     node_trusted_keys_dir: &Path,
 ) -> anyhow::Result<ryeos_runtime::verified_loader::VerifiedLoader> {
     let project_root = engine_roots
-        .ordered
-        .iter()
-        .find(|root| root.space == ryeos_engine::contracts::ItemSpace::Project)
-        .and_then(|root| root.ai_root.parent().map(Path::to_path_buf));
+        .authoritative_project_root()?
+        .map(Path::to_path_buf);
     let bundle_roots = engine_roots
-        .ordered
-        .iter()
-        .filter(|root| root.space == ryeos_engine::contracts::ItemSpace::Bundle)
-        .filter_map(|root| root.ai_root.parent().map(Path::to_path_buf))
+        .authoritative_bundle_roots()?
+        .into_iter()
+        .map(Path::to_path_buf)
         .collect();
     match project_root {
         Some(project_root) => ryeos_runtime::verified_loader::VerifiedLoader::new_with_node_config(
@@ -2566,10 +2560,8 @@ fn build_verified_loader_for_thread_under_project_authority(
     project_materialization: &ryeos_state::PinnedProjectMaterialization,
 ) -> anyhow::Result<ryeos_runtime::verified_loader::VerifiedLoader> {
     let project_root = engine_roots
-        .ordered
-        .iter()
-        .find(|root| root.space == ryeos_engine::contracts::ItemSpace::Project)
-        .and_then(|root| root.ai_root.parent().map(Path::to_path_buf))
+        .authoritative_project_root()?
+        .map(Path::to_path_buf)
         .ok_or_else(|| anyhow::anyhow!("admitted execution controls have no project root"))?;
     if project_root != project_materialization.path() {
         anyhow::bail!(
@@ -2577,10 +2569,9 @@ fn build_verified_loader_for_thread_under_project_authority(
         );
     }
     let bundle_roots = engine_roots
-        .ordered
-        .iter()
-        .filter(|root| root.space == ryeos_engine::contracts::ItemSpace::Bundle)
-        .filter_map(|root| root.ai_root.parent().map(Path::to_path_buf))
+        .authoritative_bundle_roots()?
+        .into_iter()
+        .map(Path::to_path_buf)
         .collect();
     ryeos_runtime::verified_loader::VerifiedLoader::new_with_node_config_under_project_authority(
         project_root,
@@ -2744,11 +2735,7 @@ fn execution_control_snapshot_status(
             Some(&loader.effective_trust_identity()),
             &current_node_trust,
         ) && limits_proof.revalidate_mutable_against(
-            roots
-                .ordered
-                .iter()
-                .find(|root| root.space == ryeos_engine::contracts::ItemSpace::Project)
-                .and_then(|root| root.ai_root.parent()),
+            roots.authoritative_project_root().ok().flatten(),
             node_config_root,
             true,
         ) {
@@ -3141,6 +3128,39 @@ fn admitted_hook_dispatch_authorizations(
     Ok(authorizations)
 }
 
+fn admitted_effect_dispatch_authorizations(
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    effective_definition_digest: &str,
+) -> Result<Vec<ryeos_effect_contract::AdmittedEffectAuthorization>> {
+    let Some(value) = resolution
+        .composed
+        .derived
+        .get(ryeos_effect_contract::EFFECT_AUTHORIZATIONS_DERIVED_KEY)
+    else {
+        return Ok(Vec::new());
+    };
+    let projections = serde_json::from_value::<
+        Vec<ryeos_effect_contract::EffectAuthorizationProjection>,
+    >(value.clone())
+    .context("decode admitted effect authorization projections")?;
+    ryeos_effect_contract::validate_authorization_projections(&projections)?;
+    projections
+        .into_iter()
+        .map(|projection| {
+            let authorization = ryeos_effect_contract::AdmittedEffectAuthorization {
+                authorization_id: projection.authorization_id,
+                source_definition_ref: resolution.root.resolved_ref.clone(),
+                source_effective_definition_digest: effective_definition_digest.to_string(),
+                policy_digest: projection.policy_digest,
+                action_contract_digest: projection.action_contract_digest,
+                class: projection.class,
+            };
+            authorization.validate()?;
+            Ok(authorization)
+        })
+        .collect()
+}
+
 /// How a managed runtime launch should treat checkpoint state. One axis (distinct
 /// from `reconcile::ResumeKind`, which is the dispatch route). Encoding the three
 /// legal cases as an enum makes the illegal "both machine-continuation AND
@@ -3476,6 +3496,7 @@ struct PreparedManagedLaunchAuthority {
     pending_project_snapshot: Option<super::CapturedProjectGeneration>,
     pending_executor_blob: Option<super::PendingCasPublication>,
     pending_external_realization: Option<super::PendingCasPublication>,
+    pending_session_publications: Option<super::persistent_session::AdmittedSessionPublications>,
     bound_external_realizations: Option<super::external_content::BoundExternalRealizations>,
     augmentation_audits: Vec<crate::augmentations::LaunchAugmentationAudit>,
     /// True when this preparation minted the accounting scope (fresh
@@ -3754,15 +3775,10 @@ async fn prepare_managed_launch_authority(
     .then_some(params.project_path);
     let engine_roots = engine.resolution_roots(resolution_project_root.map(Path::to_path_buf));
     let bundle_roots: Vec<PathBuf> = engine_roots
-        .ordered
-        .iter()
-        .filter(|root| root.space == ryeos_engine::contracts::ItemSpace::Bundle)
-        .map(|root| {
-            root.ai_root
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| root.ai_root.clone())
-        })
+        .authoritative_bundle_roots()
+        .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(error)))?
+        .into_iter()
+        .map(Path::to_path_buf)
         .collect();
     let persisted_admitted_capsule = params
         .state
@@ -4281,7 +4297,7 @@ async fn prepare_managed_launch_authority(
     if let Some(timings) = params.launch_timings.as_ref() {
         timings.mark("runtime_prep_started");
     }
-    let prepared_launch = if let Some(prepared) = admitted_prepared_launch {
+    let mut prepared_launch = if let Some(prepared) = admitted_prepared_launch {
         prepared
     } else {
         let runtime_preparation_timer = params
@@ -4374,6 +4390,14 @@ async fn prepare_managed_launch_authority(
         &prepared_launch,
     )
     .map_err(BuildAndLaunchError::Internal)?;
+    let pending_session_publications =
+        super::persistent_session::admit_or_verify_prepared_sessions(
+            params.state,
+            engine,
+            &mut prepared_launch,
+            admitted_capsule.is_some(),
+        )
+        .map_err(BuildAndLaunchError::Internal)?;
     let effective_caps = if let Some(capsule) = admitted_capsule.as_ref() {
         // Capability authority is part of the admitted execution closure.
         // Recovery must not reopen the composed item or its runtime-authority
@@ -4445,11 +4469,12 @@ async fn prepare_managed_launch_authority(
         super::admitted_trust::validate_hook_plan_current_trust(engine, current_trust_store, &plan)
             .map_err(BuildAndLaunchError::Internal)?;
 
-        let recovered_external = super::external_content::recover_external_realizations(
-            params.state,
-            &resolution,
-        )
-        .map_err(BuildAndLaunchError::Internal)?;
+        let recovered_external =
+            ryeos_app::external_content_admission::recover_external_realizations(
+                params.state,
+                &resolution,
+            )
+            .map_err(BuildAndLaunchError::Internal)?;
         let validation = engine
             .effective_validators
             .validate(&params.resolved.resolved_item.kind, &resolution)
@@ -4790,6 +4815,7 @@ async fn prepare_managed_launch_authority(
         pending_project_snapshot,
         pending_executor_blob,
         pending_external_realization,
+        pending_session_publications: Some(pending_session_publications),
         bound_external_realizations,
         augmentation_audits,
         freshly_minted_accounting_scope,
@@ -5000,6 +5026,32 @@ async fn build_and_launch_inner(
         .launch_metadata
         .get_or_insert_with(Default::default)
         .set_sealed_root_request(sealed_request);
+    let realization_contract_ref = authority.selected_runtime.canonical_ref.to_string();
+    let realization_contract_digest = authority.selected_runtime.raw_content_digest.clone();
+    let realization_admission = super::execution_realization::admit_or_verify(
+        params.state,
+        authority.launch_metadata.as_ref().ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "managed launch lost its admitted metadata"
+            ))
+        })?,
+        authority.effective_program.resolution(),
+        authority
+            .effective_program
+            .effective_definition_digest()
+            .as_str(),
+        &realization_contract_ref,
+        &realization_contract_digest,
+        authority.pending_external_realization.as_mut(),
+    )
+    .map_err(BuildAndLaunchError::Internal)?;
+    if authority.pending_external_realization.is_none() {
+        authority.pending_external_realization = realization_admission.publication;
+    }
+    authority.launch_metadata = authority
+        .launch_metadata
+        .take()
+        .map(|metadata| metadata.with_execution_realization_hash(realization_admission.hash));
 
     let initial_events = launch_audit_records(
         params.resolved,
@@ -5075,6 +5127,11 @@ async fn build_and_launch_inner(
     drop(authority.pending_project_snapshot.take());
     drop(authority.pending_executor_blob.take());
     drop(authority.pending_external_realization.take());
+    if let Some(publications) = authority.pending_session_publications.take() {
+        publications
+            .publish()
+            .map_err(BuildAndLaunchError::Internal)?;
+    }
     let result = run_claimed_thread_row_with_authority(
         params,
         thread,
@@ -5274,6 +5331,7 @@ async fn run_claimed_thread_row_inner(
         pending_project_snapshot,
         pending_executor_blob,
         pending_external_realization,
+        pending_session_publications,
         bound_external_realizations,
         augmentation_audits,
         freshly_minted_accounting_scope,
@@ -5312,6 +5370,7 @@ async fn run_claimed_thread_row_inner(
     drop(pending_project_snapshot);
     drop(pending_executor_blob);
     drop(pending_external_realization);
+    drop(pending_session_publications);
 
     // Record operational lineage the instant we commit to launching a child, so a
     // cancel/kill of the parent can cascade to it. Only a launch carrying a parent
@@ -5421,15 +5480,9 @@ async fn run_claimed_thread_row_inner(
 
     // 4. Build envelope
     let bundle_roots: Vec<PathBuf> = engine_roots
-        .ordered
-        .iter()
-        .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::Bundle)
-        .map(|r| {
-            r.ai_root
-                .parent()
-                .map(|pp| pp.to_path_buf())
-                .unwrap_or(r.ai_root.clone())
-        })
+        .authoritative_bundle_roots()?
+        .into_iter()
+        .map(Path::to_path_buf)
         .collect();
 
     tracing::info!(
@@ -5630,6 +5683,11 @@ async fn run_claimed_thread_row_inner(
         })?;
     let hook_dispatch_authorizations = admitted_hook_dispatch_authorizations(&hook_plan)
         .context("project finalized hook plan into callback authority")?;
+    let effect_dispatch_authorizations = admitted_effect_dispatch_authorizations(
+        resolution,
+        effective_program.effective_definition_digest().as_str(),
+    )
+    .context("project finalized effect grants into callback authority")?;
     let cap = state.callback_tokens.generate_with_context(
         &thread_id,
         token_project,
@@ -5651,6 +5709,15 @@ async fn run_claimed_thread_row_inner(
     {
         return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
             "callback capability disappeared before hook authorization binding"
+        )));
+    }
+    if !state
+        .callback_tokens
+        .set_effect_dispatch_authorizations(&cap.token, effect_dispatch_authorizations)
+        .map_err(BuildAndLaunchError::Internal)?
+    {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "callback capability disappeared before effect authorization binding"
         )));
     }
     lifecycle_owner.track_callback_token(cap.token.clone());
@@ -6552,6 +6619,7 @@ impl PreparedOperatorSuccessorLaunch {
         drop(self.prepared.authority.pending_project_snapshot.take());
         drop(self.prepared.authority.pending_executor_blob.take());
         drop(self.prepared.authority.pending_external_realization.take());
+        drop(self.prepared.authority.pending_session_publications.take());
         self
     }
 }
@@ -6566,6 +6634,7 @@ impl PreparedMachineSuccessorLaunch {
         drop(self.prepared.authority.pending_project_snapshot.take());
         drop(self.prepared.authority.pending_executor_blob.take());
         drop(self.prepared.authority.pending_external_realization.take());
+        drop(self.prepared.authority.pending_session_publications.take());
         self
     }
 }
@@ -6613,6 +6682,7 @@ impl PreparedFollowChildLaunch {
         drop(self.authority.pending_project_snapshot.take());
         drop(self.authority.pending_executor_blob.take());
         drop(self.authority.pending_external_realization.take());
+        drop(self.authority.pending_session_publications.take());
         self
     }
 }
@@ -6780,6 +6850,7 @@ async fn prepare_follow_child_launch_inner(
         lifecycle_authority: operational_resume.lifecycle_authority,
         runtime_ref: operational_resume.runtime_ref.clone(),
         parent_thread_id: None,
+        effect_authority: None,
     };
 
     let project_path = execution.provenance.effective_path().to_path_buf();

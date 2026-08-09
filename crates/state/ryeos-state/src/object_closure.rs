@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io::Read;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use anyhow::Context;
 use serde_json::Value;
@@ -93,12 +94,84 @@ pub struct ObjectLinks {
     pub unsupported_kind: Option<String>,
 }
 
+/// Meaning-blind registration surface for durable object contracts owned by
+/// layers above state. State retains and traverses the declared typed edges;
+/// it never imports or interprets the registering domain's Rust types.
+pub struct ObjectContractRegistration {
+    pub kind: &'static str,
+    pub validate: fn(&Value) -> anyhow::Result<()>,
+    pub links: fn(&Value) -> Result<RegisteredObjectLinks, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisteredObjectExpectation {
+    Any,
+    Kind(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredObjectEdge {
+    pub hash: String,
+    pub expected: RegisteredObjectExpectation,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RegisteredObjectLinks {
+    pub object_edges: Vec<RegisteredObjectEdge>,
+    pub blob_hashes: Vec<String>,
+    pub large_object_hashes: Vec<String>,
+}
+
+static REGISTERED_OBJECT_CONTRACTS: OnceLock<Vec<ObjectContractRegistration>> = OnceLock::new();
+
+/// Install the application-owned object contracts exactly once, before any
+/// closure walk. Duplicate built-in kinds and malformed/duplicate external
+/// kinds fail closed. Repeated installation is never treated as an alias.
+pub fn install_object_contracts(
+    mut registrations: Vec<ObjectContractRegistration>,
+) -> anyhow::Result<()> {
+    registrations.sort_by_key(|registration| registration.kind);
+    let mut prior = None;
+    for registration in &registrations {
+        if registration.kind.is_empty()
+            || registration.kind.len() > 128
+            || !registration
+                .kind
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            anyhow::bail!(
+                "registered object kind is not canonical: {}",
+                registration.kind
+            );
+        }
+        if contracts::CURRENT_OBJECT_KINDS.contains(&registration.kind) {
+            anyhow::bail!(
+                "registered object kind {} collides with state-owned contract",
+                registration.kind
+            );
+        }
+        if prior == Some(registration.kind) {
+            anyhow::bail!("registered object kind {} is duplicated", registration.kind);
+        }
+        prior = Some(registration.kind);
+    }
+    REGISTERED_OBJECT_CONTRACTS
+        .set(registrations)
+        .map_err(|_| anyhow::anyhow!("application object contracts were already installed"))
+}
+
 /// Exact object kinds the current closure decoder admits.
 ///
 /// Durable writers and maintenance coverage tests use this inventory so a new
 /// current kind cannot remain implicit in a private match arm.
-pub fn current_object_kinds() -> &'static [&'static str] {
-    contracts::CURRENT_OBJECT_KINDS
+pub fn current_object_kinds() -> Vec<&'static str> {
+    let mut kinds = contracts::CURRENT_OBJECT_KINDS.to_vec();
+    if let Some(registered) = REGISTERED_OBJECT_CONTRACTS.get() {
+        kinds.extend(registered.iter().map(|contract| contract.kind));
+    }
+    kinds.sort_unstable();
+    kinds
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -133,6 +206,73 @@ enum HistoryGraph {
 
 #[path = "object_closure/contracts.rs"]
 mod contracts;
+use contracts::ContractLinks;
+
+fn registered_contract(kind: &str) -> Option<&'static ObjectContractRegistration> {
+    let registrations = REGISTERED_OBJECT_CONTRACTS.get()?;
+    registrations
+        .binary_search_by_key(&kind, |registration| registration.kind)
+        .ok()
+        .map(|index| &registrations[index])
+}
+
+fn decode_registered(value: &Value) -> anyhow::Result<Option<ContractLinks>> {
+    let kind = value
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("missing object kind"))?;
+    let Some(contract) = registered_contract(kind) else {
+        return Ok(None);
+    };
+    (contract.validate)(value).with_context(|| format!("invalid registered {kind} object"))?;
+    registered_links(contract, value)
+        .map(Some)
+        .map_err(anyhow::Error::msg)
+        .with_context(|| format!("invalid registered {kind} object links"))
+}
+
+fn links_registered(value: &Value) -> Result<Option<ContractLinks>, String> {
+    let kind = value
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing object kind".to_string())?;
+    let Some(contract) = registered_contract(kind) else {
+        return Ok(None);
+    };
+    registered_links(contract, value).map(Some)
+}
+
+fn registered_links(
+    contract: &ObjectContractRegistration,
+    value: &Value,
+) -> Result<ContractLinks, String> {
+    let declared = (contract.links)(value)?;
+    let mut links = ContractLinks::leaf();
+    for edge in declared.object_edges {
+        push_typed_hash(
+            &edge.hash,
+            match edge.expected {
+                RegisteredObjectExpectation::Any => ExpectedObject::Any,
+                RegisteredObjectExpectation::Kind(kind) => ExpectedObject::Kind(kind),
+            },
+            None,
+            &mut links.object_edges,
+        )?;
+    }
+    for hash in declared.blob_hashes {
+        if !is_canonical_hash(&hash) {
+            return Err(format!("invalid registered blob hash: {hash}"));
+        }
+        links.blob_hashes.push(hash);
+    }
+    for hash in declared.large_object_hashes {
+        if !is_canonical_hash(&hash) {
+            return Err(format!("invalid registered large-object hash: {hash}"));
+        }
+        links.large_object_hashes.push(hash);
+    }
+    Ok(links.finish())
+}
 
 impl HistoryGraph {
     fn label(self) -> &'static str {
@@ -1001,6 +1141,26 @@ fn external_realization_manifest_hashes(capsule: &Value) -> Result<Vec<String>, 
         .map_err(|error| format!("invalid external realization set: {error}"))
 }
 
+fn persistent_session_external_realization_manifest_hashes(
+    capsule: &Value,
+) -> Result<Vec<String>, String> {
+    let Some(derived) = capsule
+        .get("exact_program")
+        .and_then(|program| program.get("resolution_output"))
+        .and_then(|resolution| resolution.get("composed"))
+        .and_then(|composed| composed.get("derived"))
+        .and_then(Value::as_object)
+    else {
+        return Ok(Vec::new());
+    };
+    let Some(value) = derived.get(crate::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY) else {
+        return Ok(Vec::new());
+    };
+    crate::objects::ExternalContentRealizationSet::from_value(value)
+        .map(|set| set.manifest_hashes())
+        .map_err(|error| format!("invalid persistent-session external realization set: {error}"))
+}
+
 fn push_required_hash(value: &Value, field: &str, out: &mut Vec<String>) -> Result<(), String> {
     let hash = value
         .get(field)
@@ -1114,7 +1274,7 @@ mod tests {
         );
 
         let report = collect_object_closure(&cas_root, [snapshot]).unwrap();
-        assert!(report.is_complete());
+        assert!(report.is_complete(), "{report:?}");
         assert_eq!(report.object_hashes.len(), 4);
         assert!(report.blob_hashes.contains(&blob_hash));
     }
@@ -1665,29 +1825,41 @@ mod tests {
     }
 
     #[test]
-    fn a_large_manifest_reports_large_objects_not_cas_blobs() {
+    fn a_large_manifest_reports_each_storage_tier() {
         let tmp = tempfile::tempdir().unwrap();
         let cas_root = tmp.path().join("objects");
         let large_hash = h("ac");
+        let small_blob = write_blob(&cas_root, b"small");
         let manifest = write_object(
             &cas_root,
             &json!({
                 "kind": crate::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND,
                 "schema": crate::objects::EXTERNAL_LARGE_CONTENT_SCHEMA,
-                "entries": [{
-                    "path": "model.safetensors",
-                    "file_sha256": large_hash,
-                    "size": 5,
-                    "chunk_size": crate::objects::MIN_LARGE_CONTENT_CHUNK_BYTES,
-                    "chunk_hashes": [h("bd")]
-                }],
-                "entry_count": 1,
-                "total_bytes": 5
+                "entries": [
+                    {
+                        "path": "config.json",
+                        "kind": "file",
+                        "mode": 0o644,
+                        "blob_hash": small_blob,
+                        "size": 5
+                    },
+                    {
+                        "path": "model.safetensors",
+                        "kind": "file",
+                        "mode": 0o644,
+                        "file_sha256": large_hash,
+                        "size": 5,
+                        "chunk_size": crate::objects::MIN_LARGE_CONTENT_CHUNK_BYTES,
+                        "chunk_hashes": [h("bd")]
+                    }
+                ],
+                "entry_count": 2,
+                "total_bytes": 10
             }),
         );
         let report = collect_object_closure(&cas_root, [manifest]).unwrap();
-        assert!(report.is_complete());
-        assert!(report.blob_hashes.is_empty());
+        assert!(report.is_complete(), "{report:?}");
+        assert!(report.blob_hashes.contains(&small_blob));
         assert_eq!(report.large_object_hashes, BTreeSet::from([large_hash]));
     }
 
@@ -1698,8 +1870,7 @@ mod tests {
             crate::objects::EXECUTION_IDENTITY_KIND,
             crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND,
             crate::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND,
-            crate::objects::GRAPH_NODE_EFFECT_RECORD_KIND,
-            crate::objects::PROVIDER_CALL_EFFECT_RECORD_KIND,
+            crate::objects::EFFECT_RECORD_KIND,
             crate::objects::STATE_MANIFEST_KIND,
         ] {
             assert!(

@@ -30,6 +30,10 @@ pub mod commands_submit;
 pub mod commands_wait;
 pub mod events_chain_replay;
 pub mod events_replay;
+pub mod external_content_bind;
+pub mod external_content_import;
+pub mod external_content_release;
+pub mod external_content_scrub;
 pub mod federation_capabilities;
 pub mod federation_heads_list;
 pub mod health_status;
@@ -149,6 +153,10 @@ pub const ALL: &[ServiceDescriptor] = &[
     usage_summary::DESCRIPTOR,
     events_replay::DESCRIPTOR,
     events_chain_replay::DESCRIPTOR,
+    external_content_import::DESCRIPTOR,
+    external_content_bind::DESCRIPTOR,
+    external_content_release::DESCRIPTOR,
+    external_content_scrub::DESCRIPTOR,
     trace_branch::DESCRIPTOR,
     trace_inspect::DESCRIPTOR,
     commands_submit::DESCRIPTOR,

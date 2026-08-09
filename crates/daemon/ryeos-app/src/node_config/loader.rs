@@ -30,6 +30,7 @@ use ryeos_engine::trust::TrustStore;
 use super::sections::bundle::BundleSection;
 use super::sections::command::CommandRecord;
 use super::sections::command_registration::CommandRegistrationPolicyRecord;
+use super::sections::external_content::ExternalContentImportPolicyRecord;
 use super::sections::hosted_node::HostedNodePolicyRecord;
 use super::{
     BundleRecord, NodeConfigSection, NodeConfigSnapshot, NodeItemContext, SectionSourcePolicy,
@@ -357,6 +358,10 @@ impl<'a> BootstrapLoader<'a> {
         let mut routes: Vec<RawRouteSpec> = Vec::new();
         let mut commands: Vec<CommandRecord> = Vec::new();
         let mut hosted_node_policies: Vec<HostedNodePolicyRecord> = Vec::new();
+        let mut external_content_import_policy: Option<ExternalContentImportPolicyRecord> = None;
+        let mut persistent_session_policy: Option<
+            crate::node_config::sections::persistent_sessions::PersistentSessionPolicyRecord,
+        > = None;
 
         for section_name in section_table.section_names() {
             if section_name == "command_registration" {
@@ -507,6 +512,44 @@ impl<'a> BootstrapLoader<'a> {
                             .clone();
                         record.source_file = verified.path.clone();
                         hosted_node_policies.push(record);
+                    } else if section_name == "external_content" {
+                        let record =
+                            section
+                                .parse(&verified.ctx, &verified.body)
+                                .with_context(|| {
+                                    format!(
+                                        "failed to parse external-content import policy {}",
+                                        verified.path.display()
+                                    )
+                                })?;
+                        let record = record
+                            .as_any()
+                            .downcast_ref::<ExternalContentImportPolicyRecord>()
+                            .context(
+                                "ExternalContentImportPolicySection::parse returned wrong type",
+                            )?
+                            .clone();
+                        if external_content_import_policy.replace(record).is_some() {
+                            bail!("multiple external-content import policies are not allowed");
+                        }
+                    } else if section_name == "persistent_sessions" {
+                        let record =
+                            section
+                                .parse(&verified.ctx, &verified.body)
+                                .with_context(|| {
+                                    format!(
+                                        "failed to parse persistent-session node policy {}",
+                                        verified.path.display()
+                                    )
+                                })?;
+                        let record = record
+                            .as_any()
+                            .downcast_ref::<crate::node_config::sections::persistent_sessions::PersistentSessionPolicyRecord>()
+                            .context("PersistentSessionPolicySection::parse returned wrong type")?
+                            .clone();
+                        if persistent_session_policy.replace(record).is_some() {
+                            bail!("multiple persistent-session node policies are not allowed");
+                        }
                     }
                 }
             }
@@ -529,6 +572,8 @@ impl<'a> BootstrapLoader<'a> {
             commands,
             hosted_node_policies,
             command_registration_policy,
+            external_content_import_policy,
+            persistent_session_policy,
         })
     }
 

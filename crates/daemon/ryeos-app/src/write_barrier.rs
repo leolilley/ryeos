@@ -143,8 +143,7 @@ impl WriteBarrier {
             match self.try_acquire() {
                 Ok(permit) => return Ok(permit),
                 Err(error) => {
-                    let remaining =
-                        deadline.saturating_duration_since(std::time::Instant::now());
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                     if remaining.is_zero() {
                         return Err(error.context(format!(
                             "write permit did not become available within {timeout:?}"
@@ -383,5 +382,4 @@ mod tests {
         barrier.resume();
         assert!(barrier.try_acquire().is_ok());
     }
-
 }

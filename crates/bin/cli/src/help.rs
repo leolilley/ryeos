@@ -1036,6 +1036,8 @@ mod tests {
             }],
             hosted_node_policies: vec![],
             command_registration_policy: Default::default(),
+            external_content_import_policy: None,
+            persistent_session_policy: None,
         };
         let tokens = vec!["remote".to_string(), "doctor".to_string()];
         let command = crate::node_descriptors::find_command(&snapshot, &tokens).unwrap();

@@ -28,6 +28,7 @@ impl Walker {
             item_id,
             cost,
             observations,
+            elapsed_ms,
         } = outcome.as_ref();
         // Foreach lifecycle: graph_step_started → (per-iteration
         // graph_foreach_iteration events) → graph_step_completed →
@@ -84,6 +85,62 @@ impl Walker {
             GraphStepStatus::Ok
         };
         self.extend_suppressed_errors(suppressed_errors, errors.iter().cloned());
+
+        let result_hash = match hash_json_value(&json!({
+            "results": results,
+            "statuses": statuses,
+        })) {
+            Ok(hash) => hash,
+            Err(error) => {
+                let message = format!("failed to canonicalize foreach result: {error}");
+                return self
+                    .commit_terminal(CommitTerminalInput {
+                        graph_run_id,
+                        steps: step,
+                        state,
+                        suppressed_errors,
+                        base_status: GraphRunStatus::Error,
+                        error: Some(&message),
+                        output: None,
+                        guard,
+                        inputs,
+                    })
+                    .await;
+            }
+        };
+        let receipt = NodeReceipt {
+            node: current.to_string(),
+            step,
+            definition_ref: self.graph.definition_ref.clone(),
+            effective_definition_digest: self.graph.effective_definition_digest.clone(),
+            result_hash: Some(result_hash),
+            cache_hit: false,
+            replayed_from: None,
+            dispatch: None,
+            elapsed_ms: *elapsed_ms,
+            error: diagnostic.clone(),
+            cost: cost.clone(),
+            fanout: Some(crate::model::FanoutReceiptSummary {
+                statuses: statuses
+                    .iter()
+                    .map(|status| match status {
+                        GraphToolCallStatus::Ok => FanoutItemStatus::Completed,
+                        _ => FanoutItemStatus::Failed,
+                    })
+                    .collect(),
+                failed: statuses
+                    .iter()
+                    .filter(|status| **status != GraphToolCallStatus::Ok)
+                    .count(),
+                expected: *total_items,
+                results: None,
+                dispatches: observations
+                    .iter()
+                    .filter_map(|observation| observation.dispatch.clone())
+                    .collect(),
+            }),
+        };
+        self.write_node_receipt_or_warn(graph_run_id, receipt).await;
 
         self.emit_graph_step_completed(graph_run_id, step, current, status, diagnostic.as_deref())
             .await;

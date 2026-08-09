@@ -64,7 +64,10 @@ mod tests {
     fn child_wildcards_cannot_outrun_a_narrower_parent_pattern() {
         // A parent `?` narrows to exactly one character; a child `*` would
         // widen it. Language coverage, not text matching, must decide.
-        assert!(narrow_capabilities(&caps(&["ryeos.get.vault.*"]), &caps(&["ryeos.get.vault.?"])).is_empty());
+        assert!(
+            narrow_capabilities(&caps(&["ryeos.get.vault.*"]), &caps(&["ryeos.get.vault.?"]))
+                .is_empty()
+        );
         // A trailing-star parent provably covers a prefixed child pattern.
         assert_eq!(
             narrow_capabilities(&caps(&["a.b.*"]), &caps(&["a.*"])),

@@ -1,20 +1,25 @@
-//! Canonical graph-action answers for dormant effect-record v2.
+//! Canonical callback answers for durable dispatch-effect records.
 //!
 //! This is the only live callback-envelope decoder allowed to construct a
-//! graph v2 answer. It strips observation texture (thread snapshot and cost),
+//! dispatch answer. It strips observation texture (thread snapshot and cost),
 //! rejects state that replay cannot reconstruct, and leaves the authored
 //! result byte-for-byte represented in the typed answer.
 
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::callback_contract::CallbackDispatchResponse;
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EffectResponseEnvelope {
+    thread: Value,
+    result: Value,
+}
 use crate::envelope::{RuntimeCost, RuntimeResultStatus};
-use ryeos_state::objects::GraphNodeEffectAnswerV2;
+use ryeos_effect_contract::DispatchEffectAnswer;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct NormalizedGraphNodeEffectV2 {
-    pub answer: GraphNodeEffectAnswerV2,
+pub struct NormalizedDispatchEffect {
+    pub answer: DispatchEffectAnswer,
     /// Digest of the complete first response, retained as observation only.
     pub observed_response_digest: String,
 }
@@ -58,13 +63,11 @@ struct SubprocessEnvelope {
     replayed_from: Option<String>,
 }
 
-pub fn normalize_graph_node_effect_v2(
-    response: &Value,
-) -> anyhow::Result<NormalizedGraphNodeEffectV2> {
-    let callback: CallbackDispatchResponse = serde_json::from_value(response.clone())
+pub fn normalize_dispatch_effect(response: &Value) -> anyhow::Result<NormalizedDispatchEffect> {
+    let callback: EffectResponseEnvelope = serde_json::from_value(response.clone())
         .map_err(|error| anyhow::anyhow!("invalid callback response for effect answer: {error}"))?;
-    let observed_response_digest =
-        ryeos_state::objects::effect_record_v2::canonical_value_digest(response)?;
+    let _ = &callback.thread;
+    let observed_response_digest = ryeos_effect_contract::canonical_value_digest(response)?;
     let result = callback.result;
     let answer = match result.as_object() {
         Some(object) if object.contains_key("success") || object.contains_key("status") => {
@@ -88,7 +91,7 @@ pub fn normalize_graph_node_effect_v2(
                 cost.validate()
                     .map_err(|error| anyhow::anyhow!("invalid native response cost: {error}"))?;
             }
-            GraphNodeEffectAnswerV2::Native {
+            DispatchEffectAnswer::Native {
                 result: envelope.result,
                 outputs: envelope.outputs,
                 warnings: Vec::new(),
@@ -112,7 +115,7 @@ pub fn normalize_graph_node_effect_v2(
                     "subprocess response artifacts have no reconstructible effect-answer contract"
                 );
             }
-            GraphNodeEffectAnswerV2::Subprocess {
+            DispatchEffectAnswer::Subprocess {
                 result: envelope.result,
             }
         }
@@ -126,11 +129,11 @@ pub fn normalize_graph_node_effect_v2(
             if result.get("replayed_from").is_some() {
                 anyhow::bail!("an already replayed bare response cannot be recorded again");
             }
-            GraphNodeEffectAnswerV2::Bare { result }
+            DispatchEffectAnswer::Bare { result }
         }
     };
     answer.validate()?;
-    Ok(NormalizedGraphNodeEffectV2 {
+    Ok(NormalizedDispatchEffect {
         answer,
         observed_response_digest,
     })
@@ -160,8 +163,8 @@ mod tests {
                 }
             })
         };
-        let first = normalize_graph_node_effect_v2(&response("T-first", 10)).unwrap();
-        let second = normalize_graph_node_effect_v2(&response("T-second", 99)).unwrap();
+        let first = normalize_dispatch_effect(&response("T-first", 10)).unwrap();
+        let second = normalize_dispatch_effect(&response("T-second", 99)).unwrap();
         assert_eq!(first.answer, second.answer);
         assert_eq!(
             first.answer.digest().unwrap(),
@@ -197,15 +200,13 @@ mod tests {
                 "artifacts": []
             }),
         ] {
-            assert!(
-                normalize_graph_node_effect_v2(&json!({"thread": {}, "result": result})).is_err()
-            );
+            assert!(normalize_dispatch_effect(&json!({"thread": {}, "result": result})).is_err());
         }
     }
 
     #[test]
     fn replay_wraps_bare_objects_without_mutating_authored_bytes() {
-        let normalized = normalize_graph_node_effect_v2(&json!({
+        let normalized = normalize_dispatch_effect(&json!({
             "thread": {"thread_id": "T-historical"},
             "result": {"answer": 42}
         }))

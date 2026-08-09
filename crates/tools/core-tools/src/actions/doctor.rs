@@ -453,6 +453,7 @@ fn import_one(
             verified_code: &isolation_verified_code,
             verified_command: None,
             external_read_only_mounts: &[],
+            target_channel: None,
             item_ref,
             thread_id: "offline-doctor",
         },

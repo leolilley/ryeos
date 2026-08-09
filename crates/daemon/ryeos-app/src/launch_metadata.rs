@@ -62,7 +62,7 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
 // shape require a new epoch so startup rejects the old store before nested
 // deserialization can reinterpret (or partially decode) that authority.
 // v15 carries the pinned COW base/current project-authority pair.
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 16;
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 17;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -185,6 +185,11 @@ pub struct RuntimeLaunchMetadata {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub admitted_execution_closure: Option<ryeos_state::objects::AdmittedExecutionClosure>,
 
+    /// CAS hash of the exact admitted execution realization sealed by the
+    /// launch capsule. Required for every sealed subprocess launch.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub execution_realization_hash: Option<String>,
+
     /// Validated parent execution seed used when a detached follow child is
     /// admitted later, after the live callback context is gone.
     #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -242,6 +247,7 @@ impl Default for RuntimeLaunchMetadata {
             admitted_project_authority: None,
             admitted_artifact_identity: None,
             admitted_launch_capsule_schema: None,
+            execution_realization_hash: None,
             admitted_execution_closure: None,
             follow_parent_context: None,
             follow_launch_window: None,
@@ -753,6 +759,11 @@ impl RuntimeLaunchMetadata {
                 &self.admitted_execution_closure,
                 &attempt.admitted_execution_closure,
             )?,
+            execution_realization_hash: exact(
+                "execution realization",
+                &self.execution_realization_hash,
+                &attempt.execution_realization_hash,
+            )?,
             follow_parent_context: exact(
                 "follow parent authority",
                 &self.follow_parent_context,
@@ -805,6 +816,7 @@ impl RuntimeLaunchMetadata {
                 || self.admitted_artifact_identity.is_some()
                 || self.admitted_launch_capsule_schema.is_some()
                 || self.admitted_execution_closure.is_some()
+                || self.execution_realization_hash.is_some()
                 || self.follow_parent_context.is_some()
                 || self.follow_launch_window.is_some()
                 || self.isolation.is_some()
@@ -832,6 +844,20 @@ impl RuntimeLaunchMetadata {
         }
         if self.sealed_root_request.is_some() && self.admitted_artifact_identity.is_none() {
             anyhow::bail!("sealed launch metadata has no immutable admitted artifact identity");
+        }
+        if self.sealed_root_request.is_some() && self.execution_realization_hash.is_none() {
+            anyhow::bail!("sealed launch metadata has no admitted execution realization");
+        }
+        if let Some(hash) = &self.execution_realization_hash {
+            ryeos_state::objects::thread_snapshot::validate_canonical_hash(
+                "launch metadata execution realization hash",
+                hash,
+            )?;
+            if self.sealed_root_request.is_none() {
+                anyhow::bail!(
+                    "launch metadata has an execution realization without a sealed request"
+                );
+            }
         }
         if self.sealed_root_request.is_none() && self.admitted_project_authority.is_some() {
             anyhow::bail!(
@@ -918,6 +944,7 @@ impl RuntimeLaunchMetadata {
             admitted_project_authority: None,
             admitted_artifact_identity: None,
             admitted_launch_capsule_schema: None,
+            execution_realization_hash: None,
             admitted_execution_closure: None,
             follow_parent_context: None,
             follow_launch_window: None,
@@ -943,6 +970,7 @@ impl RuntimeLaunchMetadata {
             && self.admitted_artifact_identity.is_none()
             && self.admitted_launch_capsule_schema.is_none()
             && self.admitted_execution_closure.is_none()
+            && self.execution_realization_hash.is_none()
             && self.follow_parent_context.is_none()
             && self.follow_launch_window.is_none()
             && self.isolation.is_none()
@@ -996,6 +1024,9 @@ impl RuntimeLaunchMetadata {
             execution_closure: self.admitted_execution_closure.clone().ok_or_else(|| {
                 anyhow::anyhow!("sealed launch has no admitted execution closure")
             })?,
+            execution_realization_hash: self.execution_realization_hash.clone().ok_or_else(
+                || anyhow::anyhow!("sealed launch has no admitted execution realization"),
+            )?,
             accounting_scope: self.accounting_scope.clone(),
             effective_caps,
             runtime_ref: sealed.runtime_ref().to_string(),
@@ -1067,6 +1098,48 @@ impl RuntimeLaunchMetadata {
         self
     }
 
+    pub fn with_execution_realization_hash(mut self, hash: String) -> Self {
+        self.execution_realization_hash = Some(hash);
+        self
+    }
+
+    pub fn admitted_launch_authority(
+        &self,
+    ) -> anyhow::Result<Option<ryeos_state::objects::AdmittedLaunchAuthority>> {
+        let Some(sealed) = self.sealed_root_request.as_ref() else {
+            return Ok(None);
+        };
+        let resume = self
+            .resume_context
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("sealed launch has no persisted resume authority"))?;
+        let mut effective_caps = resume.effective_caps.clone();
+        effective_caps.sort();
+        effective_caps.dedup();
+        let authority = ryeos_state::objects::AdmittedLaunchAuthority {
+            exact_program_hash: sealed.admitted_program_hash()?,
+            project_authority: self.admitted_project_authority.clone().ok_or_else(|| {
+                anyhow::anyhow!("sealed launch has no admitted project authority")
+            })?,
+            lifecycle_authority: resume.lifecycle_authority,
+            launch_driver: self
+                .launch_driver
+                .ok_or_else(|| anyhow::anyhow!("sealed launch has no admitted launch driver"))?,
+            artifact_identity: self.admitted_artifact_identity.clone().ok_or_else(|| {
+                anyhow::anyhow!("sealed launch has no admitted artifact identity")
+            })?,
+            execution_closure: self.admitted_execution_closure.clone().ok_or_else(|| {
+                anyhow::anyhow!("sealed launch has no admitted execution closure")
+            })?,
+            accounting_scope: self.accounting_scope.clone(),
+            effective_caps,
+            runtime_ref: sealed.runtime_ref().to_owned(),
+            executor_ref: sealed.executor_ref().to_owned(),
+        };
+        authority.validate()?;
+        Ok(Some(authority))
+    }
+
     pub fn with_continuation_source(mut self, source_thread_id: impl Into<String>) -> Self {
         self.continuation_source_thread_id = Some(source_thread_id.into());
         self
@@ -1100,6 +1173,7 @@ impl RuntimeLaunchMetadata {
             admitted_artifact_identity: self.admitted_artifact_identity.clone(),
             admitted_launch_capsule_schema: self.admitted_launch_capsule_schema,
             admitted_execution_closure: self.admitted_execution_closure.clone(),
+            execution_realization_hash: self.execution_realization_hash.clone(),
             follow_parent_context: None,
             follow_launch_window: None,
             // Isolation is compiled against one concrete spawn and verified
@@ -1138,6 +1212,7 @@ impl RuntimeLaunchMetadata {
             admitted_artifact_identity: self.admitted_artifact_identity.clone(),
             admitted_launch_capsule_schema: self.admitted_launch_capsule_schema,
             admitted_execution_closure: self.admitted_execution_closure.clone(),
+            execution_realization_hash: self.execution_realization_hash.clone(),
             // A continuation is another segment of the SAME execution and
             // retains the execution budget authority it was admitted under.
             // Dropping this would mint a fresh allowance per segment — the
@@ -1462,6 +1537,7 @@ mod tests {
             admitted_project_authority: None,
             admitted_artifact_identity: None,
             admitted_launch_capsule_schema: None,
+            execution_realization_hash: None,
             admitted_execution_closure: None,
             follow_parent_context: None,
             follow_launch_window: None,

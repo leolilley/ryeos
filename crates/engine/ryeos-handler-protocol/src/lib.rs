@@ -265,16 +265,23 @@ pub struct EffectiveValidateRequest {
     pub validator_config: Value,
     pub canonical_ref: String,
     pub composed: LaunchComposedViewWire,
-    /// Deepest ancestor first. These are provenance identities, not a second
+    /// Deepest ancestor first, preserving the exact identifier authored at
+    /// each `extends` edge. These are provenance identities, not a second
     /// executable payload channel.
-    pub ancestor_refs: Vec<String>,
+    pub ancestor_requested_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EffectiveValidateResponse {
-    Valid { normalized: Value },
-    Invalid { code: String, message: String },
+    Valid {
+        normalized: Value,
+        effect_authorizations: Vec<ryeos_effect_contract::EffectAuthorizationProjection>,
+    },
+    Invalid {
+        code: String,
+        message: String,
+    },
 }
 
 // ── Launch preparation ──────────────────────────────────────────
@@ -361,6 +368,11 @@ pub struct LaunchPrepareSuccess {
     pub runtime_data: BTreeMap<String, Value>,
     pub required_secrets: Vec<LaunchSecretRequirement>,
     pub runtime_facts: BTreeMap<String, Value>,
+    /// Exact executable dependencies selected by the kind-owned launch
+    /// preparer. The generic launch layer resolves and captures each request
+    /// under the signed policy below; handlers cannot supply resolution bytes,
+    /// trust, executable identity, or realization claims.
+    pub execution_dependencies: BTreeMap<String, LaunchExecutionDependencyRequestWire>,
     /// Financial authority result declared by the runtime launch contract.
     /// Required — an absent field is a protocol error, never a default.
     /// The executor validates the payload strictly against the declared
@@ -368,16 +380,33 @@ pub struct LaunchPrepareSuccess {
     /// launch capsule; the handler protocol treats the payload as bounded
     /// opaque JSON.
     pub financial_authority: FinancialAuthorityResultWire,
+    /// External-effect authority declared by the signed runtime launch
+    /// contract. Required on the wire so a preparer cannot silently omit a
+    /// newly introduced admission boundary. Its family is opaque here.
+    pub external_effect_authority: ExternalEffectAuthorityResultWire,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchExecutionDependencyRequestWire {
+    pub item_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExternalEffectAuthorityResultWire {
+    None,
+    External { authority: Value },
 }
 
 /// Financial authority produced by launch preparation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FinancialAuthorityResultWire {
-    /// The runtime performs no direct paid provider work.
+    /// The runtime exercises no direct financial boundary.
     None,
-    /// A sealed `ProviderAccountingAuthority` (version 1) payload.
-    ProviderAccountingAuthorityV1 { authority: Value },
+    /// A sealed current accounting-contract payload.
+    Accounting { authority: Value },
 }
 
 /// Contract-side declaration of the required financial authority kind.
@@ -385,7 +414,14 @@ pub enum FinancialAuthorityResultWire {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FinancialAuthorityDeclWire {
     None,
-    ProviderAccountingAuthorityV1,
+    Accounting,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExternalEffectAuthorityDeclWire {
+    None,
+    External,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -456,10 +492,21 @@ pub struct ValidateLaunchPreparerConfigRequest {
     pub secret_policy: LaunchSecretPolicyDeclWire,
     pub required_runtime_data: Vec<String>,
     pub runtime_facts: BTreeMap<String, RuntimeFactDeclWire>,
+    pub execution_dependencies: LaunchExecutionDependencyPolicyWire,
     /// Required financial-authority contract term. A preparer that does not
     /// understand this term fails strict decoding instead of silently
     /// acknowledging a contract it cannot satisfy.
     pub financial_authority: FinancialAuthorityDeclWire,
+    pub external_effect_authority: ExternalEffectAuthorityDeclWire,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchExecutionDependencyPolicyWire {
+    pub max_dependencies: u16,
+    pub allowed_kinds: Vec<String>,
+    pub allowed_spaces: Vec<ItemSpaceWire>,
+    pub allowed_trust: Vec<TrustClassWire>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -27,3 +27,4 @@ isolation_backends:
       - process.host_pid_namespace
       - process.target_pid_reporting
       - lifecycle.shared_process_group
+      - ipc.target_unix_stream

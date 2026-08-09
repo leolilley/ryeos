@@ -1,0 +1,17 @@
+[package]
+name = "ryeos-effect-contract"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Kind-neutral admitted durable dispatch-effect contracts"
+
+[lib]
+name = "ryeos_effect_contract"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true }
+lillux = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

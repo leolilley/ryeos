@@ -46,7 +46,7 @@ pub use command::{
 };
 pub use compiled_template::{CompiledActionTemplate, CompiledJsonTemplate, CompiledTemplateError};
 pub use daemon_rpc::{DaemonRpcClient, RpcError, resolve_daemon_socket_path};
-pub use effect_answer::{NormalizedGraphNodeEffectV2, normalize_graph_node_effect_v2};
+pub use effect_answer::{NormalizedDispatchEffect, normalize_dispatch_effect};
 pub use events::{
     CognitionInAssembler, CognitionInAssembly, CognitionInChunk, HOOK_FAILURE_SCHEMA,
     HOOK_OBSERVATION_SCHEMA, HookEvidenceDescriptor, HookFailedPayload, HookFailureClass,

@@ -809,6 +809,35 @@ pub struct EffectiveValidatorDecl {
     pub config: Value,
 }
 
+/// Signed mechanical projection of a subject's durable-effect ceiling.
+/// The path is kind-owned; generic dispatch code reads only the projected
+/// class vocabulary and never names the authored field.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectClassCeilingDecl {
+    pub path: Vec<String>,
+}
+
+/// Signed resource and lifecycle ceiling for a callback-free persistent
+/// subprocess session. This contract is deliberately meaning-blind: the
+/// process may implement inference or any future request/response workload,
+/// while the substrate owns only admission, framing, reuse, cancellation, and
+/// bounded lifetime.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersistentSessionDecl {
+    pub max_processes: u16,
+    pub max_inflight_per_process: u16,
+    pub max_address_space_bytes: u64,
+    pub max_cpu_seconds: u64,
+    /// Kernel RLIMIT_NPROC ceiling. On Unix this counts processes owned by the
+    /// process's real UID, not only descendants of the admitted process.
+    pub real_uid_process_limit: u64,
+    pub ready_timeout_ms: u64,
+    pub request_timeout_ms: u64,
+    pub idle_timeout_ms: u64,
+}
+
 /// Execution configuration for a kind (resolution pipeline + aliases).
 /// Only kinds with an execution block can be executed.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -862,10 +891,19 @@ pub struct ExecutionSchema {
     /// of this kind may not declare the top-level `external_content` field.
     #[serde(default)]
     pub external_content: Option<ExecutionExternalContentDecl>,
+    /// Optional generic persistent-session mechanics. Presence does not name
+    /// a domain and is actionable only with a subprocess terminator whose
+    /// signed protocol descriptor declares a session channel.
+    #[serde(default)]
+    pub persistent_session: Option<PersistentSessionDecl>,
     /// Optional kind-specific semantic validator over the complete composed
     /// effective program.
     #[serde(default)]
     pub effective_validator: Option<EffectiveValidatorDecl>,
+    /// Optional signed path to the composed subject's effect-class ceiling.
+    /// Absence means the kind is ineligible for durable dispatch effects.
+    #[serde(default)]
+    pub effect_class_ceiling: Option<EffectClassCeilingDecl>,
     /// Kind-level method dispatch: the route shared by all methods plus
     /// the default method invoked when `/execute` omits `call.method`.
     /// Present iff `methods` is non-empty (enforced at load time).
@@ -2019,12 +2057,45 @@ fn parse_execution_schema(
         });
     }
 
-    // The execution block is parsed key-by-key (not through a single
-    // `deny_unknown_fields` struct), so an unrecognized key would be
-    // silently ignored. Reject the keys that look like a method selector
-    // but are not part of the schema, so an author who reaches for the
-    // wrong spelling gets a pointer to the right one instead of a field
-    // that does nothing.
+    // The execution block is parsed key-by-key rather than through a single
+    // serde struct. Make that strict: a signed schema field that the engine
+    // ignores is worse than a load failure because it looks like policy while
+    // granting no mechanics.
+    const EXECUTION_KEYS: &[&str] = &[
+        "aliases",
+        "alias_max_depth",
+        "terminator",
+        "delegate",
+        "thread_profile",
+        "history_policy",
+        "hooks",
+        "external_content",
+        "persistent_session",
+        "effective_validator",
+        "effect_class_ceiling",
+        "method_dispatch",
+        "methods",
+        "augmentation_methods",
+        "launch_augmentations",
+        // Kept in the recognized-key set solely so the explicit rejection
+        // below can name the replacement. They are never parsed or accepted.
+        "operations",
+        "default_operation",
+    ];
+    for key in execution_value
+        .as_mapping()
+        .expect("execution mapping checked")
+        .keys()
+    {
+        let key = key.as_str().ok_or_else(|| EngineError::SchemaLoaderError {
+            reason: format!("{display}: execution keys must be strings"),
+        })?;
+        if !EXECUTION_KEYS.contains(&key) {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!("{display}: unknown execution field `{key}`"),
+            });
+        }
+    }
     for (unsupported_key, replacement) in [
         ("operations", "methods"),
         ("default_operation", "method_dispatch.default"),
@@ -2100,15 +2171,52 @@ fn parse_execution_schema(
 
     let external_content = match execution_value.get("external_content") {
         Some(value) => {
-            let declaration = serde_yaml::from_value::<ExecutionExternalContentDecl>(
-                value.clone(),
-            )
-            .map_err(|error| EngineError::SchemaLoaderError {
-                reason: format!(
-                    "{display}: invalid execution.external_content declaration: {error}"
-                ),
-            })?;
+            let declaration = serde_yaml::from_value::<ExecutionExternalContentDecl>(value.clone())
+                .map_err(|error| EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: invalid execution.external_content declaration: {error}"
+                    ),
+                })?;
             validate_execution_external_content_decl(&declaration, display)?;
+            Some(declaration)
+        }
+        None => None,
+    };
+
+    let persistent_session = match execution_value.get("persistent_session") {
+        Some(value) => {
+            let declaration = serde_yaml::from_value::<PersistentSessionDecl>(value.clone())
+                .map_err(|error| EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: invalid execution.persistent_session declaration: {error}"
+                    ),
+                })?;
+            if declaration.max_processes == 0
+                || declaration.max_processes > 64
+                // The current framed-session substrate serializes access to
+                // each child process.  Do not let signed content advertise
+                // multiplexing until request correlation, cancellation, and
+                // backpressure have a real concurrent implementation.
+                || declaration.max_inflight_per_process != 1
+                || declaration.max_address_space_bytes < 64 * 1024 * 1024
+                || declaration.max_address_space_bytes > 1024 * 1024 * 1024 * 1024
+                || declaration.max_cpu_seconds == 0
+                || declaration.max_cpu_seconds > 7 * 24 * 60 * 60
+                || declaration.real_uid_process_limit == 0
+                || declaration.real_uid_process_limit > 4096
+                || declaration.ready_timeout_ms == 0
+                || declaration.ready_timeout_ms > 10 * 60 * 1000
+                || declaration.request_timeout_ms == 0
+                || declaration.request_timeout_ms > 60 * 60 * 1000
+                || declaration.idle_timeout_ms == 0
+                || declaration.idle_timeout_ms > 24 * 60 * 60 * 1000
+            {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: execution.persistent_session resource bounds are outside substrate limits"
+                    ),
+                });
+            }
             Some(declaration)
         }
         None => None,
@@ -2126,6 +2234,31 @@ fn parse_execution_schema(
                 return Err(EngineError::SchemaLoaderError {
                     reason: format!(
                         "{display}: execution.effective_validator.handler must not be empty"
+                    ),
+                });
+            }
+            Some(declaration)
+        }
+        None => None,
+    };
+
+    let effect_class_ceiling = match execution_value.get("effect_class_ceiling") {
+        Some(value) => {
+            let declaration = serde_yaml::from_value::<EffectClassCeilingDecl>(value.clone())
+                .map_err(|error| EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: invalid execution.effect_class_ceiling declaration: {error}"
+                    ),
+                })?;
+            if declaration.path.is_empty()
+                || declaration
+                    .path
+                    .iter()
+                    .any(|segment| segment.trim().is_empty())
+            {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: execution.effect_class_ceiling.path must contain non-empty segments"
                     ),
                 });
             }
@@ -2279,6 +2412,15 @@ fn parse_execution_schema(
             ),
         });
     }
+    if persistent_session.is_some()
+        && !matches!(terminator, Some(TerminatorDecl::Subprocess { .. }))
+    {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: execution.persistent_session requires a subprocess terminator"
+            ),
+        });
+    }
 
     // S1: load-time non-actionable schema rejection. A kind that
     // declares `execution:` MUST declare at least one routing
@@ -2329,7 +2471,9 @@ fn parse_execution_schema(
         history_policy,
         hooks,
         external_content,
+        persistent_session,
         effective_validator,
+        effect_class_ceiling,
         method_dispatch,
         methods,
         augmentation_methods,
@@ -2385,8 +2529,7 @@ fn validate_execution_external_content_decl(
     declaration: &ExecutionExternalContentDecl,
     display: &str,
 ) -> Result<(), EngineError> {
-    if declaration.realization_derived
-        != crate::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY
+    if declaration.realization_derived != crate::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY
     {
         return Err(EngineError::SchemaLoaderError {
             reason: format!(
@@ -2396,8 +2539,7 @@ fn validate_execution_external_content_decl(
         });
     }
     if declaration.max_declarations == 0
-        || declaration.max_declarations
-            > crate::external_content::MAX_DECLARATIONS_PER_ITEM
+        || declaration.max_declarations > crate::external_content::MAX_DECLARATIONS_PER_ITEM
     {
         return Err(EngineError::SchemaLoaderError {
             reason: format!(
@@ -4884,9 +5026,7 @@ metadata:
 
     // ── execution.external_content contract parsing ─────────────────────
 
-    fn load_external_content_schema(
-        contract_lines: &[&str],
-    ) -> Result<KindRegistry, EngineError> {
+    fn load_external_content_schema(contract_lines: &[&str]) -> Result<KindRegistry, EngineError> {
         let mut yaml = String::from(
             "location:\n  directory: tools\nexecution:\n  aliases:\n    \"@base\": \"tool:ryeos/base/base\"\n  external_content:\n",
         );
@@ -4952,7 +5092,9 @@ metadata:
             ])
             .unwrap_err();
             assert!(
-                error.to_string().contains("max_declarations must be within"),
+                error
+                    .to_string()
+                    .contains("max_declarations must be within"),
                 "{bad}: got {error}"
             );
         }

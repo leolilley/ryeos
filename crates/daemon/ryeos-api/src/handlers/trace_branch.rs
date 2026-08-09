@@ -60,7 +60,7 @@ fn verify_ref(actual: &ryeos_app::state_store::PersistedEventRecord, expected: &
 
 fn is_state_anchor(event: &ryeos_app::state_store::PersistedEventRecord) -> bool {
     event.event_type == "milestone"
-        && ryeos_state::objects::StateAnchorMilestoneV2::from_value(event.payload.clone()).is_ok()
+        && ryeos_state::objects::StateAnchorMilestone::from_value(event.payload.clone()).is_ok()
 }
 
 fn durable_event_by_ref(

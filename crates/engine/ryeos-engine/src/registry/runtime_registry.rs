@@ -41,6 +41,7 @@ const MAX_LAUNCH_BINDINGS: usize = 32;
 const MAX_LAUNCH_RUNTIME_DATA_KEYS: usize = 32;
 const MAX_LAUNCH_CONFIG_INPUTS: usize = 16;
 const MAX_LAUNCH_RUNTIME_FACTS: usize = 128;
+const MAX_LAUNCH_EXECUTION_DEPENDENCIES: usize = 8;
 const MAX_LAUNCH_SECRET_NAMES: usize = 32;
 const MAX_LAUNCH_FACT_BYTES: u32 = 16 * 1024;
 const MAX_LAUNCH_NAME_BYTES: usize = 64;
@@ -156,19 +157,43 @@ pub struct LaunchContractDecl {
     pub secret_policy: LaunchSecretPolicyDecl,
     pub required_runtime_data: Vec<String>,
     pub runtime_facts: BTreeMap<String, RuntimeFactDecl>,
+    /// Signed mechanical ceiling for executable dependencies a kind-owned
+    /// launch preparer may select. Resolution and trust are always derived by
+    /// the engine; the handler supplies only canonical item refs.
+    pub execution_dependencies: LaunchExecutionDependencyPolicy,
     /// Required declaration of the financial authority this runtime's launch
-    /// preparation must produce. `none` states the runtime performs no
-    /// direct paid provider work; a paid runtime declares the exact sealed
-    /// authority kind so an old preparer cannot silently satisfy the
-    /// contract.
+    /// preparation must produce. `none` states the runtime exercises no
+    /// direct financial boundary; an accounting runtime declares the exact
+    /// mechanical authority contract so a mismatched preparer cannot satisfy
+    /// it silently.
     pub financial_authority: FinancialAuthorityDecl,
+    /// Required external-effect authority contract. The family carried by the
+    /// authority remains opaque to the engine; runtimes with no such boundary
+    /// declare `none` explicitly.
+    pub external_effect_authority: ExternalEffectAuthorityDecl,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchExecutionDependencyPolicy {
+    pub max_dependencies: u16,
+    pub allowed_kinds: Vec<String>,
+    pub allowed_spaces: Vec<LaunchItemSpace>,
+    pub allowed_trust: Vec<TrustClass>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FinancialAuthorityDecl {
     None,
-    ProviderAccountingAuthorityV1,
+    Accounting,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExternalEffectAuthorityDecl {
+    None,
+    External,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1014,16 +1039,78 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
         }
     }
 
+    let dependency_policy = &contract.execution_dependencies;
+    if usize::from(dependency_policy.max_dependencies) > MAX_LAUNCH_EXECUTION_DEPENDENCIES {
+        return runtime_yaml_error(
+            yaml_path,
+            format!(
+                "launch_contract.execution_dependencies.max_dependencies exceeds the limit of {MAX_LAUNCH_EXECUTION_DEPENDENCIES}"
+            ),
+        );
+    }
+    for (field, values) in [
+        ("allowed_kinds", dependency_policy.allowed_kinds.len()),
+        ("allowed_spaces", dependency_policy.allowed_spaces.len()),
+        ("allowed_trust", dependency_policy.allowed_trust.len()),
+    ] {
+        if (dependency_policy.max_dependencies == 0) != (values == 0) {
+            return runtime_yaml_error(
+                yaml_path,
+                format!(
+                    "launch_contract.execution_dependencies.{field} must be empty exactly when max_dependencies is zero"
+                ),
+            );
+        }
+    }
+    if dependency_policy.max_dependencies != 0 {
+        validate_non_empty_unique(
+            yaml_path,
+            "launch_contract.execution_dependencies.allowed_kinds",
+            &dependency_policy.allowed_kinds,
+        )?;
+        validate_non_empty_unique(
+            yaml_path,
+            "launch_contract.execution_dependencies.allowed_spaces",
+            &dependency_policy.allowed_spaces,
+        )?;
+        validate_non_empty_unique(
+            yaml_path,
+            "launch_contract.execution_dependencies.allowed_trust",
+            &dependency_policy.allowed_trust,
+        )?;
+        if dependency_policy
+            .allowed_spaces
+            .contains(&LaunchItemSpace::Node)
+            || dependency_policy
+                .allowed_trust
+                .contains(&TrustClass::TrustedNode)
+        {
+            return runtime_yaml_error(
+                yaml_path,
+                "launch execution dependencies cannot use node source/trust authority",
+            );
+        }
+        if dependency_policy.allowed_spaces.as_slice() != [LaunchItemSpace::Bundle]
+            || dependency_policy.allowed_trust.as_slice() != [TrustClass::TrustedBundle]
+        {
+            return runtime_yaml_error(
+                yaml_path,
+                "launch execution dependencies currently require exact installed bundle source and trusted-bundle provenance",
+            );
+        }
+    }
+
     if matches!(&contract.preparation, LaunchPreparationDecl::None)
         && (!contract.config_inputs.is_empty()
             || secret_policy.max_requirements != 0
             || !secret_policy.allowed_names.is_empty()
             || !contract.required_runtime_data.is_empty()
-            || !contract.runtime_facts.is_empty())
+            || !contract.runtime_facts.is_empty()
+            || contract.execution_dependencies.max_dependencies != 0)
     {
         return runtime_yaml_error(
             yaml_path,
-            "launch_contract.preparation kind `none` requires empty config_inputs, secret_policy, required_runtime_data, and runtime_facts",
+            "launch_contract.preparation kind `none` requires empty config inputs, secret policy, runtime data, runtime facts, and execution dependencies",
         );
     }
 
@@ -1206,7 +1293,14 @@ mod tests {
                 },
                 required_runtime_data: vec![],
                 runtime_facts: BTreeMap::new(),
+                execution_dependencies: LaunchExecutionDependencyPolicy {
+                    max_dependencies: 0,
+                    allowed_kinds: vec![],
+                    allowed_spaces: vec![],
+                    allowed_trust: vec![],
+                },
                 financial_authority: FinancialAuthorityDecl::None,
+                external_effect_authority: ExternalEffectAuthorityDecl::None,
             },
             observability: RuntimeObservabilityDecl::default(),
             limits: RuntimeLimitsDecl::default(),
@@ -1238,7 +1332,14 @@ mod tests {
         "    allowed_names: []\n",
         "  required_runtime_data: []\n",
         "  runtime_facts: {}\n",
+        "  execution_dependencies:\n",
+        "    max_dependencies: 0\n",
+        "    allowed_kinds: []\n",
+        "    allowed_spaces: []\n",
+        "    allowed_trust: []\n",
         "  financial_authority:\n",
+        "    kind: none\n",
+        "  external_effect_authority:\n",
         "    kind: none\n",
     );
 

@@ -12,6 +12,7 @@ directories = { workspace = true }
 jsonschema = { workspace = true }
 lillux = { workspace = true }
 ryeos-accounting = { workspace = true }
+ryeos-effect-contract = { workspace = true }
 ryeos-expression = { workspace = true }
 libc = { workspace = true }
 regex = { workspace = true }

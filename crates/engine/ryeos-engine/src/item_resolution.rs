@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::canonical_ref::CanonicalRef;
 use crate::contracts::{
-    ItemSpace, ProbedAbsence, ShadowedCandidate, SignatureEnvelope, SignatureHeader,
+    ItemSourceRoot, ItemSpace, ProbedAbsence, ShadowedCandidate, SignatureEnvelope, SignatureHeader,
 };
 use crate::error::EngineError;
 use crate::kind_registry::KindSchema;
@@ -49,10 +49,19 @@ pub struct RegisteredBundleRoot {
 #[derive(Debug, Clone)]
 pub struct ResolutionRoot {
     pub space: ItemSpace,
+    pub identity: ItemSourceRoot,
     /// Human-readable label, e.g. "project", "bundle:standard"
     pub label: String,
     /// Path to the `.ai/` directory
     pub ai_root: PathBuf,
+    /// Exact registered content root, when this root was admitted from a
+    /// canonical project or bundle registration.
+    ///
+    /// A caller that only supplies a loose `.ai` search path does not thereby
+    /// grant access to its parent directory. Consumers of named content roots
+    /// must require this explicit authority rather than reconstructing it from
+    /// filesystem layout.
+    pub content_root: Option<PathBuf>,
 }
 
 /// Ordered list of search roots for item resolution.
@@ -73,16 +82,24 @@ impl ResolutionRoots {
         if let Some(project_ai_root) = project_ai_root {
             ordered.push(ResolutionRoot {
                 space: ItemSpace::Project,
+                identity: ItemSourceRoot::Search {
+                    label: "project".to_owned(),
+                },
                 label: "project".to_owned(),
                 ai_root: project_ai_root,
+                content_root: None,
             });
         }
 
         for (i, bundle_ai_root) in bundle_ai_roots.iter().enumerate() {
             ordered.push(ResolutionRoot {
                 space: ItemSpace::Bundle,
+                identity: ItemSourceRoot::Search {
+                    label: format!("bundle:{i}"),
+                },
                 label: format!("bundle:{i}"),
                 ai_root: bundle_ai_root.clone(),
+                content_root: None,
             });
         }
 
@@ -100,16 +117,134 @@ impl ResolutionRoots {
         if let Some(project_root) = project_root {
             ordered.push(ResolutionRoot {
                 space: ItemSpace::Project,
+                identity: ItemSourceRoot::Project,
                 label: "project".to_owned(),
                 ai_root: project_root.join(crate::AI_DIR),
+                content_root: Some(project_root),
             });
         }
         ordered.extend(bundles.iter().map(|bundle| ResolutionRoot {
             space: ItemSpace::Bundle,
+            identity: ItemSourceRoot::Bundle {
+                name: bundle.name.clone(),
+            },
             label: format!("bundle:{}", bundle.name),
             ai_root: bundle.canonical_root.join(crate::AI_DIR),
+            content_root: Some(bundle.canonical_root.clone()),
         }));
         Self { ordered }
+    }
+
+    /// Resolve one authority-bearing source identity to its exact registered
+    /// content root. Diagnostic paths and labels never participate in the
+    /// identity join; they are checked only for consistency after the typed
+    /// winner has been selected.
+    pub fn authoritative_root(
+        &self,
+        identity: &ItemSourceRoot,
+        space: ItemSpace,
+        source_path: Option<&Path>,
+    ) -> Result<&ResolutionRoot, EngineError> {
+        if matches!(identity, ItemSourceRoot::Search { .. }) {
+            return Err(EngineError::Internal(
+                "a loose search root cannot supply content authority".to_owned(),
+            ));
+        }
+        if !identity.matches_space(space) {
+            return Err(EngineError::Internal(format!(
+                "typed source root {identity:?} contradicts source space {space:?}"
+            )));
+        }
+        let mut matches = self
+            .ordered
+            .iter()
+            .filter(|root| root.identity == *identity && root.space == space);
+        let root = matches.next().ok_or_else(|| {
+            EngineError::Internal(format!(
+                "typed source root {identity:?} is absent from the admitted resolution roots"
+            ))
+        })?;
+        if matches.next().is_some() {
+            return Err(EngineError::Internal(format!(
+                "typed source root {identity:?} is duplicated in the admitted resolution roots"
+            )));
+        }
+        let content_root = root.content_root.as_deref().ok_or_else(|| {
+            EngineError::Internal(format!(
+                "typed source root {identity:?} has no registered content authority"
+            ))
+        })?;
+        let expected_ai_root = content_root.join(crate::AI_DIR);
+        if root.ai_root != expected_ai_root {
+            return Err(EngineError::Internal(format!(
+                "typed source root {identity:?} has incoherent content and .ai roots"
+            )));
+        }
+        if let Some(path) = source_path
+            && !path.starts_with(&root.ai_root)
+        {
+            return Err(EngineError::Internal(format!(
+                "resolved source {} contradicts typed root {identity:?}",
+                path.display()
+            )));
+        }
+        Ok(root)
+    }
+
+    pub fn authoritative_bundle(&self, name: &str) -> Result<&ResolutionRoot, EngineError> {
+        self.authoritative_root(
+            &ItemSourceRoot::Bundle {
+                name: name.to_owned(),
+            },
+            ItemSpace::Bundle,
+            None,
+        )
+    }
+
+    /// Return the exact registered project content root, if this resolution
+    /// generation has project space. A loose search path is not promoted into
+    /// project authority.
+    pub fn authoritative_project_root(&self) -> Result<Option<&Path>, EngineError> {
+        let mut projects = self
+            .ordered
+            .iter()
+            .filter(|root| root.space == ItemSpace::Project);
+        let Some(_) = projects.next() else {
+            return Ok(None);
+        };
+        if projects.next().is_some() {
+            return Err(EngineError::Internal(
+                "multiple project roots exist in one resolution generation".to_owned(),
+            ));
+        }
+        let project =
+            self.authoritative_root(&ItemSourceRoot::Project, ItemSpace::Project, None)?;
+        Ok(project.content_root.as_deref())
+    }
+
+    /// Return installed bundle content roots in resolution order. Every entry
+    /// must carry an exact bundle identity; labels and `.ai` parents are never
+    /// used to reconstruct authority.
+    pub fn authoritative_bundle_roots(&self) -> Result<Vec<&Path>, EngineError> {
+        let mut result = Vec::new();
+        for root in self
+            .ordered
+            .iter()
+            .filter(|root| root.space == ItemSpace::Bundle)
+        {
+            let ItemSourceRoot::Bundle { name } = &root.identity else {
+                return Err(EngineError::Internal(
+                    "bundle space contains a non-authoritative search root".to_owned(),
+                ));
+            };
+            let selected = self.authoritative_bundle(name)?;
+            result.push(selected.content_root.as_deref().ok_or_else(|| {
+                EngineError::Internal(format!(
+                    "typed bundle root {name} has no registered content authority"
+                ))
+            })?);
+        }
+        Ok(result)
     }
 }
 
@@ -118,6 +253,7 @@ impl ResolutionRoots {
 pub struct ResolutionResult {
     pub winner_path: PathBuf,
     pub winner_space: ItemSpace,
+    pub winner_root_identity: ItemSourceRoot,
     pub winner_label: String,
     pub matched_ext: String,
     /// `.ai/` root directory under which the winner was found.
@@ -190,7 +326,7 @@ fn resolve_item_full_inner(
             searched_spaces,
         });
     }
-    let mut winner: Option<(PathBuf, ItemSpace, String, String, PathBuf)> = None;
+    let mut winner: Option<(PathBuf, ItemSpace, ItemSourceRoot, String, String, PathBuf)> = None;
     let mut shadowed = Vec::new();
     let mut probed_absent = Vec::new();
     let mut searched_spaces = Vec::new();
@@ -241,6 +377,7 @@ fn resolve_item_full_inner(
                     winner = Some((
                         path,
                         root.space,
+                        root.identity.clone(),
                         root.label.clone(),
                         ext_spec.ext.clone(),
                         root.ai_root.clone(),
@@ -267,7 +404,7 @@ fn resolve_item_full_inner(
     }
 
     match winner {
-        Some((path, space, label, ext, ai_root)) => {
+        Some((path, space, root_identity, label, ext, ai_root)) => {
             if !shadowed.is_empty() {
                 tracing::debug!(
                     item_ref = %ref_,
@@ -279,6 +416,7 @@ fn resolve_item_full_inner(
             Ok(ResolutionResult {
                 winner_path: path,
                 winner_space: space,
+                winner_root_identity: root_identity,
                 winner_label: label,
                 matched_ext: ext,
                 winner_ai_root: ai_root,
@@ -566,6 +704,77 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
+    #[test]
+    fn authoritative_roots_select_typed_identity_not_nested_path_prefix() {
+        let roots = ResolutionRoots::from_registered(
+            Some(PathBuf::from("/projects/demo")),
+            &[
+                RegisteredBundleRoot {
+                    name: "outer".to_owned(),
+                    canonical_root: PathBuf::from("/bundles/root"),
+                },
+                RegisteredBundleRoot {
+                    name: "inner".to_owned(),
+                    canonical_root: PathBuf::from("/bundles/root/nested"),
+                },
+            ],
+        );
+        let selected = roots
+            .authoritative_root(
+                &ItemSourceRoot::Bundle {
+                    name: "inner".to_owned(),
+                },
+                ItemSpace::Bundle,
+                Some(Path::new("/bundles/root/nested/.ai/tools/example.yaml")),
+            )
+            .unwrap();
+        assert_eq!(
+            selected.content_root.as_deref(),
+            Some(Path::new("/bundles/root/nested"))
+        );
+        assert!(
+            roots
+                .authoritative_root(
+                    &ItemSourceRoot::Bundle {
+                        name: "outer".to_owned(),
+                    },
+                    ItemSpace::Bundle,
+                    Some(Path::new("/bundles/root/nested/.ai/tools/example.yaml")),
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn loose_search_and_duplicate_typed_roots_cannot_supply_authority() {
+        let loose = ResolutionRoots::from_flat(None, vec![PathBuf::from("/bundle/.ai")]);
+        assert!(loose.authoritative_bundle_roots().is_err());
+
+        let duplicate = ResolutionRoots {
+            ordered: vec![
+                ResolutionRoot {
+                    space: ItemSpace::Bundle,
+                    identity: ItemSourceRoot::Bundle {
+                        name: "same".to_owned(),
+                    },
+                    label: "diagnostic-a".to_owned(),
+                    ai_root: PathBuf::from("/a/.ai"),
+                    content_root: Some(PathBuf::from("/a")),
+                },
+                ResolutionRoot {
+                    space: ItemSpace::Bundle,
+                    identity: ItemSourceRoot::Bundle {
+                        name: "same".to_owned(),
+                    },
+                    label: "diagnostic-b".to_owned(),
+                    ai_root: PathBuf::from("/b/.ai"),
+                    content_root: Some(PathBuf::from("/b")),
+                },
+            ],
+        };
+        assert!(duplicate.authoritative_bundle("same").is_err());
+    }
+
     fn make_kind_schema(directory: &str, extensions: Vec<(&str, &str)>) -> KindSchema {
         KindSchema {
             directory: directory.to_owned(),
@@ -574,6 +783,7 @@ mod tests {
             resolution: Vec::new(),
             effective_trust: crate::kind_registry::EffectiveTrustPolicy::default(),
             execution: Some(crate::kind_registry::ExecutionSchema {
+                effect_class_ceiling: None,
                 aliases: std::collections::HashMap::new(),
                 alias_max_depth: 8,
                 terminator: None,
@@ -587,6 +797,7 @@ mod tests {
                 hooks: None,
                 external_content: None,
                 effective_validator: None,
+                persistent_session: None,
             }),
             extensions: extensions
                 .into_iter()

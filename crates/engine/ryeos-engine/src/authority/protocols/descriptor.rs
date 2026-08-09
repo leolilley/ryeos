@@ -47,6 +47,34 @@ pub struct ProtocolDescriptor {
 
     /// Callback channel kind.
     pub callback_channel: CallbackChannel,
+
+    /// Optional bidirectional request/response channel carried independently
+    /// of stdio. Absence means this is an ordinary one-shot protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<PersistentSessionProtocol>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum PersistentSessionChannel {
+    InheritedUnixSocket,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum PersistentSessionFraming {
+    U32BeJson,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersistentSessionProtocol {
+    pub channel: PersistentSessionChannel,
+    pub channel_env: String,
+    pub framing: PersistentSessionFraming,
+    pub wire_protocol: String,
+    pub wire_version: u32,
+    pub max_frame_bytes: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +122,54 @@ pub fn validate_method_runtime_protocol(descriptor: &ProtocolDescriptor) -> Resu
     Ok(())
 }
 
+pub fn validate_persistent_session_protocol(
+    descriptor: &ProtocolDescriptor,
+) -> Result<&PersistentSessionProtocol, String> {
+    let session = descriptor
+        .session
+        .as_ref()
+        .ok_or_else(|| "does not declare a persistent session channel".to_owned())?;
+    if descriptor.callback_channel != CallbackChannel::None
+        || descriptor.stdin.shape != StdinShape::Opaque
+        || descriptor.stdout.shape != StdoutShape::OpaqueBytes
+        || descriptor.stdout.mode != StdoutMode::Terminal
+        || descriptor.lifecycle.mode != LifecycleMode::Managed
+        || descriptor.capabilities.allows_pushed_head
+        || descriptor.capabilities.allows_target_site
+        || descriptor.capabilities.allows_detached
+    {
+        return Err(
+            "persistent sessions require callback-free opaque managed stdio and no dispatch capabilities"
+                .to_owned(),
+        );
+    }
+    if session.channel != PersistentSessionChannel::InheritedUnixSocket
+        || session.channel_env.is_empty()
+        || session.channel_env.len() > 128
+        || !session
+            .channel_env
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| {
+                byte == b'_' || byte.is_ascii_uppercase() || (index != 0 && byte.is_ascii_digit())
+            })
+        || session.wire_protocol.is_empty()
+        || session.wire_protocol.len() > 128
+        || session.wire_protocol.trim() != session.wire_protocol
+        || session.wire_protocol.chars().any(char::is_control)
+        || session.wire_version == 0
+        || session.max_frame_bytes == 0
+        || session.max_frame_bytes > 16 * 1024 * 1024
+        || descriptor
+            .env_injections
+            .iter()
+            .any(|injection| injection.name == session.channel_env)
+    {
+        return Err("persistent session descriptor is not canonical or bounded".to_owned());
+    }
+    Ok(session)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,6 +201,7 @@ mod tests {
                 mode: LifecycleMode::Managed,
             },
             callback_channel: CallbackChannel::Http,
+            session: None,
         }
     }
 

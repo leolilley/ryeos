@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-27T09:00:06Z:14672fd2daff72c90a1fe431970ccd3277c15eed9f29f3d2557007ea18523438:7kMPtNbUzQO91YRN4qXkjVsrhr0NGas0yV8wMdjO+kx5dnqJAXAv9bE0PsrXki3xvYqtHCwPsV1Bl8Y2oAXfBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-09T05:54:22Z:14672fd2daff72c90a1fe431970ccd3277c15eed9f29f3d2557007ea18523438:7kMPtNbUzQO91YRN4qXkjVsrhr0NGas0yV8wMdjO+kx5dnqJAXAv9bE0PsrXki3xvYqtHCwPsV1Bl8Y2oAXfBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/bundle"
 name: "publish"
 executor_id: "@subprocess"

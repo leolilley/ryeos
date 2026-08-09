@@ -216,7 +216,7 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             root_admission: None,
             root_dispatch_evidence: None,
             parent_execution_context: None,
-            requested_effect_class: None,
+            effect_authority: None,
         };
 
         let result = ryeos_executor::dispatch::dispatch(

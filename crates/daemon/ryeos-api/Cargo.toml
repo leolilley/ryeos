@@ -33,6 +33,8 @@ ryeos-scheduler = { workspace = true }
 ryeos-state = { workspace = true }
 ryeos-bundle = { workspace = true }
 ryeos-directive-core = { workspace = true }
+ryeos-effect-contract = { workspace = true }
+ryeos-provider-contract = { workspace = true }
 ryeos-tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

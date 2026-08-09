@@ -5,21 +5,23 @@ use std::collections::{BTreeMap, HashSet};
 use anyhow::{Context, Result, anyhow, bail};
 use ryeos_engine::hooks::{EffectiveHookPlan, ExpressionCondition, HookDefinition};
 use ryeos_engine::resolution::KindComposedView;
-use ryeos_runtime::{
-    CompilationLimits, CompiledActionTemplate, CompiledJsonTemplate, EvaluationContext,
-    EvaluationLimits, EvaluationSession, Reference, ReferenceSegment, ReferenceSet,
-    compile_condition_for, compile_effective_hook_plan, compile_template_for,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod compiled;
+
+pub use compiled::{
+    CompiledCondition, CompiledConditionalEdge, CompiledEdgeSpec, CompiledGraph, CompiledNode,
+};
+
 pub const GRAPH_EFFECTIVE_VALIDATION_SCHEMA: &str = "ryeos.graph.effective_validation.v1";
+pub const DEFAULT_GRAPH_MAX_STEPS: u32 = 100;
 pub const MAX_GRAPH_STEPS: u32 = 500;
 pub const MAX_GRAPH_SEGMENT_STEPS: u32 = MAX_GRAPH_STEPS;
 pub const MAX_RETRY_BACKOFF_MS: u64 = 300_000;
 pub const MAX_NODE_CONCURRENCY: usize = 256;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphFile {
     pub version: String,
@@ -39,7 +41,7 @@ pub struct GraphFile {
     pub external_content: Option<Value>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphConfig {
     pub start: String,
@@ -51,22 +53,40 @@ pub struct GraphConfig {
     pub nodes: BTreeMap<String, GraphNode>,
     #[serde(default)]
     pub hooks: Vec<HookDefinition>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_schema: Option<Value>,
     #[serde(default)]
     pub env_requires: Vec<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_state"
+    )]
     pub state: Option<Value>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub segment_steps: Option<u32>,
 }
 
 fn default_max_steps() -> u32 {
-    100
+    DEFAULT_GRAPH_MAX_STEPS
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+fn deserialize_state<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    if value.is_object() {
+        Ok(Some(value))
+    } else {
+        Err(serde::de::Error::custom(
+            "`config.state` must be a mapping; omit the field when no initial state is needed",
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ErrorMode {
     #[default]
     Fail,
@@ -101,48 +121,98 @@ impl EffectClass {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphNode {
     #[serde(default)]
     pub node_type: NodeType,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<Value>,
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_assign"
+    )]
     pub assign: Option<Value>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<EdgeSpec>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_error: Option<String>,
     #[serde(default)]
     pub cache_result: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "EffectClass::is_live")]
     pub effects: EffectClass,
     #[serde(default)]
     pub follow: bool,
     #[serde(default)]
     pub detach: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub facets: Option<Value>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub over: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub r#as: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collect: Option<String>,
     #[serde(default)]
     pub parallel: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrency: Option<usize>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Value>,
     #[serde(default)]
     pub env_requires: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryConfig>,
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+fn deserialize_assign<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    if value.is_object() {
+        Ok(Some(value))
+    } else {
+        Err(serde::de::Error::custom(
+            "`assign` must be a mapping; omit the field when no assignment is needed",
+        ))
+    }
+}
+
+impl GraphNode {
+    pub fn is_cacheable(&self) -> bool {
+        self.cache_result
+    }
+
+    pub fn effect_class(&self) -> EffectClass {
+        self.effects
+    }
+
+    pub fn foreach_var(&self) -> &str {
+        self.r#as.as_deref().unwrap_or("item")
+    }
+
+    pub fn fold_detach_into_action(&self, action: &mut Value) {
+        if !self.detach {
+            return;
+        }
+        if let Some(object) = action.as_object_mut() {
+            object.insert(
+                ryeos_runtime::callback::action_keys::THREAD.to_owned(),
+                Value::String("detached".to_owned()),
+            );
+            if let Some(facets) = &self.facets {
+                object.insert(
+                    ryeos_runtime::callback::action_keys::FACETS.to_owned(),
+                    facets.clone(),
+                );
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeType {
     #[default]
@@ -152,28 +222,41 @@ pub enum NodeType {
     Gate,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EdgeSpec {
     Unconditional { to: String },
     Conditional { branches: Vec<ConditionalEdge> },
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConditionalEdge {
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "ryeos_runtime::ExpressionCondition::is_absent"
+    )]
     pub when: ExpressionCondition,
     pub to: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RetryConfig {
     pub attempts: u32,
     pub backoff_ms: u64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_backoff_ms: Option<u64>,
+}
+
+impl RetryConfig {
+    pub fn delay_ms(&self, failed_attempt: u32) -> u64 {
+        let exponent = failed_attempt.saturating_sub(1).min(63);
+        let grown = self.backoff_ms.saturating_mul(1_u64 << exponent);
+        self.max_backoff_ms
+            .map_or(grown, |maximum| grown.min(maximum))
+            .min(MAX_RETRY_BACKOFF_MS)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -185,11 +268,66 @@ pub struct ValidationSummary {
     pub authored_hook_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EffectiveGraphValidation {
+    pub summary: ValidationSummary,
+    pub effect_authorizations: Vec<ryeos_effect_contract::EffectAuthorizationProjection>,
+}
+
+/// One kind-owned preparation result consumed both at admission and by the
+/// graph runtime. The compiled sidecar is transient; the file and validation
+/// are derived from the same exact composed program and ancestor provenance.
+#[derive(Debug, Clone)]
+pub struct PreparedEffectiveGraph {
+    pub canonical_ref: ryeos_engine::canonical_ref::CanonicalRef,
+    pub file: GraphFile,
+    pub compiled: CompiledGraph,
+    pub declared_permissions: Vec<String>,
+    pub runtime_capability_requirements:
+        Option<ryeos_bundle::runtime_authority::RuntimeCapabilityRequirements>,
+    pub validation: EffectiveGraphValidation,
+}
+
 /// Decode and validate the exact composed graph and captured hook plan.
-pub fn validate_effective_graph(view: &KindComposedView) -> Result<ValidationSummary> {
+pub fn validate_effective_graph(
+    canonical_ref: &str,
+    view: &KindComposedView,
+    ancestor_requested_ids: &[String],
+) -> Result<EffectiveGraphValidation> {
+    prepare_effective_graph(canonical_ref, view, ancestor_requested_ids)
+        .map(|prepared| prepared.validation)
+}
+
+/// Prepare the one strict graph product whose validity is proven at admission
+/// and consumed by the runtime. No second parser or compiler is permitted
+/// after launch authority has been minted.
+pub fn prepare_effective_graph(
+    canonical_ref: &str,
+    view: &KindComposedView,
+    ancestor_requested_ids: &[String],
+) -> Result<PreparedEffectiveGraph> {
+    let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(canonical_ref)
+        .map_err(|error| anyhow!("invalid resolved graph ref: {error}"))?;
+    if canonical.kind != "graph" || canonical.to_string() != canonical_ref {
+        bail!("effective graph canonical ref is not an exact graph ref");
+    }
     let file: GraphFile =
         serde_json::from_value(view.composed.clone()).context("strictly decode composed graph")?;
     validate_graph_file(&file)?;
+    validate_extends_provenance(file.extends.as_deref(), ancestor_requested_ids)?;
+    let runtime_capability_requirements = file
+        .requires
+        .as_ref()
+        .map(|requires| requires.capabilities.clone());
+    if let Some(requirements) = runtime_capability_requirements.as_ref() {
+        ryeos_bundle::runtime_authority::validate_runtime_capability_requirements(requirements)
+            .map_err(|error| anyhow!("invalid `requires.capabilities`: {error}"))?;
+    }
+    let declared_permissions = runtime_capability_requirements
+        .as_ref()
+        .map(|requirements| requirements.declared.clone())
+        .unwrap_or_default();
 
     let plan_value = view
         .derived
@@ -202,7 +340,7 @@ pub fn validate_effective_graph(view: &KindComposedView) -> Result<ValidationSum
     if plan.authored.hooks != file.config.hooks {
         bail!("captured authored hook layer differs from composed config.hooks");
     }
-    validate_compilation(&file.config, &plan)?;
+    let compiled = CompiledGraph::compile_effective(&file.config, &plan)?;
     let declared = serde_json::to_value(
         file.requires
             .as_ref()
@@ -228,17 +366,86 @@ pub fn validate_effective_graph(view: &KindComposedView) -> Result<ValidationSum
             None => 0,
         })
         .sum();
-    Ok(ValidationSummary {
-        schema: GRAPH_EFFECTIVE_VALIDATION_SCHEMA.to_string(),
-        node_count: file.config.nodes.len(),
-        edge_count,
-        authored_hook_ids: file
-            .config
-            .hooks
-            .iter()
-            .map(|hook| hook.id.clone())
-            .collect(),
+    let effect_authorizations = compile_effect_authorizations(&file)?;
+    let validation = EffectiveGraphValidation {
+        summary: ValidationSummary {
+            schema: GRAPH_EFFECTIVE_VALIDATION_SCHEMA.to_string(),
+            node_count: file.config.nodes.len(),
+            edge_count,
+            authored_hook_ids: file
+                .config
+                .hooks
+                .iter()
+                .map(|hook| hook.id.clone())
+                .collect(),
+        },
+        effect_authorizations,
+    };
+    Ok(PreparedEffectiveGraph {
+        canonical_ref: canonical,
+        file,
+        compiled,
+        declared_permissions,
+        runtime_capability_requirements,
+        validation,
     })
+}
+
+fn validate_extends_provenance(
+    declared: Option<&str>,
+    ancestor_requested_ids: &[String],
+) -> Result<()> {
+    // Extends resolution is deepest-first, so the final admitted ancestor is
+    // the root's immediate parent. requested_id preserves authored spelling.
+    match (declared, ancestor_requested_ids.last().map(String::as_str)) {
+        (None, None) => Ok(()),
+        (Some(_), None) => {
+            bail!("effective graph declares `extends` but has no admitted ancestor")
+        }
+        (None, Some(_)) => {
+            bail!("effective graph has admitted ancestors but declares no `extends`")
+        }
+        (Some(declared), Some(parent)) if declared == parent => Ok(()),
+        (Some(declared), Some(parent)) => bail!(
+            "effective graph `extends` provenance mismatch: composed={declared}, admitted={parent}"
+        ),
+    }
+}
+
+fn compile_effect_authorizations(
+    file: &GraphFile,
+) -> Result<Vec<ryeos_effect_contract::EffectAuthorizationProjection>> {
+    let mut projections = Vec::new();
+    for (name, node) in &file.config.nodes {
+        let class = match node.effects {
+            EffectClass::Live => continue,
+            EffectClass::Recorded => ryeos_effect_contract::EffectClass::Recorded,
+            EffectClass::Sealed => ryeos_effect_contract::EffectClass::Sealed,
+        };
+        let action = node.action.as_ref().ok_or_else(|| {
+            anyhow!("durable graph node `{name}` has no authored action contract")
+        })?;
+        let action_contract_digest = ryeos_effect_contract::canonical_value_digest(action)?;
+        let policy_digest = ryeos_effect_contract::canonical_value_digest(&serde_json::json!({
+            "node_type": node.node_type,
+            "follow": node.follow,
+            "detach": node.detach,
+            "retry": node.retry.as_ref().map(|retry| serde_json::json!({
+                "attempts": retry.attempts,
+                "backoff_ms": retry.backoff_ms,
+                "max_backoff_ms": retry.max_backoff_ms,
+            })),
+            "effect_class": node.effects,
+        }))?;
+        projections.push(ryeos_effect_contract::EffectAuthorizationProjection {
+            authorization_id: format!("node:{name}"),
+            policy_digest,
+            action_contract_digest,
+            class,
+        });
+    }
+    ryeos_effect_contract::validate_authorization_projections(&projections)?;
+    Ok(projections)
 }
 
 pub fn validate_graph_file(file: &GraphFile) -> Result<()> {
@@ -503,229 +710,6 @@ fn validate_target(name: &str, target: &str, config: &GraphConfig) -> Result<()>
     Ok(())
 }
 
-/// Compile every expression/template and the complete admitted hook plan at
-/// admission. The runtime repeats this work defensively, but no authored
-/// compilation failure is allowed to survive until process spawn.
-fn validate_compilation(config: &GraphConfig, plan: &EffectiveHookPlan) -> Result<()> {
-    let limits = CompilationLimits::default();
-    if let Some(state) = config.state.as_ref() {
-        EvaluationSession::with_context(&EvaluationContext::new(), &EvaluationLimits::default())
-            .validate_value(state, "config.state")
-            .map_err(|error| anyhow!(error))?;
-    }
-    let input_properties = config
-        .config_schema
-        .as_ref()
-        .and_then(|schema| schema.get("properties"))
-        .and_then(Value::as_object)
-        .map(|properties| {
-            properties
-                .keys()
-                .map(String::as_str)
-                .collect::<HashSet<_>>()
-        });
-
-    for (name, node) in &config.nodes {
-        validate_iteration_variable(name, node)?;
-        compile_node(name, node, &limits, input_properties.as_ref())?;
-    }
-
-    let hooks = compile_effective_hook_plan(plan, &limits)
-        .map_err(|error| anyhow!("compile captured effective graph hooks: {error}"))?;
-    for (index, hook) in hooks.iter().enumerate() {
-        let field = format!("hook[{index}] (id={})", hook.id());
-        for reference in hook.references().iter() {
-            validate_input_reference(&field, reference, input_properties.as_ref())?;
-        }
-    }
-    Ok(())
-}
-
-fn compile_node(
-    name: &str,
-    node: &GraphNode,
-    limits: &CompilationLimits,
-    input_properties: Option<&HashSet<&str>>,
-) -> Result<()> {
-    let foreach_root = if node.node_type == NodeType::Foreach
-        || (node.node_type == NodeType::Action && node.follow && node.over.is_some())
-    {
-        node.r#as.as_deref()
-    } else {
-        None
-    };
-    let state_roots = allowed_roots(false, None);
-    let action_roots = allowed_roots(false, foreach_root);
-    let assign_roots = allowed_roots(node.action.is_some(), foreach_root);
-    let action_condition_roots = allowed_roots(node.action.is_some(), None);
-
-    if let Some(source) = &node.action {
-        let mut source = source.clone();
-        if node.detach
-            && let Some(action) = source.as_object_mut()
-        {
-            action.insert("thread".to_string(), Value::String("detached".to_string()));
-            if let Some(facets) = &node.facets {
-                action.insert("facets".to_string(), facets.clone());
-            }
-        }
-        let field = format!("node {name}.action");
-        let compiled = CompiledActionTemplate::compile(&source, &field, limits)
-            .map_err(|error| anyhow!(error))?;
-        validate_references(
-            &field,
-            compiled.references(),
-            &action_roots,
-            input_properties,
-        )?;
-    }
-    if let Some(source) = &node.assign {
-        let field = format!("node {name}.assign");
-        let compiled = CompiledJsonTemplate::compile(source, &field, limits)
-            .map_err(|error| anyhow!(error))?;
-        validate_references(
-            &field,
-            compiled.references(),
-            &assign_roots,
-            input_properties,
-        )?;
-    }
-    if let Some(source) = &node.output {
-        let field = format!("node {name}.output");
-        let compiled = CompiledJsonTemplate::compile(source, &field, limits)
-            .map_err(|error| anyhow!(error))?;
-        validate_references(
-            &field,
-            compiled.references(),
-            &state_roots,
-            input_properties,
-        )?;
-    }
-    if let Some(source) = &node.over {
-        let field = format!("node {name}.over");
-        let compiled =
-            compile_template_for(source, &field, limits).map_err(|error| anyhow!(error))?;
-        validate_references(
-            &field,
-            compiled.references(),
-            &state_roots,
-            input_properties,
-        )?;
-    }
-    if let Some(source) = &node.facets {
-        let field = format!("node {name}.facets");
-        let compiled = CompiledJsonTemplate::compile(source, &field, limits)
-            .map_err(|error| anyhow!(error))?;
-        validate_references(
-            &field,
-            compiled.references(),
-            &action_roots,
-            input_properties,
-        )?;
-    }
-
-    if let Some(EdgeSpec::Conditional { branches }) = &node.next {
-        let roots = if node.node_type == NodeType::Action {
-            &action_condition_roots
-        } else {
-            &state_roots
-        };
-        for (index, branch) in branches.iter().enumerate() {
-            if let ExpressionCondition::Expression(source) = &branch.when {
-                let field = format!("node {name}.next.branches[{index}].when");
-                let compiled = compile_condition_for(source, &field, limits)
-                    .map_err(|error| anyhow!(error))?;
-                validate_references(&field, compiled.references(), roots, input_properties)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn allowed_roots(include_result: bool, foreach_root: Option<&str>) -> HashSet<&str> {
-    let mut roots = HashSet::from(["state", "inputs", "_execution", "_run"]);
-    if include_result {
-        roots.insert("result");
-    }
-    if let Some(root) = foreach_root {
-        roots.insert(root);
-    }
-    roots
-}
-
-fn validate_references(
-    field: &str,
-    references: &ReferenceSet,
-    allowed_roots: &HashSet<&str>,
-    input_properties: Option<&HashSet<&str>>,
-) -> Result<()> {
-    for reference in references.iter() {
-        if !allowed_roots.contains(reference.root()) {
-            let mut roots = allowed_roots.iter().copied().collect::<Vec<_>>();
-            roots.sort_unstable();
-            bail!(
-                "{field}: expression root `{}` is unavailable; allowed roots are {}",
-                reference.root(),
-                roots.join(", ")
-            );
-        }
-        if matches!(reference.root(), "state" | "inputs" | "_execution" | "_run")
-            && matches!(
-                reference.segments().first(),
-                Some(ReferenceSegment::Index(_))
-            )
-        {
-            bail!(
-                "{field}: expression root `{}` is an object and cannot be indexed by number",
-                reference.root()
-            );
-        }
-        validate_input_reference(field, reference, input_properties)?;
-    }
-    Ok(())
-}
-
-fn validate_input_reference(
-    field: &str,
-    reference: &Reference,
-    input_properties: Option<&HashSet<&str>>,
-) -> Result<()> {
-    if reference.root() != "inputs" {
-        return Ok(());
-    }
-    let Some(properties) = input_properties else {
-        return Ok(());
-    };
-    let Some(ReferenceSegment::Key(key)) = reference.segments().first() else {
-        return Ok(());
-    };
-    if !properties.contains(key.as_str()) {
-        bail!("{field}: input `{key}` is not declared in config.config_schema.properties");
-    }
-    Ok(())
-}
-
-fn validate_iteration_variable(name: &str, node: &GraphNode) -> Result<()> {
-    let Some(variable) = node.r#as.as_deref() else {
-        return Ok(());
-    };
-    let mut bytes = variable.bytes();
-    let valid_start = bytes
-        .next()
-        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
-    let valid_rest = bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
-    if !valid_start || !valid_rest {
-        bail!("node `{name}` iteration variable `{variable}` has an invalid rye-expr name");
-    }
-    if matches!(
-        variable,
-        "true" | "false" | "null" | "in" | "state" | "inputs" | "result" | "_execution" | "_run"
-    ) {
-        bail!("node `{name}` iteration variable `{variable}` is reserved by rye-expr/1");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,12 +789,16 @@ mod tests {
         })
     }
 
+    fn validate_view(view: &KindComposedView) -> Result<EffectiveGraphValidation> {
+        validate_effective_graph("graph:test/child", view, &["graph:test/base".to_string()])
+    }
+
     #[test]
     fn validates_a_complete_inherited_effective_graph() {
-        let summary = validate_effective_graph(&view(composed_graph(), Vec::new())).unwrap();
-        assert_eq!(summary.node_count, 2);
-        assert_eq!(summary.edge_count, 1);
-        assert!(summary.authored_hook_ids.is_empty());
+        let summary = validate_view(&view(composed_graph(), Vec::new())).unwrap();
+        assert_eq!(summary.summary.node_count, 2);
+        assert_eq!(summary.summary.edge_count, 1);
+        assert!(summary.summary.authored_hook_ids.is_empty());
     }
 
     #[test]
@@ -820,7 +808,7 @@ mod tests {
             "finish": {"node_type": "return", "output": "done"}
         });
 
-        let error = validate_effective_graph(&view(graph, Vec::new())).unwrap_err();
+        let error = validate_view(&view(graph, Vec::new())).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -832,7 +820,7 @@ mod tests {
     fn rejects_runtime_only_topology_errors_during_admission() {
         let mut composed = composed_graph();
         composed["config"]["nodes"]["inherited"]["node_type"] = serde_json::json!("gate");
-        let error = validate_effective_graph(&view(composed, Vec::new())).unwrap_err();
+        let error = validate_view(&view(composed, Vec::new())).unwrap_err();
         assert!(error.to_string().contains("conditional next"));
     }
 
@@ -840,19 +828,44 @@ mod tests {
     fn rejects_unavailable_expression_roots_during_admission() {
         let mut composed = composed_graph();
         composed["config"]["nodes"]["finish"]["output"] = serde_json::json!("${result.value}");
-        let error = validate_effective_graph(&view(composed, Vec::new())).unwrap_err();
+        let error = validate_view(&view(composed, Vec::new())).unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("expression root `result` is unavailable")
+            format!("{error:#}").contains("expression root `result` is unavailable"),
+            "unexpected error: {error:#}"
         );
+    }
+
+    #[test]
+    fn rejects_runtime_reserved_iteration_variable_during_admission() {
+        let mut composed = composed_graph();
+        composed["config"]["nodes"]["inherited"] = serde_json::json!({
+            "node_type": "foreach",
+            "action": {"item_id": "tool:test/audit"},
+            "over": "${state.goal}",
+            "as": "_dispatch",
+            "next": {"type": "unconditional", "to": "finish"}
+        });
+        let error = validate_view(&view(composed, Vec::new())).unwrap_err();
+        assert!(error.to_string().contains("reserved by rye-expr/1"));
+    }
+
+    #[test]
+    fn extends_provenance_is_part_of_kind_admission() {
+        let view = view(composed_graph(), Vec::new());
+        let missing = validate_effective_graph("graph:test/child", &view, &[]).unwrap_err();
+        assert!(missing.to_string().contains("has no admitted ancestor"));
+
+        let wrong =
+            validate_effective_graph("graph:test/child", &view, &["graph:test/other".to_string()])
+                .unwrap_err();
+        assert!(wrong.to_string().contains("provenance mismatch"));
     }
 
     #[test]
     fn rejects_unknown_nested_capability_fields_during_strict_decode() {
         let mut composed = composed_graph();
         composed["requires"]["capabilities"]["undeclared"] = serde_json::json!([]);
-        let error = validate_effective_graph(&view(composed, Vec::new())).unwrap_err();
+        let error = validate_view(&view(composed, Vec::new())).unwrap_err();
         assert!(error.to_string().contains("strictly decode composed graph"));
     }
 
@@ -868,14 +881,14 @@ mod tests {
         let mut graph = composed_graph();
         graph["config"]["hooks"] = serde_json::to_value([authored.clone()]).unwrap();
 
-        let error = validate_effective_graph(&view(graph, Vec::new())).unwrap_err();
+        let error = validate_view(&view(graph, Vec::new())).unwrap_err();
         assert!(
             error
                 .to_string()
                 .contains("captured authored hook layer differs")
         );
 
-        validate_effective_graph(&view(
+        validate_view(&view(
             composed_graph_with_hook(authored.clone()),
             vec![authored],
         ))
@@ -896,7 +909,7 @@ mod tests {
         graph["config"]["nodes"]["inherited"]["action"] =
             serde_json::json!({"item_id": "tool:test/audit"});
         graph["config"]["nodes"]["inherited"]["effects"] = serde_json::json!("recorded");
-        validate_effective_graph(&view(graph, Vec::new())).unwrap();
+        validate_view(&view(graph, Vec::new())).unwrap();
 
         // Absent means live: cross-run replay is never implied.
         let file: GraphFile = serde_json::from_value(composed_graph()).unwrap();
@@ -937,7 +950,7 @@ mod tests {
         ] {
             let mut graph = composed_graph();
             graph["config"]["nodes"]["inherited"] = patch;
-            let error = validate_effective_graph(&view(graph, Vec::new())).unwrap_err();
+            let error = validate_view(&view(graph, Vec::new())).unwrap_err();
             assert!(error.to_string().contains(expect), "unexpected: {error:#}");
         }
     }

@@ -6,7 +6,7 @@ use super::{
     ExecutionRecoveryAuthority, validate_trimmed_control_free,
 };
 
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 10;
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 12;
 
 fn deserialize_required_nullable<'de, D, T>(
     deserializer: D,
@@ -44,7 +44,13 @@ pub enum AdmittedExecutionClosure {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "authority", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AdmittedDirectCommandClosure {
-    ContentAddressed { executable_blob_hash: String },
+    ContentAddressed {
+        executable_blob_hash: String,
+        /// Exact absolute path at which isolation presents the retained bytes
+        /// to the process image. This is behavior-bearing for interpreters and
+        /// binaries whose loader resolves adjacent libraries from `$ORIGIN`.
+        execution_path: std::path::PathBuf,
+    },
     NodePolicy,
 }
 
@@ -98,11 +104,16 @@ impl AdmittedExecutionClosure {
                 )?;
                 if let AdmittedDirectCommandClosure::ContentAddressed {
                     executable_blob_hash,
+                    execution_path,
                 } = command
                 {
                     super::thread_snapshot::validate_canonical_hash(
                         "admitted direct executable blob hash",
                         executable_blob_hash,
+                    )?;
+                    validate_absolute_normalized_path(
+                        "admitted direct execution path",
+                        execution_path,
                     )?;
                 }
                 if let Some(root) = admitted_project_root {
@@ -142,6 +153,22 @@ fn validate_descriptor_document(label: &str, document: &str) -> anyhow::Result<(
     }
     if document.contains('\0') {
         anyhow::bail!("{label} document contains NUL");
+    }
+    Ok(())
+}
+
+fn validate_absolute_normalized_path(label: &str, path: &std::path::Path) -> anyhow::Result<()> {
+    if path.components().count() < 2
+        || !path.is_absolute()
+        || path.components().enumerate().any(|(index, component)| {
+            !matches!(
+                (index, component),
+                (0, std::path::Component::RootDir) | (_, std::path::Component::Normal(_))
+            )
+        })
+        || path.to_str().is_none()
+    {
+        anyhow::bail!("{label} must be an absolute normalized UTF-8 path");
     }
     Ok(())
 }
@@ -204,8 +231,8 @@ impl AdmittedAccountingScope {
 pub enum DirectExecutableIdentity {
     BundleExecutor {
         content_hash: String,
-        provider_manifest_hash: String,
-        provider_manifest_signer_fingerprint: String,
+        executor_manifest_hash: String,
+        executor_manifest_signer_fingerprint: String,
     },
     CapturedContent {
         content_hash: String,
@@ -368,14 +395,14 @@ impl AdmittedLaunchArtifactIdentity {
                 match executable_identity {
                     DirectExecutableIdentity::BundleExecutor {
                         content_hash,
-                        provider_manifest_hash,
-                        provider_manifest_signer_fingerprint,
+                        executor_manifest_hash,
+                        executor_manifest_signer_fingerprint,
                     } => {
                         validate_hash("verified executable content hash", content_hash)?;
-                        validate_hash("provider executor manifest hash", provider_manifest_hash)?;
+                        validate_hash("executor bundle manifest hash", executor_manifest_hash)?;
                         validate_signer(
-                            "provider executor manifest signer",
-                            provider_manifest_signer_fingerprint,
+                            "executor bundle manifest signer",
+                            executor_manifest_signer_fingerprint,
                         )?;
                     }
                     DirectExecutableIdentity::CapturedContent { content_hash } => {
@@ -470,6 +497,10 @@ pub struct AdmittedLaunchCapsule {
     pub artifact_identity: AdmittedLaunchArtifactIdentity,
     /// Complete exact execution closure selected at admission.
     pub execution_closure: AdmittedExecutionClosure,
+    /// Exact pre-admission execution realization. The realization commits the
+    /// canonical launch-authority digest; it never back-references this final
+    /// capsule hash, avoiding an impossible content-addressed cycle.
+    pub execution_realization_hash: String,
     /// Sealed accounting scope for launches whose runtime declares a
     /// financial authority. `None` states the launch performs no direct paid
     /// provider work.
@@ -480,7 +511,178 @@ pub struct AdmittedLaunchCapsule {
     pub executor_ref: String,
 }
 
+/// Canonical pre-capsule authority shared by the realization and capsule.
+/// Invocation-local stimulus is intentionally excluded, matching the exact
+/// program boundary used for continuation admission.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmittedLaunchAuthority {
+    pub exact_program_hash: String,
+    pub project_authority: ExecutionProjectAuthority,
+    pub lifecycle_authority: ExecutionLifecycleAuthority,
+    pub launch_driver: ExecutionLaunchDriver,
+    pub artifact_identity: AdmittedLaunchArtifactIdentity,
+    pub execution_closure: AdmittedExecutionClosure,
+    pub accounting_scope: Option<AdmittedAccountingScope>,
+    pub effective_caps: Vec<String>,
+    pub runtime_ref: String,
+    pub executor_ref: String,
+}
+
+impl AdmittedLaunchAuthority {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        super::thread_snapshot::validate_canonical_hash(
+            "launch authority exact program hash",
+            &self.exact_program_hash,
+        )?;
+        self.project_authority.validate()?;
+        self.lifecycle_authority.validate()?;
+        self.artifact_identity.validate()?;
+        self.execution_closure.validate()?;
+        if self.artifact_identity.launch_driver() != self.launch_driver
+            || self.execution_closure.launch_driver() != self.launch_driver
+        {
+            anyhow::bail!("launch authority driver and admitted material disagree");
+        }
+        if let Some(scope) = &self.accounting_scope {
+            scope.validate()?;
+        }
+        validate_trimmed_control_free("launch authority runtime ref", &self.runtime_ref, false)?;
+        validate_trimmed_control_free("launch authority executor ref", &self.executor_ref, false)?;
+        let mut caps = self.effective_caps.clone();
+        for cap in &caps {
+            validate_trimmed_control_free("launch authority capability", cap, false)?;
+        }
+        caps.sort();
+        caps.dedup();
+        if caps != self.effective_caps {
+            anyhow::bail!("launch authority capabilities are not canonical");
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> anyhow::Result<String> {
+        self.validate()?;
+        Ok(lillux::sha256_hex(
+            lillux::canonical_json(&serde_json::to_value(self)?)?.as_bytes(),
+        ))
+    }
+
+    pub fn artifact_identity_digest(&self) -> anyhow::Result<String> {
+        self.validate()?;
+        Ok(lillux::sha256_hex(
+            lillux::canonical_json(&serde_json::to_value(&self.artifact_identity)?)?.as_bytes(),
+        ))
+    }
+
+    pub fn execution_closure_digest(&self) -> anyhow::Result<String> {
+        self.validate()?;
+        Ok(lillux::sha256_hex(
+            lillux::canonical_json(&serde_json::to_value(&self.execution_closure)?)?.as_bytes(),
+        ))
+    }
+}
+
 impl AdmittedLaunchCapsule {
+    /// Verify the complete realization/substrate evidence named by this
+    /// capsule against retained bytes and the current trust store.
+    pub fn verify_retained_execution_realization(
+        &self,
+        cas: &lillux::CasStore,
+        large_store: &crate::large_object_store::LargeObjectStore,
+        trust: &crate::refs::TrustStore,
+    ) -> anyhow::Result<super::AdmittedExecutionRealization> {
+        self.validate()?;
+        let value = cas
+            .get_object(&self.execution_realization_hash)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "admitted execution realization {} is missing",
+                    self.execution_realization_hash
+                )
+            })?;
+        let realization = super::AdmittedExecutionRealization::from_current_value(&value)?;
+        if realization.content_hash()? != self.execution_realization_hash {
+            anyhow::bail!("admitted execution realization content hash is inconsistent");
+        }
+        let authority = self.launch_authority();
+        if realization.launch_authority_digest != authority.digest()?
+            || realization.artifact_identity_digest != authority.artifact_identity_digest()?
+            || realization.execution_closure_digest != authority.execution_closure_digest()?
+        {
+            anyhow::bail!("admitted execution realization contradicts launch authority");
+        }
+        let effective_definition_digest = self
+            .exact_program
+            .get("effective_definition_digest")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!("admitted launch exact program has no effective-definition digest")
+            })?;
+        if realization.effective_definition_digest != effective_definition_digest {
+            anyhow::bail!("execution realization contradicts effective definition identity");
+        }
+        let (contract_ref, contract_digest) = match &self.artifact_identity {
+            AdmittedLaunchArtifactIdentity::ManagedRuntime {
+                runtime_ref,
+                runtime_content_hash,
+                ..
+            } => (runtime_ref, runtime_content_hash),
+            AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+                runtime_identity, ..
+            } => (
+                &runtime_identity.runtime_ref,
+                &runtime_identity.runtime_content_hash,
+            ),
+        };
+        if &realization.contract_ref != contract_ref
+            || &realization.contract_digest != contract_digest
+        {
+            anyhow::bail!("execution realization contradicts its owning execution contract");
+        }
+        realization.verify_retained_components(cas, large_store)?;
+
+        let identity_value = cas
+            .get_object(&realization.substrate_identity_hash)?
+            .ok_or_else(|| anyhow::anyhow!("execution substrate identity is missing"))?;
+        let identity = super::ExecutionIdentity::from_current_value(&identity_value)?;
+        let attestation_value = cas
+            .get_object(&realization.substrate_attestation_hash)?
+            .ok_or_else(|| anyhow::anyhow!("execution substrate attestation is missing"))?;
+        let attestation = super::Attestation::from_value(&attestation_value)?;
+        if attestation.subject_hash != realization.substrate_identity_hash
+            || attestation.claim != super::EXECUTION_IDENTITY_ATTESTATION_CLAIM
+            || attestation.policy != super::EXECUTION_IDENTITY_ATTESTATION_POLICY
+            || attestation.issuer_fingerprint()? != identity.node_signer_fingerprint
+        {
+            anyhow::bail!("execution substrate attestation contradicts retained identity");
+        }
+        attestation.verify_with_trust_store(trust)?;
+        if attestation.is_expired_at(&lillux::time::iso8601_now())? {
+            anyhow::bail!("execution substrate attestation is expired");
+        }
+        Ok(realization)
+    }
+
+    pub fn launch_authority(&self) -> AdmittedLaunchAuthority {
+        AdmittedLaunchAuthority {
+            exact_program_hash: self.exact_program_hash.clone(),
+            project_authority: self.project_authority.clone(),
+            lifecycle_authority: self.lifecycle_authority,
+            launch_driver: self.launch_driver,
+            artifact_identity: self.artifact_identity.clone(),
+            execution_closure: self.execution_closure.clone(),
+            accounting_scope: self.accounting_scope.clone(),
+            effective_caps: self.effective_caps.clone(),
+            runtime_ref: self.runtime_ref.clone(),
+            executor_ref: self.executor_ref.clone(),
+        }
+    }
+
+    pub fn launch_authority_digest(&self) -> anyhow::Result<String> {
+        self.launch_authority().digest()
+    }
+
     /// External realization set sealed into this capsule's exact program,
     /// parsed with the shared wire type. `Ok(None)` when the program sealed
     /// no realization slot; malformed derived data is an error, never an
@@ -500,21 +702,6 @@ impl AdmittedLaunchCapsule {
         super::ExternalContentRealizationSet::from_value(value)
             .map(Some)
             .context("admitted capsule carries an invalid external realization set")
-    }
-
-    /// Effect class the sealed program declares for its own execution
-    /// boundary (the composed top-level `effects` field), or `None` when the
-    /// program declares nothing. This is publication authority: a runtime
-    /// cannot opt itself into durable recording — only the sealed, signed
-    /// program can, and the daemon reads the declaration from the capsule it
-    /// admitted, never from the runtime's own words.
-    pub fn declared_effect_class(&self) -> Option<&str> {
-        self.exact_program
-            .get("resolution_output")
-            .and_then(|resolution| resolution.get("composed"))
-            .and_then(|composed| composed.get("composed"))
-            .and_then(|composed| composed.get("effects"))
-            .and_then(serde_json::Value::as_str)
     }
 
     /// Decode only the exact current CAS wire contract.
@@ -627,6 +814,10 @@ impl AdmittedLaunchCapsule {
         self.lifecycle_authority.validate()?;
         self.artifact_identity.validate()?;
         self.execution_closure.validate()?;
+        super::thread_snapshot::validate_canonical_hash(
+            "launch capsule execution realization hash",
+            &self.execution_realization_hash,
+        )?;
         match (&self.artifact_identity, &self.execution_closure) {
             (
                 AdmittedLaunchArtifactIdentity::ManagedRuntime {
@@ -754,6 +945,7 @@ impl AdmittedLaunchCapsule {
                 | DirectExecutableIdentity::CapturedContent { content_hash },
                 AdmittedDirectCommandClosure::ContentAddressed {
                     executable_blob_hash,
+                    execution_path: _,
                 },
             ) = (executable_identity, command)
                 && content_hash != executable_blob_hash
@@ -822,6 +1014,7 @@ impl AdmittedLaunchCapsule {
             && self.launch_driver == other.launch_driver
             && self.artifact_identity == other.artifact_identity
             && self.execution_closure == other.execution_closure
+            && self.execution_realization_hash == other.execution_realization_hash
             && self.accounting_scope == other.accounting_scope
             && self.effective_caps == other.effective_caps
             && self.runtime_ref == other.runtime_ref
@@ -854,6 +1047,7 @@ mod tests {
             | DirectExecutableIdentity::CapturedContent { content_hash } => {
                 AdmittedDirectCommandClosure::ContentAddressed {
                     executable_blob_hash: content_hash.clone(),
+                    execution_path: std::path::PathBuf::from("/admitted/bin/executor"),
                 }
             }
             DirectExecutableIdentity::NodePolicy => AdmittedDirectCommandClosure::NodePolicy,
@@ -930,6 +1124,7 @@ mod tests {
                 command,
                 admitted_project_root: None,
             },
+            execution_realization_hash: "9".repeat(64),
             accounting_scope: None,
             effective_caps: vec!["ryeos.read.project.live".to_string()],
             runtime_ref: "runtime:direct".to_string(),
@@ -999,6 +1194,7 @@ mod tests {
                 protocol_descriptor_document,
                 executor_blob_hash: "c".repeat(64),
             },
+            execution_realization_hash: "9".repeat(64),
             accounting_scope: None,
             effective_caps: vec!["ryeos.read.project.live".to_string()],
             runtime_ref: "runtime:test/directive".to_string(),
@@ -1211,13 +1407,13 @@ mod tests {
     }
 
     #[test]
-    fn source_only_root_seals_distinct_source_and_provider_manifests() {
+    fn source_only_root_seals_distinct_source_and_executor_manifests() {
         let root_manifest_hash = "a".repeat(64);
-        let provider_manifest_hash = "b".repeat(64);
+        let executor_manifest_hash = "b".repeat(64);
         let mut capsule = direct_capsule(DirectExecutableIdentity::BundleExecutor {
             content_hash: "e".repeat(64),
-            provider_manifest_hash: provider_manifest_hash.clone(),
-            provider_manifest_signer_fingerprint: "5".repeat(64),
+            executor_manifest_hash: executor_manifest_hash.clone(),
+            executor_manifest_signer_fingerprint: "5".repeat(64),
         });
         let AdmittedLaunchArtifactIdentity::DirectItemExecutor {
             root_subject_source_identity,
@@ -1232,7 +1428,7 @@ mod tests {
         };
 
         capsule.validate().unwrap();
-        assert_ne!(root_manifest_hash, provider_manifest_hash);
+        assert_ne!(root_manifest_hash, executor_manifest_hash);
     }
 
     #[test]
@@ -1276,19 +1472,5 @@ mod tests {
             error.to_string(),
             "admitted execution closure and artifact drivers disagree"
         );
-    }
-
-    #[test]
-    fn declared_effect_class_reads_only_the_sealed_composed_value() {
-        let mut capsule = direct_capsule(DirectExecutableIdentity::NodePolicy);
-        assert_eq!(capsule.declared_effect_class(), None);
-        capsule.exact_program["resolution_output"] = serde_json::json!({
-            "composed": {"composed": {"effects": "recorded"}, "derived": {}}
-        });
-        assert_eq!(capsule.declared_effect_class(), Some("recorded"));
-        // A non-string declaration is no declaration, never a default.
-        capsule.exact_program["resolution_output"]["composed"]["composed"]["effects"] =
-            serde_json::json!(7);
-        assert_eq!(capsule.declared_effect_class(), None);
     }
 }

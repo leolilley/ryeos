@@ -82,11 +82,11 @@ fn state_anchor_payload(event: &PersistedEventRecord) -> Option<Result<Value, St
     if event.payload.get("kind").and_then(Value::as_str) != Some("state_anchor") {
         return None;
     }
-    let anchor =
-        match ryeos_state::objects::StateAnchorMilestoneV2::from_value(event.payload.clone()) {
-            Ok(anchor) => anchor,
-            Err(error) => return Some(Err(error.to_string())),
-        };
+    let anchor = match ryeos_state::objects::StateAnchorMilestone::from_value(event.payload.clone())
+    {
+        Ok(anchor) => anchor,
+        Err(error) => return Some(Err(error.to_string())),
+    };
     serde_json::to_value(anchor.payload)
         .map_err(|error| error.to_string())
         .into()

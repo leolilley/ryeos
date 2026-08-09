@@ -1,14 +1,8 @@
-//! Tool-argument JSON parser used by the dispatcher. Historically
-//! this module also held a non-streaming HTTP provider adapter; the
-//! live launch path now uses `provider_adapter::call_provider_streaming`
-//! exclusively, so the only surface left here is the typed-fail-loud
-//! arg parser shared with the dispatcher.
+//! Tool-argument JSON parser shared by the dispatcher.
 
 use serde_json::Value;
 
-/// Typed-fail-loud tool-argument parser. The previous implementation
-/// silently fell back to `{}` on bad JSON, masking malformed
-/// LLM-emitted tool calls. Now any parse failure (after the
+/// Typed-fail-loud tool-argument parser. Any parse failure (after the
 /// `\"` / `\n` unescape repair pass) is propagated as a typed
 /// error so the dispatcher can refuse the call rather than dispatch
 /// with empty args.

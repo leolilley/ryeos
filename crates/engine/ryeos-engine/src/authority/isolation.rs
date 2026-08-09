@@ -20,7 +20,8 @@ use ryeos_isolation_protocol::{
     AdapterWorkspaceResponse, IsolationAdapterProtocolVersion, IsolationAuthority,
     IsolationAuthorityId, IsolationAuthorityPurpose, IsolationDeviceSurface, IsolationEnvironment,
     IsolationMount, IsolationMountAccess, IsolationNetwork, IsolationPath, IsolationPlan,
-    IsolationProjectWorkspace, IsolationTarget, WorkspaceLifecycleOperation,
+    IsolationProjectWorkspace, IsolationTarget, IsolationTargetChannel,
+    WorkspaceLifecycleOperation,
 };
 
 mod authority;
@@ -32,7 +33,8 @@ mod provenance;
 pub use authority::{
     IsolationCommandAuthority, IsolationCommandAuthorityRef, IsolationDescriptorBoundCommand,
     IsolationDescriptorFileIdentity, IsolationLaunchContext, IsolationLiveAccessAuthority,
-    IsolationProjectAuthority, IsolationReadOnlyMountAuthority, IsolationVerifiedCode,
+    IsolationProjectAuthority, IsolationReadOnlyMountAuthority, IsolationTargetChannelAuthority,
+    IsolationVerifiedCode,
 };
 pub use backend::ResolvedIsolationBackend;
 pub use inspection::{IsolationBackendInspection, IsolationBackendStatus, IsolationInspection};
@@ -952,6 +954,7 @@ impl IsolationRuntime {
                         ryeos_isolation_protocol::MAX_WORKSPACE_RESPONSE_BYTES as u64,
                     ),
                     max_stderr_bytes: Some(64 * 1024),
+                    ..lillux::SubprocessLimits::default()
                 }),
                 inherited_fds: vec![
                     backend.adapter_handle.clone(),
@@ -1202,6 +1205,13 @@ impl IsolationRuntime {
 
     pub fn is_enforced(&self) -> bool {
         self.state == IsolationRuntimeState::Enforced
+    }
+
+    /// Recorded local-worker evidence may claim an ambient-endpoint-free
+    /// execution boundary only when the active policy both enforces the
+    /// backend and removes host networking.
+    pub fn admits_recorded_local_worker(&self) -> bool {
+        self.is_enforced() && self.inspection.network.mode == IsolationNetworkMode::Isolated
     }
 
     /// Capture the exact executable selected by a fully compiled direct plan.
@@ -1592,6 +1602,11 @@ impl IsolationRuntime {
                 request.timeout
             )));
         }
+        if context.target_channel.is_some() && request.stdin_data.is_some() {
+            return Err(refused(
+                "typed target-channel launches cannot also carry target stdin".to_string(),
+            ));
+        }
         match (context.project_authority, context.live_access) {
             (IsolationProjectAuthority::External, None) => {
                 return Err(refused(
@@ -1612,6 +1627,12 @@ impl IsolationRuntime {
             _ => {}
         }
         if self.state == IsolationRuntimeState::Disabled {
+            if !context.external_read_only_mounts.is_empty() {
+                return Err(refused(
+                    "descriptor-pinned read-only mounts require an enforced isolation backend; disabled launches must receive any admitted realization through a daemon-owned private workspace"
+                        .to_string(),
+                ));
+            }
             if lifecycle == RequestedLaunchLifecycle::AwaitAttachment
                 && request.supervised_status.is_some()
             {
@@ -1773,12 +1794,33 @@ impl IsolationRuntime {
                     request.argv0 = Some(lexical_command.to_string_lossy().into_owned());
                 }
             }
+            if let Some(channel) = context.target_channel {
+                use std::os::fd::AsRawFd as _;
+                if request
+                    .envs
+                    .iter()
+                    .any(|(name, _)| name == channel.env_name())
+                {
+                    return Err(refused(format!(
+                        "caller cannot provide protected target-channel environment variable {}",
+                        channel.env_name()
+                    )));
+                }
+                request.envs.push((
+                    channel.env_name().to_owned(),
+                    channel.channel().as_raw_fd().to_string(),
+                ));
+                request.inherited_fds.push(channel.channel().clone());
+            }
             let requested = request.limits.unwrap_or_default();
             request.limits = Some(lillux::SubprocessLimits {
                 // `mode: disabled` is an OS-confinement opt-out. Preserve a
                 // tighter limit already owned by the caller, but do not install
                 // the isolation policy's RLIMIT_NOFILE until enforcement is on.
                 max_open_files: requested.max_open_files,
+                max_address_space_bytes: requested.max_address_space_bytes,
+                max_cpu_seconds: requested.max_cpu_seconds,
+                max_processes: requested.max_processes,
                 max_stdout_bytes: Some(
                     requested
                         .max_stdout_bytes
@@ -2847,11 +2889,43 @@ impl IsolationRuntime {
             None
         };
 
+        let target_channel_plan = if let Some(channel) = context.target_channel {
+            use std::os::fd::AsRawFd as _;
+            let source = IsolationAuthorityId::new("target-channel")
+                .map_err(|error| refused(error.to_string()))?;
+            let inherited_fd = u32::try_from(channel.channel().as_raw_fd())
+                .map_err(|_| refused("invalid target-channel descriptor".to_owned()))?;
+            authorities.push(IsolationAuthority {
+                id: source.clone(),
+                inherited_fd,
+                purpose: IsolationAuthorityPurpose::TargetDuplexChannel,
+            });
+            authority_handles.push(channel.channel().clone());
+            Some(IsolationTargetChannel {
+                source,
+                target_fd: 0,
+                env_name: channel.env_name().to_owned(),
+            })
+        } else {
+            None
+        };
+
         let mut environment = envs
             .into_iter()
             .filter(|(name, _)| name != "TMPDIR")
             .collect::<BTreeMap<_, _>>();
         environment.insert("TMPDIR".to_string(), "/tmp".to_string());
+        if let Some(channel) = &target_channel_plan {
+            if environment
+                .insert(channel.env_name.clone(), channel.target_fd.to_string())
+                .is_some()
+            {
+                return Err(refused(format!(
+                    "caller cannot provide protected target-channel environment variable {}",
+                    channel.env_name
+                )));
+            }
+        }
         let argv0 = command_argv0.unwrap_or_else(|| command_path.to_string_lossy().into_owned());
         let plan = IsolationPlan {
             target: IsolationTarget {
@@ -2863,6 +2937,7 @@ impl IsolationRuntime {
             },
             mounts,
             project_workspace: project_workspace_plan,
+            target_channel: target_channel_plan,
             environment: IsolationEnvironment {
                 values: environment,
             },
@@ -2954,6 +3029,11 @@ impl IsolationRuntime {
             max_open_files: effective_open_files,
             max_stdout_bytes: Some(effective_stdout_bytes),
             max_stderr_bytes: Some(effective_stderr_bytes),
+            max_address_space_bytes: limits
+                .as_ref()
+                .and_then(|limits| limits.max_address_space_bytes),
+            max_cpu_seconds: limits.as_ref().and_then(|limits| limits.max_cpu_seconds),
+            max_processes: limits.as_ref().and_then(|limits| limits.max_processes),
         });
 
         Ok(CompiledIsolationLaunch {
@@ -3695,6 +3775,7 @@ fn validate_enforced_limits(policy: &IsolationLimitsPolicy) -> Result<(), Engine
         max_open_files: policy.open_files,
         max_stdout_bytes: Some(policy.stdout_bytes),
         max_stderr_bytes: Some(policy.stderr_bytes),
+        ..lillux::SubprocessLimits::default()
     };
     lillux::validate_subprocess_limits(Some(&limits)).map_err(|reason| {
         refused(format!(
@@ -5171,6 +5252,7 @@ mod tests {
                     verified_code: std::slice::from_ref(command.identity()),
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
+                    target_channel: None,
                     item_ref: "tool:tests/descriptor-bound-disabled",
                     thread_id: "T-descriptor-bound-disabled",
                 },
@@ -5245,6 +5327,7 @@ mod tests {
                     verified_code: std::slice::from_ref(&captured),
                     verified_command: Some(&captured),
                     external_read_only_mounts: &[],
+                    target_channel: None,
                     item_ref: "tool:tests/verified-command",
                     thread_id: "T-verified-command",
                 },
@@ -5306,6 +5389,7 @@ mod tests {
                     verified_code: &verified_code,
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
+                    target_channel: None,
                     item_ref: "tool:tests/sealed-code",
                     thread_id: "T-sealed-code",
                 },
@@ -5401,6 +5485,7 @@ mod tests {
                     verified_code: std::slice::from_ref(&verified),
                     verified_command: None,
                     external_read_only_mounts: &[],
+                    target_channel: None,
                     item_ref: "tool:tests/enforced-handoff",
                     thread_id: "T-enforced-handoff",
                 },
@@ -5478,6 +5563,7 @@ mod tests {
                     verified_code: std::slice::from_ref(&captured),
                     verified_command: Some(&captured),
                     external_read_only_mounts: &[],
+                    target_channel: None,
                     item_ref: "tool:tests/mutated-command",
                     thread_id: "T-mutated-command",
                 },
@@ -5553,6 +5639,103 @@ mod tests {
     }
 
     #[test]
+    fn disabled_runtime_refuses_descriptor_mounts_instead_of_discarding_them() {
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        let runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        let source_path = app_root.path().join("sealed");
+        std::fs::create_dir(&source_path).unwrap();
+        let external = IsolationReadOnlyMountAuthority::new(
+            source_path.clone(),
+            app_root.path().join("external"),
+            std::fs::File::open(&source_path).unwrap(),
+        );
+        let request = lillux::SubprocessRequest {
+            cmd: "/bin/true".to_string(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 1.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            supervised_status: None,
+        };
+        let error = match runtime.apply(
+            request,
+            IsolationLaunchContext {
+                project_path: app_root.path(),
+                project_authority: IsolationProjectAuthority::EphemeralScratch,
+                live_access: None,
+                state_root: None,
+                checkpoint_dir: None,
+                daemon_socket_path: None,
+                bundle_roots: &[],
+                node_trusted_keys_dir: None,
+                verified_code: &[],
+                verified_command: None,
+                external_read_only_mounts: std::slice::from_ref(&external),
+                target_channel: None,
+                item_ref: "tool:tests/external-mount",
+                thread_id: "T-external-mount",
+            },
+        ) {
+            Ok(_) => panic!("disabled isolation accepted a descriptor mount"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("read-only mounts require an enforced isolation backend")
+        );
+    }
+
+    #[test]
+    fn target_channel_refuses_competing_stdin_in_every_isolation_mode() {
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        let runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        let (worker, _daemon) = std::os::unix::net::UnixStream::pair().unwrap();
+        let channel = IsolationTargetChannelAuthority::new(worker, "RYEOS_SESSION_FD").unwrap();
+        let request = lillux::SubprocessRequest {
+            cmd: "/bin/true".to_string(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: Some(String::new()),
+            timeout: 1.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            supervised_status: None,
+        };
+        let error = match runtime.apply(
+            request,
+            IsolationLaunchContext {
+                project_path: app_root.path(),
+                project_authority: IsolationProjectAuthority::EphemeralScratch,
+                live_access: None,
+                state_root: None,
+                checkpoint_dir: None,
+                daemon_socket_path: None,
+                bundle_roots: &[],
+                node_trusted_keys_dir: None,
+                verified_code: &[],
+                verified_command: None,
+                external_read_only_mounts: &[],
+                target_channel: Some(&channel),
+                item_ref: "worker:tests/channel",
+                thread_id: "T-channel",
+            },
+        ) {
+            Ok(_) => panic!("typed target channel accepted competing stdin"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("cannot also carry target stdin"));
+    }
+
+    #[test]
     fn disabled_attachment_compilation_preserves_the_distinct_request_type() {
         let app_root = tempfile::tempdir().unwrap();
         write_policy(app_root.path(), &IsolationPolicy::default_disabled());
@@ -5572,6 +5755,7 @@ mod tests {
             verified_code: &[],
             verified_command: None,
             external_read_only_mounts: &[],
+            target_channel: None,
             item_ref: "tool:tests/attachment",
             thread_id: "T-attachment",
         };
@@ -5622,6 +5806,7 @@ mod tests {
             verified_code: &[],
             verified_command: None,
             external_read_only_mounts: &[],
+            target_channel: None,
             item_ref: "tool:tests/attachment",
             thread_id: "T-attachment",
         };
@@ -5664,6 +5849,7 @@ mod tests {
             verified_code: &[],
             verified_command: None,
             external_read_only_mounts: &[],
+            target_channel: None,
             item_ref: "tool:tests/live",
             thread_id: "T-live",
         };
@@ -5734,6 +5920,7 @@ mod tests {
                     verified_code: &[],
                     verified_command: None,
                     external_read_only_mounts: &[],
+                    target_channel: None,
                     item_ref: "tool:tests/runtime-workspace",
                     thread_id: "T-runtime-workspace",
                 },
@@ -5808,6 +5995,7 @@ mod tests {
             },
             mounts: Vec::new(),
             project_workspace: None,
+            target_channel: None,
             environment: IsolationEnvironment {
                 values: BTreeMap::from([("API_TOKEN".to_string(), "first-token".to_string())]),
             },

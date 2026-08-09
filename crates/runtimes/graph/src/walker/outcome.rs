@@ -288,6 +288,7 @@ pub(super) struct ActionOkOutcome {
     /// The durable effect record the daemon replayed this result from, when
     /// it substituted a recorded result for execution.
     pub(super) replayed_from: Option<String>,
+    pub(super) dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
     /// Cache key reserved on a miss. The result is persisted only in commit,
     /// after result validation, assignment, and branch selection all succeed.
     pub(super) cache_write_key: Option<String>,
@@ -306,6 +307,7 @@ pub(super) struct ForeachDoneOutcome {
     pub(super) item_id: String,
     pub(super) cost: Option<RuntimeCost>,
     pub(super) observations: Vec<DispatchObservation>,
+    pub(super) elapsed_ms: u64,
 }
 
 pub(super) struct ForeachFailedOutcome {
@@ -460,6 +462,7 @@ pub(super) struct RetryScheduledOutcome {
     pub(super) delay_ms: u64,
     pub(super) elapsed_ms: u64,
     pub(super) cost: Option<RuntimeCost>,
+    pub(super) dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
 }
 
 pub(super) struct TerminalOutcome {
@@ -735,6 +738,7 @@ mod history_tests {
             result_hash: None,
             cache_hit: false,
             replayed_from: None,
+            dispatch: None,
             elapsed_ms: 1,
             error: None,
             cost: None,
@@ -761,6 +765,7 @@ mod history_tests {
             result_hash: None,
             cache_hit: false,
             replayed_from: None,
+            dispatch: None,
             elapsed_ms: 1,
             error: None,
             cost: Some(RuntimeCost {

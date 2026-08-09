@@ -193,6 +193,8 @@ pub fn build_test_state_with_hosted_policy(token_ttl_secs: u64) -> (tempfile::Te
             },
         ],
         command_registration_policy: Default::default(),
+        external_content_import_policy: None,
+        persistent_session_policy: None,
     });
     (tmpdir, state)
 }
@@ -217,6 +219,8 @@ fn build_app_state(
         commands: vec![],
         hosted_node_policies: vec![],
         command_registration_policy: Default::default(),
+        external_content_import_policy: None,
+        persistent_session_policy: None,
     };
     let test_command_registry =
         Arc::new(ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap());
@@ -265,6 +269,7 @@ fn build_app_state(
         ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
         vault_fingerprint: None,
         accounting: None,
+        persistent_sessions: Arc::new(ryeos_app::persistent_session::PersistentSessionPool::new()),
     };
 
     (tmpdir, state)

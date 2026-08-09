@@ -136,6 +136,8 @@ mod tests {
             }],
             hosted_node_policies: vec![],
             command_registration_policy: Default::default(),
+            external_content_import_policy: None,
+            persistent_session_policy: None,
         };
 
         let commands = load_command_descriptors_from_snapshot(&snapshot);

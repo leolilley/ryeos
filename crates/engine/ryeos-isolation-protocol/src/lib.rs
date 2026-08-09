@@ -8,6 +8,14 @@ use serde::de::{DeserializeOwned, DeserializeSeed, Error as _, MapAccess, SeqAcc
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v1";
 pub const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
@@ -214,6 +222,8 @@ pub enum IsolationCapability {
     ProcessTargetPidReporting,
     #[serde(rename = "lifecycle.shared_process_group")]
     LifecycleSharedProcessGroup,
+    #[serde(rename = "ipc.target_unix_stream")]
+    IpcTargetUnixStream,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -350,6 +360,7 @@ pub enum IsolationAuthorityPurpose {
     WorkspaceLower,
     WorkspaceUpper,
     WorkspaceWork,
+    TargetDuplexChannel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -389,6 +400,17 @@ pub struct IsolationProjectWorkspace {
     pub destination: IsolationPath,
 }
 
+/// One daemon-owned connected duplex channel delivered at a fixed target
+/// descriptor. The source authority is operational; the target descriptor and
+/// environment name are the complete admitted target-side contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IsolationTargetChannel {
+    pub source: IsolationAuthorityId,
+    pub target_fd: u32,
+    pub env_name: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IsolationNetwork {
@@ -424,6 +446,8 @@ pub struct IsolationPlan {
     pub mounts: Vec<IsolationMount>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_workspace: Option<IsolationProjectWorkspace>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub target_channel: Option<IsolationTargetChannel>,
     pub environment: IsolationEnvironment,
     pub network: IsolationNetwork,
     pub devices: IsolationDeviceSurface,
@@ -552,6 +576,48 @@ impl IsolationPlan {
                 ));
             }
         }
+        if let Some(channel) = &self.target_channel {
+            if authority_ids.get(&channel.source)
+                != Some(&IsolationAuthorityPurpose::TargetDuplexChannel)
+            {
+                return Err(ProtocolValidationError::new(
+                    "target channel authority is missing or has the wrong purpose",
+                ));
+            }
+            if channel.target_fd != 0 {
+                return Err(ProtocolValidationError::new(
+                    "target channel descriptor must be stdin (fd 0)",
+                ));
+            }
+            validate_environment_name(&channel.env_name)?;
+            if self
+                .environment
+                .values
+                .get(&channel.env_name)
+                .map(String::as_str)
+                != Some("0")
+            {
+                return Err(ProtocolValidationError::new(
+                    "target channel environment must name target descriptor 0",
+                ));
+            }
+            if self
+                .mounts
+                .iter()
+                .any(|mount| mount.source == channel.source)
+                || self.target.executable == channel.source
+                || self.project_workspace.as_ref().is_some_and(|workspace| {
+                    workspace.lower == channel.source
+                        || workspace.upper == channel.source
+                        || workspace.work == channel.source
+                })
+            {
+                return Err(ProtocolValidationError::new(
+                    "target channel authority cannot supply filesystem or executable authority",
+                ));
+            }
+            used_authorities.insert(channel.source.clone());
+        }
         if target_mounts != 1 {
             return Err(ProtocolValidationError::new(
                 "target executable authority must have exactly one mount",
@@ -591,6 +657,9 @@ impl IsolationPlan {
         if self.project_workspace.is_some() {
             capabilities.insert(IsolationCapability::FilesystemProjectWorkspaceCow);
             capabilities.insert(IsolationCapability::FilesystemWorkspaceDelta);
+        }
+        if self.target_channel.is_some() {
+            capabilities.insert(IsolationCapability::IpcTargetUnixStream);
         }
         if self.private_tmp {
             capabilities.insert(IsolationCapability::FilesystemPrivateTmp);
@@ -1174,6 +1243,7 @@ mod tests {
                     },
                 ],
                 project_workspace: None,
+                target_channel: None,
                 environment: IsolationEnvironment {
                     values: BTreeMap::from([("PATH".to_string(), "/bin".to_string())]),
                 },
@@ -1390,6 +1460,62 @@ mod tests {
                 .to_string()
                 .contains("target executable authority")
         );
+    }
+
+    #[test]
+    fn target_channel_is_required_nullable_and_derives_exact_ipc_capability() {
+        let (mut plan, mut authorities) = complete_plan();
+        let source = IsolationAuthorityId::new("session-channel").unwrap();
+        plan.target_channel = Some(IsolationTargetChannel {
+            source: source.clone(),
+            target_fd: 0,
+            env_name: "RYEOS_SESSION_FD".to_owned(),
+        });
+        plan.environment
+            .values
+            .insert("RYEOS_SESSION_FD".to_owned(), "0".to_owned());
+        authorities.push(IsolationAuthority {
+            id: source,
+            inherited_fd: 6,
+            purpose: IsolationAuthorityPurpose::TargetDuplexChannel,
+        });
+        assert!(
+            plan.validate(&authorities)
+                .unwrap()
+                .contains(&IsolationCapability::IpcTargetUnixStream)
+        );
+
+        let mut value = serde_json::to_value(&plan).unwrap();
+        assert!(value.get("target_channel").is_some());
+        value.as_object_mut().unwrap().remove("target_channel");
+        assert!(serde_json::from_value::<IsolationPlan>(value).is_err());
+    }
+
+    #[test]
+    fn target_channel_rejects_wrong_target_environment_and_authority_use() {
+        let (mut plan, mut authorities) = complete_plan();
+        let source = IsolationAuthorityId::new("session-channel").unwrap();
+        plan.target_channel = Some(IsolationTargetChannel {
+            source: source.clone(),
+            target_fd: 3,
+            env_name: "RYEOS_SESSION_FD".to_owned(),
+        });
+        plan.environment
+            .values
+            .insert("RYEOS_SESSION_FD".to_owned(), "3".to_owned());
+        authorities.push(IsolationAuthority {
+            id: source.clone(),
+            inherited_fd: 6,
+            purpose: IsolationAuthorityPurpose::TargetDuplexChannel,
+        });
+        assert!(plan.validate(&authorities).is_err());
+
+        plan.target_channel.as_mut().unwrap().target_fd = 0;
+        plan.environment
+            .values
+            .insert("RYEOS_SESSION_FD".to_owned(), "0".to_owned());
+        plan.mounts[1].source = source;
+        assert!(plan.validate(&authorities).is_err());
     }
 
     #[test]

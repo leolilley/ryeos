@@ -1,27 +1,15 @@
-//! Launch-time capture of declared external content.
+//! Verification and read-only binding of admitted external realizations.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::Seek as _;
+use std::io::{Read as _, Seek as _};
 #[cfg(unix)]
 use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
 
-use ryeos_engine::contracts::ItemSpace;
-use ryeos_engine::external_content::{
-    DeclaringAuthority, ExternalContentBlobSink, ExternalContentKind, ExternalContentRoot,
-    ExternalCapturePolicy, LaunchRealizationBudget,
-    MAX_DECLARATION_FILE_BYTES, MAX_SYMLINK_TARGET_BYTES,
-};
-use ryeos_engine::external_realization::{
-    ExternalRealizationProof, RealizationStore, RealizedExternalContent,
-    RealizedExternalContentSet,
-};
-
-use anyhow::Context as _;
-
-use super::PendingCasPublication;
+use ryeos_engine::external_content::ExternalContentKind;
+use ryeos_engine::external_realization::RealizedExternalContentSet;
 
 /// Descriptor-pinned materializations and their exact cache-generation
 /// leases. This value must live until the spawned process exits.
@@ -35,14 +23,22 @@ pub(crate) struct BoundExternalRealizations {
 }
 
 impl BoundExternalRealizations {
-    pub(crate) fn mounts(
-        &self,
-    ) -> &[ryeos_engine::isolation::IsolationReadOnlyMountAuthority] {
+    pub(crate) fn mounts(&self) -> &[ryeos_engine::isolation::IsolationReadOnlyMountAuthority] {
         &self.mounts
     }
 
     pub(crate) fn sealed_set_env(&self) -> &str {
         &self.sealed_set_env
+    }
+
+    pub(crate) fn into_spawn_parts(
+        self,
+    ) -> (
+        Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
+        String,
+        Vec<fs::File>,
+    ) {
+        (self.mounts, self.sealed_set_env, self._leases)
     }
 }
 
@@ -56,25 +52,34 @@ const MAX_EXTERNAL_MATERIALIZATION_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// A crashed build's staging directory is torn down once clearly abandoned.
 /// A live staging is always younger than this: a build publishes or cleans
 /// up within one materialization call.
-const STALE_STAGING_MAX_AGE: std::time::Duration =
-    std::time::Duration::from_secs(24 * 60 * 60);
+const STALE_STAGING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 struct ExternalMaterializationCache {
     root: PathBuf,
 }
 
 struct MaterializedExternalGeneration {
+    root: lillux::PinnedDirectory,
     source_path: PathBuf,
     source: fs::File,
-    lease: fs::File,
+    leases: Vec<fs::File>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExternalRealizationBinding {
+    /// The isolation adapter installs descriptor-pinned, read-only mounts.
+    IsolationMounts,
+    /// Disabled isolation has no mount namespace. A daemon-owned, otherwise
+    /// empty workspace receives a private exact copy before the process is
+    /// born. This preserves realization identity without writing into a live
+    /// project or exposing the shared materialization cache to the child.
+    PrivateWorkspace,
 }
 
 impl ExternalMaterializationCache {
-    fn from_app_root(app_root: &Path) -> Self {
+    fn from_runtime_state_root(runtime_state_root: &Path) -> Self {
         Self {
-            root: app_root
-                .join(ryeos_engine::AI_DIR)
-                .join("state/cache/external-content/v1"),
+            root: runtime_state_root.join("external-content-cache"),
         }
     }
 
@@ -87,12 +92,7 @@ impl ExternalMaterializationCache {
         let manifest_hash = closure.manifest_hash();
         let root = lillux::PinnedDirectory::open_or_create(&self.root)?;
         let locks = root.open_or_create_child(OsStr::new(".locks"), 0o700)?;
-        let lock = locks.open_regular_create(
-            OsStr::new(manifest_hash),
-            true,
-            false,
-            0o600,
-        )?;
+        let lock = locks.open_regular_create(OsStr::new(manifest_hash), true, false, 0o600)?;
         #[cfg(unix)]
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
             return Err(std::io::Error::last_os_error().into());
@@ -121,12 +121,7 @@ impl ExternalMaterializationCache {
         verify_materialized_tree(cas, &generation, closure.manifest())?;
 
         let leases = root.open_or_create_child(OsStr::new(".leases"), 0o700)?;
-        let lease = leases.open_regular_create(
-            OsStr::new(manifest_hash),
-            true,
-            false,
-            0o600,
-        )?;
+        let lease = leases.open_regular_create(OsStr::new(manifest_hash), true, false, 0o600)?;
         #[cfg(unix)]
         if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_SH) } != 0 {
             return Err(std::io::Error::last_os_error().into());
@@ -153,10 +148,218 @@ impl ExternalMaterializationCache {
         };
         drop(lock);
         Ok(MaterializedExternalGeneration {
+            root: generation,
             source_path,
             source,
-            lease,
+            leases: vec![lease],
         })
+    }
+
+    fn materialize_large(
+        &self,
+        cas: &lillux::CasStore,
+        store: &ryeos_state::LargeObjectStore,
+        manifest_hash: &str,
+        manifest: &ryeos_state::objects::ExternalLargeContentManifestObject,
+        kind: ExternalContentKind,
+    ) -> anyhow::Result<MaterializedExternalGeneration> {
+        let mut large_sources = BTreeMap::new();
+        for entry in &manifest.entries {
+            let Some(file_sha256) = entry.file_sha256.as_deref() else {
+                continue;
+            };
+            if large_sources.contains_key(file_sha256) {
+                continue;
+            }
+            large_sources.insert(
+                file_sha256.to_owned(),
+                store.lease_object(
+                    file_sha256,
+                    entry.size.expect("validated large file has a size"),
+                )?,
+            );
+        }
+
+        let root = lillux::PinnedDirectory::open_or_create(&self.root)?;
+        let locks = root.open_or_create_child(OsStr::new(".locks"), 0o700)?;
+        let lock = locks.open_regular_create(OsStr::new(manifest_hash), true, false, 0o600)?;
+        #[cfg(unix)]
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+
+        let generation = match root.open_child_directory(OsStr::new(manifest_hash))? {
+            Some(existing) => {
+                match verify_large_materialized_tree(
+                    cas,
+                    &existing,
+                    manifest,
+                    LargeMaterializationVerification::SharedObjects(&large_sources),
+                ) {
+                    Ok(()) => existing,
+                    Err(error) => {
+                        tracing::warn!(
+                            manifest_hash,
+                            %error,
+                            "discarding invalid large-content materialization"
+                        );
+                        existing.remove_contents_recursive()?;
+                        if !root.remove_empty_child_if_same(OsStr::new(manifest_hash), &existing)? {
+                            anyhow::bail!(
+                                "invalid large-content generation {manifest_hash} remained non-empty"
+                            );
+                        }
+                        self.build_large_generation(
+                            cas,
+                            store,
+                            &root,
+                            manifest_hash,
+                            manifest,
+                            &large_sources,
+                        )?
+                    }
+                }
+            }
+            None => self.build_large_generation(
+                cas,
+                store,
+                &root,
+                manifest_hash,
+                manifest,
+                &large_sources,
+            )?,
+        };
+        verify_large_materialized_tree(
+            cas,
+            &generation,
+            manifest,
+            LargeMaterializationVerification::SharedObjects(&large_sources),
+        )?;
+
+        let leases = root.open_or_create_child(OsStr::new(".leases"), 0o700)?;
+        let generation_lease =
+            leases.open_regular_create(OsStr::new(manifest_hash), true, false, 0o600)?;
+        #[cfg(unix)]
+        if unsafe { libc::flock(generation_lease.as_raw_fd(), libc::LOCK_SH) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let _ = generation_lease.set_modified(std::time::SystemTime::now());
+
+        let (source_path, source) = match kind {
+            ExternalContentKind::Tree => (
+                generation.path().to_path_buf(),
+                generation.try_clone_descriptor()?,
+            ),
+            ExternalContentKind::File => {
+                let name = OsStr::new(ryeos_engine::external_content::FILE_REALIZATION_ENTRY_PATH);
+                let source = generation.open_mount_entry(name)?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "file realization {manifest_hash} has no materialized content entry"
+                    )
+                })?;
+                (generation.path().join(name), source)
+            }
+        };
+        let mut retained_leases = Vec::with_capacity(large_sources.len() + 1);
+        retained_leases.push(generation_lease);
+        for leased in large_sources.into_values() {
+            let (_, _, lease) = leased.into_parts();
+            retained_leases.push(lease);
+        }
+        drop(lock);
+        Ok(MaterializedExternalGeneration {
+            root: generation,
+            source_path,
+            source,
+            leases: retained_leases,
+        })
+    }
+
+    fn build_large_generation(
+        &self,
+        cas: &lillux::CasStore,
+        store: &ryeos_state::LargeObjectStore,
+        root: &lillux::PinnedDirectory,
+        manifest_hash: &str,
+        manifest: &ryeos_state::objects::ExternalLargeContentManifestObject,
+        large_sources: &BTreeMap<String, ryeos_state::LeasedLargeObject>,
+    ) -> anyhow::Result<lillux::PinnedDirectory> {
+        let staging_name = OsString::from(format!(
+            ".{manifest_hash}.staging.{}.{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let staging = root.create_child(&staging_name, 0o700)?;
+        let result = (|| {
+            for entry in &manifest.entries {
+                let (parent, name) = ensure_materialization_parent(&staging, &entry.path)?;
+                match entry.kind {
+                    ryeos_state::objects::ExternalContentManifestEntryKind::Dir => {
+                        parent.create_child(&name, 0o755)?;
+                    }
+                    ryeos_state::objects::ExternalContentManifestEntryKind::File => {
+                        let mode = entry.mode.expect("validated file entry has a mode");
+                        if let Some(blob_hash) = entry.blob_hash.as_deref() {
+                            let written = cas
+                                .materialize_blob_to_new_regular(blob_hash, &parent, &name, mode)?;
+                            if Some(written) != entry.size {
+                                anyhow::bail!(
+                                    "materialized large-tree CAS file {} has the wrong size",
+                                    entry.path
+                                );
+                            }
+                        } else {
+                            let file_sha256 = entry
+                                .file_sha256
+                                .as_deref()
+                                .expect("validated file has one storage tier");
+                            let leased = large_sources.get(file_sha256).ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "large-content object {file_sha256} lost its launch lease"
+                                )
+                            })?;
+                            if mode == 0o644 {
+                                store.link_object_into(
+                                    file_sha256,
+                                    &parent,
+                                    &name,
+                                    leased.file(),
+                                )?;
+                            } else {
+                                materialize_executable_large_file(
+                                    leased.file(),
+                                    &parent,
+                                    &name,
+                                    entry.size.expect("validated file has a size"),
+                                )?;
+                            }
+                        }
+                    }
+                    ryeos_state::objects::ExternalContentManifestEntryKind::Symlink => {
+                        let target = large_symlink_target_bytes(cas, entry)?;
+                        parent.create_symlink(&name, &target)?;
+                    }
+                }
+            }
+            verify_large_materialized_tree(
+                cas,
+                &staging,
+                manifest,
+                LargeMaterializationVerification::SharedObjects(large_sources),
+            )?;
+            root.rename_child_directory_noreplace(
+                &staging_name,
+                OsStr::new(manifest_hash),
+                &staging,
+            )?;
+            root.open_child_directory(OsStr::new(manifest_hash))?
+                .ok_or_else(|| anyhow::anyhow!("published large-content generation disappeared"))
+        })();
+        if result.is_err() {
+            let _ = staging.remove_contents_recursive();
+            let _ = root.remove_empty_child_if_same(&staging_name, &staging);
+        }
+        result
     }
 
     fn build_generation(
@@ -341,12 +544,249 @@ fn directory_content_bytes(directory: &lillux::PinnedDirectory) -> anyhow::Resul
     Ok(total)
 }
 
+fn open_materialization_parent(
+    root: &lillux::PinnedDirectory,
+    relative: &str,
+) -> anyhow::Result<(lillux::PinnedDirectory, OsString)> {
+    let mut components = relative.split('/').peekable();
+    let mut parent = root.try_clone()?;
+    while let Some(component) = components.next() {
+        if components.peek().is_none() {
+            return Ok((parent, OsString::from(component)));
+        }
+        parent = parent
+            .open_child_directory(OsStr::new(component))?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "verified external materialization lost directory component `{component}`"
+                )
+            })?;
+    }
+    anyhow::bail!("external materialization path is empty")
+}
+
+fn copy_open_regular_to_new(
+    source: &fs::File,
+    target_parent: &lillux::PinnedDirectory,
+    target_name: &OsStr,
+    expected_size: u64,
+    mode: u32,
+) -> anyhow::Result<()> {
+    let mut source = source.try_clone()?;
+    source.rewind()?;
+    let mut target = target_parent.open_regular_create(target_name, true, true, 0o600)?;
+    let copied = std::io::copy(
+        &mut source.take(expected_size.saturating_add(1)),
+        &mut target,
+    )?;
+    if copied != expected_size {
+        anyhow::bail!(
+            "private external realization changed size while copying: expected {expected_size}, copied {copied}"
+        );
+    }
+    lillux::secure_fs::set_open_regular_file_mode(&target, mode)?;
+    Ok(())
+}
+
+fn copy_materialized_tree(
+    source: &lillux::PinnedDirectory,
+    target: &lillux::PinnedDirectory,
+    manifest: &ryeos_state::objects::ExternalContentManifestObject,
+) -> anyhow::Result<()> {
+    for entry in &manifest.entries {
+        let (target_parent, target_name) = ensure_materialization_parent(target, &entry.path)?;
+        match entry.kind {
+            ryeos_state::objects::ExternalContentManifestEntryKind::Dir => {
+                target_parent.create_child(&target_name, 0o755)?;
+            }
+            ryeos_state::objects::ExternalContentManifestEntryKind::File => {
+                let (source_parent, source_name) =
+                    open_materialization_parent(source, &entry.path)?;
+                let source_file = source_parent
+                    .open_regular(&source_name, false)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "verified external materialization lost file {}",
+                            entry.path
+                        )
+                    })?;
+                copy_open_regular_to_new(
+                    &source_file,
+                    &target_parent,
+                    &target_name,
+                    entry.size.expect("validated file entry has a size"),
+                    entry.mode.expect("validated file entry has a mode"),
+                )?;
+            }
+            ryeos_state::objects::ExternalContentManifestEntryKind::Symlink => {
+                let (source_parent, source_name) =
+                    open_materialization_parent(source, &entry.path)?;
+                let target_bytes = source_parent
+                    .read_symlink_target(
+                        &source_name,
+                        ryeos_state::objects::MAX_SYMLINK_TARGET_BYTES as usize,
+                    )?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "verified external materialization lost symlink {}",
+                            entry.path
+                        )
+                    })?;
+                target_parent.create_symlink(&target_name, &target_bytes)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn copy_large_materialized_tree(
+    source: &lillux::PinnedDirectory,
+    target: &lillux::PinnedDirectory,
+    manifest: &ryeos_state::objects::ExternalLargeContentManifestObject,
+) -> anyhow::Result<()> {
+    for entry in &manifest.entries {
+        let (target_parent, target_name) = ensure_materialization_parent(target, &entry.path)?;
+        match entry.kind {
+            ryeos_state::objects::ExternalContentManifestEntryKind::Dir => {
+                target_parent.create_child(&target_name, 0o755)?;
+            }
+            ryeos_state::objects::ExternalContentManifestEntryKind::File => {
+                let (source_parent, source_name) =
+                    open_materialization_parent(source, &entry.path)?;
+                let source_file = source_parent
+                    .open_regular(&source_name, false)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "verified large-content materialization lost file {}",
+                            entry.path
+                        )
+                    })?;
+                copy_open_regular_to_new(
+                    &source_file,
+                    &target_parent,
+                    &target_name,
+                    entry.size.expect("validated file entry has a size"),
+                    entry.mode.expect("validated file entry has a mode"),
+                )?;
+            }
+            ryeos_state::objects::ExternalContentManifestEntryKind::Symlink => {
+                let (source_parent, source_name) =
+                    open_materialization_parent(source, &entry.path)?;
+                let target_bytes = source_parent
+                    .read_symlink_target(
+                        &source_name,
+                        ryeos_state::objects::MAX_SYMLINK_TARGET_BYTES as usize,
+                    )?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "verified large-content materialization lost symlink {}",
+                            entry.path
+                        )
+                    })?;
+                target_parent.create_symlink(&target_name, &target_bytes)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn publish_private_generation<P, V>(
+    workspace: &lillux::PinnedDirectory,
+    mount: &str,
+    kind: ExternalContentKind,
+    populate: P,
+    verify: V,
+) -> anyhow::Result<()>
+where
+    P: FnOnce(&lillux::PinnedDirectory) -> anyhow::Result<()>,
+    V: FnOnce(&lillux::PinnedDirectory) -> anyhow::Result<()>,
+{
+    let (parent, mount_name) = ensure_materialization_parent(workspace, mount)?;
+    let staging_name = OsString::from(format!(
+        ".external-realization.{}.{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    let staging = parent.create_child(&staging_name, 0o700)?;
+    let mut published = false;
+    let result = (|| {
+        populate(&staging)?;
+        verify(&staging)?;
+        match kind {
+            ExternalContentKind::Tree => {
+                parent.rename_child_directory_noreplace(&staging_name, &mount_name, &staging)?;
+                published = true;
+            }
+            ExternalContentKind::File => {
+                let content_name =
+                    OsStr::new(ryeos_engine::external_content::FILE_REALIZATION_ENTRY_PATH);
+                let content = staging.open_regular(content_name, false)?.ok_or_else(|| {
+                    anyhow::anyhow!("verified file realization lost its content entry")
+                })?;
+                if !parent.publish_regular_link_from(
+                    &mount_name,
+                    &staging,
+                    content_name,
+                    &content,
+                )? {
+                    anyhow::bail!(
+                        "private external realization destination already exists: {}",
+                        parent.path().join(&mount_name).display()
+                    );
+                }
+                published = true;
+                if !parent.remove_empty_child_if_same(&staging_name, &staging)? {
+                    anyhow::bail!("file realization staging directory remained non-empty");
+                }
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() && !published {
+        let _ = staging.remove_contents_recursive();
+        let _ = parent.remove_empty_child_if_same(&staging_name, &staging);
+    }
+    result
+}
+
 /// Verify and materialize the exact realization set committed by a finalized
 /// program. No locator or live project path is consulted for source bytes.
 pub(crate) fn bind_external_realizations(
     state: &ryeos_app::state::AppState,
     resolution: &ryeos_engine::resolution::ResolutionOutput,
     project_path: &Path,
+) -> anyhow::Result<Option<BoundExternalRealizations>> {
+    bind_external_realizations_with(
+        state,
+        resolution,
+        project_path,
+        ExternalRealizationBinding::IsolationMounts,
+    )
+}
+
+/// Install admitted realizations into a daemon-owned projectless workspace
+/// when the node has explicitly disabled OS isolation. The child receives no
+/// shared cache/store inode and no live locator fallback. Callers must never
+/// use this for an operator's live project workspace: doing so would replace
+/// project content rather than construct an execution view.
+pub(crate) fn bind_external_realizations_in_private_workspace(
+    state: &ryeos_app::state::AppState,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    workspace: &Path,
+) -> anyhow::Result<Option<BoundExternalRealizations>> {
+    bind_external_realizations_with(
+        state,
+        resolution,
+        workspace,
+        ExternalRealizationBinding::PrivateWorkspace,
+    )
+}
+
+fn bind_external_realizations_with(
+    state: &ryeos_app::state::AppState,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    project_path: &Path,
+    binding: ExternalRealizationBinding,
 ) -> anyhow::Result<Option<BoundExternalRealizations>> {
     let Some(value) = resolution
         .composed
@@ -364,11 +804,25 @@ pub(crate) fn bind_external_realizations(
     let guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&guard)?;
     let cas = authority.cas_store()?;
-    let cache = ExternalMaterializationCache::from_app_root(&state.config.app_root);
+    let cache =
+        ExternalMaterializationCache::from_runtime_state_root(&state.config.runtime_state_dir());
+    let private_workspace = match binding {
+        ExternalRealizationBinding::IsolationMounts => None,
+        ExternalRealizationBinding::PrivateWorkspace => {
+            Some(lillux::PinnedDirectory::open(project_path)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "private external-realization workspace does not exist: {}",
+                    project_path.display()
+                )
+            })?)
+        }
+    };
     let mut mounts = Vec::with_capacity(realized.iter().len());
     let mut leases = Vec::with_capacity(realized.iter().len());
     for entry in realized.iter() {
-        if let Some(manifest) = try_load_large_content_manifest(&cas, &entry.manifest_hash)? {
+        if let Some(manifest) =
+            ryeos_state::objects::load_if_large_content_manifest(&cas, &entry.manifest_hash)?
+        {
             if manifest.entry_count != entry.entry_count
                 || manifest.total_bytes != entry.total_bytes
             {
@@ -385,40 +839,43 @@ pub(crate) fn bind_external_realizations(
                     entry.manifest_hash
                 );
             }
-            // Large content never materialize-copies: every manifest entry
-            // binds the store's immutable file directly, leased for the
-            // spawn's lifetime. A tree shape is one mount per entry.
             let store = authority.large_object_store()?;
-            let destination_root = project_path.join(&entry.mount);
-            for manifest_entry in &manifest.entries {
-                let leased = store
-                    .lease_object(&manifest_entry.file_sha256, manifest_entry.size)
-                    .with_context(|| {
-                        format!(
-                            "binding large object for `{}` at `{}`",
-                            entry.id, manifest_entry.path
+            let generation = cache.materialize_large(
+                &cas,
+                &store,
+                &entry.manifest_hash,
+                &manifest,
+                entry.kind,
+            )?;
+            if let Some(workspace) = private_workspace.as_ref() {
+                publish_private_generation(
+                    workspace,
+                    &entry.mount,
+                    entry.kind,
+                    |staging| copy_large_materialized_tree(&generation.root, staging, &manifest),
+                    |staging| {
+                        verify_large_materialized_tree(
+                            &cas,
+                            staging,
+                            &manifest,
+                            LargeMaterializationVerification::PrivateDigest,
                         )
-                    })?;
-                let destination = match entry.kind {
-                    ExternalContentKind::File => destination_root.clone(),
-                    ExternalContentKind::Tree => destination_root.join(&manifest_entry.path),
-                };
-                let (source_path, source, lease) = leased.into_parts();
+                    },
+                )?;
+            } else {
                 mounts.push(
                     ryeos_engine::isolation::IsolationReadOnlyMountAuthority::new(
-                        source_path,
-                        destination,
-                        source,
+                        generation.source_path,
+                        project_path.join(&entry.mount),
+                        generation.source,
                     ),
                 );
-                leases.push(lease);
             }
+            leases.extend(generation.leases);
             continue;
         }
-        let closure = ryeos_state::VerifiedExternalContentClosure::load(
-            &cas,
-            &entry.manifest_hash,
-        )?;
+        let closure =
+            ryeos_state::VerifiedExternalContentClosure::load(&cas, &entry.manifest_hash)?;
         if closure.manifest().entry_count != entry.entry_count
             || closure.manifest().total_bytes != entry.total_bytes
         {
@@ -429,12 +886,24 @@ pub(crate) fn bind_external_realizations(
             );
         }
         let generation = cache.materialize(&cas, &closure, entry.kind)?;
-        mounts.push(ryeos_engine::isolation::IsolationReadOnlyMountAuthority::new(
-            generation.source_path,
-            project_path.join(&entry.mount),
-            generation.source,
-        ));
-        leases.push(generation.lease);
+        if let Some(workspace) = private_workspace.as_ref() {
+            publish_private_generation(
+                workspace,
+                &entry.mount,
+                entry.kind,
+                |staging| copy_materialized_tree(&generation.root, staging, closure.manifest()),
+                |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
+            )?;
+        } else {
+            mounts.push(
+                ryeos_engine::isolation::IsolationReadOnlyMountAuthority::new(
+                    generation.source_path,
+                    project_path.join(&entry.mount),
+                    generation.source,
+                ),
+            );
+        }
+        leases.extend(generation.leases);
     }
     authority.ensure_guard(&guard)?;
     // This launch's generations are lease-protected above, so the sweep can
@@ -470,9 +939,13 @@ struct SealedRealizationMount {
     /// Absolute mount destination under the launch's project root.
     destination: PathBuf,
     kind: ExternalContentKind,
-    /// Manifest path → (content hash, exact size) for regular-file entries.
-    files: BTreeMap<String, (String, u64)>,
-    /// Whether hashes name large-object store files instead of CAS blobs.
+    /// Manifest path → exact regular-file bytes and their storage tier.
+    files: BTreeMap<String, SealedRealizationFile>,
+}
+
+struct SealedRealizationFile {
+    content_hash: String,
+    size: u64,
     large: bool,
 }
 
@@ -520,10 +993,10 @@ fn locate_sealed_path<'a>(
     match best {
         None => SealedPathLookup::Uncovered,
         Some((mount, Some(key))) => match mount.files.get(&key) {
-            Some((blob_hash, size)) => SealedPathLookup::File {
-                blob_hash: blob_hash.as_str(),
-                size: *size,
-                large: mount.large,
+            Some(file) => SealedPathLookup::File {
+                blob_hash: file.content_hash.as_str(),
+                size: file.size,
+                large: file.large,
             },
             None => SealedPathLookup::Absent,
         },
@@ -560,9 +1033,7 @@ impl ryeos_engine::project_content::SealedDependencyBytes for SealedRealizationD
                         "sealed dependency is {size} bytes, over the {max_bytes}-byte ceiling"
                     )));
                 }
-                self.authority
-                    .ensure_guard(&self.guard)
-                    .map_err(internal)?;
+                self.authority.ensure_guard(&self.guard).map_err(internal)?;
                 let bytes = if large {
                     // Large objects live in the store, not the CAS; a store
                     // read is hash-verified here because sealed answers are
@@ -572,7 +1043,10 @@ impl ryeos_engine::project_content::SealedDependencyBytes for SealedRealizationD
                         let leased = store.lease_object(blob_hash, size)?;
                         let mut bytes = Vec::with_capacity(size as usize);
                         use std::io::Read as _;
-                        leased.file().take(max_bytes.saturating_add(1)).read_to_end(&mut bytes)?;
+                        leased
+                            .file()
+                            .take(max_bytes.saturating_add(1))
+                            .read_to_end(&mut bytes)?;
                         if bytes.len() as u64 != size
                             || lillux::cas::sha256_hex(&bytes) != blob_hash
                         {
@@ -589,9 +1063,7 @@ impl ryeos_engine::project_content::SealedDependencyBytes for SealedRealizationD
                     )
                     .map_err(internal)?
                 };
-                self.authority
-                    .ensure_guard(&self.guard)
-                    .map_err(internal)?;
+                self.authority.ensure_guard(&self.guard).map_err(internal)?;
                 Ok(SealedDependencyContent::Sealed(bytes))
             }
         }
@@ -602,9 +1074,9 @@ impl ryeos_engine::project_content::SealedDependencyBytes for SealedRealizationD
 /// when live bytes are authoritative for this launch.
 ///
 /// A dispatched child executes under its parent's sealed realization set
-/// unless it authors its own declaration. A declaring child's realization is
-/// captured fresh from the live tree at launch, so live bytes are exactly
-/// what will execute and no substitution applies. Fail-closed on broken
+/// unless it authors its own declaration. The daemon admits a declaring
+/// child's realization from the same authoritative live generation during
+/// launch finalization, so no inherited substitution applies here. Fail-closed on broken
 /// lineage: a dispatching parent without an admitted capsule is an error,
 /// never an empty inheritance.
 pub(crate) fn sealed_dependency_bytes_for_child_dispatch(
@@ -619,19 +1091,12 @@ pub(crate) fn sealed_dependency_bytes_for_child_dispatch(
     };
     let engine = admission.request_engine();
     let resolution = admission.resolution_output();
-    let roots = engine.resolution_roots(match params.provenance.project_authority() {
-        ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => None,
-        ryeos_state::objects::ExecutionProjectAuthority::LiveProject { .. }
-        | ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. } => {
-            Some(params.provenance.original_project_path().to_path_buf())
-        }
-    });
     let contract = engine
         .kinds
         .get(&params.resolved.kind)
         .and_then(|schema| schema.execution.as_ref())
         .and_then(|execution| execution.external_content.as_ref());
-    let declarer = declaring_authority(resolution, &roots)?;
+    let declarer = ryeos_engine::external_content::declaring_authority(resolution)?;
     if ryeos_engine::external_content::declarations_from_composed(
         &resolution.composed.composed,
         contract,
@@ -663,7 +1128,9 @@ pub(crate) fn sealed_dependency_bytes_for_child_dispatch(
     let project_root = params.provenance.effective_path();
     let mut mounts = Vec::with_capacity(realized.iter().len());
     for entry in realized.iter() {
-        if let Some(manifest) = try_load_large_content_manifest(&cas, &entry.manifest_hash)? {
+        if let Some(manifest) =
+            ryeos_state::objects::load_if_large_content_manifest(&cas, &entry.manifest_hash)?
+        {
             if manifest.entry_count != entry.entry_count
                 || manifest.total_bytes != entry.total_bytes
             {
@@ -676,10 +1143,23 @@ pub(crate) fn sealed_dependency_bytes_for_child_dispatch(
             let files = manifest
                 .entries
                 .iter()
+                .filter(|entry| {
+                    entry.kind == ryeos_state::objects::ExternalContentManifestEntryKind::File
+                })
                 .map(|entry| {
+                    let (content_hash, large) =
+                        match (entry.blob_hash.as_ref(), entry.file_sha256.as_ref()) {
+                            (Some(hash), None) => (hash.clone(), false),
+                            (None, Some(hash)) => (hash.clone(), true),
+                            _ => unreachable!("validated large manifest file has one storage tier"),
+                        };
                     (
                         entry.path.clone(),
-                        (entry.file_sha256.clone(), entry.size),
+                        SealedRealizationFile {
+                            content_hash,
+                            size: entry.size.expect("validated file entry has a size"),
+                            large,
+                        },
                     )
                 })
                 .collect();
@@ -687,7 +1167,6 @@ pub(crate) fn sealed_dependency_bytes_for_child_dispatch(
                 destination: project_root.join(&entry.mount),
                 kind: entry.kind,
                 files,
-                large: true,
             });
             continue;
         }
@@ -712,13 +1191,14 @@ pub(crate) fn sealed_dependency_bytes_for_child_dispatch(
             .map(|entry| {
                 (
                     entry.path.clone(),
-                    (
-                        entry
+                    SealedRealizationFile {
+                        content_hash: entry
                             .blob_hash
                             .clone()
                             .expect("validated file entry has a blob hash"),
-                        entry.size.expect("validated file entry has a size"),
-                    ),
+                        size: entry.size.expect("validated file entry has a size"),
+                        large: false,
+                    },
                 )
             })
             .collect();
@@ -726,7 +1206,6 @@ pub(crate) fn sealed_dependency_bytes_for_child_dispatch(
             destination: project_root.join(&entry.mount),
             kind: entry.kind,
             files,
-            large: false,
         });
     }
     authority.ensure_guard(&guard)?;
@@ -766,6 +1245,187 @@ fn symlink_target_bytes(
         ),
         _ => anyhow::bail!("validated symlink entry {} lost its target", entry.path),
     }
+}
+
+fn large_symlink_target_bytes(
+    cas: &lillux::CasStore,
+    entry: &ryeos_state::objects::ExternalLargeContentManifestEntry,
+) -> anyhow::Result<Vec<u8>> {
+    match (entry.target.as_deref(), entry.target_blob.as_deref()) {
+        (Some(target), None) => Ok(target.as_bytes().to_vec()),
+        (None, Some(hash)) => ryeos_state::object_closure::load_exact_cas_blob_with_cas(
+            cas,
+            hash,
+            ryeos_state::objects::MAX_SYMLINK_TARGET_BYTES,
+        ),
+        _ => anyhow::bail!("validated symlink entry {} lost its target", entry.path),
+    }
+}
+
+fn materialize_executable_large_file(
+    source: &fs::File,
+    parent: &lillux::PinnedDirectory,
+    name: &OsStr,
+    expected_size: u64,
+) -> anyhow::Result<()> {
+    let mut source = source.try_clone()?;
+    source.rewind()?;
+    let mut target = parent.open_regular_create(name, true, true, 0o600)?;
+    let copied = std::io::copy(
+        &mut source.take(expected_size.saturating_add(1)),
+        &mut target,
+    )?;
+    if copied != expected_size {
+        anyhow::bail!(
+            "large executable changed size during materialization: expected {expected_size}, copied {copied}"
+        );
+    }
+    target.sync_all()?;
+    lillux::secure_fs::set_open_regular_file_mode(&target, 0o755)?;
+    target.sync_all()?;
+    Ok(())
+}
+
+enum LargeMaterializationVerification<'a> {
+    SharedObjects(&'a BTreeMap<String, ryeos_state::LeasedLargeObject>),
+    PrivateDigest,
+}
+
+fn verify_large_materialized_tree(
+    cas: &lillux::CasStore,
+    root: &lillux::PinnedDirectory,
+    manifest: &ryeos_state::objects::ExternalLargeContentManifestObject,
+    verification: LargeMaterializationVerification<'_>,
+) -> anyhow::Result<()> {
+    let expected = manifest
+        .entries
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut observed = Vec::with_capacity(expected.len());
+    verify_large_materialized_directory(cas, root, "", &expected, &verification, &mut observed)?;
+    observed.sort();
+    let expected_paths = expected.keys().copied().collect::<Vec<_>>();
+    if observed.iter().map(String::as_str).collect::<Vec<_>>() != expected_paths {
+        anyhow::bail!("materialized large-content tree has missing or extra entries");
+    }
+    Ok(())
+}
+
+fn verify_large_materialized_directory(
+    cas: &lillux::CasStore,
+    directory: &lillux::PinnedDirectory,
+    prefix: &str,
+    expected: &BTreeMap<&str, &ryeos_state::objects::ExternalLargeContentManifestEntry>,
+    verification: &LargeMaterializationVerification<'_>,
+    observed: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    for actual in directory.entries_no_follow()? {
+        let name = actual.name.to_str().ok_or_else(|| {
+            anyhow::anyhow!("large-content materialization contains a non-UTF-8 filename")
+        })?;
+        let path = if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let entry = expected.get(path.as_str()).ok_or_else(|| {
+            anyhow::anyhow!("large-content materialization contains unexpected entry {path}")
+        })?;
+        observed.push(path.clone());
+        match entry.kind {
+            ryeos_state::objects::ExternalContentManifestEntryKind::Dir => {
+                if actual.entry_type != lillux::PinnedEntryType::Directory {
+                    anyhow::bail!("large-content materialization entry {path} is not a directory");
+                }
+                let child = directory
+                    .open_child_directory(&actual.name)?
+                    .ok_or_else(|| anyhow::anyhow!("materialized directory {path} disappeared"))?;
+                verify_large_materialized_directory(
+                    cas,
+                    &child,
+                    &path,
+                    expected,
+                    verification,
+                    observed,
+                )?;
+            }
+            ryeos_state::objects::ExternalContentManifestEntryKind::File => {
+                if actual.entry_type != lillux::PinnedEntryType::Regular {
+                    anyhow::bail!("large-content materialization entry {path} is not a file");
+                }
+                let mut file = directory
+                    .open_regular(&actual.name, false)?
+                    .ok_or_else(|| anyhow::anyhow!("materialized file {path} disappeared"))?;
+                let metadata = file.metadata()?;
+                let expected_size = entry.size.expect("validated file has a size");
+                if metadata.len() != expected_size
+                    || Some(lillux::normalized_portable_regular_mode(&metadata)?) != entry.mode
+                {
+                    anyhow::bail!("materialized large-content file {path} has wrong metadata");
+                }
+                if let Some(blob_hash) = entry.blob_hash.as_deref() {
+                    file.rewind()?;
+                    let (digest, _) =
+                        lillux::digest_open_regular_file_stable_exact(&mut file, expected_size)?;
+                    if digest != blob_hash {
+                        anyhow::bail!("materialized CAS file {path} contradicts its manifest");
+                    }
+                } else {
+                    let file_sha256 = entry
+                        .file_sha256
+                        .as_deref()
+                        .expect("validated file has one storage tier");
+                    if let LargeMaterializationVerification::SharedObjects(large_sources) =
+                        verification
+                        && entry.mode == Some(0o644)
+                    {
+                        let source = large_sources.get(file_sha256).ok_or_else(|| {
+                            anyhow::anyhow!("large-content file {path} lost its source lease")
+                        })?;
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::MetadataExt as _;
+                            let source_metadata = source.file().metadata()?;
+                            if metadata.dev() != source_metadata.dev()
+                                || metadata.ino() != source_metadata.ino()
+                            {
+                                anyhow::bail!(
+                                    "materialized large-content file {path} is not the leased object"
+                                );
+                            }
+                        }
+                    } else {
+                        file.rewind()?;
+                        let (digest, _) = lillux::digest_open_regular_file_stable_exact(
+                            &mut file,
+                            expected_size,
+                        )?;
+                        if digest != file_sha256 {
+                            anyhow::bail!(
+                                "materialized executable {path} contradicts its large object"
+                            );
+                        }
+                    }
+                }
+            }
+            ryeos_state::objects::ExternalContentManifestEntryKind::Symlink => {
+                if actual.entry_type != lillux::PinnedEntryType::Symlink {
+                    anyhow::bail!("large-content materialization entry {path} is not a symlink");
+                }
+                let target = directory
+                    .read_symlink_target(
+                        &actual.name,
+                        ryeos_state::objects::MAX_SYMLINK_TARGET_BYTES as usize,
+                    )?
+                    .ok_or_else(|| anyhow::anyhow!("materialized symlink {path} disappeared"))?;
+                if target != large_symlink_target_bytes(cas, entry)? {
+                    anyhow::bail!("materialized symlink {path} contradicts its manifest");
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn verify_materialized_tree(
@@ -855,568 +1515,26 @@ fn verify_materialized_directory(
     Ok(())
 }
 
-/// Capture output retained until the admitted capsule becomes a durable CAS
-/// root. Dropping before publication retires (or conservatively abandons) the
-/// staged-root lease; it never exposes an unrooted realization.
-pub(crate) struct CapturedExternalRealizations {
-    proof: ExternalRealizationProof,
-    store: ExternalRealizationStore,
-    publication: Option<PendingCasPublication>,
-}
-
-impl CapturedExternalRealizations {
-    pub(crate) fn finalization_evidence(
-        &self,
-    ) -> (&ExternalRealizationProof, &dyn RealizationStore) {
-        (&self.proof, &self.store)
-    }
-
-    pub(crate) fn into_publication(mut self) -> Option<PendingCasPublication> {
-        self.publication.take()
-    }
-}
-
-/// Reconstruct the finalization evidence for a sealed realization without
-/// consulting any live locator. Recovery is deliberately CAS-only: a missing
-/// manifest or blob is an availability failure, never permission to recapture.
-pub(crate) fn recover_external_realizations(
-    state: &ryeos_app::state::AppState,
-    resolution: &ryeos_engine::resolution::ResolutionOutput,
-) -> anyhow::Result<Option<CapturedExternalRealizations>> {
-    let Some(value) = resolution
-        .composed
-        .derived
-        .get(ryeos_engine::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY)
-    else {
-        return Ok(None);
-    };
-    let realized = RealizedExternalContentSet::from_value(value)?;
-    let authority = super::pinned_state_authority(state)?;
-    let store = ExternalRealizationStore::new(authority);
-    let proof = ryeos_engine::external_realization::prove_external_realizations(realized, &store)?;
-    Ok(Some(CapturedExternalRealizations {
-        proof,
-        store,
-        publication: None,
-    }))
-}
-
-/// Inherit the dispatching program's sealed realization verbatim.
-///
-/// Every descendant of one admitted solve executes against the
-/// same realization — manifests *and* logical mounts — unless it authors its
-/// own declaration, which replaces inheritance entirely. Redeemability is
-/// re-proved from CAS under the pinned authority. No staged publication is
-/// needed: the parent's capsule roots every manifest across the admission
-/// window, and the child's own capsule roots them durably once sealed.
-fn inherit_external_realizations(
-    state: &ryeos_app::state::AppState,
-    resolution: &mut ryeos_engine::resolution::ResolutionOutput,
-    inherited: Option<&RealizedExternalContentSet>,
-) -> anyhow::Result<Option<CapturedExternalRealizations>> {
-    let Some(inherited) = inherited else {
-        return Ok(None);
-    };
-    let realized = inherited.clone();
-    resolution.composed.derived.insert(
-        ryeos_engine::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY.to_string(),
-        realized.to_value()?,
-    );
-    let authority = super::pinned_state_authority(state)?;
-    let store = ExternalRealizationStore::new(authority);
-    let proof =
-        ryeos_engine::external_realization::prove_external_realizations(realized, &store)?;
-    tracing::info!(
-        realization_count = proof.realized().iter().len(),
-        "inherited external content realization"
-    );
-    Ok(Some(CapturedExternalRealizations {
-        proof,
-        store,
-        publication: None,
-    }))
-}
-
-/// Exact CAS authority used to re-prove a realization at finalization.
-pub(crate) struct ExternalRealizationStore {
-    authority: ryeos_state::PinnedStateAuthority,
-}
-
-impl ExternalRealizationStore {
-    pub(crate) fn new(authority: ryeos_state::PinnedStateAuthority) -> Self {
-        Self { authority }
-    }
-}
-
-impl RealizationStore for ExternalRealizationStore {
-    fn realization_available(&self, manifest_hash: &str) -> anyhow::Result<bool> {
-        let guard = self.authority.acquire_shared_guard()?;
-        self.authority.ensure_guard(&guard)?;
-        let cas = self.authority.cas_store()?;
-        if let Some(manifest) = try_load_large_content_manifest(&cas, manifest_hash)? {
-            let store = self.authority.large_object_store()?;
-            for entry in &manifest.entries {
-                if store.object_size(&entry.file_sha256)? != Some(entry.size) {
-                    anyhow::bail!(
-                        "large object {} for `{}` is not in the store at its sealed size",
-                        entry.file_sha256,
-                        entry.path
-                    );
-                }
-            }
-            return Ok(true);
-        }
-        ryeos_state::VerifiedExternalContentClosure::load(&cas, manifest_hash).map(|_| true)
-    }
-}
-
-struct GuardedCasBlobSink<'a> {
-    guard: &'a ryeos_state::CasMutationGuard,
-    cas: &'a lillux::CasStore,
-    staged_roots: &'a mut ryeos_state::StagedCasRootLease,
-    stored_blobs: usize,
-    reused_blobs: usize,
-}
-
-impl GuardedCasBlobSink<'_> {
-    fn counts(&self) -> (usize, usize) {
-        (self.stored_blobs, self.reused_blobs)
-    }
-}
-
-impl ExternalContentBlobSink for GuardedCasBlobSink<'_> {
-    fn store_file(
-        &mut self,
-        file: std::fs::File,
-        path: &str,
-        expected_size: u64,
-    ) -> anyhow::Result<(String, u64)> {
-        if expected_size > MAX_DECLARATION_FILE_BYTES {
-            anyhow::bail!(
-                "external content file {path} exceeds {MAX_DECLARATION_FILE_BYTES} bytes"
-            );
-        }
-        let outcome = self.cas.put_blob_from_open_regular_bounded(
-            file,
-            Path::new(path),
-            MAX_DECLARATION_FILE_BYTES,
-        )?;
-        self.staged_roots
-            .protect_blob_hash_admitted(self.guard, &outcome.hash)?;
-        if outcome.created {
-            self.stored_blobs += 1;
-        } else {
-            self.reused_blobs += 1;
-        }
-        Ok((outcome.hash, outcome.size))
-    }
-
-    fn store_target(&mut self, target: &[u8], path: &str) -> anyhow::Result<String> {
-        if target.is_empty() || target.len() > MAX_SYMLINK_TARGET_BYTES || target.contains(&0) {
-            anyhow::bail!("external content symlink {path} has an invalid target");
-        }
-        let expected = lillux::sha256_hex(target);
-        let existed = self.cas.has_blob(&expected)?;
-        let hash = self
-            .staged_roots
-            .store_blob_admitted(self.guard, self.cas, target)?;
-        if existed {
-            self.reused_blobs += 1;
-        } else {
-            self.stored_blobs += 1;
-        }
-        Ok(hash)
-    }
-}
-
-/// Fetch `digest` and decode it as a large-content manifest, or `None` when
-/// the object is absent or is some other kind. Routing is data: the pinned
-/// manifest names its own tier.
-fn try_load_large_content_manifest(
-    cas: &lillux::CasStore,
-    digest: &str,
-) -> anyhow::Result<Option<ryeos_state::objects::ExternalLargeContentManifestObject>> {
-    let Some(value) = cas.get_object(digest)? else {
-        return Ok(None);
-    };
-    if value.get("kind").and_then(serde_json::Value::as_str)
-        != Some(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND)
-    {
-        return Ok(None);
-    }
-    Ok(Some(
-        ryeos_state::objects::ExternalLargeContentManifestObject::from_value(&value)?,
-    ))
-}
-
-/// Seal one pinned large-content declaration without touching any live tree:
-/// the manifest is already admitted content, so admission proves the grant,
-/// the shape, and store residency, then roots the manifest object.
-#[allow(clippy::too_many_arguments)]
-fn seal_pinned_large_realization(
-    declaration: &ryeos_engine::external_content::ExternalContentDeclaration,
-    digest: &str,
-    manifest: ryeos_state::objects::ExternalLargeContentManifestObject,
-    contract: Option<&ryeos_engine::kind_registry::ExecutionExternalContentDecl>,
-    authority: &ryeos_state::PinnedStateAuthority,
-    guard: &ryeos_state::CasMutationGuard,
-    cas: &lillux::CasStore,
-    sink: &mut GuardedCasBlobSink<'_>,
-    large_total: &mut u64,
-) -> anyhow::Result<RealizedExternalContent> {
-    let grant = contract
-        .and_then(|contract| contract.large_content.as_ref())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "external content `{}` pins a large-content manifest but its signed kind \
-                 declares no `execution.external_content.large_content` grant",
-                declaration.id
-            )
-        })?;
-    if declaration.locator.is_some() {
-        anyhow::bail!(
-            "external content `{}` pins a large-content manifest and must not carry a \
-             source locator: large bytes bind from the store, not from a live tree",
-            declaration.id
-        );
-    }
-    *large_total = large_total
-        .checked_add(manifest.total_bytes)
-        .ok_or_else(|| anyhow::anyhow!("large-content realization byte total overflow"))?;
-    let ceiling = grant
-        .max_total_bytes
-        .unwrap_or(ryeos_state::objects::MAX_LARGE_CONTENT_TOTAL_BYTES);
-    if *large_total > ceiling {
-        anyhow::bail!(
-            "large-content realizations total {large_total} bytes; this kind's grant admits \
-             {ceiling}"
-        );
-    }
-    match declaration.kind {
-        ExternalContentKind::File => {
-            if !manifest.is_file_shaped() {
-                anyhow::bail!(
-                    "external content `{}` declares kind file but manifest {digest} is not \
-                     file-shaped",
-                    declaration.id
-                );
-            }
-        }
-        ExternalContentKind::Tree => {}
-    }
-    let store = authority.large_object_store()?;
-    for entry in &manifest.entries {
-        match store.object_size(&entry.file_sha256)? {
-            Some(size) if size == entry.size => {}
-            Some(size) => anyhow::bail!(
-                "large object {} for `{}` is {size} bytes in the store; the manifest sealed {}",
-                entry.file_sha256,
-                entry.path,
-                entry.size
-            ),
-            None => anyhow::bail!(
-                "large object {} for `{}` is not in the store; ingest it before pinning",
-                entry.file_sha256,
-                entry.path
-            ),
-        }
-    }
-    let stored = sink
-        .staged_roots
-        .store_object_admitted(guard, cas, &manifest.to_value()?)?;
-    if stored != digest {
-        anyhow::bail!(
-            "large-content manifest {digest} re-stored as {stored}; canonical identity broke"
-        );
-    }
-    Ok(RealizedExternalContent {
-        id: declaration.id.clone(),
-        kind: declaration.kind,
-        mode: declaration.mode,
-        manifest_hash: digest.to_string(),
-        entry_count: manifest.entry_count,
-        total_bytes: manifest.total_bytes,
-        mount: declaration.mount.clone(),
-    })
-}
-
-/// Capture the effective declaration list and write its identity-only
-/// realization set into the reserved derived slot.
-pub(crate) fn capture_external_realizations(
-    state: &ryeos_app::state::AppState,
-    engine: &ryeos_engine::engine::Engine,
-    kind: &str,
-    resolution: &mut ryeos_engine::resolution::ResolutionOutput,
-    roots: &ryeos_engine::item_resolution::ResolutionRoots,
-    inherited: Option<&RealizedExternalContentSet>,
-) -> anyhow::Result<Option<CapturedExternalRealizations>> {
-    let contract = engine
-        .kinds
-        .get(kind)
-        .and_then(|schema| schema.execution.as_ref())
-        .and_then(|execution| execution.external_content.as_ref());
-    let declarer = declaring_authority(resolution, roots)?;
-    let Some(declarations) = ryeos_engine::external_content::declarations_from_composed(
-        &resolution.composed.composed,
-        contract,
-        declarer,
-    )? else {
-        // No authored declaration: a descendant seals its dispatching
-        // program's realization; an independent root seals nothing.
-        return inherit_external_realizations(state, resolution, inherited);
-    };
-
-    let authority = super::pinned_state_authority(state)?;
-    let proof_authority = authority.try_clone()?;
-    let guard = authority.acquire_shared_guard()?;
-    authority.ensure_guard(&guard)?;
-    let _permit = state
-        .write_barrier
-        .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
-    let cas = authority.cas_store()?;
-    let mut staged_roots = authority
-        .require_recovery()?
-        .begin_staged_cas_roots_admitted(&guard, "external-content-realization")?;
-    let mut budget = LaunchRealizationBudget::default();
-    let mut realized = Vec::with_capacity(declarations.len());
-    let mut sink = GuardedCasBlobSink {
-        guard: &guard,
-        cas: &cas,
-        staged_roots: &mut staged_roots,
-        stored_blobs: 0,
-        reused_blobs: 0,
-    };
-
-    let mut large_total = 0u64;
-    for declaration in &declarations {
-        if declaration.mode == ryeos_engine::external_content::ExternalContentMode::Pinned
-            && let Some(digest) = declaration.digest.as_deref()
-            && let Some(large_manifest) = try_load_large_content_manifest(&cas, digest)?
-        {
-            let realized_entry = seal_pinned_large_realization(
-                declaration,
-                digest,
-                large_manifest,
-                contract,
-                &authority,
-                &guard,
-                &cas,
-                &mut sink,
-                &mut large_total,
-            )?;
-            realized.push(realized_entry);
-            continue;
-        }
-        let locator = declaration.locator.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "external content `{}` has no source locator and its digest does not \
-                 resolve to a large-content manifest; nothing can be captured",
-                declaration.id
-            )
-        })?;
-        let base_path = resolve_named_root(engine, roots, &locator.root)?;
-        let base = lillux::PinnedDirectory::open(&base_path)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "external content root `{}` is unavailable",
-                locator.root.label()
-            )
-        })?;
-        let capture_policy =
-            ExternalCapturePolicy::for_declaration(declaration, state.ignore_matcher.as_ref())?;
-        let manifest = match declaration.kind {
-            ExternalContentKind::Tree => {
-                let declared_root = open_directory_relative(&base, &locator.path)?;
-                let manifest = ryeos_engine::external_content::build_manifest(
-                    &declared_root,
-                    &declaration.exclude,
-                    &capture_policy,
-                    &mut budget,
-                    &mut sink,
-                )?;
-                declared_root.ensure_path_binding()?;
-                manifest
-            }
-            ExternalContentKind::File => {
-                let (parent, name) = open_file_parent(&base, &locator.path)?;
-                let file = parent.open_regular(OsStr::new(name), false)?.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "external content file `{}` is unavailable",
-                        locator.path
-                    )
-                })?;
-                let manifest = ryeos_engine::external_content::build_file_manifest(
-                    file,
-                    &locator.path,
-                    &mut budget,
-                    &mut sink,
-                )?;
-                parent.ensure_path_binding()?;
-                manifest
-            }
-        };
-        base.ensure_path_binding()?;
-        let manifest_hash = sink.staged_roots.store_object_admitted(
-            &guard,
-            &cas,
-            &serde_json::to_value(&manifest)?,
-        )?;
-        let verified = ryeos_state::VerifiedExternalContentClosure::load(&cas, &manifest_hash)?;
-        if verified.manifest() != &manifest {
-            anyhow::bail!(
-                "stored external content manifest {manifest_hash} differs from its captured value"
-            );
-        }
-        if declaration.mode == ryeos_engine::external_content::ExternalContentMode::Pinned
-            && declaration.digest.as_deref() != Some(manifest_hash.as_str())
-        {
-            anyhow::bail!(
-                "pinned external content `{}` expected {}, observed {manifest_hash}",
-                declaration.id,
-                declaration.digest.as_deref().unwrap_or("<missing>")
-            );
-        }
-        realized.push(RealizedExternalContent {
-            id: declaration.id.clone(),
-            kind: declaration.kind,
-            mode: declaration.mode,
-            manifest_hash,
-            entry_count: manifest.entry_count,
-            total_bytes: manifest.total_bytes,
-            mount: declaration.mount.clone(),
-        });
-    }
-
-    let realized = RealizedExternalContentSet::new(realized)?;
-    resolution.composed.derived.insert(
-        ryeos_engine::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY.to_string(),
-        realized.to_value()?,
-    );
-    let store = ExternalRealizationStore::new(proof_authority);
-    let proof = ryeos_engine::external_realization::prove_external_realizations(
-        realized,
-        &store,
-    )?;
-    let (stored_blobs, reused_blobs) = sink.counts();
-    tracing::info!(
-        kind,
-        declaration_count = declarations.len(),
-        stored_blobs,
-        reused_blobs,
-        "captured external content realization"
-    );
-    drop(sink);
-    drop(_permit);
-    drop(guard);
-
-    Ok(Some(CapturedExternalRealizations {
-        proof,
-        store,
-        publication: Some(PendingCasPublication {
-            authority,
-            staged_roots: Some(staged_roots),
-        }),
-    }))
-}
-
-fn declaring_authority<'a>(
-    resolution: &ryeos_engine::resolution::ResolutionOutput,
-    roots: &'a ryeos_engine::item_resolution::ResolutionRoots,
-) -> anyhow::Result<DeclaringAuthority<'a>> {
-    match resolution.root.source_space {
-        ItemSpace::Project => Ok(DeclaringAuthority::Project),
-        ItemSpace::Node => Ok(DeclaringAuthority::Node),
-        ItemSpace::Bundle => {
-            let root = roots
-                .ordered
-                .iter()
-                .filter(|root| root.space == ItemSpace::Bundle)
-                .find(|root| resolution.root.source_path.starts_with(&root.ai_root))
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "bundle-authored external content has no exact registered bundle root"
-                    )
-                })?;
-            let name = root.label.strip_prefix("bundle:").ok_or_else(|| {
-                anyhow::anyhow!("registered bundle root has a non-canonical label")
-            })?;
-            Ok(DeclaringAuthority::Bundle(name))
-        }
-    }
-}
-
-fn resolve_named_root(
-    engine: &ryeos_engine::engine::Engine,
-    roots: &ryeos_engine::item_resolution::ResolutionRoots,
-    root: &ExternalContentRoot,
-) -> anyhow::Result<PathBuf> {
-    match root {
-        ExternalContentRoot::ProjectAi => roots
-            .ordered
-            .iter()
-            .find(|candidate| candidate.space == ItemSpace::Project)
-            .map(|candidate| candidate.ai_root.clone())
-            .ok_or_else(|| anyhow::anyhow!("project_ai external content root is unavailable")),
-        ExternalContentRoot::ProjectFiles => roots
-            .ordered
-            .iter()
-            .find(|candidate| candidate.space == ItemSpace::Project)
-            .and_then(|candidate| candidate.ai_root.parent().map(Path::to_path_buf))
-            .ok_or_else(|| anyhow::anyhow!("project_files external content root is unavailable")),
-        ExternalContentRoot::NodeFiles => engine
-            .node_config_root()
-            .ok_or_else(|| anyhow::anyhow!("node_files external content root is unavailable")),
-        ExternalContentRoot::Bundle(name) => roots
-            .ordered
-            .iter()
-            .find(|candidate| candidate.label == format!("bundle:{name}"))
-            .and_then(|candidate| candidate.ai_root.parent().map(Path::to_path_buf))
-            .ok_or_else(|| {
-                anyhow::anyhow!("bundle:{name} external content root is unavailable")
-            }),
-    }
-}
-
-fn open_directory_relative(
-    base: &lillux::PinnedDirectory,
-    relative: &str,
-) -> anyhow::Result<lillux::PinnedDirectory> {
-    let mut current = base.try_clone()?;
-    for segment in relative.split('/') {
-        current = current
-            .open_child_directory(OsStr::new(segment))?
-            .ok_or_else(|| {
-                anyhow::anyhow!("external content directory `{relative}` is unavailable")
-            })?;
-    }
-    Ok(current)
-}
-
-fn open_file_parent<'a>(
-    base: &lillux::PinnedDirectory,
-    relative: &'a str,
-) -> anyhow::Result<(lillux::PinnedDirectory, &'a str)> {
-    let (parent, name) = relative.rsplit_once('/').unwrap_or(("", relative));
-    let parent = if parent.is_empty() {
-        base.try_clone()?
-    } else {
-        open_directory_relative(base, parent)?
-    };
-    Ok((parent, name))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn tree_mount(destination: &str, files: &[(&str, u64)]) -> SealedRealizationMount {
         SealedRealizationMount {
-            large: false,
             destination: PathBuf::from(destination),
             kind: ExternalContentKind::Tree,
             files: files
                 .iter()
-                .map(|(path, size)| ((*path).to_owned(), (format!("hash-{path}"), *size)))
+                .map(|(path, size)| {
+                    (
+                        (*path).to_owned(),
+                        SealedRealizationFile {
+                            content_hash: format!("hash-{path}"),
+                            size: *size,
+                            large: false,
+                        },
+                    )
+                })
                 .collect(),
         }
     }
@@ -1425,21 +1543,24 @@ mod tests {
     fn sealed_path_lookup_answers_like_the_mount_table() {
         let mounts = vec![
             tree_mount(
-                "/p/.ai/tools/arc/lib",
+                "/workspace/content/lib",
                 &[("bfs.py", 10), ("deep/util.py", 20)],
             ),
             SealedRealizationMount {
-                large: false,
-                destination: PathBuf::from("/p/.ai/tools/arc/featurize.py"),
+                destination: PathBuf::from("/workspace/content/entry.py"),
                 kind: ExternalContentKind::File,
                 files: BTreeMap::from([(
                     ryeos_engine::external_content::FILE_REALIZATION_ENTRY_PATH.to_owned(),
-                    ("hash-file".to_owned(), 5),
+                    SealedRealizationFile {
+                        content_hash: "hash-file".to_owned(),
+                        size: 5,
+                        large: false,
+                    },
                 )]),
             },
         ];
         assert!(matches!(
-            locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/lib/bfs.py")),
+            locate_sealed_path(&mounts, Path::new("/workspace/content/lib/bfs.py")),
             SealedPathLookup::File {
                 blob_hash: "hash-bfs.py",
                 size: 10,
@@ -1447,7 +1568,7 @@ mod tests {
             }
         ));
         assert!(matches!(
-            locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/lib/deep/util.py")),
+            locate_sealed_path(&mounts, Path::new("/workspace/content/lib/deep/util.py")),
             SealedPathLookup::File {
                 blob_hash: "hash-deep/util.py",
                 size: 20,
@@ -1456,7 +1577,7 @@ mod tests {
         ));
         // A file-kind realization answers for exactly its mount path.
         assert!(matches!(
-            locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/featurize.py")),
+            locate_sealed_path(&mounts, Path::new("/workspace/content/entry.py")),
             SealedPathLookup::File {
                 blob_hash: "hash-file",
                 size: 5,
@@ -1465,17 +1586,17 @@ mod tests {
         ));
         // Covered but unsealed paths are absent at execution, never live.
         assert!(matches!(
-            locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/lib/scratch.py")),
+            locate_sealed_path(&mounts, Path::new("/workspace/content/lib/scratch.py")),
             SealedPathLookup::Absent
         ));
         // Outside every mount, live bytes stay authoritative.
         assert!(matches!(
-            locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/evidence.py")),
+            locate_sealed_path(&mounts, Path::new("/workspace/content/evidence.py")),
             SealedPathLookup::Uncovered
         ));
         // A lexical prefix that is not a path-component prefix is uncovered.
         assert!(matches!(
-            locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/libx.py")),
+            locate_sealed_path(&mounts, Path::new("/workspace/content/libx.py")),
             SealedPathLookup::Uncovered
         ));
     }
@@ -1483,17 +1604,17 @@ mod tests {
     #[test]
     fn nested_mounts_resolve_to_the_most_specific_destination() {
         let mounts = vec![
-            tree_mount("/p/.ai/tools/arc", &[("lib/bfs.py", 1), ("run.py", 2)]),
-            tree_mount("/p/.ai/tools/arc/lib", &[("other.py", 3)]),
+            tree_mount("/workspace/content", &[("lib/bfs.py", 1), ("run.py", 2)]),
+            tree_mount("/workspace/content/lib", &[("other.py", 3)]),
         ];
         // The inner mount owns its subtree: bfs.py is sealed only in the
         // outer manifest, so under the inner mount it does not exist.
         assert!(matches!(
-            locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/lib/bfs.py")),
+            locate_sealed_path(&mounts, Path::new("/workspace/content/lib/bfs.py")),
             SealedPathLookup::Absent
         ));
         assert!(matches!(
-            locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/lib/other.py")),
+            locate_sealed_path(&mounts, Path::new("/workspace/content/lib/other.py")),
             SealedPathLookup::File {
                 blob_hash: "hash-other.py",
                 size: 3,
@@ -1501,7 +1622,7 @@ mod tests {
             }
         ));
         assert!(matches!(
-            locate_sealed_path(&mounts, Path::new("/p/.ai/tools/arc/run.py")),
+            locate_sealed_path(&mounts, Path::new("/workspace/content/run.py")),
             SealedPathLookup::File {
                 blob_hash: "hash-run.py",
                 size: 2,
@@ -1525,15 +1646,17 @@ mod tests {
     ) -> ryeos_state::VerifiedExternalContentClosure {
         let mut entries = files
             .iter()
-            .map(|(path, bytes)| ryeos_state::objects::ExternalContentManifestEntry {
-                path: (*path).to_string(),
-                kind: ryeos_state::objects::ExternalContentManifestEntryKind::File,
-                mode: Some(0o644),
-                blob_hash: Some(cas.store_blob(bytes).unwrap()),
-                size: Some(bytes.len() as u64),
-                target: None,
-                target_blob: None,
-            })
+            .map(
+                |(path, bytes)| ryeos_state::objects::ExternalContentManifestEntry {
+                    path: (*path).to_string(),
+                    kind: ryeos_state::objects::ExternalContentManifestEntryKind::File,
+                    mode: Some(0o644),
+                    blob_hash: Some(cas.store_blob(bytes).unwrap()),
+                    size: Some(bytes.len() as u64),
+                    target: None,
+                    target_blob: None,
+                },
+            )
             .collect::<Vec<_>>();
         entries.sort_by(|left, right| left.path.cmp(&right.path));
         let manifest = ryeos_state::objects::ExternalContentManifestObject {
@@ -1554,7 +1677,7 @@ mod tests {
         let (dir, cas) = temp_cas();
         let app_root = dir.path().join("app");
         std::fs::create_dir_all(&app_root).unwrap();
-        let cache = ExternalMaterializationCache::from_app_root(&app_root);
+        let cache = ExternalMaterializationCache::from_runtime_state_root(&app_root);
         let closure =
             store_tree_closure(&cas, &[("alpha.txt", b"alpha"), ("omega.txt", b"omega!")]);
 
@@ -1580,11 +1703,225 @@ mod tests {
     }
 
     #[test]
+    fn private_workspace_receives_an_exact_independent_tree() {
+        let (dir, cas) = temp_cas();
+        let app_root = dir.path().join("app");
+        let workspace_path = dir.path().join("workspace");
+        std::fs::create_dir_all(&app_root).unwrap();
+        std::fs::create_dir_all(&workspace_path).unwrap();
+        let cache = ExternalMaterializationCache::from_runtime_state_root(&app_root);
+        let closure = store_tree_closure(&cas, &[("value.txt", b"sealed")]);
+        let generation = cache
+            .materialize(&cas, &closure, ExternalContentKind::Tree)
+            .unwrap();
+        let workspace = lillux::PinnedDirectory::open(&workspace_path)
+            .unwrap()
+            .unwrap();
+
+        publish_private_generation(
+            &workspace,
+            "runtime/content",
+            ExternalContentKind::Tree,
+            |staging| copy_materialized_tree(&generation.root, staging, closure.manifest()),
+            |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
+        )
+        .unwrap();
+
+        let private_file = workspace_path.join("runtime/content/value.txt");
+        let cached_file = generation.source_path.join("value.txt");
+        assert_eq!(std::fs::read(&private_file).unwrap(), b"sealed");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            assert_ne!(
+                std::fs::metadata(&private_file).unwrap().ino(),
+                std::fs::metadata(&cached_file).unwrap().ino()
+            );
+        }
+        std::fs::write(&private_file, b"private mutation").unwrap();
+        assert_eq!(std::fs::read(cached_file).unwrap(), b"sealed");
+    }
+
+    #[test]
+    fn large_tree_materialization_preserves_modes_links_and_large_inodes() {
+        let (dir, cas) = temp_cas();
+        let runtime_root = dir.path().join("state");
+        let runtime = lillux::PinnedDirectory::open_or_create(&runtime_root).unwrap();
+        let store = ryeos_state::LargeObjectStore::open_or_create_under(&runtime).unwrap();
+        let source_path = dir.path().join("large-source.bin");
+        let large_bytes = b"large-object-payload-with-several-chunks";
+        std::fs::write(&source_path, large_bytes).unwrap();
+        let source = std::fs::File::open(&source_path).unwrap();
+        let metadata = source.metadata().unwrap();
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt as _;
+        let ingested = store
+            .ingest_open_regular(
+                source,
+                ryeos_state::PinnedLargeObjectSourceIdentity {
+                    containing_device: metadata.dev(),
+                    inode: metadata.ino(),
+                    size: metadata.len(),
+                },
+                "lib/payload.so",
+                None,
+            )
+            .unwrap();
+        let driver_bytes = b"#!/bin/sh\nexit 0\n";
+        let driver = cas.store_blob(driver_bytes).unwrap();
+        let mut entries = vec![
+            ryeos_state::objects::ExternalLargeContentManifestEntry {
+                path: "bin".to_owned(),
+                kind: ryeos_state::objects::ExternalContentManifestEntryKind::Dir,
+                mode: None,
+                blob_hash: None,
+                file_sha256: None,
+                size: None,
+                chunk_size: None,
+                chunk_hashes: Vec::new(),
+                target: None,
+                target_blob: None,
+            },
+            ryeos_state::objects::ExternalLargeContentManifestEntry {
+                path: "bin/driver".to_owned(),
+                kind: ryeos_state::objects::ExternalContentManifestEntryKind::File,
+                mode: Some(0o755),
+                blob_hash: Some(driver),
+                file_sha256: None,
+                size: Some(driver_bytes.len() as u64),
+                chunk_size: None,
+                chunk_hashes: Vec::new(),
+                target: None,
+                target_blob: None,
+            },
+            ryeos_state::objects::ExternalLargeContentManifestEntry {
+                path: "lib".to_owned(),
+                kind: ryeos_state::objects::ExternalContentManifestEntryKind::Dir,
+                mode: None,
+                blob_hash: None,
+                file_sha256: None,
+                size: None,
+                chunk_size: None,
+                chunk_hashes: Vec::new(),
+                target: None,
+                target_blob: None,
+            },
+            ryeos_state::objects::ExternalLargeContentManifestEntry {
+                path: "lib/payload.so".to_owned(),
+                kind: ryeos_state::objects::ExternalContentManifestEntryKind::File,
+                mode: Some(0o644),
+                blob_hash: None,
+                file_sha256: Some(ingested.file_sha256.clone()),
+                size: Some(ingested.size),
+                chunk_size: Some(ingested.chunk_size),
+                chunk_hashes: ingested.chunk_hashes.clone(),
+                target: None,
+                target_blob: None,
+            },
+            ryeos_state::objects::ExternalLargeContentManifestEntry {
+                path: "lib/payload.so.1".to_owned(),
+                kind: ryeos_state::objects::ExternalContentManifestEntryKind::Symlink,
+                mode: None,
+                blob_hash: None,
+                file_sha256: None,
+                size: None,
+                chunk_size: None,
+                chunk_hashes: Vec::new(),
+                target: Some("payload.so".to_owned()),
+                target_blob: None,
+            },
+        ];
+        entries.sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
+        let manifest = ryeos_state::objects::ExternalLargeContentManifestObject {
+            schema: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA.to_owned(),
+            kind: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND.to_owned(),
+            entry_count: entries.len(),
+            total_bytes: ingested.size + driver_bytes.len() as u64,
+            entries,
+        };
+        manifest.validate().unwrap();
+        let manifest_hash = cas.store_object(&manifest.to_value().unwrap()).unwrap();
+        let cache = ExternalMaterializationCache::from_runtime_state_root(&runtime_root);
+        let generation = cache
+            .materialize_large(
+                &cas,
+                &store,
+                &manifest_hash,
+                &manifest,
+                ExternalContentKind::Tree,
+            )
+            .unwrap();
+        let root = generation.source_path.clone();
+        assert_eq!(
+            std::fs::read(root.join("lib/payload.so")).unwrap(),
+            large_bytes
+        );
+        assert_eq!(
+            std::fs::read_link(root.join("lib/payload.so.1")).unwrap(),
+            PathBuf::from("payload.so")
+        );
+        assert_eq!(
+            lillux::normalized_portable_regular_mode(
+                &std::fs::metadata(root.join("bin/driver")).unwrap()
+            )
+            .unwrap(),
+            0o755
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(root.join("lib/payload.so"))
+                .unwrap()
+                .ino(),
+            store
+                .lease_object(&ingested.file_sha256, ingested.size)
+                .unwrap()
+                .file()
+                .metadata()
+                .unwrap()
+                .ino()
+        );
+
+        let private_path = dir.path().join("private");
+        std::fs::create_dir_all(&private_path).unwrap();
+        let private = lillux::PinnedDirectory::open(&private_path)
+            .unwrap()
+            .unwrap();
+        publish_private_generation(
+            &private,
+            "model",
+            ExternalContentKind::Tree,
+            |staging| copy_large_materialized_tree(&generation.root, staging, &manifest),
+            |staging| {
+                verify_large_materialized_tree(
+                    &cas,
+                    staging,
+                    &manifest,
+                    LargeMaterializationVerification::PrivateDigest,
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(private_path.join("model/lib/payload.so")).unwrap(),
+            large_bytes
+        );
+        #[cfg(unix)]
+        assert_ne!(
+            std::fs::metadata(private_path.join("model/lib/payload.so"))
+                .unwrap()
+                .ino(),
+            std::fs::metadata(root.join("lib/payload.so"))
+                .unwrap()
+                .ino()
+        );
+    }
+
+    #[test]
     fn a_file_realization_materializes_its_content_entry() {
         let (dir, cas) = temp_cas();
         let app_root = dir.path().join("app");
         std::fs::create_dir_all(&app_root).unwrap();
-        let cache = ExternalMaterializationCache::from_app_root(&app_root);
+        let cache = ExternalMaterializationCache::from_runtime_state_root(&app_root);
         let closure = store_tree_closure(
             &cas,
             &[(
@@ -1605,11 +1942,49 @@ mod tests {
     }
 
     #[test]
+    fn private_file_realization_publishes_at_the_mount_path() {
+        let (dir, cas) = temp_cas();
+        let app_root = dir.path().join("app");
+        let workspace_path = dir.path().join("workspace");
+        std::fs::create_dir_all(&app_root).unwrap();
+        std::fs::create_dir_all(&workspace_path).unwrap();
+        let cache = ExternalMaterializationCache::from_runtime_state_root(&app_root);
+        let closure = store_tree_closure(
+            &cas,
+            &[(
+                ryeos_engine::external_content::FILE_REALIZATION_ENTRY_PATH,
+                b"payload",
+            )],
+        );
+        let generation = cache
+            .materialize(&cas, &closure, ExternalContentKind::File)
+            .unwrap();
+        let workspace = lillux::PinnedDirectory::open(&workspace_path)
+            .unwrap()
+            .unwrap();
+
+        publish_private_generation(
+            &workspace,
+            "config/model.bin",
+            ExternalContentKind::File,
+            |staging| copy_materialized_tree(&generation.root, staging, closure.manifest()),
+            |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(workspace_path.join("config/model.bin")).unwrap(),
+            b"payload"
+        );
+        assert!(!workspace_path.join("config/model.bin/content").exists());
+    }
+
+    #[test]
     fn sweep_reclaims_only_unleased_generations() {
         let (dir, cas) = temp_cas();
         let app_root = dir.path().join("app");
         std::fs::create_dir_all(&app_root).unwrap();
-        let cache = ExternalMaterializationCache::from_app_root(&app_root);
+        let cache = ExternalMaterializationCache::from_runtime_state_root(&app_root);
         let first = store_tree_closure(&cas, &[("one.txt", b"generation one")]);
         let second = store_tree_closure(&cas, &[("two.txt", b"generation two")]);
 

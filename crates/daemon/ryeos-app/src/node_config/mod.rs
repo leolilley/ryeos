@@ -32,7 +32,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::node_config::sections::command::CommandRecord;
 use crate::node_config::sections::command_registration::CommandRegistrationPolicyRecord;
+use crate::node_config::sections::external_content::ExternalContentImportPolicyRecord;
 use crate::node_config::sections::hosted_node::HostedNodePolicyRecord;
+use crate::node_config::sections::persistent_sessions::PersistentSessionPolicyRecord;
 use crate::route_raw::RawRouteSpec;
 
 /// Loader-derived structural context for a node-config item.
@@ -91,6 +93,11 @@ pub struct NodeConfigSnapshot {
     pub hosted_node_policies: Vec<HostedNodePolicyRecord>,
     /// Effective command registration admission policy.
     pub command_registration_policy: CommandRegistrationPolicyRecord,
+    /// System/state-only host roots and bounds for operator external-content import.
+    pub external_content_import_policy: Option<ExternalContentImportPolicyRecord>,
+    /// Node-wide process, memory, CPU, stream, and backlog ceilings. Absence
+    /// disables persistent sessions rather than selecting hidden defaults.
+    pub persistent_session_policy: Option<PersistentSessionPolicyRecord>,
 }
 
 impl NodeConfigSnapshot {}
@@ -138,6 +145,14 @@ impl SectionTable {
         sections.insert(
             "hosted",
             Box::new(sections::hosted_node::HostedNodePolicySection),
+        );
+        sections.insert(
+            "external_content",
+            Box::new(sections::external_content::ExternalContentImportPolicySection),
+        );
+        sections.insert(
+            "persistent_sessions",
+            Box::new(sections::persistent_sessions::PersistentSessionPolicySection),
         );
         sections.insert("routes", Box::new(sections::route::RouteSection));
         Self { sections }

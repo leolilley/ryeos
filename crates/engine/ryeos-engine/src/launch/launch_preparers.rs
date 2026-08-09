@@ -263,6 +263,7 @@ impl LaunchPreparerRunner {
                     max_open_files: Some(LAUNCH_PREPARER_OPEN_FILE_LIMIT),
                     max_stdout_bytes: Some(LAUNCH_PREPARER_STDOUT_MAX_BYTES as u64),
                     max_stderr_bytes: Some(LAUNCH_PREPARER_STDERR_MAX_BYTES as u64),
+                    ..lillux::SubprocessLimits::default()
                 }),
                 inherited_fds: Vec::new(),
                 supervised_status: None,
@@ -279,6 +280,7 @@ impl LaunchPreparerRunner {
                 verified_code: &verified_code,
                 verified_command: Some(&verified_code[0]),
                 external_read_only_mounts: &[],
+                target_channel: None,
                 item_ref: &item_ref,
                 thread_id: "launch-preparer",
             },

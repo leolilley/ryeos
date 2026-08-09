@@ -708,6 +708,9 @@ composer: {composer}
             resolved_ref: "directive:test".into(),
             source_path: root.join("directive/test.directive.md"),
             source_space: crate::contracts::ItemSpace::Bundle,
+            source_root: crate::contracts::ItemSourceRoot::Bundle {
+                name: "fixture".to_string(),
+            },
             trust_class: TrustClass::TrustedBundle,
             signer_fingerprint: Some("fixture-signer".to_string()),
             alias_resolution: None,

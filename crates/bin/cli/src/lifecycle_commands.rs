@@ -10,6 +10,7 @@
 //!   - `ryeos node status` — show local node lifecycle status
 //!   - `ryeos node doctor` — offline "why won't it start" checklist
 //!   - `ryeos node gc` — explicit offline recovery/GC that must work when boot fails
+//!   - `ryeos node replay-reset` — explicit clean-cut replay-index activation
 //!
 //! `ryeos identity` is local as a bootstrap affordance: remote
 //! operators need to copy their node public key before the daemon is running.
@@ -87,6 +88,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "maintenance",
     },
     LocalCommandDescriptor {
+        tokens: &["node", "replay-reset"],
+        summary: "Discard predecessor graph/provider replay indexes",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
         tokens: &["help"],
         summary: "Open the compact TTY help screen",
         category: "meta",
@@ -155,6 +161,10 @@ pub async fn try_dispatch(
             run_node_auth_reset_command(&argv[2..], console).map_err(map_local_err)?;
             Ok(true)
         }
+        ("node", Some("replay-reset")) => {
+            run_node_replay_reset_command(&argv[2..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
         ("start", _) => {
             run_start_command(&argv[1..], console)
                 .await
@@ -169,6 +179,66 @@ pub async fn try_dispatch(
         }
         _ => Ok(false),
     }
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node replay-reset",
+    about = "Discard predecessor graph/provider replay indexes",
+    long_about = "Perform the explicit clean-cut replay-index activation. The daemon must be stopped. Only runtime-only graph and provider replay rows are discarded; thread history, CAS content, sync state, admission attestations, and accounting state are preserved.",
+    no_binary_name = true
+)]
+struct NodeReplayResetArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Required acknowledgement that predecessor replay indexes are discarded.
+    #[arg(long)]
+    confirm_discard_replay_indexes: bool,
+
+    /// Emit structured JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_node_replay_reset_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodeReplayResetArgs>(argv, console)? else {
+        return Ok(());
+    };
+    if !args.confirm_discard_replay_indexes {
+        anyhow::bail!(
+            "discarding predecessor replay indexes requires --confirm-discard-replay-indexes"
+        );
+    }
+    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+        app_root: args.app_root,
+        ..Default::default()
+    })
+    .context("load local node configuration for replay-index reset")?;
+    let _state_lock = ryeos_app::state_lock::StateLock::acquire(
+        &ryeos_app::state_lock::default_lock_path(&config.app_root),
+    )
+    .context("replay-index reset requires the daemon to be stopped")?;
+    let path = config
+        .runtime_state_dir()
+        .join(ryeos_state::operational::OPERATIONAL_DB_FILENAME);
+    let db = ryeos_state::OperationalDb::open_for_explicit_replay_reset(&path)
+        .with_context(|| format!("activate replay indexes in {}", path.display()))?;
+    drop(db);
+    if args.json {
+        crate::tty::write_json(&serde_json::json!({
+            "status": "activated",
+            "database": path,
+            "discarded": ["graph_effect_records", "provider_call_records"],
+        }))?;
+    } else {
+        console.text(&format!(
+            "Replay indexes activated: {}\nThread history and other operational state were preserved.\n",
+            path.display()
+        ))?;
+    }
+    Ok(())
 }
 
 #[derive(Parser, Debug)]

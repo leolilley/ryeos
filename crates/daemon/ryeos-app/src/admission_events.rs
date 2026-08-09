@@ -102,7 +102,12 @@ pub struct AdmissionRefused<'a> {
     pub acting_principal: &'a str,
 }
 
-fn append(state_store: &StateStore, project_path: &Path, event_type: &str, payload: Value) -> Result<()> {
+fn append(
+    state_store: &StateStore,
+    project_path: &Path,
+    event_type: &str,
+    payload: Value,
+) -> Result<()> {
     let serialized = serde_json::to_vec(&payload)?;
     if serialized.len() > MAX_ADMISSION_PAYLOAD_BYTES {
         anyhow::bail!(
@@ -137,7 +142,10 @@ fn append(state_store: &StateStore, project_path: &Path, event_type: &str, paylo
 
 /// Record a finalized-and-spawned managed launch. Emission failure is logged
 /// by the caller as a warning; it never fails the launch.
-pub fn append_admission_recorded(state_store: &StateStore, event: AdmissionRecorded<'_>) -> Result<()> {
+pub fn append_admission_recorded(
+    state_store: &StateStore,
+    event: AdmissionRecorded<'_>,
+) -> Result<()> {
     append(
         state_store,
         event.project_path,
@@ -155,7 +163,10 @@ pub fn append_admission_recorded(state_store: &StateStore, event: AdmissionRecor
 }
 
 /// Record a managed launch refused before spawn.
-pub fn append_admission_refused(state_store: &StateStore, event: AdmissionRefused<'_>) -> Result<()> {
+pub fn append_admission_refused(
+    state_store: &StateStore,
+    event: AdmissionRefused<'_>,
+) -> Result<()> {
     append(
         state_store,
         event.project_path,

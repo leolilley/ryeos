@@ -358,13 +358,19 @@ metadata:
             ordered: vec![
                 ResolutionRoot {
                     space: crate::contracts::ItemSpace::Project,
+                    identity: crate::contracts::ItemSourceRoot::Project,
                     label: "project".into(),
                     ai_root: project_ai.clone(),
+                    content_root: Some(project_root.clone()),
                 },
                 ResolutionRoot {
                     space: crate::contracts::ItemSpace::Bundle,
+                    identity: crate::contracts::ItemSourceRoot::Bundle {
+                        name: "system".to_owned(),
+                    },
                     label: "system(node)".into(),
                     ai_root: system_ai.clone(),
+                    content_root: Some(system_root.clone()),
                 },
             ],
         };
@@ -421,6 +427,10 @@ metadata:
             resolved_ref: format!("tool:{executor_id}"),
             kind: "tool".into(),
             source_path: PathBuf::from("/tmp/fake"),
+            source_space: crate::contracts::ItemSpace::Project,
+            source_root: crate::contracts::ItemSourceRoot::Search {
+                label: "test".to_owned(),
+            },
             parsed,
         }
     }
@@ -435,6 +445,10 @@ metadata:
             resolved_ref: resolved_ref.into(),
             kind: "tool".into(),
             source_path: PathBuf::from("/tmp/fake"),
+            source_space: crate::contracts::ItemSpace::Project,
+            source_root: crate::contracts::ItemSourceRoot::Search {
+                label: "test".to_owned(),
+            },
             parsed,
         }
     }

@@ -26,10 +26,10 @@ use crate::state_store::{
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{
     DelegatedPrincipal, EffectivePrincipal, EngineContext, ExecutionArtifact, ExecutionCompletion,
-    ExecutionHints, ExecutionPlan, FinalCost, ItemMetadata, ItemSpace, LaunchMode, PinnedVersion,
-    PlanContext, PlanSubprocessSpec, Principal, ProjectContext, ResolvedItem, ResolvedSourceFormat,
-    RuntimeEnvSource, ShadowedCandidate, SignatureEnvelope, SignatureHeader, SignerFingerprint,
-    ThreadTerminalStatus, TrustClass, VerifiedItem,
+    ExecutionHints, ExecutionPlan, FinalCost, ItemMetadata, ItemSourceRoot, ItemSpace, LaunchMode,
+    PinnedVersion, PlanContext, PlanSubprocessSpec, Principal, ProjectContext, ResolvedItem,
+    ResolvedSourceFormat, RuntimeEnvSource, ShadowedCandidate, SignatureEnvelope, SignatureHeader,
+    SignerFingerprint, ThreadTerminalStatus, TrustClass, VerifiedItem,
 };
 use ryeos_engine::engine::Engine;
 use ryeos_engine::history_policy::{
@@ -50,7 +50,7 @@ mod validation;
 
 pub use direct_execution::{
     PreparedItemPlan, RunningItem, SpawnItemParams, SpawnedItemAwaitingAttachment,
-    prepare_item_plan, spawn_item,
+    prepare_captured_item_plan, prepare_item_plan, spawn_item,
 };
 #[cfg(test)]
 use sealed_request::SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION;
@@ -6365,6 +6365,7 @@ mod tests {
             resolved_ref: "directive:example".to_string(),
             source_path: workspace.join(".ai/directives/example.md"),
             source_space: ItemSpace::Project,
+            source_root: ItemSourceRoot::Project,
             trust_class: ResolutionTrustClass::TrustedProject,
             signer_fingerprint: Some("fixture-signer".to_string()),
             alias_resolution: None,
@@ -6397,6 +6398,13 @@ mod tests {
             resolved_ref: "runtime:augmentation-runtime".to_string(),
             source_path: PathBuf::from("/bundle/.ai/runtimes/augmentation-runtime.yaml"),
             source_space,
+            source_root: match source_space {
+                ItemSpace::Project => ItemSourceRoot::Project,
+                ItemSpace::Bundle => ItemSourceRoot::Bundle {
+                    name: "fixture".to_owned(),
+                },
+                ItemSpace::Node => ItemSourceRoot::Node,
+            },
             trust_class: ResolutionTrustClass::TrustedBundle,
             signer_fingerprint: Some("fixture-signer".to_string()),
             alias_resolution: None,
@@ -6681,6 +6689,9 @@ mod tests {
                 kind: "service".to_string(),
                 source_path: PathBuf::from("/bundle/.ai/services/items/effective.yaml"),
                 source_space: ItemSpace::Bundle,
+                source_root: ItemSourceRoot::Bundle {
+                    name: "fixture".to_owned(),
+                },
                 resolved_from: "bundle:standard".to_string(),
                 shadowed: Vec::new(),
                 probed_absent: Vec::new(),

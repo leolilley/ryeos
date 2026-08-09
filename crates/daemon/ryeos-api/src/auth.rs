@@ -855,6 +855,8 @@ mod tests {
             commands: vec![],
             hosted_node_policies: vec![],
             command_registration_policy: Default::default(),
+            external_content_import_policy: None,
+            persistent_session_policy: None,
         };
         let test_command_registry = Arc::new(
             ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap(),
@@ -901,6 +903,9 @@ mod tests {
             ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
             vault_fingerprint: None,
             accounting: None,
+            persistent_sessions: Arc::new(
+                ryeos_app::persistent_session::PersistentSessionPool::new(),
+            ),
         };
         (tmpdir, state)
     }

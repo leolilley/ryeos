@@ -132,10 +132,38 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         .get::<ryeos_app::prospective_admission::ProspectiveNodeConfigValidator>()
         .context("prospective node-config validator is not installed at the composition root")?;
 
+    // Registration grants are node-owned authority. Replacing bundle bytes
+    // neither invents nor revokes them: retain the exact currently verified
+    // grant set. A first installation still begins with no implicit grants.
+    let retained_command_registration_caps = if replaced {
+        let loader = ryeos_app::node_config::loader::BootstrapLoader {
+            app_root: &state.config.app_root,
+            trust_store: &state.engine.node_trust_store,
+        };
+        loader
+            .load_bundle_section()
+            .context("load current node bundle registrations")?
+            .into_iter()
+            .find(|record| record.name == req.name)
+            .with_context(|| {
+                format!(
+                    "installed bundle '{}' has no verified node registration",
+                    req.name
+                )
+            })?
+            .command_registration_caps
+    } else {
+        Vec::new()
+    };
+
     fs::create_dir_all(&bundles_root)
         .with_context(|| format!("failed to create bundles root {}", bundles_root.display()))?;
 
-    let registration = serde_json::json!({ "kind": "node", "path": target });
+    let mut registration = serde_json::json!({ "kind": "node", "path": target });
+    if !retained_command_registration_caps.is_empty() {
+        registration["command_registration_caps"] =
+            serde_json::json!(retained_command_registration_caps);
+    }
     let activation = if replaced {
         replace_dir_atomic(
             &req.source_path,
@@ -330,7 +358,8 @@ pub(crate) fn admit_completed_staging(
     // Exercise the second boot phase too: bundle-contributed node config is
     // scanned from the prospective roots and command/policy collisions are
     // rejected before activation. Existing records retain their node-owned
-    // command grants; a newly written/replaced record has no implicit grants.
+    // command grants; a new record has no implicit grants, while replacement
+    // retains the exact verified node-owned grant set.
     let loader = ryeos_app::node_config::loader::BootstrapLoader {
         app_root,
         trust_store: node_trust_store,
@@ -349,10 +378,23 @@ pub(crate) fn admit_completed_staging(
         .iter()
         .map(|(name, bundle)| {
             if name == bundle_name {
+                let command_registration_caps = if replace {
+                    current_records
+                        .remove(name)
+                        .with_context(|| {
+                            format!(
+                                "replacement bundle '{}' has no verified current registration",
+                                name
+                            )
+                        })?
+                        .command_registration_caps
+                } else {
+                    Vec::new()
+                };
                 Ok(ryeos_app::node_config::BundleRecord {
                     name: name.clone(),
                     path: bundle.source.root_path().clone(),
-                    command_registration_caps: Vec::new(),
+                    command_registration_caps,
                     source_file: app_root
                         .join(ryeos_engine::AI_DIR)
                         .join("node/bundles")
