@@ -310,7 +310,7 @@ fi
 staged_release_bins_for_set() {
   printf '%s\n' \
     rye-parser-yaml-document rye-parser-yaml-header-document rye-parser-regex-kv \
-    rye-composer-identity ryeos-core-tools ryeos-session-exec
+    rye-composer-identity ryeos-core-tools
   case "$BUNDLE_SET" in
     full|central-host|standard|hosted-workflow)
       printf '%s\n' ryeos-directive-runtime ryeos-graph-runtime \
@@ -323,6 +323,12 @@ staged_release_bins_for_set() {
     central-host) printf '%s\n' ryeos-web-tools ;;
   esac
 }
+
+# `ryeos-session-exec` is intentionally absent from the skew set above. It is
+# a standalone static exec bridge with no RyeOS crate dependencies; comparing
+# its mtime to ryeos-runtime/state/app sources would invent a linkage that does
+# not exist. Its own dedicated build and PT_INTERP/DT_NEEDED checks above are
+# the complete freshness and closure boundary for that payload.
 
 # Newest mtime (integer epoch) across the foundational library crate sources.
 foundational_newest_mtime() {
