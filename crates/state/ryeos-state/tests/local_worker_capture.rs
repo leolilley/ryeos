@@ -23,10 +23,6 @@ impl ExternalContentBlobSink for DigestOnlySink {
         );
         Ok((lillux::sha256_hex(&bytes), expected_size))
     }
-
-    fn store_target(&mut self, target: &[u8], _path: &str) -> anyhow::Result<String> {
-        Ok(lillux::sha256_hex(target))
-    }
 }
 
 #[test]
@@ -103,11 +99,14 @@ fn activation_fixture_matches_every_sourceless_worker_realization() {
         .collect::<BTreeMap<_, _>>();
 
     let fixture: serde_yaml::Value = serde_yaml::from_str(
-        &std::fs::read_to_string(
-            repository
-                .join("bundles/standard/.ai/workers/lib/tinygrad_qwen/activation-fixture.yaml"),
-        )
-        .unwrap(),
+        &lillux::signature::strip_signature_lines(
+            &std::fs::read_to_string(
+                repository.join(
+                    "bundles/standard/.ai/config/ryeos-runtime/local-tinygrad-activation.yaml",
+                ),
+            )
+            .unwrap(),
+        ),
     )
     .unwrap();
     assert_eq!(
@@ -144,6 +143,12 @@ fn activation_fixture_matches_every_sourceless_worker_realization() {
             let (path, storage, maximum_bytes) = expected_imports[id];
             assert_eq!(entry["path"].as_str(), Some(path));
             assert_eq!(entry["storage"].as_str(), Some(storage));
+            let expected_schema = match storage {
+                "content" => ryeos_state::objects::EXTERNAL_CONTENT_TREE_SCHEMA,
+                "large_content" => ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA,
+                _ => unreachable!("fixture storage was validated above"),
+            };
+            assert_eq!(entry["manifest_schema"].as_str(), Some(expected_schema));
             assert_eq!(entry["maximum_bytes"].as_u64(), Some(maximum_bytes));
             (
                 id.to_owned(),

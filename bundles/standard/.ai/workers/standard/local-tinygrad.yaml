@@ -1,8 +1,11 @@
-# ryeos:signed:2026-08-09T05:54:52Z:e1006b1c66087b3d50b2fc80b5d498bb5842f5aff194b3d1e44807c36a96523c:izGX638qwiuC4JFQrPTVQ1SaeByw+khL/pKrDXaYPjnmQOygl9SfH3KZIBkopDvsv33cOLiwdUW6V3kMwCKGCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-09T11:09:57Z:f278577c2d35e134239b91d2207c25afe74b93d5fd742c6ece1b711bfc77236c:F5aru0UyYHNT458krYRNZWIWlj5y+rHFT14wq4BYJOWr9dot+xY+2eLzZInEVYZyoB6Lp7uizO+BmfNZ/Z2QBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "standard"
 version: "1.0.0"
 executor_id: "@subprocess"
 description: "Hermetic persistent CPU worker for the admitted Qwen3 0.6B realization."
+supported_target:
+  os: linux
+  arch: x86_64
 
 external_content:
   - id: worker
@@ -11,37 +14,36 @@ external_content:
       root: "bundle:standard"
       path: ".ai/workers/lib/tinygrad_qwen"
     mode: pinned
-    digest: "73bfd26e58dfe9637dd7e14e5404c5a770b05974e5a7553be5c7d7ded32adf7d"
+    digest: "2bfe77240022d95bd88eac7e01dcced97df6b2cf9d5f9cfec68f05a0fd4c8631"
     mount: worker
   - id: runtime
     kind: tree
     mode: pinned
-    digest: "f2113fe46e19cfe2b651b3580f880728afbb6093b647a3032b7014344edffc1b"
+    digest: "d7b930b1dcb5076823e515c515348ad9e1c8f9191f065fef243f0ab77f3fea35"
     metadata_hint: "python-build-standalone-3.14.7-musl"
     mount: runtime
   - id: tinygrad
     kind: tree
     mode: pinned
-    digest: "435e4572b5a7ccf8944c70dc87a4fafdc952bc52b68a6ae798893742fde80b23"
+    digest: "e468f263924eb44fc21405dafba8ea27a7cd9e70dd6847822905a652549be21c"
     metadata_hint: "tinygrad-4c206a52b1a72a98db8c97576959b54fa2a38232"
     mount: tinygrad
   - id: toolchain
     kind: tree
     mode: pinned
-    digest: "2d7e1b906ae6d61460289adaee3c201b82e354949b2c3618301cdc1e7b011316"
+    digest: "606fb7544f54b869d4abaaf298ec4389979a72dfe23c79594ef8099cd3ce6974"
     metadata_hint: "alpine-v3.22-clang-lld-20.1.8"
     mount: toolchain
   - id: model
     kind: tree
     mode: pinned
-    digest: "41deaea6c1b16cdc434d680713045b515551e0387aa127bb4c9e9506dc806831"
+    digest: "b49578842db4c65d14edfeeadddfcab3e9a0f9324a2a6d8d501e90e1146ed7c6"
     metadata_hint: "qwen3-0.6b-c1899de289a04d12100db370d81485cdf75e47ca"
     mount: model
 
 config:
-  command: "bin:core/ryeos-core-tools"
+  command: "bin:core/ryeos-session-exec"
   args:
-    - "session-exec"
     - "runtime/lib/ld-musl-x86_64.so.1"
     - "--library-path"
     - "runtime/lib"

@@ -1,0 +1,43 @@
+# ryeos:signed:2026-08-09T11:09:57Z:3b08bb0cbdc0ef83aa3488cae27a18351f2d534216b35f3e2bd44616f10becff:A92oNkKini12W5SftNJi5S4aRh2d03Qse7a1JHqPgtUGc5zSn+iZtLqWf2449/AHQDaGKWJFbnJiaITH39zYBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "ryeos-runtime"
+schema: 1
+consumer_ref: worker:standard/local-tinygrad
+persistent_session_policy:
+  max_pool_groups: 4
+  max_total_processes: 1
+  max_total_address_space_bytes: 17179869184
+  max_total_cpu_seconds: 3600
+  max_open_streams: 8
+  max_active_streams: 1
+  max_active_streams_per_subject: 1
+  max_stream_backlog_bytes: 16777216
+  max_total_backlog_bytes: 16777216
+components:
+  - id: runtime
+    path: runtime
+    shape: tree
+    storage: content
+    manifest_schema: ryeos.external_content.tree.v2
+    maximum_bytes: 104857600
+    expected_manifest_hash: d7b930b1dcb5076823e515c515348ad9e1c8f9191f065fef243f0ab77f3fea35
+  - id: tinygrad
+    path: tinygrad
+    shape: tree
+    storage: content
+    manifest_schema: ryeos.external_content.tree.v2
+    maximum_bytes: 33554432
+    expected_manifest_hash: e468f263924eb44fc21405dafba8ea27a7cd9e70dd6847822905a652549be21c
+  - id: toolchain
+    path: toolchain
+    shape: tree
+    storage: large_content
+    manifest_schema: ryeos.external_content.large.v2
+    maximum_bytes: 335544320
+    expected_manifest_hash: 606fb7544f54b869d4abaaf298ec4389979a72dfe23c79594ef8099cd3ce6974
+  - id: model
+    path: model
+    shape: tree
+    storage: large_content
+    manifest_schema: ryeos.external_content.large.v2
+    maximum_bytes: 1677721600
+    expected_manifest_hash: b49578842db4c65d14edfeeadddfcab3e9a0f9324a2a6d8d501e90e1146ed7c6

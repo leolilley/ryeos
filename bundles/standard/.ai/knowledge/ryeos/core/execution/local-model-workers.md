@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-09T06:00:54Z:4516a926eacd9cbd78da460513a027eceaf961e318186bd02cfca8dccc1f56ef:aKIqu4RhCcXjnCI6YIPSitVkU8nABrH3kBiUiXebrUxHDodQS2VrNs6J4J4sbQGyZ4mXOLJL80kB8ikjKcWXDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-09T11:09:57Z:b598b043246ae0b60e67f6a11433fd22abcdd0171e4884ae490df0268f48cf6a:P+c7KfWeMRPnADcCylXgrQovvvGU4CLyMw7IfeC5wxZ5rtfAcJ47kTZayh5tDgTGmaJLj6vtWn+5WC7M75JgDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/execution
 tags: [execution, external-content, persistent-session, local-model, replay]
@@ -76,17 +76,99 @@ activation fixture. In particular, the aggregate address-space and CPU
 ceilings must each cover the worker lifecycle reservation; a smaller pool is
 refused before spawn.
 
-Sign both files with `ryeos sign <path>` while the daemon is stopped, then
-start the node and confirm the policies loaded. Absence is a refusal, not a
-request for compiled defaults.
+Sign both files with `ryeos sign <path>` while the daemon is stopped. Do not
+start the node yet; the isolation backend, isolation policy, clean-cut resets,
+and doctor check below are part of the same stopped-node activation. Absence is
+a refusal, not a request for compiled defaults.
+
+## Required isolation backend
+
+Recorded local workers require enforced process isolation and isolated
+networking. Persistent-session and external-content policy alone do not
+activate the route. RyeOS installs no backend by default.
+
+Build and publish the current `sandbox-linux-bubblewrap` bundle with the
+ordinary bundle-authoring tools and install it while the daemon is stopped:
+
+```text
+./bundles/sandbox-linux-bubblewrap/build-payload.sh
+ryeos bundle publish bundles/sandbox-linux-bubblewrap
+ryeos bundle install sandbox-linux-bubblewrap bundles/sandbox-linux-bubblewrap
+```
+
+The activation policy grants this worker only `{verified_code}` in
+`filesystem.readable` and `{project}` in `filesystem.writable`; the worker uses
+the former for its content-addressed command and the latter for daemon-owned
+ephemeral scratch. Its persistent-session launch does not receive live bundle
+roots, node trust configuration, node identity, or the daemon socket. It must
+select the backend and isolate networking:
+
+```yaml
+version: 1
+mode: enforce
+backend:
+  bundle: sandbox-linux-bubblewrap
+  implementation: linux-bubblewrap
+filesystem:
+  readable:
+    - "{verified_code}"
+  writable:
+    - "{project}"
+network:
+  mode: isolated
+environment:
+  allow:
+    - CACHELEVEL
+    - CCACHE
+    - DEV
+    - LANG
+    - LC_ALL
+    - PATH
+    - PYTHONHASHSEED
+    - PYTHONHOME
+    - PYTHONNOUSERSITE
+    - PYTHONSAFEPATH
+    - PYTHONDONTWRITEBYTECODE
+    - PYTHONUNBUFFERED
+    - RYEOS_EXTERNAL_REALIZATIONS
+    - RYEOS_SESSION_FD
+limits:
+  open_files: 1024
+  stdout_bytes: 8388608
+  stderr_bytes: 8388608
+  verified_artifact_file_bytes: 67108864
+  verified_artifact_total_bytes: 268435456
+  verified_artifact_files: 4096
+```
+
+Sign `<system>/.ai/node/isolation.yaml` with `ryeos sign <path>` while the
+daemon is stopped. The shipped worker additionally declares `linux` and
+`x86_64` as its supported node substrate; admission checks that constraint
+before capturing content or contacting a process.
 
 ## Exact acceptance realization
 
-The worker-digest-pinned
-`bundles/standard/.ai/workers/lib/tinygrad_qwen/activation-fixture.yaml` is the
-durable machine-readable fixture. Its four paths are relative to one
-operator-admitted assembly root. Each import is an ordinary signed service
-execution:
+Construct the four operator-owned inputs from exact upstream archives into a
+new assembly directory. The helper is authoring tooling, not worker content;
+it verifies every download and refuses an existing output path:
+
+```text
+python3 scripts/assemble-local-tinygrad.py \
+  --cache /absolute/operator-owned/download-cache \
+  --output /absolute/operator-owned/assembly
+```
+
+`--offline` forbids downloads when the exact cache is already populated. The
+script deliberately does not mint RyeOS identity. The import service below
+builds each canonical manifest, and the signed fixture is the only authority
+for its expected hash.
+
+The publisher-signed config item
+`config:ryeos-runtime/local-tinygrad-activation` is the durable
+machine-readable fixture. Its four paths are relative to one operator-admitted
+assembly root. Each import is an ordinary signed service execution authenticated
+as the configured local operator. A remote-origin client, a different local
+signer, or project content is refused even when it can name the service:
 
 ```text
 ryeos execute service:external-content/import --no-stream \
@@ -121,17 +203,46 @@ names:
 ryeos node gc --discard-thread-history --dry-run
 ryeos node gc --discard-thread-history --confirm-discard-thread-history
 ryeos node replay-reset --confirm-discard-replay-indexes
+ryeos node external-content-reset --dry-run
+ryeos node external-content-reset --confirm-discard-external-content-bindings
 ```
 
 The thread-history command is destructive: it retires all thread/recovery
-history while preserving identity, trust, installed bundles, vault data,
-project heads, and durable provider evidence roots. The replay reset discards
-only predecessor graph/provider replay indexes. These commands are a cutover
-operation, not normal startup procedure.
+history, including references to persistent-session capsule schema 1; the
+path-free retained-resolution wire is capsule schema 2. Identity, trust,
+installed bundles, vault data, project heads, and durable provider evidence
+roots are preserved. No predecessor capsule is translated. The replay reset
+discards only predecessor graph/provider replay
+indexes. These commands are a cutover operation, not normal startup procedure.
+The external-content reset retires every predecessor binding head because
+current tree manifests use the
+`ryeos.external_content.tree.v2` and
+`ryeos.external_content.large.v2` schemas. It does not translate or preserve
+old bindings: every required realization must be imported and rebound after
+startup. Old CAS bytes become ordinary unrooted content eligible for later GC.
+
+Perform activation in this order so doctor and the first launch observe one
+coherent contract generation:
+
+1. Assemble the external inputs and verify that the assembly helper completed.
+2. Stop the daemon. Install the current RyeOS build and the freshly published
+   current `core` and `standard` bundles. The installed engine must understand
+   `persistent_session.target_path` and `ipc.target_unix_stream` before doctor
+   inspects the new declarations.
+3. Build, publish, and install the current `sandbox-linux-bubblewrap` bundle.
+4. Author and sign `external_content/policy.yaml`,
+   `persistent_sessions/policy.yaml`, and `isolation.yaml`. Keep isolation in
+   `mode: enforce`, networking `isolated`, `{verified_code}` as the only
+   readable namespace, and `{project}` as the only writable namespace.
+5. Run only the clean-cut reset commands named by the stopped node's refusal.
+6. Run `ryeos node doctor` and require the selected isolation backend to report
+   `available` with the expected capabilities.
+7. Start the daemon once. Confirm all three signed policies loaded, then import
+   and bind the four exact realizations before running the smoke directive.
 
 ## Bank and replay acceptance
 
-After installing the current core and standard bundles, execute:
+After completing the ordered activation above, execute:
 
 ```text
 ryeos execute directive:ryeos/examples/local_tinygrad_smoke --no-stream '{}'
