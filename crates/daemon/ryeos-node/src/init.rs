@@ -424,29 +424,6 @@ fn run_init_internal(
         "installation order determined"
     );
 
-    // A re-init inherits the existing immutable node policy. On first init the
-    // policy is materialized later in this transaction and its defined default
-    // is disabled, so authoring preflight uses the matching compiled snapshot.
-    let isolation_policy = opts
-        .app_root
-        .join(ryeos_engine::AI_DIR)
-        .join(ryeos_engine::isolation::ISOLATION_POLICY_RELATIVE_PATH);
-    let isolation = match fs::symlink_metadata(&isolation_policy) {
-        Ok(_) => ryeos_app::engine_init::load_registered_isolation(&opts.app_root)
-            .context("load existing node isolation policy for init preflight")?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Arc::new(ryeos_engine::isolation::IsolationRuntime::default())
-        }
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "inspect existing node isolation policy {}",
-                    isolation_policy.display()
-                )
-            });
-        }
-    };
-
     // Prove the complete source generation can become the next immutable
     // runtime before the first installed bundle is touched. This privileged
     // admission is mandatory even for test-only `skip_preflight`: that flag
@@ -463,6 +440,15 @@ fn run_init_internal(
         &seed_trust_store,
     )
     .context("prospective init source set would fail node boot")?;
+
+    // Re-init inherits the existing immutable node policy, but resolves its
+    // selected backend and all supporting kinds through the prospective source
+    // generation. Consulting the predecessor installed generation here would
+    // make a clean schema cut impossible: an obsolete bundle could prevent the
+    // very init transaction that atomically replaces it. The prospective
+    // admission above still fails closed on the signed policy and proves the
+    // exact generation that will become active before any installed tree moves.
+    let isolation = Arc::clone(&prospective_isolation);
 
     if !opts.skip_preflight {
         progress(
@@ -1833,6 +1819,32 @@ mod tests {
             genesis,
             fs::read(genesis_path).expect("operator genesis #2"),
             "reinitialization must not rewrite operator genesis"
+        );
+    }
+
+    #[test]
+    fn reinit_admits_the_prospective_generation_without_decoding_the_predecessor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        let opts = make_opts(&state, &user);
+        run_init(&opts).expect("initial generation");
+
+        let installed_manifest = state.join(".ai/bundles/core/.ai/manifest.yaml");
+        let predecessor = fs::read_to_string(&installed_manifest).expect("installed manifest");
+        let obsolete = predecessor.replacen(
+            "runtime_authority:\n",
+            "runtime_authority:\n  predecessor_only_authority: []\n",
+            1,
+        );
+        assert_ne!(obsolete, predecessor, "fixture must alter the closed wire");
+        fs::write(&installed_manifest, obsolete).expect("write obsolete predecessor manifest");
+
+        run_init(&opts).expect("prospective generation must replace obsolete predecessor");
+        assert_eq!(
+            fs::read(&installed_manifest).expect("replaced installed manifest"),
+            fs::read(workspace_root().join("bundles/core/.ai/manifest.yaml"))
+                .expect("current source manifest")
         );
     }
 
