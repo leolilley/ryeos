@@ -14,7 +14,34 @@ use serde::{Deserialize, Serialize};
 use crate::handler_context::HandlerContext;
 use crate::state::AppState;
 
-const BINDING_HEAD_NAMESPACE: &str = "external-content-bindings";
+const BINDING_HEAD_NAMESPACE: &str = ryeos_state::objects::EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE;
+
+/// Retire every predecessor external-content binding head while the node is
+/// stopped. Manifest-schema cuts change the binding coordinate itself; old
+/// active heads cannot remain roots under the new decoder and are never
+/// translated.
+pub fn discard_binding_heads_offline(
+    config: &crate::config::Config,
+    dry_run: bool,
+) -> anyhow::Result<usize> {
+    let _state_lock = crate::state_lock::StateLock::acquire(&crate::state_lock::default_lock_path(
+        &config.app_root,
+    ))
+    .context("external-content binding reset requires the daemon to be stopped")?;
+    let runtime_state_dir = config.runtime_state_dir();
+    let identity = crate::identity::NodeIdentity::load(&config.node_signing_key_path)
+        .context("load node identity for external-content binding reset")?;
+    let mut trust = ryeos_state::refs::TrustStore::new();
+    trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
+    let state = ryeos_state::StateDb::open_for_projection_rebuild(
+        &runtime_state_dir,
+        std::sync::Arc::new(trust),
+    )
+    .context("open pinned state authority for external-content binding reset")?;
+    let authority = state.pinned_authority()?;
+    let guard = authority.acquire_exclusive_guard(!dry_run)?;
+    state.discard_external_content_binding_heads(&guard, dry_run)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -411,6 +438,7 @@ pub async fn bind(
         })?;
     let signer = crate::state_store::NodeIdentitySigner::from_identity(&state.identity);
     state.state_store.with_state_db(|db| {
+        db.ensure_current_external_content_binding_epoch(&guard)?;
         let current = db.read_generic_head_ref(BINDING_HEAD_NAMESPACE, &binding_id)?;
         if let Some(current) = current.as_ref()
             && current.target_hash == binding_hash
@@ -932,16 +960,6 @@ impl ryeos_state::ExternalContentBlobSink for DurableContentSink<'_> {
         )?;
         Ok((outcome.hash, outcome.size))
     }
-
-    fn store_target(&mut self, target: &[u8], path: &str) -> anyhow::Result<String> {
-        if target.is_empty()
-            || target.len() as u64 > ryeos_state::objects::MAX_SYMLINK_TARGET_BYTES
-            || target.contains(&0)
-        {
-            bail!("external content symlink {path} has an invalid target");
-        }
-        self.stage.store_blob(self.guard, self.cas, target)
-    }
 }
 
 fn resolve_external_content_consumer(
@@ -1058,16 +1076,6 @@ impl ryeos_state::ExternalLargeContentSink for DurableLargeSink<'_> {
         let hash = self.stage.store_blob(self.guard, self.cas, &bytes)?;
         Ok((hash, expected_size))
     }
-
-    fn store_target(&mut self, target: &[u8], relative_path: &str) -> anyhow::Result<String> {
-        if target.is_empty()
-            || target.len() as u64 > ryeos_state::objects::MAX_SYMLINK_TARGET_BYTES
-            || target.contains(&0)
-        {
-            bail!("large-content symlink {relative_path} has an invalid target");
-        }
-        self.stage.store_blob(self.guard, self.cas, target)
-    }
 }
 
 fn import_request_digest(
@@ -1094,7 +1102,7 @@ fn import_request_digest(
             "root_inode": root_inode,
         },
         "limits": limits,
-        "capture_floor_patterns": ryeos_state::ignore::durable_capture_floor().canonical_patterns(),
+        "capture_floor_rules": ryeos_state::project_sync::durable_content_capture_floor_rules(),
         "configured_ignore_patterns": configured_ignore.canonical_patterns(),
     }))?;
     Ok(lillux::sha256_hex(canonical.as_bytes()))

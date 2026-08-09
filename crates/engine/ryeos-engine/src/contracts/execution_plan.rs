@@ -182,6 +182,8 @@ pub struct EngineContext {
     pub app_root: PathBuf,
     pub isolation: Arc<crate::isolation::IsolationRuntime>,
     pub isolation_project_authority: crate::isolation::IsolationProjectAuthority,
+    pub isolation_filesystem_authority_ceiling:
+        crate::isolation::IsolationFilesystemAuthorityCeiling,
     pub isolation_live_access_authority: Option<crate::isolation::IsolationLiveAccessAuthority>,
     pub isolation_state_root: Option<PathBuf>,
     pub isolation_checkpoint_dir: Option<PathBuf>,
@@ -398,7 +400,12 @@ pub enum PlanNode {
         /// The fully resolved subprocess specification.
         spec: Box<PlanSubprocessSpec>,
         /// Audit: the root item's source path.
-        #[serde(default)]
+        ///
+        /// This is live diagnostic state, not executable plan state. It is
+        /// deliberately excluded from the admitted plan wire identity: the
+        /// source bytes/root identity are committed elsewhere, while this
+        /// host installation path is inert after compilation.
+        #[serde(skip)]
         tool_path: Option<PathBuf>,
         /// Audit: executor IDs traversed during chain resolution.
         #[serde(default)]

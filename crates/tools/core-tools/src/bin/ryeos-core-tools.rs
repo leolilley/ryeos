@@ -31,16 +31,6 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Execute one path strictly inside the current admitted workspace.
-    /// Internal persistent-session launcher; never resolves PATH or a host
-    /// pathname outside that workspace.
-    #[command(hide = true)]
-    SessionExec {
-        executable: PathBuf,
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
     /// Sign a Rye item by canonical ref after path-anchoring validation.
     Sign {
         /// Canonical refs or `.ai/...` paths of the items to sign.
@@ -479,7 +469,6 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.cmd {
-        Cmd::SessionExec { executable, args } => run_session_exec(executable, args),
         Cmd::Sign {
             item_refs,
             project,
@@ -662,42 +651,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             cli.stdin_json,
         ),
         Cmd::Vault { cmd } => run_vault(cmd),
-    }
-}
-
-fn run_session_exec(executable: PathBuf, args: Vec<String>) -> anyhow::Result<()> {
-    if executable.is_absolute()
-        || executable.as_os_str().is_empty()
-        || executable
-            .components()
-            .any(|component| !matches!(component, std::path::Component::Normal(_)))
-    {
-        anyhow::bail!("session executable must be a non-empty workspace-relative path");
-    }
-    let workspace = std::env::current_dir().context("resolve admitted session workspace")?;
-    let workspace =
-        std::fs::canonicalize(&workspace).context("canonicalize admitted session workspace")?;
-    let target = std::fs::canonicalize(workspace.join(&executable)).with_context(|| {
-        format!(
-            "resolve admitted session executable {}",
-            executable.display()
-        )
-    })?;
-    if !target.starts_with(&workspace) || !target.is_file() {
-        anyhow::bail!(
-            "session executable resolves outside the admitted workspace or is not a file"
-        );
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        let error = std::process::Command::new(&target).args(args).exec();
-        Err(error).with_context(|| format!("exec admitted session target {}", target.display()))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (target, args);
-        anyhow::bail!("persistent session execution requires Unix descriptor inheritance")
     }
 }
 

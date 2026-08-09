@@ -1,0 +1,11 @@
+[package]
+name = "ryeos-session-exec"
+version = "0.5.76"
+edition = "2024"
+description = "Static admitted persistent-session exec bridge"
+license.workspace = true
+repository = "https://github.com/leolilley/ryeos"
+
+[[bin]]
+name = "ryeos-session-exec"
+path = "src/main.rs"

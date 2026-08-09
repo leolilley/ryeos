@@ -1223,35 +1223,44 @@ fn close_fd(fd: RawFd) {
 }
 
 fn validate_connected_unix_stream(fd: RawFd) -> Result<(), String> {
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+    let mut socket_type: libc::c_int = 0;
+    let mut socket_type_len = std::mem::size_of_val(&socket_type) as libc::socklen_t;
+    if unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            (&mut socket_type as *mut libc::c_int).cast(),
+            &mut socket_type_len,
+        )
+    } != 0
+    {
         return Err(format!(
-            "inspect target channel descriptor {fd}: {}",
+            "target channel is not a socket: {}",
             std::io::Error::last_os_error()
         ));
     }
-    if stat.st_mode & libc::S_IFMT != libc::S_IFSOCK {
-        return Err("target channel is not an AF_UNIX socket".to_owned());
-    }
-    let table = std::fs::read_to_string("/proc/net/unix")
-        .map_err(|error| format!("inspect target channel Unix-socket table: {error}"))?;
-    let row = table
-        .lines()
-        .skip(1)
-        .map(|line| line.split_whitespace().collect::<Vec<_>>())
-        .find(|columns| {
-            columns.len() >= 7 && columns[6].parse::<u64>().ok() == Some(stat.st_ino)
-        })
-        .ok_or_else(|| "target channel is not present in the AF_UNIX socket table".to_owned())?;
-    let socket_type = libc::c_int::from_str_radix(row[4], 16)
-        .map_err(|error| format!("decode target channel socket type: {error}"))?;
     if socket_type != libc::SOCK_STREAM {
         return Err("target channel is not a SOCK_STREAM socket".to_owned());
     }
-    let state = u8::from_str_radix(row[5], 16)
-        .map_err(|error| format!("decode target channel socket state: {error}"))?;
-    if state != 3 {
-        return Err("target channel is not connected".to_owned());
+
+    let mut peer: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut peer_len = std::mem::size_of_val(&peer) as libc::socklen_t;
+    if unsafe {
+        libc::getpeername(
+            fd,
+            (&mut peer as *mut libc::sockaddr_storage).cast(),
+            &mut peer_len,
+        )
+    } != 0
+    {
+        return Err(format!(
+            "target channel is not connected: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if peer.ss_family as libc::c_int != libc::AF_UNIX {
+        return Err("target channel is not an AF_UNIX socket".to_owned());
     }
     Ok(())
 }

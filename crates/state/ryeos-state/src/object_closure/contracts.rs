@@ -714,7 +714,6 @@ fn links_external_content_manifest(value: &Value) -> Result<ContractLinks, Strin
         .ok_or_else(|| "external_content_manifest missing entries array".to_string())?;
     for entry in entries {
         super::push_optional_hash(entry, "blob_hash", &mut links.blob_hashes)?;
-        super::push_optional_hash(entry, "target_blob", &mut links.blob_hashes)?;
     }
     Ok(links)
 }

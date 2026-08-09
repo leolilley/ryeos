@@ -2882,6 +2882,53 @@ pub(crate) fn discard_all_thread_runtime_files(
     delete_runtime_tree_contents(threads_root)
 }
 
+fn ensure_current_external_content_bindings(state: &StateDb) -> Result<()> {
+    let namespace = ryeos_state::objects::EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE;
+    let heads = state.list_generic_head_refs(namespace)?;
+    let epoch = state.external_content_binding_schema_epoch()?;
+    if heads.is_empty() && epoch.is_none() {
+        return Ok(());
+    }
+    let current_epoch = ryeos_state::objects::EXTERNAL_CONTENT_BINDING_SCHEMA_EPOCH;
+    if epoch != Some(current_epoch) {
+        bail!(
+            "external-content binding epoch is {}, expected {current_epoch}; stop the daemon and run `ryeos node external-content-reset --dry-run`, then `ryeos node external-content-reset --confirm-discard-external-content-bindings`",
+            epoch.map_or_else(|| "absent".to_owned(), |value| value.to_string())
+        );
+    }
+    let cas = state.pinned_authority()?.cas_store()?;
+    for head in heads {
+        let value = cas
+            .get_object(&head.target_hash)?
+            .ok_or_else(|| anyhow!("external-content binding head target is absent"))?;
+        let binding = ryeos_state::objects::ExternalContentBinding::from_value(&value)?;
+        if head.namespace != namespace || head.name != binding.binding_id {
+            bail!("external-content binding head coordinates are inconsistent");
+        }
+        if binding.state != ryeos_state::objects::ExternalContentBindingState::Active {
+            continue;
+        }
+        let manifest = cas
+            .get_object(&binding.manifest_hash)?
+            .ok_or_else(|| anyhow!("active external-content binding manifest is absent"))?;
+        let expected_schema = match binding.manifest_kind.as_str() {
+            ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND => {
+                ryeos_state::objects::EXTERNAL_CONTENT_TREE_SCHEMA
+            }
+            ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND => {
+                ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA
+            }
+            _ => bail!("active external-content binding names an unsupported manifest kind"),
+        };
+        if manifest.get("schema").and_then(serde_json::Value::as_str) != Some(expected_schema) {
+            bail!(
+                "external-content binding state predates the current manifest schema; stop the daemon and run `ryeos node external-content-reset --dry-run`, then `ryeos node external-content-reset --confirm-discard-external-content-bindings`"
+            );
+        }
+    }
+    Ok(())
+}
+
 impl StateStore {
     fn thread_runtime_authority(&self) -> Result<&ThreadRuntimeAuthority> {
         self.thread_runtime_authority
@@ -3071,6 +3118,7 @@ impl StateStore {
             }
         }
         .map_err(with_execution_schema_cutover_hint)?;
+        ensure_current_external_content_bindings(&state_db)?;
         projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
         let state_authority = state_db.pinned_authority()?;
         Ok(Self {
@@ -10454,6 +10502,68 @@ mod tests {
             Arc::new(head_trust),
         )
         .expect("state store")
+    }
+
+    #[test]
+    fn predecessor_released_binding_head_requires_explicit_epoch_reset() {
+        let tmp = tempdir().unwrap();
+        let runtime_state_dir = tmp.path().join(".ai/state");
+        let identity = crate::identity::NodeIdentity::create(&tmp.path().join("node-key.pem"))
+            .expect("test node identity");
+        let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
+        let mut trust = ryeos_state::refs::TrustStore::new();
+        trust.insert(
+            identity.fingerprint().to_string(),
+            *identity.verifying_key(),
+        );
+        let trust = Arc::new(trust);
+        let state = StateDb::open(&runtime_state_dir, Arc::clone(&trust)).unwrap();
+        let authority = state.pinned_authority().unwrap();
+        let guard = authority.acquire_exclusive_guard(true).unwrap();
+        let active = ryeos_state::objects::ExternalContentBinding::active(
+            "a".repeat(64),
+            ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.to_owned(),
+            "worker:tests/old".to_owned(),
+            "b".repeat(64),
+            "c".repeat(64),
+        )
+        .unwrap();
+        let released =
+            ryeos_state::objects::ExternalContentBinding::released_from(&active, "c".repeat(64))
+                .unwrap();
+        let binding_hash = authority
+            .cas_store()
+            .unwrap()
+            .store_object(&released.to_value().unwrap())
+            .unwrap();
+        state
+            .write_generic_head_ref(
+                ryeos_state::objects::EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE,
+                &released.binding_id,
+                &binding_hash,
+                signer.as_ref(),
+                &guard,
+            )
+            .unwrap();
+        drop(guard);
+        drop(authority);
+        drop(state);
+
+        let error = StateStore::new_with_head_trust(
+            tmp.path().to_path_buf(),
+            runtime_state_dir.clone(),
+            runtime_state_dir.join("runtime.sqlite3"),
+            signer,
+            WriteBarrier::new(),
+            trust,
+        )
+        .err()
+        .expect("predecessor binding head must refuse startup");
+        assert!(
+            error
+                .to_string()
+                .contains("ryeos node external-content-reset")
+        );
     }
 
     #[test]

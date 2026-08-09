@@ -32,9 +32,9 @@ mod provenance;
 
 pub use authority::{
     IsolationCommandAuthority, IsolationCommandAuthorityRef, IsolationDescriptorBoundCommand,
-    IsolationDescriptorFileIdentity, IsolationLaunchContext, IsolationLiveAccessAuthority,
-    IsolationProjectAuthority, IsolationReadOnlyMountAuthority, IsolationTargetChannelAuthority,
-    IsolationVerifiedCode,
+    IsolationDescriptorFileIdentity, IsolationFilesystemAuthorityCeiling, IsolationLaunchContext,
+    IsolationLiveAccessAuthority, IsolationProjectAuthority, IsolationReadOnlyMountAuthority,
+    IsolationTargetChannelAuthority, IsolationVerifiedCode,
 };
 pub use backend::ResolvedIsolationBackend;
 pub use inspection::{IsolationBackendInspection, IsolationBackendStatus, IsolationInspection};
@@ -1607,6 +1607,40 @@ impl IsolationRuntime {
                 "typed target-channel launches cannot also carry target stdin".to_string(),
             ));
         }
+        if self.state == IsolationRuntimeState::Enforced
+            && context.filesystem_authority_ceiling
+                == IsolationFilesystemAuthorityCeiling::CapturedExecution
+        {
+            let unexpected_readable = self
+                .inspection
+                .filesystem
+                .readable
+                .iter()
+                .find(|entry| entry.as_str() != "{verified_code}");
+            let unexpected_writable = self
+                .inspection
+                .filesystem
+                .writable
+                .iter()
+                .find(|entry| entry.as_str() != "{project}");
+            if unexpected_readable.is_some() || unexpected_writable.is_some() {
+                return Err(refused(format!(
+                    "captured execution admits only {{verified_code}} readable and {{project}} writable; node policy requested readable {:?}, writable {:?}",
+                    self.inspection.filesystem.readable, self.inspection.filesystem.writable
+                )));
+            }
+            if context.live_access.is_some()
+                || context.state_root.is_some()
+                || context.checkpoint_dir.is_some()
+                || context.daemon_socket_path.is_some()
+                || !context.bundle_roots.is_empty()
+                || context.node_trusted_keys_dir.is_some()
+            {
+                return Err(refused(
+                    "captured execution context carries ambient filesystem authority".to_string(),
+                ));
+            }
+        }
         match (context.project_authority, context.live_access) {
             (IsolationProjectAuthority::External, None) => {
                 return Err(refused(
@@ -2703,36 +2737,42 @@ impl IsolationRuntime {
             };
 
             let mut system_readable_mounts = Vec::new();
-            for path in ["/usr", "/bin", "/lib", "/lib64"] {
-                let destination = PathBuf::from(path);
-                if destination.exists() {
-                    let source = canonicalize_launch_path("system runtime mount", &destination)?;
-                    let source_handle = pin_mount_source("system runtime mount", &source)?;
-                    system_readable_mounts.push(ReadableMount {
-                        source,
-                        destination,
-                        source_handle,
-                        layer: 20,
-                    });
+            if context.filesystem_authority_ceiling
+                == IsolationFilesystemAuthorityCeiling::NodePolicy
+            {
+                for path in ["/usr", "/bin", "/lib", "/lib64"] {
+                    let destination = PathBuf::from(path);
+                    if destination.exists() {
+                        let source =
+                            canonicalize_launch_path("system runtime mount", &destination)?;
+                        let source_handle = pin_mount_source("system runtime mount", &source)?;
+                        system_readable_mounts.push(ReadableMount {
+                            source,
+                            destination,
+                            source_handle,
+                            layer: 20,
+                        });
+                    }
                 }
-            }
-            for path in [
-                "/etc/hosts",
-                "/etc/nsswitch.conf",
-                "/etc/resolv.conf",
-                "/etc/ssl",
-            ] {
-                let destination = PathBuf::from(path);
-                if destination.exists() {
-                    let source =
-                        canonicalize_launch_path("system configuration mount", &destination)?;
-                    let source_handle = pin_mount_source("system configuration mount", &source)?;
-                    system_readable_mounts.push(ReadableMount {
-                        source,
-                        destination,
-                        source_handle,
-                        layer: 20,
-                    });
+                for path in [
+                    "/etc/hosts",
+                    "/etc/nsswitch.conf",
+                    "/etc/resolv.conf",
+                    "/etc/ssl",
+                ] {
+                    let destination = PathBuf::from(path);
+                    if destination.exists() {
+                        let source =
+                            canonicalize_launch_path("system configuration mount", &destination)?;
+                        let source_handle =
+                            pin_mount_source("system configuration mount", &source)?;
+                        system_readable_mounts.push(ReadableMount {
+                            source,
+                            destination,
+                            source_handle,
+                            layer: 20,
+                        });
+                    }
                 }
             }
 
@@ -5243,6 +5283,7 @@ mod tests {
                 IsolationLaunchContext {
                     project_path: app_root.path(),
                     project_authority: IsolationProjectAuthority::ReadOnly,
+                    filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
                     checkpoint_dir: None,
@@ -5318,6 +5359,7 @@ mod tests {
                 IsolationLaunchContext {
                     project_path: app_root.path(),
                     project_authority: IsolationProjectAuthority::ReadOnly,
+                    filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
                     checkpoint_dir: None,
@@ -5380,6 +5422,7 @@ mod tests {
                 IsolationLaunchContext {
                     project_path: project.path(),
                     project_authority: IsolationProjectAuthority::ReadOnly,
+                    filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
                     checkpoint_dir: None,
@@ -5476,6 +5519,7 @@ mod tests {
                 IsolationLaunchContext {
                     project_path: project.path(),
                     project_authority: IsolationProjectAuthority::External,
+                    filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
                     live_access: Some(&live_access),
                     state_root: None,
                     checkpoint_dir: None,
@@ -5516,6 +5560,104 @@ mod tests {
         assert_eq!(identity["content_hash"], verified.content_hash);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn captured_execution_plan_has_no_ambient_system_mounts() {
+        use std::io::{Read as _, Seek as _};
+
+        let app_root = tempfile::tempdir().unwrap();
+        let mut policy = IsolationPolicy::default_disabled();
+        policy.mode = IsolationMode::Enforce;
+        policy.backend = Some(resolved_backend().selection.clone());
+        policy.filesystem.readable = vec!["{verified_code}".to_string()];
+        policy.filesystem.writable = vec!["{project}".to_string()];
+        policy.network.mode = IsolationNetworkMode::Isolated;
+        write_policy(app_root.path(), &policy);
+
+        let mut backend = resolved_backend();
+        backend.effective_capabilities = BTreeSet::from([
+            IsolationCapability::FilesystemPrivateRoot,
+            IsolationCapability::FilesystemFdReadOnly,
+            IsolationCapability::FilesystemFdWritable,
+            IsolationCapability::FilesystemOrderedOverlays,
+            IsolationCapability::FilesystemPrivateTmp,
+            IsolationCapability::DevicesMinimal,
+            IsolationCapability::EnvironmentExact,
+            IsolationCapability::NetworkIsolated,
+            IsolationCapability::ProcessHostPidNamespace,
+            IsolationCapability::ProcessTargetPidReporting,
+            IsolationCapability::LifecycleSharedProcessGroup,
+        ]);
+        backend.declaration.capabilities = backend.effective_capabilities.clone();
+        let runtime =
+            IsolationRuntime::load_with_backend(app_root.path(), Some(Arc::new(backend))).unwrap();
+        let command = runtime
+            .capture_verified_command(Path::new("/bin/true"), None, None)
+            .unwrap();
+        let project = runtime
+            .runtime_workspaces
+            .as_ref()
+            .unwrap()
+            .open_or_create_child(std::ffi::OsStr::new("captured-plan"), 0o700)
+            .unwrap();
+        let applied = runtime
+            .apply_with_provenance(
+                lillux::SubprocessRequest {
+                    cmd: "/bin/true".to_string(),
+                    argv0: None,
+                    args: Vec::new(),
+                    cwd: Some(project.path().to_string_lossy().into_owned()),
+                    envs: Vec::new(),
+                    stdin_data: None,
+                    timeout: 1.0,
+                    limits: None,
+                    inherited_fds: Vec::new(),
+                    supervised_status: None,
+                },
+                IsolationLaunchContext {
+                    project_path: project.path(),
+                    project_authority: IsolationProjectAuthority::EphemeralScratch,
+                    filesystem_authority_ceiling:
+                        IsolationFilesystemAuthorityCeiling::CapturedExecution,
+                    live_access: None,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    daemon_socket_path: None,
+                    bundle_roots: &[],
+                    node_trusted_keys_dir: None,
+                    verified_code: &[],
+                    verified_command: Some(&command),
+                    external_read_only_mounts: &[],
+                    target_channel: None,
+                    item_ref: "worker:tests/captured-plan",
+                    thread_id: "T-captured-plan",
+                },
+            )
+            .unwrap();
+        let mut request_handle = applied
+            .request
+            .inherited_fds
+            .last()
+            .unwrap()
+            .try_clone()
+            .unwrap();
+        request_handle.rewind().unwrap();
+        let mut request_bytes = Vec::new();
+        request_handle.read_to_end(&mut request_bytes).unwrap();
+        let request: serde_json::Value = serde_json::from_slice(&request_bytes).unwrap();
+        let mounts = request["plan"]["mounts"].as_array().unwrap();
+        for mount in mounts {
+            let destination = mount["destination"].as_str().unwrap();
+            assert!(
+                !["/usr", "/bin", "/lib", "/lib64", "/etc"]
+                    .iter()
+                    .any(|ambient| destination == *ambient
+                        || destination.starts_with(&format!("{ambient}/"))),
+                "captured plan exposed ambient system mount {destination}"
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn disabled_runtime_rejects_command_mutation_after_admission() {
@@ -5554,6 +5696,7 @@ mod tests {
                 IsolationLaunchContext {
                     project_path: project.path(),
                     project_authority: IsolationProjectAuthority::External,
+                    filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
                     live_access: Some(&live_access),
                     state_root: None,
                     checkpoint_dir: None,
@@ -5667,6 +5810,7 @@ mod tests {
             IsolationLaunchContext {
                 project_path: app_root.path(),
                 project_authority: IsolationProjectAuthority::EphemeralScratch,
+                filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
                 live_access: None,
                 state_root: None,
                 checkpoint_dir: None,
@@ -5688,6 +5832,57 @@ mod tests {
             error
                 .to_string()
                 .contains("read-only mounts require an enforced isolation backend")
+        );
+    }
+
+    #[test]
+    fn captured_execution_refuses_ambient_node_filesystem_policy() {
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        let mut runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        // The ceiling is checked before backend compilation. Make the fixture
+        // exercise the enforced contract without pretending a backend exists.
+        runtime.state = IsolationRuntimeState::Enforced;
+        let request = lillux::SubprocessRequest {
+            cmd: "/bin/true".to_string(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 1.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            supervised_status: None,
+        };
+        let error = match runtime.apply(
+            request,
+            IsolationLaunchContext {
+                project_path: app_root.path(),
+                project_authority: IsolationProjectAuthority::EphemeralScratch,
+                filesystem_authority_ceiling:
+                    IsolationFilesystemAuthorityCeiling::CapturedExecution,
+                live_access: None,
+                state_root: None,
+                checkpoint_dir: None,
+                daemon_socket_path: None,
+                bundle_roots: &[],
+                node_trusted_keys_dir: None,
+                verified_code: &[],
+                verified_command: None,
+                external_read_only_mounts: &[],
+                target_channel: None,
+                item_ref: "worker:tests/captured",
+                thread_id: "T-captured",
+            },
+        ) {
+            Ok(_) => panic!("captured execution accepted ambient node filesystem policy"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("captured execution admits only {verified_code} readable")
         );
     }
 
@@ -5715,6 +5910,7 @@ mod tests {
             IsolationLaunchContext {
                 project_path: app_root.path(),
                 project_authority: IsolationProjectAuthority::EphemeralScratch,
+                filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
                 live_access: None,
                 state_root: None,
                 checkpoint_dir: None,
@@ -5746,6 +5942,7 @@ mod tests {
         let context = IsolationLaunchContext {
             project_path: app_root.path(),
             project_authority: IsolationProjectAuthority::External,
+            filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
             live_access: Some(&live_access),
             state_root: None,
             checkpoint_dir: None,
@@ -5797,6 +5994,7 @@ mod tests {
         let context = IsolationLaunchContext {
             project_path: app_root.path(),
             project_authority: IsolationProjectAuthority::External,
+            filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
             live_access: Some(&live_access),
             state_root: None,
             checkpoint_dir: None,
@@ -5840,6 +6038,7 @@ mod tests {
         let context = |live_access| IsolationLaunchContext {
             project_path: app_root.path(),
             project_authority: IsolationProjectAuthority::External,
+            filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
             live_access,
             state_root: None,
             checkpoint_dir: None,
@@ -5911,6 +6110,7 @@ mod tests {
                 IsolationLaunchContext {
                     project_path: app_root.path(),
                     project_authority: IsolationProjectAuthority::RuntimeWorkspace,
+                    filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
                     checkpoint_dir: None,

@@ -444,6 +444,8 @@ fn import_one(
         IsolationLaunchContext {
             project_path,
             project_authority: IsolationProjectAuthority::ReadOnly,
+            filesystem_authority_ceiling:
+                ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             live_access: None,
             state_root: None,
             checkpoint_dir: None,

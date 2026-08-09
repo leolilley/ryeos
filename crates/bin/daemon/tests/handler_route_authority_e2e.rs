@@ -246,6 +246,8 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
+        isolation_filesystem_authority_ceiling:
+            ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
         isolation_live_access_authority: Some(
             ryeos_engine::isolation::IsolationLiveAccessAuthority::UnconfinedHost {
                 authorized_write_namespaces: vec!["project".to_string()],

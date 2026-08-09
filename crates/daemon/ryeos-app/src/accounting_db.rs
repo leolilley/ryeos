@@ -6220,6 +6220,11 @@ mod tests {
             &authority,
         )
         .unwrap();
+        assert_eq!(
+            db.provider_local_worker_observation(&attempt_id).unwrap(),
+            Some(observation.clone()),
+            "terminal settlement must retain the pre-exposure observation for restart replay"
+        );
         let proof = ProviderCallPublicationProof {
             cache_key,
             answer_digest: observation.answer_digest.clone(),

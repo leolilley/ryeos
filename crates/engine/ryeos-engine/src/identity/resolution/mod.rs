@@ -24,7 +24,7 @@ pub use types::{
     EffectiveDefinitionDigestError, KindComposedView, ResolutionDigestNode, ResolutionEdge,
     ResolutionError, ResolutionFailureClass, ResolutionOutput, ResolutionProvenance,
     ResolutionProvenanceEdge, ResolutionProvenanceNode, ResolutionStepName, ResolvedAncestor,
-    TrustClass, effective_trust,
+    RetainedResolutionOutput, TrustClass, effective_trust,
 };
 
 use crate::canonical_ref::CanonicalRef;

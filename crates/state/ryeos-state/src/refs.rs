@@ -1955,7 +1955,6 @@ pub(crate) fn read_verified_generic_head_ref_in_directory(
     Ok(Some(signed_ref))
 }
 
-#[cfg(test)]
 pub(crate) fn remove_generic_head_ref_in_directory(
     refs_directory: &lillux::PinnedDirectory,
     namespace: &str,

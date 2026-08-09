@@ -215,6 +215,8 @@ pub async fn handle(
                 ryeos_engine::isolation::IsolationLaunchContext {
                     project_path: &project_path,
                     project_authority: ryeos_engine::isolation::IsolationProjectAuthority::ReadOnly,
+                    filesystem_authority_ceiling:
+                        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
                     checkpoint_dir: None,

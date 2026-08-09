@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const EXTERNAL_CONTENT_MANIFEST_KIND: &str = "external_content_manifest";
-pub const EXTERNAL_CONTENT_TREE_SCHEMA: &str = "ryeos.external_content.tree.v1";
+pub const EXTERNAL_CONTENT_TREE_SCHEMA: &str = "ryeos.external_content.tree.v2";
 pub const EXTERNAL_REALIZATIONS_DERIVED_KEY: &str = "effective_external_realizations";
 /// The single manifest path a file-shaped realization stores its content
 /// under. Wire-level: both manifest kinds spell file shape the same way.
@@ -34,8 +34,44 @@ pub const MAX_EXTERNAL_CONTENT_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 /// the large-content caps on that manifest object and at ingest.
 pub const MAX_REALIZATION_CLAIMED_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 pub const MAX_EXTERNAL_CONTENT_PATH_BYTES: usize = 4096;
-pub const MAX_INLINE_SYMLINK_TARGET_BYTES: usize = 1024;
+pub const MAX_INLINE_SYMLINK_TARGET_BYTES: usize = 4096;
 pub const MAX_SYMLINK_TARGET_BYTES: u64 = 4096;
+
+/// Prove that a realization symlink resolves lexically inside its manifest
+/// root. Realizations retain bytes, not ambient filesystem authority: an
+/// absolute target or a relative target that walks above the manifest root
+/// would make execution depend on host content outside the captured tree.
+pub fn validate_internal_symlink_target(entry_path: &str, target: &[u8]) -> anyhow::Result<()> {
+    if target.is_empty() || target.contains(&0) || target.len() as u64 > MAX_SYMLINK_TARGET_BYTES {
+        anyhow::bail!("manifest symlink entry `{entry_path}` has an invalid target");
+    }
+    let target = std::str::from_utf8(target).map_err(|_| {
+        anyhow::anyhow!("manifest symlink entry `{entry_path}` has a non-UTF-8 target")
+    })?;
+    let target_path = std::path::Path::new(target);
+    if target_path.is_absolute() {
+        anyhow::bail!("manifest symlink entry `{entry_path}` has an absolute target");
+    }
+
+    let mut depth = std::path::Path::new(entry_path)
+        .parent()
+        .map(|parent| parent.components().count())
+        .unwrap_or(0);
+    for component in target_path.components() {
+        match component {
+            std::path::Component::Normal(_) => depth += 1,
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir if depth > 0 => depth -= 1,
+            std::path::Component::ParentDir => {
+                anyhow::bail!("manifest symlink entry `{entry_path}` escapes the realization root")
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                anyhow::bail!("manifest symlink entry `{entry_path}` has a non-relative target")
+            }
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,8 +108,6 @@ pub struct ExternalContentManifestEntry {
     pub size: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_blob: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -322,7 +356,7 @@ impl ExternalContentManifestObject {
                             entry.path
                         );
                     }
-                    if entry.target.is_some() || entry.target_blob.is_some() {
+                    if entry.target.is_some() {
                         anyhow::bail!("manifest file entry `{}` carries a link target", entry.path);
                     }
                 }
@@ -331,7 +365,6 @@ impl ExternalContentManifestObject {
                         || entry.size.is_some()
                         || entry.mode.is_some()
                         || entry.target.is_some()
-                        || entry.target_blob.is_some()
                     {
                         anyhow::bail!("manifest directory entry `{}` carries content", entry.path);
                     }
@@ -340,8 +373,8 @@ impl ExternalContentManifestObject {
                     if entry.blob_hash.is_some() || entry.size.is_some() || entry.mode.is_some() {
                         anyhow::bail!("manifest symlink entry `{}` carries a blob", entry.path);
                     }
-                    match (entry.target.as_deref(), entry.target_blob.as_deref()) {
-                        (Some(target), None) => {
+                    match entry.target.as_deref() {
+                        Some(target) => {
                             if target.is_empty()
                                 || target.as_bytes().contains(&0)
                                 || target.len() > MAX_INLINE_SYMLINK_TARGET_BYTES
@@ -351,20 +384,11 @@ impl ExternalContentManifestObject {
                                     entry.path
                                 );
                             }
+                            validate_internal_symlink_target(&entry.path, target.as_bytes())?;
                         }
-                        (None, Some(hash)) => {
-                            crate::objects::thread_snapshot::validate_canonical_hash(
-                                "external content target_blob",
-                                hash,
-                            )?;
-                        }
-                        (Some(_), Some(_)) => anyhow::bail!(
-                            "manifest symlink entry `{}` carries both an inline and a stored target",
-                            entry.path
-                        ),
                         // A symlink without a target cannot be rebuilt, and a
                         // realization that cannot be rebuilt is not one.
-                        (None, None) => anyhow::bail!(
+                        None => anyhow::bail!(
                             "manifest symlink entry `{}` cannot be reconstructed without a target",
                             entry.path
                         ),
@@ -390,9 +414,6 @@ impl ExternalContentManifestObject {
             if let Some(hash) = &entry.blob_hash {
                 blobs.insert(hash.clone());
             }
-            if let Some(hash) = &entry.target_blob {
-                blobs.insert(hash.clone());
-            }
         }
         blobs.into_iter().collect()
     }
@@ -410,7 +431,6 @@ mod tests {
             blob_hash: None,
             size: None,
             target: None,
-            target_blob: None,
         }
     }
 
@@ -435,6 +455,26 @@ mod tests {
     }
 
     #[test]
+    fn realization_symlinks_must_resolve_inside_the_manifest_root() {
+        let mut absolute = entry("bin/python", ExternalContentManifestEntryKind::Symlink);
+        absolute.target = Some("/usr/bin/python3".to_owned());
+        let error = manifest(vec![absolute]).validate().unwrap_err().to_string();
+        assert!(error.contains("absolute target"), "got: {error}");
+
+        let mut escaping = entry("bin/python", ExternalContentManifestEntryKind::Symlink);
+        escaping.target = Some("../../usr/bin/python3".to_owned());
+        let error = manifest(vec![escaping]).validate().unwrap_err().to_string();
+        assert!(
+            error.contains("escapes the realization root"),
+            "got: {error}"
+        );
+
+        let mut internal = entry("bin/python", ExternalContentManifestEntryKind::Symlink);
+        internal.target = Some("../lib/python3".to_owned());
+        manifest(vec![internal]).validate().unwrap();
+    }
+
+    #[test]
     fn entries_must_be_strictly_ordered_by_path_bytes() {
         let mut first = entry("b", ExternalContentManifestEntryKind::Dir);
         first.path = "b".to_string();
@@ -447,21 +487,18 @@ mod tests {
     }
 
     #[test]
-    fn referenced_blobs_cover_content_and_oversized_targets() {
+    fn referenced_blobs_cover_regular_file_content_only() {
         let mut file = entry("a", ExternalContentManifestEntryKind::File);
         file.blob_hash = Some("a".repeat(64));
         file.size = Some(1);
         file.mode = Some(0o644);
         let mut link = entry("b", ExternalContentManifestEntryKind::Symlink);
-        link.target_blob = Some("b".repeat(64));
+        link.target = Some("a".to_owned());
 
         let mut object = manifest(vec![file, link]);
         object.total_bytes = 1;
         object.validate().unwrap();
-        assert_eq!(
-            object.referenced_blobs(),
-            vec!["a".repeat(64), "b".repeat(64)]
-        );
+        assert_eq!(object.referenced_blobs(), vec!["a".repeat(64)]);
     }
 
     fn realization(id: &str, mount: &str) -> ExternalContentRealization {

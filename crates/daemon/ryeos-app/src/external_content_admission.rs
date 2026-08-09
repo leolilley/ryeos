@@ -412,26 +412,6 @@ impl ExternalContentBlobSink for GuardedCasBlobSink<'_> {
         }
         Ok((outcome.hash, outcome.size))
     }
-
-    fn store_target(&mut self, target: &[u8], path: &str) -> anyhow::Result<String> {
-        if target.is_empty()
-            || target.len() as u64 > ryeos_state::objects::MAX_SYMLINK_TARGET_BYTES
-            || target.contains(&0)
-        {
-            anyhow::bail!("external content symlink {path} has an invalid target");
-        }
-        let expected = lillux::sha256_hex(target);
-        let existed = self.cas.has_blob(&expected)?;
-        let hash = self
-            .staged_roots
-            .store_blob_admitted(self.guard, self.cas, target)?;
-        if existed {
-            self.reused_blobs += 1;
-        } else {
-            self.stored_blobs += 1;
-        }
-        Ok(hash)
-    }
 }
 
 #[allow(clippy::too_many_arguments)]

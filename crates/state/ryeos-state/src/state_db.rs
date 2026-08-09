@@ -5251,6 +5251,143 @@ impl StateDb {
         )
     }
 
+    /// Explicit clean-cut retirement of every external-content binding head.
+    ///
+    /// This is intentionally not a generic namespace-deletion surface. A
+    /// manifest schema cut changes every binding coordinate, so the stopped
+    /// node must retire predecessor heads before v2 content is imported and
+    /// rebound. The operation is idempotent after a crash: each head is
+    /// locked, re-read, and unlinked through its pinned directory authority.
+    pub fn discard_external_content_binding_heads(
+        &self,
+        guard: &crate::recovery::CasMutationGuard,
+        dry_run: bool,
+    ) -> anyhow::Result<usize> {
+        guard.ensure_protects_pinned_runtime(&self._runtime_state_directory)?;
+        if !guard.is_exclusive() {
+            anyhow::bail!("external-content binding reset requires exclusive state authority");
+        }
+        let namespace = crate::objects::EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE;
+        let heads = self.list_generic_head_refs(namespace)?;
+        if dry_run {
+            return Ok(heads.len());
+        }
+        let mut removed = 0usize;
+        for expected in heads {
+            if expected.namespace != namespace {
+                anyhow::bail!("external-content binding enumeration escaped its namespace");
+            }
+            let head_lock = crate::refs::GenericHeadLock::acquire_in_refs_directory(
+                &self._refs_directory,
+                namespace,
+                &expected.name,
+            )?;
+            let current = crate::refs::read_verified_generic_head_ref_in_directory(
+                &self._refs_directory,
+                namespace,
+                &expected.name,
+                self.trust_store.as_ref(),
+            )?;
+            let Some(current) = current else {
+                continue;
+            };
+            if current.target_hash != expected.target_hash {
+                anyhow::bail!("external-content binding head changed during stopped-node reset");
+            }
+            if crate::refs::remove_generic_head_ref_in_directory(
+                &self._refs_directory,
+                namespace,
+                &expected.name,
+                &head_lock,
+            )? {
+                removed = removed.saturating_add(1);
+            }
+        }
+        self.activate_external_content_binding_epoch_after_reset(guard)?;
+        Ok(removed)
+    }
+
+    /// Read the clean-cut epoch for external-content binding heads. Absence is
+    /// allowed only for a fresh namespace with no heads; callers decide that
+    /// distinction explicitly.
+    pub fn external_content_binding_schema_epoch(&self) -> anyhow::Result<Option<u32>> {
+        let name = std::ffi::OsStr::new("external-content-bindings.epoch");
+        let Some(file) = self._runtime_state_directory.open_regular(name, false)? else {
+            return Ok(None);
+        };
+        use std::io::Read as _;
+        let mut bytes = Vec::new();
+        file.take(32).read_to_end(&mut bytes)?;
+        let text =
+            std::str::from_utf8(&bytes).context("external-content binding epoch is not UTF-8")?;
+        let epoch = text
+            .strip_suffix('\n')
+            .unwrap_or(text)
+            .parse::<u32>()
+            .context("external-content binding epoch is malformed")?;
+        if epoch == 0 {
+            anyhow::bail!("external-content binding epoch cannot be zero");
+        }
+        Ok(Some(epoch))
+    }
+
+    /// Initialize a fresh binding namespace, or prove an existing namespace
+    /// is current. Ordinary bind paths may never advance a predecessor epoch.
+    pub fn ensure_current_external_content_binding_epoch(
+        &self,
+        guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<()> {
+        self.write_external_content_binding_epoch(guard, false)
+    }
+
+    fn activate_external_content_binding_epoch_after_reset(
+        &self,
+        guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<()> {
+        self.write_external_content_binding_epoch(guard, true)
+    }
+
+    fn write_external_content_binding_epoch(
+        &self,
+        guard: &crate::recovery::CasMutationGuard,
+        explicit_reset: bool,
+    ) -> anyhow::Result<()> {
+        guard.ensure_protects_pinned_runtime(&self._runtime_state_directory)?;
+        if !guard.is_exclusive() {
+            anyhow::bail!(
+                "external-content binding epoch publication requires exclusive state authority"
+            );
+        }
+        let current = crate::objects::EXTERNAL_CONTENT_BINDING_SCHEMA_EPOCH;
+        let name = std::ffi::OsStr::new("external-content-bindings.epoch");
+        let expected = self._runtime_state_directory.open_regular(name, false)?;
+        if let Some(stored) = self.external_content_binding_schema_epoch()? {
+            if stored == current {
+                return Ok(());
+            }
+            if !explicit_reset {
+                anyhow::bail!(
+                    "external-content binding epoch is {stored}, expected {current}; explicit reset is required"
+                );
+            }
+            if stored > current {
+                anyhow::bail!(
+                    "external-content binding epoch {stored} is newer than this binary's epoch {current}"
+                );
+            }
+        }
+        self._runtime_state_directory.atomic_write_if_same(
+            name,
+            expected.as_ref(),
+            format!("{current}\n").as_bytes(),
+            0o600,
+        )?;
+        if self.external_content_binding_schema_epoch()? != Some(current) {
+            anyhow::bail!("external-content binding epoch publication did not verify");
+        }
+        Ok(())
+    }
+
     // ── Bundle event chains ────────────────────────────────
 
     pub fn append_bundle_event_admitted(
@@ -5826,6 +5963,49 @@ mod tests {
             db.read_deployed_project_ref(&deployed_project_hash)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn explicit_external_content_cutover_retires_only_binding_heads() {
+        let signer = TestSigner::default();
+        let (_dir, db) = open_temp_trusted(&signer);
+        let authority = db.pinned_authority().unwrap();
+        let guard = authority.acquire_exclusive_guard(true).unwrap();
+        let namespace = crate::objects::EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE;
+        let first = "a".repeat(64);
+        let second = "b".repeat(64);
+        db.write_generic_head_ref(namespace, &first, &"c".repeat(64), &signer, &guard)
+            .unwrap();
+        db.write_generic_head_ref(namespace, &second, &"d".repeat(64), &signer, &guard)
+            .unwrap();
+        db.write_generic_head_ref("unrelated", "retained", &"e".repeat(64), &signer, &guard)
+            .unwrap();
+
+        assert_eq!(
+            db.discard_external_content_binding_heads(&guard, true)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.discard_external_content_binding_heads(&guard, false)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.external_content_binding_schema_epoch().unwrap(),
+            Some(crate::objects::EXTERNAL_CONTENT_BINDING_SCHEMA_EPOCH)
+        );
+        assert!(db.list_generic_head_refs(namespace).unwrap().is_empty());
+        assert!(
+            db.read_generic_head_ref("unrelated", "retained")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            db.discard_external_content_binding_heads(&guard, false)
+                .unwrap(),
+            0
         );
     }
 

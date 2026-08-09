@@ -826,6 +826,10 @@ pub struct EffectClassCeilingDecl {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PersistentSessionDecl {
+    /// Composed-value path to the authored node substrate constraint. The
+    /// generic session launcher compares its `{os, arch}` value with the
+    /// current node before capturing content or contacting a worker.
+    pub target_path: Vec<String>,
     pub max_processes: u16,
     pub max_inflight_per_process: u16,
     pub max_address_space_bytes: u64,
@@ -2192,6 +2196,11 @@ fn parse_execution_schema(
                     ),
                 })?;
             if declaration.max_processes == 0
+                || declaration.target_path.is_empty()
+                || declaration
+                    .target_path
+                    .iter()
+                    .any(|segment| segment.trim().is_empty() || segment.contains('.'))
                 || declaration.max_processes > 64
                 // The current framed-session substrate serializes access to
                 // each child process.  Do not let signed content advertise

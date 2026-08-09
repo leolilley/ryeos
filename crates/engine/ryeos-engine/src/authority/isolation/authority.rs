@@ -6,9 +6,6 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(target_os = "linux")]
-use anyhow::Context as _;
-
 #[derive(Debug, Clone)]
 pub enum IsolationLiveAccessAuthority {
     DescriptorRootedMasked {
@@ -50,6 +47,17 @@ pub enum IsolationProjectAuthority {
     /// Pure node handler launch. The project path supplies a read-only cwd;
     /// no configured host writable mount is granted for this launch.
     ReadOnly,
+}
+
+/// Launch-owned ceiling over the node filesystem policy. Ordinary tools may
+/// consume every node-policy mount they otherwise qualify for. Captured
+/// execution is narrower: only its descriptor-bound verified command,
+/// daemon-owned scratch workspace, and separately admitted realization mounts
+/// may enter the namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationFilesystemAuthorityCeiling {
+    NodePolicy,
+    CapturedExecution,
 }
 
 /// Verified file identity for executable code used by one launch.
@@ -208,13 +216,7 @@ impl IsolationTargetChannelAuthority {
         if fd <= libc::STDERR_FILENO {
             anyhow::bail!("target-channel source descriptor overlaps stdio");
         }
-        let (socket_type, socket_state) = inspect_proc_unix_socket(fd)?;
-        if socket_type != libc::SOCK_STREAM {
-            anyhow::bail!("target-channel source is not a SOCK_STREAM socket");
-        }
-        if socket_state != 3 {
-            anyhow::bail!("target-channel source is not connected");
-        }
+        validate_connected_unix_stream(fd)?;
         let file = std::fs::File::from(OwnedFd::from(channel));
         Ok(Self {
             channel: Arc::new(file),
@@ -231,30 +233,51 @@ impl IsolationTargetChannelAuthority {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn inspect_proc_unix_socket(fd: std::os::fd::RawFd) -> anyhow::Result<(libc::c_int, u8)> {
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: `stat` is a valid writable buffer and the caller retains `fd`.
-    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
+#[cfg(unix)]
+fn validate_connected_unix_stream(fd: std::os::fd::RawFd) -> anyhow::Result<()> {
+    let mut socket_type: libc::c_int = 0;
+    let mut socket_type_len = std::mem::size_of_val(&socket_type) as libc::socklen_t;
+    // SAFETY: both output pointers name initialized writable storage, and the
+    // caller retains the descriptor for the duration of the syscall.
+    if unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            (&mut socket_type as *mut libc::c_int).cast(),
+            &mut socket_type_len,
+        )
+    } != 0
+    {
+        anyhow::bail!(
+            "target-channel source is not a socket: {}",
+            std::io::Error::last_os_error()
+        );
     }
-    if stat.st_mode & libc::S_IFMT != libc::S_IFSOCK {
+    if socket_type != libc::SOCK_STREAM {
+        anyhow::bail!("target-channel source is not a SOCK_STREAM socket");
+    }
+
+    let mut peer: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut peer_len = std::mem::size_of_val(&peer) as libc::socklen_t;
+    // SAFETY: `peer` and `peer_len` are valid writable buffers.
+    if unsafe {
+        libc::getpeername(
+            fd,
+            (&mut peer as *mut libc::sockaddr_storage).cast(),
+            &mut peer_len,
+        )
+    } != 0
+    {
+        anyhow::bail!(
+            "target-channel source is not connected: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    if peer.ss_family as libc::c_int != libc::AF_UNIX {
         anyhow::bail!("target-channel source is not an AF_UNIX socket");
     }
-    let table = std::fs::read_to_string("/proc/net/unix")
-        .context("inspect Linux Unix-socket table for target channel")?;
-    for line in table.lines().skip(1) {
-        let columns = line.split_whitespace().collect::<Vec<_>>();
-        if columns.len() < 7 || columns[6].parse::<u64>().ok() != Some(stat.st_ino) {
-            continue;
-        }
-        let socket_type = libc::c_int::from_str_radix(columns[4], 16)
-            .context("decode target-channel Unix socket type")?;
-        let state = u8::from_str_radix(columns[5], 16)
-            .context("decode target-channel Unix socket state")?;
-        return Ok((socket_type, state));
-    }
-    anyhow::bail!("target-channel source is not present in the Linux AF_UNIX socket table")
+    Ok(())
 }
 
 /// Per-launch facts used to resolve policy placeholders and record provenance.
@@ -262,6 +285,7 @@ fn inspect_proc_unix_socket(fd: std::os::fd::RawFd) -> anyhow::Result<(libc::c_i
 pub struct IsolationLaunchContext<'a> {
     pub project_path: &'a Path,
     pub project_authority: IsolationProjectAuthority,
+    pub filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling,
     pub live_access: Option<&'a IsolationLiveAccessAuthority>,
     pub state_root: Option<&'a Path>,
     pub checkpoint_dir: Option<&'a Path>,
@@ -301,6 +325,18 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("SOCK_STREAM")
+        );
+
+        let regular = std::fs::File::open("/dev/null").unwrap();
+        // SAFETY: the owned descriptor moves exactly once. This deliberately
+        // adversarial construction proves the authority validates the kernel
+        // object instead of trusting the Rust wrapper's nominal type.
+        let forged = unsafe { UnixStream::from_raw_fd(regular.into_raw_fd()) };
+        assert!(
+            IsolationTargetChannelAuthority::new(forged, "RYEOS_SESSION_FD")
+                .unwrap_err()
+                .to_string()
+                .contains("not a socket")
         );
 
         let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };

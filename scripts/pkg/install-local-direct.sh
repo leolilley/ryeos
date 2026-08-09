@@ -127,7 +127,8 @@ bundle_payload_bins() {
                 rye-parser-yaml-header-document \
                 rye-parser-regex-kv \
                 rye-composer-identity \
-                ryeos-core-tools
+                ryeos-core-tools \
+                ryeos-session-exec
             ;;
         standard)
             printf '%s\n' \
@@ -327,6 +328,12 @@ refresh_installed_bundle_payload() {
     sudo mkdir -p "$bin_dest"
     for b in "${bins[@]}"; do
         [[ -x "$target_dir/$b" ]] || die "bundle payload binary missing: $target_dir/$b"
+        if [[ "$b" == "ryeos-session-exec" ]] && {
+            readelf -l "$target_dir/$b" | grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' \
+                || readelf -d "$target_dir/$b" | grep -Eq 'NEEDED'
+        }; then
+            die "refusing non-static admitted persistent-session bridge: $target_dir/$b"
+        fi
         sudo install -Dm755 "$target_dir/$b" "$bin_dest/$b"
     done
 
@@ -654,6 +661,7 @@ done
 # they now live exclusively inside bundles under /usr/share/ryeos/.
 stale_bins=(
     ryeos-core-tools
+    ryeos-session-exec
     ryeos-tui
     ryeos-directive-runtime
     ryeos-directive-launch-preparer

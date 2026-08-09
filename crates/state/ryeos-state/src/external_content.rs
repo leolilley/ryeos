@@ -7,7 +7,7 @@ use anyhow::Context as _;
 
 use crate::objects::{
     ExternalContentManifestEntryKind, ExternalContentManifestObject,
-    MAX_EXTERNAL_CONTENT_FILE_BYTES, MAX_EXTERNAL_CONTENT_MANIFEST_BYTES, MAX_SYMLINK_TARGET_BYTES,
+    MAX_EXTERNAL_CONTENT_FILE_BYTES, MAX_EXTERNAL_CONTENT_MANIFEST_BYTES,
 };
 
 /// Manifest plus every verified payload required to materialize it.
@@ -63,7 +63,7 @@ impl<'a> ExternalCapturePolicy<'a> {
     }
 
     fn excludes_complete_path(&self, path: &str) -> bool {
-        crate::ignore::durable_capture_floor().is_ignored(path)
+        crate::project_sync::is_durable_content_capture_floor_excluded(path)
             || self.configured_ignore.is_ignored(path)
     }
 }
@@ -171,8 +171,6 @@ pub trait ExternalContentBlobSink {
         path: &str,
         expected_size: u64,
     ) -> anyhow::Result<(String, u64)>;
-
-    fn store_target(&mut self, target: &[u8], path: &str) -> anyhow::Result<String>;
 }
 
 /// Node-admitted bounds for one large-content import. These are supplied by
@@ -241,14 +239,15 @@ impl<'a> LargeContentCapturePolicy<'a> {
     }
 
     fn excludes_complete_path(&self, path: &str) -> bool {
-        crate::ignore::durable_capture_floor().is_ignored(path)
+        crate::project_sync::is_durable_content_capture_floor_excluded(path)
             || self.configured_ignore.is_ignored(path)
     }
 }
 
 /// Storage seam used by the descriptor walker. A large realization is a
-/// complete tree, not a bag of large files: bounded files and link targets use
-/// CAS while files above the content-tier ceiling use [`crate::LargeObjectStore`].
+/// complete tree, not a bag of large files: bounded files use CAS while files
+/// above the content-tier ceiling use [`crate::LargeObjectStore`]. Symlink
+/// targets are canonical internal relative text committed inline.
 /// Implementations durably root both stores in the caller's upload stage.
 pub trait ExternalLargeContentSink {
     fn store_large_file(
@@ -265,8 +264,6 @@ pub trait ExternalLargeContentSink {
         relative_path: &str,
         expected_size: u64,
     ) -> anyhow::Result<(String, u64)>;
-
-    fn store_target(&mut self, target: &[u8], relative_path: &str) -> anyhow::Result<String>;
 }
 
 #[cfg(unix)]
@@ -332,7 +329,6 @@ pub fn capture_large_file(
                 chunk_size: None,
                 chunk_hashes: Vec::new(),
                 target: None,
-                target_blob: None,
             },
             stored_size,
         )
@@ -350,7 +346,6 @@ pub fn capture_large_file(
                 chunk_size: Some(ingested.chunk_size),
                 chunk_hashes: ingested.chunk_hashes,
                 target: None,
-                target_blob: None,
             },
             stored_size,
         )
@@ -429,7 +424,6 @@ fn capture_large_directory(
                         chunk_size: None,
                         chunk_hashes: Vec::new(),
                         target: None,
-                        target_blob: None,
                     });
                 let child = directory
                     .open_child_directory(OsStr::new(&name))?
@@ -483,7 +477,6 @@ fn capture_large_directory(
                         chunk_size: None,
                         chunk_hashes: Vec::new(),
                         target: None,
-                        target_blob: None,
                     }
                 } else {
                     let ingested = sink.store_large_file(
@@ -509,7 +502,6 @@ fn capture_large_directory(
                         chunk_size: Some(ingested.chunk_size),
                         chunk_hashes: ingested.chunk_hashes,
                         target: None,
-                        target_blob: None,
                     }
                 };
                 state.entries.push(manifest_entry);
@@ -524,12 +516,10 @@ fn capture_large_directory(
                 if target.is_empty() || target.contains(&0) {
                     anyhow::bail!("large-content symlink {path} has an invalid target");
                 }
-                let (inline, target_blob) = match String::from_utf8(target.clone()) {
-                    Ok(text) if target.len() <= crate::objects::MAX_INLINE_SYMLINK_TARGET_BYTES => {
-                        (Some(text), None)
-                    }
-                    _ => (None, Some(sink.store_target(&target, &path)?)),
-                };
+                crate::objects::validate_internal_symlink_target(&path, &target)?;
+                let inline = String::from_utf8(target).map_err(|_| {
+                    anyhow::anyhow!("large-content symlink {path} has a non-UTF-8 target")
+                })?;
                 state
                     .entries
                     .push(crate::objects::ExternalLargeContentManifestEntry {
@@ -541,8 +531,7 @@ fn capture_large_directory(
                         size: None,
                         chunk_size: None,
                         chunk_hashes: Vec::new(),
-                        target: inline,
-                        target_blob,
+                        target: Some(inline),
                     });
             }
             other => anyhow::bail!(
@@ -622,7 +611,6 @@ pub fn capture_file(
             blob_hash: Some(blob_hash),
             size: Some(size),
             target: None,
-            target_blob: None,
         }],
         entry_count: 1,
         total_bytes: size,
@@ -689,7 +677,6 @@ fn capture_directory(
                     blob_hash: None,
                     size: None,
                     target: None,
-                    target_blob: None,
                 });
                 let child = directory
                     .open_child_directory(OsStr::new(&name))?
@@ -738,7 +725,6 @@ fn capture_directory(
                     blob_hash: Some(blob_hash),
                     size: Some(size),
                     target: None,
-                    target_blob: None,
                 });
             }
             lillux::PinnedEntryType::Symlink => {
@@ -751,20 +737,17 @@ fn capture_directory(
                 if target.is_empty() || target.contains(&0) {
                     anyhow::bail!("external content symlink {path} has an invalid target");
                 }
-                let (inline, target_blob) = match String::from_utf8(target.clone()) {
-                    Ok(text) if target.len() <= crate::objects::MAX_INLINE_SYMLINK_TARGET_BYTES => {
-                        (Some(text), None)
-                    }
-                    _ => (None, Some(sink.store_target(&target, &path)?)),
-                };
+                crate::objects::validate_internal_symlink_target(&path, &target)?;
+                let inline = String::from_utf8(target).map_err(|_| {
+                    anyhow::anyhow!("external content symlink {path} has a non-UTF-8 target")
+                })?;
                 entries.push(crate::objects::ExternalContentManifestEntry {
                     path,
                     kind: ExternalContentManifestEntryKind::Symlink,
                     mode: None,
                     blob_hash: None,
                     size: None,
-                    target: inline,
-                    target_blob,
+                    target: Some(inline),
                 });
             }
             other => anyhow::bail!(
@@ -805,12 +788,7 @@ impl VerifiedExternalContentClosure {
                     MAX_EXTERNAL_CONTENT_FILE_BYTES,
                     entry.size,
                 ),
-                ExternalContentManifestEntryKind::Symlink => {
-                    let Some(hash) = entry.target_blob.as_deref() else {
-                        continue;
-                    };
-                    (hash, MAX_SYMLINK_TARGET_BYTES, None)
-                }
+                ExternalContentManifestEntryKind::Symlink => continue,
                 ExternalContentManifestEntryKind::Dir => continue,
             };
             let bytes = crate::object_closure::load_exact_cas_blob_with_cas(cas, hash, max_bytes)
@@ -827,14 +805,6 @@ impl VerifiedExternalContentClosure {
             {
                 anyhow::bail!(
                     "external content blob {hash} for {} has size {size}, expected {expected_size}",
-                    entry.path
-                );
-            }
-            if entry.kind == ExternalContentManifestEntryKind::Symlink
-                && (bytes.is_empty() || bytes.contains(&0))
-            {
-                anyhow::bail!(
-                    "external content symlink target blob {hash} for {} is invalid",
                     entry.path
                 );
             }
@@ -884,7 +854,6 @@ mod tests {
             blob_hash: Some(blob_hash.to_string()),
             size: Some(size),
             target: None,
-            target_blob: None,
         }
     }
 
@@ -961,5 +930,46 @@ mod tests {
         budget.charge_bytes(5).unwrap();
         let byte_error = budget.charge_bytes(1).unwrap_err().to_string();
         assert!(byte_error.contains("5 aggregate bytes"));
+    }
+
+    #[test]
+    fn both_capture_tiers_apply_the_complete_non_bypassable_floor() {
+        let configured = crate::ignore::IgnoreMatcher::from_config(&crate::ignore::IgnoreConfig {
+            patterns: Vec::new(),
+        })
+        .unwrap();
+        let bounds = LargeContentCaptureBounds {
+            max_depth: 8,
+            max_entries: 32,
+            max_file_bytes: 1024,
+            max_total_bytes: 4096,
+        };
+        for path in [
+            ".ai/node/vault",
+            ".ai/config/keys/signing",
+            ".ryeos-pull-staging-fixture",
+        ] {
+            assert!(
+                ExternalCapturePolicy::new(path.to_owned(), &configured).is_err(),
+                "content capture admitted {path}"
+            );
+            assert!(
+                LargeContentCapturePolicy::new(path.to_owned(), &configured, bounds.clone())
+                    .is_err(),
+                "large-content capture admitted {path}"
+            );
+        }
+        let identity = crate::project_sync::durable_content_capture_floor_rules();
+        assert!(identity.iter().any(|rule| rule.contains(".ai/node/vault")));
+        assert!(
+            identity
+                .iter()
+                .any(|rule| rule.contains(".ryeos-pull-staging-*"))
+        );
+        assert!(
+            identity
+                .iter()
+                .any(|rule| rule.starts_with("built_in_ignore:"))
+        );
     }
 }

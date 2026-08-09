@@ -33,7 +33,7 @@ use super::launch_preparation::{PreparedExecutionDependency, PreparedRuntimeLaun
 #[serde(deny_unknown_fields)]
 pub(crate) struct PersistentSessionExactProgram {
     pub(crate) effective_definition_digest: String,
-    pub(crate) resolution_output: ryeos_engine::resolution::ResolutionOutput,
+    pub(crate) resolution_output: ryeos_engine::resolution::RetainedResolutionOutput,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,7 +132,42 @@ fn session_contract(
         })?;
     validate_persistent_session_protocol(&protocol.descriptor)
         .map_err(|error| anyhow!("persistent-session protocol `{protocol_ref}`: {error}"))?;
+    validate_session_target(
+        &dependency.resolution.composed.composed,
+        &declaration.target_path,
+    )?;
     Ok(Some((declaration, protocol)))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistentSessionTarget {
+    os: String,
+    arch: String,
+}
+
+fn validate_session_target(composed: &Value, path: &[String]) -> Result<()> {
+    let mut value = composed;
+    for segment in path {
+        value = value.get(segment).ok_or_else(|| {
+            anyhow!(
+                "persistent-session subject has no target constraint at `{}`",
+                path.join(".")
+            )
+        })?;
+    }
+    let target: PersistentSessionTarget = serde_json::from_value(value.clone())
+        .context("decode persistent-session target constraint")?;
+    if target.os != std::env::consts::OS || target.arch != std::env::consts::ARCH {
+        bail!(
+            "persistent-session target {}-{} does not admit this {}-{} node",
+            target.arch,
+            target.os,
+            std::env::consts::ARCH,
+            std::env::consts::OS
+        );
+    }
+    Ok(())
 }
 
 fn admit_session_capsule(
@@ -175,11 +210,13 @@ fn admit_session_capsule(
     dependency.resolution = finalized.resolution().clone();
     let exact_program = PersistentSessionExactProgram {
         effective_definition_digest: finalized.effective_definition_digest().as_str().to_owned(),
-        resolution_output: finalized.resolution().clone(),
+        resolution_output: ryeos_engine::resolution::RetainedResolutionOutput::capture(
+            finalized.resolution(),
+        ),
     };
     let exact_program_value = serde_json::to_value(&exact_program)?;
     let exact_program_hash = canonical_hash(&exact_program_value)?;
-    let workspace = deterministic_admission_workspace(state, &exact_program_hash);
+    let workspace = logical_admission_workspace();
     let lifecycle = lifecycle_contract(declaration)?;
     let wire = wire_contract(protocol)?;
     let verified = dependency.captured_verified_subject()?;
@@ -295,9 +332,11 @@ fn verify_session_capsule(
     let capsule = load_capsule(state, capsule_hash)?;
     let exact: PersistentSessionExactProgram =
         serde_json::from_value(capsule.exact_program.clone())?;
-    if exact.resolution_output.root.resolved_ref != dependency.canonical_ref
+    let retained_dependency =
+        ryeos_engine::resolution::RetainedResolutionOutput::capture(&dependency.resolution);
+    if exact.resolution_output.root_ref() != dependency.canonical_ref
         || canonical_hash(&serde_json::to_value(&exact.resolution_output)?)?
-            != canonical_hash(&serde_json::to_value(&dependency.resolution)?)?
+            != canonical_hash(&serde_json::to_value(&retained_dependency)?)?
     {
         bail!("persistent-session capsule contradicts its captured dependency");
     }
@@ -307,10 +346,11 @@ fn verify_session_capsule(
     }
     validate_capsule_current_trust(engine, &capsule)?;
     let (protocol_ref, protocol_digest) = capsule_protocol_identity(&capsule)?;
+    let resolution = exact.resolution_output.restore();
     super::execution_realization::verify_persistent_session(
         state,
         &capsule,
-        &exact.resolution_output,
+        &resolution,
         &exact.effective_definition_digest,
         protocol_ref,
         protocol_digest,
@@ -330,16 +370,17 @@ pub fn inspect_capsule(
     if current_digest.as_str() != exact.effective_definition_digest {
         bail!("persistent-session exact program digest does not reproduce");
     }
+    let resolution = exact.resolution_output.restore();
     super::execution_realization::verify_persistent_session(
         state,
         &capsule,
-        &exact.resolution_output,
+        &resolution,
         &exact.effective_definition_digest,
         capsule_protocol_identity(&capsule)?.0,
         capsule_protocol_identity(&capsule)?.1,
     )?;
     Ok(AdmittedPersistentSessionIdentity {
-        canonical_ref: exact.resolution_output.root.resolved_ref,
+        canonical_ref: exact.resolution_output.root_ref().to_owned(),
         effective_definition_digest: exact.effective_definition_digest,
         capsule_hash: capsule_hash.to_owned(),
         execution_realization_hash: capsule.execution_realization_hash,
@@ -365,10 +406,11 @@ where
     if current_digest.as_str() != exact.effective_definition_digest {
         bail!("persistent-session exact program digest does not reproduce");
     }
+    let resolution = exact.resolution_output.restore();
     super::execution_realization::verify_persistent_session(
         state,
         &capsule,
-        &exact.resolution_output,
+        &resolution,
         &exact.effective_definition_digest,
         capsule_protocol_identity(&capsule)?.0,
         capsule_protocol_identity(&capsule)?.1,
@@ -406,16 +448,13 @@ fn start_capsule_process(
         &state.config.runtime_root().cache(),
         &workspace_name,
     )?;
+    let resolution = exact.resolution_output.restore();
     let bound = if state.isolation.is_enforced() {
-        super::external_content::bind_external_realizations(
-            state,
-            &exact.resolution_output,
-            &workspace,
-        )?
+        super::external_content::bind_external_realizations(state, &resolution, &workspace)?
     } else {
         super::external_content::bind_external_realizations_in_private_workspace(
             state,
-            &exact.resolution_output,
+            &resolution,
             &workspace,
         )?
     };
@@ -641,16 +680,12 @@ fn wire_contract(protocol: &VerifiedProtocol) -> Result<PersistentSessionWireCon
     Ok(contract)
 }
 
-fn deterministic_admission_workspace(state: &AppState, exact_program_hash: &str) -> PathBuf {
-    state
-        .config
-        .runtime_root()
-        .cache()
-        .join("executions")
-        .join(format!(
-            "persistent-session-plan-{}",
-            &exact_program_hash[..24]
-        ))
+/// Canonical identity-space root for persistent-session plans. This is never
+/// opened on the host. Recovery relocates it to the daemon-owned workspace in
+/// the mutable spawn copy, keeping runtime-root paths out of plan hashes and
+/// retained capsules.
+fn logical_admission_workspace() -> PathBuf {
+    PathBuf::from("/ryeos/persistent-session-workspace")
 }
 
 fn canonical_hash(value: &Value) -> Result<String> {
@@ -662,6 +697,174 @@ fn canonical_hash(value: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn retained_program_fixture(
+        source_path: &str,
+        body_digest_byte: char,
+    ) -> PersistentSessionExactProgram {
+        let resolution = ryeos_engine::resolution::ResolutionOutput {
+            root: ryeos_engine::resolution::ResolvedAncestor {
+                requested_id: "worker:fixture/session".to_owned(),
+                resolved_ref: "worker:fixture/session".to_owned(),
+                source_path: PathBuf::from(source_path),
+                source_space: ryeos_engine::contracts::ItemSpace::Bundle,
+                source_root: ryeos_engine::contracts::ItemSourceRoot::Bundle {
+                    name: "fixture".to_owned(),
+                },
+                trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
+                signer_fingerprint: Some("f".repeat(64)),
+                alias_resolution: None,
+                added_by: ryeos_engine::resolution::ResolutionStepName::PipelineInit,
+                raw_content: format!("body-{body_digest_byte}"),
+                source_content_digest: body_digest_byte.to_string().repeat(64),
+                raw_content_digest: body_digest_byte.to_string().repeat(64),
+            },
+            ancestors: Vec::new(),
+            references_edges: Vec::new(),
+            referenced_items: Vec::new(),
+            step_outputs: BTreeMap::new().into_iter().collect(),
+            effective_trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
+            composed: ryeos_engine::resolution::KindComposedView::identity(json!({
+                "supported_target": {
+                    "os": std::env::consts::OS,
+                    "arch": std::env::consts::ARCH
+                }
+            })),
+        };
+        let digest = resolution.effective_definition_digest().unwrap();
+        PersistentSessionExactProgram {
+            effective_definition_digest: digest.as_str().to_owned(),
+            resolution_output: ryeos_engine::resolution::RetainedResolutionOutput::capture(
+                &resolution,
+            ),
+        }
+    }
+
+    fn capsule_fixture(
+        exact_program: &PersistentSessionExactProgram,
+    ) -> AdmittedPersistentSessionCapsule {
+        use ryeos_state::objects::{
+            AdmittedDirectCommandClosure, AdmittedExecutionClosure, AdmittedLaunchArtifactIdentity,
+            DirectExecutableIdentity, DirectRootSourceIdentity, DirectRuntimeIdentity,
+            DirectRuntimeSourceSpace,
+        };
+
+        let exact_program = serde_json::to_value(exact_program).unwrap();
+        let exact_program_hash = canonical_hash(&exact_program).unwrap();
+        let executable_blob_hash = "e".repeat(64);
+        let execution_path = ryeos_state::objects::admitted_direct_command_execution_path(
+            &executable_blob_hash,
+            std::path::Path::new("ryeos-session-exec"),
+        )
+        .unwrap();
+        AdmittedPersistentSessionCapsule {
+            schema: PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
+            kind: PERSISTENT_SESSION_CAPSULE_KIND.to_owned(),
+            exact_program,
+            exact_program_hash,
+            lifecycle: PersistentSessionLifecycleContract {
+                max_processes: 1,
+                max_inflight_per_process: 1,
+                max_address_space_bytes: 64 * 1024 * 1024,
+                max_cpu_seconds: 1,
+                real_uid_process_limit: 1,
+                ready_timeout_ms: 1,
+                request_timeout_ms: 1,
+                idle_timeout_ms: 1,
+            },
+            wire: PersistentSessionWireContract {
+                channel_env: "RYEOS_SESSION_FD".to_owned(),
+                wire_protocol: "fixture.session".to_owned(),
+                wire_version: 1,
+                max_frame_bytes: 1024,
+            },
+            artifact_identity: AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+                executor_ref: "native:fixture".to_owned(),
+                root_subject_source_content_digest: "a".repeat(64),
+                root_subject_signer_fingerprint: Some("f".repeat(64)),
+                root_subject_source_identity: DirectRootSourceIdentity::Bundle {
+                    manifest_hash: "b".repeat(64),
+                    manifest_signer_fingerprint: "f".repeat(64),
+                },
+                protocol_ref: "protocol:fixture/session".to_owned(),
+                protocol_content_hash: "c".repeat(64),
+                protocol_signer_fingerprint: "f".repeat(64),
+                execution_plan_hash: "d".repeat(64),
+                executable_identity: DirectExecutableIdentity::CapturedContent {
+                    content_hash: executable_blob_hash.clone(),
+                },
+                runtime_identity: DirectRuntimeIdentity {
+                    runtime_ref: "runtime:fixture/session".to_owned(),
+                    runtime_source_space: DirectRuntimeSourceSpace::Bundle,
+                    runtime_content_hash: "6".repeat(64),
+                    runtime_signer_fingerprint: "f".repeat(64),
+                    runtime_bundle_manifest_hash: Some("7".repeat(64)),
+                    runtime_bundle_signer_fingerprint: Some("f".repeat(64)),
+                },
+            },
+            execution_closure: AdmittedExecutionClosure::DirectItemExecutor {
+                execution_plan: json!({}),
+                protocol_descriptor_document: "fixture protocol".to_owned(),
+                command: AdmittedDirectCommandClosure::ContentAddressed {
+                    executable_blob_hash,
+                    execution_path,
+                },
+                admitted_project_root: Some(logical_admission_workspace()),
+            },
+            execution_realization_hash: "8".repeat(64),
+            runtime_ref: "runtime:fixture/session".to_owned(),
+            executor_ref: "native:fixture".to_owned(),
+        }
+    }
+
+    fn downstream_identities(
+        exact_program: &PersistentSessionExactProgram,
+    ) -> (String, String, String) {
+        let mut capsule = capsule_fixture(exact_program);
+        let authority = capsule.authority();
+        let realization = ryeos_state::objects::AdmittedExecutionRealization {
+            schema: ryeos_state::objects::EXECUTION_REALIZATION_SCHEMA_VERSION,
+            kind: ryeos_state::objects::ADMITTED_EXECUTION_REALIZATION_KIND.to_owned(),
+            substrate_identity_hash: "1".repeat(64),
+            substrate_attestation_hash: "2".repeat(64),
+            launch_authority_digest: authority.digest().unwrap(),
+            effective_definition_digest: exact_program.effective_definition_digest.clone(),
+            artifact_identity_digest: authority.artifact_identity_digest().unwrap(),
+            execution_closure_digest: authority.execution_closure_digest().unwrap(),
+            contract_ref: "runtime:fixture/session".to_owned(),
+            contract_digest: "3".repeat(64),
+            components: Vec::new(),
+            properties: BTreeMap::new(),
+        };
+        let realization_hash = realization.content_hash().unwrap();
+        capsule.execution_realization_hash = realization_hash.clone();
+        let capsule_hash = capsule.content_hash().unwrap();
+        let coordinate = ryeos_provider_contract::RequestCoordinate {
+            outer_effective_definition_digest: "4".repeat(64),
+            transport: ryeos_provider_contract::TransportCoordinate::AdmittedLocalWorker {
+                worker_ref: "worker:fixture/session".to_owned(),
+                effective_definition_digest: exact_program.effective_definition_digest.clone(),
+                capsule_hash: capsule_hash.clone(),
+                execution_realization_hash: realization_hash.clone(),
+            },
+            provider_family: "local-fixture".to_owned(),
+            provider_config_hash: "fixture-config".to_owned(),
+            provider_config_value_digest: "5".repeat(64),
+            provider_id: "local-fixture".to_owned(),
+            profile_id: None,
+            model_name: "fixture-model".to_owned(),
+            public_headers: Vec::new(),
+            credential_header_names: Vec::new(),
+            body_sha256: "6".repeat(64),
+            requested_output_ceiling: 1,
+            credential_binding_hmac: "7".repeat(64),
+            credential_authority_generation: "fixture-generation".to_owned(),
+            authority_digest: "8".repeat(64),
+            admitted_effect_class: Some(ryeos_effect_contract::EffectClass::Recorded),
+        };
+        let cache_key = coordinate.cache_key().unwrap();
+        (capsule_hash, realization_hash, cache_key)
+    }
 
     #[test]
     fn dependency_plan_authority_is_exact_and_never_wildcarded() {
@@ -679,5 +882,78 @@ mod tests {
         let error =
             dependency_plan_principal("node-fp", "worker:fixture/session@t:now").unwrap_err();
         assert!(error.to_string().contains("exact and unsuffixed"));
+    }
+
+    #[test]
+    fn persistent_session_workspace_identity_is_node_path_independent() {
+        let logical = logical_admission_workspace();
+        assert_eq!(
+            logical,
+            std::path::Path::new("/ryeos/persistent-session-workspace")
+        );
+        assert!(!logical.starts_with("/tmp"));
+        assert!(!logical.to_string_lossy().contains("cache"));
+    }
+
+    #[test]
+    fn persistent_session_capsule_identity_excludes_resolution_diagnostic_paths() {
+        let first = retained_program_fixture("/opt/first/worker.yaml", 'a');
+        let second = retained_program_fixture("/srv/second/worker.yaml", 'a');
+        let first_capsule = capsule_fixture(&first);
+        let second_capsule = capsule_fixture(&second);
+
+        assert_eq!(
+            first_capsule.exact_program_hash,
+            second_capsule.exact_program_hash
+        );
+        assert_eq!(
+            first_capsule.authority().digest().unwrap(),
+            second_capsule.authority().digest().unwrap()
+        );
+        assert_eq!(
+            first_capsule.content_hash().unwrap(),
+            second_capsule.content_hash().unwrap()
+        );
+        assert_eq!(
+            downstream_identities(&first),
+            downstream_identities(&second)
+        );
+        let canonical = lillux::canonical_json(&first_capsule.exact_program).unwrap();
+        assert!(!canonical.contains("/opt/first"));
+        assert!(!canonical.contains("/srv/second"));
+
+        let changed_capsule =
+            capsule_fixture(&retained_program_fixture("/opt/first/worker.yaml", 'b'));
+        assert_ne!(
+            first_capsule.exact_program_hash,
+            changed_capsule.exact_program_hash
+        );
+        assert_ne!(
+            first_capsule.content_hash().unwrap(),
+            changed_capsule.content_hash().unwrap()
+        );
+        assert_ne!(
+            downstream_identities(&first),
+            downstream_identities(&retained_program_fixture("/opt/first/worker.yaml", 'b'))
+        );
+    }
+
+    #[test]
+    fn persistent_session_target_is_checked_before_launch() {
+        let path = vec!["supported_target".to_owned()];
+        validate_session_target(
+            &json!({"supported_target": {
+                "os": std::env::consts::OS,
+                "arch": std::env::consts::ARCH
+            }}),
+            &path,
+        )
+        .unwrap();
+        let error = validate_session_target(
+            &json!({"supported_target": {"os": "other", "arch": "other"}}),
+            &path,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("does not admit this"));
     }
 }

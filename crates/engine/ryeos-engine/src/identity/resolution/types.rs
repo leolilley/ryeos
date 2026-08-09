@@ -397,6 +397,181 @@ impl ResolutionOutput {
     }
 }
 
+/// Path-free retained form of one finalized resolution.
+///
+/// A live [`ResolutionOutput`] carries host paths for diagnostics and for the
+/// admission-time resolver. Those paths are not executable identity and must
+/// never enter a retained-program digest. This projection keeps every byte,
+/// trust fact, contributor, edge, and composed value needed to reproduce the
+/// effective definition while deliberately omitting diagnostic filesystem
+/// locations and arbitrary step outputs. Recovery may reconstruct opaque
+/// logical diagnostic paths when an API still requires a `ResolutionOutput`;
+/// it never reopens them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedResolutionOutput {
+    root: RetainedResolvedAncestor,
+    ancestors: Vec<RetainedResolvedAncestor>,
+    references_edges: Vec<RetainedResolutionEdge>,
+    referenced_items: Vec<RetainedResolvedAncestor>,
+    effective_trust_class: TrustClass,
+    composed: KindComposedView,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetainedResolvedAncestor {
+    requested_id: String,
+    resolved_ref: String,
+    source_space: ItemSpace,
+    source_root: ItemSourceRoot,
+    trust_class: TrustClass,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    signer_fingerprint: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    alias_resolution: Option<AliasHop>,
+    added_by: ResolutionStepName,
+    raw_content: String,
+    source_content_digest: String,
+    raw_content_digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetainedResolutionEdge {
+    from_ref: String,
+    to_ref: String,
+    to_source_space: ItemSpace,
+    trust_class: TrustClass,
+    added_by: ResolutionStepName,
+}
+
+impl RetainedResolutionOutput {
+    pub fn capture(resolution: &ResolutionOutput) -> Self {
+        Self {
+            root: RetainedResolvedAncestor::capture(&resolution.root),
+            ancestors: resolution
+                .ancestors
+                .iter()
+                .map(RetainedResolvedAncestor::capture)
+                .collect(),
+            references_edges: resolution
+                .references_edges
+                .iter()
+                .map(RetainedResolutionEdge::capture)
+                .collect(),
+            referenced_items: resolution
+                .referenced_items
+                .iter()
+                .map(RetainedResolvedAncestor::capture)
+                .collect(),
+            effective_trust_class: resolution.effective_trust_class,
+            composed: resolution.composed.clone(),
+        }
+    }
+
+    pub fn restore(&self) -> ResolutionOutput {
+        ResolutionOutput {
+            root: self.root.restore(),
+            ancestors: self
+                .ancestors
+                .iter()
+                .map(RetainedResolvedAncestor::restore)
+                .collect(),
+            references_edges: self
+                .references_edges
+                .iter()
+                .map(RetainedResolutionEdge::restore)
+                .collect(),
+            referenced_items: self
+                .referenced_items
+                .iter()
+                .map(RetainedResolvedAncestor::restore)
+                .collect(),
+            // Step output is arbitrary resolver diagnostics. It is not
+            // executable input and is deliberately absent from the retained
+            // program rather than trusting every future step to stay
+            // path-free.
+            step_outputs: HashMap::new(),
+            effective_trust_class: self.effective_trust_class,
+            composed: self.composed.clone(),
+        }
+    }
+
+    pub fn root_ref(&self) -> &str {
+        &self.root.resolved_ref
+    }
+
+    pub fn effective_definition_digest(
+        &self,
+    ) -> Result<EffectiveDefinitionDigest, EffectiveDefinitionDigestError> {
+        self.restore().effective_definition_digest()
+    }
+}
+
+impl RetainedResolvedAncestor {
+    fn capture(value: &ResolvedAncestor) -> Self {
+        Self {
+            requested_id: value.requested_id.clone(),
+            resolved_ref: value.resolved_ref.clone(),
+            source_space: value.source_space,
+            source_root: value.source_root.clone(),
+            trust_class: value.trust_class,
+            signer_fingerprint: value.signer_fingerprint.clone(),
+            alias_resolution: value.alias_resolution.clone(),
+            added_by: value.added_by,
+            raw_content: value.raw_content.clone(),
+            source_content_digest: value.source_content_digest.clone(),
+            raw_content_digest: value.raw_content_digest.clone(),
+        }
+    }
+
+    fn restore(&self) -> ResolvedAncestor {
+        ResolvedAncestor {
+            requested_id: self.requested_id.clone(),
+            resolved_ref: self.resolved_ref.clone(),
+            source_path: retained_diagnostic_path(&self.resolved_ref),
+            source_space: self.source_space,
+            source_root: self.source_root.clone(),
+            trust_class: self.trust_class,
+            signer_fingerprint: self.signer_fingerprint.clone(),
+            alias_resolution: self.alias_resolution.clone(),
+            added_by: self.added_by,
+            raw_content: self.raw_content.clone(),
+            source_content_digest: self.source_content_digest.clone(),
+            raw_content_digest: self.raw_content_digest.clone(),
+        }
+    }
+}
+
+impl RetainedResolutionEdge {
+    fn capture(value: &ResolutionEdge) -> Self {
+        Self {
+            from_ref: value.from_ref.clone(),
+            to_ref: value.to_ref.clone(),
+            to_source_space: value.to_source_space,
+            trust_class: value.trust_class,
+            added_by: value.added_by,
+        }
+    }
+
+    fn restore(&self) -> ResolutionEdge {
+        ResolutionEdge {
+            from_ref: self.from_ref.clone(),
+            from_source_path: retained_diagnostic_path(&self.from_ref),
+            to_ref: self.to_ref.clone(),
+            to_source_path: retained_diagnostic_path(&self.to_ref),
+            to_source_space: self.to_source_space,
+            trust_class: self.trust_class,
+            added_by: self.added_by,
+        }
+    }
+}
+
+fn retained_diagnostic_path(canonical_ref: &str) -> PathBuf {
+    PathBuf::from("retained-resolution").join(lillux::sha256_hex(canonical_ref.as_bytes()))
+}
+
 /// Canonical lower-case SHA-256 digest used for exact executable identity.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -1091,6 +1266,50 @@ mod tests {
         assert_eq!(
             original.effective_definition_digest().unwrap(),
             reordered.effective_definition_digest().unwrap()
+        );
+    }
+
+    #[test]
+    fn retained_resolution_is_path_free_and_reproduces_the_effective_program() {
+        let original = effective_digest_fixture();
+        let mut relocated = original.clone();
+        relocated.root.source_path = PathBuf::from("/opt/node-a/root.yaml");
+        relocated.ancestors[0].source_path = PathBuf::from("/srv/node-b/base.yaml");
+        relocated.referenced_items[0].source_path = PathBuf::from("/var/lib/node-c/audit.yaml");
+        relocated.references_edges[0].from_source_path = PathBuf::from("/opt/node-a/root.yaml");
+        relocated.references_edges[0].to_source_path = PathBuf::from("/var/lib/node-c/audit.yaml");
+        relocated.step_outputs.insert(
+            "diagnostic".to_owned(),
+            serde_json::json!({"host_path": "/home/operator/private/root.yaml"}),
+        );
+
+        let first = RetainedResolutionOutput::capture(&original);
+        let second = RetainedResolutionOutput::capture(&relocated);
+        let first_value = serde_json::to_value(&first).unwrap();
+        let second_value = serde_json::to_value(&second).unwrap();
+        assert_eq!(first_value, second_value);
+        let canonical = lillux::canonical_json(&first_value).unwrap();
+        assert!(!canonical.contains("/opt/"));
+        assert!(!canonical.contains("/srv/"));
+        assert!(!canonical.contains("/var/lib/"));
+        assert!(!canonical.contains("/home/operator/"));
+        assert_eq!(
+            first.effective_definition_digest().unwrap(),
+            original.effective_definition_digest().unwrap()
+        );
+
+        let restored = first.restore();
+        assert!(restored.root.source_path.is_relative());
+        assert_eq!(
+            restored.effective_definition_digest().unwrap(),
+            original.effective_definition_digest().unwrap()
+        );
+
+        let mut changed = original.clone();
+        changed.composed.composed["config"]["start"] = serde_json::json!("changed");
+        assert_ne!(
+            serde_json::to_value(RetainedResolutionOutput::capture(&changed)).unwrap(),
+            first_value
         );
     }
 

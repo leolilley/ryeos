@@ -38,10 +38,11 @@ pub mod thread_event;
 pub mod thread_snapshot;
 
 pub use admitted_launch_capsule::{
-    ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION, AdmittedAccountingScope, AdmittedDirectCommandClosure,
-    AdmittedExecutionClosure, AdmittedLaunchArtifactIdentity, AdmittedLaunchAuthority,
-    AdmittedLaunchCapsule, DirectExecutableIdentity, DirectRootSourceIdentity,
-    DirectRuntimeIdentity, DirectRuntimeSourceSpace,
+    ADMITTED_DIRECT_COMMAND_ROOT, ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION, AdmittedAccountingScope,
+    AdmittedDirectCommandClosure, AdmittedExecutionClosure, AdmittedLaunchArtifactIdentity,
+    AdmittedLaunchAuthority, AdmittedLaunchCapsule, DirectExecutableIdentity,
+    DirectRootSourceIdentity, DirectRuntimeIdentity, DirectRuntimeSourceSpace,
+    admitted_direct_command_execution_path,
 };
 pub use attestation::Attestation;
 pub use bundle_event::{
@@ -77,7 +78,8 @@ pub use execution_realization::{
     OBSERVED_EXECUTION_REALIZATION_KIND, ObservedExecutionRealization,
 };
 pub use external_content_binding::{
-    EXTERNAL_CONTENT_BINDING_KIND, EXTERNAL_CONTENT_BINDING_SCHEMA, ExternalContentBinding,
+    EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE, EXTERNAL_CONTENT_BINDING_KIND,
+    EXTERNAL_CONTENT_BINDING_SCHEMA, EXTERNAL_CONTENT_BINDING_SCHEMA_EPOCH, ExternalContentBinding,
     ExternalContentBindingState,
 };
 pub use external_content_manifest::{
@@ -88,7 +90,7 @@ pub use external_content_manifest::{
     MAX_EXTERNAL_CONTENT_ENTRIES, MAX_EXTERNAL_CONTENT_FILE_BYTES,
     MAX_EXTERNAL_CONTENT_MANIFEST_BYTES, MAX_EXTERNAL_CONTENT_PATH_BYTES,
     MAX_EXTERNAL_CONTENT_TOTAL_BYTES, MAX_INLINE_SYMLINK_TARGET_BYTES,
-    MAX_REALIZATION_CLAIMED_BYTES, MAX_SYMLINK_TARGET_BYTES,
+    MAX_REALIZATION_CLAIMED_BYTES, MAX_SYMLINK_TARGET_BYTES, validate_internal_symlink_target,
 };
 pub use external_large_content_manifest::{
     EXTERNAL_LARGE_CONTENT_MANIFEST_KIND, EXTERNAL_LARGE_CONTENT_SCHEMA,

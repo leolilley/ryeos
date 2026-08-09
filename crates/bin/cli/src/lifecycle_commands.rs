@@ -11,6 +11,7 @@
 //!   - `ryeos node doctor` — offline "why won't it start" checklist
 //!   - `ryeos node gc` — explicit offline recovery/GC that must work when boot fails
 //!   - `ryeos node replay-reset` — explicit clean-cut replay-index activation
+//!   - `ryeos node external-content-reset` — retire predecessor realization bindings
 //!
 //! `ryeos identity` is local as a bootstrap affordance: remote
 //! operators need to copy their node public key before the daemon is running.
@@ -93,6 +94,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "maintenance",
     },
     LocalCommandDescriptor {
+        tokens: &["node", "external-content-reset"],
+        summary: "Discard predecessor external-content bindings",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
         tokens: &["help"],
         summary: "Open the compact TTY help screen",
         category: "meta",
@@ -163,6 +169,10 @@ pub async fn try_dispatch(
         }
         ("node", Some("replay-reset")) => {
             run_node_replay_reset_command(&argv[2..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("external-content-reset")) => {
+            run_node_external_content_reset_command(&argv[2..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("start", _) => {
@@ -236,6 +246,68 @@ fn run_node_replay_reset_command(argv: &[String], console: &crate::tty::Console)
         console.text(&format!(
             "Replay indexes activated: {}\nThread history and other operational state were preserved.\n",
             path.display()
+        ))?;
+    }
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node external-content-reset",
+    about = "Discard predecessor external-content bindings",
+    long_about = "Perform the explicit clean-cut external-content manifest activation. The daemon must be stopped. Every predecessor external-content binding head is retired; CAS objects remain reclaimable and all required content must be imported and rebound under the current schema.",
+    no_binary_name = true
+)]
+struct NodeExternalContentResetArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Inspect the number of binding heads without retiring them.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Required acknowledgement that every external-content binding is discarded.
+    #[arg(long)]
+    confirm_discard_external_content_bindings: bool,
+
+    /// Emit structured JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_node_external_content_reset_command(
+    argv: &[String],
+    console: &crate::tty::Console,
+) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodeExternalContentResetArgs>(argv, console)? else {
+        return Ok(());
+    };
+    if !args.dry_run && !args.confirm_discard_external_content_bindings {
+        anyhow::bail!(
+            "discarding predecessor external-content bindings requires --confirm-discard-external-content-bindings"
+        );
+    }
+    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+        app_root: args.app_root,
+        ..Default::default()
+    })
+    .context("load local node configuration for external-content binding reset")?;
+    let bindings =
+        ryeos_app::operator_external_content::discard_binding_heads_offline(&config, args.dry_run)?;
+    if args.json {
+        crate::tty::write_json(&serde_json::json!({
+            "status": if args.dry_run { "inspected" } else { "retired" },
+            "bindings": bindings,
+            "requires_reimport": !args.dry_run,
+        }))?;
+    } else if args.dry_run {
+        console.text(&format!(
+            "External-content binding reset preview: {bindings} binding head(s) would be retired.\n"
+        ))?;
+    } else {
+        console.text(&format!(
+            "External-content binding cutover complete: retired {bindings} binding head(s).\nAll required realizations must be imported and rebound before launch.\n"
         ))?;
     }
     Ok(())

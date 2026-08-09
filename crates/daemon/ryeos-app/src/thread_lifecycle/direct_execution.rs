@@ -125,7 +125,7 @@ impl PreparedItemPlan {
         resolved: &ResolvedExecutionRequest,
         protocol: &ryeos_engine::protocols::VerifiedProtocol,
     ) -> Result<ryeos_state::objects::AdmittedLaunchArtifactIdentity> {
-        let canonical_plan = lillux::canonical_json(&serde_json::to_value(&self.plan)?)?;
+        let canonical_plan = lillux::canonical_json(&admitted_execution_plan_value(&self.plan)?)?;
         let execution_plan_hash = lillux::sha256_hex(canonical_plan.as_bytes());
         let plan_runtime = self
             .plan
@@ -216,15 +216,20 @@ impl PreparedItemPlan {
         admitted_project_root: Option<&Path>,
     ) -> Result<ryeos_state::objects::AdmittedExecutionClosure> {
         validate_direct_plan_portability(&self.plan, admitted_project_root)?;
-        let execution_plan = serde_json::to_value(&self.plan)?;
+        let original_command = match self.plan.nodes.first() {
+            Some(ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. }) => {
+                spec.verified_command.clone()
+            }
+            _ => None,
+        };
+        let execution_plan = admitted_execution_plan_value(&self.plan)?;
         let protocol_descriptor_document = capture_signed_descriptor_document(
             &protocol.descriptor_path,
             &protocol.raw_content_digest,
             &protocol.signer_fingerprint,
             protocol_trust_store,
         )?;
-        let spec = first_subprocess_spec_mut(&mut self.plan)?;
-        let Some(command) = spec.verified_command.as_ref() else {
+        let Some(command) = original_command else {
             return Ok(
                 ryeos_state::objects::AdmittedExecutionClosure::DirectItemExecutor {
                     execution_plan,
@@ -235,6 +240,7 @@ impl PreparedItemPlan {
             );
         };
         let original = command.code().clone();
+        let execution_path = admitted_direct_command_path(&original)?;
         let source = std::fs::File::open(&original.source_path).with_context(|| {
             format!(
                 "open admitted direct executable {}",
@@ -253,12 +259,13 @@ impl PreparedItemPlan {
             .open_blob(&stored.hash)?
             .ok_or_else(|| anyhow!("admitted direct executable blob disappeared"))?;
         let cached_identity = ryeos_engine::isolation::IsolationVerifiedCode {
-            source_path: original.source_path.clone(),
+            source_path: execution_path.clone(),
             content_hash: stored.hash.clone(),
         };
         self.admitted_command =
             Some(isolation.bind_admitted_verified_command(cached_identity.clone(), blob)?);
-        spec.cmd = original.source_path.display().to_string();
+        let spec = first_subprocess_spec_mut(&mut self.plan)?;
+        spec.cmd = execution_path.display().to_string();
         match spec
             .verified_command
             .as_mut()
@@ -277,7 +284,7 @@ impl PreparedItemPlan {
                 protocol_descriptor_document,
                 command: ryeos_state::objects::AdmittedDirectCommandClosure::ContentAddressed {
                     executable_blob_hash: stored.hash,
-                    execution_path: original.source_path,
+                    execution_path,
                 },
                 admitted_project_root: admitted_project_root.map(Path::to_path_buf),
             },
@@ -501,31 +508,22 @@ impl PreparedItemPlan {
         if session_identity.is_empty() || session_identity.len() > 128 {
             bail!("persistent-session process identity is not canonical");
         }
-        let roots = state.engine.resolution_roots(None);
-        let bundle_roots = roots
-            .ordered
-            .iter()
-            .filter(|root| root.space == ItemSpace::Bundle)
-            .map(|root| {
-                root.content_root.clone().ok_or_else(|| {
-                    anyhow!(
-                        "persistent-session isolation root `{}` has no registered content-root authority",
-                        root.label
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
         let context = EngineContext {
             app_root: state.config.app_root.clone(),
             isolation: state.isolation.clone(),
             isolation_project_authority:
                 ryeos_engine::isolation::IsolationProjectAuthority::EphemeralScratch,
+            isolation_filesystem_authority_ceiling:
+                ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution,
             isolation_live_access_authority: None,
             isolation_state_root: None,
             isolation_checkpoint_dir: None,
             isolation_daemon_socket_path: None,
-            isolation_bundle_roots: bundle_roots,
-            isolation_node_trusted_keys_dir: Some(state.config.runtime_root().trusted_keys_dir()),
+            // A persistent session executes its captured command and exact
+            // external realizations. Mutable bundle roots and node trust state
+            // are neither inputs nor ambient read authority for that worker.
+            isolation_bundle_roots: Vec::new(),
+            isolation_node_trusted_keys_dir: None,
             isolation_verified_code: Vec::new(),
             isolation_verified_command: self.admitted_command,
             isolation_external_read_only_mounts: external_mounts,
@@ -613,6 +611,54 @@ fn capture_signed_descriptor_document(
         bail!("admitted descriptor signature does not verify");
     }
     Ok(document)
+}
+
+/// Stable target-side name for exact retained command bytes. The host path
+/// used to open those bytes is operational admission state; it must not enter
+/// the retained plan/capsule identity or make equal bundle installs differ.
+fn admitted_direct_command_path(
+    code: &ryeos_engine::isolation::IsolationVerifiedCode,
+) -> Result<PathBuf> {
+    ryeos_state::objects::admitted_direct_command_execution_path(
+        &code.content_hash,
+        &code.source_path,
+    )
+}
+
+/// Canonical retained plan value. Diagnostic source paths are skipped by the
+/// plan wire, and command pathnames are rewritten to their stable admitted
+/// target path before the execution-plan hash is computed.
+fn admitted_execution_plan_value(plan: &ExecutionPlan) -> Result<Value> {
+    let mut admitted = plan.clone();
+    if let Some(ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. }) =
+        admitted.nodes.first_mut()
+        && let Some(command) = spec.verified_command.as_mut()
+    {
+        let original = command.code().source_path.clone();
+        let execution_path = admitted_direct_command_path(command.code())?;
+        let original_text = original
+            .to_str()
+            .ok_or_else(|| anyhow!("admitted direct command source path is not valid UTF-8"))?;
+        let execution_text = execution_path.to_str().expect("constant path is UTF-8");
+        spec.cmd = execution_text.to_owned();
+        for argument in &mut spec.args {
+            if argument == original_text {
+                *argument = execution_text.to_owned();
+            }
+        }
+        for value in spec.env.values_mut() {
+            if value == original_text {
+                *value = execution_text.to_owned();
+            }
+        }
+        match command {
+            ryeos_engine::contracts::PlanVerifiedCommand::BundleExecutor { code, .. }
+            | ryeos_engine::contracts::PlanVerifiedCommand::CapturedContent { code } => {
+                code.source_path = execution_path;
+            }
+        }
+    }
+    serde_json::to_value(admitted).context("encode admitted direct execution plan")
 }
 
 fn first_subprocess_spec_mut(plan: &mut ExecutionPlan) -> Result<&mut PlanSubprocessSpec> {
@@ -1173,6 +1219,8 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItemAwaitingAtta
         app_root,
         isolation,
         isolation_project_authority,
+        isolation_filesystem_authority_ceiling:
+            ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
         isolation_live_access_authority,
         isolation_state_root: state_root.map(std::path::Path::to_path_buf),
         isolation_checkpoint_dir: allocated_checkpoint_dir.clone(),
@@ -1265,7 +1313,7 @@ mod tests {
     use super::*;
 
     fn portable_direct_plan(project_root: &Path) -> ExecutionPlan {
-        serde_json::from_value(serde_json::json!({
+        let mut plan: ExecutionPlan = serde_json::from_value(serde_json::json!({
             "plan_id": "plan:test",
             "root_executor_id": "tool:test/runtime",
             "root_ref": "tool:test/run",
@@ -1293,7 +1341,6 @@ mod tests {
                         "project_path": project_root
                     }
                 },
-                "tool_path": project_root.join(".ai/tools/test/run.yaml"),
                 "executor_chain": ["tool:test/run", "tool:test/runtime"]
             }],
             "entrypoint": "spawn",
@@ -1311,7 +1358,14 @@ mod tests {
             "runtime_identity": null,
             "debug_raw": false
         }))
-        .unwrap()
+        .unwrap();
+        let ryeos_engine::contracts::PlanNode::DispatchSubprocess { tool_path, .. } =
+            &mut plan.nodes[0]
+        else {
+            unreachable!("portable direct-plan fixture must dispatch")
+        };
+        *tool_path = Some(project_root.join(".ai/tools/test/run.yaml"));
+        plan
     }
 
     #[test]
@@ -1362,6 +1416,99 @@ mod tests {
             panic!("fixture must carry runtime parameters");
         };
         assert_eq!(project_path.as_deref(), Some(effective));
+    }
+
+    #[test]
+    fn persistent_session_plan_identity_is_stable_across_runtime_roots() {
+        let admitted = Path::new("/ryeos/persistent-session-workspace");
+        let plan = portable_direct_plan(admitted);
+        let admitted_bytes = lillux::canonical_json(&serde_json::to_value(&plan).unwrap()).unwrap();
+        let admitted_hash = lillux::sha256_hex(admitted_bytes.as_bytes());
+
+        let mut first = plan.clone();
+        let mut second = plan;
+        relocate_admitted_direct_plan(
+            &mut first,
+            Some(admitted),
+            Some(Path::new("/var/lib/ryeos-a/session")),
+        )
+        .unwrap();
+        relocate_admitted_direct_plan(
+            &mut second,
+            Some(admitted),
+            Some(Path::new("/srv/ryeos-b/session")),
+        )
+        .unwrap();
+
+        let cwd = |plan: &ExecutionPlan| match &plan.nodes[0] {
+            ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } => {
+                spec.cwd.clone().unwrap()
+            }
+            _ => panic!("fixture must dispatch"),
+        };
+        assert_eq!(cwd(&first), PathBuf::from("/var/lib/ryeos-a/session"));
+        assert_eq!(cwd(&second), PathBuf::from("/srv/ryeos-b/session"));
+        assert_ne!(cwd(&first), cwd(&second));
+
+        // Runtime relocation is applied to mutable spawn copies. The retained
+        // plan/capsule identity remains the single logical-root hash.
+        assert_eq!(
+            lillux::sha256_hex(
+                lillux::canonical_json(
+                    &serde_json::to_value(&portable_direct_plan(admitted)).unwrap()
+                )
+                .unwrap()
+                .as_bytes()
+            ),
+            admitted_hash
+        );
+    }
+
+    #[test]
+    fn audit_tool_path_does_not_fragment_admitted_plan_identity() {
+        let admitted = Path::new("/ryeos/persistent-session-workspace");
+        let mut first = portable_direct_plan(admitted);
+        let mut second = first.clone();
+        let ryeos_engine::contracts::PlanNode::DispatchSubprocess {
+            tool_path: first_path,
+            ..
+        } = &mut first.nodes[0]
+        else {
+            panic!("fixture must dispatch");
+        };
+        let ryeos_engine::contracts::PlanNode::DispatchSubprocess {
+            tool_path: second_path,
+            ..
+        } = &mut second.nodes[0]
+        else {
+            panic!("fixture must dispatch");
+        };
+        *first_path = Some(PathBuf::from("/opt/first/.ai/workers/example.yaml"));
+        *second_path = Some(PathBuf::from("/srv/second/.ai/workers/example.yaml"));
+
+        for (plan, root) in [(&mut first, "/opt/first"), (&mut second, "/srv/second")] {
+            let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } =
+                &mut plan.nodes[0]
+            else {
+                panic!("fixture must dispatch");
+            };
+            let command = PathBuf::from(root).join("bin/ryeos-core-tools");
+            spec.cmd = command.display().to_string();
+            match spec.verified_command.as_mut().unwrap() {
+                ryeos_engine::contracts::PlanVerifiedCommand::BundleExecutor { code, .. }
+                | ryeos_engine::contracts::PlanVerifiedCommand::CapturedContent { code } => {
+                    code.source_path = command;
+                }
+            }
+        }
+
+        let first =
+            lillux::canonical_json(&admitted_execution_plan_value(&first).unwrap()).unwrap();
+        let second =
+            lillux::canonical_json(&admitted_execution_plan_value(&second).unwrap()).unwrap();
+        assert_eq!(first, second);
+        assert!(!first.contains("/opt/first"));
+        assert!(!first.contains("/srv/second"));
     }
 
     #[test]

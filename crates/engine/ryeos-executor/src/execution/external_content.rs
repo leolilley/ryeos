@@ -336,7 +336,7 @@ impl ExternalMaterializationCache {
                         }
                     }
                     ryeos_state::objects::ExternalContentManifestEntryKind::Symlink => {
-                        let target = large_symlink_target_bytes(cas, entry)?;
+                        let target = large_symlink_target_bytes(entry)?;
                         parent.create_symlink(&name, &target)?;
                     }
                 }
@@ -401,7 +401,7 @@ impl ExternalMaterializationCache {
                         }
                     }
                     ryeos_state::objects::ExternalContentManifestEntryKind::Symlink => {
-                        let target = symlink_target_bytes(cas, entry)?;
+                        let target = symlink_target_bytes(entry)?;
                         parent.create_symlink(&name, &target)?;
                     }
                 }
@@ -1233,33 +1233,29 @@ fn ensure_materialization_parent(
 }
 
 fn symlink_target_bytes(
-    cas: &lillux::CasStore,
     entry: &ryeos_state::objects::ExternalContentManifestEntry,
 ) -> anyhow::Result<Vec<u8>> {
-    match (entry.target.as_deref(), entry.target_blob.as_deref()) {
-        (Some(target), None) => Ok(target.as_bytes().to_vec()),
-        (None, Some(hash)) => ryeos_state::object_closure::load_exact_cas_blob_with_cas(
-            cas,
-            hash,
-            ryeos_state::objects::MAX_SYMLINK_TARGET_BYTES,
-        ),
-        _ => anyhow::bail!("validated symlink entry {} lost its target", entry.path),
-    }
+    let target = entry
+        .target
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("validated symlink entry {} lost its target", entry.path))?
+        .as_bytes()
+        .to_vec();
+    ryeos_state::objects::validate_internal_symlink_target(&entry.path, &target)?;
+    Ok(target)
 }
 
 fn large_symlink_target_bytes(
-    cas: &lillux::CasStore,
     entry: &ryeos_state::objects::ExternalLargeContentManifestEntry,
 ) -> anyhow::Result<Vec<u8>> {
-    match (entry.target.as_deref(), entry.target_blob.as_deref()) {
-        (Some(target), None) => Ok(target.as_bytes().to_vec()),
-        (None, Some(hash)) => ryeos_state::object_closure::load_exact_cas_blob_with_cas(
-            cas,
-            hash,
-            ryeos_state::objects::MAX_SYMLINK_TARGET_BYTES,
-        ),
-        _ => anyhow::bail!("validated symlink entry {} lost its target", entry.path),
-    }
+    let target = entry
+        .target
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("validated symlink entry {} lost its target", entry.path))?
+        .as_bytes()
+        .to_vec();
+    ryeos_state::objects::validate_internal_symlink_target(&entry.path, &target)?;
+    Ok(target)
 }
 
 fn materialize_executable_large_file(
@@ -1419,7 +1415,7 @@ fn verify_large_materialized_directory(
                         ryeos_state::objects::MAX_SYMLINK_TARGET_BYTES as usize,
                     )?
                     .ok_or_else(|| anyhow::anyhow!("materialized symlink {path} disappeared"))?;
-                if target != large_symlink_target_bytes(cas, entry)? {
+                if target != large_symlink_target_bytes(entry)? {
                     anyhow::bail!("materialized symlink {path} contradicts its manifest");
                 }
             }
@@ -1506,7 +1502,7 @@ fn verify_materialized_directory(
                         ryeos_state::objects::MAX_SYMLINK_TARGET_BYTES as usize,
                     )?
                     .ok_or_else(|| anyhow::anyhow!("materialized symlink {path} disappeared"))?;
-                if actual_target != symlink_target_bytes(cas, entry)? {
+                if actual_target != symlink_target_bytes(entry)? {
                     anyhow::bail!("materialized symlink {path} contradicts its manifest");
                 }
             }
@@ -1654,7 +1650,6 @@ mod tests {
                     blob_hash: Some(cas.store_blob(bytes).unwrap()),
                     size: Some(bytes.len() as u64),
                     target: None,
-                    target_blob: None,
                 },
             )
             .collect::<Vec<_>>();
@@ -1780,7 +1775,6 @@ mod tests {
                 chunk_size: None,
                 chunk_hashes: Vec::new(),
                 target: None,
-                target_blob: None,
             },
             ryeos_state::objects::ExternalLargeContentManifestEntry {
                 path: "bin/driver".to_owned(),
@@ -1792,7 +1786,6 @@ mod tests {
                 chunk_size: None,
                 chunk_hashes: Vec::new(),
                 target: None,
-                target_blob: None,
             },
             ryeos_state::objects::ExternalLargeContentManifestEntry {
                 path: "lib".to_owned(),
@@ -1804,7 +1797,6 @@ mod tests {
                 chunk_size: None,
                 chunk_hashes: Vec::new(),
                 target: None,
-                target_blob: None,
             },
             ryeos_state::objects::ExternalLargeContentManifestEntry {
                 path: "lib/payload.so".to_owned(),
@@ -1816,7 +1808,6 @@ mod tests {
                 chunk_size: Some(ingested.chunk_size),
                 chunk_hashes: ingested.chunk_hashes.clone(),
                 target: None,
-                target_blob: None,
             },
             ryeos_state::objects::ExternalLargeContentManifestEntry {
                 path: "lib/payload.so.1".to_owned(),
@@ -1828,7 +1819,6 @@ mod tests {
                 chunk_size: None,
                 chunk_hashes: Vec::new(),
                 target: Some("payload.so".to_owned()),
-                target_blob: None,
             },
         ];
         entries.sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));

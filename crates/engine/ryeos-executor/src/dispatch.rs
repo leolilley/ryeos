@@ -2436,6 +2436,8 @@ pub(crate) async fn dispatch_method(
                 ryeos_engine::isolation::IsolationLaunchContext {
                     project_path: request.project_path,
                     project_authority: request.provenance.isolation_project_authority(),
+                    filesystem_authority_ceiling:
+                        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
                     live_access: live_access.as_ref(),
                     state_root: request.provenance.state_root_override(),
                     checkpoint_dir: None,
@@ -6232,6 +6234,7 @@ metadata:
                 kind: canonical_ref.kind.clone(),
                 source_path,
                 source_space: ItemSpace::Project,
+                source_root: ryeos_engine::contracts::ItemSourceRoot::Project,
                 resolved_from: "project".into(),
                 shadowed: Vec::new(),
                 probed_absent: Vec::new(),
@@ -6414,6 +6417,19 @@ metadata:
             kind: canonical_ref.kind.clone(),
             source_path,
             source_space,
+            source_root: match source_space {
+                ryeos_engine::contracts::ItemSpace::Project => {
+                    ryeos_engine::contracts::ItemSourceRoot::Project
+                }
+                ryeos_engine::contracts::ItemSpace::Bundle => {
+                    ryeos_engine::contracts::ItemSourceRoot::Bundle {
+                        name: "example-bundle".to_string(),
+                    }
+                }
+                ryeos_engine::contracts::ItemSpace::Node => {
+                    ryeos_engine::contracts::ItemSourceRoot::Node
+                }
+            },
             resolved_from: source_space.as_str().into(),
             shadowed: Vec::new(),
             probed_absent: Vec::new(),
@@ -7968,6 +7984,13 @@ requires:
             resolved_ref: ref_str.to_string(),
             source_path: std::path::PathBuf::from(format!("/tmp/{ref_str}")),
             source_space,
+            source_root: match source_space {
+                ItemSpace::Project => ryeos_engine::contracts::ItemSourceRoot::Project,
+                ItemSpace::Bundle => ryeos_engine::contracts::ItemSourceRoot::Bundle {
+                    name: "fixture".to_string(),
+                },
+                ItemSpace::Node => ryeos_engine::contracts::ItemSourceRoot::Node,
+            },
             trust_class: trust,
             signer_fingerprint: matches!(
                 trust,

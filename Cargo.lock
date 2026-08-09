@@ -2703,6 +2703,7 @@ dependencies = [
  "ryeos-engine",
  "ryeos-handler-protocol",
  "ryeos-isolation-protocol",
+ "ryeos-provider-contract",
  "ryeos-runtime",
  "ryeos-scheduler",
  "ryeos-state",
@@ -2903,6 +2904,10 @@ dependencies = [
  "tokio",
  "tracing",
 ]
+
+[[package]]
+name = "ryeos-session-exec"
+version = "0.5.76"
 
 [[package]]
 name = "ryeos-state"

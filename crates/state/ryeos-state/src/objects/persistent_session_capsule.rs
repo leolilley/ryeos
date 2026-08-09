@@ -14,7 +14,7 @@ use super::{
 };
 
 pub const PERSISTENT_SESSION_CAPSULE_KIND: &str = "persistent_session_capsule";
-pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 1;
+pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 2;
 pub const MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,5 +267,15 @@ mod tests {
             idle_timeout_ms: 1,
         };
         assert!(contract.validate().is_err());
+    }
+
+    #[test]
+    fn predecessor_capsule_schema_is_refused_without_translation() {
+        let value = serde_json::json!({
+            "schema": 1,
+            "kind": PERSISTENT_SESSION_CAPSULE_KIND
+        });
+        let error = AdmittedPersistentSessionCapsule::from_current_value(&value).unwrap_err();
+        assert!(error.to_string().contains("schema"), "got: {error:#}");
     }
 }

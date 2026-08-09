@@ -405,6 +405,13 @@ mod tests {
             requested_id: resolved_ref.to_string(),
             resolved_ref: resolved_ref.to_string(),
             source_space,
+            source_root: match source_space {
+                ItemSpace::Project => ryeos_engine::contracts::ItemSourceRoot::Project,
+                ItemSpace::Bundle => ryeos_engine::contracts::ItemSourceRoot::Bundle {
+                    name: "fixture".to_string(),
+                },
+                ItemSpace::Node => ryeos_engine::contracts::ItemSourceRoot::Node,
+            },
             trust_class,
             signer_fingerprint,
             raw_content_digest: "a".repeat(64),

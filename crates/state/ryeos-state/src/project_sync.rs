@@ -360,6 +360,23 @@ pub fn snapshot_floor_rules() -> Vec<String> {
     rules
 }
 
+/// Canonical identity of every non-bypassable rule applied before bytes may
+/// enter durable CAS. Keep this beside the predicate so import request
+/// identity and capture enforcement cannot drift into separate hard-coded
+/// path lists.
+pub fn durable_content_capture_floor_rules() -> Vec<String> {
+    let mut rules = snapshot_floor_rules();
+    rules.extend(
+        crate::ignore::durable_capture_floor()
+            .canonical_patterns()
+            .iter()
+            .map(|pattern| format!("built_in_ignore:{pattern}")),
+    );
+    rules.sort();
+    rules.dedup();
+    rules
+}
+
 /// Match `rel_path` against a set of `.ai` prefixes on segment boundaries,
 /// returning the matched prefix. `foo` matches `foo` and `foo/bar`, never
 /// `foobar`.

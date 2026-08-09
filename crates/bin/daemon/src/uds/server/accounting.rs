@@ -912,6 +912,27 @@ fn local_stream_owner(thread_id: &str, attempt_id: &str, request_hash: &str) -> 
     lillux::sha256_hex(canonical.as_bytes())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum LocalStreamStartDisposition {
+    Replay(ProviderLocalWorkerObservationReference),
+    Contact,
+}
+
+fn local_stream_start_disposition(
+    attempt_state: ryeos_accounting::AttemptBudgetState,
+    observation: Option<ProviderLocalWorkerObservationReference>,
+) -> Result<LocalStreamStartDisposition> {
+    if let Some(observation) = observation {
+        return Ok(LocalStreamStartDisposition::Replay(observation));
+    }
+    if attempt_state != ryeos_accounting::AttemptBudgetState::Issued {
+        anyhow::bail!(
+            "terminal local provider attempt has no retained observation; outcome is contradictory"
+        );
+    }
+    Ok(LocalStreamStartDisposition::Contact)
+}
+
 fn require_exact_local_attempt(
     state: &AppState,
     thread_id: &str,
@@ -1120,32 +1141,31 @@ pub(super) fn handle_provider_attempt_local_stream_start(
     );
     let coordinate_key = request.coordinate.cache_key()?;
     let current_stream = state.persistent_sessions.existing_stream_id(&owner)?;
-    if let Some(reference) =
-        accounting(state)?.provider_local_worker_observation(&request.attempt_id)?
-    {
-        let observation = load_local_worker_observation(
-            state,
-            &request.attempt_id,
-            &request.request_hash,
-            &request.coordinate,
-            &reference,
-        )?;
-        if let Some(stream_id) = current_stream {
-            state
-                .persistent_sessions
-                .retire_stream(&owner, &stream_id)?;
+    match local_stream_start_disposition(
+        attempt.state,
+        accounting(state)?.provider_local_worker_observation(&request.attempt_id)?,
+    )? {
+        LocalStreamStartDisposition::Replay(reference) => {
+            let observation = load_local_worker_observation(
+                state,
+                &request.attempt_id,
+                &request.request_hash,
+                &request.coordinate,
+                &reference,
+            )?;
+            if let Some(stream_id) = current_stream {
+                state
+                    .persistent_sessions
+                    .retire_stream(&owner, &stream_id)?;
+            }
+            return Ok(serde_json::to_value(
+                ProviderAttemptLocalStreamStartResponse::Replay {
+                    observation_hash: reference.observation_hash,
+                    terminal: observation.terminal,
+                },
+            )?);
         }
-        return Ok(serde_json::to_value(
-            ProviderAttemptLocalStreamStartResponse::Replay {
-                observation_hash: reference.observation_hash,
-                terminal: observation.terminal,
-            },
-        )?);
-    }
-    if attempt.state != ryeos_accounting::AttemptBudgetState::Issued {
-        anyhow::bail!(
-            "terminal local provider attempt has no retained observation; outcome is contradictory"
-        );
+        LocalStreamStartDisposition::Contact => {}
     }
     let stream_capacity = if current_stream.is_none() {
         Some(
@@ -1341,4 +1361,267 @@ pub(super) fn handle_provider_attempt_local_stream_control(
         }
     }
     Ok(serde_json::json!({"ok": true}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_accounting::{
+        ChargeReconciliationAuthority, HexDigest, SpendAccounting, SpendBoundAuthority,
+        SpendBoundCommitments, UsdNanos, VerifiedPreparedSpendBound,
+    };
+    use ryeos_provider_contract::{PreparedRequestProjection, ProviderCallAnswer, RecordedMessage};
+
+    fn digest(label: &str) -> HexDigest {
+        HexDigest::new(lillux::sha256_hex(label.as_bytes())).unwrap()
+    }
+
+    fn free_authority() -> ProviderAccountingAuthority {
+        let mut authority = ProviderAccountingAuthority {
+            authority_digest: digest("placeholder"),
+            config_hash: "cfg".to_owned(),
+            config_value_digest: digest("cfg-value"),
+            billing_principal_digest: digest("principal"),
+            credential_authority_generation: "none".to_owned(),
+            pricing_contract_subject_digest: digest("local-recorded"),
+            provider_id: "local-tinygrad".to_owned(),
+            model_name: "fixture".to_owned(),
+            matched_profile: None,
+            spend_bound: SpendBoundAuthority::ExplicitlyFree {
+                contract_digest: digest("explicitly-free"),
+            },
+            reconciliation: ChargeReconciliationAuthority::Unavailable,
+        };
+        authority = authority.sealed().unwrap();
+        authority
+    }
+
+    fn local_coordinate(authority: &ProviderAccountingAuthority) -> RequestCoordinate {
+        RequestCoordinate::build(
+            RequestAuthority {
+                outer_effective_definition_digest: "1".repeat(64),
+                provider_family: "chat_completions".to_owned(),
+                provider_config_hash: authority.config_hash.clone(),
+                provider_config_value_digest: authority.config_value_digest.as_str().to_owned(),
+                provider_id: authority.provider_id.clone(),
+                profile_id: None,
+                model_name: authority.model_name.clone(),
+                credential_binding_hmac: "2".repeat(64),
+                credential_authority_generation: authority.credential_authority_generation.clone(),
+                authority_digest: authority.authority_digest.as_str().to_owned(),
+                admitted_effect_class: Some(EffectClass::Recorded),
+            },
+            TransportCoordinate::AdmittedLocalWorker {
+                worker_ref: "worker:test/local".to_owned(),
+                effective_definition_digest: "3".repeat(64),
+                capsule_hash: "4".repeat(64),
+                execution_realization_hash: "5".repeat(64),
+            },
+            PreparedRequestProjection::new(
+                std::iter::empty(),
+                std::iter::empty(),
+                "6".repeat(64),
+                8,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn indexed_provider_record_repairs_missing_accounting_publication_proof() {
+        let (tmp, mut state) = super::super::tests::setup_app_state();
+        let ledger = Arc::new(
+            AccountingDb::open_default(&tmp.path().join("accounting-proof-repair")).unwrap(),
+        );
+        state.accounting = Some(Arc::clone(&ledger));
+
+        let thread_id = "T-publication-repair";
+        let generation = "launch-1";
+        let execution_budget = "execution-1";
+        ledger
+            .create_execution_account_prepared(execution_budget, thread_id, None)
+            .unwrap();
+        ledger
+            .activate_account(execution_budget, "execution", execution_budget)
+            .unwrap();
+        ledger
+            .open_launch_gate(thread_id, generation, execution_budget, thread_id)
+            .unwrap();
+
+        let authority = free_authority();
+        let coordinate = local_coordinate(&authority);
+        let cache_key = coordinate.cache_key().unwrap();
+        let request_hash =
+            ryeos_accounting::rpc::provider_attempt_request_hash(thread_id, 1, 1, &cache_key);
+        let bound = VerifiedPreparedSpendBound {
+            prepared_request_digest: digest("prepared-request"),
+            authority_digest: authority.authority_digest.clone(),
+            maximum: UsdNanos::ZERO,
+            commitments: SpendBoundCommitments::ExplicitlyFree {
+                contract_digest: match &authority.spend_bound {
+                    SpendBoundAuthority::ExplicitlyFree { contract_digest } => {
+                        contract_digest.clone()
+                    }
+                    _ => unreachable!(),
+                },
+            },
+            verifier_contract_digest: HexDigest::new(lillux::sha256_hex(
+                ryeos_accounting::rpc::SPEND_VERIFIER_CONTRACT_V1.as_bytes(),
+            ))
+            .unwrap(),
+        };
+        let attempt_id = match ledger
+            .reserve_provider_attempt(ReserveArgs {
+                thread_id,
+                launch_generation: generation,
+                turn: 1,
+                attempt_number: 1,
+                request_hash: &request_hash,
+                config_hash: &authority.config_hash,
+                verified_bound: &bound,
+                authority: &authority,
+                execution_budget_id: execution_budget,
+                directive_budget_id: None,
+                root_chain_id: thread_id,
+                audit_chain_root_id: thread_id,
+                now_ms: 1,
+            })
+            .unwrap()
+        {
+            ReserveOutcome::Reserved { attempt_id, .. } => attempt_id,
+            outcome => panic!("expected reservation, got {outcome:?}"),
+        };
+        ledger
+            .mark_provider_attempt_issued(
+                thread_id,
+                generation,
+                &attempt_id,
+                &request_hash,
+                2,
+                60_000,
+            )
+            .unwrap();
+        ledger
+            .settle_provider_attempt(
+                thread_id,
+                generation,
+                &attempt_id,
+                &request_hash,
+                &SpendAccounting::ExplicitlyFree,
+                &TokenAccounting::Unavailable,
+                authority.authority_digest.as_str(),
+                3,
+            )
+            .unwrap();
+
+        let answer = ProviderCallAnswer {
+            message: RecordedMessage {
+                role: "assistant".to_owned(),
+                content: Some(Value::String("done".to_owned())),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            finish_reason: Some("stop".to_owned()),
+        };
+        let answer_digest = answer.digest().unwrap();
+        let record = ProviderCallRecord {
+            schema: ryeos_provider_contract::PROVIDER_CALL_RECORD_SCHEMA_VERSION,
+            kind: ryeos_provider_contract::PROVIDER_CALL_RECORD_KIND.to_owned(),
+            cache_key: cache_key.clone(),
+            coordinate,
+            answer_digest: answer_digest.clone(),
+            answer,
+            first_observation: FirstObservation {
+                produced_by_thread: thread_id.to_owned(),
+                attempt_id: attempt_id.clone(),
+                response_digest: answer_digest.clone(),
+                observed_at: "2026-08-09T00:00:00.000Z".to_owned(),
+                observation_class: ObservationClass::DaemonWorkerObserved,
+                provider_accounting: serde_json::json!({"state": "reconciled"}),
+                execution_identity_digest: Some("7".repeat(64)),
+                execution_identity_attestation_hash: Some("8".repeat(64)),
+                admitted_execution_realization_hash: Some("5".repeat(64)),
+                observed_execution_realization_hash: None,
+            },
+        };
+        record.validate().unwrap();
+        let authority_store = state
+            .state_store
+            .with_state_db(|db| db.pinned_authority())
+            .unwrap();
+        let guard = authority_store.acquire_shared_guard().unwrap();
+        let cas = authority_store.cas_store().unwrap();
+        let record_hash = cas.store_object(&record.to_value().unwrap()).unwrap();
+        let namespace =
+            ryeos_state::ReplayIndexNamespace::new(PROVIDER_CALL_REPLAY_NAMESPACE).unwrap();
+        let candidate = ryeos_state::ReplayIndexRecord {
+            cache_key,
+            answer_digest,
+            record_hash: record_hash.clone(),
+        };
+        let outcome = state
+            .state_store
+            .with_state_db(|db| {
+                db.publish_replay_record(&namespace, &candidate, |_| {
+                    ryeos_state::ReplayRecordVerification::Verified
+                })
+            })
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            ryeos_state::ReplayPublishOutcome::Inserted { .. }
+        ));
+        assert!(
+            ledger
+                .get_provider_attempt(thread_id, &attempt_id)
+                .unwrap()
+                .unwrap()
+                .publication_proof
+                .is_none()
+        );
+
+        ensure_provider_call_publication_proof(&state, &record_hash, &record).unwrap();
+        let proof = ledger
+            .get_provider_attempt(thread_id, &attempt_id)
+            .unwrap()
+            .unwrap()
+            .publication_proof
+            .expect("prepare-time repair must confirm publication");
+        assert_eq!(proof.record_hash, record_hash);
+        verify_provider_call_publication_proof(&state, &proof).unwrap();
+        authority_store.ensure_guard(&guard).unwrap();
+    }
+
+    #[test]
+    fn terminal_local_attempt_replays_retained_observation_before_contact_gate() {
+        let reference = ProviderLocalWorkerObservationReference {
+            request_hash: "a".repeat(64),
+            coordinate_key: "b".repeat(64),
+            observation_key: "c".repeat(64),
+            observation_hash: "d".repeat(64),
+            terminal_digest: "e".repeat(64),
+            answer_digest: "f".repeat(64),
+        };
+        assert_eq!(
+            local_stream_start_disposition(
+                ryeos_accounting::AttemptBudgetState::Reconciled,
+                Some(reference.clone()),
+            )
+            .unwrap(),
+            LocalStreamStartDisposition::Replay(reference)
+        );
+        assert!(
+            local_stream_start_disposition(ryeos_accounting::AttemptBudgetState::Reconciled, None,)
+                .unwrap_err()
+                .to_string()
+                .contains("no retained observation")
+        );
+        assert_eq!(
+            local_stream_start_disposition(ryeos_accounting::AttemptBudgetState::Issued, None,)
+                .unwrap(),
+            LocalStreamStartDisposition::Contact
+        );
+    }
 }

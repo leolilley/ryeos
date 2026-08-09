@@ -1846,6 +1846,8 @@ while True:
             isolation,
             isolation_project_authority:
                 ryeos_engine::isolation::IsolationProjectAuthority::External,
+            isolation_filesystem_authority_ceiling:
+                ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             isolation_live_access_authority: Some(
                 ryeos_engine::isolation::IsolationLiveAccessAuthority::UnconfinedHost {
                     authorized_write_namespaces: vec!["project".into()],
@@ -2140,6 +2142,31 @@ while True:
                 .to_string()
                 .contains("cancelled before worker contact")
         );
+        assert_eq!(spawn_count.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn unproved_cleanup_quarantines_capacity_before_replacement_spawn() {
+        let pool = PersistentSessionPool::with_limits(narrow_stream_limits()).unwrap();
+        pool.poison_after_unproved_cleanup("injected cleanup refusal".to_owned());
+        let spawn_count = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&spawn_count);
+        let result = pool.acquire(
+            &"a".repeat(64),
+            &test_lifecycle(),
+            &test_wire(),
+            &mut move || {
+                counted.fetch_add(1, Ordering::AcqRel);
+                bail!("quarantined pool must not spawn")
+            },
+            &|| false,
+            Instant::now() + Duration::from_secs(1),
+        );
+        let error = match result {
+            Ok(_) => panic!("quarantined pool returned replacement capacity"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("injected cleanup refusal"));
         assert_eq!(spawn_count.load(Ordering::Acquire), 0);
     }
 

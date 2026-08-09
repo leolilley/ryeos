@@ -271,6 +271,8 @@ impl LaunchPreparerRunner {
             IsolationLaunchContext {
                 project_path,
                 project_authority: IsolationProjectAuthority::ReadOnly,
+                filesystem_authority_ceiling:
+                    crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
                 live_access: None,
                 state_root: None,
                 checkpoint_dir: None,

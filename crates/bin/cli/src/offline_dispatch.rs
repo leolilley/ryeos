@@ -696,6 +696,8 @@ fn exec_tool(
             ryeos_engine::isolation::IsolationLaunchContext {
                 project_path: Path::new(project_path),
                 project_authority: project_authority.project,
+                filesystem_authority_ceiling:
+                    ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
                 live_access: project_authority.live_access.as_ref(),
                 state_root: None,
                 checkpoint_dir: None,

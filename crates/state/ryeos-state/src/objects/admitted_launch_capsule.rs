@@ -7,6 +7,26 @@ use super::{
 };
 
 pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 12;
+pub const ADMITTED_DIRECT_COMMAND_ROOT: &str = "/ryeos/admitted-direct-command";
+
+pub fn admitted_direct_command_execution_path(
+    content_hash: &str,
+    source_path: &std::path::Path,
+) -> anyhow::Result<std::path::PathBuf> {
+    super::thread_snapshot::validate_canonical_hash(
+        "admitted direct executable blob hash",
+        content_hash,
+    )?;
+    let file_name = source_path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("admitted direct command path has no file name"))?;
+    if std::path::Path::new(file_name).components().count() != 1 {
+        anyhow::bail!("admitted direct command has an unsafe file name");
+    }
+    Ok(std::path::PathBuf::from(ADMITTED_DIRECT_COMMAND_ROOT)
+        .join(content_hash)
+        .join(file_name))
+}
 
 fn deserialize_required_nullable<'de, D, T>(
     deserializer: D,
@@ -115,6 +135,15 @@ impl AdmittedExecutionClosure {
                         "admitted direct execution path",
                         execution_path,
                     )?;
+                    let expected = admitted_direct_command_execution_path(
+                        executable_blob_hash,
+                        execution_path,
+                    )?;
+                    if &expected != execution_path {
+                        anyhow::bail!(
+                            "admitted direct execution path does not match its content-addressed namespace"
+                        );
+                    }
                 }
                 if let Some(root) = admitted_project_root {
                     if root.components().count() < 2

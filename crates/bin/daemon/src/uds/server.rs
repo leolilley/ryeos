@@ -1735,7 +1735,7 @@ mod tests {
     }
 
     /// Build a minimal AppState for UDS dispatch tests.
-    fn setup_app_state() -> (TempDir, AppState) {
+    pub(super) fn setup_app_state() -> (TempDir, AppState) {
         let tmpdir = TempDir::new().unwrap();
         let runtime_state_dir = tmpdir.path().join(".ai").join("state");
         let runtime_db_path = tmpdir.path().join("runtime.sqlite3");

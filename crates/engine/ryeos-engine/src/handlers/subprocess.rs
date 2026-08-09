@@ -118,6 +118,8 @@ pub(crate) fn run_handler_subprocess(
         IsolationLaunchContext {
             project_path: &bundle_root,
             project_authority: IsolationProjectAuthority::ReadOnly,
+            filesystem_authority_ceiling:
+                crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             live_access: None,
             state_root: None,
             checkpoint_dir: None,

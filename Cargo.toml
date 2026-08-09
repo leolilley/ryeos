@@ -29,6 +29,7 @@ members = [
     "crates/state/ryeos-scheduler",
     "crates/state/ryeos-state",
     "crates/tools/core-tools",
+    "crates/tools/session-exec",
     "crates/tools/web-tools",
     "crates/tools/browser-tools",
     "crates/support/ryeos-tracing",

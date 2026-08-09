@@ -4,8 +4,8 @@
 //! The realization wire shape does not change and carries no tier
 //! discriminator: bind and admission fetch this object and route on what it
 //! says it is. A tree remains a tree: directories, normalized file modes, and
-//! symlinks are part of its identity. Small files and symlink targets stay in
-//! CAS; files above the content-tier ceiling name contiguous mmap-ready
+//! symlinks are part of its identity. Small files stay in CAS; files above
+//! the content-tier ceiling name contiguous mmap-ready
 //! objects in the large-object store. Each large file commits to a fixed-size
 //! chunk list so ingest and scrub can verify it streaming, one chunk in memory
 //! at a time.
@@ -20,10 +20,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const EXTERNAL_LARGE_CONTENT_MANIFEST_KIND: &str = "external_large_content_manifest";
-pub const EXTERNAL_LARGE_CONTENT_SCHEMA: &str = "ryeos.external_content.large.v1";
+pub const EXTERNAL_LARGE_CONTENT_SCHEMA: &str = "ryeos.external_content.large.v2";
 
 /// Fixed chunk size for production manifests. Recorded per entry so the
-/// commitment is explicit in the bytes, but v1 admits exactly this value
+/// commitment is explicit in the bytes. The current schema admits this value
 /// range; the constant is the default the ingest surface uses.
 pub const LARGE_CONTENT_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
 pub const MIN_LARGE_CONTENT_CHUNK_BYTES: u64 = 1024 * 1024;
@@ -67,8 +67,6 @@ pub struct ExternalLargeContentManifestEntry {
     pub chunk_hashes: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_blob: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,7 +145,7 @@ impl ExternalLargeContentManifestObject {
                             entry.path
                         );
                     }
-                    if entry.target.is_some() || entry.target_blob.is_some() {
+                    if entry.target.is_some() {
                         anyhow::bail!(
                             "external large-content file `{}` carries a link target",
                             entry.path
@@ -194,7 +192,7 @@ impl ExternalLargeContentManifestObject {
                                 || !chunk_size.is_power_of_two()
                             {
                                 anyhow::bail!(
-                                    "external large-content entry `{}` has chunk size {chunk_size}; v1 admits powers of two in \
+                                    "external large-content entry `{}` has chunk size {chunk_size}; the current schema admits powers of two in \
                                      [{MIN_LARGE_CONTENT_CHUNK_BYTES}, {MAX_LARGE_CONTENT_CHUNK_BYTES}]",
                                     entry.path
                                 );
@@ -236,7 +234,6 @@ impl ExternalLargeContentManifestObject {
                         || entry.chunk_size.is_some()
                         || !entry.chunk_hashes.is_empty()
                         || entry.target.is_some()
-                        || entry.target_blob.is_some()
                     {
                         anyhow::bail!(
                             "external large-content directory `{}` carries content",
@@ -257,21 +254,17 @@ impl ExternalLargeContentManifestObject {
                             entry.path
                         );
                     }
-                    match (entry.target.as_deref(), entry.target_blob.as_deref()) {
-                        (Some(target), None)
+                    match entry.target.as_deref() {
+                        Some(target)
                             if !target.is_empty()
                                 && !target.as_bytes().contains(&0)
-                                && target.len() <= super::MAX_INLINE_SYMLINK_TARGET_BYTES => {}
-                        (None, Some(hash)) => {
-                            super::thread_snapshot::validate_canonical_hash(
-                                "external large-content target_blob",
-                                hash,
+                                && target.len() <= super::MAX_INLINE_SYMLINK_TARGET_BYTES =>
+                        {
+                            super::validate_internal_symlink_target(
+                                &entry.path,
+                                target.as_bytes(),
                             )?;
                         }
-                        (Some(_), Some(_)) => anyhow::bail!(
-                            "external large-content symlink `{}` carries two targets",
-                            entry.path
-                        ),
                         _ => anyhow::bail!(
                             "external large-content symlink `{}` has no valid target",
                             entry.path
@@ -318,9 +311,6 @@ impl ExternalLargeContentManifestObject {
         let mut blobs = BTreeSet::new();
         for entry in &self.entries {
             if let Some(hash) = &entry.blob_hash {
-                blobs.insert(hash.clone());
-            }
-            if let Some(hash) = &entry.target_blob {
                 blobs.insert(hash.clone());
             }
         }
@@ -373,7 +363,6 @@ mod tests {
             chunk_size: Some(chunk_size),
             chunk_hashes: (0..chunks).map(|_| "b".repeat(64)).collect(),
             target: None,
-            target_blob: None,
         }
     }
 
@@ -451,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn chunk_size_is_bounded_to_the_v1_range() {
+    fn chunk_size_is_bounded_to_the_current_schema_range() {
         let mut object = manifest(vec![entry("payload.bin", 8)]);
         object.entries[0].chunk_size = Some(512);
         object.entries[0].chunk_hashes = vec!["b".repeat(64)];
@@ -479,7 +468,6 @@ mod tests {
                 chunk_size: None,
                 chunk_hashes: Vec::new(),
                 target: None,
-                target_blob: None,
             },
             ExternalLargeContentManifestEntry {
                 path: "bin/compiler".to_owned(),
@@ -491,7 +479,6 @@ mod tests {
                 chunk_size: None,
                 chunk_hashes: Vec::new(),
                 target: None,
-                target_blob: None,
             },
             ExternalLargeContentManifestEntry {
                 path: "bin/cc".to_owned(),
@@ -503,7 +490,6 @@ mod tests {
                 chunk_size: None,
                 chunk_hashes: Vec::new(),
                 target: Some("compiler".to_owned()),
-                target_blob: None,
             },
         ];
         entries.sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));

@@ -224,31 +224,22 @@ fn execution_properties(state: &AppState) -> Result<BTreeMap<String, serde_json:
             .unwrap_or(serde_json::Value::Null),
     );
     properties.insert(
-        "isolation_backend_manifest_digest".to_owned(),
-        inspection
-            .backend
-            .bundle_manifest_digest
-            .clone()
-            .map(serde_json::Value::String)
-            .unwrap_or(serde_json::Value::Null),
-    );
-    properties.insert(
-        "isolation_backend_adapter_digest".to_owned(),
-        inspection
-            .backend
-            .adapter_digest
-            .clone()
-            .map(serde_json::Value::String)
-            .unwrap_or(serde_json::Value::Null),
-    );
-    let capabilities = serde_json::to_value(&inspection.backend.effective_capabilities)?;
-    properties.insert(
-        "isolation_capabilities_digest".to_owned(),
-        serde_json::Value::String(lillux::sha256_hex(
-            lillux::canonical_json(&capabilities)?.as_bytes(),
-        )),
+        "isolation_backend_inspection_digest".to_owned(),
+        serde_json::Value::String(isolation_backend_inspection_digest(&inspection.backend)?),
     );
     Ok(properties)
+}
+
+/// Path-free identity of the complete backend observation that can affect a
+/// launch. A declaration/adapter-only identity is insufficient: replacing an
+/// inspected launcher payload must move the execution realization too.
+fn isolation_backend_inspection_digest(
+    inspection: &ryeos_engine::isolation::IsolationBackendInspection,
+) -> Result<String> {
+    let value = serde_json::to_value(inspection)?;
+    Ok(lillux::sha256_hex(
+        lillux::canonical_json(&value)?.as_bytes(),
+    ))
 }
 
 fn verify_realization_components(
@@ -405,4 +396,48 @@ fn external_components(
     }
     components.sort_by(|left, right| left.role.cmp(&right.role));
     Ok(components)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_engine::isolation::{IsolationBackendInspection, IsolationBackendStatus};
+    use ryeos_isolation_protocol::{
+        InspectedArtifact, IsolationArtifactRole, IsolationBackendSelection,
+    };
+
+    fn backend_with_launcher(digest: &str) -> IsolationBackendInspection {
+        IsolationBackendInspection {
+            selection: Some(IsolationBackendSelection {
+                bundle: "sandbox-fixture".to_owned(),
+                implementation: "fixture".to_owned(),
+            }),
+            status: IsolationBackendStatus::Available,
+            bundle_manifest_digest: Some("1".repeat(64)),
+            signer_fingerprint: Some("2".repeat(64)),
+            adapter_digest: Some("3".repeat(64)),
+            adapter_build: Some("fixture-build".to_owned()),
+            declared_capabilities: Default::default(),
+            effective_capabilities: Default::default(),
+            artifacts: [(
+                IsolationArtifactRole::Launcher,
+                InspectedArtifact {
+                    version: "1.0.0".to_owned(),
+                    digest: digest.to_owned(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        }
+    }
+
+    #[test]
+    fn launcher_payload_moves_execution_realization_backend_identity() {
+        let first = backend_with_launcher(&"4".repeat(64));
+        let second = backend_with_launcher(&"5".repeat(64));
+        assert_ne!(
+            isolation_backend_inspection_digest(&first).unwrap(),
+            isolation_backend_inspection_digest(&second).unwrap()
+        );
+    }
 }

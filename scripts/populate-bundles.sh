@@ -237,19 +237,19 @@ done
 case "$BUNDLE_SET" in
   full)
     pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
-          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-web-tools ryeos-browser-tools \
+          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-browser-tools \
           ryeos-client-terminal ryeos-client-web)
     ;;
   central-host)
     pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
-          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-web-tools)
+          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools)
     ;;
   standard|hosted-workflow)
     pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
-          ryeos-handler-bins ryeos-cli ryeos-core-tools)
+          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec)
     ;;
   hosted-node)
-    pkgs=(ryeosd ryeos-handler-bins ryeos-cli ryeos-core-tools)
+    pkgs=(ryeosd ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec)
     ;;
 esac
 
@@ -289,6 +289,17 @@ ryeos_term_suspend
 "$CARGO" build --release "${jobs_args[@]}" "${build_args[@]}" "${feature_args[@]}"
 ryeos_term_resume "release build complete"
 
+# The admitted persistent-session bridge must bring no ambient loader/library
+# closure into the worker realization. Build it fully static and reject any
+# payload carrying PT_INTERP or DT_NEEDED before bundle publication.
+RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+  "$CARGO" build --release "${jobs_args[@]}" -p ryeos-session-exec
+if readelf -l "$TARGET/release/ryeos-session-exec" | grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' \
+    || readelf -d "$TARGET/release/ryeos-session-exec" | grep -Eq 'NEEDED'; then
+  ryeos_term_fail "ryeos-session-exec is not fully static"
+  exit 2
+fi
+
 # ── Guard: no stale sibling binaries under --crates ──────────────────
 # With --crates only the named crates are rebuilt, but staging copies EVERY
 # bundle binary from target/release. A sibling built before a foundational lib
@@ -299,7 +310,7 @@ ryeos_term_resume "release build complete"
 staged_release_bins_for_set() {
   printf '%s\n' \
     rye-parser-yaml-document rye-parser-yaml-header-document rye-parser-regex-kv \
-    rye-composer-identity ryeos-core-tools
+    rye-composer-identity ryeos-core-tools ryeos-session-exec
   case "$BUNDLE_SET" in
     full|central-host|standard|hosted-workflow)
       printf '%s\n' ryeos-directive-runtime ryeos-graph-runtime \
@@ -357,6 +368,7 @@ install -m 0755 \
   "$TARGET/release/rye-parser-regex-kv" \
   "$TARGET/release/rye-composer-identity" \
   "$TARGET/release/ryeos-core-tools" \
+  "$TARGET/release/ryeos-session-exec" \
   "$CORE_BIN/"
 
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" ]]; then

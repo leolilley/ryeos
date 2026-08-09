@@ -11,6 +11,8 @@ use serde_json::Value;
 
 pub const EXTERNAL_CONTENT_BINDING_KIND: &str = "external_content_binding";
 pub const EXTERNAL_CONTENT_BINDING_SCHEMA: &str = "ryeos.external_content_binding.v1";
+pub const EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE: &str = "external-content-bindings";
+pub const EXTERNAL_CONTENT_BINDING_SCHEMA_EPOCH: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
