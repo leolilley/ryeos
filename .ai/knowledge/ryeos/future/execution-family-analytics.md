@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-10T03:16:08Z:023e88fc345b526a621aec7ee271357f97c169d60a6b0a9aafce6d6765539308:hHrg/lD7nSJHfxJopKY8rDRTY7jAzEqE1NnwqVKDUT1fIIB+tjiyFdyOQ1ZBnVqQ+YTBFDAfIwo9SWDwImP5AA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-10T10:35:12Z:f83a1fa5444c11e6662789300eaa869b709fa6fbdff93d95a86913e567256920:RKdz4FGQh9w4Ej5wshg6CerT5BpStrIDR7ghqkuK+udKkI0JktcWwtKS2UtWGWMpileBFjDfHzy6GblMpNTgDA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, analytics, execution-family, effective-definition, cost]
 version: "0.2.0"
@@ -16,7 +16,7 @@ answer honestly, and neither has a query surface yet.
 
 The field already projects effective-definition families and bounded run facts.
 The next ARC campaign slice adds project-owned bank/pending/replay/digest-moved
-classification from daemon-supplied `_dispatch` and `_run` proof rows. That is
+classification from daemon-supplied `dispatch` and `run` proof rows. That is
 acceptance instrumentation, not the generic seed-diff/cost-series query owned
 here: ARC interprets its outcomes, while RyeOS supplies identity and provenance.
 
@@ -34,24 +34,28 @@ Decomposes mechanically:
   config key. The seed is a versioned structure, so the diff is structural,
   not textual.
 
-Deliverable: a seed-diff projection — given two `definition:@digest` entities,
-emit typed change records (`contributor`, `coordinate`, `from`, `to`) the
-field renders in its existing compare machinery. The output is "the output
-differs *because* the operator layer gained a hook," not "the output differs."
+Deliverable: a seed-diff projection — given two exact, authorized run subjects,
+emit typed change records (`contributor`, `coordinate`, `change`, plus
+allowlisted identity sides) through a dedicated execution-comparison field
+source. Arbitrary composed values and their hashes remain undisclosed. A bare
+definition digest is not a lookup capability, and the existing artifact-grid
+comparison contract remains unchanged. The output is "the output differs
+*because* the operator layer gained a hook," not "the output differs."
 
 ## 2. Cost series — computation with a receipt
 
 Accounting scopes are sealed into capsules, so spend is already attributable
-to nameable behavior. Deliverable: cost-per-effective-digest as a series
-across a family — cost regressions become detectable the same way behavior
-regressions are. Relationship to
+to nameable behavior. Deliverable: exact per-run cost samples grouped by
+effective digest across a family — cost regressions become detectable without
+inventing a second accounting total. Direct costs and rollups retain their
+basis and are never summed together or with their children. Relationship to
 `directive-provider-accounting-and-hard-budgets.md`: budgets act at
 admission/dispatch time; this reads sealed scopes after the fact. Separate
 concerns, one denominator.
 
 ## Boundaries
 
-- The generic layer diffs seeds and sums sealed costs. Domain outcomes
+- The generic layer diffs seeds and reports sealed cost samples. Domain outcomes
   (win rates, quality) remain project evidence mapped by project projections —
   the field's standing ownership line.
 - No new store: seed diffs compute from capsules already retained; series
