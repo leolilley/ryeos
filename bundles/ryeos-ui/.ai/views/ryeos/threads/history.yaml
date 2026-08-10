@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-04T10:21:25Z:4e5e4de0bbefe3d9a2c98db8633e4e4061f470b6a560aea6cf4f6f0a59ad5420:URkJeezP1LsFsW7yukatBReNRpkW1/Zsu02Gxy22FjoigbyVZG+tigNEPuAKE0SSr5DWNjbEVvitcf6EitBZBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-10T09:26:26Z:4bf7b1071fdff8ad9751e35f86854f9848b85f7f2c413b7d8769ca3440c234e7:9OxXW9ArJjJxz3KDXHbG+ybWM5nKpf5oYWqtMZnVO5QS0pQRzzb/GYELFlYS8AaLpIXqpfASmu1flFN2Ex5iCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-threads
 title: Project Threads
 version: "1.0.0"
@@ -106,6 +106,20 @@ affordances:
       value:
         thread_id: "{record.thread_id}"
       open_view: view:ryeos/threads/detail
+  - id: compare-left
+    label: Compare as left
+    invoke:
+      plane: ui
+      facet: comparison
+      merge:
+        left_thread_id: "{record.thread_id}"
+  - id: compare-right
+    label: Compare as right
+    invoke:
+      plane: ui
+      facet: comparison
+      merge:
+        right_thread_id: "{record.thread_id}"
   - id: cancel
     label: Cancel
     invoke:

@@ -3917,6 +3917,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn shipped_history_exposes_both_comparison_actions_through_shared_overlay() {
+        use crate::ui::model::{BrowserSession, BrowserViewport};
+        let history: serde_json::Value = serde_yaml::from_str(include_str!(
+            "../../../../../bundles/ryeos-ui/.ai/views/ryeos/threads/history.yaml"
+        ))
+        .unwrap();
+        let session = BrowserSession {
+            effective_surface: Some(json!({
+                "name": "t",
+                "tiles": ["view:ryeos/threads/history"],
+                "views": { "view:ryeos/threads/history": history }
+            })),
+            read_only: false,
+            ..Default::default()
+        };
+        let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
+        let key = tile_default_source_key(&core, core.workspace.focused_tile);
+        core.data.sources.insert(
+            key,
+            json!({ "threads": [{
+                "thread_id": "T-ab",
+                "chain_root_id": "T-ab",
+                "kind": "graph",
+                "item_ref": "graph:test/run",
+                "status": "completed",
+                "created_at": "2026-08-10T00:00:00Z"
+            }] }),
+        );
+
+        let items = command_overlay_items_for(&core);
+        for (label, affordance_id) in [
+            ("Compare as left", "compare-left"),
+            ("Compare as right", "compare-right"),
+        ] {
+            let item = items
+                .iter()
+                .find(|item| item.label == label)
+                .unwrap_or_else(|| panic!("missing shared action {label}"));
+            assert!(matches!(&item.intent,
+                RyeOsUiIntent::InvokeAffordance { view_ref, affordance_id: actual, record }
+                    if view_ref == "view:ryeos/threads/history"
+                        && actual == affordance_id
+                        && record["thread_id"] == "T-ab"));
+        }
+    }
+
     /// Build a single focused timeline tile over a chain_replay response, with
     /// the feed point (distance-from-bottom 0) on the newest entry.
     fn feed_core(events: serde_json::Value) -> RyeOsCore {

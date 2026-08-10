@@ -1,0 +1,116 @@
+# ryeos:signed:2026-08-10T09:26:26Z:deae63ad0cae458adafc1b1eb32bf566c73f2e07d1e24ed008c405ceff179e52:kUEGFqHSHBmlCEdW2rji6wZH4IP0YZ6CW5UsjtYDfMclPq5YiLzD9OzbRptYxfm1KdcRiuXBlRvA5KX+oVrNDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: run-comparison
+title: Run comparison
+version: "1.0.0"
+description: "Exact mechanical comparison of two authorized retained executions: admitted program, execution realization, and authoritative per-run cost."
+
+widget: field
+sources:
+  comparison:
+    ref: service:ui/ryeos-ui/field/comparison
+    params:
+      left_thread_id: "@facet:comparison.left_thread_id"
+      right_thread_id: "@facet:comparison.right_thread_id"
+projections:
+  schema_version: ryeos.ui.field.projection.v1
+  groups:
+    - { id: summary, label: Comparison, layout: flow }
+    - { id: operands, label: Exact runs, parent: summary, layout: lanes }
+    - { id: definition, label: Definition changes, layout: stack, aggregate: { mode: count } }
+    - { id: realization, label: Execution realization, layout: stack, aggregate: { mode: count } }
+    - { id: cost, label: Run cost, layout: lanes }
+  layers:
+    - { id: summary, label: Summary, default_visible: true }
+    - { id: definition, label: Definition, default_visible: true }
+    - { id: realization, label: Realization, default_visible: true }
+    - { id: cost, label: Cost, default_visible: true }
+  entity_rules:
+    - match: { source: comparison, kind: run_comparison }
+      set:
+        role: comparison
+        group: summary
+        layer: summary
+        shape: diamond
+        emphasis: strong
+        tone:
+          field: status
+          map: { identical: good, changed: accent, incomplete: warn, refused: danger }
+          default: neutral
+    - match: { source: comparison, kind: comparison_operand }
+      set:
+        role: operand
+        group: operands
+        layer: summary
+        lane: "{attributes.side}"
+        label: "{attributes.thread_id}"
+        secondary: "{canonical_ref}"
+        shape: capsule
+        emphasis: strong
+    - match: { source: comparison, kind: definition_change }
+      set:
+        role: definition-change
+        group: definition
+        layer: definition
+        secondary: "{attributes.coordinate}"
+        shape: rect
+        fill: hollow
+        tone: accent
+    - match: { source: comparison, kind: execution_realization_comparison }
+      set:
+        role: realization-summary
+        group: realization
+        layer: realization
+        shape: hex
+        emphasis: strong
+        tone:
+          field: status
+          map: { identical: good, changed: accent }
+          default: neutral
+    - match: { source: comparison, kind: execution_realization_change }
+      set:
+        role: realization-change
+        group: realization
+        layer: realization
+        secondary: "{attributes.coordinate}"
+        shape: rect
+        fill: hollow
+        tone: accent
+    - match: { source: comparison, kind: run_cost }
+      set:
+        role: run-cost
+        group: cost
+        layer: cost
+        lane: "{attributes.side}"
+        shape: capsule
+        secondary: "{attributes.spend}"
+        tone:
+          field: status
+          map: { available: good, pending: accent, unavailable: warn }
+          default: neutral
+  relation_rules:
+    - match: { source: comparison, kind: compares_left }
+      set: { layer: summary, stroke: solid, directed: true, label: left }
+    - match: { source: comparison, kind: compares_right }
+      set: { layer: summary, stroke: solid, directed: true, label: right }
+    - match: { source: comparison, kind: changes_definition }
+      set: { layer: definition, stroke: dotted, directed: true }
+    - match: { source: comparison, kind: compares_realization }
+      set: { layer: realization, stroke: solid, directed: true }
+    - match: { source: comparison, kind: changes_realization }
+      set: { layer: realization, stroke: dotted, directed: true }
+    - match: { source: comparison, kind: measures_operand }
+      set: { layer: cost, stroke: solid, directed: true }
+selection:
+  change: select
+  activate: select
+affordances:
+  - id: select
+    label: Inspect
+    invoke:
+      plane: ui
+      facet: comparison
+      merge:
+        entity_id: "{record.id}"
+refresh:
+  on_facet: comparison
+  on_hint: [thread, activity]

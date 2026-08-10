@@ -580,6 +580,69 @@ mod tests {
     }
 
     #[test]
+    fn shipped_comparison_actions_merge_operands_and_fetch_only_when_complete() {
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        let history: crate::ui::content::ViewBinding = serde_yaml::from_str(include_str!(
+            "../../../../../../bundles/ryeos-ui/.ai/views/ryeos/threads/history.yaml"
+        ))
+        .unwrap();
+        let comparison: crate::ui::content::ViewBinding = serde_yaml::from_str(include_str!(
+            "../../../../../../bundles/ryeos-ui/.ai/views/ryeos/runs/comparison.yaml"
+        ))
+        .unwrap();
+        core.views
+            .insert("view:ryeos/threads/history".to_string(), history);
+        core.views
+            .insert("view:ryeos/runs/comparison".to_string(), comparison);
+        core.workspace.add_tile(ViewSpec {
+            view_ref: "view:ryeos/runs/comparison".to_string(),
+        });
+
+        let left_effects = core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::Activate {
+                intent: RyeOsUiIntent::InvokeAffordance {
+                    view_ref: "view:ryeos/threads/history".to_string(),
+                    affordance_id: "compare-left".to_string(),
+                    record: serde_json::json!({ "thread_id": "T-left" }),
+                },
+            },
+        });
+        assert_eq!(
+            core.seat.fold().get("comparison").unwrap()["left_thread_id"],
+            "T-left"
+        );
+        assert!(
+            !left_effects.iter().any(|effect| matches!(
+                &effect.kind,
+                RyeOsEffectKind::FetchSource { source_ref, .. }
+                    if source_ref == "service:ui/ryeos-ui/field/comparison"
+            )),
+            "a missing right operand must suppress comparison fetch"
+        );
+
+        let right_effects = core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::Activate {
+                intent: RyeOsUiIntent::InvokeAffordance {
+                    view_ref: "view:ryeos/threads/history".to_string(),
+                    affordance_id: "compare-right".to_string(),
+                    record: serde_json::json!({ "thread_id": "T-right" }),
+                },
+            },
+        });
+        let fold = core.seat.fold();
+        let facet = fold.get("comparison").unwrap();
+        assert_eq!(facet["left_thread_id"], "T-left");
+        assert_eq!(facet["right_thread_id"], "T-right");
+        assert!(right_effects.iter().any(|effect| matches!(
+            &effect.kind,
+            RyeOsEffectKind::FetchSource { source_ref, params, .. }
+                if source_ref == "service:ui/ryeos-ui/field/comparison"
+                    && params["left_thread_id"] == "T-left"
+                    && params["right_thread_id"] == "T-right"
+        )));
+    }
+
+    #[test]
     fn shipped_threads_list_cancel_uses_the_single_command_submit_path() {
         // Steering guard (05c §3): the ryeos has exactly ONE cancel path — the
         // audited command channel `service:commands/submit` with

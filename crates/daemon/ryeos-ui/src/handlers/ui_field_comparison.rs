@@ -576,6 +576,11 @@ fn add_cost(
         "comparison-cost",
         &json!({"comparison_id": model.id, "kind": "run_cost", "side": side}),
     )?;
+    let mut attributes = serde_json::to_value(&operand.cost)?;
+    attributes
+        .as_object_mut()
+        .expect("run cost sample serializes as an object")
+        .insert("side".to_string(), Value::String(side.to_string()));
     emitter.add_entity(FieldFactEntity {
         id: id.clone(),
         kind: "run_cost".to_string(),
@@ -598,7 +603,7 @@ fn add_cost(
         admitted_launch_capsule_hash: None,
         event_ref: None,
         artifact_ref: None,
-        attributes: serde_json::to_value(&operand.cost)?,
+        attributes,
         provenance: emitter.provenance(operand_evidence(operand)),
     })?;
     add_relation(
