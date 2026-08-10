@@ -30,6 +30,10 @@ impl NodeConfigSection for PersistentSessionPolicySection {
         SectionSourcePolicy::SystemAndState
     }
 
+    fn operator_policy_item_id(&self) -> Option<&'static str> {
+        Some("policy")
+    }
+
     fn parse(&self, ctx: &NodeItemContext, body: &Value) -> anyhow::Result<Box<dyn SectionRecord>> {
         if ctx.id != "policy" {
             bail!(
@@ -66,6 +70,7 @@ mod tests {
     fn policy_is_node_owned_and_parses_exact_limits() {
         let section = PersistentSessionPolicySection;
         assert_eq!(section.source_policy(), SectionSourcePolicy::SystemAndState);
+        assert_eq!(section.operator_policy_item_id(), Some("policy"));
         let context = NodeItemContext {
             section: "persistent_sessions".to_owned(),
             id: "policy".to_owned(),

@@ -120,6 +120,8 @@ pub(crate) fn run_handler_subprocess(
             project_authority: IsolationProjectAuthority::ReadOnly,
             filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            network_authority_ceiling:
+                crate::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
             live_access: None,
             state_root: None,
             checkpoint_dir: None,
@@ -137,6 +139,12 @@ pub(crate) fn run_handler_subprocess(
 
     let output = lillux::exec::lib_run(req);
     if !output.success {
+        if let Some(refusal) = output.launcher_refusal {
+            return Err(EngineError::HandlerSpawnFailed {
+                handler: canonical_ref.clone(),
+                detail: format!("isolation adapter refused launch: {refusal}"),
+            });
+        }
         if output.timed_out {
             return Err(EngineError::HandlerSpawnFailed {
                 handler: canonical_ref.clone(),

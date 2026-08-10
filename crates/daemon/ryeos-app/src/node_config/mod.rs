@@ -107,6 +107,13 @@ pub trait NodeConfigSection: Send + Sync {
     /// Which sources this section scans.
     fn source_policy(&self) -> SectionSourcePolicy;
 
+    /// Fixed item id that a stopped-node local operator may author through the
+    /// typed `node policy-apply` boundary. Most sections are runtime- or
+    /// bundle-owned and deliberately return `None`.
+    fn operator_policy_item_id(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Parse a verified YAML body into a section record.
     fn parse(
         &self,

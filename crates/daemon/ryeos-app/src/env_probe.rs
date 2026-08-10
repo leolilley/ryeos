@@ -324,6 +324,8 @@ mod tests {
                 project_authority: IsolationProjectAuthority::ReadOnly,
                 filesystem_authority_ceiling:
                     ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                network_authority_ceiling:
+                    ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                 live_access: None,
                 state_root: None,
                 checkpoint_dir: None,

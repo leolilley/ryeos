@@ -16,7 +16,7 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
-pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v1";
+pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v2";
 pub const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 pub const MAX_WORKSPACE_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
@@ -156,8 +156,8 @@ impl<'de> Visitor<'de> for StrictJsonValueVisitor {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum IsolationAdapterProtocolVersion {
-    #[serde(rename = "ryeos.isolation-adapter/v1")]
-    V1,
+    #[serde(rename = "ryeos.isolation-adapter/v2")]
+    Current,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -757,6 +757,10 @@ pub struct AdapterLaunchRequest {
     pub plan: IsolationPlan,
     pub authorities: Vec<IsolationAuthority>,
     pub artifacts: BTreeMap<IsolationArtifactRole, u32>,
+    /// Exact signed adapter executable retained by the daemon. The adapter
+    /// verifies that this handle identifies its current image before using a
+    /// duplicate as the sandbox-side sealed-argv bridge.
+    pub adapter_fd: u32,
     pub status_fd: u32,
     pub lifecycle: AdapterLaunchLifecycle,
 }
@@ -996,6 +1000,11 @@ impl AdapterLaunchRequest {
             ));
         }
         let mut descriptors = validate_artifact_descriptors(&self.artifacts, Some(self.status_fd))?;
+        if self.adapter_fd <= 2 || !descriptors.insert(self.adapter_fd) {
+            return Err(ProtocolValidationError::new(
+                "adapter descriptor overlaps stdio or another isolation protocol role",
+            ));
+        }
         if let AdapterLaunchLifecycle::AwaitAttachment {
             release_fd,
             release_keepalive_fd,
@@ -1272,7 +1281,7 @@ mod tests {
     fn declaration_requires_distinct_launcher() {
         let declaration = IsolationBackendDeclaration {
             id: "example".to_string(),
-            protocol: IsolationAdapterProtocolVersion::V1,
+            protocol: IsolationAdapterProtocolVersion::Current,
             targets: vec![IsolationTargetTriple::X86_64UnknownLinuxGnu],
             adapter: "adapter".to_string(),
             artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, "adapter".to_string())]),
@@ -1285,7 +1294,7 @@ mod tests {
     fn declaration_rejects_duplicate_targets_and_unsafe_executable_names() {
         let mut declaration = IsolationBackendDeclaration {
             id: "example".to_string(),
-            protocol: IsolationAdapterProtocolVersion::V1,
+            protocol: IsolationAdapterProtocolVersion::Current,
             targets: vec![
                 IsolationTargetTriple::X86_64UnknownLinuxGnu,
                 IsolationTargetTriple::X86_64UnknownLinuxGnu,
@@ -1311,7 +1320,7 @@ mod tests {
     fn signed_declaration_is_the_capability_upper_bound() {
         let declaration = IsolationBackendDeclaration {
             id: "linux".to_string(),
-            protocol: IsolationAdapterProtocolVersion::V1,
+            protocol: IsolationAdapterProtocolVersion::Current,
             targets: vec![IsolationTargetTriple::X86_64UnknownLinuxGnu],
             adapter: "adapter".to_string(),
             artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, "launcher".to_string())]),
@@ -1346,8 +1355,8 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_duplicate_keys_at_every_depth() {
-        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v1","protocol":"ryeos.isolation-adapter/v1","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
-        let nested = r#"{"protocol":"ryeos.isolation-adapter/v1","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3,"launcher":4}}"#;
+        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v2","protocol":"ryeos.isolation-adapter/v2","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let nested = r#"{"protocol":"ryeos.isolation-adapter/v2","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3,"launcher":4}}"#;
         for document in [top_level, nested] {
             let error = from_json_str_strict::<AdapterInspectionRequest>(document).unwrap_err();
             assert!(error.to_string().contains("duplicate JSON object key"));
@@ -1356,7 +1365,7 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_unknown_fields_trailing_data_and_excessive_depth() {
-        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v1","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
+        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v2","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
         assert!(
             from_json_str_strict::<AdapterInspectionRequest>(unknown)
                 .unwrap_err()
@@ -1364,7 +1373,7 @@ mod tests {
                 .contains("unknown field")
         );
 
-        let valid = r#"{"protocol":"ryeos.isolation-adapter/v1","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let valid = r#"{"protocol":"ryeos.isolation-adapter/v2","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
         assert!(
             from_json_str_strict::<AdapterInspectionRequest>(&format!("{valid} true"))
                 .unwrap_err()
@@ -1383,6 +1392,13 @@ mod tests {
                 .to_string()
                 .contains("nesting exceeds")
         );
+    }
+
+    #[test]
+    fn predecessor_adapter_protocol_is_refused() {
+        let predecessor = r#"{"protocol":"ryeos.isolation-adapter/v1","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let error = from_json_str_strict::<AdapterInspectionRequest>(predecessor).unwrap_err();
+        assert!(error.to_string().contains("unknown variant"));
     }
 
     #[test]
@@ -1522,10 +1538,11 @@ mod tests {
     fn launch_request_rejects_descriptor_reuse_across_roles() {
         let (plan, authorities) = complete_plan();
         let request = AdapterLaunchRequest {
-            protocol: IsolationAdapterProtocolVersion::V1,
+            protocol: IsolationAdapterProtocolVersion::Current,
             plan,
             authorities,
             artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 7)]),
+            adapter_fd: 10,
             status_fd: 6,
             lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
                 release_fd: 7,
@@ -1535,16 +1552,33 @@ mod tests {
         assert!(request.validate().unwrap_err().to_string().contains(
             "attachment release descriptor overlaps stdio or another isolation protocol role"
         ));
+
+        let (plan, authorities) = complete_plan();
+        let request = AdapterLaunchRequest {
+            protocol: IsolationAdapterProtocolVersion::Current,
+            plan,
+            authorities,
+            artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 7)]),
+            adapter_fd: 7,
+            status_fd: 6,
+            lifecycle: AdapterLaunchLifecycle::Run,
+        };
+        assert!(request
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("adapter descriptor overlaps stdio or another isolation protocol role"));
     }
 
     #[test]
     fn launch_lifecycle_wire_shape_is_exact() {
         let (plan, authorities) = complete_plan();
         let run = AdapterLaunchRequest {
-            protocol: IsolationAdapterProtocolVersion::V1,
+            protocol: IsolationAdapterProtocolVersion::Current,
             plan: plan.clone(),
             authorities: authorities.clone(),
             artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 7)]),
+            adapter_fd: 8,
             status_fd: 6,
             lifecycle: AdapterLaunchLifecycle::Run,
         };
@@ -1553,10 +1587,11 @@ mod tests {
         run.validate().unwrap();
 
         let awaiting = AdapterLaunchRequest {
-            protocol: IsolationAdapterProtocolVersion::V1,
+            protocol: IsolationAdapterProtocolVersion::Current,
             plan,
             authorities,
             artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 7)]),
+            adapter_fd: 10,
             status_fd: 6,
             lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
                 release_fd: 8,
@@ -1660,7 +1695,7 @@ mod tests {
     #[test]
     fn inspection_contract_validates_identity_descriptors_and_digests() {
         let request = AdapterInspectionRequest {
-            protocol: IsolationAdapterProtocolVersion::V1,
+            protocol: IsolationAdapterProtocolVersion::Current,
             target: IsolationTargetTriple::X86_64UnknownLinuxGnu,
             backend_id: "invalid/example".to_string(),
             artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 3)]),
@@ -1668,7 +1703,7 @@ mod tests {
         assert!(request.validate().is_err());
 
         let response = AdapterInspectionResponse {
-            protocol: IsolationAdapterProtocolVersion::V1,
+            protocol: IsolationAdapterProtocolVersion::Current,
             adapter_build: "0.1.0".to_string(),
             effective_capabilities: BTreeSet::from([IsolationCapability::FilesystemPrivateRoot]),
             artifacts: BTreeMap::from([(

@@ -269,7 +269,7 @@ pub(super) fn handle_provider_attempt_prepare(
                 && !state.isolation.admits_recorded_local_worker()
             {
                 anyhow::bail!(
-                    "recorded local-provider execution requires enforced isolation with an isolated network"
+                    "recorded local-provider execution requires enforced isolation with a backend capable of the per-launch isolated-network ceiling"
                 );
             }
             let capsule_hash = sealed.admitted_sessions.get(&execute).ok_or_else(|| {

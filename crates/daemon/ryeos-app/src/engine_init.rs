@@ -403,8 +403,9 @@ fn resolve_verified_isolation_backend(
     if !declaration.targets.contains(&target) {
         anyhow::bail!("{diagnostic_prefix}isolation implementation omits the host target");
     }
+    let adapter_ref = format!("bin:{}", declaration.adapter);
     let adapter = ryeos_engine::binary_resolver::capture_bundle_binary_ref(
-        &declaration.adapter,
+        &adapter_ref,
         root,
         node_trust_store,
     )
@@ -418,8 +419,9 @@ fn resolve_verified_isolation_backend(
     let mut artifact_handles = std::collections::BTreeMap::new();
     let mut artifact_digests = std::collections::BTreeMap::new();
     for (role, executable) in &declaration.artifacts {
+        let executable_ref = format!("bin:{executable}");
         let artifact = ryeos_engine::binary_resolver::capture_bundle_binary_ref(
-            executable,
+            &executable_ref,
             root,
             node_trust_store,
         )
@@ -512,7 +514,7 @@ fn inspect_isolation_backend(
             })
             .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
         let request = AdapterInspectionRequest {
-            protocol: IsolationAdapterProtocolVersion::V1,
+            protocol: IsolationAdapterProtocolVersion::Current,
             target,
             backend_id: declaration.id.clone(),
             artifacts,

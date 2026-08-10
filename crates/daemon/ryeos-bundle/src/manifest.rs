@@ -1368,7 +1368,7 @@ typo_field: oops
 
         ryeos_isolation_protocol::IsolationBackendDeclaration {
             id: id.to_string(),
-            protocol: IsolationAdapterProtocolVersion::V1,
+            protocol: IsolationAdapterProtocolVersion::Current,
             targets: vec![IsolationTargetTriple::X86_64UnknownLinuxGnu],
             adapter: "adapter".to_string(),
             artifacts: std::collections::BTreeMap::from([(
@@ -1394,7 +1394,7 @@ name: isolation
 version: "1.0"
 isolation_backends:
   - id: linux
-    protocol: ryeos.isolation-adapter/v1
+    protocol: ryeos.isolation-adapter/v2
     targets: [x86_64-unknown-linux-gnu]
     adapter: adapter
     artifacts: { launcher: launcher }

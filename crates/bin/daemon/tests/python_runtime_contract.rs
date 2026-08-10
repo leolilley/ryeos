@@ -170,6 +170,8 @@ fn run_tool_with_hints(
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
         isolation_filesystem_authority_ceiling:
             ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+        isolation_network_authority_ceiling:
+            ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
         isolation_live_access_authority: Some(
             ryeos_engine::isolation::IsolationLiveAccessAuthority::UnconfinedHost {
                 authorized_write_namespaces: vec!["project".to_string()],

@@ -31,7 +31,11 @@ pub(crate) fn admit_or_verify(
     let launch_authority_digest = launch_authority.digest()?;
     let artifact_identity_digest = launch_authority.artifact_identity_digest()?;
     let execution_closure_digest = launch_authority.execution_closure_digest()?;
-    let properties = execution_properties(state)?;
+    let properties = execution_properties(
+        state,
+        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+        ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
+    )?;
 
     if let Some(existing_hash) = metadata.execution_realization_hash.as_deref() {
         let existing = load_realization(state, existing_hash)?;
@@ -65,6 +69,8 @@ pub(crate) fn admit_or_verify(
         contract_ref,
         contract_digest,
         components,
+        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+        ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
         staged_publication,
     )
 }
@@ -88,6 +94,8 @@ pub(crate) fn admit_persistent_session(
         contract_ref,
         contract_digest,
         external_components(state, resolution)?,
+        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution,
+        ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::Isolated,
         staged_publication,
     )
 }
@@ -103,7 +111,11 @@ pub(crate) fn verify_persistent_session(
     capsule.validate()?;
     let authority = capsule.authority();
     let existing = load_realization(state, &capsule.execution_realization_hash)?;
-    let properties = execution_properties(state)?;
+    let properties = execution_properties(
+        state,
+        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution,
+        ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::Isolated,
+    )?;
     if existing.launch_authority_digest != authority.digest()?
         || existing.effective_definition_digest != effective_definition_digest
         || existing.artifact_identity_digest != authority.artifact_identity_digest()?
@@ -129,6 +141,8 @@ fn store_new_realization(
     contract_ref: &str,
     contract_digest: &str,
     components: Vec<ExecutionComponentReference>,
+    filesystem_authority_ceiling: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
+    network_authority_ceiling: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling,
     staged_publication: Option<&mut ryeos_state::PendingCasPublication>,
 ) -> Result<ExecutionRealizationAdmission> {
     let node = state
@@ -136,7 +150,11 @@ fn store_new_realization(
         .get::<ryeos_app::execution_identity_probe::NodeExecutionIdentity>()
         .ok_or_else(|| anyhow::anyhow!("node execution substrate evidence is unavailable"))?;
     verify_node_evidence(state, &node)?;
-    let properties = execution_properties(state)?;
+    let properties = execution_properties(
+        state,
+        filesystem_authority_ceiling,
+        network_authority_ceiling,
+    )?;
     let candidate = AdmittedExecutionRealization {
         schema: EXECUTION_REALIZATION_SCHEMA_VERSION,
         kind: ADMITTED_EXECUTION_REALIZATION_KIND.to_owned(),
@@ -208,7 +226,11 @@ fn store_new_realization(
     })
 }
 
-fn execution_properties(state: &AppState) -> Result<BTreeMap<String, serde_json::Value>> {
+fn execution_properties(
+    state: &AppState,
+    filesystem_authority_ceiling: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
+    network_authority_ceiling: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling,
+) -> Result<BTreeMap<String, serde_json::Value>> {
     let inspection = state.isolation.inspection();
     let mut properties = BTreeMap::new();
     properties.insert(
@@ -227,7 +249,39 @@ fn execution_properties(state: &AppState) -> Result<BTreeMap<String, serde_json:
         "isolation_backend_inspection_digest".to_owned(),
         serde_json::Value::String(isolation_backend_inspection_digest(&inspection.backend)?),
     );
+    properties.extend(authority_ceiling_properties(
+        filesystem_authority_ceiling,
+        network_authority_ceiling,
+    ));
     Ok(properties)
+}
+
+fn authority_ceiling_properties(
+    filesystem: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
+    network: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling,
+) -> BTreeMap<String, serde_json::Value> {
+    let filesystem = match filesystem {
+        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy => "node_policy",
+        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution => {
+            "captured_execution"
+        }
+    };
+    let network = match network {
+        ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy => "node_policy",
+        ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::Isolated => "isolated",
+    };
+    [
+        (
+            "isolation_filesystem_authority_ceiling".to_owned(),
+            serde_json::Value::String(filesystem.to_owned()),
+        ),
+        (
+            "isolation_network_authority_ceiling".to_owned(),
+            serde_json::Value::String(network.to_owned()),
+        ),
+    ]
+    .into_iter()
+    .collect()
 }
 
 /// Path-free identity of the complete backend observation that can affect a
@@ -438,6 +492,27 @@ mod tests {
         assert_ne!(
             isolation_backend_inspection_digest(&first).unwrap(),
             isolation_backend_inspection_digest(&second).unwrap()
+        );
+    }
+
+    #[test]
+    fn captured_launch_ceilings_move_execution_realization_identity() {
+        let ordinary = authority_ceiling_properties(
+            ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
+        );
+        let captured = authority_ceiling_properties(
+            ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution,
+            ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::Isolated,
+        );
+        assert_ne!(ordinary, captured);
+        assert_eq!(
+            captured["isolation_filesystem_authority_ceiling"],
+            serde_json::json!("captured_execution")
+        );
+        assert_eq!(
+            captured["isolation_network_authority_ceiling"],
+            serde_json::json!("isolated")
         );
     }
 }

@@ -515,6 +515,8 @@ impl PreparedItemPlan {
                 ryeos_engine::isolation::IsolationProjectAuthority::EphemeralScratch,
             isolation_filesystem_authority_ceiling:
                 ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution,
+            isolation_network_authority_ceiling:
+                ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::Isolated,
             isolation_live_access_authority: None,
             isolation_state_root: None,
             isolation_checkpoint_dir: None,
@@ -1221,6 +1223,8 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItemAwaitingAtta
         isolation_project_authority,
         isolation_filesystem_authority_ceiling:
             ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+        isolation_network_authority_ceiling:
+            ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
         isolation_live_access_authority,
         isolation_state_root: state_root.map(std::path::Path::to_path_buf),
         isolation_checkpoint_dir: allocated_checkpoint_dir.clone(),

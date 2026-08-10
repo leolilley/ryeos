@@ -60,6 +60,15 @@ pub enum IsolationFilesystemAuthorityCeiling {
     CapturedExecution,
 }
 
+/// Launch-owned narrowing of the node network ceiling. Ordinary execution
+/// inherits the configured node mode. A captured local worker must remove host
+/// networking even when the node permits it for unrelated admitted tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationNetworkAuthorityCeiling {
+    NodePolicy,
+    Isolated,
+}
+
 /// Verified file identity for executable code used by one launch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -286,6 +295,7 @@ pub struct IsolationLaunchContext<'a> {
     pub project_path: &'a Path,
     pub project_authority: IsolationProjectAuthority,
     pub filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling,
+    pub network_authority_ceiling: IsolationNetworkAuthorityCeiling,
     pub live_access: Option<&'a IsolationLiveAccessAuthority>,
     pub state_root: Option<&'a Path>,
     pub checkpoint_dir: Option<&'a Path>,

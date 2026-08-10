@@ -549,6 +549,56 @@ fn malformed_launcher_status_fails_closed_and_kills_wrapper() {
 
 #[test]
 #[cfg(target_os = "linux")]
+fn bubblewrap_namespace_identity_fields_are_accepted_but_remain_closed() {
+    let status = supervised_launcher_status_pipe().expect("status pipe");
+    let status_fd = status.writer_fd();
+    let wrapper_script = format!(
+        "sleep 30 & target=$!; printf '{{\"child-pid\":%s,\"ipc-namespace\":1,\"mnt-namespace\":2,\"net-namespace\":3,\"uts-namespace\":4}}\\n' \"$target\" >&{status_fd}; wait \"$target\""
+    );
+    let mut request = sh(&["-c", &wrapper_script]);
+    request.envs = path_env();
+    request.inherited_fds.push(status.writer);
+    request.supervised_status = Some(status.reader);
+
+    let running = spawn(request).expect("known Bubblewrap status fields must be accepted");
+    running.abort();
+
+    let status = supervised_launcher_status_pipe().expect("status pipe");
+    let status_fd = status.writer_fd();
+    let wrapper_script =
+        format!("printf '{{\"child-pid\":123,\"unexpected-namespace\":1}}\\n' >&{status_fd}");
+    let mut request = sh(&["-c", &wrapper_script]);
+    request.envs = path_env();
+    request.inherited_fds.push(status.writer);
+    request.supervised_status = Some(status.reader);
+    let Err(result) = spawn(request) else {
+        panic!("unknown launcher status fields must still fail closed");
+    };
+    assert!(result.stderr.contains("unknown field"), "{}", result.stderr);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn launcher_stderr_is_retained_when_status_closes_before_target_identity() {
+    let status = supervised_launcher_status_pipe().expect("status pipe");
+    let mut request = sh(&["-c", "printf 'backend setup failed\\n' >&2"]);
+    request.envs = path_env();
+    request.inherited_fds.push(status.writer);
+    request.supervised_status = Some(status.reader);
+
+    let Err(result) = spawn(request) else {
+        panic!("a launcher without target identity must refuse the spawn");
+    };
+    assert!(result.stderr.contains("status channel reached EOF"));
+    assert!(
+        result.stderr.contains("backend setup failed"),
+        "{}",
+        result.stderr
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
 fn duplicate_launcher_status_keys_fail_closed() {
     let status = supervised_launcher_status_pipe().expect("status pipe");
     let status_fd = status.writer_fd();

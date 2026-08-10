@@ -698,6 +698,8 @@ fn exec_tool(
                 project_authority: project_authority.project,
                 filesystem_authority_ceiling:
                     ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                network_authority_ceiling:
+                    ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                 live_access: project_authority.live_access.as_ref(),
                 state_root: None,
                 checkpoint_dir: None,

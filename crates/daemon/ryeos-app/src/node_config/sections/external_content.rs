@@ -48,6 +48,10 @@ impl NodeConfigSection for ExternalContentImportPolicySection {
         SectionSourcePolicy::SystemAndState
     }
 
+    fn operator_policy_item_id(&self) -> Option<&'static str> {
+        Some("policy")
+    }
+
     fn parse(&self, ctx: &NodeItemContext, body: &Value) -> anyhow::Result<Box<dyn SectionRecord>> {
         if ctx.id != "policy" {
             bail!(
@@ -138,6 +142,10 @@ mod tests {
 
     #[test]
     fn policy_rejects_relative_roots_and_unbounded_limits() {
+        assert_eq!(
+            ExternalContentImportPolicySection.operator_policy_item_id(),
+            Some("policy")
+        );
         let policy = ExternalContentImportPolicyRecord {
             schema: 1,
             roots: BTreeMap::from([(

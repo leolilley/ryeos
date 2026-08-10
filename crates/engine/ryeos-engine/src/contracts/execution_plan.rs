@@ -184,6 +184,7 @@ pub struct EngineContext {
     pub isolation_project_authority: crate::isolation::IsolationProjectAuthority,
     pub isolation_filesystem_authority_ceiling:
         crate::isolation::IsolationFilesystemAuthorityCeiling,
+    pub isolation_network_authority_ceiling: crate::isolation::IsolationNetworkAuthorityCeiling,
     pub isolation_live_access_authority: Option<crate::isolation::IsolationLiveAccessAuthority>,
     pub isolation_state_root: Option<PathBuf>,
     pub isolation_checkpoint_dir: Option<PathBuf>,

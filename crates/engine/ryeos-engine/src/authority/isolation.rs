@@ -33,8 +33,8 @@ mod provenance;
 pub use authority::{
     IsolationCommandAuthority, IsolationCommandAuthorityRef, IsolationDescriptorBoundCommand,
     IsolationDescriptorFileIdentity, IsolationFilesystemAuthorityCeiling, IsolationLaunchContext,
-    IsolationLiveAccessAuthority, IsolationProjectAuthority, IsolationReadOnlyMountAuthority,
-    IsolationTargetChannelAuthority, IsolationVerifiedCode,
+    IsolationLiveAccessAuthority, IsolationNetworkAuthorityCeiling, IsolationProjectAuthority,
+    IsolationReadOnlyMountAuthority, IsolationTargetChannelAuthority, IsolationVerifiedCode,
 };
 pub use backend::ResolvedIsolationBackend;
 pub use inspection::{IsolationBackendInspection, IsolationBackendStatus, IsolationInspection};
@@ -917,7 +917,7 @@ impl IsolationRuntime {
                 },
             ];
             let request = AdapterWorkspaceRequest {
-                protocol: IsolationAdapterProtocolVersion::V1,
+                protocol: IsolationAdapterProtocolVersion::Current,
                 operation,
                 workspace_id: workspace_id.to_string(),
                 launch_owner: launch_owner.to_string(),
@@ -1011,17 +1011,25 @@ impl IsolationRuntime {
     /// uses this before selecting any privileged bundle artifact.
     pub fn load_policy(app_root: &Path) -> Result<IsolationPolicy, EngineError> {
         let loaded = load_policy_source(app_root)?;
-        if loaded.policy.version != ISOLATION_POLICY_VERSION {
+        Self::validate_policy(&loaded.policy)?;
+        Ok(loaded.policy)
+    }
+
+    /// Validate an operator-authored policy before it is atomically installed
+    /// at the fixed node-owned path. Backend resolution remains a prospective
+    /// node-generation operation and is intentionally not performed here.
+    pub fn validate_policy(policy: &IsolationPolicy) -> Result<(), EngineError> {
+        if policy.version != ISOLATION_POLICY_VERSION {
             return Err(refused(format!(
                 "unsupported node isolation policy version {} (expected {})",
-                loaded.policy.version, ISOLATION_POLICY_VERSION
+                policy.version, ISOLATION_POLICY_VERSION
             )));
         }
-        validate_policy_semantics(&loaded.policy)?;
-        if loaded.policy.mode == IsolationMode::Enforce {
-            validate_enforced_limits(&loaded.policy.limits)?;
+        validate_policy_semantics(policy)?;
+        if policy.mode == IsolationMode::Enforce {
+            validate_enforced_limits(&policy.limits)?;
         }
-        Ok(loaded.policy)
+        Ok(())
     }
 
     pub fn load_with_backend(
@@ -1207,11 +1215,16 @@ impl IsolationRuntime {
         self.state == IsolationRuntimeState::Enforced
     }
 
-    /// Recorded local-worker evidence may claim an ambient-endpoint-free
-    /// execution boundary only when the active policy both enforces the
-    /// backend and removes host networking.
+    /// Recorded local-worker evidence requires an enforced backend capable of
+    /// removing host networking. The per-launch network ceiling performs that
+    /// narrowing; unrelated tools may retain the node policy's host mode.
     pub fn admits_recorded_local_worker(&self) -> bool {
-        self.is_enforced() && self.inspection.network.mode == IsolationNetworkMode::Isolated
+        self.is_enforced()
+            && self
+                .inspection
+                .backend
+                .effective_capabilities
+                .contains(&ryeos_isolation_protocol::IsolationCapability::NetworkIsolated)
     }
 
     /// Capture the exact executable selected by a fully compiled direct plan.
@@ -1611,21 +1624,21 @@ impl IsolationRuntime {
             && context.filesystem_authority_ceiling
                 == IsolationFilesystemAuthorityCeiling::CapturedExecution
         {
-            let unexpected_readable = self
+            let admits_verified_code = self
                 .inspection
                 .filesystem
                 .readable
                 .iter()
-                .find(|entry| entry.as_str() != "{verified_code}");
-            let unexpected_writable = self
+                .any(|entry| entry == "{verified_code}");
+            let admits_project = self
                 .inspection
                 .filesystem
                 .writable
                 .iter()
-                .find(|entry| entry.as_str() != "{project}");
-            if unexpected_readable.is_some() || unexpected_writable.is_some() {
+                .any(|entry| entry == "{project}");
+            if !admits_verified_code || !admits_project {
                 return Err(refused(format!(
-                    "captured execution admits only {{verified_code}} readable and {{project}} writable; node policy requested readable {:?}, writable {:?}",
+                    "captured execution requires node ceilings for {{verified_code}} readable and {{project}} writable; node policy requested readable {:?}, writable {:?}",
                     self.inspection.filesystem.readable, self.inspection.filesystem.writable
                 )));
             }
@@ -2262,14 +2275,21 @@ impl IsolationRuntime {
             checkpoint_source_handle: checkpoint_source_handle.as_ref(),
             project_source_handle: project_source_handle.as_ref(),
         };
+        let configured_writable = self
+            .inspection
+            .filesystem
+            .writable
+            .iter()
+            .filter(|configured| {
+                context.filesystem_authority_ceiling
+                    == IsolationFilesystemAuthorityCeiling::NodePolicy
+                    || configured.as_str() == "{project}"
+            });
         let mut resolved_writable_mounts =
             if context.project_authority == IsolationProjectAuthority::ReadOnly {
                 Vec::new()
             } else {
-                self.inspection
-                    .filesystem
-                    .writable
-                    .iter()
+                configured_writable
                     .map(|configured| resolve_writable_mount(configured, &writable_resolution))
                     .collect::<Result<Vec<_>, _>>()?
             };
@@ -2525,11 +2545,17 @@ impl IsolationRuntime {
             node_trusted_keys_dir: context.node_trusted_keys_dir,
             verified_code_mounts: &verified_code_mounts,
         };
-        let mut readable_mounts = self
+        let configured_readable = self
             .inspection
             .filesystem
             .readable
             .iter()
+            .filter(|configured| {
+                context.filesystem_authority_ceiling
+                    == IsolationFilesystemAuthorityCeiling::NodePolicy
+                    || configured.as_str() == "{verified_code}"
+            });
+        let mut readable_mounts = configured_readable
             .map(|configured| resolve_readable_mounts(configured, &readable_resolution))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
@@ -2981,9 +3007,14 @@ impl IsolationRuntime {
             environment: IsolationEnvironment {
                 values: environment,
             },
-            network: match self.inspection.network.mode {
-                IsolationNetworkMode::Host => IsolationNetwork::Host,
-                IsolationNetworkMode::Isolated => IsolationNetwork::Isolated,
+            network: match context.network_authority_ceiling {
+                IsolationNetworkAuthorityCeiling::Isolated => IsolationNetwork::Isolated,
+                IsolationNetworkAuthorityCeiling::NodePolicy => {
+                    match self.inspection.network.mode {
+                        IsolationNetworkMode::Host => IsolationNetwork::Host,
+                        IsolationNetworkMode::Isolated => IsolationNetwork::Isolated,
+                    }
+                }
             },
             devices: IsolationDeviceSurface::Minimal,
             private_tmp: true,
@@ -3017,10 +3048,15 @@ impl IsolationRuntime {
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         let launch_request = AdapterLaunchRequest {
-            protocol: IsolationAdapterProtocolVersion::V1,
+            protocol: IsolationAdapterProtocolVersion::Current,
             plan,
             authorities,
             artifacts: artifact_fds,
+            adapter_fd: mount_fd_arg(&backend.adapter_handle)
+                .parse::<u32>()
+                .map_err(|error| {
+                    refused(format!("invalid isolation adapter descriptor: {error}"))
+                })?,
             status_fd: u32::try_from(status_fd)
                 .map_err(|_| refused("invalid isolation status descriptor".to_string()))?,
             lifecycle: adapter_lifecycle,
@@ -3041,9 +3077,11 @@ impl IsolationRuntime {
         let request_fd = mount_fd_arg(&request_handle);
         inherited_fds.extend(authority_handles);
         inherited_fds.extend(backend.artifact_handles.values().cloned());
-        // The adapter descriptor is used only as the initial exec path. Keep
-        // its parent handle alive through spawn but leave FD_CLOEXEC set so it
-        // disappears in the adapter image and cannot reach its launcher or target.
+        // The exact signed adapter is both the initial executable and the
+        // typed source for its sandbox-side sealed-argv bridge. The adapter
+        // verifies the identity, duplicates it into its private descriptor
+        // range, and closes this original at the launcher exec boundary.
+        inherited_fds.push(backend.adapter_handle.clone());
         inherited_fds.push(request_handle);
 
         let requested_open_files = limits.as_ref().and_then(|limits| limits.max_open_files);
@@ -3105,7 +3143,7 @@ impl IsolationRuntime {
             signer_fingerprint: self.inspection.backend.signer_fingerprint.clone(),
             adapter_digest: self.inspection.backend.adapter_digest.clone(),
             adapter_protocol: (self.state == IsolationRuntimeState::Enforced)
-                .then_some(IsolationAdapterProtocolVersion::V1),
+                .then_some(IsolationAdapterProtocolVersion::Current),
             payloads: self.inspection.backend.artifacts.clone(),
             effective_capabilities: self.inspection.backend.effective_capabilities.clone(),
             plan_digest,
@@ -4934,7 +4972,7 @@ mod tests {
             },
             declaration: IsolationBackendDeclaration {
                 id: "example".to_string(),
-                protocol: IsolationAdapterProtocolVersion::V1,
+                protocol: IsolationAdapterProtocolVersion::Current,
                 targets: vec![
                     ryeos_isolation_protocol::IsolationTargetTriple::X86_64UnknownLinuxGnu,
                 ],
@@ -5284,6 +5322,7 @@ mod tests {
                     project_path: app_root.path(),
                     project_authority: IsolationProjectAuthority::ReadOnly,
                     filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
+                    network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
                     checkpoint_dir: None,
@@ -5360,6 +5399,7 @@ mod tests {
                     project_path: app_root.path(),
                     project_authority: IsolationProjectAuthority::ReadOnly,
                     filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
+                    network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
                     checkpoint_dir: None,
@@ -5423,6 +5463,7 @@ mod tests {
                     project_path: project.path(),
                     project_authority: IsolationProjectAuthority::ReadOnly,
                     filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
+                    network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
                     checkpoint_dir: None,
@@ -5520,6 +5561,7 @@ mod tests {
                     project_path: project.path(),
                     project_authority: IsolationProjectAuthority::External,
                     filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
+                    network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: Some(&live_access),
                     state_root: None,
                     checkpoint_dir: None,
@@ -5569,9 +5611,15 @@ mod tests {
         let mut policy = IsolationPolicy::default_disabled();
         policy.mode = IsolationMode::Enforce;
         policy.backend = Some(resolved_backend().selection.clone());
-        policy.filesystem.readable = vec!["{verified_code}".to_string()];
-        policy.filesystem.writable = vec!["{project}".to_string()];
-        policy.network.mode = IsolationNetworkMode::Isolated;
+        policy.filesystem.readable = vec![
+            "{node_public_identity}".to_string(),
+            "{daemon_socket}".to_string(),
+            "{bundle_roots}".to_string(),
+            "{node_trusted_keys}".to_string(),
+            "{verified_code}".to_string(),
+        ];
+        policy.filesystem.writable = vec!["{project}".to_string(), "{checkpoint_dir}".to_string()];
+        policy.network.mode = IsolationNetworkMode::Host;
         write_policy(app_root.path(), &policy);
 
         let mut backend = resolved_backend();
@@ -5584,6 +5632,7 @@ mod tests {
             IsolationCapability::DevicesMinimal,
             IsolationCapability::EnvironmentExact,
             IsolationCapability::NetworkIsolated,
+            IsolationCapability::NetworkHost,
             IsolationCapability::ProcessHostPidNamespace,
             IsolationCapability::ProcessTargetPidReporting,
             IsolationCapability::LifecycleSharedProcessGroup,
@@ -5619,6 +5668,7 @@ mod tests {
                     project_authority: IsolationProjectAuthority::EphemeralScratch,
                     filesystem_authority_ceiling:
                         IsolationFilesystemAuthorityCeiling::CapturedExecution,
+                    network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
                     live_access: None,
                     state_root: None,
                     checkpoint_dir: None,
@@ -5645,6 +5695,7 @@ mod tests {
         let mut request_bytes = Vec::new();
         request_handle.read_to_end(&mut request_bytes).unwrap();
         let request: serde_json::Value = serde_json::from_slice(&request_bytes).unwrap();
+        assert_eq!(request["plan"]["network"], "isolated");
         let mounts = request["plan"]["mounts"].as_array().unwrap();
         for mount in mounts {
             let destination = mount["destination"].as_str().unwrap();
@@ -5697,6 +5748,7 @@ mod tests {
                     project_path: project.path(),
                     project_authority: IsolationProjectAuthority::External,
                     filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
+                    network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: Some(&live_access),
                     state_root: None,
                     checkpoint_dir: None,
@@ -5811,6 +5863,7 @@ mod tests {
                 project_path: app_root.path(),
                 project_authority: IsolationProjectAuthority::EphemeralScratch,
                 filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
+                network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                 live_access: None,
                 state_root: None,
                 checkpoint_dir: None,
@@ -5862,6 +5915,7 @@ mod tests {
                 project_authority: IsolationProjectAuthority::EphemeralScratch,
                 filesystem_authority_ceiling:
                     IsolationFilesystemAuthorityCeiling::CapturedExecution,
+                network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
                 live_access: None,
                 state_root: None,
                 checkpoint_dir: None,
@@ -5911,6 +5965,7 @@ mod tests {
                 project_path: app_root.path(),
                 project_authority: IsolationProjectAuthority::EphemeralScratch,
                 filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
+                network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                 live_access: None,
                 state_root: None,
                 checkpoint_dir: None,
@@ -5943,6 +5998,7 @@ mod tests {
             project_path: app_root.path(),
             project_authority: IsolationProjectAuthority::External,
             filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
+            network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
             live_access: Some(&live_access),
             state_root: None,
             checkpoint_dir: None,
@@ -5995,6 +6051,7 @@ mod tests {
             project_path: app_root.path(),
             project_authority: IsolationProjectAuthority::External,
             filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
+            network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
             live_access: Some(&live_access),
             state_root: None,
             checkpoint_dir: None,
@@ -6039,6 +6096,7 @@ mod tests {
             project_path: app_root.path(),
             project_authority: IsolationProjectAuthority::External,
             filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
+            network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
             live_access,
             state_root: None,
             checkpoint_dir: None,
@@ -6111,6 +6169,7 @@ mod tests {
                     project_path: app_root.path(),
                     project_authority: IsolationProjectAuthority::RuntimeWorkspace,
                     filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
+                    network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
                     checkpoint_dir: None,

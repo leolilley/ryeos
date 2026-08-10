@@ -98,17 +98,16 @@ fn activation_fixture_matches_every_sourceless_worker_realization() {
         })
         .collect::<BTreeMap<_, _>>();
 
-    let fixture: serde_yaml::Value = serde_yaml::from_str(
-        &lillux::signature::strip_signature_lines(
+    let fixture: serde_yaml::Value =
+        serde_yaml::from_str(&lillux::signature::strip_signature_lines(
             &std::fs::read_to_string(
                 repository.join(
                     "bundles/standard/.ai/config/ryeos-runtime/local-tinygrad-activation.yaml",
                 ),
             )
             .unwrap(),
-        ),
-    )
-    .unwrap();
+        ))
+        .unwrap();
     assert_eq!(
         fixture["consumer_ref"].as_str(),
         Some("worker:standard/local-tinygrad")

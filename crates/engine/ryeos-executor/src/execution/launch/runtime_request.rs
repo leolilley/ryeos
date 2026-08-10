@@ -260,6 +260,8 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
                 project_authority,
                 filesystem_authority_ceiling:
                     ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                network_authority_ceiling:
+                    ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                 live_access: live_access.as_ref(),
                 state_root,
                 checkpoint_dir,

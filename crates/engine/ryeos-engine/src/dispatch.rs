@@ -489,6 +489,7 @@ fn isolation_plan_request(
             project_path,
             project_authority: ctx.isolation_project_authority,
             filesystem_authority_ceiling: ctx.isolation_filesystem_authority_ceiling,
+            network_authority_ceiling: ctx.isolation_network_authority_ceiling,
             live_access: ctx.isolation_live_access_authority.as_ref(),
             state_root: ctx.isolation_state_root.as_deref(),
             checkpoint_dir: ctx.isolation_checkpoint_dir.as_deref(),
@@ -525,6 +526,7 @@ fn isolation_plan_request_awaiting_attachment(
             project_path,
             project_authority: ctx.isolation_project_authority,
             filesystem_authority_ceiling: ctx.isolation_filesystem_authority_ceiling,
+            network_authority_ceiling: ctx.isolation_network_authority_ceiling,
             live_access: ctx.isolation_live_access_authority.as_ref(),
             state_root: ctx.isolation_state_root.as_deref(),
             checkpoint_dir: ctx.isolation_checkpoint_dir.as_deref(),
@@ -682,6 +684,8 @@ mod tests {
             isolation_project_authority: crate::isolation::IsolationProjectAuthority::External,
             isolation_filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            isolation_network_authority_ceiling:
+                crate::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
             isolation_live_access_authority: Some(
                 crate::isolation::IsolationLiveAccessAuthority::UnconfinedHost {
                     authorized_write_namespaces: vec!["project".into()],

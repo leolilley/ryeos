@@ -29,7 +29,7 @@ bwrap_compatible() {
         return 1
     fi
     help="$("$executable" --help 2>&1)" || return 1
-    for option in --bind-fd --ro-bind-fd --argv0 --overlay-src --overlay; do
+    for option in --bind-fd --ro-bind-fd --ro-bind-data --argv0 --overlay-src --overlay; do
         grep -Eq "(^|[[:space:]])${option}([[:space:]]|$)" <<<"$help" || return 1
     done
     dynamic="$(readelf -d "$executable" 2>/dev/null)" || return 1

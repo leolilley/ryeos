@@ -415,6 +415,18 @@ enum InitialLauncherStatus {
 struct LauncherTargetDocument {
     #[serde(rename = "child-pid")]
     child_pid: u32,
+    #[serde(rename = "cgroup-namespace")]
+    _cgroup_namespace: Option<u64>,
+    #[serde(rename = "ipc-namespace")]
+    _ipc_namespace: Option<u64>,
+    #[serde(rename = "mnt-namespace")]
+    _mount_namespace: Option<u64>,
+    #[serde(rename = "net-namespace")]
+    _network_namespace: Option<u64>,
+    #[serde(rename = "pid-namespace")]
+    _pid_namespace: Option<u64>,
+    #[serde(rename = "uts-namespace")]
+    _uts_namespace: Option<u64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -2409,7 +2421,10 @@ fn lib_spawn_with_stdio(
                 let _ = status_thread.join();
                 return Err(spawn_failure(
                     start,
-                    format!("Failed to spawn: supervised launcher refused: {error}"),
+                    append_captured_stderr(
+                        format!("Failed to spawn: supervised launcher refused: {error}"),
+                        &stderr_capture,
+                    ),
                 ));
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -2425,9 +2440,12 @@ fn lib_spawn_with_stdio(
                 let _ = status_thread.join();
                 return Err(spawn_failure(
                     start,
-                    format!(
-                        "Failed to spawn: supervised launcher did not report its target PID before the bounded setup/request deadline ({:.3} seconds remaining after launch setup)",
-                        setup_wait.as_secs_f64()
+                    append_captured_stderr(
+                        format!(
+                            "Failed to spawn: supervised launcher did not report its target PID before the bounded setup/request deadline ({:.3} seconds remaining after launch setup)",
+                            setup_wait.as_secs_f64()
+                        ),
+                        &stderr_capture,
                     ),
                 ));
             }
@@ -2444,7 +2462,10 @@ fn lib_spawn_with_stdio(
                 let _ = status_thread.join();
                 return Err(spawn_failure(
                     start,
-                    "Failed to spawn: supervised-launcher status channel closed before reporting its target PID",
+                    append_captured_stderr(
+                        "Failed to spawn: supervised-launcher status channel closed before reporting its target PID".to_owned(),
+                        &stderr_capture,
+                    ),
                 ));
             }
         };
@@ -3688,6 +3709,29 @@ fn append_diagnostic(existing: &str, diagnostic: &str) -> String {
     } else {
         format!("{existing}\n{diagnostic}")
     }
+}
+
+fn append_captured_stderr(reason: String, capture: &SharedCapture) -> String {
+    const DIAGNOSTIC_BYTES: usize = 4 * 1024;
+
+    let capture = capture.lock().unwrap_or_else(|error| error.into_inner());
+    if capture.bytes.is_empty() {
+        return reason;
+    }
+    let diagnostic = if capture.bytes.len() > DIAGNOSTIC_BYTES {
+        let half = DIAGNOSTIC_BYTES / 2;
+        let head = String::from_utf8_lossy(&capture.bytes[..half]);
+        let tail = String::from_utf8_lossy(&capture.bytes[capture.bytes.len() - half..]);
+        format!("{head}\n… (bounded launcher stderr; middle bytes omitted) …\n{tail}")
+    } else {
+        let body = String::from_utf8_lossy(&capture.bytes);
+        if capture.truncated {
+            format!("{body}\n… (launcher stderr exceeded its capture limit)")
+        } else {
+            body.into_owned()
+        }
+    };
+    append_diagnostic(&reason, &diagnostic)
 }
 
 fn spawn_failure(start: Instant, reason: impl Into<String>) -> SubprocessResult {

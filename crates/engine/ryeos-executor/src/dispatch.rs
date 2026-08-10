@@ -2438,6 +2438,7 @@ pub(crate) async fn dispatch_method(
                     project_authority: request.provenance.isolation_project_authority(),
                     filesystem_authority_ceiling:
                         ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                network_authority_ceiling: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: live_access.as_ref(),
                     state_root: request.provenance.state_root_override(),
                     checkpoint_dir: None,

@@ -1279,7 +1279,7 @@ mod tests {
         let parent = tempdir();
         let bundle_root = parent.join("runtime-bundle");
         fs::create_dir_all(bundle_root.join(crate::AI_DIR)).unwrap();
-        let backend = "  - id: linux\n    protocol: ryeos.isolation-adapter/v1\n    targets: [x86_64-unknown-linux-gnu]\n    adapter: adapter\n    artifacts: {launcher: launcher}\n    capabilities: [filesystem.private_root]\n";
+        let backend = "  - id: linux\n    protocol: ryeos.isolation-adapter/v2\n    targets: [x86_64-unknown-linux-gnu]\n    adapter: adapter\n    artifacts: {launcher: launcher}\n    capabilities: [filesystem.private_root]\n";
         let body = format!(
             "name: runtime-bundle\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\nisolation_backends:\n{backend}{backend}"
         );

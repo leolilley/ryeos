@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-09T22:41:30Z:ab314a8ad90c08072c0f2101bc872b153cafd824a6f9edfafaafbc47e3df8cde:7GFV4TgfGtK4uo6egdCiCzq0UJuzbrRbe+XxtJj5Zg6zbqV5lvep/RkMLNyeJP64f9mPdJvPG1aYQwuHWOD4Bw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+# ryeos:signed:2026-08-10T00:31:18Z:d96b437a3776209e7f6040eec68abd065ff025c4440900965f3b48de7209bbf0:ZqoL1ccdOitH+6pnNa1JPvjo6D5/chXoooKUOq1yc7TzbZaPG4BqHUBI8f7dNbT8fhH+qThhwqfmI2Q6qhSkCA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 name: sandbox-linux-bubblewrap
 version: 0.1.0
 description: Linux process confinement using a signed bundled Bubblewrap launcher
@@ -7,7 +7,7 @@ requires_kinds: []
 uses_kinds: []
 isolation_backends:
 - id: linux-bubblewrap
-  protocol: ryeos.isolation-adapter/v1
+  protocol: ryeos.isolation-adapter/v2
   targets:
   - x86_64-unknown-linux-gnu
   - aarch64-unknown-linux-gnu

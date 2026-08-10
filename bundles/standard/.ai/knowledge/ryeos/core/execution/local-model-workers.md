@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-09T11:09:57Z:b598b043246ae0b60e67f6a11433fd22abcdd0171e4884ae490df0268f48cf6a:P+c7KfWeMRPnADcCylXgrQovvvGU4CLyMw7IfeC5wxZ5rtfAcJ47kTZayh5tDgTGmaJLj6vtWn+5WC7M75JgDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-10T01:24:43Z:8cd3cb8d3aeb2e17cb18f56c17224b18903fe968da81683532aeed01775c5a84:SVfpkpvUy5TCjctJO5ZcEi1u7L4Kyp5vQ5o9MDy1A8OG6jc4tzFku4ofMFS0TU+vyAsyEUsSVOqAn9oJrWHWDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/execution
 tags: [execution, external-content, persistent-session, local-model, replay]
@@ -28,7 +28,8 @@ pre-admitted deterministic compiled-artifact set.
 
 Persistent sessions are disabled when their node-owned policy is absent.
 External import is also disabled without a node-owned named-root policy. Both
-files live in system space and must be signed by the configured operator:
+files live in system space and are node-signed only after their typed section
+validator accepts an operator-authored source:
 
 - `<system>/.ai/node/persistent_sessions/policy.yaml`
 - `<system>/.ai/node/external_content/policy.yaml`
@@ -76,15 +77,27 @@ activation fixture. In particular, the aggregate address-space and CPU
 ceilings must each cover the worker lifecycle reservation; a smaller pool is
 refused before spawn.
 
-Sign both files with `ryeos sign <path>` while the daemon is stopped. Do not
-start the node yet; the isolation backend, isolation policy, clean-cut resets,
-and doctor check below are part of the same stopped-node activation. Absence is
-a refusal, not a request for compiled defaults.
+Author each policy outside the live `.ai/node` namespace, then apply it while
+the daemon is stopped:
+
+```text
+ryeos node policy-apply external_content /path/to/external-content-policy.yaml
+ryeos node policy-apply persistent_sessions /path/to/persistent-session-policy.yaml
+```
+
+The command validates through the registered node-config section and
+atomically publishes a node-signed `policy.yaml`; `ryeos sign` intentionally
+remains a project-item authoring tool. Do not start the node yet; the isolation
+backend, isolation policy, clean-cut resets, and doctor check below are part of
+the same stopped-node activation. Absence is a refusal, not a request for
+compiled defaults.
 
 ## Required isolation backend
 
-Recorded local workers require enforced process isolation and isolated
-networking. Persistent-session and external-content policy alone do not
+Recorded local workers require enforced process isolation and a backend capable
+of isolated networking. The captured-worker launch narrows networking to
+isolated even when the node ceiling permits host networking for unrelated
+admitted tools. Persistent-session and external-content policy alone do not
 activate the route. RyeOS installs no backend by default.
 
 Build and publish the current `sandbox-linux-bubblewrap` bundle with the
@@ -96,12 +109,14 @@ ryeos bundle publish bundles/sandbox-linux-bubblewrap
 ryeos bundle install sandbox-linux-bubblewrap bundles/sandbox-linux-bubblewrap
 ```
 
-The activation policy grants this worker only `{verified_code}` in
-`filesystem.readable` and `{project}` in `filesystem.writable`; the worker uses
-the former for its content-addressed command and the latter for daemon-owned
-ephemeral scratch. Its persistent-session launch does not receive live bundle
-roots, node trust configuration, node identity, or the daemon socket. It must
-select the backend and isolate networking:
+The node policy is a ceiling shared by ordinary parser, handler, tool, and
+worker launches. It therefore admits the standard node surfaces they may
+request. The persistent-session launch independently selects the captured
+filesystem ceiling: only `{verified_code}`, daemon-owned `{project}` scratch,
+and its admitted realization mounts survive, and networking is forced to
+isolated. It does not receive live bundle roots, node trust configuration, node
+identity, or the daemon socket even though the node ceiling permits those
+surfaces for other executions:
 
 ```yaml
 version: 1
@@ -111,11 +126,16 @@ backend:
   implementation: linux-bubblewrap
 filesystem:
   readable:
+    - "{node_public_identity}"
+    - "{daemon_socket}"
+    - "{bundle_roots}"
+    - "{node_trusted_keys}"
     - "{verified_code}"
   writable:
     - "{project}"
+    - "{checkpoint_dir}"
 network:
-  mode: isolated
+  mode: host
 environment:
   allow:
     - CACHELEVEL
@@ -141,10 +161,19 @@ limits:
   verified_artifact_files: 4096
 ```
 
-Sign `<system>/.ai/node/isolation.yaml` with `ryeos sign <path>` while the
-daemon is stopped. The shipped worker additionally declares `linux` and
-`x86_64` as its supported node substrate; admission checks that constraint
-before capturing content or contacting a process.
+Author that YAML outside the live node namespace and apply it while the daemon
+is stopped:
+
+```text
+ryeos node isolation-apply /path/to/isolation.yaml
+```
+
+Isolation is the separate fixed bootstrap policy rather than a signed
+node-config section. The command strictly validates and atomically publishes
+it; backend resolution and artifact inspection remain doctor/startup admission
+steps. The shipped worker additionally declares `linux` and `x86_64` as its
+supported node substrate; admission checks that constraint before capturing
+content or contacting a process.
 
 ## Exact acceptance realization
 
@@ -230,10 +259,12 @@ coherent contract generation:
    `persistent_session.target_path` and `ipc.target_unix_stream` before doctor
    inspects the new declarations.
 3. Build, publish, and install the current `sandbox-linux-bubblewrap` bundle.
-4. Author and sign `external_content/policy.yaml`,
-   `persistent_sessions/policy.yaml`, and `isolation.yaml`. Keep isolation in
-   `mode: enforce`, networking `isolated`, `{verified_code}` as the only
-   readable namespace, and `{project}` as the only writable namespace.
+4. Apply the external-content and persistent-session sources through `ryeos
+   node policy-apply`, then apply isolation through `ryeos node
+   isolation-apply`. Keep isolation in `mode: enforce`; the node ceiling may
+   retain host networking and standard node surfaces, while the captured
+   worker ceiling independently removes them and requires backend support for
+   isolated networking.
 5. Run only the clean-cut reset commands named by the stopped node's refusal.
 6. Run `ryeos node doctor` and require the selected isolation backend to report
    `available` with the expected capabilities.
