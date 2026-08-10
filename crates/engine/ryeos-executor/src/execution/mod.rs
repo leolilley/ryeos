@@ -547,6 +547,16 @@ fn pinned_output_parent(
 
 // ── Fold-back ───────────────────────────────────────────────────────
 
+fn admitted_operational_shadow_paths(
+    state: &ryeos_app::state::AppState,
+    thread_id: &str,
+) -> Result<Vec<String>> {
+    let Some(evidence) = state.state_store.admitted_program_evidence(thread_id)? else {
+        return Ok(Vec::new());
+    };
+    external_content::admitted_realization_mounts(&evidence.resolution)
+}
+
 /// Capture the authoritative post-execution tree under the exact immutable
 /// policy that produced the base generation.
 pub(crate) struct FoldBackOutputsParams<'a> {
@@ -560,6 +570,7 @@ pub(crate) struct FoldBackOutputsParams<'a> {
     pub policy_hash: &'a str,
     pub base_snapshot_hash: &'a str,
     pub workspace_record: &'a ryeos_app::runtime_db::WorkspaceRecord,
+    pub operational_shadow_paths: &'a [String],
 }
 
 pub(crate) fn fold_back_outputs(
@@ -576,6 +587,7 @@ pub(crate) fn fold_back_outputs(
         policy_hash,
         base_snapshot_hash,
         workspace_record,
+        operational_shadow_paths,
     } = params;
     authority.ensure_guard(cas_mutation_guard)?;
     let cas = authority.cas_store()?;
@@ -598,9 +610,17 @@ pub(crate) fn fold_back_outputs(
             working_dir.display()
         );
     }
+    let lifecycle_operation = if isolation.is_enforced() {
+        ryeos_isolation_protocol::WorkspaceLifecycleOperation::FreezeAndDiff
+    } else {
+        // A disabled node has no mount namespace or overlay adapter. Re-run
+        // the exact native Create check to pin the same private directories,
+        // then capture the complete mutable lower tree below.
+        ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create
+    };
     let lifecycle = isolation
         .workspace_lifecycle_pinned(ryeos_engine::isolation::WorkspaceLifecycleInvocation {
-            operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::FreezeAndDiff,
+            operation: lifecycle_operation,
             workspace_id,
             launch_owner,
             lower_snapshot: base_snapshot_hash,
@@ -624,16 +644,29 @@ pub(crate) fn fold_back_outputs(
     {
         anyhow::bail!("workspace freeze evidence does not match the durable creation journal");
     }
-    let Some(new_tree) = workspace::apply_workspace_delta(
-        authority,
-        cas_mutation_guard,
-        &mut staged_roots,
-        &lifecycle.upper,
-        pre_tree,
-        policy,
-        &lifecycle.response.mutations,
-    )?
-    else {
+    let new_tree = if isolation.is_enforced() {
+        workspace::apply_workspace_delta(
+            authority,
+            cas_mutation_guard,
+            &mut staged_roots,
+            &lifecycle.upper,
+            pre_tree,
+            policy,
+            &lifecycle.response.mutations,
+        )?
+    } else {
+        let lower = lillux::PinnedDirectory::open(&layout.lower)?
+            .ok_or_else(|| anyhow::anyhow!("daemon-private workspace lower disappeared"))?;
+        let captured = ingest::ingest_project_tree_with_operational_exclusions(
+            authority,
+            cas_mutation_guard,
+            &lower,
+            policy,
+            operational_shadow_paths,
+        )?;
+        (captured != *pre_tree).then_some(captured)
+    };
+    let Some(new_tree) = new_tree else {
         return Ok((
             None,
             PendingCasPublication::new(authority.try_clone()?, staged_roots),
@@ -803,6 +836,7 @@ pub(crate) fn seal_callback_workspace_generation(
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("acquire callback generation write permit: {error}"))?;
+    let operational_shadow_paths = admitted_operational_shadow_paths(state, thread_id)?;
     let (next_tree, mut publication) = fold_back_outputs(FoldBackOutputsParams {
         authority: &authority,
         cas_mutation_guard: &guard,
@@ -814,6 +848,7 @@ pub(crate) fn seal_callback_workspace_generation(
         policy_hash: &snapshot.effective_policy_hash,
         base_snapshot_hash,
         workspace_record: &record,
+        operational_shadow_paths: &operational_shadow_paths,
     })?;
     let snapshot_hash = match next_tree {
         Some(tree_hash) => store_foldback_snapshot(
@@ -878,6 +913,7 @@ pub fn recover_interrupted_workspace_freeze(
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("acquire recovery freeze write permit: {error}"))?;
+    let operational_shadow_paths = admitted_operational_shadow_paths(state, thread_id)?;
     let (next_tree, mut publication) = fold_back_outputs(FoldBackOutputsParams {
         authority: &authority,
         cas_mutation_guard: &guard,
@@ -889,6 +925,7 @@ pub fn recover_interrupted_workspace_freeze(
         policy_hash: &base.effective_policy_hash,
         base_snapshot_hash: &record.lower_snapshot,
         workspace_record: record,
+        operational_shadow_paths: &operational_shadow_paths,
     })?;
     let snapshot_hash = match next_tree {
         Some(tree_hash) => store_foldback_snapshot(

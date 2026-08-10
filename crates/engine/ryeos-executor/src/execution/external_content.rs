@@ -811,6 +811,29 @@ pub(crate) fn bind_external_realizations(
     )
 }
 
+/// Exact project-relative roots populated from separately admitted external
+/// realizations. Native private-copy fold-back excludes these operational
+/// shadows so input realizations never become project output bytes.
+pub(crate) fn admitted_realization_mounts(
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+) -> anyhow::Result<Vec<String>> {
+    let Some(value) = resolution
+        .composed
+        .derived
+        .get(ryeos_engine::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY)
+    else {
+        return Ok(Vec::new());
+    };
+    let realized = RealizedExternalContentSet::from_value(value)?;
+    let mut mounts = realized
+        .iter()
+        .map(|entry| entry.mount.clone())
+        .collect::<Vec<_>>();
+    mounts.sort();
+    mounts.dedup();
+    Ok(mounts)
+}
+
 /// Bind admitted realizations for a normal execution workspace.
 ///
 /// Enforced isolation receives descriptor-pinned read-only mounts. With

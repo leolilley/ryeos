@@ -50,6 +50,8 @@ pub use provenance::{
 };
 
 const VERIFIED_CODE_ISOLATION_ROOT: &str = "/run/ryeos/verified-code";
+const DAEMON_PRIVATE_WORKSPACE_BACKEND_ID: &str = "ryeos-daemon-private-workspace";
+const DAEMON_PRIVATE_WORKSPACE_BACKEND_VERSION: &str = "1";
 /// Engine-owned handoff from sealed descriptor paths to their verified logical
 /// identities. Runtime loaders may use the logical path for import layout and
 /// diagnostics, but must read executable bytes only from the descriptor path.
@@ -807,14 +809,60 @@ struct PreparedProjectWorkspace {
 }
 
 impl IsolationRuntime {
+    fn verify_runtime_workspace_layout(
+        &self,
+        workspace_id: &str,
+        lower: &lillux::PinnedDirectory,
+        upper: &lillux::PinnedDirectory,
+        work: &lillux::PinnedDirectory,
+    ) -> Result<(), EngineError> {
+        let workspaces = self.runtime_workspaces.as_deref().ok_or_else(|| {
+            refused("runtime workspace root authority is unavailable".to_string())
+        })?;
+        let workspace = workspaces
+            .open_child_directory(std::ffi::OsStr::new(workspace_id))
+            .map_err(|error| refused(format!("runtime workspace cannot be opened: {error}")))?
+            .ok_or_else(|| refused("runtime workspace disappeared".to_string()))?;
+        for (label, name, observed) in [
+            ("lower", "project", lower),
+            ("upper", "upper", upper),
+            ("work", "work", work),
+        ] {
+            let expected = workspace
+                .open_child_directory(std::ffi::OsStr::new(name))
+                .map_err(|error| {
+                    refused(format!(
+                        "runtime workspace {label} cannot be opened: {error}"
+                    ))
+                })?
+                .ok_or_else(|| refused(format!("runtime workspace {label} disappeared")))?;
+            if !expected.is_same_directory(observed).map_err(|error| {
+                refused(format!(
+                    "runtime workspace {label} identity cannot be compared: {error}"
+                ))
+            })? {
+                return Err(refused(format!(
+                    "runtime workspace {label} does not match its daemon-owned authority"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Exact signed backend identity captured for workspace lifecycle calls.
     /// Callers persist this before the adapter is invoked so crash recovery is
     /// fenced to the same implementation and build.
     pub fn workspace_backend_identity(&self) -> Result<(&str, &str), EngineError> {
-        let backend = self.backend_capture.as_ref().ok_or_else(|| {
-            refused("durable workspace requires an enforced signed isolation backend".to_string())
-        })?;
-        Ok((&backend.declaration.id, &backend.adapter_build))
+        match self.backend_capture.as_ref() {
+            Some(backend) => Ok((&backend.declaration.id, &backend.adapter_build)),
+            None if self.state == IsolationRuntimeState::Disabled => Ok((
+                DAEMON_PRIVATE_WORKSPACE_BACKEND_ID,
+                DAEMON_PRIVATE_WORKSPACE_BACKEND_VERSION,
+            )),
+            None => Err(refused(
+                "durable workspace backend identity is unavailable".to_string(),
+            )),
+        }
     }
 
     /// Invoke the exact signed adapter captured at daemon composition for a
@@ -862,6 +910,106 @@ impl IsolationRuntime {
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd as _;
+
+            if self.state == IsolationRuntimeState::Disabled {
+                if operation == WorkspaceLifecycleOperation::FreezeAndDiff {
+                    return Err(refused(
+                        "daemon-private workspaces use complete project recapture, not adapter delta evidence"
+                            .to_string(),
+                    ));
+                }
+                let lower_root = lillux::PinnedDirectory::open(lower_path)
+                    .map_err(|error| refused(format!("pin workspace lower: {error}")))?
+                    .ok_or_else(|| refused("workspace lower is missing".to_string()))?;
+                let upper_root = lillux::PinnedDirectory::open(upper_path)
+                    .map_err(|error| refused(format!("pin workspace upper: {error}")))?
+                    .ok_or_else(|| refused("workspace upper is missing".to_string()))?;
+                let work_root = lillux::PinnedDirectory::open(work_path)
+                    .map_err(|error| refused(format!("pin workspace work: {error}")))?
+                    .ok_or_else(|| refused("workspace work is missing".to_string()))?;
+                self.verify_runtime_workspace_layout(
+                    workspace_id,
+                    &lower_root,
+                    &upper_root,
+                    &work_root,
+                )?;
+                let root_identity =
+                    |label: &str, root: &lillux::PinnedDirectory| -> Result<String, EngineError> {
+                        let (device, inode) = root.device_inode().map_err(|error| {
+                            refused(format!("inspect workspace {label} identity: {error}"))
+                        })?;
+                        Ok(format!("dev{device}-ino{inode}"))
+                    };
+                let pinned_root_identities = BTreeMap::from([
+                    ("lower".to_string(), root_identity("lower", &lower_root)?),
+                    ("upper".to_string(), root_identity("upper", &upper_root)?),
+                    ("work".to_string(), root_identity("work", &work_root)?),
+                ]);
+                let mount_identity = format!(
+                    "daemon-private-copy:{}:{}:{}",
+                    pinned_root_identities["lower"],
+                    pinned_root_identities["upper"],
+                    pinned_root_identities["work"]
+                );
+                let lower_descriptor = lower_root.try_clone_descriptor().map_err(|error| {
+                    refused(format!("clone workspace lower descriptor: {error}"))
+                })?;
+                let upper_descriptor = upper_root.try_clone_descriptor().map_err(|error| {
+                    refused(format!("clone workspace upper descriptor: {error}"))
+                })?;
+                let work_descriptor = work_root.try_clone_descriptor().map_err(|error| {
+                    refused(format!("clone workspace work descriptor: {error}"))
+                })?;
+                let response = AdapterWorkspaceResponse {
+                    protocol: IsolationAdapterProtocolVersion::Current,
+                    operation,
+                    workspace_id: workspace_id.to_string(),
+                    launch_owner: launch_owner.to_string(),
+                    backend_id: DAEMON_PRIVATE_WORKSPACE_BACKEND_ID.to_string(),
+                    backend_version: DAEMON_PRIVATE_WORKSPACE_BACKEND_VERSION.to_string(),
+                    pinned_root_identities,
+                    mount_identity,
+                    mutations: Vec::new(),
+                    destroyed: operation == WorkspaceLifecycleOperation::Destroy,
+                };
+                let request = AdapterWorkspaceRequest {
+                    protocol: IsolationAdapterProtocolVersion::Current,
+                    operation,
+                    workspace_id: workspace_id.to_string(),
+                    launch_owner: launch_owner.to_string(),
+                    lower_snapshot: lower_snapshot.to_string(),
+                    authorities: vec![
+                        IsolationAuthority {
+                            id: IsolationAuthorityId::new("workspace-lower")
+                                .map_err(|error| refused(error.to_string()))?,
+                            inherited_fd: lower_descriptor.as_raw_fd() as u32,
+                            purpose: IsolationAuthorityPurpose::WorkspaceLower,
+                        },
+                        IsolationAuthority {
+                            id: IsolationAuthorityId::new("workspace-upper")
+                                .map_err(|error| refused(error.to_string()))?,
+                            inherited_fd: upper_descriptor.as_raw_fd() as u32,
+                            purpose: IsolationAuthorityPurpose::WorkspaceUpper,
+                        },
+                        IsolationAuthority {
+                            id: IsolationAuthorityId::new("workspace-work")
+                                .map_err(|error| refused(error.to_string()))?,
+                            inherited_fd: work_descriptor.as_raw_fd() as u32,
+                            purpose: IsolationAuthorityPurpose::WorkspaceWork,
+                        },
+                    ],
+                };
+                request
+                    .validate()
+                    .map_err(|error| refused(format!("invalid workspace request: {error}")))?;
+                response
+                    .validate_for(&request)
+                    .map_err(|error| refused(format!("invalid workspace response: {error}")))?;
+                return Ok(PinnedWorkspaceLifecycleResult {
+                    response,
+                    upper: upper_root,
+                });
+            }
 
             let backend = self.backend_capture.as_ref().ok_or_else(|| {
                 refused(
@@ -1718,10 +1866,35 @@ impl IsolationRuntime {
                 }
             }
             if context.project_authority == IsolationProjectAuthority::RuntimeWorkspace {
-                return Err(refused(
-                    "durable project execution requires an enforced isolation backend with filesystem.project_workspace_cow and filesystem.workspace_delta"
-                        .to_string(),
-                ));
+                let lower = lillux::PinnedDirectory::open(context.project_path)
+                    .map_err(|error| refused(format!("pin runtime workspace lower: {error}")))?
+                    .ok_or_else(|| refused("runtime workspace lower is missing".to_string()))?;
+                let workspace_root = context.project_path.parent().ok_or_else(|| {
+                    refused("runtime workspace lower has no workspace root".to_string())
+                })?;
+                let workspace_id = workspace_root
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| {
+                        refused("runtime workspace id is not valid UTF-8".to_string())
+                    })?;
+                if context
+                    .project_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    != Some("project")
+                {
+                    return Err(refused(
+                        "runtime workspace lower is not the canonical project child".to_string(),
+                    ));
+                }
+                let upper = lillux::PinnedDirectory::open(&workspace_root.join("upper"))
+                    .map_err(|error| refused(format!("pin runtime workspace upper: {error}")))?
+                    .ok_or_else(|| refused("runtime workspace upper is missing".to_string()))?;
+                let work = lillux::PinnedDirectory::open(&workspace_root.join("work"))
+                    .map_err(|error| refused(format!("pin runtime workspace work: {error}")))?
+                    .ok_or_else(|| refused("runtime workspace work is missing".to_string()))?;
+                self.verify_runtime_workspace_layout(workspace_id, &lower, &upper, &work)?;
             }
             if request
                 .envs
@@ -3209,10 +3382,7 @@ impl IsolationRuntime {
         };
         let captured_backend = (state == IsolationRuntimeState::Enforced)
             .then(|| backend.expect("enforced backend was validated"));
-        let runtime_workspaces = if state == IsolationRuntimeState::Enforced {
-            let app_root = app_root_authority.as_deref().ok_or_else(|| {
-                refused("enforced isolation runtime requires pinned app-root authority".to_string())
-            })?;
+        let runtime_workspaces = if let Some(app_root) = app_root_authority.as_deref() {
             let workspaces = open_or_create_relative_directory(
                 app_root,
                 &[crate::AI_DIR, "state", "cache", "executions"],
@@ -5984,6 +6154,91 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("cannot also carry target stdin"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disabled_runtime_owns_complete_private_project_workspaces() {
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        let runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        let workspaces = runtime.runtime_workspaces.as_ref().unwrap();
+        let workspace = workspaces
+            .open_or_create_child(std::ffi::OsStr::new("native-cow"), 0o700)
+            .unwrap();
+        for name in ["project", "upper", "work"] {
+            workspace
+                .open_or_create_child(std::ffi::OsStr::new(name), 0o700)
+                .unwrap();
+        }
+        let lower = workspace.path().join("project");
+        let upper = workspace.path().join("upper");
+        let work = workspace.path().join("work");
+        let lower_snapshot = "a".repeat(64);
+        let invocation = |operation| WorkspaceLifecycleInvocation {
+            operation,
+            workspace_id: "native-cow",
+            launch_owner: "{\"attempt\":1}",
+            lower_snapshot: &lower_snapshot,
+            lower_path: &lower,
+            upper_path: &upper,
+            work_path: &work,
+        };
+        let created = runtime
+            .workspace_lifecycle(invocation(WorkspaceLifecycleOperation::Create))
+            .unwrap();
+        assert_eq!(created.backend_id, DAEMON_PRIVATE_WORKSPACE_BACKEND_ID);
+        assert!(!created.destroyed);
+        assert!(
+            runtime
+                .workspace_lifecycle(invocation(WorkspaceLifecycleOperation::FreezeAndDiff))
+                .unwrap_err()
+                .to_string()
+                .contains("complete project recapture")
+        );
+
+        let compiled = runtime
+            .apply(
+                lillux::SubprocessRequest {
+                    cmd: "/bin/true".to_string(),
+                    argv0: None,
+                    args: Vec::new(),
+                    cwd: Some(lower.to_string_lossy().into_owned()),
+                    envs: Vec::new(),
+                    stdin_data: None,
+                    timeout: 1.0,
+                    limits: None,
+                    inherited_fds: Vec::new(),
+                    supervised_status: None,
+                },
+                IsolationLaunchContext {
+                    project_path: &lower,
+                    project_authority: IsolationProjectAuthority::RuntimeWorkspace,
+                    filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
+                    network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
+                    live_access: None,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    daemon_socket_path: None,
+                    bundle_roots: &[],
+                    node_trusted_keys_dir: None,
+                    verified_code: &[],
+                    verified_command: None,
+                    external_read_only_mounts: &[],
+                    target_channel: None,
+                    item_ref: "graph:tests/native-cow",
+                    thread_id: "T-native-cow",
+                },
+            )
+            .unwrap();
+        assert_eq!(compiled.cwd.as_deref(), Some(lower.to_string_lossy().as_ref()));
+        assert!(lillux::run(compiled).success);
+
+        let destroyed = runtime
+            .workspace_lifecycle(invocation(WorkspaceLifecycleOperation::Destroy))
+            .unwrap();
+        assert!(destroyed.destroyed);
+        assert_eq!(destroyed.mount_identity, created.mount_identity);
     }
 
     #[test]

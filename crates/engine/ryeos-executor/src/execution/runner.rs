@@ -1020,6 +1020,8 @@ fn post_execution_foldback(
         .map_err(|error| anyhow::anyhow!("acquire CAS write permit for fold-back: {error}"))?;
 
     // Fold back changes
+    let operational_shadow_paths =
+        crate::execution::admitted_operational_shadow_paths(state, thread_id)?;
     let (output_tree_hash, mut publication) =
         crate::execution::fold_back_outputs(crate::execution::FoldBackOutputsParams {
             authority: &authority,
@@ -1032,6 +1034,7 @@ fn post_execution_foldback(
             policy_hash: pre_policy_hash,
             base_snapshot_hash,
             workspace_record: &workspace_record,
+            operational_shadow_paths: &operational_shadow_paths,
         })
         .context("freeze, validate, and publish authoritative project delta")?;
 
