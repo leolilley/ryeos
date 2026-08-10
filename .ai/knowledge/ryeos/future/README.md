@@ -1,17 +1,19 @@
-<!-- ryeos:signed:2026-08-06T03:37:12Z:cbc777d3e3590a78c9cd37c5047f19ee25974e6c6c786470f7ecaee486063aa0:WazzF/LC+t28uO1pMR0WxdQBxIVIG6bgBGCXsYax4XDYPWUsVhbyDPa781smz93E7ssA1zSLGp5JBEhVm3E1DA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-10T03:16:08Z:6c1e312f080fc2a205839d84a5f80203215916aed47819f3f161c05e6804f816:j150K4yrjjakadDPG7EpLek5vkyCHMF4K/8J6NFfzA6v5K2oFoLc23vpA0dL/BgSKIhIZ2P2p7OTB9YEtv6LDg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/future
 name: README
 title: Future RyeOS Design Notes
 description: Index and ownership rules for explicitly deferred RyeOS design work
 entry_type: reference
-version: "1.0.0"
+version: "1.1.0"
 ```
 
 # Future RyeOS Design Notes
 
 This directory holds explicitly deferred design work. It should not contain
-completed implementation plans or stale branch notes.
+completed implementation plans or stale branch notes. A deferred note may
+state the landed foundation it depends on, but only to draw the boundary around
+what remains; current operating contracts belong in core knowledge.
 
 Completed work from the June 2026 planning scratch files includes:
 
@@ -26,9 +28,25 @@ Completed work from the June 2026 planning scratch files includes:
 Deferred entries are individual knowledge items in this directory. Notes moved
 from the former top-level `docs/future` tree include:
 
+- [`local-execution-roadmap.md`](local-execution-roadmap.md) — the current
+  local-execution foundation and the exact remaining boundaries for sealed
+  inference, generation capsules, and leased latency workers;
 - [`chat-latency-investigation.md`](chat-latency-investigation.md) — measured
   chat-latency boundaries, optimization order, and the evidence gate for
   managed workers;
+- [`content-addressed-managed-runtime-workers.md`](content-addressed-managed-runtime-workers.md)
+  — the future leased-invocation class of the existing `worker` kind; it does
+  not define a second kind or replace the fixed local-provider worker;
+- [`sealed-local-inference.md`](sealed-local-inference.md) — qualification from
+  the landed recorded local route to honestly re-derivable execution;
+- [`generation-state-capsules.md`](generation-state-capsules.md) — provider-
+  owned generation checkpoints over a meaning-blind capsule substrate;
+- [`large-content-realization-follow-ons.md`](large-content-realization-follow-ons.md)
+  — deferred storage/composition/operational work over the landed semantically
+  blind large-content tier;
+- [`provider-call-effect-records.md`](provider-call-effect-records.md) — the
+  remaining ARC measurement, certification, and retention/export work over
+  the landed provider record boundary;
 - [`mcp-server-auth.md`](mcp-server-auth.md) — authentication for any future
   non-local MCP transport;
 - [`native-resume-snapshot-pinning.md`](native-resume-snapshot-pinning.md) —

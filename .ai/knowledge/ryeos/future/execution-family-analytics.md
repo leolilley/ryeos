@@ -1,7 +1,7 @@
-<!-- ryeos:signed:2026-08-06T03:37:09Z:c6264bdbea9ca991b58f3e4a0cccf21d5619ba632d4656b12c159ac3f92a6c97:cKtBKLlpOy/zlqLssptobVeHZxRaMv/Ru8If9ELKagXnKlQBKQb4ZjgJK1FZ7FS1q/WYtiZOZ/pOZg5TGVhFDQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-10T03:16:08Z:023e88fc345b526a621aec7ee271357f97c169d60a6b0a9aafce6d6765539308:hHrg/lD7nSJHfxJopKY8rDRTY7jAzEqE1NnwqVKDUT1fIIB+tjiyFdyOQ1ZBnVqQ+YTBFDAfIwo9SWDwImP5AA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, analytics, execution-family, effective-definition, cost]
-version: "0.1.0"
+version: "0.2.0"
 status: deferred
 description: >
   Behavioral diff over the effective-definition digest seed and
@@ -14,17 +14,21 @@ Effective-definition digests name behavior; family entities group lineage by
 canonical ref. That makes two questions answerable that no other system can
 answer honestly, and neither has a query surface yet.
 
-**A minimal slice ships ahead of this note** (per-version run/status/cost
-aggregates on existing field entities — designed in the post-activation
-implementation package). This note owns the rest.
+The field already projects effective-definition families and bounded run facts.
+The next ARC campaign slice adds project-owned bank/pending/replay/digest-moved
+classification from daemon-supplied `_dispatch` and `_run` proof rows. That is
+acceptance instrumentation, not the generic seed-diff/cost-series query owned
+here: ARC interprets its outcomes, while RyeOS supplies identity and provenance.
 
 ## 1. Behavioral diff — "what changed between these two runs"
 
 Decomposes mechanically:
 
-- **Same effective digest** → behavior is pinned; attribute differences to the
-  recorded stochastic boundary (and, once determinism classes land, to a
-  specific divergence proof).
+- **Same effective digest** → the composed program is pinned. First compare the
+  admitted realization/target scope and action/effect identity; only when
+  those also match may remaining differences be attributed to a recorded
+  stochastic boundary (and, once determinism classes land, to a specific
+  divergence proof).
 - **Different digest** → walk the two digest seeds and name the contributor
   that changed: root, a specific ancestor, a hook-plan layer, a grant, a
   config key. The seed is a versioned structure, so the diff is structural,
@@ -52,11 +56,19 @@ concerns, one denominator.
   the field's standing ownership line.
 - No new store: seed diffs compute from capsules already retained; series
   compute from run summaries already projected.
+- A first bank and a replay are distinct. Campaign reports may aggregate the
+  distinction, but generic analytics never infer replay from record existence
+  or from equal result bytes.
+- Provider-turn evidence and outer graph-dispatch evidence are separate rows;
+  an aggregate must not collapse them into one replay claim. First-class
+  provider publication rows in the execution field remain a prerequisite of
+  the next ARC operator slice, not landed analytics substrate today.
 
 ## Triggers to revisit
 
 - the solver family exceeds a handful of members and "which change caused
   this" is asked more than once a week;
-- the minimal slice's aggregates prompt "why" questions the aggregates cannot
-  answer (that is this note's cue, not a defect in the slice);
+- the ARC campaign proof view prompts "why did this digest move" questions its
+  project-owned classification cannot answer (that is this note's cue, not a
+  defect in the campaign slice);
 - cost anomalies get investigated by reading run lists manually.

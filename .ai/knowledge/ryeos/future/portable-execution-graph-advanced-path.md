@@ -1,7 +1,7 @@
-<!-- ryeos:signed:2026-08-06T03:37:11Z:067a0131936d6c15ea7fc1da2ef989e714a6428b87a97528ab4a4839e2c9a44b:4MHO6jlluRk0pky6XdcwId7NduSyUowhAtS+QtL1GWgr5Hq/ARDqY78EPlViInb9mWtH0L5C1X4vzp+gXcMZCA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-10T03:16:08Z:15bc5a4d81f61da0e90fac00fe220d37c0e723c3ff36d549fbf5f8e9f21e322f:wmtptcO0gpwjYWNQnkAXRn5qSo3kmlWmeEUYZgQ5quMbLkYLrQqtuk3J+jbhnRwpYdKURWO14IZlVXl92TWmAg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, portable-execution, execution-graph, architecture, export]
-version: "0.2.0"
+version: "0.3.0"
 status: deferred
 description: >
   Remaining deferred scope for portable execution: capsule/evidence export and
@@ -32,20 +32,25 @@ What remains deferred is only the word **portable**: a chain leaving its node.
 
 ## Remaining scope
 
-A capsule plus its evidence chain is already a self-verifying object —
-verification requires trusting its signers, not the node that produced it.
-The missing pieces are transport-shaped, not identity-shaped:
+A capsule plus its evidence chain is internally hash-checkable under its
+retained signer evidence. It is not yet an independently complete/authentic
+export: that claim requires the content-complete closure and signed export-head
+attestation below. The missing pieces are transport-shaped, not
+identity-shaped:
 
 1. **Export closure format.** One archive: capsule, CAS closure (definition
-   contributors, hook-plan sources, manifests, artifacts), and the chain's
-   event history with signatures — content-complete for independent
+   contributors, hook-plan sources, manifests, artifacts, dispatch/provider
+   effect records, first observations, accounting/publication proofs, and
+   execution realizations), plus the chain's event history with signatures —
+   content-complete for independent
    verification, with an explicit statement of what is *excluded* (secrets,
    vault material, host paths — the sealed request's sanitization boundary is
    the template).
 2. **Verification profile.** What a second party checks and in what order:
    capsule hash → contributor signatures → effective-digest recomputation →
-   event-chain integrity → evidence conformance. Effectively the recovery
-   path minus the authority to continue; specify it as a read-only profile.
+   realization/attestation closure → event-chain integrity → effect-coordinate
+   and publication-proof conformance. Effectively the recovery path minus the
+   authority to continue; specify it as a read-only profile.
 3. **Attestation statement.** A signed claim by the exporting node binding
    the export to its head state ("this is the complete history of chain X
    through seq N as of T"), so partial or pruned exports are detectable.
@@ -64,6 +69,8 @@ The missing pieces are transport-shaped, not identity-shaped:
 
 - a chain needs to be shown to anyone who does not trust the node (audit,
   benchmark submission, publication of an ARC solve);
+- an ARC campaign report needs to become an independently verifiable solve
+  proof rather than a node-local projection;
 - distributed-substrate pull-forward work starts (closure transfer wants this
   format);
 - key-lifecycle succession design lands (attestation depends on it).

@@ -3,8 +3,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 
-use crate::directive::*;
-use ryeos_directive_core::ResolvedProviderSnapshot;
+use crate::directive::{BootstrapConfig, ExecutionConfig, ToolSchema};
+use ryeos_directive_definition::{
+    DirectiveHeader, ProviderConfig, ReasoningConfig, ResolvedProviderSnapshot, SamplingConfig,
+};
 use ryeos_engine::resolution::KindComposedView;
 use ryeos_runtime::verified_loader::VerifiedLoader;
 
@@ -217,13 +219,7 @@ pub fn bootstrap(
         })?
         .to_string();
 
-    let provider_effects_recorded = matches!(
-        composed_view
-            .composed
-            .get("effects")
-            .and_then(|value| value.as_str()),
-        Some("recorded") | Some("sealed")
-    );
+    let provider_effects_recorded = header.effects.records_provider_calls();
 
     Ok(BootstrapOutput {
         config: BootstrapConfig {
@@ -279,35 +275,12 @@ fn sanitized_context_item_contributions(value: &serde_json::Value) -> Option<ser
     Some(serde_json::Value::Object(sanitized))
 }
 
-/// Project the engine-supplied composed view down to the keys the
-/// runtime actually consumes, then deserialise into the typed
-/// `DirectiveHeader`.
-///
-/// The composer ships every frontmatter key it preserved (e.g.
-/// `body`, `category`, `description`, `inputs`, `required_secrets`)
-/// in `view.composed`. Most of those are owned by the daemon — the
-/// dispatcher reads `required_secrets` to populate vault bindings,
-/// the engine reads `category` for kind routing, etc. The runtime
-/// only needs the model/permissions/limits/outputs/context/hooks
-/// surface, so we project explicitly and let `deny_unknown_fields`
-/// keep catching drift in the keys we *do* own.
+/// Invoke the directive-kind parser over the engine-supplied composed value.
+/// Launch preparation uses the same function before token minting, so the
+/// runtime cannot discover a second semantic interpretation after spawn.
 pub(super) fn parse_effective_header(view: &KindComposedView) -> Result<DirectiveHeader> {
-    let projected = match view.composed.as_object() {
-        Some(map) => {
-            let mut out = serde_json::Map::with_capacity(DIRECTIVE_HEADER_RUNTIME_KEYS.len());
-            for &key in DIRECTIVE_HEADER_RUNTIME_KEYS {
-                if let Some(v) = map.get(key) {
-                    out.insert(key.to_string(), v.clone());
-                }
-            }
-            serde_json::Value::Object(out)
-        }
-        // Non-object composed views are unexpected — fall through to
-        // the typed deserialise so the error names the actual cause.
-        None => view.composed.clone(),
-    };
-    serde_json::from_value(projected)
-        .map_err(|e| anyhow!("deserialize composed view into DirectiveHeader: {e}"))
+    ryeos_directive_definition::parse_effective_header(&view.composed)
+        .map_err(|error| anyhow!("parse effective directive header: {error}"))
 }
 
 /// Project the daemon-baked inventory of `kind:tool` items shipped in
@@ -353,14 +326,7 @@ fn compile_admitted_directive_hooks(
             count = header_hooks.len(),
             "directive runtime: compiling directive-declared hooks"
         );
-        for (idx, definition) in header_hooks.iter().cloned().enumerate() {
-            if definition.event == "continuation" && !header.continuation.enabled() {
-                return Err(anyhow::anyhow!(
-                    "directive header hooks[{idx}]: a `continuation` event hook is \
-                     declared but `continuation` is disabled — it can never fire. \
-                     Enable `continuation` or remove the hook."
-                ));
-            }
+        for definition in header_hooks.iter().cloned() {
             directive_hooks.push(definition);
         }
     }

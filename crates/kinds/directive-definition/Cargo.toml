@@ -1,12 +1,12 @@
 [package]
-name = "ryeos-directive-core"
+name = "ryeos-directive-definition"
 version = "0.1.0"
 edition = "2024"
 license.workspace = true
-description = "Directive-owned model, provider, and launch-preparation domain logic"
+description = "Directive-kind definition, provider, and launch-preparation domain logic"
 
 [lib]
-name = "ryeos_directive_core"
+name = "ryeos_directive_definition"
 path = "src/lib.rs"
 
 [dependencies]
@@ -14,6 +14,7 @@ anyhow = { workspace = true }
 lillux = { workspace = true }
 ryeos-accounting = { workspace = true }
 ryeos-effect-contract = { workspace = true }
+ryeos-runtime = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -1,7 +1,11 @@
 use serde_json::Value;
 
-use crate::directive::{StreamingConfig, UsageAggregation};
 use crate::provider_adapter::http::{ProviderUsageSource, TokenUsage};
+#[cfg(test)]
+use ryeos_directive_definition::{
+    ReportedCostUnit, StreamMetadataConfig, StreamPaths, StreamUsageConfig, StreamingMode,
+};
+use ryeos_directive_definition::{StreamingConfig, UsageAggregation};
 
 /// Pull provider-side metadata (usage totals, finish_reason) out of a
 /// single SSE event block. Stream events and response accounting are kept
@@ -516,10 +520,10 @@ mod tests {
 
     fn declared_metadata(aggregation: UsageAggregation) -> StreamingConfig {
         StreamingConfig {
-            mode: Some(crate::directive::StreamingMode::DeltaMerge),
+            mode: Some(StreamingMode::DeltaMerge),
             paths: None,
-            metadata: Some(crate::directive::StreamMetadataConfig {
-                usage: Some(crate::directive::StreamUsageConfig {
+            metadata: Some(StreamMetadataConfig {
+                usage: Some(StreamUsageConfig {
                     path: "usage".into(),
                     input_tokens_path: Some("prompt_tokens".into()),
                     output_tokens_path: Some("completion_tokens".into()),
@@ -531,7 +535,7 @@ mod tests {
                     cache_write_tokens_path: None,
                     cache_partition_of_input: false,
                     reported_cost_path: Some("cost".into()),
-                    reported_cost_unit: Some(crate::directive::ReportedCostUnit::Usd),
+                    reported_cost_unit: Some(ReportedCostUnit::Usd),
                     cost_details_path: Some("cost_details".into()),
                     is_byok_path: Some("is_byok".into()),
                     reasoning_included_in_output: true,
@@ -831,7 +835,7 @@ mod tests {
 
     #[test]
     fn protocol_paths_do_not_compete_with_metadata_authority() {
-        let paths = crate::directive::StreamPaths {
+        let paths = StreamPaths {
             content_path: "candidates.0.content.parts".into(),
             text_field: "text".into(),
             thought_field: None,
@@ -844,7 +848,7 @@ mod tests {
             finish_reason_path: Some("candidates.0.finishReason".into()),
         };
         let streaming = StreamingConfig {
-            mode: Some(crate::directive::StreamingMode::CompleteChunks),
+            mode: Some(StreamingMode::CompleteChunks),
             paths: Some(paths),
             metadata: None,
         };

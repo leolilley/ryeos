@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use ryeos_directive_core::{ProviderSetupModelProjection, ProviderSetupProjection};
+use ryeos_directive_definition::{ProviderSetupModelProjection, ProviderSetupProjection};
 use ryeos_node::{
     InitOperatorCeremony, InitOperatorProfile, InitOptions, InitPhase, InitProgress, InitReport,
     LifecycleController, LocalLifecycleEnv, PersistModelRouteOptions,

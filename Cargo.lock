@@ -2377,7 +2377,7 @@ dependencies = [
  "ryeos-accounting",
  "ryeos-app",
  "ryeos-bundle",
- "ryeos-directive-core",
+ "ryeos-directive-definition",
  "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-executor",
@@ -2490,7 +2490,7 @@ dependencies = [
  "ryeos-app",
  "ryeos-bundle",
  "ryeos-core-tools",
- "ryeos-directive-core",
+ "ryeos-directive-definition",
  "ryeos-engine",
  "ryeos-node",
  "ryeos-runtime",
@@ -2602,13 +2602,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "ryeos-directive-core"
+name = "ryeos-directive-definition"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "lillux",
  "ryeos-accounting",
  "ryeos-effect-contract",
+ "ryeos-runtime",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2630,7 +2631,7 @@ dependencies = [
  "regex",
  "reqwest",
  "ryeos-accounting",
- "ryeos-directive-core",
+ "ryeos-directive-definition",
  "ryeos-engine",
  "ryeos-provider-contract",
  "ryeos-runtime",
@@ -2775,7 +2776,7 @@ dependencies = [
  "anyhow",
  "base64",
  "regex",
- "ryeos-directive-core",
+ "ryeos-directive-definition",
  "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-graph-definition",

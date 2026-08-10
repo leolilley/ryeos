@@ -31,13 +31,18 @@ fn shipped_local_worker_pins_the_production_capture_digest() {
         .ancestors()
         .nth(3)
         .expect("ryeos-state lives below the repository root");
-    let worker_root = repository.join("bundles/standard/.ai/workers/lib/tinygrad_qwen");
+    let worker_root =
+        repository.join("bundles/standard/.ai/workers/standard/lib/tinygrad_qwen");
     let pinned = lillux::PinnedDirectory::open(&worker_root)
         .unwrap()
         .expect("shipped local worker tree exists");
     let ignore = ryeos_state::ignore::matcher_from_builtins();
     let policy =
-        ExternalCapturePolicy::new(".ai/workers/lib/tinygrad_qwen".to_owned(), &ignore).unwrap();
+        ExternalCapturePolicy::new(
+            ".ai/workers/standard/lib/tinygrad_qwen".to_owned(),
+            &ignore,
+        )
+        .unwrap();
     let manifest = capture_tree(
         &pinned,
         &[],

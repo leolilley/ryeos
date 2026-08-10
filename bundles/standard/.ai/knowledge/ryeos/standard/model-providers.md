@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-03T05:24:52Z:41012d699530ec721387d2f4c2c83a77d4f8e55700ade4e62c6cfb37ee451841:85bkLUKSgPTv1WMGqprOyuDbFmw0w19W61W7Pxybrs6mkzMAsl4ouWKHP3JYPpG1BueULzxcEl3x/PBnvuJKBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-10T03:16:08Z:85a5f7302c6516131838d76c2f95f51261b78fd093510285b019936fd083bc97:TeJPmfrI+3jtF5wpWugNkQXIQa+njdUiRrJFZesC6/0aGdntZuquKEBz0AaWwyEQlHH61XTDsJcyTENInyedAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
@@ -37,11 +37,11 @@ explicitly in the `model` slot.
 
 ## Resolution order
 
-Provider selection is owned by the pure directive launch preparer and shared
-directive core:
+Provider selection is owned by the pure directive launch preparer and the
+directive kind definition:
 
 - `ryeos-handler-bins/src/directive_launch.rs`
-- `ryeos-directive-core/src/lib.rs`
+- `crates/kinds/directive-definition/src/lib.rs`
 
 1. The preparer reads model settings from the resolved `model` binding. If it
    names `model.name`, it must also name

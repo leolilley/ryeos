@@ -1,114 +1,111 @@
-<!-- ryeos:signed:2026-08-07T10:40:48Z:a453f9fa66d3262832cfa4329f68e99fe7ae18d9b44b42285efdadf24a1bd832:LJz+U48AjvcwPltUlvvve3W9ra5UcfMIz3IdZbFJa3AlMqge62fBrUe7QdxFCDb4Wcfg3fA2l9qLlhl/3K4ODw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-10T03:16:08Z:4f75a2e58e34732016d40e5e635bf5d0fea00b3f379f0816bc23fde819bc2b6b:RqMUJ5J+rE3vjBBVxZU+rQfLW38QWB//hW0Fovx3+BVYGg/YQ+4ytOn3/TlxmV5+z5EkLkU25JPdbWP9vlsOBg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, inference, checkpoint, capsule, tinygrad, search, sealed]
-version: "0.1.0"
-status: draft
+version: "0.2.0"
+status: deferred
 description: >
-  Checkpoint, park, resume, and fork for in-flight local generation: KV
-  cache, RNG state, and token position as a content-addressed capsule —
-  with the prefix cache falling out as the degenerate checkpoint.
+  Checkpoint, park, resume, prefix reuse, and fork for qualified local
+  generation, with provider-owned tensor semantics over a meaning-blind RyeOS
+  capsule/index/retention substrate.
 ---
 
 # Generation-state capsules
 
-Under sealed local inference a turn stops being atomic: generation state
-is tensors — KV cache, RNG state, tokens so far — and tensors checkpoint.
-This note designs the capsule that carries that state, and the three
-operations it enables: park a canceled turn instead of discarding it,
-resume bit-identically, and fork at a token with sealed provenance per
-branch. The graph runtime already has park-tree, continuation capsules,
-and `segment_steps`; this is the same machinery reaching inside the
-model.
+## Current boundary
 
-## The capsule
+RyeOS has a recorded local Tinygrad route, external large-content storage,
+admitted persistent sessions, execution realizations, durable stages, immutable
+effect indexes, and graph continuation machinery. It does **not** yet have a
+qualified sealed local route or a generation-state capsule.
 
-A content-addressed object:
+This work begins only after positive sealed qualification. A retained terminal
+answer proves replay of the completed effect; it does not prove that an
+in-flight KV/RNG state can resume bit-identically.
 
-- **scope** — the program digest and the **execution identity**
-  (`knowledge:ryeos/future/execution-identity`), both required. A
-  checkpoint is sealed-class state: its bytes are meaningful only where
-  weights, kernels, and numerics match. On a foreign identity a capsule
-  is not resumable and never pretends to be — the graceful path is the
-  turn's provider-call record (replay the finished turn) or live
-  recomputation from the last durable boundary.
-- **position** — the token offset, the RNG state at that offset, and the
-  digest of the token sequence up to it. History-as-counter, as
-  everywhere: the sequence digest is the identity of "where in the
-  generation," so two checkpoints at the same offset of different
-  generations can never be confused.
-- **state payload** — the KV tensors, stored through the semantically
-  blind large-object store
-  (`knowledge:ryeos/future/weights-tier-realizations`): contiguous,
-  mmap-ready, streaming-verified at write. The capsule holds hashes,
-  never tensors.
-- **lineage** — the parent capsule hash when this checkpoint continues or
-  forks another. The search tree is literally the capsule lineage graph.
+## Ownership split
 
-## The unification: prefix cache is the degenerate checkpoint
+The generic capsule substrate is meaning-blind. It may commit only to:
 
-A KV-prefix cache entry is a checkpoint with no partial output: position
-at the end of a shared prompt prefix, RNG untouched. Same object, same
-store, same keying by (execution identity, weights, kernels, sequence
-digest). There is no separate prefix-cache subsystem to build — sharing
-prompt-prefix computation across runs and callers is capsule reuse, and
-every property below (retention, foreign-identity refusal, lineage)
-applies to it for free.
+- owning contract/ref and admitted execution realization;
+- an opaque canonical coordinate digest and payload-schema digest;
+- payload CAS objects, CAS blobs, and distinct large-object hashes;
+- parent checkpoint and fork lineage;
+- an opaque bounded continuation-state digest;
+- an owning-contract-declared safe boundary;
+- tenant/privacy scope, leases, budgets, and retention state.
 
-## Operations
+The provider-generation contract owns:
 
-- **Park.** An interrupt at a checkpoint boundary seals the capsule and
-  parks the turn exactly as a graph parks at a continuation boundary. A
-  crash re-pays tokens since the last checkpoint, not the turn.
-- **Resume.** Admission verifies scope (program digest and execution
-  identity match), restores KV and RNG, and continues. Bit-identity with
-  the uninterrupted run is the sealed-class contract, and a divergence
-  is a substrate-integrity finding.
-- **Fork.** A new generation admitted *from* a capsule with a divergent
-  continuation — different seed, injected tokens, different sampler
-  config. The child seals the parent hash; branch provenance is
-  structural. Best-of-N and tree search are fork loops, and rejected
-  branches remain re-derivable evidence.
+- model/runtime state schema and compatibility;
+- request prefix and logical token position;
+- token sequence, KV tensor layout, and sampler/RNG state;
+- the exact derivation of coordinate and payload digests;
+- semantic validation of park/resume/fork; and
+- whether a boundary is safe for the admitted runtime.
 
-## Boundaries and economics
+None of those provider nouns enter generic state, CAS traversal, operational
+indexes, executor code, or the `worker` kind.
 
-KV runs to gigabytes at long context, so checkpoints land at declared
-boundaries, never per token: a `segment_tokens` cadence in the sealed
-declaration, plus the natural free boundaries — tool-call pauses and
-turn ends, where generation already stops. Retention is the cheapest
-lane in the system, because capsules are pure derived state: under a
-matching identity they are re-derivable, so eviction is never loss of
-evidence, only loss of time. Two protections stand above LRU: a parked
-thread's newest capsule is rooted by its thread row (parking must
-survive the sweep), and an active generation's capsule chain is leased.
-Speculative search branches age out first by construction.
+## Capsule behavior
 
-## What this means
+### Prefix reuse
 
-- **Cancellation is costless** — canceled work is parked work.
-- **Search is native** — the solver forks reasoning at token granularity
-  with provenance, which is the ARC campaign's deep lever.
-- **Deploy windows shrink** — a clear window needs solves parkable, and
-  parkable now reaches inside a turn instead of waiting for one to end.
-- **Chat products** get cross-caller prompt-prefix sharing as capsule
-  reuse under a shared execution identity.
+A prompt-end prefix is the degenerate checkpoint: no partial output, RNG at its
+initial generation state, and a provider-owned coordinate committing to the
+qualified realization and exact prefix. The daemon index treats it like any
+other opaque capsule. Cross-principal sharing is forbidden unless explicit node
+policy creates a broader trusted domain; lookup timing must not become a prompt
+membership oracle.
 
-## Increments
+### Park and resume
 
-0. Capsule object + canonical digest in ryeos-state (scope, position,
-   payload hashes, lineage), decode discipline as everywhere.
-1. Prefix-as-checkpoint in the tinygrad runtime: write a capsule at
-   prompt-end, look one up before prefill — the cheapest win and the
-   proof of the store path.
-2. Park/resume at declared boundaries, wired to the existing interrupt
-   and continuation surfaces.
-3. Fork, with lineage sealed and a bounded fan-out declared like every
-   other budget.
-4. Retention lanes: thread-rooted parked capsules, leased active chains,
-   LRU for the speculative rest.
+At an admitted token boundary the worker stages the complete opaque payload;
+the daemon independently verifies its declared closure, atomically publishes
+the capsule/index entry, and roots the parked capsule through the owning thread.
+Exact resume requires the same qualified realization and provider coordinate.
+Missing/incompatible content fails closed. A caller may separately request a
+fresh generation, but an exact resume never silently restarts.
+
+### Fork
+
+A fork seals its parent capsule and a new provider-owned continuation
+coordinate. Bounded fanout/depth are admitted before publication. Rejected
+speculative branches are derived performance state, not primary execution
+evidence, and age out before parked/leased capsules.
+
+## Atomicity and retention
+
+Publication extends the existing durable stage across CAS objects, blobs, and
+large objects. A capsule/index entry becomes visible only after the complete
+closure is retained. Active worker/thread leases and parked-thread roots block
+retirement. Per-thread and per-principal count/byte ceilings plus fanout/depth
+budgets are checked before content becomes durable authority.
+
+Crash recovery must cover every boundary: stage before index, index before root,
+root before response, active lease loss, and retirement racing a reader. An
+exact duplicate folds; divergent content under one coordinate fails closed.
+
+## Implementation increments
+
+0. **Qualification prerequisite.** Prove the target local route sealed under a
+   retained realization; otherwise this package remains blocked by design.
+1. **Generic capsule contract.** Current-schema object, opaque coordinate and
+   payload digests, typed closure edges, lineage, tenant scope, and strict
+   bounds. No provider vocabulary in state.
+2. **Operational index and staging.** Immutable answer semantics, atomic
+   CAS/blob/large publication, GC roots, leases, and crash matrix.
+3. **Provider adapter.** Tinygrad derives/validates prompt-prefix coordinates
+   and opaque payloads; daemon never parses KV/tokens/sampler state.
+4. **Prefix acceptance.** Fresh process reuses a retained prompt-end capsule
+   with zero prefill work and exact realization/privacy proof.
+5. **Park/resume.** Interrupt and recovery at declared boundaries; exact
+   resumed output matches uninterrupted generation.
+6. **Fork and retention.** Bounded lineage, speculative lanes, field
+   projection of identity/lineage only, and budget/eviction acceptance.
 
 ## Triggers to revisit
 
-- The tinygrad runtime lands (increment 1 becomes buildable);
-- the first real solver wants mid-turn fork budgets;
-- KV size at target context lengths makes `segment_tokens` defaults or
-  the large-object budget wrong in practice.
+- sealed local qualification passes on a target node;
+- ARC search needs prefix reuse, mid-turn park/resume, or token-level fork;
+- retained KV sizes establish realistic segment and storage budgets; or
+- deployment windows need in-turn parking rather than turn-boundary replay.

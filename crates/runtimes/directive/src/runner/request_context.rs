@@ -1,6 +1,7 @@
 use serde_json::{Map, Value, json};
 
-use crate::directive::{OutputSpec, ProviderMessage, ToolSchema};
+use crate::directive::{ProviderMessage, ToolSchema};
+use ryeos_directive_definition::OutputSpec;
 
 pub(super) fn initial_messages(
     messages: Vec<ProviderMessage>,

@@ -53,7 +53,7 @@ pub async fn handle(
                 ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
         })
         .map_err(|error| HandlerError::Internal(error.to_string()))?;
-    let provider: ryeos_directive_core::ProviderConfig =
+    let provider: ryeos_directive_definition::ProviderConfig =
         serde_json::from_value(effective.composed_value)
             .map_err(|error| HandlerError::Internal(error.to_string()))?;
     provider

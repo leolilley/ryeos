@@ -9,12 +9,12 @@
 
 use anyhow::{Result, anyhow, bail};
 
-use crate::directive::ProviderConfig;
 use crate::provider_adapter::PreparedProviderRequest;
 use ryeos_accounting::{
     BillableDimension, HexDigest, ProviderAccountingAuthority, SpendBoundAuthority,
     SpendBoundCertificate, SpendBoundCommitments, UnitCount, UsdNanos, VerifiedPreparedSpendBound,
 };
+use ryeos_directive_definition::ProviderConfig;
 
 /// Version string committed into every proof so a daemon can reject proofs
 /// produced under a different verifier contract.
@@ -33,7 +33,7 @@ fn verifier_contract_digest() -> Result<HexDigest> {
 /// dimensions are bounded by the declared context window, generation-side
 /// dimensions by the effective provider-native output ceiling, per-request
 /// by exactly one. Must stay in lock-step with
-/// `ryeos_directive_core::resolve_accounting_authority`.
+/// `ryeos_directive_definition::resolve_accounting_authority`.
 fn dimension_bound(
     dimension: BillableDimension,
     context_window: u64,
@@ -288,7 +288,9 @@ mod tests {
         PROVIDER_CHARGE_CAP_SCHEMA_VERSION, ProviderChargeCapContract, SPEND_TARIFF_SCHEMA_VERSION,
         SpendTariffDocument,
     };
-    use ryeos_directive_core::SpendAuthorityConfig;
+    use ryeos_directive_definition::{
+        ProtocolFamily, ProviderTransportConfig, SpendAuthorityConfig,
+    };
 
     const CONTEXT_WINDOW: u64 = 200_000;
     const OUTPUT_CEILING: u64 = 8_192;
@@ -335,8 +337,8 @@ mod tests {
     fn provider_with(spend_authority: Option<SpendAuthorityConfig>) -> ProviderConfig {
         ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
                 base_url: "http://localhost".to_string(),
             },
             auth: Default::default(),
@@ -682,7 +684,7 @@ mod tests {
         };
         let authority = authority.sealed().unwrap();
         let mut provider = provider_with(None);
-        provider.pricing = Some(ryeos_directive_core::PricingConfig {
+        provider.pricing = Some(ryeos_directive_definition::PricingConfig {
             explicitly_free: true,
             input_per_million: None,
             output_per_million: None,

@@ -32,7 +32,7 @@ ryeos-runtime = { workspace = true }
 ryeos-scheduler = { workspace = true }
 ryeos-state = { workspace = true }
 ryeos-bundle = { workspace = true }
-ryeos-directive-core = { workspace = true }
+ryeos-directive-definition = { workspace = true }
 ryeos-effect-contract = { workspace = true }
 ryeos-provider-contract = { workspace = true }
 ryeos-tracing = { workspace = true }

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use ryeos_directive_core::{
+use ryeos_directive_definition::{
     DirectiveDiagnosticScalar, DirectiveLaunchPreparationInput, DirectivePreparationError,
     DirectivePreparationErrorClass, EXECUTION_INPUT, MODEL_BINDING, MODEL_PROVIDERS_INPUT,
     MODEL_ROUTING_INPUT, PROVIDER_CONFIG_PREFIX, PROVIDER_SNAPSHOT_KEY, ProviderConfigSource,
@@ -99,6 +99,17 @@ fn prepare_inner(
         ));
     }
 
+    let directive =
+        ryeos_directive_definition::parse_effective_header(&request.primary.composed.composed)
+            .map_err(|error| {
+                wire_error(
+                    "directive_effective_header_invalid",
+                    error.to_string(),
+                    LaunchPrepareErrorClass::Configuration,
+                    None,
+                )
+            })?;
+
     let model_item = request
         .ref_bindings
         .get(MODEL_BINDING)
@@ -136,67 +147,16 @@ fn prepare_inner(
     })
     .map_err(domain_error)?;
 
-    let admitted_effect_class = match request
-        .primary
-        .composed
-        .composed
-        .get("effects")
-        .and_then(serde_json::Value::as_str)
-    {
-        None | Some("live") => None,
-        Some("recorded") => Some(ryeos_effect_contract::EffectClass::Recorded),
-        Some("sealed") => Some(ryeos_effect_contract::EffectClass::Sealed),
-        Some(value) => {
-            return Err(wire_error(
-                "directive_effect_class_invalid",
-                format!("directive effect class `{value}` is not supported"),
-                LaunchPrepareErrorClass::Configuration,
-                None,
-            ));
-        }
-    };
-    if admitted_effect_class.is_some_and(|requested| {
-        !prepared
-            .snapshot
-            .provider
-            .transport
-            .effect_class_ceiling()
-            .permits(requested)
-    }) {
-        return Err(wire_error(
-            "directive_effect_class_exceeds_provider_boundary",
-            "directive effect class exceeds the selected provider transport's admitted boundary",
-            LaunchPrepareErrorClass::Configuration,
-            Some(MODEL_BINDING),
-        ));
-    }
-    let family_value =
-        serde_json::to_value(prepared.snapshot.provider.family).map_err(|error| {
-            wire_error(
-                "provider_family_serialize_failed",
-                format!("could not serialize provider family: {error}"),
-                LaunchPrepareErrorClass::Internal,
-                None,
-            )
-        })?;
-    let provider_family = family_value.as_str().ok_or_else(|| {
-        wire_error(
-            "provider_family_serialize_failed",
-            "provider family did not serialize as a string",
-            LaunchPrepareErrorClass::Internal,
-            None,
-        )
-    })?;
-    let external_effect_authority = ryeos_effect_contract::AdmittedExternalEffectAuthority {
-        authority_family: provider_family.to_owned(),
-        admitted_effect_class,
-    };
-    external_effect_authority.validate().map_err(|error| {
+    let external_effect_authority = ryeos_directive_definition::resolve_external_effect_authority(
+        &directive,
+        &prepared.snapshot.provider,
+    )
+    .map_err(|error| {
         wire_error(
             "external_effect_authority_invalid",
             error.to_string(),
-            LaunchPrepareErrorClass::Internal,
-            None,
+            LaunchPrepareErrorClass::Configuration,
+            Some(MODEL_BINDING),
         )
     })?;
 
@@ -857,7 +817,7 @@ mod tests {
     fn bundled_deepseek_provider_is_strict_and_hard_spend_capable() {
         let path = repository_root()
             .join("bundles/standard/.ai/config/ryeos-runtime/model-providers/deepseek.yaml");
-        let provider: ryeos_directive_core::ProviderConfig = serde_yaml::from_str(
+        let provider: ryeos_directive_definition::ProviderConfig = serde_yaml::from_str(
             &std::fs::read_to_string(&path).expect("read DeepSeek provider config"),
         )
         .expect("strictly parse DeepSeek provider config");

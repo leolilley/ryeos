@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-07T10:40:49Z:95ec4404b762f238b01c2639df69eae1f344f1a3f6b3791e5a75b25ac98b4384:2/tzuR+NlV0X9dV8vzmSuy4OU2ZsZTtHtzeCfnHreKe2S9iHYCEkYlAyUnCurro73PY+rk7fIBE+Ava+88blAA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-10T03:16:08Z:39e6620092c9488fcb0ca6caddf8787c21dfab13413a1049b1c990bf2646d90c:0iDwlTSBzfUIhaLGlF9GhOa+xoi26tTSLn8+ArQVko3M14hyPOJSDthClRoWaGywThtWMj5si3G4LfqbTln0Bw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, inference, tinygrad, sealed, replay, arc]
-version: "0.1.0"
-status: draft
+version: "0.2.0"
+status: deferred
 description: >
   The destination for LLM execution in ryeos: local inference on tinygrad as
   sealed-class computation — weights, kernels, and sampler state as admitted
@@ -10,6 +10,22 @@ description: >
 ---
 
 # Sealed local inference
+
+## Current boundary
+
+The recorded local foundation has landed. RyeOS can import and bind exact
+runtime/model/toolchain content, admit a signed `worker`, run Tinygrad/Qwen
+through an isolated persistent session, retain a daemon observation, publish a
+provider-call record, repair crash boundaries, and replay after restart without
+model contact. Node execution identity, admitted execution realization, large
+content, and provider-effect evidence are current contracts; see
+`knowledge:ryeos/core/execution/local-model-workers`.
+
+The route is intentionally **recorded**, not sealed. No observed realization or
+sealed qualification currently proves that the compiled artifact set,
+numerics, sampler, and two clean processes reproduce the same bytes. This note
+owns that promotion boundary and nothing in the landed worker kind implicitly
+crosses it.
 
 Remote provider calls cap out at `recorded`: the sample from the
 distribution is irreproducible (provider batching, MoE routing, silent
@@ -114,44 +130,41 @@ program includes the model — and the substrate's claim becomes
 whole-agent reproducibility: re-derive an entire agent run bit-for-bit or
 receive a typed proof naming which tranche moved. The three standing
 directions turn out to be one architecture: the campaign instrument is
-the proving ground, portable execution is "ship the capsule, re-derive
-where the execution identity matches, recorded-replay where it doesn't,"
-and chat-product reuse is the same record store plus cross-caller
-KV-prefix sharing.
+the proving ground, while portable execution eventually becomes "export the
+complete authenticated capsule closure, re-derive where the execution identity
+matches, recorded-replay where it doesn't." That independently complete export
+is deferred in `portable-execution-graph-advanced-path.md`; a retained local
+capsule alone is not yet a portable artifact. Chat-product reuse is the same
+record store plus cross-caller KV-prefix sharing.
 
-## Prerequisites, in dependency order
+## Remaining implementation, in dependency order
 
-1. **Provider-call effect records**
-   (`knowledge:ryeos/future/provider-call-effect-records`) — the identity
-   and store machinery, placement- and class-agnostic by design; local
-   arrival changes the class marker on the same keys.
-2. **Weights-tier realizations** — designed:
-   `knowledge:ryeos/future/weights-tier-realizations`. Pin-only ingest,
-   contiguous mmap-ready storage under the pinned authority with
-   streaming chunk verification, no materialize-copy, dedup by
-   base-plus-adapter composition rather than chunking, per-kind bounds.
-   Identity layer unchanged. This gates local work and is now ready to
-   build.
-3. **Execution-identity vocabulary** — designed:
-   `knowledge:ryeos/future/execution-identity`. A coordinate beside the
-   program digest, not a digest tranche: sealed claims scope to the
-   pair and degrade to recorded across hardware; the interpreter
-   residue is absorbed as a named tranche; divergence distinguishes
-   scope from finding. Ready to build, and useful before local
-   inference arrives.
-4. **tinygrad as a realized managed runtime** — the inference server on
-   the framed-streaming protocol, its tree and its JIT/BEAM caches either
-   pinned as realizations or declared live (the ambient-content
-   discipline applies to caches exactly as it did to the interpreter).
-5. **Generation-state capsules** — designed:
-   `knowledge:ryeos/future/generation-state-capsules`. Park/resume/fork
-   at declared token boundaries, KV through the large-object store,
-   prefix cache unified as the degenerate checkpoint, foreign-identity
-   capsules refused with replay as the graceful path.
-6. **Sealed training runs** (later) — data manifests as realizations,
-   seeded runs, campaign-as-eval; parallelism nondeterminism honestly
-   classed (`sealed` single-device or deterministic-reduction, `recorded`
-   otherwise).
+The former prerequisites — provider-call records, semantically blind large
+content, execution identity/realizations, and a realized Tinygrad worker — are
+landed foundation. The remaining work is narrower and evidence-gated:
+
+1. **Qualification contract.** Add a node-signed sealed qualification linking
+   the exact admitted realization, target identity/attestation, deterministic
+   request and sampler policy, and retained compiled-artifact/numerics plan.
+   Provider admission derives its class ceiling from this object; an authored
+   `effects: sealed` declaration cannot upgrade a recorded route.
+2. **Observed-artifact promotion.** A discovery run records the exact kernels,
+   compiler products, selection cache, and numerics facts it observed. It stays
+   recorded. Promotion creates a new closed admitted realization; any new JIT
+   artifact during a qualified run is an integrity failure.
+3. **Two-process byte proof.** Run a bounded acceptance corpus in two clean
+   processes under the same realization and require byte-identical canonical
+   terminal answers. Changed target/realization moves identity rather than
+   serving old proof.
+4. **Divergence projection.** Distinguish different program, different
+   realization/target scope, and same-scope byte divergence. Only the last is a
+   substrate-integrity finding.
+5. **Generation-state capsules.** Only after positive qualification, implement
+   `knowledge:ryeos/future/generation-state-capsules`; a recorded terminal
+   replay does not prove an in-flight tensor checkpoint resumable.
+6. **Sealed training runs** (later) — data manifests as realizations, seeded
+   runs, campaign-as-eval; parallelism nondeterminism honestly classed
+   (`sealed` single-device or deterministic-reduction, `recorded` otherwise).
 
 ## Non-goals
 
@@ -162,8 +175,9 @@ KV-prefix sharing.
 
 ## Triggers to revisit
 
-- Provider records land and the ARC measurement (turns replayed, spend
-  saved) is in hand;
-- the weights-tier realization design starts;
+- the ARC measurement (turns replayed, spend saved, and first divergence) is in
+  hand;
+- an available CPU/device target can retain and close its full compiled
+  artifact/numerics set;
 - ARC's offline deadline is scheduled — the forcing function for the
   whole ladder.

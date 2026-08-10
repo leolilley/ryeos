@@ -11,12 +11,22 @@ use sha2::{Digest, Sha256};
 #[cfg(test)]
 use crate::directive::FinishReason;
 use crate::directive::{
-    ExecutionConfig, MalformedArgs, ProtocolFamily, ProviderConfig, ProviderMessage,
-    ReasoningConfig, ReasoningMode, ReasoningSchemaConfig, SamplingConfig, StreamEvent,
-    SystemMessageMode, ToolCall, ToolSchema, UsageUpdate, normalize_finish_reason,
+    ExecutionConfig, MalformedArgs, ProviderMessage, StreamEvent, ToolCall, ToolSchema,
+    UsageUpdate, normalize_finish_reason,
 };
 use crate::provider_adapter::http::{
     AdapterResponse, ObservedOutput, ProviderLimitContractStatus, ProviderUsageSource, TokenUsage,
+};
+#[cfg(test)]
+use ryeos_directive_definition::{
+    MessageSchemas, ProviderTransportConfig, ReasoningEffortSchemaConfig,
+    ReasoningModeSchemaConfig, ReasoningModeValues, SchemasConfig, StreamMetadataConfig,
+    StreamUsageConfig, StreamingConfig, StreamingMode, SystemMessageConfig, UsageAggregation,
+};
+use ryeos_directive_definition::{
+    OutputLimitConfig, OutputLimitSemantics, ProtocolFamily, ProviderConfig, ReasoningConfig,
+    ReasoningMode, ReasoningSchemaConfig, SamplingConfig, StreamErrorConfig, StreamPaths,
+    SystemMessageMode,
 };
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::events::{MAX_RUNTIME_EVENT_BATCH_ITEMS, RuntimeEventType};
@@ -528,7 +538,7 @@ fn parse_sse_events(data: &str, mode: Option<&str>) -> Vec<StreamEvent> {
 pub fn parse_sse_events_with_state(
     data: &str,
     mode: Option<&str>,
-    stream_paths: Option<&crate::directive::StreamPaths>,
+    stream_paths: Option<&StreamPaths>,
     tool_call_state: &mut HashMap<String, String>,
 ) -> Vec<StreamEvent> {
     let raw_events = split_sse_events(data);
@@ -619,7 +629,7 @@ struct ProviderReportedErrorContext<'a> {
 
 fn provider_reported_error(
     block: &str,
-    config: Option<&crate::directive::StreamErrorConfig>,
+    config: Option<&StreamErrorConfig>,
     context: ProviderReportedErrorContext<'_>,
 ) -> Result<Option<ProviderReportedStreamError>> {
     let ProviderReportedErrorContext {
@@ -1068,7 +1078,7 @@ fn parse_delta_merge(
 fn parse_complete_chunks(
     parsed: &Value,
     events: &mut Vec<StreamEvent>,
-    paths: Option<&crate::directive::StreamPaths>,
+    paths: Option<&StreamPaths>,
     tool_call_state: &mut HashMap<String, String>,
 ) {
     use ryeos_runtime::template::resolve_path;
@@ -3238,7 +3248,7 @@ pub fn build_request_body(
 
 pub(crate) fn apply_declared_output_limit(
     body: &mut Value,
-    config: Option<&crate::directive::OutputLimitConfig>,
+    config: Option<&OutputLimitConfig>,
     hard_limit: Option<u64>,
 ) -> Result<()> {
     use ryeos_runtime::template::resolve_path;
@@ -3325,7 +3335,7 @@ pub(crate) fn declared_output_limit_from_body(
         return Ok(None);
     };
     match config.semantics {
-        crate::directive::OutputLimitSemantics::ProviderNativeOutputTokens => resolve_path(
+        OutputLimitSemantics::ProviderNativeOutputTokens => resolve_path(
             body,
             &config.path,
         )
@@ -3680,11 +3690,11 @@ mod tests {
                 "usage": {"prompt_tokens": 100, "completion_tokens": 65_536}
             })
         );
-        let streaming = crate::directive::StreamingConfig {
-            mode: Some(crate::directive::StreamingMode::DeltaMerge),
+        let streaming = StreamingConfig {
+            mode: Some(StreamingMode::DeltaMerge),
             paths: None,
-            metadata: Some(crate::directive::StreamMetadataConfig {
-                usage: Some(crate::directive::StreamUsageConfig {
+            metadata: Some(StreamMetadataConfig {
+                usage: Some(StreamUsageConfig {
                     path: "usage".into(),
                     input_tokens_path: Some("prompt_tokens".into()),
                     output_tokens_path: Some("completion_tokens".into()),
@@ -3698,11 +3708,11 @@ mod tests {
                     cost_details_path: None,
                     is_byok_path: None,
                     reasoning_included_in_output: false,
-                    aggregation: crate::directive::UsageAggregation::LatestSnapshot,
+                    aggregation: UsageAggregation::LatestSnapshot,
                     single_snapshot: true,
                 }),
                 finish_reason_path: Some("choices.0.finish_reason".into()),
-                error: Some(crate::directive::StreamErrorConfig {
+                error: Some(StreamErrorConfig {
                     path: "error".into(),
                     message_path: "message".into(),
                     finish_reasons: vec!["error".into()],
@@ -3775,7 +3785,7 @@ mod tests {
     #[test]
     fn null_declared_error_is_absent() {
         let block = "data: {\"error\":null,\"choices\":[]}\n\n";
-        let config = crate::directive::StreamErrorConfig {
+        let config = StreamErrorConfig {
             path: "error".into(),
             message_path: "message".into(),
             finish_reasons: vec!["error".into()],
@@ -3882,7 +3892,7 @@ mod tests {
             "\"metadata\":{\"provider_name\":\"example\"}},",
             "\"choices\":[{\"finish_reason\":\"error\"}]}\n\n",
         );
-        let config = crate::directive::StreamErrorConfig {
+        let config = StreamErrorConfig {
             path: "error".into(),
             message_path: "message".into(),
             finish_reasons: vec!["error".into()],
@@ -4402,14 +4412,14 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     fn reasoning_schema() -> ReasoningSchemaConfig {
         ReasoningSchemaConfig {
-            mode: Some(crate::directive::ReasoningModeSchemaConfig {
+            mode: Some(ReasoningModeSchemaConfig {
                 path: "thinking.type".to_string(),
-                values: crate::directive::ReasoningModeValues {
+                values: ReasoningModeValues {
                     enabled: json!("on"),
                     disabled: json!("off"),
                 },
             }),
-            effort: Some(crate::directive::ReasoningEffortSchemaConfig {
+            effort: Some(ReasoningEffortSchemaConfig {
                 path: "reasoning_effort".to_string(),
                 values: std::collections::BTreeMap::from([
                     ("high".to_string(), json!("high")),
@@ -4484,8 +4494,8 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     fn build_request_body_renders_template() {
         let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
                 base_url: "http://example.com".to_string(),
             },
             auth: Default::default(),
@@ -4522,8 +4532,8 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     fn build_request_body_deep_merges_body_extra() {
         let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
                 base_url: "http://example.com".to_string(),
             },
             auth: Default::default(),
@@ -4554,20 +4564,20 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     fn build_request_body_exposes_limit_to_authoritative_provider_template() {
         let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
                 base_url: "http://example.com".to_string(),
             },
             auth: Default::default(),
             headers: Default::default(),
-            schemas: Some(crate::directive::SchemasConfig {
+            schemas: Some(SchemasConfig {
                 accounting: None,
                 messages: None,
                 tools: None,
                 streaming: None,
-                output_limit: Some(crate::directive::OutputLimitConfig {
+                output_limit: Some(OutputLimitConfig {
                     path: "max_tokens".into(),
-                    semantics: crate::directive::OutputLimitSemantics::ProviderNativeOutputTokens,
+                    semantics: OutputLimitSemantics::ProviderNativeOutputTokens,
                 }),
                 reasoning: None,
             }),
@@ -4656,8 +4666,8 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         // because ProviderConfig::validate catches it at load-time.
         let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
                 base_url: "http://example.com".to_string(),
             },
             auth: Default::default(),
@@ -4681,8 +4691,8 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
         // "tools" key at all — not even tools: [].
         let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
                 base_url: "http://example.com".to_string(),
             },
             auth: Default::default(),
@@ -4717,11 +4727,10 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     #[test]
     fn inject_system_prompt_body_field_with_explicit_field() {
-        use crate::directive::{MessageSchemas, SchemasConfig, SystemMessageConfig};
         let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
                 base_url: "http://example.com".to_string(),
             },
             auth: Default::default(),
@@ -4753,11 +4762,10 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     #[test]
     fn inject_system_prompt_body_inject_renders_gemini_shape() {
-        use crate::directive::{MessageSchemas, SchemasConfig, SystemMessageConfig};
         let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
                 base_url: "http://example.com".to_string(),
             },
             auth: Default::default(),
@@ -4803,7 +4811,6 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     #[test]
     fn parse_complete_chunks_extracts_gemini_text_delta() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),
@@ -4833,7 +4840,6 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     #[test]
     fn parse_complete_chunks_filters_thinking_blocks() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),
@@ -4871,7 +4877,6 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     #[test]
     fn parse_complete_chunks_emits_done_on_finish_reason() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),
@@ -4909,7 +4914,6 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     #[test]
     fn parse_complete_chunks_assigns_stable_sequential_tool_call_ids() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),
@@ -4951,7 +4955,6 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     #[test]
     fn complete_chunks_cumulative_text_does_not_duplicate() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),
@@ -4991,7 +4994,6 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     #[test]
     fn gemini_complete_chunks_multi_part_text_in_one_frame_emits_full_text() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),
@@ -5036,7 +5038,6 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     #[test]
     fn gemini_complete_chunks_cumulative_multi_part_does_not_truncate() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),
@@ -5083,7 +5084,6 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
     #[test]
     fn complete_chunks_repeated_tool_call_emits_once() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),
@@ -5139,7 +5139,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     //
     // If a bundle YAML edit breaks one of these, CI catches it here.
 
-    use ryeos_directive_core::{
+    use ryeos_directive_definition::{
         ProviderConfigSource, ResolvedProviderSnapshot, SnapshotItemSpace, SnapshotTrustClass,
     };
     use ryeos_runtime::verified_loader::VerifiedLoader;
@@ -5880,7 +5880,7 @@ owner = "ryeos-dev"
         });
 
         let mut snapshot = resolve("openrouter", "anthropic/claude-sonnet-4.6");
-        snapshot.provider.transport = crate::directive::ProviderTransportConfig::RemoteHttp {
+        snapshot.provider.transport = ProviderTransportConfig::RemoteHttp {
             base_url: format!("http://{address}"),
         };
         snapshot.provider.auth.env_var = None;
@@ -6013,7 +6013,7 @@ owner = "ryeos-dev"
         });
 
         let mut snapshot = resolve("openrouter", "anthropic/claude-sonnet-4.6");
-        snapshot.provider.transport = crate::directive::ProviderTransportConfig::RemoteHttp {
+        snapshot.provider.transport = ProviderTransportConfig::RemoteHttp {
             base_url: format!("http://{address}"),
         };
         snapshot.provider.auth.env_var = None;
@@ -6307,7 +6307,6 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","
 
     #[test]
     fn gemini_emits_usage_from_usage_metadata() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),
@@ -6348,7 +6347,6 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","
 
     #[test]
     fn gemini_emits_reasoning_delta_for_thought_parts() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),
@@ -6394,7 +6392,6 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","
 
     #[test]
     fn gemini_uppercase_finish_reason_normalizes_correctly() {
-        use crate::directive::StreamPaths;
         let paths = StreamPaths {
             content_path: "candidates.0.content.parts".to_string(),
             text_field: "text".to_string(),

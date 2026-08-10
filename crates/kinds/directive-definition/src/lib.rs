@@ -1,4 +1,4 @@
-//! Directive-owned model/provider schema and pure launch preparation.
+//! Directive-kind model/provider schema and pure launch preparation.
 //!
 //! This crate deliberately has no executor, daemon, vault, thread, handler-runner,
 //! filesystem, or environment dependency. The host supplies already-authorized,
@@ -17,6 +17,14 @@ use ryeos_accounting::{
     BillableDimension, ChargeReconciliationAuthority, ClosedBillableDimensionSet, Currency,
     FinalityContract, HexDigest, ProviderAccountingAuthority, ProviderChargeCapContract,
     SpendBoundAuthority, SpendBoundCertificate, SpendTariffDocument, UsdNanos,
+};
+
+mod effective;
+
+pub use effective::{
+    ContinuationConfig, ContinuationEnabled, DIRECTIVE_EFFECTIVE_HEADER_KEYS, DirectiveEffectClass,
+    DirectiveHeader, LimitsSpec, OutputSpec, ReturnNudge, parse_effective_header,
+    resolve_external_effect_authority,
 };
 
 pub const MODEL_BINDING: &str = "model";

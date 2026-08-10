@@ -4,10 +4,7 @@ use serde_json::{Value, json};
 
 use crate::budget::BudgetTracker;
 use crate::continuation::ContinuationCheck;
-use crate::directive::{
-    ContinuationConfig, ExecutionConfig, FinishReason, OutputSpec, ProviderMessage,
-    ReasoningConfig, ReturnNudge, SamplingConfig, StreamEvent, ToolSchema,
-};
+use crate::directive::{ExecutionConfig, FinishReason, ProviderMessage, StreamEvent, ToolSchema};
 use crate::dispatcher::{DispatchKind, Dispatcher};
 use crate::harness::{Harness, HookAction};
 use crate::result_guard::ResultGuard;
@@ -19,6 +16,11 @@ use ryeos_accounting::{
     ProviderAttemptReleaseUnissuedParams, ProviderAttemptSettleParams, ReconciliationReason,
     SpendAccounting, SpendBoundAuthority, TokenAccounting, UnitCount, VerifiedPreparedSpendBound,
 };
+use ryeos_directive_definition::{
+    ContinuationConfig, OutputSpec, ProviderConfig, ReasoningConfig, ReturnNudge, SamplingConfig,
+};
+#[cfg(test)]
+use ryeos_directive_definition::{PricingConfig, ProtocolFamily, ProviderTransportConfig};
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::{
     EnvelopeAccountingScope, RuntimeCost, RuntimeResult, RuntimeResultStatus,
@@ -184,7 +186,7 @@ pub struct Runner {
     callback: CallbackClient,
     continuation: ContinuationCheck,
     result_guard: ResultGuard,
-    provider_config: crate::directive::ProviderConfig,
+    provider_config: ProviderConfig,
     provider_id: String,
     /// Profile name that matched during daemon preflight.
     matched_profile: Option<String>,
@@ -614,7 +616,7 @@ pub struct RunnerConfig {
     /// Fraction of the context window at which the continuation boundary fires;
     /// from the directive runtime's `ryeos-runtime/continuation` config.
     pub context_threshold_ratio: f64,
-    pub provider_config: crate::directive::ProviderConfig,
+    pub provider_config: ProviderConfig,
     pub provider_id: String,
     /// Profile name that matched during daemon preflight.
     pub matched_profile: Option<String>,
@@ -4079,7 +4081,7 @@ impl Runner {
                     });
                 }
                 (Some(i), Some(o)) => (
-                    ryeos_directive_core::ModelPricing {
+                    ryeos_directive_definition::ModelPricing {
                         input_per_million: i,
                         output_per_million: o,
                         cache_read_per_million: pricing.cache_read_per_million,
@@ -4305,9 +4307,8 @@ fn runtime_failure_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::directive::PricingConfig;
     use crate::harness::Harness;
-    use ryeos_directive_core::ModelPricing;
+    use ryeos_directive_definition::ModelPricing;
     use ryeos_runtime::callback_client::CallbackClient;
     use ryeos_runtime::envelope::{EnvelopeCallback, EnvelopePolicy, HardLimits};
     use std::path::PathBuf;
@@ -4527,10 +4528,10 @@ mod tests {
 
     #[test]
     fn compute_cost_with_pricing() {
-        let provider = crate::directive::ProviderConfig {
+        let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
                 base_url: "http://localhost".to_string(),
             },
             auth: Default::default(),
@@ -4615,10 +4616,10 @@ mod tests {
 
     #[test]
     fn finalize_extracts_string() {
-        let provider = crate::directive::ProviderConfig {
+        let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
                 base_url: "http://localhost".to_string(),
             },
             auth: Default::default(),
@@ -4672,10 +4673,10 @@ mod tests {
 
     #[test]
     fn system_prompt_prepended() {
-        let provider = crate::directive::ProviderConfig {
+        let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
                 base_url: "http://localhost".to_string(),
             },
             auth: Default::default(),
@@ -4734,10 +4735,10 @@ mod tests {
 
     #[test]
     fn directive_outputs_stored_from_config() {
-        let provider = crate::directive::ProviderConfig {
+        let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
                 base_url: "http://localhost".to_string(),
             },
             auth: Default::default(),
@@ -4805,10 +4806,10 @@ mod tests {
 
     #[test]
     fn continuation_hook_context_is_event_namespaced() {
-        let provider = crate::directive::ProviderConfig {
+        let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
                 base_url: "http://localhost".to_string(),
             },
             auth: Default::default(),
@@ -4987,10 +4988,10 @@ mod tests {
 
     #[test]
     fn sampling_stored_from_config() {
-        let provider = crate::directive::ProviderConfig {
+        let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
                 base_url: "http://localhost".to_string(),
             },
             auth: Default::default(),
@@ -5056,10 +5057,10 @@ mod tests {
                 cache_miss_per_million: None,
             },
         );
-        let provider = crate::directive::ProviderConfig {
+        let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
                 base_url: "http://localhost".to_string(),
             },
             auth: Default::default(),
@@ -5129,10 +5130,10 @@ mod tests {
 
     #[test]
     fn compute_cost_falls_back_to_provider_default_when_no_model_entry() {
-        let provider = crate::directive::ProviderConfig {
+        let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
                 base_url: "http://localhost".to_string(),
             },
             auth: Default::default(),
@@ -5193,10 +5194,10 @@ mod tests {
 
     #[test]
     fn compute_cost_unpriced_when_no_pricing_config() {
-        let provider = crate::directive::ProviderConfig {
+        let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
                 base_url: "http://localhost".to_string(),
             },
             auth: Default::default(),
@@ -5929,10 +5930,10 @@ mod tests {
     }
 
     fn ledger_runner(mock: Arc<ScriptedLedger>) -> Runner {
-        let provider = crate::directive::ProviderConfig {
+        let provider = ProviderConfig {
             category: None,
-            family: crate::directive::ProtocolFamily::ChatCompletions,
-            transport: crate::directive::ProviderTransportConfig::RemoteHttp {
+            family: ProtocolFamily::ChatCompletions,
+            transport: ProviderTransportConfig::RemoteHttp {
                 base_url: "http://localhost".to_string(),
             },
             auth: Default::default(),

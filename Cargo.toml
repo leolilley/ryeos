@@ -11,7 +11,7 @@ members = [
     "crates/clients/base",
     "crates/clients/terminal",
     "crates/clients/web",
-    "crates/runtimes/directive-core",
+    "crates/kinds/directive-definition",
     "crates/runtimes/directive",
     "crates/engine/ryeos-accounting",
     "crates/engine/ryeos-effect-contract",
@@ -70,7 +70,7 @@ ryeos-app = { path = "crates/daemon/ryeos-app" }
 ryeos-bundle = { path = "crates/daemon/ryeos-bundle" }
 ryeos-cli = { path = "crates/bin/cli" }
 ryeos-client-base = { path = "crates/clients/base" }
-ryeos-directive-core = { path = "crates/runtimes/directive-core" }
+ryeos-directive-definition = { path = "crates/kinds/directive-definition" }
 ryeos-expression = { path = "crates/engine/ryeos-expression" }
 ryeos-graph-definition = { path = "crates/kinds/graph-definition" }
 ryeos-engine = { path = "crates/engine/ryeos-engine" }

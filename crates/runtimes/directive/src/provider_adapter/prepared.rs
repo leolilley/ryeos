@@ -166,7 +166,7 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
     };
 
     let transport = match &provider.transport {
-        ryeos_directive_core::ProviderTransportConfig::RemoteHttp { base_url } => {
+        ryeos_directive_definition::ProviderTransportConfig::RemoteHttp { base_url } => {
             let stream_url = provider.extra.get("stream_url").and_then(|v| v.as_str());
             // Resolve {model} template in base_url (e.g. gemini profiles use
             // `{model}:streamGenerateContent`).
@@ -189,11 +189,12 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
                 url,
             }
         }
-        ryeos_directive_core::ProviderTransportConfig::AdmittedLocalWorker { execute, .. } => {
-            PreparedProviderTransport::AdmittedLocalWorker {
-                execute: execute.clone(),
-            }
-        }
+        ryeos_directive_definition::ProviderTransportConfig::AdmittedLocalWorker {
+            execute,
+            ..
+        } => PreparedProviderTransport::AdmittedLocalWorker {
+            execute: execute.clone(),
+        },
     };
 
     let mut body = build_request_body(
@@ -371,9 +372,8 @@ fn serialized_len(value: &impl serde::Serialize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::directive::{
-        ExecutionConfig, ProviderConfig, ProviderMessage, ReasoningConfig, ReasoningMode,
-    };
+    use crate::directive::{ExecutionConfig, ProviderMessage};
+    use ryeos_directive_definition::{ProviderConfig, ReasoningConfig, ReasoningMode};
     use ryeos_runtime::callback_client::CallbackClient;
     use ryeos_runtime::envelope::EnvelopeCallback;
     use serde_json::{Value, json};

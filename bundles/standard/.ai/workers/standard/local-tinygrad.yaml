@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-09T11:09:57Z:f278577c2d35e134239b91d2207c25afe74b93d5fd742c6ece1b711bfc77236c:F5aru0UyYHNT458krYRNZWIWlj5y+rHFT14wq4BYJOWr9dot+xY+2eLzZInEVYZyoB6Lp7uizO+BmfNZ/Z2QBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-10T03:16:08Z:5ded5c49e6dda4423e4dc3852782b2f81640172d6b966adf05062efe99e1992c:N2zvNjg6S770DrJpui+RfWaAs2WGTMA9q8FPEoZ4oz8JFU0SVg5XmcobOheX0LEuI/VWJD/3quDRZyiSIqBCDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "standard"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -12,7 +12,7 @@ external_content:
     kind: tree
     locator:
       root: "bundle:standard"
-      path: ".ai/workers/lib/tinygrad_qwen"
+      path: ".ai/workers/standard/lib/tinygrad_qwen"
     mode: pinned
     digest: "2bfe77240022d95bd88eac7e01dcced97df6b2cf9d5f9cfec68f05a0fd4c8631"
     mount: worker

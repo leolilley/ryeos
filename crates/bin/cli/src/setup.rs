@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use ryeos_directive_core::{ProviderConfig, ProviderSetupProjection};
+use ryeos_directive_definition::{ProviderConfig, ProviderSetupProjection};
 use serde_json::Value;
 use zeroize::Zeroizing;
 

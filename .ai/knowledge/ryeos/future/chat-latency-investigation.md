@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-08-03T10:15:05Z:9c869658f96f116f5beab19f61ff99dfd8a738f5fe77b418a757b4f3db0fe69f:koYoIX32OXk6jrrIlwQ8yw/hBWLzmmCP7LOuW2bSVXojZ7ffyQBHRNfXkfLJa4+9CuR2dn8fxQrsSq4Eivz3CA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-10T03:16:08Z:e871c62a534fb7fd6da32e665ccb499c45648620779f4400dfb53b90a870b2c5:3Hux5jSwjSEELJNsLaN/A2L9JQISSAglJyqrhtEPHct6V0C2uQhKFzD2MyW8AGRSKYG5e77ovB91nBdDsNwcBA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/future
 name: chat-latency-investigation
 title: Chat Latency Investigation and Optimization Order
 description: Measurement contract, observed RyeOS latency boundaries, implemented safeguards, and evidence gates for future work
 entry_type: design
-version: "0.3.0"
+version: "0.4.0"
 ```
 
 # Chat Latency Investigation and Optimization Order
@@ -208,17 +208,27 @@ Apply changes in descending expected impact:
 
 ## Workers and chat
 
-Workers can help chat throughput and cold-tail latency by retaining a verified
-runtime process and, within a matching authority/transport partition, a warm
-HTTP connection. They do not make a serial reasoning/tool loop parallel and do
-not shorten provider inference.
+The generic `worker` kind and a fixed persistent-session class now exist. The
+landed standard worker is a content-addressed local-provider vessel: its
+executable closure, realizations, isolation ceiling, and request protocol are
+fixed before boot. It is not the deferred chat-latency worker and it must not be
+widened into one merely because the process/session mechanics are reusable.
+
+A future leased class of the same `worker` kind can help chat throughput and
+cold-tail latency by retaining a verified runtime process and, within a
+matching authority/transport partition, a warm HTTP connection. Each chat
+invocation would still require its own admitted capsule, one-use invocation
+lease, callback/accounting authority, cancellation identity, settlement, and
+reset acknowledgement. Workers do not make a serial reasoning/tool loop
+parallel and do not shorten provider inference.
 
 The captured warm launch was already about 0.23 seconds, while first-call
 DNS/connection establishment was under 0.1 seconds in the cited sample. That
-does not meet the current worker pull-forward gate. Workers remain useful if a
-larger cold/warm distribution later shows a repeatable material residual, but
-they are not the next answer for multi-second first text or 40-80 second
-multi-round requests.
+does not meet the current worker pull-forward gate. Leased workers remain
+useful if a larger cold/warm distribution later shows a repeatable material
+residual, but they are not the next answer for multi-second first text or
+40-80 second multi-round requests. Landing the worker kind does not change this
+measurement gate.
 
 See `knowledge:ryeos/future/content-addressed-managed-runtime-workers` for the
 authority and isolation design.

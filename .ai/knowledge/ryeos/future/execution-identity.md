@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-07T09:52:46Z:545fae12a37dcac8029e6e8b5db0549cc4b1bb1623c758cd70813629de64c0e6:c5kbRHO3TAr4zPdCCjNU8+9w0grdQ4/7wFir/nme24GQYjGSZzo93bWmBsh4ahfT1hPwuhas7YezgHlM4dagCA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-10T03:16:08Z:47a70985b2296b417525177fe1975aec72363072a57004aa2de833a331be9ae0:14fixDk7eM29o/4NpYct4zA+t/XpdHNgd9sSAnjd38Dq3YsHnJcdXukBR2RLius4pGqoj8yEymEMv/DBKxTODQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, identity, hardware, inference, tinygrad, evidence]
-version: "0.1.0"
-status: draft
+version: "0.2.0"
+status: deferred
 description: >
   A named, content-addressed identity for the execution substrate — device,
   kernel stack, numerics — as a coordinate beside the program digest, so
@@ -11,6 +11,23 @@ description: >
 ---
 
 # Execution identity
+
+## Current foundation
+
+The missing coordinate is now split at the correct lifecycle boundaries:
+
+- a stable node execution identity and node attestation name the boot substrate;
+- an admitted execution realization names the exact behavior-bearing substrate,
+  isolation backend/policy, retained program closure, and external realizations
+  selected before one launch;
+- an observed execution realization is a distinct optional evidence object and
+  is not fabricated by echoing the admitted hash; and
+- capsules and local provider coordinates retain the admitted realization.
+
+The standard local route currently publishes recorded evidence with its
+admitted realization and no observed realization. That absence is meaningful:
+the node has not yet qualified the observed artifact/numerics set for sealed
+re-derivation.
 
 The effective definition digest names the *program*: definition, tools,
 realizations, parameters. Nothing names what computes it. For recorded-class
@@ -31,8 +48,10 @@ world per machine. Instead, **execution identity is a separate
 content-addressed coordinate beside the program digest**:
 
 - the program digest stays portable — same program everywhere;
-- `recorded` evidence is keyed by program alone and is portable by
-  construction;
+- `recorded` evidence is keyed by its exact effect coordinate: program and
+  action identity plus the admitted invocation/realization scope required by
+  that transport. A retained record may be verified elsewhere; it is never
+  treated as program-only merely because it does not claim re-derivation;
 - `sealed` claims are scoped to (program, execution identity):
   re-derivation is provable exactly where both match;
 - on a foreign execution identity, sealed evidence **degrades to
@@ -43,9 +62,9 @@ This also names why remote providers cap at `recorded`: a provider
 exposes no honest execution identity, so the stronger scope cannot be
 claimed. The class ceiling was an execution-identity fact all along.
 
-## The object
+## The retained identity family
 
-A content-addressed `execution_identity` with named tranches:
+The landed content-addressed identity family carries named mechanical tranches:
 
 - **device** — class and architecture (GPU model/arch string, CPU ISA and
   the feature flags that reach codegen). Self-attested by the node's own
@@ -60,11 +79,11 @@ A content-addressed `execution_identity` with named tranches:
   the one piece of today's execution substrate that every realized tool
   still leans on becomes a named identity tranche instead of a footnote.
 
-The digest over the canonical object is the identity. Nodes probe and
-publish their identities at boot as signed documents; a launch selects
-one; the capsule seals the selection; records carry it in an optional
-field — absent exactly when the boundary has none to claim (remote
-providers), which keeps the field itself evidence-bearing.
+Canonical digests name each object. Nodes probe and attest their stable
+identity at boot; launch admission creates the exact realization; capsules
+seal it; effect records carry admitted and observed realization fields only
+where their observation boundary can honestly claim them. Remote providers do
+not acquire a local execution realization merely because RyeOS called them.
 
 ## Divergence gains a hardware tranche
 
@@ -76,35 +95,33 @@ A divergence report can now say which coordinate moved:
   reported as scope, never as a finding;
 - different program — the existing tranche decomposition, unchanged.
 
-## Why now, before local inference
+## Why the split matters
 
-The vocabulary pays immediately: absorbing the interpreter residue closes
-the last named ambient in the realization story, and giving records the
-optional field early means the store's shape never migrates when local
-arrives — tinygrad lands as new tranche *values*, not new machinery.
-Portable execution (the standing candidate B) becomes a matching problem:
-nodes advertise identities, capsules carry requirements, sealed work
-re-derives where identities match and recorded-replays where they do not.
+Boot identity cannot absorb per-program kernels, model bytes, or mutable policy;
+launch realization cannot pretend it observed what actually executed; an
+observation cannot rewrite the already admitted launch. The three objects keep
+those claims separate while making portable execution a matching problem:
+nodes advertise identities, capsules carry requirements, sealed work re-derives
+where qualification matches, and recorded evidence replays where it does not.
 
-## Increments
+## Remaining increments
 
-0. Wire object + canonical digest in ryeos-state, with the same
-   current-schema-only decode discipline as every other evidence object.
-1. Node probe at boot: CPU/interpreter tranches first (no GPU required),
-   published as a signed node document; capsule field seals the
-   selection.
-2. Optional `execution_identity` on effect records (node and provider),
-   absent-means-unclaimable semantics.
-3. Divergence reporting: the scope-versus-finding distinction above,
-   surfaced wherever records are compared.
-4. tinygrad tranches (device, kernel set, BEAM cache, numerics) with the
-   sealed-local runtime — values into an already-landed shape.
-5. Portable-execution matching (with candidate B, later): advertise,
-   require, schedule.
+0. **Observed artifact capture.** Retain a strict observation of the compiled
+   artifact/numerics closure actually used by one local generation. Never
+   synthesize it from the admitted hash.
+1. **Qualification.** Promote a closed observed set into a node-signed sealed
+   qualification for subsequent launches; link it to the exact node identity,
+   admitted realization, sampler policy, and two-process byte proof.
+2. **Divergence reporting.** Surface program movement, admitted/observed scope
+   movement, and same-scope byte divergence as distinct typed outcomes.
+3. **Portable matching.** Advertise retained node/realization requirements and
+   support verification-only matching before any cross-node continuation.
+4. **Stronger attestation** (later). Hardware-backed claims require their own
+   trust policy; the current node probe remains self-attested and says so.
 
 ## Triggers to revisit
 
-- Local inference work begins (tranche values arrive);
+- sealed local qualification begins (observed tranche values arrive);
 - the first cross-node capsule migration is attempted;
 - anyone proposes trusting a device claim further than self-attestation
   reaches — that conversation is TEE territory and deserves its own note.
