@@ -38,8 +38,12 @@ struct ComparisonRequest {
 }
 
 struct ComparisonOperand {
-    subject: AuthoritativeThreadSubject,
-    evidence: AdmittedExecutionComparisonEvidence,
+    thread_id: String,
+    status: String,
+    canonical_ref: String,
+    effective_definition_digest: String,
+    admitted_launch_capsule_hash: String,
+    execution_realization_hash: String,
     cost: RunCostSample,
 }
 
@@ -243,22 +247,32 @@ fn prepare_comparison(
         Some(&left_evidence.program.admitted_launch_capsule_hash),
         Some(&right_evidence.program.admitted_launch_capsule_hash),
     )?;
+    let left = project_operand(left_subject, &left_evidence, left_cost);
+    let right = project_operand(right_subject, &right_evidence, right_cost);
 
     Ok(ComparisonModel {
         id,
-        left: ComparisonOperand {
-            subject: left_subject,
-            evidence: left_evidence,
-            cost: left_cost,
-        },
-        right: ComparisonOperand {
-            subject: right_subject,
-            evidence: right_evidence,
-            cost: right_cost,
-        },
+        left,
+        right,
         definition,
         realization,
     })
+}
+
+fn project_operand(
+    subject: AuthoritativeThreadSubject,
+    evidence: &AdmittedExecutionComparisonEvidence,
+    cost: RunCostSample,
+) -> ComparisonOperand {
+    ComparisonOperand {
+        thread_id: subject.thread_id,
+        status: subject.status.as_str().to_string(),
+        canonical_ref: evidence.program.subject.canonical_ref.clone(),
+        effective_definition_digest: evidence.program.effective_definition_digest.to_string(),
+        admitted_launch_capsule_hash: evidence.program.admitted_launch_capsule_hash.clone(),
+        execution_realization_hash: evidence.execution_realization_hash.clone(),
+        cost,
+    }
 }
 
 fn verify_subject_evidence(
@@ -333,7 +347,8 @@ fn assemble_document(
 ) -> Result<FieldFactsDocument> {
     let mut emitter = ComparisonEmitter::new(comparison_subject(&model.id));
     let pair_evidence = pair_evidence(model);
-    let changed = !model.definition.changes.is_empty() || model.realization.changed;
+    let changed =
+        model.definition.left_digest != model.definition.right_digest || model.realization.changed;
     let status = if !advertised_complete {
         "incomplete"
     } else if changed {
@@ -354,8 +369,8 @@ fn assemble_document(
         event_ref: None,
         artifact_ref: None,
         attributes: json!({
-            "left_thread_id": model.left.subject.thread_id,
-            "right_thread_id": model.right.subject.thread_id,
+            "left_thread_id": model.left.thread_id,
+            "right_thread_id": model.right.thread_id,
             "complete": advertised_complete,
             "changed": changed,
             "definition_complete": model.definition.complete,
@@ -554,34 +569,17 @@ fn add_operand(
         }
         .to_string(),
         parent_id: Some(model.id.clone()),
-        status: Some(
-            serde_json::to_value(operand.subject.status)?
-                .as_str()
-                .unwrap_or("unknown")
-                .to_string(),
-        ),
-        canonical_ref: Some(operand.evidence.program.subject.canonical_ref.clone()),
+        status: Some(operand.status.clone()),
+        canonical_ref: Some(operand.canonical_ref.clone()),
         source_content_digest: None,
-        effective_definition_digest: Some(
-            operand
-                .evidence
-                .program
-                .effective_definition_digest
-                .to_string(),
-        ),
-        admitted_launch_capsule_hash: Some(
-            operand
-                .evidence
-                .program
-                .admitted_launch_capsule_hash
-                .clone(),
-        ),
+        effective_definition_digest: Some(operand.effective_definition_digest.clone()),
+        admitted_launch_capsule_hash: Some(operand.admitted_launch_capsule_hash.clone()),
         event_ref: None,
         artifact_ref: None,
         attributes: json!({
             "side": side,
-            "thread_id": operand.subject.thread_id,
-            "execution_realization_hash": operand.evidence.execution_realization_hash,
+            "thread_id": operand.thread_id,
+            "execution_realization_hash": operand.execution_realization_hash,
         }),
         provenance: emitter.provenance(operand_evidence(operand)),
     })?;
@@ -679,14 +677,10 @@ fn pair_evidence(model: &ComparisonModel) -> Vec<FieldEvidenceRef> {
 fn operand_evidence(operand: &ComparisonOperand) -> Vec<FieldEvidenceRef> {
     vec![
         FieldEvidenceRef::Thread {
-            thread_id: operand.subject.thread_id.clone(),
+            thread_id: operand.thread_id.clone(),
         },
         FieldEvidenceRef::AdmittedLaunchCapsule {
-            content_hash: operand
-                .evidence
-                .program
-                .admitted_launch_capsule_hash
-                .clone(),
+            content_hash: operand.admitted_launch_capsule_hash.clone(),
         },
     ]
 }
@@ -796,6 +790,86 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_app::execution_comparison::{CostBasis, CostSampleStatus};
+    use ryeos_engine::identity::execution_realization_comparison::{
+        ExecutionRealizationChange, ExecutionRealizationTranche,
+    };
+    use ryeos_engine::resolution::{
+        DefinitionChangeCategory, DefinitionChangeKind, DefinitionIdentityChange,
+        DefinitionValueSummary, DefinitionValueType, EffectiveDefinitionDigest,
+    };
+
+    fn digest(byte: char) -> EffectiveDefinitionDigest {
+        EffectiveDefinitionDigest::parse(byte.to_string().repeat(64)).unwrap()
+    }
+
+    fn operand(thread_id: &str, capsule_byte: char, realization_byte: char) -> ComparisonOperand {
+        ComparisonOperand {
+            thread_id: thread_id.to_string(),
+            status: "completed".to_string(),
+            canonical_ref: "graph:test/comparison-subject".to_string(),
+            effective_definition_digest: digest('a').to_string(),
+            admitted_launch_capsule_hash: capsule_byte.to_string().repeat(64),
+            execution_realization_hash: realization_byte.to_string().repeat(64),
+            cost: RunCostSample {
+                status: CostSampleStatus::Available,
+                turns: Some(3),
+                input_tokens: Some(11),
+                output_tokens: Some(7),
+                spend: Some("0.125".to_string()),
+                basis: Some(CostBasis::Direct),
+            },
+        }
+    }
+
+    fn model(
+        left_digest: EffectiveDefinitionDigest,
+        right_digest: EffectiveDefinitionDigest,
+        definition_complete: bool,
+        definition_changes: Vec<DefinitionIdentityChange>,
+        realization: ExecutionRealizationComparison,
+    ) -> ComparisonModel {
+        let left = operand("T-left", 'c', 'e');
+        let right = operand("T-right", 'd', 'f');
+        let id = comparison_id(
+            &left.thread_id,
+            &right.thread_id,
+            Some(&left.admitted_launch_capsule_hash),
+            Some(&right.admitted_launch_capsule_hash),
+        )
+        .unwrap();
+        ComparisonModel {
+            id,
+            left,
+            right,
+            definition: DefinitionIdentityDiff {
+                left_digest,
+                right_digest,
+                complete: definition_complete,
+                omitted_changes: (!definition_complete).then_some(1),
+                changes: definition_changes,
+            },
+            realization,
+        }
+    }
+
+    fn identical_realization() -> ExecutionRealizationComparison {
+        ExecutionRealizationComparison {
+            left_hash: "e".repeat(64),
+            right_hash: "e".repeat(64),
+            changed: false,
+            complete: true,
+            tranche_changes: Vec::new(),
+        }
+    }
+
+    fn entity<'a>(document: &'a FieldFactsDocument, kind: &str) -> &'a FieldFactEntity {
+        document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == kind)
+            .unwrap()
+    }
 
     #[test]
     fn comparison_identity_is_ordered_capsule_scoped_and_delimiter_safe() {
@@ -861,5 +935,148 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn identical_comparison_emits_a_complete_closed_projection() {
+        let digest = digest('a');
+        let model = model(
+            digest.clone(),
+            digest,
+            true,
+            Vec::new(),
+            identical_realization(),
+        );
+        let document = assemble_document(&model, model.complete(), false).unwrap();
+
+        let summary = entity(&document, "run_comparison");
+        assert_eq!(summary.status.as_deref(), Some("identical"));
+        assert_eq!(summary.attributes["complete"], true);
+        assert_eq!(summary.attributes["changed"], false);
+        assert!(!document.truncated);
+        assert_eq!(
+            document
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == "comparison_operand")
+                .count(),
+            2
+        );
+        assert_eq!(
+            document
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == "run_cost")
+                .count(),
+            2
+        );
+
+        let encoded = serde_json::to_string(&document).unwrap();
+        assert!(!encoded.contains("provider"));
+        assert!(!encoded.contains("metadata"));
+        assert!(!encoded.contains("source_path"));
+    }
+
+    #[test]
+    fn realization_only_change_is_visible_without_definition_drift() {
+        let digest = digest('a');
+        let realization = ExecutionRealizationComparison {
+            left_hash: "e".repeat(64),
+            right_hash: "f".repeat(64),
+            changed: true,
+            complete: true,
+            tranche_changes: vec![ExecutionRealizationChange {
+                tranche: ExecutionRealizationTranche::ArtifactIdentity,
+                coordinate: "artifact_identity_digest".to_string(),
+                change: DefinitionChangeKind::Changed,
+                left: Some(DefinitionValueSummary {
+                    value_type: DefinitionValueType::String,
+                    public_scalar: Some("e".repeat(64)),
+                }),
+                right: Some(DefinitionValueSummary {
+                    value_type: DefinitionValueType::String,
+                    public_scalar: Some("f".repeat(64)),
+                }),
+            }],
+        };
+        let model = model(digest.clone(), digest, true, Vec::new(), realization);
+        let document = assemble_document(&model, model.complete(), false).unwrap();
+
+        let summary = entity(&document, "run_comparison");
+        assert_eq!(summary.status.as_deref(), Some("changed"));
+        assert_eq!(summary.attributes["definition_change_count"], 0);
+        assert_eq!(summary.attributes["realization_change_count"], 1);
+        assert_eq!(
+            document
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == "execution_realization_change")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn bounded_definition_diff_never_advertises_complete_or_identical() {
+        let model = model(
+            digest('a'),
+            digest('b'),
+            false,
+            Vec::new(),
+            identical_realization(),
+        );
+        let document = assemble_document(&model, model.complete(), false).unwrap();
+
+        let summary = entity(&document, "run_comparison");
+        assert_eq!(summary.status.as_deref(), Some("incomplete"));
+        assert_eq!(summary.attributes["complete"], false);
+        assert_eq!(summary.attributes["changed"], true);
+        assert!(!document.truncated);
+        assert!(document.warnings.iter().any(|warning| {
+            warning["code"] == Value::String("comparison_incomplete".to_string())
+        }));
+    }
+
+    #[test]
+    fn maximum_definition_row_budget_fits_the_field_document_without_trimming() {
+        let value = DefinitionValueSummary {
+            value_type: DefinitionValueType::String,
+            public_scalar: Some("p".repeat(256)),
+        };
+        let changes = (0..MAX_COMPARISON_CHANGE_ROWS)
+            .map(|ordinal| DefinitionIdentityChange {
+                category: DefinitionChangeCategory::ComposedProgram,
+                coordinate: format!("composed.{}.{}", "c".repeat(480), ordinal),
+                change: DefinitionChangeKind::Changed,
+                left: Some(value.clone()),
+                right: Some(value.clone()),
+            })
+            .collect();
+        let model = model(
+            digest('a'),
+            digest('b'),
+            true,
+            changes,
+            identical_realization(),
+        );
+        let document = assemble_document(&model, model.complete(), false).unwrap();
+
+        assert!(!document.truncated);
+        assert_eq!(
+            entity(&document, "run_comparison").attributes["complete"],
+            true
+        );
+        assert_eq!(
+            document
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == "definition_change")
+                .count(),
+            MAX_COMPARISON_CHANGE_ROWS
+        );
+        let bytes = lillux::canonical_json(&serde_json::to_value(&document).unwrap())
+            .unwrap()
+            .len();
+        assert!(bytes <= super::super::ui_field::MAX_FIELD_FACT_DOCUMENT_BYTES);
     }
 }
