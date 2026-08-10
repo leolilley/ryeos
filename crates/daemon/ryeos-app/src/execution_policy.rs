@@ -191,6 +191,25 @@ impl ExecutionPolicy {
         }
     }
 
+    /// Capture the complete local project at admission, then execute from a
+    /// daemon-owned copy-on-write generation. The live tree supplies bytes
+    /// only to the admitted capture; execution and recovery use the retained
+    /// generation and never fall back to the mutable source tree.
+    pub fn local_pinned_capture(response: ExecutionResponse) -> Self {
+        Self {
+            project: ProjectExecutionPolicy::Pinned {
+                source: PinnedSource::CaptureLive {
+                    scope: ProjectCaptureScope::FullProject,
+                },
+                realization: PinnedRealization::Cow {
+                    terminal_publication: TerminalPublication::RetainResult,
+                },
+                child_policy: ChildProjectPolicy::Inherit,
+            },
+            ..Self::local_live(response)
+        }
+    }
+
     pub fn projectless(response: ExecutionResponse) -> Self {
         Self {
             recovery: ExecutionRecovery::RestartRecoverable,
@@ -626,6 +645,26 @@ mod policy_tests {
         assert_eq!(policy.ownership, ExecutionOwnership::DaemonOwned);
         assert_eq!(policy.recovery, ExecutionRecovery::RestartRecoverable);
         assert_eq!(policy.response, ExecutionResponse::Wait);
+    }
+
+    #[test]
+    fn local_pinned_capture_is_daemon_owned_cow_with_retained_result() {
+        let policy = ExecutionPolicy::local_pinned_capture(ExecutionResponse::Wait);
+        policy.validate().unwrap();
+        assert_eq!(policy.ownership, ExecutionOwnership::DaemonOwned);
+        assert_eq!(policy.recovery, ExecutionRecovery::RestartRecoverable);
+        assert!(matches!(
+            policy.project,
+            ProjectExecutionPolicy::Pinned {
+                source: PinnedSource::CaptureLive {
+                    scope: ProjectCaptureScope::FullProject,
+                },
+                realization: PinnedRealization::Cow {
+                    terminal_publication: TerminalPublication::RetainResult,
+                },
+                child_policy: ChildProjectPolicy::Inherit,
+            }
+        ));
     }
 
     #[test]

@@ -246,6 +246,7 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         "execution_policy": execution_policy_value(
             resolved.project_path.is_some(),
             resolved.async_launch,
+            resolved.pin_project_at_admission,
         ),
     });
     if let Some(project_path) = &resolved.project_path {
@@ -359,13 +360,19 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     Ok(())
 }
 
-fn execution_policy_value(project_backed: bool, accepted: bool) -> Value {
+fn execution_policy_value(
+    project_backed: bool,
+    accepted: bool,
+    pin_project_at_admission: bool,
+) -> Value {
     let response = if accepted {
         ryeos_app::execution_policy::ExecutionResponse::Accepted
     } else {
         ryeos_app::execution_policy::ExecutionResponse::Wait
     };
-    let policy = if project_backed {
+    let policy = if pin_project_at_admission {
+        ryeos_app::execution_policy::ExecutionPolicy::local_pinned_capture(response)
+    } else if project_backed {
         ryeos_app::execution_policy::ExecutionPolicy::local_live(response)
     } else {
         ryeos_app::execution_policy::ExecutionPolicy::projectless(response)
@@ -587,6 +594,9 @@ struct CliResolvedExecute {
     parameters: Value,
     project_path: Option<PathBuf>,
     async_launch: bool,
+    /// Capture the complete local project at admission and execute from a
+    /// retained daemon-owned COW generation.
+    pin_project_at_admission: bool,
     /// Typed command-dispatch intent. Validation uses the existing no-spawn
     /// execution boundary and is never inferred from item parameters.
     validate_only: bool,
@@ -616,6 +626,7 @@ struct CliResolvedExecute {
 #[derive(Default)]
 struct ResolvedControlFlags {
     async_launch: bool,
+    pin_project_at_admission: bool,
     stream: Option<bool>,
     debug_raw: bool,
     call_method: Option<String>,
@@ -709,6 +720,19 @@ fn resolve_command_for_daemon_with_commands(
     };
     let mut parameters = bind_command_parameters_for_daemon(parameter_tail, &matched.command)?;
     let project_path = apply_project_policy(&matched.command, &mut parameters, default_project)?;
+    if control.pin_project_at_admission && project_path.is_none() {
+        return Err(CliError::Local {
+            detail:
+                "--pin-project requires a project root; it cannot be combined with --no-project"
+                    .to_string(),
+        });
+    }
+    if control.pin_project_at_admission && control.state_root.is_some() {
+        return Err(CliError::Local {
+            detail: "--pin-project cannot be combined with --state-root; the pinned generation owns runtime state"
+                .to_string(),
+        });
+    }
     // Absolutize (not canonicalize — the daemon creates it on demand) the
     // state-root override against the CLI's cwd, which the daemon cannot see.
     let state_root = control
@@ -729,6 +753,7 @@ fn resolve_command_for_daemon_with_commands(
         parameters,
         project_path,
         async_launch: control.async_launch,
+        pin_project_at_admission: control.pin_project_at_admission,
         validate_only,
         direct_execute,
         stream: control.stream,
@@ -915,6 +940,7 @@ fn strip_declared_control_flags(
             }
             match binding {
                 Bind::LaunchModeAccepted => flags.async_launch = true,
+                Bind::PinProjectAtAdmission => flags.pin_project_at_admission = true,
                 Bind::DebugRaw => flags.debug_raw = true,
                 Bind::StreamOn => {
                     if flags.stream == Some(false) {
@@ -1780,6 +1806,13 @@ mod tests {
                 aliases: vec![],
             },
             F {
+                flag: "pin-project".into(),
+                help: "Capture the project at admission and execute from a retained COW generation"
+                    .into(),
+                binding: B::PinProjectAtAdmission,
+                aliases: vec![],
+            },
+            F {
                 flag: "method".into(),
                 help: "Method selector for method-dispatch kinds (call.method)".into(),
                 binding: B::CallMethod,
@@ -1789,6 +1822,12 @@ mod tests {
                 flag: "args".into(),
                 help: "Method args as a JSON object (call.args)".into(),
                 binding: B::CallArgs,
+                aliases: vec![],
+            },
+            F {
+                flag: "state-root".into(),
+                help: "Place runtime state under an explicit path".into(),
+                binding: B::StateRoot,
                 aliases: vec![],
             },
             F {
@@ -1877,8 +1916,8 @@ mod tests {
 
     #[test]
     fn live_project_execute_is_daemon_owned_and_restart_recoverable() {
-        let wait = execution_policy_value(true, false);
-        let accepted = execution_policy_value(true, true);
+        let wait = execution_policy_value(true, false, false);
+        let accepted = execution_policy_value(true, true, false);
         for policy in [&wait, &accepted] {
             assert_eq!(policy["ownership"], "daemon_owned");
             assert_eq!(policy["recovery"], "restart_recoverable");
@@ -1891,8 +1930,8 @@ mod tests {
 
     #[test]
     fn projectless_execute_can_be_restart_recoverable() {
-        let wait = execution_policy_value(false, false);
-        let accepted = execution_policy_value(false, true);
+        let wait = execution_policy_value(false, false, false);
+        let accepted = execution_policy_value(false, true, false);
         for policy in [&wait, &accepted] {
             assert_eq!(policy["ownership"], "daemon_owned");
             assert_eq!(policy["recovery"], "restart_recoverable");
@@ -1900,6 +1939,21 @@ mod tests {
         }
         assert_eq!(wait["response"], "wait");
         assert_eq!(accepted["response"], "accepted");
+    }
+
+    #[test]
+    fn pinned_local_execute_captures_to_cow_and_retains_result() {
+        let policy = execution_policy_value(true, false, true);
+        assert_eq!(policy["ownership"], "daemon_owned");
+        assert_eq!(policy["recovery"], "restart_recoverable");
+        assert_eq!(policy["project"]["kind"], "pinned");
+        assert_eq!(policy["project"]["source"]["kind"], "capture_live");
+        assert_eq!(policy["project"]["source"]["scope"], "full_project");
+        assert_eq!(policy["project"]["realization"]["kind"], "cow");
+        assert_eq!(
+            policy["project"]["realization"]["terminal_publication"]["kind"],
+            "retain_result"
+        );
     }
 
     #[test]
@@ -1989,6 +2043,71 @@ mod tests {
 
         assert_eq!(resolved.item_ref, "tool:test/run");
         assert_eq!(resolved.project_path.as_deref(), Some(tmp.path()));
+    }
+
+    #[test]
+    fn direct_execute_pin_project_is_typed_control_not_item_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let commands = vec![direct_execute_command()];
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&[
+                "execute",
+                "--pin-project",
+                "graph:test/run",
+                "--profile",
+                "fast",
+            ]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            Some(tmp.path()),
+        )
+        .unwrap();
+
+        assert!(resolved.pin_project_at_admission);
+        assert_eq!(resolved.project_path.as_deref(), Some(tmp.path()));
+        assert_eq!(resolved.parameters["profile"], "fast");
+        assert!(resolved.parameters.get("pin_project").is_none());
+    }
+
+    #[test]
+    fn direct_execute_pin_project_requires_project_authority() {
+        let commands = vec![direct_execute_command()];
+        let error = match resolve_command_for_daemon_with_commands(
+            &s(&["execute", "--pin-project", "graph:test/run", "--no-project"]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        ) {
+            Ok(_) => panic!("projectless pinned execution must be refused"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("--pin-project requires a project root"));
+    }
+
+    #[test]
+    fn direct_execute_pin_project_refuses_caller_owned_state_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let commands = vec![direct_execute_command()];
+        let error = match resolve_command_for_daemon_with_commands(
+            &s(&[
+                "execute",
+                "--pin-project",
+                "--state-root",
+                ".runtime",
+                "graph:test/run",
+            ]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            Some(tmp.path()),
+        ) {
+            Ok(_) => panic!("pinned execution with caller-owned state must be refused"),
+            Err(error) => error,
+        };
+
+        assert!(error
+            .to_string()
+            .contains("--pin-project cannot be combined with --state-root"));
     }
 
     #[test]
