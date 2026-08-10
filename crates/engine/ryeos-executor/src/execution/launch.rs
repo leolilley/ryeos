@@ -4551,12 +4551,14 @@ async fn prepare_managed_launch_authority(
         )
         .map_err(BuildAndLaunchError::from)?
     };
-    let bound_external_realizations = super::external_content::bind_external_realizations(
-        params.state,
-        effective_program.resolution(),
-        params.project_path,
-    )
-    .map_err(BuildAndLaunchError::Internal)?;
+    let bound_external_realizations =
+        super::external_content::bind_external_realizations_for_execution(
+            params.state,
+            effective_program.resolution(),
+            params.project_path,
+            params.provenance.project_authority(),
+        )
+        .map_err(BuildAndLaunchError::Internal)?;
     let admitted_artifact_identity =
         ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
             runtime_ref: selected_runtime.canonical_ref.to_string(),

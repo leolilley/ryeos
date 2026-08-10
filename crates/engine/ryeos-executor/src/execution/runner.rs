@@ -2028,10 +2028,11 @@ fn admitted_root_launch_metadata(
     }
     metadata = metadata.with_execution_realization_hash(realization_admission.hash);
     metadata.validate()?;
-    let bound_external = super::external_content::bind_external_realizations(
+    let bound_external = super::external_content::bind_external_realizations_for_execution(
         state,
         finalized_program.resolution(),
         params.provenance.effective_path(),
+        params.provenance.project_authority(),
     )?;
     Ok((
         metadata,
@@ -5042,15 +5043,17 @@ async fn run_existing_recovered_thread(
     // restored admission carries the derived-bearing sealed resolution, and
     // a missing manifest or blob refuses recovery here rather than letting
     // the runtime read live content under a realized identity.
-    let bg_external_realizations = super::external_content::bind_external_realizations(
-        &bg_state,
-        bg_resolved
-            .root_admission
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("restored sealed root has no admission"))?
-            .resolution_output(),
-        params.provenance.effective_path(),
-    )?;
+    let bg_external_realizations =
+        super::external_content::bind_external_realizations_for_execution(
+            &bg_state,
+            bg_resolved
+                .root_admission
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("restored sealed root has no admission"))?
+                .resolution_output(),
+            params.provenance.effective_path(),
+            params.provenance.project_authority(),
+        )?;
 
     tokio::spawn(dispatch_detached_bg_task(
         bg_state,

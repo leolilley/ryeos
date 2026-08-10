@@ -8,6 +8,7 @@ use std::io::{Read as _, Seek as _};
 use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use ryeos_engine::external_content::ExternalContentKind;
 use ryeos_engine::external_realization::RealizedExternalContentSet;
 
@@ -74,6 +75,25 @@ enum ExternalRealizationBinding {
     /// born. This preserves realization identity without writing into a live
     /// project or exposing the shared materialization cache to the child.
     PrivateWorkspace,
+}
+
+fn binding_for_execution(
+    isolation_enforced: bool,
+    project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+) -> ExternalRealizationBinding {
+    let daemon_owned_workspace = matches!(
+        project_authority,
+        ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. }
+            | ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                realization: ryeos_state::objects::PinnedProjectRealization::Cow { .. },
+                ..
+            }
+    );
+    if !isolation_enforced && daemon_owned_workspace {
+        ExternalRealizationBinding::PrivateWorkspace
+    } else {
+        ExternalRealizationBinding::IsolationMounts
+    }
 }
 
 impl ExternalMaterializationCache {
@@ -690,18 +710,45 @@ fn copy_large_materialized_tree(
     Ok(())
 }
 
-fn publish_private_generation<P, V>(
+fn verify_open_regular_exact(
+    file: &mut fs::File,
+    expected_size: u64,
+    expected_mode: u32,
+    expected_digest: &str,
+) -> anyhow::Result<()> {
+    file.rewind()?;
+    let (digest, metadata) = lillux::digest_open_regular_file_stable_exact(file, expected_size)?;
+    if digest != expected_digest
+        || lillux::normalized_portable_regular_mode(&metadata)? != expected_mode
+    {
+        anyhow::bail!("private external realization file contradicts its admitted manifest");
+    }
+    Ok(())
+}
+
+fn publish_private_generation<P, V, E>(
     workspace: &lillux::PinnedDirectory,
     mount: &str,
     kind: ExternalContentKind,
     populate: P,
     verify: V,
+    verify_existing: E,
 ) -> anyhow::Result<()>
 where
     P: FnOnce(&lillux::PinnedDirectory) -> anyhow::Result<()>,
     V: FnOnce(&lillux::PinnedDirectory) -> anyhow::Result<()>,
+    E: FnOnce(lillux::PinnedDirectoryEntry) -> anyhow::Result<()>,
 {
     let (parent, mount_name) = ensure_materialization_parent(workspace, mount)?;
+    if let Some(existing) = parent.open_entry(&mount_name, false)? {
+        verify_existing(existing).with_context(|| {
+            format!(
+                "verify existing private external realization {}",
+                parent.path().join(&mount_name).display()
+            )
+        })?;
+        return Ok(());
+    }
     let staging_name = OsString::from(format!(
         ".external-realization.{}.{}",
         std::process::id(),
@@ -761,6 +808,26 @@ pub(crate) fn bind_external_realizations(
         resolution,
         project_path,
         ExternalRealizationBinding::IsolationMounts,
+    )
+}
+
+/// Bind admitted realizations for a normal execution workspace.
+///
+/// Enforced isolation receives descriptor-pinned read-only mounts. With
+/// isolation disabled, only workspaces whose durable authority proves daemon
+/// ownership may receive private copies. Live and shared read-only project
+/// roots keep the mount form and are refused later by the isolation boundary.
+pub(crate) fn bind_external_realizations_for_execution(
+    state: &ryeos_app::state::AppState,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    project_path: &Path,
+    project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+) -> anyhow::Result<Option<BoundExternalRealizations>> {
+    bind_external_realizations_with(
+        state,
+        resolution,
+        project_path,
+        binding_for_execution(state.isolation.is_enforced(), project_authority),
     )
 }
 
@@ -848,6 +915,14 @@ fn bind_external_realizations_with(
                 entry.kind,
             )?;
             if let Some(workspace) = private_workspace.as_ref() {
+                let expected_file = if entry.kind == ExternalContentKind::File {
+                    manifest.entries.iter().find(|manifest_entry| {
+                        manifest_entry.path
+                            == ryeos_engine::external_content::FILE_REALIZATION_ENTRY_PATH
+                    })
+                } else {
+                    None
+                };
                 publish_private_generation(
                     workspace,
                     &entry.mount,
@@ -860,6 +935,40 @@ fn bind_external_realizations_with(
                             &manifest,
                             LargeMaterializationVerification::PrivateDigest,
                         )
+                    },
+                    |existing| match (entry.kind, existing) {
+                        (
+                            ExternalContentKind::Tree,
+                            lillux::PinnedDirectoryEntry::Directory(directory),
+                        ) => verify_large_materialized_tree(
+                            &cas,
+                            &directory,
+                            &manifest,
+                            LargeMaterializationVerification::PrivateDigest,
+                        ),
+                        (
+                            ExternalContentKind::File,
+                            lillux::PinnedDirectoryEntry::Regular(mut file),
+                        ) => {
+                            let expected = expected_file.ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "file-shaped large realization has no canonical file entry"
+                                )
+                            })?;
+                            verify_open_regular_exact(
+                                &mut file,
+                                expected.size.expect("validated file has a size"),
+                                expected.mode.expect("validated file has a mode"),
+                                expected
+                                    .blob_hash
+                                    .as_deref()
+                                    .or(expected.file_sha256.as_deref())
+                                    .expect("validated file has one content identity"),
+                            )
+                        }
+                        _ => anyhow::bail!(
+                            "private external realization destination has the wrong entry type"
+                        ),
                     },
                 )?;
             } else {
@@ -887,12 +996,46 @@ fn bind_external_realizations_with(
         }
         let generation = cache.materialize(&cas, &closure, entry.kind)?;
         if let Some(workspace) = private_workspace.as_ref() {
+            let expected_file = if entry.kind == ExternalContentKind::File {
+                closure.manifest().entries.iter().find(|manifest_entry| {
+                    manifest_entry.path
+                        == ryeos_engine::external_content::FILE_REALIZATION_ENTRY_PATH
+                })
+            } else {
+                None
+            };
             publish_private_generation(
                 workspace,
                 &entry.mount,
                 entry.kind,
                 |staging| copy_materialized_tree(&generation.root, staging, closure.manifest()),
                 |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
+                |existing| match (entry.kind, existing) {
+                    (
+                        ExternalContentKind::Tree,
+                        lillux::PinnedDirectoryEntry::Directory(directory),
+                    ) => verify_materialized_tree(&cas, &directory, closure.manifest()),
+                    (
+                        ExternalContentKind::File,
+                        lillux::PinnedDirectoryEntry::Regular(mut file),
+                    ) => {
+                        let expected = expected_file.ok_or_else(|| {
+                            anyhow::anyhow!("file-shaped realization has no canonical file entry")
+                        })?;
+                        verify_open_regular_exact(
+                            &mut file,
+                            expected.size.expect("validated file has a size"),
+                            expected.mode.expect("validated file has a mode"),
+                            expected
+                                .blob_hash
+                                .as_deref()
+                                .expect("validated regular file has a blob identity"),
+                        )
+                    }
+                    _ => anyhow::bail!(
+                        "private external realization destination has the wrong entry type"
+                    ),
+                },
             )?;
         } else {
             mounts.push(
@@ -1515,6 +1658,71 @@ fn verify_materialized_directory(
 mod tests {
     use super::*;
 
+    #[test]
+    fn disabled_isolation_uses_private_copies_only_for_daemon_owned_workspaces() {
+        use ryeos_state::objects::{
+            EnvironmentAuthority, ExecutionProjectAuthority, LiveFilesystemConfinement,
+            LiveProjectAccess, PinnedProjectRealization, PinnedTerminalPublication,
+        };
+
+        let projectless = ExecutionProjectAuthority::PROJECTLESS;
+        let pinned_read_only = ExecutionProjectAuthority::pinned(
+            "project:test".to_owned(),
+            None,
+            "a".repeat(64),
+            PinnedProjectRealization::ReadOnly,
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let pinned_cow = ExecutionProjectAuthority::pinned(
+            "project:test".to_owned(),
+            None,
+            "b".repeat(64),
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::Discard,
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let live_root = tempfile::tempdir().unwrap();
+        let live = ExecutionProjectAuthority::live(
+            live_root.path().to_path_buf(),
+            "project:test".to_owned(),
+            LiveProjectAccess::ReadOnly,
+            LiveFilesystemConfinement::standard_descriptor_rooted(),
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            binding_for_execution(false, &projectless),
+            ExternalRealizationBinding::PrivateWorkspace
+        );
+        assert_eq!(
+            binding_for_execution(false, &pinned_cow),
+            ExternalRealizationBinding::PrivateWorkspace
+        );
+        assert_eq!(
+            binding_for_execution(false, &pinned_read_only),
+            ExternalRealizationBinding::IsolationMounts
+        );
+        assert_eq!(
+            binding_for_execution(false, &live),
+            ExternalRealizationBinding::IsolationMounts
+        );
+        assert_eq!(
+            binding_for_execution(true, &projectless),
+            ExternalRealizationBinding::IsolationMounts
+        );
+        assert_eq!(
+            binding_for_execution(true, &pinned_cow),
+            ExternalRealizationBinding::IsolationMounts
+        );
+    }
+
     fn tree_mount(destination: &str, files: &[(&str, u64)]) -> SealedRealizationMount {
         SealedRealizationMount {
             destination: PathBuf::from(destination),
@@ -1719,12 +1927,36 @@ mod tests {
             ExternalContentKind::Tree,
             |staging| copy_materialized_tree(&generation.root, staging, closure.manifest()),
             |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
+            |existing| match existing {
+                lillux::PinnedDirectoryEntry::Directory(directory) => {
+                    verify_materialized_tree(&cas, &directory, closure.manifest())
+                }
+                lillux::PinnedDirectoryEntry::Regular(_) => {
+                    anyhow::bail!("tree realization destination is a regular file")
+                }
+            },
         )
         .unwrap();
 
         let private_file = workspace_path.join("runtime/content/value.txt");
         let cached_file = generation.source_path.join("value.txt");
         assert_eq!(std::fs::read(&private_file).unwrap(), b"sealed");
+        publish_private_generation(
+            &workspace,
+            "runtime/content",
+            ExternalContentKind::Tree,
+            |staging| copy_materialized_tree(&generation.root, staging, closure.manifest()),
+            |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
+            |existing| match existing {
+                lillux::PinnedDirectoryEntry::Directory(directory) => {
+                    verify_materialized_tree(&cas, &directory, closure.manifest())
+                }
+                lillux::PinnedDirectoryEntry::Regular(_) => {
+                    anyhow::bail!("tree realization destination is a regular file")
+                }
+            },
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt as _;
@@ -1735,6 +1967,24 @@ mod tests {
         }
         std::fs::write(&private_file, b"private mutation").unwrap();
         assert_eq!(std::fs::read(cached_file).unwrap(), b"sealed");
+        assert!(
+            publish_private_generation(
+                &workspace,
+                "runtime/content",
+                ExternalContentKind::Tree,
+                |staging| { copy_materialized_tree(&generation.root, staging, closure.manifest()) },
+                |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
+                |existing| match existing {
+                    lillux::PinnedDirectoryEntry::Directory(directory) => {
+                        verify_materialized_tree(&cas, &directory, closure.manifest())
+                    }
+                    lillux::PinnedDirectoryEntry::Regular(_) => {
+                        anyhow::bail!("tree realization destination is a regular file")
+                    }
+                },
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1889,6 +2139,19 @@ mod tests {
                     LargeMaterializationVerification::PrivateDigest,
                 )
             },
+            |existing| match existing {
+                lillux::PinnedDirectoryEntry::Directory(directory) => {
+                    verify_large_materialized_tree(
+                        &cas,
+                        &directory,
+                        &manifest,
+                        LargeMaterializationVerification::PrivateDigest,
+                    )
+                }
+                lillux::PinnedDirectoryEntry::Regular(_) => {
+                    anyhow::bail!("tree realization destination is a regular file")
+                }
+            },
         )
         .unwrap();
         assert_eq!(
@@ -1959,6 +2222,28 @@ mod tests {
             ExternalContentKind::File,
             |staging| copy_materialized_tree(&generation.root, staging, closure.manifest()),
             |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
+            |existing| match existing {
+                lillux::PinnedDirectoryEntry::Regular(mut file) => {
+                    let expected = closure
+                        .manifest()
+                        .entries
+                        .iter()
+                        .find(|entry| {
+                            entry.path
+                                == ryeos_engine::external_content::FILE_REALIZATION_ENTRY_PATH
+                        })
+                        .unwrap();
+                    verify_open_regular_exact(
+                        &mut file,
+                        expected.size.unwrap(),
+                        expected.mode.unwrap(),
+                        expected.blob_hash.as_deref().unwrap(),
+                    )
+                }
+                lillux::PinnedDirectoryEntry::Directory(_) => {
+                    anyhow::bail!("file realization destination is a directory")
+                }
+            },
         )
         .unwrap();
 
@@ -1967,6 +2252,70 @@ mod tests {
             b"payload"
         );
         assert!(!workspace_path.join("config/model.bin/content").exists());
+        publish_private_generation(
+            &workspace,
+            "config/model.bin",
+            ExternalContentKind::File,
+            |staging| copy_materialized_tree(&generation.root, staging, closure.manifest()),
+            |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
+            |existing| match existing {
+                lillux::PinnedDirectoryEntry::Regular(mut file) => {
+                    let expected = closure
+                        .manifest()
+                        .entries
+                        .iter()
+                        .find(|entry| {
+                            entry.path
+                                == ryeos_engine::external_content::FILE_REALIZATION_ENTRY_PATH
+                        })
+                        .unwrap();
+                    verify_open_regular_exact(
+                        &mut file,
+                        expected.size.unwrap(),
+                        expected.mode.unwrap(),
+                        expected.blob_hash.as_deref().unwrap(),
+                    )
+                }
+                lillux::PinnedDirectoryEntry::Directory(_) => {
+                    anyhow::bail!("file realization destination is a directory")
+                }
+            },
+        )
+        .unwrap();
+
+        std::fs::write(workspace_path.join("config/model.bin"), b"mutated").unwrap();
+        assert!(
+            publish_private_generation(
+                &workspace,
+                "config/model.bin",
+                ExternalContentKind::File,
+                |staging| { copy_materialized_tree(&generation.root, staging, closure.manifest()) },
+                |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
+                |existing| match existing {
+                    lillux::PinnedDirectoryEntry::Regular(mut file) => {
+                        let expected = closure
+                            .manifest()
+                            .entries
+                            .iter()
+                            .find(|entry| {
+                                entry.path
+                                    == ryeos_engine::external_content::FILE_REALIZATION_ENTRY_PATH
+                            })
+                            .unwrap();
+                        verify_open_regular_exact(
+                            &mut file,
+                            expected.size.unwrap(),
+                            expected.mode.unwrap(),
+                            expected.blob_hash.as_deref().unwrap(),
+                        )
+                    }
+                    lillux::PinnedDirectoryEntry::Directory(_) => {
+                        anyhow::bail!("file realization destination is a directory")
+                    }
+                },
+            )
+            .is_err()
+        );
     }
 
     #[test]
