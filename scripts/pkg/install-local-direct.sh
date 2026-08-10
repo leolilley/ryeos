@@ -260,6 +260,28 @@ validate_selected_source_publisher_trust() {
     done
 }
 
+require_closed_source_bundle_payloads() {
+    local repo_root="$1"
+    shift
+    local name bundle_root
+    local -a incomplete=()
+
+    for name in "$@"; do
+        bundle_root="$repo_root/bundles/$name"
+        if [[ ! -s "$bundle_root/.ai/refs/bundles/manifest" \
+            || ! -d "$bundle_root/.ai/objects" ]]; then
+            incomplete+=("$name")
+        fi
+    done
+
+    if (( ${#incomplete[@]} > 0 )); then
+        ryeos_term_fail "source bundle payload is not published for: ${incomplete[*]}"
+        ryeos_term_info "refusing to replace installed bundles with source trees that lack their closed manifest/object payload"
+        ryeos_term_info "rerun with --populate and an explicit --crates or --all scope"
+        return 1
+    fi
+}
+
 # Build init trust arguments from the exact source boundary the installer
 # selected and validated. The result intentionally excludes every other
 # document that might already exist below the packaged share directory.
@@ -559,6 +581,11 @@ if [[ ${#bundle_names[@]} -eq 0 ]]; then
 fi
 bundle_names_csv=$(IFS=,; printf '%s\n' "${bundle_names[*]}")
 
+closed_payload_bundle_names=()
+while IFS= read -r _bundle_name; do
+    closed_payload_bundle_names+=("$_bundle_name")
+done < <(ryeos_bundle_set_bin_managed_names "$bundle_set") || true
+
 if [[ "$bundle_set" != "full" && $run_init -eq 0 ]]; then
     ryeos_term_warn "--no-init installs lean sources only; existing local initialized state is not rewritten"
 fi
@@ -644,6 +671,14 @@ if [[ $run_init -eq 1 ]]; then
         "$trust_source_publishers" "$official_publisher_fp" "${source_trust_docs[@]}" \
         || die "source publisher trust policy rejected initialization"
 fi
+
+# A failed/interrupted population can leave authored source plus binaries but
+# no derived manifest/object closure. Installing that tree would destroy a
+# previously bootable installed payload and can never pass prospective init.
+# Refuse before stopping the daemon or replacing anything; only the publisher
+# build may recreate this closed evidence.
+require_closed_source_bundle_payloads "$repo_root" "${closed_payload_bundle_names[@]}" \
+    || die "selected source bundle set is incomplete"
 
 daemon_was_running=0
 if [[ $restart_daemon -eq 1 ]] && command -v ryeos >/dev/null 2>&1; then

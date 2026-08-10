@@ -108,4 +108,19 @@ collect_selected_source_trust_args "$installed_share" core
 [[ "${SELECTED_SOURCE_TRUST_ARGS[1]}" == "$installed_share/.ai/PUBLISHER_TRUST.toml" ]]
 [[ " ${SELECTED_SOURCE_TRUST_ARGS[*]} " != *" $installed_share/residual/PUBLISHER_TRUST.toml "* ]]
 
+# Incremental installation may copy only a complete publisher-built payload.
+# Authored source left behind by an interrupted population must be rejected
+# before it can replace a bootable installed bundle.
+payload_root="$tmp/payload-root"
+mkdir -p \
+    "$payload_root/bundles/core/.ai/refs/bundles" \
+    "$payload_root/bundles/core/.ai/objects" \
+    "$payload_root/bundles/browser/.ai"
+printf 'manifest-object-ref\n' \
+    >"$payload_root/bundles/core/.ai/refs/bundles/manifest"
+require_closed_source_bundle_payloads "$payload_root" core
+expect_rejected require_closed_source_bundle_payloads "$payload_root" core browser
+rm "$payload_root/bundles/core/.ai/refs/bundles/manifest"
+expect_rejected require_closed_source_bundle_payloads "$payload_root" core
+
 echo "publisher trust policy cases passed"
