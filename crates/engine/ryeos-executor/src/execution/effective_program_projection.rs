@@ -454,11 +454,109 @@ fn capture_and_finalize_fresh_effective_program_once(
     ))
 }
 
+/// Validate one already-admitted managed program without turning it into
+/// execution authority.
+///
+/// Static validation captures the same authored/configured hook plan and
+/// invokes the same kind-declared effective validator as launch. It does not
+/// realize external content, finalize an effective definition, build an
+/// execution plan, materialize an executor, or mint durable lifecycle state.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_admitted_effective_program(
+    engine: &ryeos_engine::engine::Engine,
+    kind: &str,
+    resolution: ResolutionOutput,
+    effective_caps: &[String],
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    parsers: &ryeos_engine::parsers::ParserDispatcher,
+    trust_store: &ryeos_engine::trust::TrustStore,
+    materialization: Option<&ryeos_app::resolution_cache::ResolutionMaterializationBinding>,
+) -> Result<(), DispatchError> {
+    let external_contract = engine
+        .kinds
+        .get(kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .and_then(|execution| execution.external_content.as_ref());
+    let declarer = ryeos_engine::external_content::declaring_authority(&resolution)
+        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+    ryeos_engine::external_content::declarations_from_composed(
+        &resolution.composed.composed,
+        external_contract,
+        declarer,
+    )
+    .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+
+    let config_roots = engine.launch_config_roots(roots);
+    let project = materialization
+        .map(|binding| binding.authoritative_project_content())
+        .transpose()
+        .map_err(DispatchError::Internal)?
+        .flatten()
+        .map(|(root, content)| {
+            (
+                root,
+                content as &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+            )
+        });
+    let mut mutable_authority_races = 0usize;
+    loop {
+        let snapshots = super::launch_preparation::load_launch_config_set_under_current_authority(
+            &ryeos_engine::hooks::hook_source_declarations(),
+            &config_roots,
+            parsers,
+            engine,
+            trust_store,
+            materialization,
+        )?;
+        capture_and_validate_with_hook_snapshots(
+            engine,
+            kind,
+            resolution.clone(),
+            effective_caps,
+            trust_store,
+            &snapshots,
+        )?;
+        match snapshots
+            .dependency_proof
+            .revalidate_under_authority_status(&config_roots, project)
+        {
+            LaunchConfigProofStatus::Current => return Ok(()),
+            LaunchConfigProofStatus::MutableAuthorityChanged
+                if mutable_authority_races
+                    < ryeos_app::resolution_cache::MAX_MUTABLE_AUTHORITY_RACE_RETRIES =>
+            {
+                mutable_authority_races = mutable_authority_races.saturating_add(1);
+                tracing::warn!(
+                    attempt = mutable_authority_races,
+                    max_retries = ryeos_app::resolution_cache::MAX_MUTABLE_AUTHORITY_RACE_RETRIES,
+                    kind,
+                    "retrying static effective-program validation after concurrent authority edit"
+                );
+            }
+            LaunchConfigProofStatus::MutableAuthorityChanged => {
+                return Err(DispatchError::LaunchPreparationFailed {
+                    code: "effective_program_authority_changed".to_string(),
+                    message: "effective-program validation authority changed concurrently"
+                        .to_string(),
+                    classification: "unavailable".to_string(),
+                    binding: None,
+                    details: Box::default(),
+                });
+            }
+            LaunchConfigProofStatus::ImmutableAuthorityMismatch => {
+                return Err(DispatchError::Internal(anyhow::anyhow!(
+                    "immutable effective-program validation authority mismatched"
+                )));
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn capture_and_finalize_with_hook_snapshots(
     engine: &ryeos_engine::engine::Engine,
     kind: &str,
-    mut resolution: ResolutionOutput,
+    resolution: ResolutionOutput,
     effective_caps: &[String],
     roots: &ryeos_engine::item_resolution::ResolutionRoots,
     trust_store: &ryeos_engine::trust::TrustStore,
@@ -468,6 +566,66 @@ fn capture_and_finalize_with_hook_snapshots(
         &ryeos_app::external_content_admission::AdmittedExternalRealizations,
     >,
 ) -> Result<FinalizedEffectiveProgram, DispatchError> {
+    let (resolution, validation) = capture_and_validate_with_hook_snapshots(
+        engine,
+        kind,
+        resolution,
+        effective_caps,
+        trust_store,
+        snapshots,
+    )?;
+    let candidate =
+        ryeos_engine::effective_program::lock_validated_effective_program(resolution, validation)
+            .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+    let config_roots = engine.launch_config_roots(roots);
+    let project = materialization
+        .map(|binding| binding.authoritative_project_content())
+        .transpose()
+        .map_err(DispatchError::Internal)?
+        .flatten()
+        .map(|(root, content)| {
+            (
+                root,
+                content as &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+            )
+        });
+    let proof = ryeos_engine::effective_program::prove_finalization_authority(
+        &candidate,
+        std::slice::from_ref(&snapshots.dependency_proof),
+        &config_roots,
+        project,
+        external_realization.map(|captured| captured.finalization_evidence()),
+    )
+    .map_err(|error| match error {
+        ryeos_engine::error::EngineError::MutableEffectiveProgramAuthorityChanged => {
+            DispatchError::LaunchPreparationFailed {
+                code: "effective_program_authority_changed".to_string(),
+                message: error.to_string(),
+                classification: "unavailable".to_string(),
+                binding: None,
+                details: Box::default(),
+            }
+        }
+        error => DispatchError::Internal(anyhow::anyhow!(error)),
+    })?;
+    ryeos_engine::effective_program::finalize_effective_program(candidate, proof)
+        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))
+}
+
+fn capture_and_validate_with_hook_snapshots(
+    engine: &ryeos_engine::engine::Engine,
+    kind: &str,
+    mut resolution: ResolutionOutput,
+    effective_caps: &[String],
+    trust_store: &ryeos_engine::trust::TrustStore,
+    snapshots: &LaunchConfigSnapshotSet,
+) -> Result<
+    (
+        ResolutionOutput,
+        ryeos_engine::effective_program::EffectiveValidationSuccess,
+    ),
+    DispatchError,
+> {
     let hook_contract = engine
         .kinds
         .get(kind)
@@ -478,7 +636,6 @@ fn capture_and_finalize_with_hook_snapshots(
                 "managed runtime kind `{kind}` has no signed hook contract"
             ))
         })?;
-    let config_roots = engine.launch_config_roots(roots);
     let authored =
         value_at_composed_path(&resolution.composed.composed, &hook_contract.authored_path);
     let known_event_contracts = engine
@@ -527,41 +684,7 @@ fn capture_and_finalize_with_hook_snapshots(
         .effective_validators
         .validate(kind, &resolution)
         .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
-    let candidate =
-        ryeos_engine::effective_program::lock_validated_effective_program(resolution, validation)
-            .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
-    let project = materialization
-        .map(|binding| binding.authoritative_project_content())
-        .transpose()
-        .map_err(DispatchError::Internal)?
-        .flatten()
-        .map(|(root, content)| {
-            (
-                root,
-                content as &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
-            )
-        });
-    let proof = ryeos_engine::effective_program::prove_finalization_authority(
-        &candidate,
-        std::slice::from_ref(&snapshots.dependency_proof),
-        &config_roots,
-        project,
-        external_realization.map(|captured| captured.finalization_evidence()),
-    )
-    .map_err(|error| match error {
-        ryeos_engine::error::EngineError::MutableEffectiveProgramAuthorityChanged => {
-            DispatchError::LaunchPreparationFailed {
-                code: "effective_program_authority_changed".to_string(),
-                message: error.to_string(),
-                classification: "unavailable".to_string(),
-                binding: None,
-                details: Box::default(),
-            }
-        }
-        error => DispatchError::Internal(anyhow::anyhow!(error)),
-    })?;
-    ryeos_engine::effective_program::finalize_effective_program(candidate, proof)
-        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))
+    Ok((resolution, validation))
 }
 
 /// Compile and validate the exact admitted plan before any callback token,

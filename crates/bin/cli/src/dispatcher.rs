@@ -242,6 +242,7 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         "item_ref": resolved.item_ref,
         "ref_bindings": resolved.ref_bindings,
         "parameters": resolved.parameters,
+        "validate_only": resolved.validate_only,
         "execution_policy": execution_policy_value(
             resolved.project_path.is_some(),
             resolved.async_launch,
@@ -308,6 +309,7 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     let stream_live = should_stream_direct_execute(
         resolved.direct_execute,
         resolved.async_launch,
+        resolved.validate_only,
         resolved.state_root.is_some(),
         want_stream,
     );
@@ -374,10 +376,11 @@ fn execution_policy_value(project_backed: bool, accepted: bool) -> Value {
 fn should_stream_direct_execute(
     direct_execute: bool,
     async_launch: bool,
+    validate_only: bool,
     has_state_root: bool,
     want_stream: bool,
 ) -> bool {
-    direct_execute && !async_launch && !has_state_root && want_stream
+    direct_execute && !async_launch && !validate_only && !has_state_root && want_stream
 }
 
 fn should_show_tty_screen(rest: &[String], stdout_is_tty: bool) -> bool {
@@ -584,6 +587,9 @@ struct CliResolvedExecute {
     parameters: Value,
     project_path: Option<PathBuf>,
     async_launch: bool,
+    /// Typed command-dispatch intent. Validation uses the existing no-spawn
+    /// execution boundary and is never inferred from item parameters.
+    validate_only: bool,
     /// True when this is the `execute` command (`direct_execute_item_ref`) —
     /// the only path that streams a live execution log.
     direct_execute: bool,
@@ -666,6 +672,12 @@ fn resolve_command_for_daemon_with_commands(
         matched.command.dispatch,
         CommandDispatch::DirectExecuteItemRef { .. }
     );
+    let validate_only = match &matched.command.dispatch {
+        CommandDispatch::DirectExecuteItemRef { validate_only, .. } => *validate_only,
+        CommandDispatch::Group
+        | CommandDispatch::LocalHandler { .. }
+        | CommandDispatch::ExecuteRef { .. } => false,
+    };
     // Strip the command's DECLARED control flags (from data) and route them.
     // Commands that declare none get a no-op, so non-execute commands are
     // unaffected; the execute command declares --async/--method/--args/etc.
@@ -717,6 +729,7 @@ fn resolve_command_for_daemon_with_commands(
         parameters,
         project_path,
         async_launch: control.async_launch,
+        validate_only,
         direct_execute,
         stream: control.stream,
         debug_raw: control.debug_raw,
@@ -1514,11 +1527,12 @@ mod tests {
         // Project selection is deliberately absent from this decision: both
         // project-backed and projectless direct execution use the same live
         // route when the execution controls permit it.
-        assert!(should_stream_direct_execute(true, false, false, true));
-        assert!(!should_stream_direct_execute(false, false, false, true));
-        assert!(!should_stream_direct_execute(true, true, false, true));
-        assert!(!should_stream_direct_execute(true, false, true, true));
-        assert!(!should_stream_direct_execute(true, false, false, false));
+        assert!(should_stream_direct_execute(true, false, false, false, true));
+        assert!(!should_stream_direct_execute(false, false, false, false, true));
+        assert!(!should_stream_direct_execute(true, true, false, false, true));
+        assert!(!should_stream_direct_execute(true, false, true, false, true));
+        assert!(!should_stream_direct_execute(true, false, false, true, true));
+        assert!(!should_stream_direct_execute(true, false, false, false, false));
     }
 
     #[test]
@@ -1853,6 +1867,7 @@ mod tests {
             }),
             dispatch: ryeos_runtime::CommandDispatch::DirectExecuteItemRef {
                 item_ref_arg: "item_ref".into(),
+                validate_only: false,
                 availability: ryeos_runtime::CommandAvailability::Both,
             },
             source_file: PathBuf::new(),
@@ -1935,6 +1950,29 @@ mod tests {
         assert!(!resolved.async_launch);
         assert_eq!(resolved.item_ref, "tool:test/run");
         assert_eq!(resolved.parameters["provider"], serde_json::json!("zen"));
+    }
+
+    #[test]
+    fn direct_execute_preserves_typed_validation_intent() {
+        let mut command = direct_execute_command();
+        let ryeos_runtime::CommandDispatch::DirectExecuteItemRef {
+            validate_only, ..
+        } = &mut command.dispatch
+        else {
+            panic!("fixture must use direct_execute_item_ref");
+        };
+        *validate_only = true;
+
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&["execute", "graph:test/run"]),
+            &[command],
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .unwrap();
+
+        assert!(resolved.validate_only);
+        assert!(resolved.parameters.get("validate").is_none());
     }
 
     #[test]

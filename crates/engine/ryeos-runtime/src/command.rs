@@ -374,6 +374,9 @@ pub enum CommandDispatch {
     },
     DirectExecuteItemRef {
         item_ref_arg: String,
+        /// Dispatches through the existing pre-spawn validation boundary when
+        /// true. This is command intent, never an item input named `validate`.
+        validate_only: bool,
         #[serde(default)]
         availability: CommandAvailability,
     },
@@ -765,6 +768,7 @@ mod tests {
         let mut record = command("demo", &["demo"]);
         record.dispatch = CommandDispatch::DirectExecuteItemRef {
             item_ref_arg: "item_ref".into(),
+            validate_only: false,
             availability: CommandAvailability::Both,
         };
 
@@ -780,6 +784,7 @@ mod tests {
         let mut record = command("demo", &["demo"]);
         record.dispatch = CommandDispatch::DirectExecuteItemRef {
             item_ref_arg: "item_ref".into(),
+            validate_only: false,
             availability: CommandAvailability::Both,
         };
         record
@@ -802,6 +807,7 @@ mod tests {
         });
         record.dispatch = CommandDispatch::DirectExecuteItemRef {
             item_ref_arg: "item_ref".into(),
+            validate_only: false,
             availability: CommandAvailability::Both,
         };
 
@@ -823,6 +829,24 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn direct_execute_item_ref_requires_explicit_validation_intent() {
+        let mut record = command("demo", &["demo"]);
+        record.dispatch = CommandDispatch::DirectExecuteItemRef {
+            item_ref_arg: "item_ref".into(),
+            validate_only: true,
+            availability: CommandAvailability::Both,
+        };
+
+        let value = serde_json::to_value(&record).unwrap();
+        assert_eq!(value["dispatch"]["validate_only"], true);
+
+        let mut missing = value;
+        missing["dispatch"].as_object_mut().unwrap().remove("validate_only");
+        let error = serde_json::from_value::<CommandDef>(missing).unwrap_err();
+        assert!(error.to_string().contains("validate_only"));
     }
 
     #[test]

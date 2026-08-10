@@ -1110,6 +1110,8 @@ enum PreflightCommandDispatch {
     DirectExecuteItemRef {
         item_ref_arg: String,
         #[allow(dead_code)]
+        validate_only: bool,
+        #[allow(dead_code)]
         #[serde(default)]
         availability: PreflightCommandAvailability,
     },

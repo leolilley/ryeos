@@ -1085,6 +1085,7 @@ mod tests {
                 project: None,
                 dispatch: ryeos_runtime::CommandDispatch::DirectExecuteItemRef {
                     item_ref_arg: "item_ref".into(),
+                    validate_only: false,
                     availability: ryeos_runtime::CommandAvailability::Both,
                 },
                 source_file: PathBuf::from("/tmp/execute.yaml"),

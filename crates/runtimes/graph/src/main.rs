@@ -12,10 +12,8 @@ mod knowledge;
 mod model;
 mod persistence;
 mod resume;
-mod validation;
 mod walker;
 
-use std::collections::HashSet;
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -58,7 +56,6 @@ struct ResolvedLaunch {
     /// needs no source root of its own: the composed definition arrives in
     /// the envelope and children resolve daemon-side from token provenance.
     state_root: std::path::PathBuf,
-    node_trusted_keys_dir: std::path::PathBuf,
     /// Diagnostic source label only. Executable bytes come exclusively from
     /// the finalized composed resolution carried by the launch envelope.
     graph_source_label: String,
@@ -71,62 +68,9 @@ struct ResolvedLaunch {
     hard_limits: Value,
     callback: Option<EnvelopeCallback>,
     target_digest: Option<String>,
-    bundle_roots: Vec<std::path::PathBuf>,
     invocation_id: Option<String>,
     resolution: ryeos_engine::resolution::ResolutionOutput,
     effective_definition_digest: ryeos_engine::resolution::EffectiveDefinitionDigest,
-}
-
-/// Static validation report for a graph: `{valid, errors, warnings, …}`.
-/// Reached only via the daemon-spawned `validate` execution input — the
-/// daemon trust-gates the graph (resolve → verify) before the runtime
-/// ever runs, so the runtime never analyzes untrusted content.
-fn validate_report(graph: &model::GraphDefinition, managed_kinds: &HashSet<String>) -> Value {
-    let mut report = validation::analyze_graph(graph);
-    report
-        .errors
-        .extend(validation::validate_managed_child_kinds(
-            graph,
-            managed_kinds,
-        ));
-    json!({
-        "valid": report.errors.is_empty(),
-        "graph_id": graph.graph_id,
-        "definition_ref": graph.definition_ref,
-        "node_count": graph.config.nodes.len(),
-        "errors": report.errors,
-        "warnings": report.warnings,
-    })
-}
-
-fn admitted_managed_runtime_kinds(resolved: &ResolvedLaunch) -> anyhow::Result<HashSet<String>> {
-    use ryeos_engine::kind_registry::KindRegistry;
-    use ryeos_engine::resolution::TrustClass;
-    use ryeos_engine::runtime_registry::RuntimeRegistry;
-    use ryeos_engine::trust::TrustStore;
-
-    let trust = TrustStore::load_from_dir(&resolved.node_trusted_keys_dir)?;
-    let schema_roots = resolved
-        .bundle_roots
-        .iter()
-        .map(|root| {
-            root.join(ryeos_engine::AI_DIR)
-                .join(ryeos_engine::KIND_SCHEMAS_DIR)
-        })
-        .filter(|root| root.is_dir())
-        .collect::<Vec<_>>();
-    let kinds = KindRegistry::load_base(&schema_roots, &trust)?;
-    let tagged_roots = resolved
-        .bundle_roots
-        .iter()
-        .cloned()
-        .map(|root| (root, TrustClass::TrustedBundle))
-        .collect::<Vec<_>>();
-    let runtimes = RuntimeRegistry::build_from_bundles(&tagged_roots, &trust, &kinds)?;
-    Ok(runtimes
-        .all()
-        .map(|runtime| runtime.yaml.serves.clone())
-        .collect())
 }
 
 fn main() -> anyhow::Result<()> {
@@ -153,7 +97,6 @@ fn main() -> anyhow::Result<()> {
         graph_run_id = ?resolved.graph_run_id,
         target_digest = ?resolved.target_digest,
         invocation_id = ?resolved.invocation_id,
-        bundle_roots = ?resolved.bundle_roots,
         graph_id = %graph.graph_id,
         declared_permissions = ?graph.declared_permissions,
         runtime_capability_requirements = ?graph.runtime_capability_requirements,
@@ -199,41 +142,6 @@ fn main() -> anyhow::Result<()> {
     // cannot tell a live graph from a crashed one on restart and would resume
     // a duplicate. Resume-critical: a graph that cannot register must not run.
     rt.block_on(callback.attach_current_process())?;
-
-    // Validate-as-input: a graph run carrying the reserved `validate` input
-    // returns the static analysis report instead of executing. Runs AFTER
-    // attach so even this early-return path has recorded pid/pgid — the daemon
-    // creates a thread row and settles it from this stdout, so it must be
-    // trackable like any other managed launch.
-    if resolved
-        .inputs
-        .get("validate")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        let managed_kinds = admitted_managed_runtime_kinds(&resolved)?;
-        let report = validate_report(&graph, &managed_kinds);
-        let valid = report
-            .get("valid")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let status = if valid {
-            RuntimeResultStatus::Completed
-        } else {
-            RuntimeResultStatus::Failed
-        };
-        let runtime_result = RuntimeResult {
-            success: status.is_success(),
-            status,
-            thread_id: resolved.thread_id.clone(),
-            result: Some(report),
-            outputs: Value::Null,
-            cost: None,
-            warnings: Vec::new(),
-        };
-        println!("{}", serde_json::to_string(&runtime_result)?);
-        return Ok(());
-    }
 
     // A resumed rye-expr/1 run requires its identity-bearing local checkpoint.
     // No event-replay fallback exists after the clean language cutover.
@@ -375,7 +283,6 @@ fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<Resolve
 
     Ok(ResolvedLaunch {
         state_root: envelope.roots.state_root().to_path_buf(),
-        node_trusted_keys_dir: envelope.roots.node_trusted_keys_dir.clone(),
         graph_source_label: envelope
             .resolution()
             .root
@@ -391,7 +298,6 @@ fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<Resolve
         hard_limits: serde_json::to_value(&envelope.policy.hard_limits).unwrap_or(json!({})),
         callback: Some(envelope.callback),
         target_digest: Some(target_digest),
-        bundle_roots: envelope.roots.bundle_roots.clone(),
         invocation_id: Some(envelope.invocation_id.clone()),
         resolution,
         effective_definition_digest,

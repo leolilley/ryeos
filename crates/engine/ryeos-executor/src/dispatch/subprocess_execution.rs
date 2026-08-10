@@ -319,6 +319,16 @@ async fn dispatch_managed_subprocess(
         &state.node_history_policy,
     )?;
 
+    if request.validate_only {
+        validate_managed_effective_program(&prepared, request, ctx)?;
+        return Ok(json!({
+            "validated": true,
+            "item_ref": &prepared.resolved.item_ref,
+            "kind": &prepared.resolved.resolved_item.kind,
+            "executor_ref": &prepared.executor_ref,
+        }));
+    }
+
     // Runtime callback caps (bundle-events / runtime-vault) are minted inside
     // `build_and_launch` from the *composed* `requires` block — after the
     // extends-chain composer has narrowed a child directive against its parent.
@@ -392,6 +402,100 @@ async fn dispatch_managed_subprocess(
         "thread": result.thread,
         "result": result.result,
     }))
+}
+
+fn validate_managed_effective_program(
+    prepared: &crate::dispatch::PreparedManagedLaunch,
+    request: &DispatchRequest<'_>,
+    ctx: &ExecutionContext,
+) -> Result<(), DispatchError> {
+    let admission = prepared.resolved.root_admission.as_ref().ok_or_else(|| {
+        DispatchError::Internal(anyhow::anyhow!(
+            "managed static validation has no exact root admission"
+        ))
+    })?;
+    admission
+        .ensure_matches_provenance(&request.provenance)
+        .map_err(DispatchError::Internal)?;
+    let engine = admission.request_engine();
+    if !std::sync::Arc::ptr_eq(engine, &ctx.engine) {
+        return Err(DispatchError::Internal(anyhow::anyhow!(
+            "managed static validation engine differs from root admission"
+        )));
+    }
+    let subject_authority = admission
+        .plan_context()
+        .subject_resolution_authority
+        .clone();
+    let resolution_project_root = (!matches!(
+        subject_authority,
+        ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
+    ))
+    .then(|| {
+        admission.execution_workspace().ok_or_else(|| {
+            DispatchError::Internal(anyhow::anyhow!(
+                "managed static validation has no admitted project workspace"
+            ))
+        })
+    })
+    .transpose()?;
+    let roots = engine.resolution_roots(resolution_project_root.map(Path::to_path_buf));
+    let request_snapshot = match admission.admitted_request_snapshot() {
+        Some(admitted) => engine.effective_request_snapshot_under_admitted_authority(
+            resolution_project_root.ok_or_else(|| {
+                DispatchError::Internal(anyhow::anyhow!(
+                    "admitted static validation snapshot has no project workspace"
+                ))
+            })?,
+            admitted,
+        ),
+        None if subject_authority.operational_generation().is_some() => {
+            return Err(DispatchError::Internal(anyhow::anyhow!(
+                "content-addressed static validation has no admitted request snapshot"
+            )));
+        }
+        None => engine
+            .effective_request_snapshot(resolution_project_root, &subject_authority)
+            .map(std::sync::Arc::new),
+    }
+    .map_err(|error| {
+        DispatchError::Internal(anyhow::anyhow!(
+            "managed static validation request authority: {error}"
+        ))
+    })?;
+    let resolution = admission.resolution_output().clone();
+    let declared_caps = launch::derive_effective_caps(&resolution.composed);
+    ryeos_bundle::runtime_authority::reject_disallowed_composed_grants(&declared_caps).map_err(
+        |error| DispatchError::CapabilityRejected {
+            reason: error.to_string(),
+        },
+    )?;
+    let runtime_caps = crate::dispatch::mint_runtime_capability_caps(
+        resolution.composed.composed.get("requires"),
+        &prepared.resolved.resolved_item,
+        resolution.effective_trust_class,
+        engine,
+    )
+    .map_err(|reason| DispatchError::CapabilityRejected { reason })?;
+    let effective_caps = declared_caps
+        .into_iter()
+        .chain(runtime_caps)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let materialization = admission
+        .resolution_materialization_binding()
+        .map_err(DispatchError::Internal)?;
+    crate::execution::effective_program_projection::validate_admitted_effective_program(
+        engine,
+        &prepared.resolved.resolved_item.kind,
+        resolution,
+        &effective_caps,
+        &roots,
+        &request_snapshot.parser_dispatcher,
+        &request_snapshot.trust_store,
+        Some(&materialization),
+    )
 }
 
 // Verified hop identity, root authority, request context, daemon state, and

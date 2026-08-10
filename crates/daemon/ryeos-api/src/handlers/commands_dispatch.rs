@@ -50,16 +50,20 @@ pub async fn handle(
     )
     .map_err(HandlerError::BadRequest)?;
 
-    let item_ref = match &matched.command.dispatch {
-        CommandDispatch::ExecuteRef { execute, .. } => execute.clone(),
-        CommandDispatch::DirectExecuteItemRef { item_ref_arg, .. } => {
+    let (item_ref, validate_only) = match &matched.command.dispatch {
+        CommandDispatch::ExecuteRef { execute, .. } => (execute.clone(), false),
+        CommandDispatch::DirectExecuteItemRef {
+            item_ref_arg,
+            validate_only,
+            ..
+        } => {
             // The ref itself is a tail argument (e.g. `execute <ref>`).
             let Some(found) = parameters.get(item_ref_arg).and_then(Value::as_str) else {
                 return Err(HandlerError::BadRequest(format!(
                     "command requires `{item_ref_arg}` argument"
                 )));
             };
-            found.to_string()
+            (found.to_string(), *validate_only)
         }
         CommandDispatch::Group => {
             // A group prefix is a prompt for more tokens, not an error:
@@ -112,7 +116,7 @@ pub async fn handle(
         current_site_id: site_id.clone(),
         origin_site_id,
         execution_hints: Default::default(),
-        validate_only: false,
+        validate_only,
     };
     let exec_ctx = ryeos_executor::executor::ExecutionContext {
         principal_fingerprint: ctx.fingerprint.clone(),
@@ -137,7 +141,7 @@ pub async fn handle(
     let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
         launch_mode: "wait",
         target_site_id: None,
-        validate_only: false,
+        validate_only,
         params: parameters,
         ref_bindings: req.ref_bindings,
         acting_principal: ctx.fingerprint.as_str(),
