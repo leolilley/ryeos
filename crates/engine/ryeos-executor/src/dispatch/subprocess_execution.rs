@@ -320,12 +320,17 @@ async fn dispatch_managed_subprocess(
     )?;
 
     if request.validate_only {
-        validate_managed_effective_program(&prepared, request, ctx)?;
+        let external_content = validate_managed_effective_program(&prepared, request, ctx, state)?;
+        let admission_ready = external_content
+            .as_ref()
+            .is_none_or(|preview| preview.ready_for_admission);
         return Ok(json!({
             "validated": true,
+            "admission_ready": admission_ready,
             "item_ref": &prepared.resolved.item_ref,
             "kind": &prepared.resolved.resolved_item.kind,
             "executor_ref": &prepared.executor_ref,
+            "external_content": external_content,
         }));
     }
 
@@ -408,7 +413,11 @@ fn validate_managed_effective_program(
     prepared: &crate::dispatch::PreparedManagedLaunch,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
-) -> Result<(), DispatchError> {
+    state: &AppState,
+) -> Result<
+    Option<ryeos_app::external_content_admission::ExternalContentValidationPreview>,
+    DispatchError,
+> {
     let admission = prepared.resolved.root_admission.as_ref().ok_or_else(|| {
         DispatchError::Internal(anyhow::anyhow!(
             "managed static validation has no exact root admission"
@@ -487,6 +496,7 @@ fn validate_managed_effective_program(
         .resolution_materialization_binding()
         .map_err(DispatchError::Internal)?;
     crate::execution::effective_program_projection::validate_admitted_effective_program(
+        state,
         engine,
         &prepared.resolved.resolved_item.kind,
         resolution,

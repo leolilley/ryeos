@@ -124,6 +124,21 @@ pub struct ExternalContentDeclaration {
 
 impl ExternalContentDeclaration {
     pub fn validate(&self, declarer: DeclaringAuthority<'_>) -> anyhow::Result<()> {
+        self.validate_with_pending_pin(declarer, false)
+    }
+
+    pub fn validate_for_static_preview(
+        &self,
+        declarer: DeclaringAuthority<'_>,
+    ) -> anyhow::Result<()> {
+        self.validate_with_pending_pin(declarer, true)
+    }
+
+    fn validate_with_pending_pin(
+        &self,
+        declarer: DeclaringAuthority<'_>,
+        allow_pending_pin: bool,
+    ) -> anyhow::Result<()> {
         validate_declaration_id(&self.id)?;
         validate_relative_path("external content mount target", &self.mount)?;
         match &self.locator {
@@ -151,6 +166,8 @@ impl ExternalContentDeclaration {
         }
         match (self.mode, self.digest.as_deref()) {
             (ExternalContentMode::Pinned, Some(digest)) if lillux::cas::valid_hash(digest) => {}
+            (ExternalContentMode::Pinned, Some(digest))
+                if allow_pending_pin && self.locator.is_some() && is_pending_pin_token(digest) => {}
             (ExternalContentMode::Pinned, Some(_)) => {
                 anyhow::bail!("pinned external content digest is not canonical")
             }
@@ -181,13 +198,32 @@ pub fn validate_declarations(
     declarations: &[ExternalContentDeclaration],
     declarer: DeclaringAuthority<'_>,
 ) -> anyhow::Result<()> {
+    validate_declaration_collection(declarations, declarer, false)
+}
+
+pub fn validate_declarations_for_static_preview(
+    declarations: &[ExternalContentDeclaration],
+    declarer: DeclaringAuthority<'_>,
+) -> anyhow::Result<()> {
+    validate_declaration_collection(declarations, declarer, true)
+}
+
+fn validate_declaration_collection(
+    declarations: &[ExternalContentDeclaration],
+    declarer: DeclaringAuthority<'_>,
+    allow_pending_pin: bool,
+) -> anyhow::Result<()> {
     if declarations.len() > MAX_DECLARATIONS_PER_ITEM {
         anyhow::bail!("item declares too many external content entries");
     }
     let mut ids = BTreeSet::new();
     let mut mounts = BTreeSet::new();
     for declaration in declarations {
-        declaration.validate(declarer)?;
+        if allow_pending_pin {
+            declaration.validate_for_static_preview(declarer)?;
+        } else {
+            declaration.validate(declarer)?;
+        }
         if !ids.insert(declaration.id.as_str()) {
             anyhow::bail!("external content id `{}` is duplicated", declaration.id);
         }
@@ -214,6 +250,23 @@ pub fn declarations_from_composed(
     contract: Option<&crate::kind_registry::ExecutionExternalContentDecl>,
     declarer: DeclaringAuthority<'_>,
 ) -> anyhow::Result<Option<Vec<ExternalContentDeclaration>>> {
+    declarations_from_composed_with_pending(composed, contract, declarer, false)
+}
+
+pub fn declarations_from_composed_for_static_preview(
+    composed: &serde_json::Value,
+    contract: Option<&crate::kind_registry::ExecutionExternalContentDecl>,
+    declarer: DeclaringAuthority<'_>,
+) -> anyhow::Result<Option<Vec<ExternalContentDeclaration>>> {
+    declarations_from_composed_with_pending(composed, contract, declarer, true)
+}
+
+fn declarations_from_composed_with_pending(
+    composed: &serde_json::Value,
+    contract: Option<&crate::kind_registry::ExecutionExternalContentDecl>,
+    declarer: DeclaringAuthority<'_>,
+    allow_pending_pin: bool,
+) -> anyhow::Result<Option<Vec<ExternalContentDeclaration>>> {
     let authored = composed.get("external_content");
     let Some(contract) = contract else {
         if authored.is_some() {
@@ -238,7 +291,11 @@ pub fn declarations_from_composed(
             contract.max_declarations
         );
     }
-    validate_declarations(&declarations, declarer)?;
+    if allow_pending_pin {
+        validate_declarations_for_static_preview(&declarations, declarer)?;
+    } else {
+        validate_declarations(&declarations, declarer)?;
+    }
     for declaration in &declarations {
         if let Some(locator) = &declaration.locator
             && !contract
@@ -294,6 +351,15 @@ fn validate_declaration_id(id: &str) -> anyhow::Result<()> {
         anyhow::bail!("external content id has a non-canonical value: {id:?}");
     }
     Ok(())
+}
+
+fn is_pending_pin_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && !lillux::cas::valid_hash(value)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
 }
 
 fn validate_exclude_pattern(pattern: &str) -> anyhow::Result<()> {
@@ -381,6 +447,35 @@ mod tests {
             declarations_from_composed(
                 &value,
                 Some(&contract(&["node_files"], 1)),
+                DeclaringAuthority::Project
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn pending_pin_tokens_exist_only_in_static_preview() {
+        let value = serde_json::json!({"external_content": [{
+            "id": "fixture",
+            "kind": "tree",
+            "locator": {"root": "project_files", "path": "vendor/fixture"},
+            "mode": "pinned",
+            "digest": "PENDING_FIXTURE_DIGEST",
+            "mount": "vendor/fixture"
+        }]});
+        assert!(
+            declarations_from_composed_for_static_preview(
+                &value,
+                Some(&contract(&["project_files"], 1)),
+                DeclaringAuthority::Project
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            declarations_from_composed(
+                &value,
+                Some(&contract(&["project_files"], 1)),
                 DeclaringAuthority::Project
             )
             .is_err()

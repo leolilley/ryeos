@@ -463,6 +463,7 @@ fn capture_and_finalize_fresh_effective_program_once(
 /// execution plan, materialize an executor, or mint durable lifecycle state.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_admitted_effective_program(
+    state: &ryeos_app::state::AppState,
     engine: &ryeos_engine::engine::Engine,
     kind: &str,
     resolution: ResolutionOutput,
@@ -471,7 +472,10 @@ pub(crate) fn validate_admitted_effective_program(
     parsers: &ryeos_engine::parsers::ParserDispatcher,
     trust_store: &ryeos_engine::trust::TrustStore,
     materialization: Option<&ryeos_app::resolution_cache::ResolutionMaterializationBinding>,
-) -> Result<(), DispatchError> {
+) -> Result<
+    Option<ryeos_app::external_content_admission::ExternalContentValidationPreview>,
+    DispatchError,
+> {
     let external_contract = engine
         .kinds
         .get(kind)
@@ -479,7 +483,7 @@ pub(crate) fn validate_admitted_effective_program(
         .and_then(|execution| execution.external_content.as_ref());
     let declarer = ryeos_engine::external_content::declaring_authority(&resolution)
         .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
-    ryeos_engine::external_content::declarations_from_composed(
+    ryeos_engine::external_content::declarations_from_composed_for_static_preview(
         &resolution.composed.composed,
         external_contract,
         declarer,
@@ -520,7 +524,16 @@ pub(crate) fn validate_admitted_effective_program(
             .dependency_proof
             .revalidate_under_authority_status(&config_roots, project)
         {
-            LaunchConfigProofStatus::Current => return Ok(()),
+            LaunchConfigProofStatus::Current => {
+                return ryeos_app::external_content_admission::preview_external_content_pins(
+                    state,
+                    engine,
+                    kind,
+                    &resolution,
+                    roots,
+                )
+                .map_err(DispatchError::Internal);
+            }
             LaunchConfigProofStatus::MutableAuthorityChanged
                 if mutable_authority_races
                     < ryeos_app::resolution_cache::MAX_MUTABLE_AUTHORITY_RACE_RETRIES =>
