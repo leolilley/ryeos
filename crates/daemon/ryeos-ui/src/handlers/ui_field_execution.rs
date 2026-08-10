@@ -110,6 +110,20 @@ struct HookFailureFact {
     event_refs: Vec<FieldEventRef>,
 }
 
+#[derive(Debug, Clone)]
+struct ProjectObservationFact {
+    thread_id: String,
+    payload: ryeos_state::ProjectObservationRecordedPayload,
+    event_refs: Vec<FieldEventRef>,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderCallObservationFact {
+    thread_id: String,
+    payload: ryeos_state::ProviderCallObservationRecordedPayload,
+    event_refs: Vec<FieldEventRef>,
+}
+
 struct CutTreeScope {
     selected_chain: String,
     included_threads: BTreeSet<String>,
@@ -133,6 +147,8 @@ struct ExecutionAssembler {
     occurrences: BTreeMap<OccurrenceKey, OccurrenceFact>,
     observations: BTreeMap<String, ObservationFact>,
     hook_failures: BTreeMap<String, HookFailureFact>,
+    project_observations: BTreeMap<String, ProjectObservationFact>,
+    provider_call_observations: BTreeMap<String, ProviderCallObservationFact>,
     current_graph: BTreeMap<String, (String, String, String)>,
     manifest_verifications: BTreeMap<String, (FieldManifestVerification, Option<String>)>,
 }
@@ -446,6 +462,8 @@ impl ExecutionAssembler {
             occurrences: BTreeMap::new(),
             observations: BTreeMap::new(),
             hook_failures: BTreeMap::new(),
+            project_observations: BTreeMap::new(),
+            provider_call_observations: BTreeMap::new(),
             current_graph: BTreeMap::new(),
             manifest_verifications: BTreeMap::new(),
         }
@@ -768,6 +786,104 @@ impl ExecutionAssembler {
         }
 
         match event.event_type.as_str() {
+            ryeos_state::event_types::PROVIDER_CALL_OBSERVATION_RECORDED => {
+                let payload: ryeos_state::ProviderCallObservationRecordedPayload =
+                    match serde_json::from_value(event.payload.clone()) {
+                        Ok(payload) => payload,
+                        Err(error) => {
+                            self.builder.warn(
+                                "malformed_provider_call_observation",
+                                format!(
+                                    "durable provider-call observation at {}:{} was not projected: {error}",
+                                    event_ref.chain_root_id, event_ref.chain_seq
+                                ),
+                            );
+                            return Ok(());
+                        }
+                    };
+                if let Err(error) =
+                    payload.validate_for_subject(&event.chain_root_id, &event.thread_id)
+                {
+                    self.builder.warn(
+                        "malformed_provider_call_observation",
+                        format!(
+                            "durable provider-call observation at {}:{} was not projected: {error:#}",
+                            event_ref.chain_root_id, event_ref.chain_seq
+                        ),
+                    );
+                    return Ok(());
+                }
+                match self
+                    .provider_call_observations
+                    .get_mut(&payload.observation_id)
+                {
+                    Some(existing)
+                        if existing.thread_id == event.thread_id && existing.payload == payload =>
+                    {
+                        existing.event_refs.push(event_ref);
+                    }
+                    Some(_) => bail!(
+                        "provider-call observation `{}` has divergent durable duplicates",
+                        payload.observation_id
+                    ),
+                    None => {
+                        self.provider_call_observations.insert(
+                            payload.observation_id.clone(),
+                            ProviderCallObservationFact {
+                                thread_id: event.thread_id.clone(),
+                                payload,
+                                event_refs: vec![event_ref],
+                            },
+                        );
+                    }
+                }
+            }
+            ryeos_state::event_types::PROJECT_OBSERVATION_RECORDED => {
+                let payload: ryeos_state::ProjectObservationRecordedPayload =
+                    match serde_json::from_value(event.payload.clone()) {
+                        Ok(payload) => payload,
+                        Err(error) => {
+                            self.builder.warn(
+                                "malformed_project_observation",
+                                format!(
+                                    "durable project observation at {}:{} was not projected: {error}",
+                                    event_ref.chain_root_id, event_ref.chain_seq
+                                ),
+                            );
+                            return Ok(());
+                        }
+                    };
+                if let Err(error) = payload.validate_for_chain(&event.chain_root_id) {
+                    self.builder.warn(
+                        "malformed_project_observation",
+                        format!(
+                            "durable project observation at {}:{} was not projected: {error:#}",
+                            event_ref.chain_root_id, event_ref.chain_seq
+                        ),
+                    );
+                    return Ok(());
+                }
+                self.record_project_observation_occurrence(&event.thread_id, &payload, &event_ref)?;
+                match self.project_observations.get_mut(&payload.observation_id) {
+                    Some(existing) if existing.payload == payload => {
+                        existing.event_refs.push(event_ref);
+                    }
+                    Some(_) => bail!(
+                        "project observation `{}` has divergent durable duplicates",
+                        payload.observation_id
+                    ),
+                    None => {
+                        self.project_observations.insert(
+                            payload.observation_id.clone(),
+                            ProjectObservationFact {
+                                thread_id: event.thread_id.clone(),
+                                payload,
+                                event_refs: vec![event_ref],
+                            },
+                        );
+                    }
+                }
+            }
             ryeos_state::event_types::HOOK_OBSERVATION_RECORDED => {
                 let payload: ryeos_runtime::HookObservationRecordedPayload =
                     match serde_json::from_value(event.payload.clone()) {
@@ -1134,6 +1250,68 @@ impl ExecutionAssembler {
         Ok(())
     }
 
+    fn record_project_observation_occurrence(
+        &mut self,
+        thread_id: &str,
+        observation: &ryeos_state::ProjectObservationRecordedPayload,
+        event_ref: &FieldEventRef,
+    ) -> Result<()> {
+        let occurrence = &observation.occurrence;
+        let run = self
+            .graph_runs
+            .entry((thread_id.to_string(), occurrence.graph_run_id.clone()))
+            .or_insert_with(|| GraphRunFact {
+                thread_id: thread_id.to_string(),
+                graph_run_id: occurrence.graph_run_id.clone(),
+                definition_ref: observation.source_definition_ref.clone(),
+                effective_definition_digest: observation.source_effective_definition_digest.clone(),
+                status: Some("running".to_string()),
+                evidence: Vec::new(),
+            });
+        if run.definition_ref != observation.source_definition_ref
+            || run.effective_definition_digest != observation.source_effective_definition_digest
+        {
+            bail!(
+                "project observation graph run `{}` has divergent definition identity",
+                occurrence.graph_run_id
+            );
+        }
+        push_evidence(&mut run.evidence, event_ref.clone());
+
+        let key = OccurrenceKey {
+            thread_id: thread_id.to_string(),
+            graph_run_id: occurrence.graph_run_id.clone(),
+            step: occurrence.step,
+            attempt: 0,
+            iteration: 0,
+        };
+        let fact = self
+            .occurrences
+            .entry(key.clone())
+            .or_insert_with(|| OccurrenceFact {
+                key,
+                definition_ref: observation.source_definition_ref.clone(),
+                effective_definition_digest: observation.source_effective_definition_digest.clone(),
+                node: occurrence.node.clone(),
+                status: Some("completed".to_string()),
+                evidence: Vec::new(),
+            });
+        if fact.node != occurrence.node
+            || fact.definition_ref != observation.source_definition_ref
+            || fact.effective_definition_digest != observation.source_effective_definition_digest
+        {
+            bail!(
+                "project observation occurrence `{}` has divergent identity",
+                fact.key.id()
+            );
+        }
+        if fact.status.is_none() {
+            fact.status = Some("completed".to_string());
+        }
+        push_evidence(&mut fact.evidence, event_ref.clone());
+        Ok(())
+    }
+
     fn add_artifact(&mut self, thread_id: &str, artifact: ThreadArtifactRecord) -> Result<()> {
         let id = format!("artifact:{thread_id}:{}", artifact.artifact_id);
         let metadata = artifact.metadata.unwrap_or(Value::Null);
@@ -1321,6 +1499,8 @@ impl ExecutionAssembler {
     fn finish(mut self) -> Result<super::ui_field::FieldFactsDocument> {
         self.emit_graph_facts()?;
         self.emit_hook_facts()?;
+        self.emit_project_observation_facts()?;
+        self.emit_provider_call_observation_facts()?;
         self.builder.finish()
     }
 
@@ -1518,6 +1698,223 @@ impl ExecutionAssembler {
                 }),
                 provenance: self.builder.provenance(event_evidence(&failure.event_refs)),
             })?;
+        }
+        Ok(())
+    }
+
+    fn emit_project_observation_facts(&mut self) -> Result<()> {
+        for observation in self.project_observations.values() {
+            let payload = &observation.payload;
+            let event = observation
+                .event_refs
+                .first()
+                .expect("project observation has evidence")
+                .clone();
+            let evidence = event_evidence(&observation.event_refs);
+            self.builder.add_entity(FieldFactEntity {
+                id: payload.observation_id.clone(),
+                kind: "project_observation".to_string(),
+                label: payload.namespace.clone(),
+                parent_id: Some(format!("thread:{}", observation.thread_id)),
+                status: payload
+                    .payload
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| Some("recorded".to_string())),
+                canonical_ref: Some(payload.source_definition_ref.clone()),
+                source_content_digest: None,
+                effective_definition_digest: Some(
+                    payload.source_effective_definition_digest.clone(),
+                ),
+                admitted_launch_capsule_hash: None,
+                event_ref: Some(event.clone()),
+                artifact_ref: None,
+                attributes: json!({
+                    "namespace": payload.namespace,
+                    "stable_id": payload.stable_id,
+                    "source_definition_ref": payload.source_definition_ref,
+                    "source_effective_definition_digest": payload.source_effective_definition_digest,
+                    "occurrence": payload.occurrence,
+                    "payload_fingerprint": payload.payload_fingerprint,
+                    "payload": bounded_inline_value(payload.payload.clone()),
+                    "thread": self.thread_context(&observation.thread_id),
+                    "duplicate_events": observation.event_refs,
+                }),
+                provenance: self.builder.provenance(evidence.clone()),
+            })?;
+            add_observation_attachments(
+                &mut self.builder,
+                &payload.observation_id,
+                &payload.namespace,
+                &payload.payload,
+            )?;
+            let occurrence = OccurrenceKey {
+                thread_id: observation.thread_id.clone(),
+                graph_run_id: payload.occurrence.graph_run_id.clone(),
+                step: payload.occurrence.step,
+                attempt: 0,
+                iteration: 0,
+            };
+            self.builder.add_relation(FieldFactRelation {
+                id: format!(
+                    "project-observation-for:{}:{}",
+                    payload.observation_id,
+                    occurrence.id()
+                ),
+                kind: "observes".to_string(),
+                source_id: payload.observation_id.clone(),
+                target_id: occurrence.id(),
+                status: None,
+                directed: true,
+                attributes: json!({}),
+                provenance: self.builder.provenance(evidence.clone()),
+            })?;
+            self.builder.add_relation(FieldFactRelation {
+                id: format!(
+                    "records-project-observation:{}:{}",
+                    event_entity_id(&event),
+                    payload.observation_id
+                ),
+                kind: "records".to_string(),
+                source_id: event_entity_id(&event),
+                target_id: payload.observation_id.clone(),
+                status: None,
+                directed: true,
+                attributes: json!({}),
+                provenance: self.builder.provenance(evidence),
+            })?;
+        }
+        Ok(())
+    }
+
+    fn emit_provider_call_observation_facts(&mut self) -> Result<()> {
+        let mut turns = BTreeSet::new();
+        let mut records = BTreeMap::<String, (String, String, Vec<FieldEventRef>)>::new();
+        for observation in self.provider_call_observations.values() {
+            let payload = &observation.payload;
+            turns.insert((observation.thread_id.clone(), payload.turn));
+            let record = records
+                .entry(payload.record_hash.clone())
+                .or_insert_with(|| {
+                    (
+                        payload.answer_digest.clone(),
+                        payload.effect_coordinate_digest.clone(),
+                        Vec::new(),
+                    )
+                });
+            if record.0 != payload.answer_digest || record.1 != payload.effect_coordinate_digest {
+                bail!(
+                    "provider record `{}` has divergent projected identity",
+                    payload.record_hash
+                );
+            }
+            for event in &observation.event_refs {
+                push_evidence(&mut record.2, event.clone());
+            }
+        }
+        for (thread_id, turn) in turns {
+            let turn_id = format!("directive-turn:{thread_id}:{turn}");
+            self.builder.add_entity(FieldFactEntity {
+                id: turn_id,
+                kind: "directive_turn".to_string(),
+                label: format!("turn {turn}"),
+                parent_id: Some(format!("thread:{thread_id}")),
+                status: None,
+                canonical_ref: None,
+                source_content_digest: None,
+                effective_definition_digest: None,
+                admitted_launch_capsule_hash: None,
+                event_ref: None,
+                artifact_ref: None,
+                attributes: json!({
+                    "thread": self.thread_context(&thread_id),
+                    "turn": turn,
+                }),
+                provenance: self
+                    .builder
+                    .provenance(vec![FieldEvidenceRef::Thread { thread_id }]),
+            })?;
+        }
+        for (record_hash, (answer_digest, effect_coordinate_digest, evidence)) in records {
+            self.builder.add_entity(FieldFactEntity {
+                id: format!("provider-record:{record_hash}"),
+                kind: "provider_record".to_string(),
+                label: "provider call record".to_string(),
+                parent_id: None,
+                status: Some("published".to_string()),
+                canonical_ref: None,
+                source_content_digest: Some(record_hash.clone()),
+                effective_definition_digest: None,
+                admitted_launch_capsule_hash: None,
+                event_ref: evidence.first().cloned(),
+                artifact_ref: None,
+                attributes: json!({
+                    "record_hash": record_hash,
+                    "answer_digest": answer_digest,
+                    "effect_coordinate_digest": effect_coordinate_digest,
+                }),
+                provenance: self.builder.provenance(event_evidence(&evidence)),
+            })?;
+        }
+        for observation in self.provider_call_observations.values() {
+            let payload = &observation.payload;
+            let event = observation
+                .event_refs
+                .first()
+                .expect("provider-call observation has evidence")
+                .clone();
+            let evidence = event_evidence(&observation.event_refs);
+            let turn_id = format!("directive-turn:{}:{}", observation.thread_id, payload.turn);
+            let record_id = format!("provider-record:{}", payload.record_hash);
+            let source = serde_json::to_value(payload.source)?;
+            let publication = serde_json::to_value(payload.publication)?;
+            self.builder.add_entity(FieldFactEntity {
+                id: payload.observation_id.clone(),
+                kind: "provider_call_observation".to_string(),
+                label: source.as_str().unwrap_or("provider call").to_string(),
+                parent_id: Some(turn_id.clone()),
+                status: source.as_str().map(str::to_string),
+                canonical_ref: None,
+                source_content_digest: Some(payload.record_hash.clone()),
+                effective_definition_digest: None,
+                admitted_launch_capsule_hash: None,
+                event_ref: Some(event.clone()),
+                artifact_ref: None,
+                attributes: json!({
+                    "thread": self.thread_context(&observation.thread_id),
+                    "turn": payload.turn,
+                    "attempt_number": payload.attempt_number,
+                    "effect_coordinate_digest": payload.effect_coordinate_digest,
+                    "source": source,
+                    "answer_digest": payload.answer_digest,
+                    "record_hash": payload.record_hash,
+                    "publication": publication,
+                    "replayed_from": payload.replayed_from,
+                    "duplicate_events": observation.event_refs,
+                }),
+                provenance: self.builder.provenance(evidence.clone()),
+            })?;
+            for (kind, source_id, target_id) in [
+                ("observes", payload.observation_id.clone(), turn_id),
+                ("evidences", payload.observation_id.clone(), record_id),
+                (
+                    "records",
+                    event_entity_id(&event),
+                    payload.observation_id.clone(),
+                ),
+            ] {
+                self.builder.add_relation(FieldFactRelation {
+                    id: format!("provider-call-{kind}:{source_id}:{target_id}"),
+                    kind: kind.to_string(),
+                    source_id,
+                    target_id,
+                    status: None,
+                    directed: true,
+                    attributes: json!({}),
+                    provenance: self.builder.provenance(evidence.clone()),
+                })?;
+            }
         }
         Ok(())
     }
@@ -2598,6 +2995,239 @@ mod tests {
             ))
             .expect_err("same observation identity with changed bytes must fail");
         assert!(error.to_string().contains("divergent durable duplicates"));
+    }
+
+    fn project_observation_payload(
+        payload: Value,
+    ) -> ryeos_state::ProjectObservationRecordedPayload {
+        let source_definition_ref = "graph:example/campaign".to_string();
+        let source_effective_definition_digest = "d".repeat(64);
+        let namespace = "example.classification".to_string();
+        let stable_id = "classification:game-1".to_string();
+        let canonical = lillux::canonical_json(&payload).unwrap();
+        ryeos_state::ProjectObservationRecordedPayload {
+            schema_version: ryeos_state::PROJECT_OBSERVATION_SCHEMA.to_string(),
+            observation_id: ryeos_state::project_observation_id(
+                "T-root",
+                &source_definition_ref,
+                &source_effective_definition_digest,
+                &namespace,
+                &stable_id,
+            )
+            .unwrap(),
+            namespace,
+            stable_id,
+            source_definition_ref,
+            source_effective_definition_digest,
+            occurrence: ryeos_state::ProjectObservationOccurrence {
+                graph_run_id: "G-campaign".to_string(),
+                node: "classify".to_string(),
+                step: 7,
+            },
+            payload_fingerprint: lillux::sha256_hex(canonical.as_bytes()),
+            payload,
+        }
+    }
+
+    #[test]
+    fn project_observation_projects_one_stable_selectable_entity() {
+        let mut assembler = assembler();
+        let payload = project_observation_payload(json!({
+            "status": "accepted",
+            "metrics": {"confidence": 0.95},
+        }));
+        let observation_id = payload.observation_id.clone();
+        assembler
+            .add_event(event(
+                1,
+                ryeos_state::event_types::PROJECT_OBSERVATION_RECORDED,
+                serde_json::to_value(payload).unwrap(),
+            ))
+            .unwrap();
+        let facts = assembler.finish().unwrap();
+
+        let observations = facts
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == "project_observation")
+            .collect::<Vec<_>>();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].id, observation_id);
+        assert_eq!(observations[0].status.as_deref(), Some("accepted"));
+        assert_eq!(observations[0].parent_id.as_deref(), Some("thread:T-root"));
+        assert!(facts.entities.iter().any(|entity| {
+            entity.id == "occurrence:T-root:G-campaign:7:0:0" && entity.kind == "occurrence"
+        }));
+        assert!(facts.relations.iter().any(|relation| {
+            relation.kind == "observes"
+                && relation.source_id == observation_id
+                && relation.target_id == "occurrence:T-root:G-campaign:7:0:0"
+        }));
+        assert!(facts.relations.iter().any(|relation| {
+            relation.kind == "records"
+                && relation.target_id == observation_id
+                && relation.source_id.starts_with("event:T-root:1:")
+        }));
+        assert_eq!(facts.metrics.len(), 1);
+    }
+
+    #[test]
+    fn project_observation_duplicate_folding_and_divergence_are_explicit() {
+        let mut folded = assembler();
+        let payload = project_observation_payload(json!({"status": "accepted"}));
+        for seq in [1, 2] {
+            folded
+                .add_event(event(
+                    seq,
+                    ryeos_state::event_types::PROJECT_OBSERVATION_RECORDED,
+                    serde_json::to_value(&payload).unwrap(),
+                ))
+                .unwrap();
+        }
+        let facts = folded.finish().unwrap();
+        let projected = facts
+            .entities
+            .iter()
+            .find(|entity| entity.kind == "project_observation")
+            .expect("project observation entity");
+        assert_eq!(
+            projected.attributes["duplicate_events"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+
+        let mut divergent = assembler();
+        divergent
+            .add_event(event(
+                1,
+                ryeos_state::event_types::PROJECT_OBSERVATION_RECORDED,
+                serde_json::to_value(&payload).unwrap(),
+            ))
+            .unwrap();
+        let mut changed = payload;
+        changed.payload = json!({"status": "rejected"});
+        changed.payload_fingerprint =
+            lillux::sha256_hex(lillux::canonical_json(&changed.payload).unwrap().as_bytes());
+        let error = divergent
+            .add_event(event(
+                2,
+                ryeos_state::event_types::PROJECT_OBSERVATION_RECORDED,
+                serde_json::to_value(changed).unwrap(),
+            ))
+            .expect_err("divergent stable project observation must fail closed");
+        assert!(error.to_string().contains("divergent durable duplicates"));
+    }
+
+    fn provider_observation_payload(
+        turn: u32,
+        source: ryeos_state::ProviderCallObservationSource,
+        publication: ryeos_state::ProviderCallObservationPublication,
+        replayed_from: Option<ryeos_state::ProviderCallReplaySource>,
+    ) -> ryeos_state::ProviderCallObservationRecordedPayload {
+        let effect_coordinate_digest = "a".repeat(64);
+        let answer_digest = "b".repeat(64);
+        let record_hash = "c".repeat(64);
+        let observation_id = ryeos_state::provider_call_observation_id(
+            "T-root",
+            "T-root",
+            turn,
+            1,
+            &effect_coordinate_digest,
+            source,
+            &answer_digest,
+            &record_hash,
+            publication,
+            replayed_from.as_ref(),
+        )
+        .unwrap();
+        ryeos_state::ProviderCallObservationRecordedPayload {
+            schema_version: ryeos_state::PROVIDER_CALL_OBSERVATION_SCHEMA.to_string(),
+            observation_id,
+            turn,
+            attempt_number: 1,
+            effect_coordinate_digest,
+            source,
+            answer_digest,
+            record_hash,
+            publication,
+            replayed_from,
+        }
+    }
+
+    #[test]
+    fn provider_call_observations_keep_bank_and_replay_distinct_from_the_shared_record() {
+        let mut assembler = assembler();
+        let executed = provider_observation_payload(
+            1,
+            ryeos_state::ProviderCallObservationSource::Executed,
+            ryeos_state::ProviderCallObservationPublication::Inserted,
+            None,
+        );
+        let replay = provider_observation_payload(
+            1,
+            ryeos_state::ProviderCallObservationSource::Replay,
+            ryeos_state::ProviderCallObservationPublication::NotApplicable,
+            Some(ryeos_state::ProviderCallReplaySource {
+                produced_by_thread: "T-root".to_string(),
+                attempt_id: "attempt-origin".to_string(),
+            }),
+        );
+        for (seq, payload) in [(1, executed), (2, replay)] {
+            assembler
+                .add_event(event(
+                    seq,
+                    ryeos_state::event_types::PROVIDER_CALL_OBSERVATION_RECORDED,
+                    serde_json::to_value(payload).unwrap(),
+                ))
+                .unwrap();
+        }
+        let facts = assembler.finish().unwrap();
+
+        assert_eq!(
+            facts
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == "provider_call_observation")
+                .count(),
+            2
+        );
+        assert_eq!(
+            facts
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == "provider_record")
+                .count(),
+            1,
+            "bank and replay point at one immutable provider record"
+        );
+        assert_eq!(
+            facts
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == "directive_turn")
+                .count(),
+            1,
+            "bank and exact replay share one logical directive turn"
+        );
+        assert!(facts.entities.iter().any(|entity| {
+            entity.kind == "provider_call_observation"
+                && entity.status.as_deref() == Some("executed")
+                && entity.attributes["publication"] == "inserted"
+        }));
+        assert!(facts.entities.iter().any(|entity| {
+            entity.kind == "provider_call_observation"
+                && entity.status.as_deref() == Some("replay")
+                && entity.attributes["replayed_from"]["attempt_id"] == "attempt-origin"
+        }));
+        assert_eq!(
+            facts
+                .relations
+                .iter()
+                .filter(|relation| relation.kind == "evidences")
+                .count(),
+            2
+        );
     }
 
     #[test]

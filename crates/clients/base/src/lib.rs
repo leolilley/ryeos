@@ -23,4 +23,4 @@ pub mod workspace;
 /// Daemon, signed content, web, and terminal cut over together. There is no
 /// compatibility parser: a session advertising any other revision is refused
 /// before embedded view bindings are decoded or source effects are emitted.
-pub const UI_BINDING_CONTRACT_REVISION: &str = "ryeos.ui.binding.v2";
+pub const UI_BINDING_CONTRACT_REVISION: &str = "ryeos.ui.binding.v3";

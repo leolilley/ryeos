@@ -4921,6 +4921,37 @@ impl ThreadLifecycleService {
         Ok(publication)
     }
 
+    pub fn publish_project_observation(
+        &self,
+        params: &ryeos_runtime::ProjectObservationPublishParams,
+        source_definition_ref: &str,
+        source_effective_definition_digest: &str,
+    ) -> Result<crate::state_store::ProjectObservationPublication> {
+        let publication = self.state_store.publish_project_observation(
+            params,
+            source_definition_ref,
+            source_effective_definition_digest,
+        )?;
+        if publication.inserted {
+            self.publish_records(std::slice::from_ref(&publication.event));
+        }
+        Ok(publication)
+    }
+
+    pub fn publish_provider_call_observation(
+        &self,
+        thread_id: &str,
+        draft: &ryeos_state::ProviderCallObservationDraft,
+    ) -> Result<crate::state_store::ProviderCallObservationPublication> {
+        let publication = self
+            .state_store
+            .publish_provider_call_observation(thread_id, draft)?;
+        if publication.inserted {
+            self.publish_records(std::slice::from_ref(&publication.event));
+        }
+        Ok(publication)
+    }
+
     /// Append caller-supplied events to a running thread, then publish the
     /// persisted records live (persist-then-publish, same invariant as the
     /// lifecycle paths). Returns `None` when the thread is no longer running,

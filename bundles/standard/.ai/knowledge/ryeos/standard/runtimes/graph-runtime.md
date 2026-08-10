@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-05T07:04:40Z:b7654ec6cf80cb7c1ae486fd9f9892b106dd5b5a3b49fd0b148fb444dd8de291:iZIfLJSUjxeF+WxQwjnoNTb1Bk5vL0kO3mcqeHcPXdoWh1TKvvbVnQtwiqiestTzaNQt8Wh+0Y2Wzot9nGFWDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-10T04:56:59Z:e800e1937d3427888319be8902362464f37fc1d0b3f6a1bde65783e6d20bbe20:Sw0lfE9HIzKqcb9UQvNWfMWgAs9bdHqKIncnmyHxMEjXArgjm3+YmE4L5bHGAjR3dDAk5r/BWM3YIusecthgDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/runtimes
 tags: [runtime, graph, dag, callbacks, execution-model, checkpoint, durability, continuation, fence]
@@ -64,7 +64,8 @@ For an advancing action node, `commit_step` emits effects in this fixed order:
 
 ```
 graph_step_started → tool_call_start → (dispatch) → tool_call_result
-  → state mutation → receipt → graph_step_completed → checkpoint
+  → accepted project observations → state mutation → receipt
+  → graph_step_completed → checkpoint
 ```
 
 The **checkpoint is written last**, and it is the only effect that points at the
@@ -79,9 +80,13 @@ checkpoint authoritative** — the one still pointing at the *current* node — 
 the whole node re-runs on resume. Two consequences follow, and both are
 contract, not accident:
 
-- **Effects before the checkpoint are at-least-once.** Events, the receipt, and
-  advancing-step hooks may be re-emitted on replay. They are idempotent
-  observability, not authority. Only the checkpoint advances resumable state.
+- **Ordinary effects before the checkpoint are at-least-once.** Lifecycle
+  events, the receipt, and advancing-step hooks may be re-emitted on replay.
+  They are observability, not authority. An accepted project observation is the
+  deliberate exception: it has a daemon-derived, source-scoped stable identity,
+  exact retry returns the original event, and divergent reuse fails commit. It
+  can therefore remain authoritative when a crash causes the enclosing node to
+  re-run. Only the checkpoint advances resumable graph state.
 - **There is no separate recovery path.** Recovery *is* resume, and resume is
   just startup with a checkpoint injected. A crash is indistinguishable from a
   clean pause — see segment continuation below.

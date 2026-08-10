@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-22T04:23:11Z:af1ce9bbe60072e94495f649a8c2b96b77ce43161f3ca8213334fe076b98aee1:ssVK0TeHWDPo2duXQ2UXDl9RIykU7td2bTFGzYzvxa5/x4MRZHeRKN9+4TXOIOamGwt77FNAJvz3XL0tY1FIAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-10T04:56:59Z:a1b5616e1e4a0a1a0807eb3b3c1af2690ebe49339eea317cbaf48b60de2feca4:OxUrVaycDrOPRiiqGQeAXUeVkqoCIN2+JrXJMZ32qkUxynNSgIJdw8PRPEcOiGKFm/EapXwEY4tOiLfqfPUuAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, authoring, dag, workflow]
@@ -18,5 +18,9 @@ Invariant: a graph is signed YAML describing explicit nodes, edges, conditions, 
 - Use conditional edges for branching and foreach blocks for fan-out.
 - Prefer explicit error edges/hooks over relying on runtime defaults.
 - Keep side-effecting nodes isolated so resume/retry behavior is understandable.
+- When an action proposes `project_observations`, give each claim a bounded
+  namespaced `namespace`, a source-owned stable `stable_id`, and a bounded
+  meaning-blind `payload`. RyeOS publishes it at the graph commit boundary;
+  callers cannot assert the graph source identity.
 
 The graph kind delegates to `runtime:graph-runtime` through the runtime registry.

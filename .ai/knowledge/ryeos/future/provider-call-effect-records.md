@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-10T03:16:08Z:415512c1dea3ee82aaf597c0ee611aa5f7ea4858b8879008207de7eb10b30a0d:H2VJemTw+k1mOpQPwYX4yW6u99KnXcByoh5QHZOtM8HgjUgqVbTR7+kM1To8noIf2G8tBIrtRuVNgX14WepYCg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-10T04:56:54Z:c0f72cacc67a9bc0ef1ece275cc1ce385d0db0dd689de7ce2283c8832b809c80:4SenZZ/YoKYriJH685S+cD5v9nH8eAs5m14FExv612i9nDdnDqJGnlVwwfofrd/wSGbhRjG7tG5QVgf2o1maAA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, replay, provider, directive, evidence, certification]
 version: "0.2.0"
@@ -27,8 +27,9 @@ For a signed directive that admits a durable provider effect, RyeOS now:
 - inserts or folds an immutable replay-index answer;
 - confirms per-attempt publication proof and repairs both cross-store crash
   edges on restart; and
-- serves a hit before reservation/contact while projecting `replayed_from`
-  honestly into turn evidence.
+- emits a runtime-unforgeable chain observation after proof confirmation, then
+  serves later hits before reservation/contact with a separate replay
+  observation pointing at the same immutable record.
 
 Corrupt or contradictory indexed evidence is an integrity failure, not a live
 miss. One identity has one answer; an exact duplicate folds and divergence
@@ -65,6 +66,15 @@ concurrent answer, but it is still a bank operation. Only a later source of
 `effect_record` proves replay. A moved identity starts a new bank generation.
 Record existence, report existence, or deterministic source code alone never
 proves that a particular run replayed.
+
+The execution field exposes this distinction directly. Each daemon-authored
+observation is keyed by chain/thread, logical turn/attempt, effect coordinate,
+record, and outcome. An executed `inserted|folded` observation and a later
+`replay/not_applicable` observation remain separate selectable facts, including
+when crash recovery gives them the same logical turn/attempt. Both relate to
+one generic directive-turn entity and one provider-record entity. Runtime code
+cannot append this reserved event kind, and malformed durable events degrade
+the field rather than failing the whole execution document.
 
 ### Streaming
 

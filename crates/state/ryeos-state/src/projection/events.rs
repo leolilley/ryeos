@@ -155,6 +155,14 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
         project_provider_attempt_budget_latest(db, event)?;
     }
 
+    if event.event_type == crate::event_types::PROJECT_OBSERVATION_RECORDED {
+        project_project_observation_once(db, event, &event_hash)?;
+    }
+
+    if event.event_type == crate::event_types::PROVIDER_CALL_OBSERVATION_RECORDED {
+        project_provider_call_observation_once(db, event, &event_hash)?;
+    }
+
     if event.event_type == crate::event_types::THREAD_CREATED {
         project_thread_usage_subject(db, event)?;
     }
@@ -223,6 +231,211 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
             .context("failed to project thread facet")?;
     }
 
+    Ok(())
+}
+
+fn project_project_observation_once(
+    db: &ProjectionDb,
+    event: &crate::ThreadEvent,
+    event_hash: &str,
+) -> anyhow::Result<()> {
+    let observation: crate::ProjectObservationRecordedPayload =
+        serde_json::from_value(event.payload.clone())
+            .context("invalid project_observation_recorded payload")?;
+    observation.validate_for_chain(&event.chain_root_id)?;
+
+    let existing: Option<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        i64,
+    )> = db
+        .connection()
+        .query_row(
+            "SELECT chain_root_id, thread_id, source_definition_ref,
+                    source_effective_definition_digest, namespace, stable_id,
+                    payload_fingerprint, event_hash, chain_seq
+             FROM project_observation_once
+             WHERE observation_id = ?1",
+            [&observation.observation_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            },
+        )
+        .optional()
+        .context("read project observation publication identity")?;
+    if let Some((
+        chain_root_id,
+        thread_id,
+        definition_ref,
+        effective_digest,
+        namespace,
+        stable_id,
+        payload_fingerprint,
+        projected_event_hash,
+        chain_seq,
+    )) = existing
+    {
+        let exact = chain_root_id == event.chain_root_id
+            && thread_id == event.thread_id
+            && definition_ref == observation.source_definition_ref
+            && effective_digest == observation.source_effective_definition_digest
+            && namespace == observation.namespace
+            && stable_id == observation.stable_id
+            && payload_fingerprint == observation.payload_fingerprint
+            && projected_event_hash == event_hash
+            && chain_seq == i64::try_from(event.chain_seq).context("chain_seq exceeds i64")?;
+        if !exact {
+            anyhow::bail!(
+                "project observation ID {} contradicts its projected publication identity",
+                observation.observation_id
+            );
+        }
+        return Ok(());
+    }
+
+    db.connection()
+        .execute(
+            "INSERT INTO project_observation_once (
+                observation_id, chain_root_id, thread_id, source_definition_ref,
+                source_effective_definition_digest, namespace, stable_id,
+                payload_fingerprint, event_hash, chain_seq
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                &observation.observation_id,
+                &event.chain_root_id,
+                &event.thread_id,
+                &observation.source_definition_ref,
+                &observation.source_effective_definition_digest,
+                &observation.namespace,
+                &observation.stable_id,
+                &observation.payload_fingerprint,
+                event_hash,
+                i64::try_from(event.chain_seq)
+                    .context("project observation chain_seq exceeds i64")?,
+            ],
+        )
+        .context("project project-observation publication identity")?;
+    Ok(())
+}
+
+fn project_provider_call_observation_once(
+    db: &ProjectionDb,
+    event: &crate::ThreadEvent,
+    event_hash: &str,
+) -> anyhow::Result<()> {
+    let observation: crate::ProviderCallObservationRecordedPayload =
+        serde_json::from_value(event.payload.clone())
+            .context("invalid provider_call_observation_recorded payload")?;
+    observation.validate_for_subject(&event.chain_root_id, &event.thread_id)?;
+    let source = serde_json::to_value(observation.source)?
+        .as_str()
+        .expect("provider observation source serializes as a string")
+        .to_string();
+    let publication = serde_json::to_value(observation.publication)?
+        .as_str()
+        .expect("provider observation publication serializes as a string")
+        .to_string();
+
+    let existing: Option<(
+        String,
+        String,
+        i64,
+        i64,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        i64,
+    )> = db
+        .connection()
+        .query_row(
+            "SELECT chain_root_id, thread_id, turn, attempt_number,
+                    effect_coordinate_digest, source, answer_digest, record_hash,
+                    publication, event_hash, chain_seq
+             FROM provider_call_observation_once
+             WHERE observation_id = ?1",
+            [&observation.observation_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                ))
+            },
+        )
+        .optional()
+        .context("read provider-call observation publication identity")?;
+    if let Some(existing) = existing {
+        let exact = existing.0 == event.chain_root_id
+            && existing.1 == event.thread_id
+            && existing.2 == i64::from(observation.turn)
+            && existing.3 == i64::from(observation.attempt_number)
+            && existing.4 == observation.effect_coordinate_digest
+            && existing.5 == source
+            && existing.6 == observation.answer_digest
+            && existing.7 == observation.record_hash
+            && existing.8 == publication
+            && existing.9 == event_hash
+            && existing.10 == i64::try_from(event.chain_seq).context("chain_seq exceeds i64")?;
+        if !exact {
+            anyhow::bail!(
+                "provider-call observation ID {} contradicts its projected publication identity",
+                observation.observation_id
+            );
+        }
+        return Ok(());
+    }
+
+    db.connection()
+        .execute(
+            "INSERT INTO provider_call_observation_once (
+                observation_id, chain_root_id, thread_id, turn, attempt_number,
+                effect_coordinate_digest, source, answer_digest, record_hash,
+                publication, event_hash, chain_seq
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                &observation.observation_id,
+                &event.chain_root_id,
+                &event.thread_id,
+                i64::from(observation.turn),
+                i64::from(observation.attempt_number),
+                &observation.effect_coordinate_digest,
+                source,
+                &observation.answer_digest,
+                &observation.record_hash,
+                publication,
+                event_hash,
+                i64::try_from(event.chain_seq)
+                    .context("provider-call observation chain_seq exceeds i64")?,
+            ],
+        )
+        .context("project provider-call observation publication identity")?;
     Ok(())
 }
 

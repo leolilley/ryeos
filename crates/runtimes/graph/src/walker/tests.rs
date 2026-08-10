@@ -2591,6 +2591,8 @@ struct RecordingMockClient {
     finalize_costs: Mutex<Vec<Option<Value>>>,
     /// Collected artifacts from publish_artifact calls.
     artifacts: Mutex<Vec<Value>>,
+    /// Source-owned observations committed through the authoritative callback.
+    project_observations: Mutex<Vec<ryeos_runtime::ProjectObservationPublishParams>>,
     /// Recorded `spawn_follow_child` requests (for follow idempotency tests).
     follow_requests: Mutex<Vec<ryeos_runtime::callback::SpawnFollowChildRequest>>,
     /// When true, `spawn_follow_child` returns an error (failed-handoff test).
@@ -2609,6 +2611,7 @@ impl RecordingMockClient {
             finalizations: Mutex::new(Vec::new()),
             finalize_costs: Mutex::new(Vec::new()),
             artifacts: Mutex::new(Vec::new()),
+            project_observations: Mutex::new(Vec::new()),
             follow_requests: Mutex::new(Vec::new()),
             follow_should_fail: false,
             dispatch_count: Mutex::new(0),
@@ -2629,6 +2632,10 @@ impl RecordingMockClient {
 
     fn recorded_follow_requests(&self) -> Vec<ryeos_runtime::callback::SpawnFollowChildRequest> {
         self.follow_requests.lock().unwrap().clone()
+    }
+
+    fn recorded_project_observations(&self) -> Vec<ryeos_runtime::ProjectObservationPublishParams> {
+        self.project_observations.lock().unwrap().clone()
     }
 
     fn recorded_finalizations(&self) -> Vec<(String, ryeos_runtime::ThreadTerminalStatus)> {
@@ -2749,6 +2756,13 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for RecordingMockClient {
     async fn publish_artifact(&self, _: &str, artifact: Value) -> Result<Value, CallbackError> {
         self.artifacts.lock().unwrap().push(artifact);
         Ok(json!({}))
+    }
+    async fn publish_project_observation(
+        &self,
+        request: ryeos_runtime::ProjectObservationPublishParams,
+    ) -> Result<Value, CallbackError> {
+        self.project_observations.lock().unwrap().push(request);
+        Ok(json!({"inserted": true}))
     }
     async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> {
         Ok(json!({}))
@@ -4758,6 +4772,144 @@ config:
         receipt["node_result_hash"].as_str(),
         Some(hash_json_value(&json!({"msg": "hello"})).unwrap().as_str())
     );
+}
+
+#[tokio::test]
+async fn action_result_publishes_project_observation_at_the_commit_boundary() {
+    let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: classify
+  nodes:
+    classify:
+      action: {item_id: "tool:test/classify", ref_bindings: {}, params: {}}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#;
+    let graph = make_graph(yaml);
+    let (walker, recorder) = make_recording_walker(
+        graph,
+        vec![json!({
+            "project_observations": [{
+                "namespace": "example.classification",
+                "stable_id": "classification:game-1",
+                "payload": {"status": "accepted"}
+            }]
+        })],
+        None,
+    );
+
+    let result = walker
+        .execute(json!({}), Some("G-project-observation".to_string()))
+        .await;
+    assert!(result.success, "{result:?}");
+    let observations = recorder.recorded_project_observations();
+    assert_eq!(
+        observations.len(),
+        1,
+        "dispatches={}, events={:?}, result={result:?}",
+        recorder.dispatch_count(),
+        recorder.recorded_events()
+    );
+    assert_eq!(observations[0].thread_id, "thread-test");
+    assert_eq!(observations[0].graph_run_id, "G-project-observation");
+    assert_eq!(observations[0].node, "classify");
+    assert_eq!(observations[0].step, 0);
+    assert_eq!(
+        observations[0].observation.stable_id,
+        "classification:game-1"
+    );
+}
+
+#[tokio::test]
+async fn project_observation_list_is_bounded_and_prevalidated_before_append() {
+    let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: classify
+  nodes:
+    classify:
+      action: {item_id: "tool:test/classify", ref_bindings: {}, params: {}}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#;
+
+    let too_many = (0..=ryeos_runtime::MAX_PROJECT_OBSERVATIONS_PER_ACTION)
+        .map(|index| {
+            json!({
+                "namespace": "example.classification",
+                "stable_id": format!("classification:{index}"),
+                "payload": {"status": "accepted"}
+            })
+        })
+        .collect::<Vec<_>>();
+    let (walker, recorder) = make_recording_walker(
+        make_graph(yaml),
+        vec![json!({"project_observations": too_many})],
+        None,
+    );
+    let result = walker
+        .execute(json!({}), Some("G-project-observation-bound".to_string()))
+        .await;
+    assert!(!result.success, "oversized observation list must fail");
+    assert!(recorder.recorded_project_observations().is_empty());
+
+    let (walker, recorder) = make_recording_walker(
+        make_graph(yaml),
+        vec![json!({
+            "project_observations": [
+                {
+                    "namespace": "example.classification",
+                    "stable_id": "classification:valid",
+                    "payload": {"status": "accepted"}
+                },
+                {
+                    "namespace": "not-namespaced",
+                    "stable_id": "classification:invalid",
+                    "payload": {"status": "accepted"}
+                }
+            ]
+        })],
+        None,
+    );
+    let result = walker
+        .execute(
+            json!({}),
+            Some("G-project-observation-prevalidate".to_string()),
+        )
+        .await;
+    assert!(!result.success, "malformed observation list must fail");
+    assert!(
+        recorder.recorded_project_observations().is_empty(),
+        "the valid prefix must not publish before the complete list validates"
+    );
+
+    let (walker, recorder) = make_recording_walker(
+        make_graph(yaml),
+        vec![json!({
+            "project_observations": {
+                "namespace": "example.classification",
+                "stable_id": "classification:not-an-array",
+                "payload": {"status": "accepted"}
+            }
+        })],
+        None,
+    );
+    let result = walker
+        .execute(
+            json!({}),
+            Some("G-project-observation-container".to_string()),
+        )
+        .await;
+    assert!(
+        !result.success,
+        "a non-array project_observations container must fail instead of disappearing"
+    );
+    assert!(recorder.recorded_project_observations().is_empty());
 }
 
 /// Every non-terminal `Advance` must write a checkpoint. For a

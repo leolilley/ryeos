@@ -2455,6 +2455,120 @@ pub fn get_provider_attempt_budget_transition_identity(
         .context("query provider attempt budget transition identity")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectObservationIdentity {
+    pub observation_id: String,
+    pub chain_root_id: String,
+    pub thread_id: String,
+    pub source_definition_ref: String,
+    pub source_effective_definition_digest: String,
+    pub namespace: String,
+    pub stable_id: String,
+    pub payload_fingerprint: String,
+    pub event_hash: String,
+    pub chain_seq: i64,
+}
+
+pub fn get_project_observation_identity(
+    db: &ProjectionDb,
+    observation_id: &str,
+) -> anyhow::Result<Option<ProjectObservationIdentity>> {
+    db.connection()
+        .query_row(
+            "SELECT observation_id, chain_root_id, thread_id,
+                    source_definition_ref, source_effective_definition_digest,
+                    namespace, stable_id, payload_fingerprint, event_hash, chain_seq
+             FROM project_observation_once
+             WHERE observation_id = ?1",
+            [observation_id],
+            |row| {
+                Ok(ProjectObservationIdentity {
+                    observation_id: row.get(0)?,
+                    chain_root_id: row.get(1)?,
+                    thread_id: row.get(2)?,
+                    source_definition_ref: row.get(3)?,
+                    source_effective_definition_digest: row.get(4)?,
+                    namespace: row.get(5)?,
+                    stable_id: row.get(6)?,
+                    payload_fingerprint: row.get(7)?,
+                    event_hash: row.get(8)?,
+                    chain_seq: row.get(9)?,
+                })
+            },
+        )
+        .optional()
+        .context("query project observation identity")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderCallObservationIdentity {
+    pub observation_id: String,
+    pub chain_root_id: String,
+    pub thread_id: String,
+    pub turn: u32,
+    pub attempt_number: u32,
+    pub effect_coordinate_digest: String,
+    pub source: String,
+    pub answer_digest: String,
+    pub record_hash: String,
+    pub publication: String,
+    pub event_hash: String,
+    pub chain_seq: i64,
+}
+
+pub fn get_provider_call_observation_identity(
+    db: &ProjectionDb,
+    observation_id: &str,
+) -> anyhow::Result<Option<ProviderCallObservationIdentity>> {
+    db.connection()
+        .query_row(
+            "SELECT observation_id, chain_root_id, thread_id, turn,
+                    attempt_number, effect_coordinate_digest, source,
+                    answer_digest, record_hash, publication, event_hash, chain_seq
+             FROM provider_call_observation_once
+            WHERE observation_id = ?1",
+            [observation_id],
+            |row| {
+                let raw_turn = row.get::<_, i64>(3)?;
+                let turn = u32::try_from(raw_turn)
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, raw_turn))?;
+                let raw_attempt_number = row.get::<_, i64>(4)?;
+                let attempt_number = u32::try_from(raw_attempt_number)
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, raw_attempt_number))?;
+                Ok(ProviderCallObservationIdentity {
+                    observation_id: row.get(0)?,
+                    chain_root_id: row.get(1)?,
+                    thread_id: row.get(2)?,
+                    turn,
+                    attempt_number,
+                    effect_coordinate_digest: row.get(5)?,
+                    source: row.get(6)?,
+                    answer_digest: row.get(7)?,
+                    record_hash: row.get(8)?,
+                    publication: row.get(9)?,
+                    event_hash: row.get(10)?,
+                    chain_seq: row.get(11)?,
+                })
+            },
+        )
+        .optional()
+        .context("query provider-call observation identity")
+}
+
+pub fn get_event_by_hash(db: &ProjectionDb, event_hash: &str) -> anyhow::Result<Option<EventRow>> {
+    db.connection()
+        .query_row(
+            "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq,
+                    event_type, durability, ts, prev_chain_event_hash,
+                    prev_thread_event_hash, payload
+             FROM events WHERE event_hash = ?1",
+            [event_hash],
+            EventRow::from_row,
+        )
+        .optional()
+        .context("query event by hash")
+}
+
 /// Bounded filter for the accounting summary/drill-down service. Money is
 /// aggregated in integer nanos; identifiers stay in bounded detail rows.
 #[derive(Debug, Clone, Default)]

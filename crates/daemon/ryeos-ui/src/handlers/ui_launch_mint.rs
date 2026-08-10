@@ -250,7 +250,7 @@ mod tests {
             current.ui_binding_contract_revision,
             crate::UI_BINDING_CONTRACT_REVISION
         );
-        assert!(require_current_binding_contract("ryeos.ui.binding.v1").is_err());
+        assert!(require_current_binding_contract("ryeos.ui.binding.v2").is_err());
         assert!(require_current_binding_contract(crate::UI_BINDING_CONTRACT_REVISION).is_ok());
     }
 

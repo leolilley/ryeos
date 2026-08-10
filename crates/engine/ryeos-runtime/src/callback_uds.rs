@@ -549,6 +549,22 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
+    async fn publish_project_observation(
+        &self,
+        request: crate::ProjectObservationPublishParams,
+    ) -> Result<Value, CallbackError> {
+        let mut params = serde_json::to_value(request).map_err(|error| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "serialize publish_project_observation request: {error}"
+            ))
+        })?;
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.publish_project_observation", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
     async fn get_facets(&self, thread_id: &str) -> Result<Value, CallbackError> {
         let mut params = json!({"thread_id": thread_id});
         self.inject_callback_token(&mut params);

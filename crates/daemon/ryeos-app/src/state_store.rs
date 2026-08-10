@@ -283,6 +283,18 @@ pub struct StateAnchorPublication {
     pub event: PersistedEventRecord,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectObservationPublication {
+    pub event: PersistedEventRecord,
+    pub inserted: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderCallObservationPublication {
+    pub event: PersistedEventRecord,
+    pub inserted: bool,
+}
+
 #[derive(Debug)]
 pub struct NewBundleEventAttachment {
     pub name: String,
@@ -2116,6 +2128,31 @@ fn persisted_from_stored_events(
             })
         })
         .collect()
+}
+
+fn persisted_event_from_projection_row(
+    row: ryeos_state::queries::EventRow,
+) -> Result<PersistedEventRecord> {
+    let payload: Value = serde_json::from_slice(&row.payload).with_context(|| {
+        format!(
+            "malformed JSON payload for event {} (chain_seq {})",
+            row.event_id, row.chain_seq
+        )
+    })?;
+    Ok(PersistedEventRecord {
+        event_id: row.event_id,
+        event_hash: Some(row.event_hash),
+        chain_root_id: row.chain_root_id,
+        chain_seq: row.chain_seq,
+        thread_id: row.thread_id,
+        thread_seq: row.thread_seq,
+        event_type: row.event_type,
+        storage_class: row.durability,
+        ts: row.ts,
+        prev_chain_event_hash: row.prev_chain_event_hash,
+        prev_thread_event_hash: row.prev_thread_event_hash,
+        payload,
+    })
 }
 
 fn ephemeral_record(
@@ -7118,6 +7155,268 @@ impl StateStore {
         })
     }
 
+    /// Append or exactly fold one source-scoped project observation. The
+    /// rebuildable projection is the idempotency index, so the identity lives
+    /// for exactly as long as its chain evidence.
+    pub fn publish_project_observation(
+        &self,
+        params: &ryeos_runtime::ProjectObservationPublishParams,
+        source_definition_ref: &str,
+        source_effective_definition_digest: &str,
+    ) -> Result<ProjectObservationPublication> {
+        params.observation.validate()?;
+        let occurrence = ryeos_state::ProjectObservationOccurrence {
+            graph_run_id: params.graph_run_id.clone(),
+            node: params.node.clone(),
+            step: params.step,
+        };
+        occurrence.validate()?;
+        let payload_canonical = lillux::canonical_json(&params.observation.payload)
+            .context("canonicalize project observation payload")?;
+        let payload_fingerprint = lillux::sha256_hex(payload_canonical.as_bytes());
+
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let thread = g
+            .state_db
+            .get_thread(&params.thread_id)?
+            .ok_or_else(|| anyhow!("project-observation thread not found: {}", params.thread_id))?;
+        if thread.status != ThreadStatus::Running.as_str() {
+            bail!(
+                "project-observation publication requires a running thread; {} is '{}'",
+                params.thread_id,
+                thread.status
+            );
+        }
+        let runtime = g
+            .runtime_db
+            .get_runtime_info(&params.thread_id)?
+            .ok_or_else(|| anyhow!("runtime row missing while publishing project observation"))?;
+        if runtime.stop_intent.is_some()
+            || !self
+                .process_attachment_admission_open
+                .load(Ordering::Acquire)
+        {
+            bail!(
+                "project-observation publication is closed for thread {}",
+                params.thread_id
+            );
+        }
+        if !self.projection_health.is_current() {
+            bail!("project-observation admission requires a current thread projection");
+        }
+
+        let observation_id = ryeos_state::project_observation_id(
+            &thread.chain_root_id,
+            source_definition_ref,
+            source_effective_definition_digest,
+            &params.observation.namespace,
+            &params.observation.stable_id,
+        )?;
+        let payload = ryeos_state::ProjectObservationRecordedPayload {
+            schema_version: ryeos_state::PROJECT_OBSERVATION_SCHEMA.to_string(),
+            observation_id: observation_id.clone(),
+            namespace: params.observation.namespace.clone(),
+            stable_id: params.observation.stable_id.clone(),
+            source_definition_ref: source_definition_ref.to_string(),
+            source_effective_definition_digest: source_effective_definition_digest.to_string(),
+            occurrence,
+            payload_fingerprint,
+            payload: params.observation.payload.clone(),
+        };
+        payload.validate_for_chain(&thread.chain_root_id)?;
+        let event_payload = serde_json::to_value(&payload)?;
+
+        if let Some(existing) = ryeos_state::queries::get_project_observation_identity(
+            g.state_db.projection(),
+            &observation_id,
+        )? {
+            if existing.chain_root_id != thread.chain_root_id
+                || existing.source_definition_ref != source_definition_ref
+                || existing.source_effective_definition_digest != source_effective_definition_digest
+                || existing.namespace != params.observation.namespace
+                || existing.stable_id != params.observation.stable_id
+                || existing.payload_fingerprint != payload.payload_fingerprint
+            {
+                bail!(
+                    "project observation {} contradicts its durable identity",
+                    observation_id
+                );
+            }
+            let row = ryeos_state::queries::get_event_by_hash(
+                g.state_db.projection(),
+                &existing.event_hash,
+            )?
+            .ok_or_else(|| {
+                anyhow!(
+                    "project observation {} references missing projected event {}",
+                    observation_id,
+                    existing.event_hash
+                )
+            })?;
+            let event = persisted_event_from_projection_row(row)?;
+            if event.event_type != ryeos_state::event_types::PROJECT_OBSERVATION_RECORDED
+                || event.payload != event_payload
+            {
+                bail!(
+                    "project observation {} has divergent durable event content",
+                    observation_id
+                );
+            }
+            return Ok(ProjectObservationPublication {
+                event,
+                inserted: false,
+            });
+        }
+
+        let event = NewEventRecord {
+            event_type: ryeos_state::event_types::PROJECT_OBSERVATION_RECORDED.to_string(),
+            storage_class: "indexed".to_string(),
+            payload: event_payload,
+        };
+        let mut persisted = append_events_locked(
+            &g,
+            Some(permit.cas_guard()),
+            &thread.chain_root_id,
+            &params.thread_id,
+            std::slice::from_ref(&event),
+        )?;
+        let event = persisted
+            .pop()
+            .ok_or_else(|| anyhow!("project observation append returned no event"))?;
+        Ok(ProjectObservationPublication {
+            event,
+            inserted: true,
+        })
+    }
+
+    /// Append or exactly fold a daemon-authored provider publication/replay
+    /// observation after the provider record has crossed its proof boundary.
+    pub fn publish_provider_call_observation(
+        &self,
+        thread_id: &str,
+        draft: &ryeos_state::ProviderCallObservationDraft,
+    ) -> Result<ProviderCallObservationPublication> {
+        draft.validate()?;
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let thread = g
+            .state_db
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("provider-call observation thread not found: {thread_id}"))?;
+        if thread.status != ThreadStatus::Running.as_str() {
+            bail!(
+                "provider-call observation requires a running thread; {thread_id} is '{}'",
+                thread.status
+            );
+        }
+        // This event completes evidence for an already-issued provider effect.
+        // The callback admission layer therefore classifies it with settlement
+        // as a stop-completion mutation. Re-applying the ordinary authoring
+        // gate here would make cancellation after contact strand a financially
+        // terminal call without its provider observation.
+        if !self.projection_health.is_current() {
+            bail!("provider-call observation requires a current thread projection");
+        }
+
+        let observation_id = ryeos_state::provider_call_observation_id(
+            &thread.chain_root_id,
+            thread_id,
+            draft.turn,
+            draft.attempt_number,
+            &draft.effect_coordinate_digest,
+            draft.source,
+            &draft.answer_digest,
+            &draft.record_hash,
+            draft.publication,
+            draft.replayed_from.as_ref(),
+        )?;
+        let payload = ryeos_state::ProviderCallObservationRecordedPayload {
+            schema_version: ryeos_state::PROVIDER_CALL_OBSERVATION_SCHEMA.to_string(),
+            observation_id: observation_id.clone(),
+            turn: draft.turn,
+            attempt_number: draft.attempt_number,
+            effect_coordinate_digest: draft.effect_coordinate_digest.clone(),
+            source: draft.source,
+            answer_digest: draft.answer_digest.clone(),
+            record_hash: draft.record_hash.clone(),
+            publication: draft.publication,
+            replayed_from: draft.replayed_from.clone(),
+        };
+        payload.validate_for_subject(&thread.chain_root_id, thread_id)?;
+        let event_payload = serde_json::to_value(&payload)?;
+        let source = serde_json::to_value(payload.source)?
+            .as_str()
+            .expect("provider source serializes as a string")
+            .to_string();
+        let publication = serde_json::to_value(payload.publication)?
+            .as_str()
+            .expect("provider publication serializes as a string")
+            .to_string();
+
+        if let Some(existing) = ryeos_state::queries::get_provider_call_observation_identity(
+            g.state_db.projection(),
+            &observation_id,
+        )? {
+            if existing.chain_root_id != thread.chain_root_id
+                || existing.thread_id != thread_id
+                || existing.turn != draft.turn
+                || existing.attempt_number != draft.attempt_number
+                || existing.effect_coordinate_digest != draft.effect_coordinate_digest
+                || existing.source != source
+                || existing.answer_digest != draft.answer_digest
+                || existing.record_hash != draft.record_hash
+                || existing.publication != publication
+            {
+                bail!(
+                    "provider-call observation {observation_id} contradicts its durable identity"
+                );
+            }
+            let row = ryeos_state::queries::get_event_by_hash(
+                g.state_db.projection(),
+                &existing.event_hash,
+            )?
+            .ok_or_else(|| {
+                anyhow!(
+                    "provider-call observation {observation_id} references missing event {}",
+                    existing.event_hash
+                )
+            })?;
+            let event = persisted_event_from_projection_row(row)?;
+            if event.event_type != ryeos_state::event_types::PROVIDER_CALL_OBSERVATION_RECORDED
+                || event.payload != event_payload
+            {
+                bail!(
+                    "provider-call observation {observation_id} has divergent durable event content"
+                );
+            }
+            return Ok(ProviderCallObservationPublication {
+                event,
+                inserted: false,
+            });
+        }
+
+        let event = NewEventRecord {
+            event_type: ryeos_state::event_types::PROVIDER_CALL_OBSERVATION_RECORDED.to_string(),
+            storage_class: "indexed".to_string(),
+            payload: event_payload,
+        };
+        let mut persisted = append_events_locked(
+            &g,
+            Some(permit.cas_guard()),
+            &thread.chain_root_id,
+            thread_id,
+            std::slice::from_ref(&event),
+        )?;
+        let event = persisted
+            .pop()
+            .ok_or_else(|| anyhow!("provider-call observation append returned no event"))?;
+        Ok(ProviderCallObservationPublication {
+            event,
+            inserted: true,
+        })
+    }
+
     #[tracing::instrument(
         name = "state:publish_artifact",
         skip(self, artifact),
@@ -11651,6 +11950,132 @@ mod tests {
                 &owner,
             )
             .expect("create running hook evidence root");
+    }
+
+    #[test]
+    fn project_observation_exact_retry_returns_one_durable_event_and_divergence_refuses() {
+        let store = test_store();
+        let thread_id = "T-project-observation";
+        running_in_process_test_root(&store, thread_id);
+        let request = ryeos_runtime::ProjectObservationPublishParams {
+            thread_id: thread_id.to_string(),
+            graph_run_id: "G-campaign".to_string(),
+            node: "classify".to_string(),
+            step: 7,
+            observation: ryeos_state::ProjectObservationRequest {
+                namespace: "example.classification".to_string(),
+                stable_id: "classification:game-1".to_string(),
+                payload: json!({"status": "accepted", "score": 1}),
+            },
+        };
+        let source_ref = "graph:example/campaign";
+        let source_digest = "d".repeat(64);
+
+        let first = store
+            .publish_project_observation(&request, source_ref, &source_digest)
+            .expect("publish project observation");
+        assert!(first.inserted);
+        let replay = store
+            .publish_project_observation(&request, source_ref, &source_digest)
+            .expect("fold exact project observation retry");
+        assert!(!replay.inserted);
+        assert_eq!(replay.event.event_hash, first.event.event_hash);
+        assert_eq!(replay.event.chain_seq, first.event.chain_seq);
+
+        let events = store
+            .replay_events(thread_id, Some(thread_id), None, 16, 1024 * 1024)
+            .expect("replay project observation evidence")
+            .events
+            .into_iter()
+            .filter(|event| {
+                event.event_type == ryeos_state::event_types::PROJECT_OBSERVATION_RECORDED
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 1, "exact retry must not append a duplicate");
+
+        let mut changed_payload = request.clone();
+        changed_payload.observation.payload = json!({"status": "rejected", "score": 0});
+        assert!(
+            store
+                .publish_project_observation(&changed_payload, source_ref, &source_digest)
+                .unwrap_err()
+                .to_string()
+                .contains("contradicts its durable identity")
+        );
+
+        let mut changed_occurrence = request;
+        changed_occurrence.step = 8;
+        assert!(
+            store
+                .publish_project_observation(&changed_occurrence, source_ref, &source_digest)
+                .unwrap_err()
+                .to_string()
+                .contains("divergent durable event content")
+        );
+    }
+
+    #[test]
+    fn provider_call_observation_exact_retry_folds_and_replay_stays_distinct() {
+        let store = test_store();
+        let thread_id = "T-provider-observation";
+        running_in_process_test_root(&store, thread_id);
+        let draft = ryeos_state::ProviderCallObservationDraft {
+            turn: 2,
+            attempt_number: 1,
+            effect_coordinate_digest: "a".repeat(64),
+            source: ryeos_state::ProviderCallObservationSource::Executed,
+            answer_digest: "b".repeat(64),
+            record_hash: "c".repeat(64),
+            publication: ryeos_state::ProviderCallObservationPublication::Inserted,
+            replayed_from: None,
+        };
+
+        let first = store
+            .publish_provider_call_observation(thread_id, &draft)
+            .expect("publish provider-call observation");
+        assert!(first.inserted);
+        let replay = store
+            .publish_provider_call_observation(thread_id, &draft)
+            .expect("fold provider-call observation retry");
+        assert!(!replay.inserted);
+        assert_eq!(replay.event.event_hash, first.event.event_hash);
+
+        let events = store
+            .replay_events(thread_id, Some(thread_id), None, 16, 1024 * 1024)
+            .expect("replay provider-call observation")
+            .events
+            .into_iter()
+            .filter(|event| {
+                event.event_type == ryeos_state::event_types::PROVIDER_CALL_OBSERVATION_RECORDED
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 1);
+
+        let replay = ryeos_state::ProviderCallObservationDraft {
+            source: ryeos_state::ProviderCallObservationSource::Replay,
+            publication: ryeos_state::ProviderCallObservationPublication::NotApplicable,
+            replayed_from: Some(ryeos_state::ProviderCallReplaySource {
+                produced_by_thread: thread_id.to_string(),
+                attempt_id: "attempt-origin".to_string(),
+            }),
+            ..draft
+        };
+        let replay = store
+            .publish_provider_call_observation(thread_id, &replay)
+            .expect("publish same-coordinate replay observation");
+        assert!(replay.inserted);
+        assert_ne!(replay.event.event_hash, first.event.event_hash);
+
+        let events = store
+            .replay_events(thread_id, Some(thread_id), None, 16, 1024 * 1024)
+            .expect("replay provider-call observations")
+            .events
+            .into_iter()
+            .filter(|event| {
+                event.event_type == ryeos_state::event_types::PROVIDER_CALL_OBSERVATION_RECORDED
+            })
+            .count();
+        assert_eq!(events, 2);
     }
 
     fn hook_observation_identity(hook_id: &str) -> ryeos_runtime::callback::HookDispatchIdentity {

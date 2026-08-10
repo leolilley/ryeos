@@ -105,6 +105,10 @@ pub struct ViewBinding {
     pub sections: Vec<SectionBinding>,
     #[serde(default)]
     pub refresh: Value,
+    /// Shared renderer-neutral field controls. The complete mapping composes
+    /// atomically so a child cannot inherit half of a cursor authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_state: Option<FieldStateBinding>,
     /// The view item's canonical ref (provenance chrome).
     #[serde(default)]
     pub view_ref: Option<String>,
@@ -180,6 +184,55 @@ pub struct SelectionBinding {
     pub change: Option<String>,
     #[serde(default)]
     pub activate: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldStateBinding {
+    pub cursor_scope: FieldCursorScopeBinding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldCursorScopeBinding {
+    pub id: String,
+    pub subject: Vec<String>,
+}
+
+impl FieldCursorScopeBinding {
+    fn validate(&self) -> Result<(), String> {
+        let mut chars = self.id.bytes();
+        if self.id.len() > 64
+            || !chars.next().is_some_and(|byte| byte.is_ascii_lowercase())
+            || !chars.all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+            })
+        {
+            return Err("field cursor scope id must match [a-z][a-z0-9_-]{0,63}".to_string());
+        }
+        if self.subject.is_empty() || self.subject.len() > 16 {
+            return Err("field cursor scope subject must contain 1..=16 bindings".to_string());
+        }
+        let mut seen = BTreeSet::new();
+        for binding in &self.subject {
+            let Some(path) = binding.strip_prefix("@facet:") else {
+                return Err(format!(
+                    "field cursor scope subject binding `{binding}` is not a facet binding"
+                ));
+            };
+            if path.is_empty()
+                || binding.len() > 256
+                || binding.trim() != binding
+                || binding.chars().any(char::is_control)
+                || !seen.insert(binding)
+            {
+                return Err(
+                    "field cursor scope subject bindings must be bounded and unique".to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A singular transient input buffer declared on a view binding. Not a
@@ -1229,7 +1282,38 @@ fn source_contract_error(binding: &ViewBinding) -> Option<String> {
             ));
         }
     }
+    if let Some(field_state) = &binding.field_state {
+        if binding.widget != "field" {
+            return Some("field_state is valid only on field views".to_string());
+        }
+        if let Err(error) = field_state.cursor_scope.validate() {
+            return Some(error);
+        }
+        if !binding
+            .sources
+            .values()
+            .any(|source| value_contains_exact_string(&source.params, "@field:cursor"))
+        {
+            return Some(
+                "field cursor scope requires a source cursor parameter bound to @field:cursor"
+                    .to_string(),
+            );
+        }
+    }
     None
+}
+
+fn value_contains_exact_string(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::String(value) => value == needle,
+        Value::Array(values) => values
+            .iter()
+            .any(|value| value_contains_exact_string(value, needle)),
+        Value::Object(values) => values
+            .values()
+            .any(|value| value_contains_exact_string(value, needle)),
+        _ => false,
+    }
 }
 
 /// Semantic validation: a `target:` declaration is only meaningful on an
@@ -1493,6 +1577,46 @@ pub fn views_from_surface(effective_surface: Option<&Value>) -> BTreeMap<String,
         };
         out.insert(view_ref.clone(), binding);
     }
+    let mut declared = BTreeMap::<String, Vec<String>>::new();
+    let mut divergent = BTreeSet::new();
+    for binding in out.values() {
+        let Some(scope) = binding
+            .field_state
+            .as_ref()
+            .map(|state| &state.cursor_scope)
+        else {
+            continue;
+        };
+        match declared.get(&scope.id) {
+            Some(subject) if subject != &scope.subject => {
+                divergent.insert(scope.id.clone());
+            }
+            Some(_) => {}
+            None => {
+                declared.insert(scope.id.clone(), scope.subject.clone());
+            }
+        }
+    }
+    for binding in out.values_mut() {
+        if let Some(scope) = binding
+            .field_state
+            .as_ref()
+            .map(|state| &state.cursor_scope)
+            && divergent.contains(&scope.id)
+        {
+            let view_ref = binding
+                .view_ref
+                .clone()
+                .unwrap_or_else(|| "view".to_string());
+            *binding = ViewBinding::degraded(
+                &view_ref,
+                format!(
+                    "field cursor scope `{}` has divergent subject declarations",
+                    scope.id
+                ),
+            );
+        }
+    }
     out
 }
 
@@ -1500,6 +1624,80 @@ pub fn views_from_surface(effective_surface: Option<&Value>) -> BTreeMap<String,
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn field_cursor_scope_is_strict_and_requires_a_cursor_bound_field_source() {
+        let valid: ViewBinding = serde_json::from_value(json!({
+            "widget": "field",
+            "sources": {
+                "execution": {
+                    "ref": "service:test/field",
+                    "params": {"cursor": "@field:cursor"}
+                }
+            },
+            "field_state": {
+                "cursor_scope": {
+                    "id": "solve-replay",
+                    "subject": ["@facet:selection.thread_id"]
+                }
+            }
+        }))
+        .unwrap();
+        assert!(source_contract_error(&valid).is_none());
+
+        let mut no_cursor = valid.clone();
+        no_cursor.sources.get_mut("execution").unwrap().params = json!({});
+        assert!(
+            source_contract_error(&no_cursor)
+                .unwrap()
+                .contains("@field:cursor")
+        );
+
+        let mut malformed = valid;
+        malformed.field_state.as_mut().unwrap().cursor_scope.subject =
+            vec!["selection.thread_id".to_string()];
+        assert!(
+            source_contract_error(&malformed)
+                .unwrap()
+                .contains("facet binding")
+        );
+    }
+
+    #[test]
+    fn one_scope_id_cannot_claim_divergent_subjects_on_the_same_surface() {
+        let views = views_from_surface(Some(&json!({
+            "views": {
+                "view:test/one": {
+                    "widget": "field",
+                    "sources": {"default": {
+                        "ref": "service:test/one",
+                        "params": {"cursor": "@field:cursor"}
+                    }},
+                    "field_state": {"cursor_scope": {
+                        "id": "shared",
+                        "subject": ["@facet:selection.thread_id"]
+                    }}
+                },
+                "view:test/two": {
+                    "widget": "field",
+                    "sources": {"default": {
+                        "ref": "service:test/two",
+                        "params": {"cursor": "@field:cursor"}
+                    }},
+                    "field_state": {"cursor_scope": {
+                        "id": "shared",
+                        "subject": ["@facet:selection.definition_digest"]
+                    }}
+                }
+            }
+        })));
+        assert!(views.values().all(|binding| {
+            binding
+                .degraded
+                .as_deref()
+                .is_some_and(|reason| reason.contains("divergent subject declarations"))
+        }));
+    }
 
     fn threads_binding() -> ViewBinding {
         serde_json::from_value(json!({

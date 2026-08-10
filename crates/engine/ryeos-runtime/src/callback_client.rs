@@ -641,6 +641,32 @@ impl CallbackClient {
             .map_err(|error| anyhow::anyhow!("{error}"))
     }
 
+    /// Authoritative: exact retry must return the original durable event and
+    /// divergent stable-ID reuse must fail the graph commit.
+    pub async fn publish_project_observation(
+        &self,
+        graph_run_id: &str,
+        node: &str,
+        step: u32,
+        observation: crate::ProjectObservationRequest,
+    ) -> Result<Value> {
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback publish_project_observation called without an inner UDS client (socket missing)"
+            )
+        })?;
+        client
+            .publish_project_observation(crate::ProjectObservationPublishParams {
+                thread_id: self.thread_id.clone(),
+                graph_run_id: graph_run_id.to_string(),
+                node: node.to_string(),
+                step,
+                observation,
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+
     /// Advisory: warn-and-continue OK when disconnected.
     pub async fn get_thread(&self) -> Result<Value> {
         match &self.inner {

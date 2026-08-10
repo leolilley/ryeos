@@ -183,6 +183,12 @@ impl RyeOsCore {
     /// reference the facet explicitly.
     pub fn effects_for_facet(&mut self, facet: &str) -> Vec<RyeOsEffect> {
         let subscribed_channels = |binding: &super::content::ViewBinding| {
+            let cursor_scope_depends_on_facet = binding.field_state.as_ref().is_some_and(|state| {
+                state.cursor_scope.subject.iter().any(|subject| {
+                    subject == &format!("@facet:{facet}")
+                        || subject.starts_with(&format!("@facet:{facet}."))
+                })
+            });
             binding
                 .sources
                 .iter()
@@ -198,6 +204,10 @@ impl RyeOsCore {
                         || serde_json::to_string(&source.params)
                             .unwrap_or_default()
                             .contains(&format!("@facet:{facet}"))
+                        || (cursor_scope_depends_on_facet
+                            && serde_json::to_string(&source.params)
+                                .unwrap_or_default()
+                                .contains("@field:cursor"))
                 })
                 .map(|(channel, _)| channel.clone())
                 .collect::<Vec<_>>()

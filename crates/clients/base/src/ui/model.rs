@@ -14,7 +14,7 @@ use crate::ids::RyeOsViewInstanceKey;
 use crate::surface::{
     SlotContentSpec, SlotSpec, SlotsSpec, SurfaceSpec, SurfaceStyleSpec, builtin_default,
 };
-use crate::workspace::{ViewLocalState, ViewSpec, Workspace};
+use crate::workspace::{FieldCursorScopeState, ViewLocalState, ViewSpec, Workspace};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -614,6 +614,10 @@ pub struct RyeOsCore {
     pub active_workspace: usize,
     pub runtime: RyeOsRuntimeState,
     pub pending_effects: BTreeMap<u64, RyeOsEffectKind>,
+    /// Surface-instance-scoped replay state declared by signed field views.
+    /// The storage key combines the mounted surface instance and scope id.
+    #[serde(default)]
+    pub field_cursor_scopes: BTreeMap<String, FieldCursorScopeState>,
     /// Latest hint-driven reconciliation requested while the same source key
     /// already had a fetch in flight. Transient client backpressure: at most
     /// one request runs and one trailing request waits per source.
@@ -912,6 +916,7 @@ impl RyeOsCore {
                     .or_insert_with(|| ViewLocalState::Field(Default::default()));
             }
         }
+        self.normalize_field_cursor_scopes();
     }
 
     /// Hint arrival: semantic hook for transient "look" notices. Visual pulse
@@ -2389,6 +2394,7 @@ impl Default for RyeOsCore {
             active_workspace: 0,
             runtime: RyeOsRuntimeState::default(),
             pending_effects: BTreeMap::new(),
+            field_cursor_scopes: BTreeMap::new(),
             deferred_source_fetches: BTreeMap::new(),
             generation: 0,
             next_effect_id: 0,

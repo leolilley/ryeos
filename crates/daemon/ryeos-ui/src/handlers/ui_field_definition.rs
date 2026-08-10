@@ -572,6 +572,9 @@ mod tests {
                 resolved_ref: "graph:test/build".to_string(),
                 source_path: std::path::PathBuf::from("/sealed/build.yaml"),
                 source_space: ryeos_engine::contracts::ItemSpace::Bundle,
+                source_root: ryeos_engine::contracts::ItemSourceRoot::Bundle {
+                    name: "fixture".to_string(),
+                },
                 trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
                 signer_fingerprint: Some("f".repeat(64)),
                 alias_resolution: None,
@@ -585,6 +588,9 @@ mod tests {
                 resolved_ref: "graph:test/base".to_string(),
                 source_path: std::path::PathBuf::from("/sealed/base.yaml"),
                 source_space: ryeos_engine::contracts::ItemSpace::Bundle,
+                source_root: ryeos_engine::contracts::ItemSourceRoot::Bundle {
+                    name: "fixture".to_string(),
+                },
                 trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
                 signer_fingerprint: Some("e".repeat(64)),
                 alias_resolution: None,

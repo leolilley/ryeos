@@ -29,9 +29,10 @@ pub use authorizer::{
     CapabilityParseError, canonical_cap, cap_matches,
 };
 pub use callback::{
-    ActionPayload, CallbackError, DispatchActionRequest, RUNTIME_FAILURE_KIND, ReplayResponse,
-    ReplayedEventRecord, RuntimeCallbackAPI, RuntimeFailure, RuntimeFailureDiagnosticLocator,
-    TerminalCompletion, client_from_env, parse_hook_action, validate_runtime_thread_id,
+    ActionPayload, CallbackError, DispatchActionRequest, ProjectObservationPublishParams,
+    RUNTIME_FAILURE_KIND, ReplayResponse, ReplayedEventRecord, RuntimeCallbackAPI, RuntimeFailure,
+    RuntimeFailureDiagnosticLocator, TerminalCompletion, client_from_env, parse_hook_action,
+    validate_runtime_thread_id,
 };
 pub use checkpoint::CheckpointWriter;
 pub use command::{
@@ -73,3 +74,10 @@ pub use paths::AI_DIR;
 pub use progress::{ProgressEvent, StatusEvent};
 pub use resolver::{ResolveError, ResolvedCommand, resolve_command};
 pub use ryeos_engine::contracts::ThreadTerminalStatus;
+pub use ryeos_state::{
+    MAX_PROJECT_OBSERVATION_JSON_DEPTH, MAX_PROJECT_OBSERVATION_JSON_VALUES,
+    MAX_PROJECT_OBSERVATION_NAMESPACE_BYTES, MAX_PROJECT_OBSERVATION_PAYLOAD_BYTES,
+    MAX_PROJECT_OBSERVATION_STABLE_ID_BYTES, MAX_PROJECT_OBSERVATIONS_PER_ACTION,
+    PROJECT_OBSERVATION_SCHEMA, ProjectObservationOccurrence, ProjectObservationRecordedPayload,
+    ProjectObservationRequest, project_observation_id,
+};

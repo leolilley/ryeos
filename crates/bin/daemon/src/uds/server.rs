@@ -457,6 +457,9 @@ pub(crate) async fn dispatch_runtime_method(
         }
         "runtime.publish_artifact" => handle_publish_artifact(&clean_params, state),
         "runtime.publish_state_anchor" => handle_publish_state_anchor(&clean_params, state),
+        "runtime.publish_project_observation" => {
+            handle_publish_project_observation(&clean_params, state, callback_cap.as_ref())
+        }
         "runtime.get_facets" => handle_get_facets(&clean_params, state),
         "runtime.get_thread" => handle_get(&clean_params, state),
         "runtime.submit_command" => handle_submit_command(&clean_params, state).await,
@@ -594,6 +597,7 @@ fn is_running_runtime_mutation(method: &str) -> bool {
             | "runtime.bundle_events_materialize_attachment"
             | "runtime.publish_artifact"
             | "runtime.publish_state_anchor"
+            | "runtime.publish_project_observation"
             | "runtime.submit_command"
             | "runtime.poll_input"
             | "runtime.provider_attempt_prepare"
@@ -1543,6 +1547,35 @@ fn handle_publish_state_anchor(
     let publication = state.threads.publish_state_anchor(&params)?;
     serde_json::to_value(publication)
         .context("failed to encode runtime.publish_state_anchor result")
+}
+
+fn handle_publish_project_observation(
+    params: &serde_json::Value,
+    state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+) -> Result<serde_json::Value> {
+    let params: ryeos_runtime::ProjectObservationPublishParams =
+        serde_json::from_value(params.clone())
+            .context("invalid runtime.publish_project_observation params")?;
+    let cap = cap.ok_or_else(|| anyhow!("project observation requires callback authority"))?;
+    let source_definition_ref = cap
+        .item_ref
+        .as_deref()
+        .ok_or_else(|| anyhow!("project observation source has no admitted item identity"))?;
+    if !source_definition_ref.starts_with("graph:") {
+        anyhow::bail!("project observations may be published only by an admitted graph runtime");
+    }
+    let source_effective_definition_digest = cap
+        .effective_definition_digest
+        .as_deref()
+        .ok_or_else(|| anyhow!("project observation source has no effective definition digest"))?;
+    let publication = state.threads.publish_project_observation(
+        &params,
+        source_definition_ref,
+        source_effective_definition_digest,
+    )?;
+    serde_json::to_value(publication)
+        .context("failed to encode runtime.publish_project_observation result")
 }
 
 fn handle_get_facets(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
@@ -5437,6 +5470,7 @@ mod tests {
             "runtime.request_continuation",
             "runtime.publish_artifact",
             "runtime.publish_state_anchor",
+            "runtime.publish_project_observation",
         ] {
             let resp = dispatch(
                 rpc(

@@ -100,6 +100,34 @@ impl Walker {
         step: u32,
         observation: &DispatchObservation,
     ) -> anyhow::Result<()> {
+        if !observation.project_observations_well_formed {
+            anyhow::bail!("action project_observations must be an array");
+        }
+        if observation.project_observations.len()
+            > ryeos_runtime::MAX_PROJECT_OBSERVATIONS_PER_ACTION
+        {
+            anyhow::bail!(
+                "action proposed {} project observations; maximum is {}",
+                observation.project_observations.len(),
+                ryeos_runtime::MAX_PROJECT_OBSERVATIONS_PER_ACTION
+            );
+        }
+        // Normalize the complete authored list before the first authoritative
+        // append. A malformed later entry must not turn an earlier entry into
+        // an accidental partial result of input validation.
+        let requests = observation
+            .project_observations
+            .iter()
+            .cloned()
+            .map(ryeos_runtime::ProjectObservationRequest::from_value)
+            .collect::<anyhow::Result<Vec<_>>>()
+            .context("normalize project observation requests")?;
+        for request in requests {
+            self.client
+                .publish_project_observation(graph_run_id, node, step, request)
+                .await
+                .context("publish authoritative project observation")?;
+        }
         for request in &observation.state_anchors {
             let mut request = request.clone();
             let object = request

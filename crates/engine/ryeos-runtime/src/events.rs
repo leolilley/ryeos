@@ -511,6 +511,8 @@ pub enum RuntimeEventType {
     // ── Daemon-authored hook evidence ──────────────────────────
     HookObservationRecorded,
     HookFailed,
+    ProjectObservationRecorded,
+    ProviderCallObservationRecorded,
 
     // ── Audit / artifact ────────────────────────────────────────
     ArtifactPublished,
@@ -598,6 +600,8 @@ impl RuntimeEventType {
             Self::Observation => wire::OBSERVATION,
             Self::HookObservationRecorded => wire::HOOK_OBSERVATION_RECORDED,
             Self::HookFailed => wire::HOOK_FAILED,
+            Self::ProjectObservationRecorded => wire::PROJECT_OBSERVATION_RECORDED,
+            Self::ProviderCallObservationRecorded => wire::PROVIDER_CALL_OBSERVATION_RECORDED,
             Self::ArtifactPublished => wire::ARTIFACT_PUBLISHED,
             Self::AsLaunchedResolution => wire::AS_LAUNCHED_RESOLUTION,
             Self::AsLaunchedRefBindings => wire::AS_LAUNCHED_REF_BINDINGS,
@@ -654,6 +658,8 @@ impl RuntimeEventType {
             wire::OBSERVATION => Ok(Self::Observation),
             wire::HOOK_OBSERVATION_RECORDED => Ok(Self::HookObservationRecorded),
             wire::HOOK_FAILED => Ok(Self::HookFailed),
+            wire::PROJECT_OBSERVATION_RECORDED => Ok(Self::ProjectObservationRecorded),
+            wire::PROVIDER_CALL_OBSERVATION_RECORDED => Ok(Self::ProviderCallObservationRecorded),
             wire::ARTIFACT_PUBLISHED => Ok(Self::ArtifactPublished),
             wire::AS_LAUNCHED_RESOLUTION => Ok(Self::AsLaunchedResolution),
             wire::AS_LAUNCHED_REF_BINDINGS => Ok(Self::AsLaunchedRefBindings),
@@ -758,6 +764,8 @@ impl RuntimeEventType {
             | Self::StreamClosed
             | Self::HookObservationRecorded
             | Self::HookFailed
+            | Self::ProjectObservationRecorded
+            | Self::ProviderCallObservationRecorded
             | Self::ArtifactPublished
             | Self::AsLaunchedResolution
             | Self::AsLaunchedRefBindings

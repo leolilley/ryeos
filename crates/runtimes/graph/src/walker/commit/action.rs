@@ -35,7 +35,8 @@ impl Walker {
         let elapsed_ms = *elapsed_ms;
         // R3 fence order:
         // graph_step_started → tool_call_start → (dispatch in run_node_body) →
-        // tool_call_result → state mutation → receipt → graph_step_completed → checkpoint
+        // tool_call_result → accepted project observations → state mutation →
+        // receipt → graph_step_completed → checkpoint
         self.emit_graph_step_started(graph_run_id, step, current)
             .await;
         self.emit_tool_call_start(graph_run_id, step, current, item_id)

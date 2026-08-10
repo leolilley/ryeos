@@ -466,6 +466,8 @@ pub(crate) struct DispatchObservation {
     pub(crate) dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
     pub(crate) milestones: Vec<Value>,
     pub(crate) state_anchors: Vec<Value>,
+    pub(crate) project_observations: Vec<Value>,
+    pub(crate) project_observations_well_formed: bool,
 }
 
 impl DispatchObservation {
@@ -485,10 +487,18 @@ impl DispatchObservation {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        let (project_observations, project_observations_well_formed) =
+            match result.get("project_observations") {
+                None => (Vec::new(), true),
+                Some(Value::Array(observations)) => (observations.clone(), true),
+                Some(_) => (Vec::new(), false),
+            };
         if child_thread_id.is_none()
             && dispatch.is_none()
             && milestones.is_empty()
             && state_anchors.is_empty()
+            && project_observations.is_empty()
+            && project_observations_well_formed
         {
             None
         } else {
@@ -498,6 +508,8 @@ impl DispatchObservation {
                 dispatch,
                 milestones,
                 state_anchors,
+                project_observations,
+                project_observations_well_formed,
             })
         }
     }
@@ -516,6 +528,8 @@ impl DispatchObservation {
                 dispatch,
                 milestones: Vec::new(),
                 state_anchors: Vec::new(),
+                project_observations: Vec::new(),
+                project_observations_well_formed: true,
             })
         }
     }
@@ -685,7 +699,7 @@ config:
     }
 
     #[test]
-    fn dispatch_observation_carries_authoritative_state_anchor_requests_separately() {
+    fn dispatch_observation_carries_authoritative_requests_separately() {
         let observation = DispatchObservation::from_success(
             "tool:test",
             None,
@@ -694,16 +708,26 @@ config:
                 "state_anchors": [{
                     "contract": "domain.restore.v1",
                     "restore": {"value": 1}
-                }]
+                }],
+                "project_observations": [{
+                    "namespace": "example.classification",
+                    "stable_id": "classification:game-1",
+                    "payload": {"status": "accepted"}
+                }],
             }),
             None,
         )
         .unwrap();
         assert_eq!(observation.milestones.len(), 1);
         assert_eq!(observation.state_anchors.len(), 1);
+        assert_eq!(observation.project_observations.len(), 1);
         assert_eq!(
             observation.state_anchors[0]["contract"],
             "domain.restore.v1"
+        );
+        assert_eq!(
+            observation.project_observations[0]["stable_id"],
+            "classification:game-1"
         );
     }
 

@@ -691,6 +691,7 @@ mod tests {
                 resolved_ref: "graph:test/build".to_string(),
                 source_path: graph_path,
                 source_space: ryeos_engine::contracts::ItemSpace::Project,
+                source_root: ryeos_engine::contracts::ItemSourceRoot::Project,
                 trust_class: ryeos_engine::resolution::TrustClass::TrustedProject,
                 signer_fingerprint: Some("f".repeat(64)),
                 alias_resolution: None,

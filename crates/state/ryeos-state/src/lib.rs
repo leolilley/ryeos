@@ -25,8 +25,10 @@ pub mod operational;
 mod pending_publication;
 pub mod project_discovery;
 pub mod project_materialization;
+pub mod project_observation;
 pub mod project_sync;
 pub mod projection;
+pub mod provider_call_observation;
 pub mod queries;
 pub mod reachability;
 pub mod rebuild;
@@ -84,8 +86,20 @@ pub use operational::{
 };
 pub use pending_publication::PendingCasPublication;
 pub use project_materialization::PinnedProjectMaterialization;
+pub use project_observation::{
+    MAX_PROJECT_OBSERVATION_JSON_DEPTH, MAX_PROJECT_OBSERVATION_JSON_VALUES,
+    MAX_PROJECT_OBSERVATION_NAMESPACE_BYTES, MAX_PROJECT_OBSERVATION_PAYLOAD_BYTES,
+    MAX_PROJECT_OBSERVATION_STABLE_ID_BYTES, MAX_PROJECT_OBSERVATIONS_PER_ACTION,
+    PROJECT_OBSERVATION_SCHEMA, ProjectObservationOccurrence, ProjectObservationRecordedPayload,
+    ProjectObservationRequest, project_observation_id,
+};
 pub use projection::{
     ChainRetentionProjection, DueTerminalChain, DueTerminalChainCursor, ProjectionDb,
+};
+pub use provider_call_observation::{
+    PROVIDER_CALL_OBSERVATION_SCHEMA, ProviderCallObservationDraft,
+    ProviderCallObservationPublication, ProviderCallObservationRecordedPayload,
+    ProviderCallObservationSource, ProviderCallReplaySource, provider_call_observation_id,
 };
 pub use recovery::{
     CasMutationGuard, DurableCasPublicationKey, DurableCasUploadStage, HeadOperation,

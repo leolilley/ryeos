@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-10T03:37:52Z:f3259293e58a961e99ad9ab520b72aaf0200b6422acb95f07432b390dcbefd93:NTyGD4v0XZUrB9MNeCTQXKmNE27PS3oHiDfMMsqfp+2X4eF99ShoOkv3yUQ35QlYlQ+RV4MJnrsOzP2NjJbPDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-10T04:56:59Z:1873ebffd01c72ac8e6f5b685c3a7de7b244e57eb3f7860d63da9657e42dd7c8:DfwdJpAY4QFN9J9JDlzYdavkp8rNKRs9rljh06Jg714yjX67DzMqJSNXNqJ4N6bi5gBS8A8sSYebyaxTUYo6Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, graphs, dag, state-machine]
 version: "1.0.0"
@@ -93,6 +93,28 @@ action:
   item_id: "directive:my/review"     # Execute a directive
   params: { scope: "full" }
 ```
+
+An action result may propose authoritative, meaning-blind project observations:
+
+```json
+{
+  "project_observations": [{
+    "namespace": "example.classification",
+    "stable_id": "classification:subject-1",
+    "payload": {"status": "accepted"}
+  }]
+}
+```
+
+The graph runtime normalizes these requests only after assignment and branch
+evaluation succeed; one action may propose at most 256. The daemon supplies the chain and admitted graph
+definition/effective digest, derives the durable observation identity, and
+refuses ordinary runtime append of the reserved event kind. A byte-identical
+retry returns the original event; reusing the same source-scoped stable ID with
+different payload or occurrence fails the graph commit. The field therefore
+projects one selectable entity across a crash/retry. This boundary is for
+accepted project claims, not progress telemetry; use milestones for advisory
+status.
 
 ### Edge Conditions
 
@@ -255,9 +277,10 @@ produces exactly one outcome, and every outcome is committed through one fence.
 The observable guarantees an author can rely on:
 
 - **The checkpoint is written last.** For an advancing node the durable cursor is
-  written only after that node's events, state mutation, and receipt. A crash
-  anywhere before it leaves the previous checkpoint authoritative, so **the
-  current node re-runs on resume** — never a half-applied node. Events, receipts,
+  written only after that node's events, authoritative project observations,
+  state mutation, and receipt. A crash anywhere before it leaves the previous
+  checkpoint authoritative, so **the current node re-runs on resume** — never a
+  half-applied node. Events, receipts,
   and advancing-step hooks are therefore at-least-once observability; only the
   checkpoint advances resumable state.
 - **`cache_result` is fenced.** An entry becomes visible only after its advancing

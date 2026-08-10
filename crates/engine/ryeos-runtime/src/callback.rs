@@ -75,6 +75,19 @@ pub struct EffectDispatchRequest {
     pub authorization_id: String,
 }
 
+/// Runtime-to-daemon request for one source-scoped project observation. The
+/// runtime owns only the graph occurrence and the bounded source request; the
+/// daemon derives chain and admitted source identity from callback authority.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectObservationPublishParams {
+    pub thread_id: String,
+    pub graph_run_id: String,
+    pub node: String,
+    pub step: u32,
+    pub observation: crate::ProjectObservationRequest,
+}
+
 /// Canonical digest of the exact wire action admitted for dispatch.
 pub fn dispatch_action_digest(action: &ActionPayload) -> anyhow::Result<String> {
     let value = serde_json::to_value(action)?;
@@ -695,6 +708,17 @@ pub trait RuntimeCallbackAPI: Send + Sync {
     ) -> Result<Value, CallbackError> {
         Err(CallbackError::Transport(anyhow::anyhow!(
             "runtime.publish_state_anchor callback is not implemented by this client"
+        )))
+    }
+
+    /// Publish an idempotent, daemon-authored project observation. This is a
+    /// settlement-significant graph-commit boundary, not advisory telemetry.
+    async fn publish_project_observation(
+        &self,
+        _params: ProjectObservationPublishParams,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::Transport(anyhow::anyhow!(
+            "runtime.publish_project_observation callback is not implemented by this client"
         )))
     }
 

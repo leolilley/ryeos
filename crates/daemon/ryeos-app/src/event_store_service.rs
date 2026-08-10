@@ -278,6 +278,8 @@ fn validate_event_type(event_type: &str) -> Result<()> {
         ryeos_state::event_types::PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1
             | ryeos_state::event_types::HOOK_OBSERVATION_RECORDED
             | ryeos_state::event_types::HOOK_FAILED
+            | ryeos_state::event_types::PROJECT_OBSERVATION_RECORDED
+            | ryeos_state::event_types::PROVIDER_CALL_OBSERVATION_RECORDED
     ) {
         bail!(
             "event append refused: `{event_type}` is daemon-authored and cannot be appended by a runtime"
@@ -375,10 +377,12 @@ mod tests {
     }
 
     #[test]
-    fn runtime_cannot_forge_daemon_authored_hook_evidence() {
+    fn runtime_cannot_forge_daemon_authored_evidence() {
         for event_type in [
             ryeos_state::event_types::HOOK_OBSERVATION_RECORDED,
             ryeos_state::event_types::HOOK_FAILED,
+            ryeos_state::event_types::PROJECT_OBSERVATION_RECORDED,
+            ryeos_state::event_types::PROVIDER_CALL_OBSERVATION_RECORDED,
         ] {
             let error = validate_event_type(event_type).unwrap_err();
             assert!(
@@ -387,7 +391,7 @@ mod tests {
             );
             assert!(
                 ryeos_runtime::RuntimeEventType::parse(event_type).is_ok(),
-                "hook evidence remains part of the indexed event vocabulary"
+                "daemon evidence remains part of the indexed event vocabulary"
             );
         }
     }

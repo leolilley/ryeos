@@ -334,6 +334,21 @@ pub(super) fn handle_provider_attempt_prepare(
         match lookup_provider_call(state, &coordinate_key)? {
             Some((record_hash, record)) => {
                 ensure_provider_call_publication_proof(state, &record_hash, &record)?;
+                publish_provider_call_observation(
+                    state,
+                    &cap.thread_id,
+                    request.turn,
+                    request.attempt_number,
+                    &coordinate_key,
+                    &record.answer_digest,
+                    &record_hash,
+                    ryeos_state::ProviderCallObservationSource::Replay,
+                    ryeos_state::ProviderCallObservationPublication::NotApplicable,
+                    Some(ryeos_state::ProviderCallReplaySource {
+                        produced_by_thread: record.first_observation.produced_by_thread.clone(),
+                        attempt_id: record.first_observation.attempt_id.clone(),
+                    }),
+                )?;
                 return Ok(serde_json::to_value(
                     ProviderAttemptPrepareResponse::Replay {
                         record_hash,
@@ -592,15 +607,40 @@ pub(super) fn handle_provider_attempt_settle(
         }
         match request.coordinate.admitted_effect_class {
             None => None,
-            Some(EffectClass::Recorded) => Some(publish_provider_call(
-                state,
-                &cap.thread_id,
-                &request.attempt_id,
-                &request.coordinate,
-                answer,
-                &outcome,
-                local_observation.as_ref(),
-            )?),
+            Some(EffectClass::Recorded) => {
+                let publication = publish_provider_call(
+                    state,
+                    &cap.thread_id,
+                    &request.attempt_id,
+                    &request.coordinate,
+                    answer,
+                    &outcome,
+                    local_observation.as_ref(),
+                )?;
+                let (publication_status, record_hash) = match &publication {
+                    ProviderCallPublication::Inserted { record_hash } => (
+                        ryeos_state::ProviderCallObservationPublication::Inserted,
+                        record_hash,
+                    ),
+                    ProviderCallPublication::Folded { record_hash } => (
+                        ryeos_state::ProviderCallObservationPublication::Folded,
+                        record_hash,
+                    ),
+                };
+                publish_provider_call_observation(
+                    state,
+                    &cap.thread_id,
+                    binding.turn,
+                    binding.attempt_number,
+                    &coordinate_key,
+                    &answer.digest()?,
+                    record_hash,
+                    ryeos_state::ProviderCallObservationSource::Executed,
+                    publication_status,
+                    None,
+                )?;
+                Some(publication)
+            }
             Some(EffectClass::Sealed) => {
                 anyhow::bail!("remote provider settlement cannot publish sealed evidence")
             }
@@ -720,12 +760,28 @@ fn publish_provider_call(
             },
             record_hash,
         ),
-        ryeos_state::ReplayPublishOutcome::Folded { record_hash } => (
-            ProviderCallPublication::Folded {
-                record_hash: record_hash.clone(),
-            },
-            record_hash,
-        ),
+        ryeos_state::ReplayPublishOutcome::Folded { record_hash } => {
+            let existing = cas
+                .get_object(&record_hash)?
+                .ok_or_else(|| anyhow!("folded provider record {record_hash} is missing"))?;
+            let existing = ProviderCallRecord::from_current_value(&existing)
+                .context("decode folded provider record")?;
+            let publication = if existing.first_observation.attempt_id == attempt_id
+                && existing.first_observation.produced_by_thread == thread_id
+            {
+                // A crash after this attempt inserted the replay row but before
+                // its later proof/event boundary must retain the original
+                // semantic outcome on exact retry.
+                ProviderCallPublication::Inserted {
+                    record_hash: record_hash.clone(),
+                }
+            } else {
+                ProviderCallPublication::Folded {
+                    record_hash: record_hash.clone(),
+                }
+            };
+            (publication, record_hash)
+        }
         ryeos_state::ReplayPublishOutcome::Unavailable { reason } => {
             anyhow::bail!("provider publication is unavailable: {reason}")
         }
@@ -750,6 +806,35 @@ fn publish_provider_call(
     }
     pending.publish()?;
     Ok(publication)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_provider_call_observation(
+    state: &AppState,
+    thread_id: &str,
+    turn: u32,
+    attempt_number: u32,
+    effect_coordinate_digest: &str,
+    answer_digest: &str,
+    record_hash: &str,
+    source: ryeos_state::ProviderCallObservationSource,
+    publication: ryeos_state::ProviderCallObservationPublication,
+    replayed_from: Option<ryeos_state::ProviderCallReplaySource>,
+) -> Result<()> {
+    state.threads.publish_provider_call_observation(
+        thread_id,
+        &ryeos_state::ProviderCallObservationDraft {
+            turn,
+            attempt_number,
+            effect_coordinate_digest: effect_coordinate_digest.to_string(),
+            source,
+            answer_digest: answer_digest.to_string(),
+            record_hash: record_hash.to_string(),
+            publication,
+            replayed_from,
+        },
+    )?;
+    Ok(())
 }
 
 pub(super) fn handle_provider_attempt_release_unissued(
