@@ -1,0 +1,13 @@
+# ryeos:signed:2026-08-10T09:19:02Z:7fac7cd2d056269958896272094e6ac348b8c83e43aa0b9f1f5de82bde810130:oPjpDCA7982Ycs/urXSH9P/SbIVSrZcManfClFXTLlNiEEKvNJ5GZyAGmslMNzjzF085UaGVUcsJAzOp2coSDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/ryeos-ui/field/comparison
+path: /ui/api/ryeos-ui/field/comparison
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 10000
+  concurrent_max: 64
+response:
+  mode: json
+  source: "service:ui/ryeos-ui/field/comparison"

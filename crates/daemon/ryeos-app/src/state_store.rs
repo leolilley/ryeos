@@ -851,6 +851,19 @@ pub struct AdmittedProgramEvidence {
     pub resolution: ryeos_engine::resolution::ResolutionOutput,
 }
 
+/// Exact retained operands needed for a mechanical execution comparison.
+///
+/// The state boundary verifies the capsule, its sealed program, and the
+/// retained realization before exposing this value. UI code never receives a
+/// CAS handle or a way to reinterpret operational projection rows as
+/// execution authority.
+#[derive(Debug, Clone)]
+pub struct AdmittedExecutionComparisonEvidence {
+    pub program: AdmittedProgramEvidence,
+    pub execution_realization_hash: String,
+    pub execution_realization: ryeos_state::objects::AdmittedExecutionRealization,
+}
+
 /// Minimum exact-thread authority read from the signed CAS snapshot.
 ///
 /// UI authorization must not derive membership from the rebuildable thread
@@ -1288,13 +1301,23 @@ fn load_admitted_launch_capsule(
     state_authority: &ryeos_state::PinnedStateAuthority,
     capsule_hash: &str,
 ) -> Result<ryeos_state::objects::AdmittedLaunchCapsule> {
+    Ok(load_admitted_launch_capsule_with_realization(state_authority, capsule_hash)?.0)
+}
+
+fn load_admitted_launch_capsule_with_realization(
+    state_authority: &ryeos_state::PinnedStateAuthority,
+    capsule_hash: &str,
+) -> Result<(
+    ryeos_state::objects::AdmittedLaunchCapsule,
+    ryeos_state::objects::AdmittedExecutionRealization,
+)> {
     let value = state_authority
         .cas_store()?
         .get_object(capsule_hash)?
         .ok_or_else(|| anyhow!("admitted launch capsule is missing from CAS: {capsule_hash}"))?;
     let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(value)
         .context("decode supported admitted launch capsule")?;
-    capsule
+    let realization = capsule
         .verify_retained_execution_realization(
             &state_authority.cas_store()?,
             &state_authority.large_object_store()?,
@@ -1304,7 +1327,7 @@ fn load_admitted_launch_capsule(
     if capsule.content_hash()? != capsule_hash {
         bail!("admitted launch capsule object hash is not canonical: {capsule_hash}");
     }
-    Ok(capsule)
+    Ok((capsule, realization))
 }
 
 struct ContinuationCapsuleTransition<'a> {
@@ -8260,6 +8283,19 @@ impl StateStore {
         &self,
         thread_id: &str,
     ) -> Result<Option<AdmittedProgramEvidence>> {
+        Ok(self
+            .admitted_execution_comparison_evidence(thread_id)?
+            .map(|evidence| evidence.program))
+    }
+
+    /// Load the exact admitted program and its retained execution realization
+    /// under one verification path. This is intentionally keyed by an
+    /// already-authorized thread id; hashes are evidence identities, not
+    /// lookup authority.
+    pub fn admitted_execution_comparison_evidence(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<AdmittedExecutionComparisonEvidence>> {
         let g = self.lock()?;
         let Some(snapshot) = g.state_db.get_thread(thread_id)? else {
             return Ok(None);
@@ -8267,7 +8303,8 @@ impl StateStore {
         let Some(capsule_hash) = snapshot.admitted_launch_capsule_hash else {
             return Ok(None);
         };
-        let capsule = load_admitted_launch_capsule(&self.state_authority, &capsule_hash)?;
+        let (capsule, execution_realization) =
+            load_admitted_launch_capsule_with_realization(&self.state_authority, &capsule_hash)?;
         capsule.validate()?;
         let request: crate::thread_lifecycle::SealedRootExecutionRequest =
             serde_json::from_value(capsule.sealed_invocation.clone())
@@ -8282,11 +8319,15 @@ impl StateStore {
             .context("verify exact admitted root subject")?;
         let resolution = request.admitted_effective_resolution()?.clone();
         let effective_definition_digest = request.effective_definition_digest().clone();
-        Ok(Some(AdmittedProgramEvidence {
-            admitted_launch_capsule_hash: capsule_hash,
-            subject,
-            effective_definition_digest,
-            resolution,
+        Ok(Some(AdmittedExecutionComparisonEvidence {
+            execution_realization_hash: capsule.execution_realization_hash.clone(),
+            execution_realization,
+            program: AdmittedProgramEvidence {
+                admitted_launch_capsule_hash: capsule_hash,
+                subject,
+                effective_definition_digest,
+                resolution,
+            },
         }))
     }
 
