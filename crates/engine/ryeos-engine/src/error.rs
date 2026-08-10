@@ -351,10 +351,6 @@ pub enum EngineError {
     #[error("invalid state transition from `{from}` on event `{event}`")]
     InvalidStateTransition { from: String, event: String },
 
-    // ── Delegation ───────────────────────────────────────────────────
-    #[error("delegated principal validation failed: {reason}")]
-    DelegationValidationFailed { reason: String },
-
     // ── Runtime registry ─────────────────────────────────────────────
     #[error("runtime YAML invalid at {path}: {reason}")]
     RuntimeYamlInvalid { path: PathBuf, reason: String },

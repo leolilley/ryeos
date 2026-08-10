@@ -28,7 +28,7 @@ pub mod scope;
 // The grouped modules above nest this crate physically; these re-exports pin
 // every pre-grouping public path, so no caller inside or outside the crate
 // observes the move.
-pub use authority::{capability_cover, delegation, isolation, protocols, trust};
+pub use authority::{capability_cover, isolation, protocols, trust};
 pub use identity::{
     canonical_ref, effective_program, external_content, external_realization, resolution,
 };

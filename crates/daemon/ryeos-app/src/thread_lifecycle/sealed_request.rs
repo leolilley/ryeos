@@ -490,44 +490,18 @@ impl From<&EffectivePrincipal> for SealedPrincipal {
 }
 
 impl SealedPrincipal {
-    fn restore(&self) -> EffectivePrincipal {
+    fn restore(&self) -> Result<EffectivePrincipal> {
         match self {
             Self::Local {
                 fingerprint,
                 scopes,
-            } => EffectivePrincipal::Local(Principal {
+            } => Ok(EffectivePrincipal::Local(Principal {
                 fingerprint: fingerprint.clone(),
                 scopes: scopes.clone(),
-            }),
-            Self::Delegated {
-                protocol_version,
-                delegation_id,
-                caller_fingerprint,
-                origin_site_id,
-                audience_site_id,
-                delegated_scopes,
-                budget_lease_id,
-                request_hash,
-                idempotency_key,
-                issued_at,
-                expires_at,
-                non_redelegable,
-                origin_signature,
-            } => EffectivePrincipal::Delegated(Box::new(DelegatedPrincipal {
-                protocol_version: protocol_version.clone(),
-                delegation_id: delegation_id.clone(),
-                caller_fingerprint: caller_fingerprint.clone(),
-                origin_site_id: origin_site_id.clone(),
-                audience_site_id: audience_site_id.clone(),
-                delegated_scopes: delegated_scopes.clone(),
-                budget_lease_id: budget_lease_id.clone(),
-                request_hash: request_hash.clone(),
-                idempotency_key: idempotency_key.clone(),
-                issued_at: issued_at.clone(),
-                expires_at: expires_at.clone(),
-                non_redelegable: *non_redelegable,
-                origin_signature: origin_signature.clone(),
             })),
+            Self::Delegated { .. } => bail!(
+                "sealed request principal restore refused: delegated principals have no acceptance path and their origin signature is unverifiable"
+            ),
         }
     }
 }
@@ -1043,6 +1017,7 @@ impl SealedRootExecutionRequest {
         if self.validate_only {
             bail!("persisted root execution request cannot be validate-only");
         }
+        let requested_by = self.planning_principal.restore()?;
         let observed_effective_digest = self.resolution_output.effective_definition_digest()?;
         if observed_effective_digest != self.effective_definition_digest {
             bail!(
@@ -1072,7 +1047,7 @@ impl SealedRootExecutionRequest {
             pinned_version: self.verified_pinned_version.clone(),
         };
         let plan_context = PlanContext {
-            requested_by: self.planning_principal.restore(),
+            requested_by,
             project_context: self.project_context.clone(),
             subject_resolution_authority: self.project_binding_subject_authority.clone(),
             current_site_id: self.current_site_id.clone(),
@@ -1460,6 +1435,70 @@ fn storage_fixture_subject_authority_from_project_authority(
 #[cfg(test)]
 mod authority_tests {
     use super::*;
+    use ryeos_engine::contracts::DelegatedPrincipal;
+
+    fn empty_engine() -> Arc<Engine> {
+        Arc::new(Engine::new(
+            ryeos_engine::kind_registry::KindRegistry::empty(),
+            ryeos_engine::parsers::dispatcher::ParserDispatcher::new(
+                ryeos_engine::parsers::registry::ParserRegistry::empty(),
+                Arc::new(ryeos_engine::handlers::registry::HandlerRegistry::empty()),
+            ),
+            Vec::new(),
+        ))
+    }
+
+    #[test]
+    fn sealed_request_refuses_delegated_principal_recovery() {
+        let mut value =
+            serde_json::to_value(SealedRootExecutionRequest::storage_test_fixture()).unwrap();
+        value["planning_principal"] = json!({
+            "type": "delegated",
+            "protocol_version": "1",
+            "delegation_id": "delegation:test",
+            "caller_fingerprint": "caller:test",
+            "origin_site_id": "site:origin",
+            "audience_site_id": "site:target",
+            "delegated_scopes": ["threads.execute"],
+            "budget_lease_id": null,
+            "request_hash": "request:test",
+            "idempotency_key": "idempotency:test",
+            "issued_at": "2026-08-10T00:00:00Z",
+            "expires_at": "2026-08-10T00:05:00Z",
+            "non_redelegable": true,
+            "origin_signature": "unverifiable-signature"
+        });
+        let sealed: SealedRootExecutionRequest = serde_json::from_value(value).unwrap();
+        let capsule_root = tempfile::tempdir().unwrap();
+
+        let error = sealed
+            .restore(&empty_engine(), capsule_root.path())
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "sealed request principal restore refused: delegated principals have no acceptance path and their origin signature is unverifiable"
+        );
+    }
+
+    #[test]
+    fn sealed_request_local_principal_round_trips_unchanged() {
+        let fixture = SealedRootExecutionRequest::storage_test_fixture();
+        let value = serde_json::to_value(&fixture).unwrap();
+        let sealed: SealedRootExecutionRequest = serde_json::from_value(value.clone()).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&sealed.planning_principal).unwrap(),
+            value["planning_principal"]
+        );
+        assert_eq!(
+            sealed.planning_principal.restore().unwrap(),
+            EffectivePrincipal::Local(Principal {
+                fingerprint: "session:test".to_string(),
+                scopes: Vec::new(),
+            })
+        );
+    }
 
     fn cow_authority(base: &str, current: &str) -> ryeos_state::objects::ExecutionProjectAuthority {
         let authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
