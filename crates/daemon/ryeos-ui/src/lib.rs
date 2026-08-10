@@ -10,6 +10,7 @@ pub mod invokers;
 pub mod seat_auth;
 pub mod session_bus;
 pub mod state;
+mod thread_authorization;
 
 pub use browser_session::{BrowserSession, BrowserSessionStore, LaunchContext};
 pub use session_bus::SessionBus;

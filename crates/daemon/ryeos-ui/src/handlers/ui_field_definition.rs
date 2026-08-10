@@ -31,7 +31,7 @@ struct DefinitionRequest {
 }
 
 pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    crate::seat_auth::require_seat_caller(&ctx, &state)?;
+    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
     let request: DefinitionRequest = serde_json::from_value(params).map_err(|error| {
         HandlerError::BadRequest(format!("invalid field definition request: {error}"))
     })?;
@@ -40,6 +40,12 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             HandlerError::BadRequest("invalid field definition thread_id".to_string()).into(),
         );
     }
+    crate::thread_authorization::authorize_exact_thread_subjects(
+        &ctx,
+        &state,
+        &caller,
+        &[&request.thread_id],
+    )?;
     let Some(thread) = state.threads.get_thread_view(&request.thread_id)? else {
         return Err(HandlerError::NotFound.into());
     };

@@ -423,7 +423,9 @@ fn validate_managed_terminal_envelope(
     Ok(())
 }
 
-fn validate_final_cost_for_settlement(cost: &ryeos_engine::contracts::FinalCost) -> Result<()> {
+pub(crate) fn validate_final_cost_for_settlement(
+    cost: &ryeos_engine::contracts::FinalCost,
+) -> Result<()> {
     // `spend` is `UsdNanos`: finite and non-negative by construction.
     if cost.input_tokens > i64::MAX as u64 {
         bail!("final cost input_tokens exceeds the settlement storage maximum");
@@ -847,6 +849,21 @@ pub struct AdmittedProgramEvidence {
     pub subject: crate::thread_lifecycle::AdmittedProgramSubject,
     pub effective_definition_digest: ryeos_engine::resolution::EffectiveDefinitionDigest,
     pub resolution: ryeos_engine::resolution::ResolutionOutput,
+}
+
+/// Minimum exact-thread authority read from the signed CAS snapshot.
+///
+/// UI authorization must not derive membership from the rebuildable thread
+/// projection. These fields authorize the subject before any capsule, event,
+/// result, artifact, or descendant is loaded.
+#[derive(Debug, Clone)]
+pub struct AuthoritativeThreadSubject {
+    pub thread_id: String,
+    pub chain_root_id: String,
+    pub status: ryeos_state::objects::ThreadStatus,
+    pub requested_by: Option<String>,
+    pub project_authority: ryeos_state::objects::ExecutionProjectAuthority,
+    pub admitted_launch_capsule_hash: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -6360,6 +6377,47 @@ impl StateStore {
         }
         repaired += g.runtime_db.expire_stale_launch_planning()?;
         Ok(repaired)
+    }
+
+    /// Load at most two exact thread subjects under one state-store lock.
+    /// Results retain input order and use `None` for a genuinely absent
+    /// subject. Callers must collapse absence and authorization refusal before
+    /// returning anything externally.
+    pub fn authoritative_thread_subjects(
+        &self,
+        thread_ids: &[&str],
+    ) -> Result<Vec<Option<AuthoritativeThreadSubject>>> {
+        if thread_ids.is_empty() || thread_ids.len() > 2 {
+            bail!("exact thread authority reads require one or two subjects");
+        }
+        let g = self.lock()?;
+        thread_ids
+            .iter()
+            .map(|thread_id| {
+                let Some(row) = g.state_db.get_thread(thread_id)? else {
+                    return Ok(None);
+                };
+                let Some(snapshot) = g
+                    .state_db
+                    .read_authoritative_thread_snapshot(&row.chain_root_id, thread_id)?
+                else {
+                    bail!("thread {thread_id} is missing its authoritative signed snapshot");
+                };
+                if snapshot.thread_id.as_str() != *thread_id
+                    || snapshot.chain_root_id != row.chain_root_id
+                {
+                    bail!("thread {thread_id} authoritative subject identity is inconsistent");
+                }
+                Ok(Some(AuthoritativeThreadSubject {
+                    thread_id: snapshot.thread_id,
+                    chain_root_id: snapshot.chain_root_id,
+                    status: snapshot.status,
+                    requested_by: snapshot.requested_by,
+                    project_authority: snapshot.project_authority,
+                    admitted_launch_capsule_hash: snapshot.admitted_launch_capsule_hash,
+                }))
+            })
+            .collect()
     }
 
     pub fn get_thread(&self, thread_id: &str) -> Result<Option<ThreadDetail>> {

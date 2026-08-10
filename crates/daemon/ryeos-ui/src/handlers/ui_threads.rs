@@ -186,10 +186,17 @@ pub async fn handle_inspect(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    crate::seat_auth::require_seat_caller(&ctx, &state)?;
+    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
 
     let req: InspectRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
+
+    crate::thread_authorization::authorize_exact_thread_subjects(
+        &ctx,
+        &state,
+        &caller,
+        &[&req.thread_id],
+    )?;
 
     let Some(thread) = state.threads.get_thread_view(&req.thread_id)? else {
         return Err(HandlerError::NotFound.into());

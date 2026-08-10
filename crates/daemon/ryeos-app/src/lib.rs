@@ -20,6 +20,7 @@ pub mod env_contract;
 pub mod env_probe;
 pub mod event_store_service;
 pub mod event_stream;
+pub mod execution_comparison;
 pub mod execution_identity_probe;
 pub mod execution_policy;
 pub mod execution_provenance;

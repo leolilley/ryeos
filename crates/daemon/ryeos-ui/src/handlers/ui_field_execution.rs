@@ -154,7 +154,7 @@ struct ExecutionAssembler {
 }
 
 pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    crate::seat_auth::require_seat_caller(&ctx, &state)?;
+    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
     let request: ExecutionRequest = serde_json::from_value(params).map_err(|error| {
         HandlerError::BadRequest(format!("invalid field execution request: {error}"))
     })?;
@@ -190,6 +190,13 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         }
         return serde_json::to_value(document).map_err(Into::into);
     };
+
+    crate::thread_authorization::authorize_exact_thread_subjects(
+        &ctx,
+        &state,
+        &caller,
+        &[thread_id],
+    )?;
 
     // Materialize enough source-owned candidates for bounded neighborhood
     // expansion before the generic field layer applies its fact/page bounds.

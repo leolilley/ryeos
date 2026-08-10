@@ -38,7 +38,7 @@ const fn default_max_nodes() -> usize {
 }
 
 pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    crate::seat_auth::require_seat_caller(&ctx, &state)?;
+    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
     let request: Request = serde_json::from_value(params)
         .map_err(|error| HandlerError::BadRequest(format!("invalid request: {error}")))?;
     let Some(thread_id) = request
@@ -53,6 +53,12 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             "truncated": false,
         }));
     };
+    crate::thread_authorization::authorize_exact_thread_subjects(
+        &ctx,
+        &state,
+        &caller,
+        &[thread_id],
+    )?;
     let tree = state.threads.execution_tree(
         thread_id,
         request.max_depth.clamp(1, MAX_DEPTH),

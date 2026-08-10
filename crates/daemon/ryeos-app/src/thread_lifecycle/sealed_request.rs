@@ -1435,7 +1435,6 @@ fn storage_fixture_subject_authority_from_project_authority(
 #[cfg(test)]
 mod authority_tests {
     use super::*;
-    use ryeos_engine::contracts::DelegatedPrincipal;
 
     fn empty_engine() -> Arc<Engine> {
         Arc::new(Engine::new(
