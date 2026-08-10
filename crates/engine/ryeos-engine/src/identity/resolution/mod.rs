@@ -9,6 +9,7 @@ pub mod alias;
 pub mod context;
 pub mod corpus;
 pub mod decl;
+mod definition_identity;
 pub mod steps;
 pub mod types;
 
@@ -19,6 +20,12 @@ pub use corpus::{
     resolve_item_for_corpus_under_project_authority,
 };
 pub use decl::ResolutionStepDecl;
+pub use definition_identity::{
+    DefinitionChangeCategory, DefinitionChangeKind, DefinitionIdentityChange,
+    DefinitionIdentityDiff, DefinitionIdentityDocument, DefinitionValueSummary,
+    DefinitionValueType, MAX_IDENTITY_COORDINATE_BYTES, MAX_IDENTITY_DIFF_ROWS,
+    MAX_IDENTITY_DIFF_VISITS, MAX_PUBLIC_SCALAR_BYTES,
+};
 pub use types::{
     AliasHop, AsLaunchedResolutionDigest, EffectiveDefinitionDigest,
     EffectiveDefinitionDigestError, KindComposedView, ResolutionDigestNode, ResolutionEdge,

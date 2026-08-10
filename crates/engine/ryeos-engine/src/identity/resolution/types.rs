@@ -334,7 +334,18 @@ impl ResolutionOutput {
     pub fn effective_definition_digest(
         &self,
     ) -> Result<EffectiveDefinitionDigest, EffectiveDefinitionDigestError> {
-        self.definition_digest(DigestScope::Effective)
+        self.effective_definition_document()?.digest()
+    }
+
+    /// The exact document whose canonical bytes are hashed by
+    /// [`Self::effective_definition_digest`].
+    pub fn effective_definition_document(
+        &self,
+    ) -> Result<super::DefinitionIdentityDocument, EffectiveDefinitionDigestError> {
+        super::DefinitionIdentityDocument::from_resolution(
+            self,
+            super::definition_identity::DefinitionIdentityScope::Effective,
+        )
     }
 
     /// Identity of the authored program alone, with realized environment
@@ -347,53 +358,17 @@ impl ResolutionOutput {
     pub fn authored_definition_digest(
         &self,
     ) -> Result<EffectiveDefinitionDigest, EffectiveDefinitionDigestError> {
-        self.definition_digest(DigestScope::Authored)
+        self.authored_definition_document()?.digest()
     }
 
-    fn definition_digest(
+    /// The authored-program projection of the canonical identity document.
+    pub fn authored_definition_document(
         &self,
-        scope: DigestScope,
-    ) -> Result<EffectiveDefinitionDigest, EffectiveDefinitionDigestError> {
-        let mut referenced_items = self
-            .referenced_items
-            .iter()
-            .map(EffectiveContributorV1::try_from)
-            .collect::<Result<Vec<_>, _>>()?;
-        referenced_items.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
-
-        let mut reference_edges = self
-            .references_edges
-            .iter()
-            .map(EffectiveReferenceEdgeV1::try_from)
-            .collect::<Result<Vec<_>, _>>()?;
-        reference_edges.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
-
-        // One builder produces both scopes: an authored digest is the same
-        // seed with the realization slot removed, never a second
-        // canonicalizer that could drift from this one.
-        let composed = scope.composed_view(&self.composed);
-        let seed = EffectiveDefinitionSeed {
-            schema: scope.schema_tag(),
-            root: EffectiveContributorV1::try_from(&self.root)?,
-            ancestors: self
-                .ancestors
-                .iter()
-                .map(EffectiveContributorV1::try_from)
-                .collect::<Result<Vec<_>, _>>()?,
-            referenced_items,
-            reference_edges,
-            effective_trust_class: self.effective_trust_class,
-            composed: composed.as_ref(),
-        };
-        let value = serde_json::to_value(seed).map_err(|error| {
-            EffectiveDefinitionDigestError(format!("serialize effective-definition seed: {error}"))
-        })?;
-        let canonical = lillux::cas::canonical_json(&value).map_err(|error| {
-            EffectiveDefinitionDigestError(format!(
-                "canonicalize effective-definition seed: {error}"
-            ))
-        })?;
-        EffectiveDefinitionDigest::parse(lillux::cas::sha256_hex(canonical.as_bytes()))
+    ) -> Result<super::DefinitionIdentityDocument, EffectiveDefinitionDigestError> {
+        super::DefinitionIdentityDocument::from_resolution(
+            self,
+            super::definition_identity::DefinitionIdentityScope::Authored,
+        )
     }
 }
 
@@ -613,201 +588,9 @@ impl std::fmt::Display for EffectiveDefinitionDigestError {
 
 impl std::error::Error for EffectiveDefinitionDigestError {}
 
-/// Which identity a digest names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DigestScope {
-    /// Program plus realized environment: what actually executes.
-    Effective,
-    /// Program alone, for grouping versions across an environment change.
-    Authored,
-}
-
-impl DigestScope {
-    fn schema_tag(self) -> &'static str {
-        match self {
-            Self::Effective => "ryeos.effective_definition.v2",
-            Self::Authored => "ryeos.authored_definition.v2",
-        }
-    }
-
-    /// The composed view this scope commits to.
-    ///
-    /// `Effective` borrows the view unchanged. `Authored` clones it once and
-    /// drops the realization slot, so the two scopes cannot disagree about
-    /// anything except the environment they deliberately differ on.
-    fn composed_view<'a>(
-        self,
-        composed: &'a KindComposedView,
-    ) -> std::borrow::Cow<'a, KindComposedView> {
-        match self {
-            Self::Effective => std::borrow::Cow::Borrowed(composed),
-            Self::Authored => {
-                let mut authored = composed.clone();
-                authored
-                    .derived
-                    .retain(|key, _| key != EXTERNAL_REALIZATIONS_DERIVED_KEY);
-                std::borrow::Cow::Owned(authored)
-            }
-        }
-    }
-}
-
 /// Derived slot carrying the captured external realization set.
 pub const EXTERNAL_REALIZATIONS_DERIVED_KEY: &str =
     ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY;
-
-#[derive(Serialize)]
-#[serde(deny_unknown_fields)]
-struct EffectiveDefinitionSeed<'a> {
-    schema: &'static str,
-    root: EffectiveContributorV1,
-    ancestors: Vec<EffectiveContributorV1>,
-    referenced_items: Vec<EffectiveContributorV1>,
-    reference_edges: Vec<EffectiveReferenceEdgeV1>,
-    effective_trust_class: TrustClass,
-    composed: &'a KindComposedView,
-}
-
-#[derive(Serialize)]
-#[serde(deny_unknown_fields)]
-struct EffectiveContributorV1 {
-    canonical_ref: String,
-    root_raw_content_digest: String,
-    source_space: crate::contracts::ItemSpace,
-    source_root: ItemSourceRoot,
-    trust_class: TrustClass,
-    signer_fingerprint: Option<String>,
-    added_by: ResolutionStepName,
-}
-
-impl EffectiveContributorV1 {
-    fn sort_key(&self) -> (&str, &str, &str, &str, &str, &str, &str, &str) {
-        let (source_root_kind, source_root_name) = source_root_sort_key(&self.source_root);
-        (
-            &self.canonical_ref,
-            &self.root_raw_content_digest,
-            self.source_space.as_str(),
-            source_root_kind,
-            source_root_name,
-            trust_class_name(self.trust_class),
-            self.signer_fingerprint.as_deref().unwrap_or(""),
-            resolution_step_name(self.added_by),
-        )
-    }
-}
-
-impl TryFrom<&ResolvedAncestor> for EffectiveContributorV1 {
-    type Error = EffectiveDefinitionDigestError;
-
-    fn try_from(value: &ResolvedAncestor) -> Result<Self, Self::Error> {
-        require_canonical_ref("canonical ref", &value.resolved_ref)?;
-        require_lower_sha256("root raw content digest", &value.raw_content_digest)?;
-        if matches!(
-            value.trust_class,
-            TrustClass::TrustedBundle | TrustClass::TrustedProject | TrustClass::TrustedNode
-        ) {
-            let signer = value.signer_fingerprint.as_deref().ok_or_else(|| {
-                EffectiveDefinitionDigestError(format!(
-                    "trusted contributor `{}` has no signer fingerprint",
-                    value.resolved_ref
-                ))
-            })?;
-            require_lower_sha256("signer fingerprint", signer)?;
-        } else if let Some(signer) = value.signer_fingerprint.as_deref() {
-            require_lower_sha256("signer fingerprint", signer)?;
-        }
-        Ok(Self {
-            canonical_ref: value.resolved_ref.clone(),
-            root_raw_content_digest: value.raw_content_digest.clone(),
-            source_space: value.source_space,
-            source_root: value.source_root.clone(),
-            trust_class: value.trust_class,
-            signer_fingerprint: value.signer_fingerprint.clone(),
-            added_by: value.added_by,
-        })
-    }
-}
-
-fn source_root_sort_key(value: &ItemSourceRoot) -> (&'static str, &str) {
-    match value {
-        ItemSourceRoot::Project => ("project", ""),
-        ItemSourceRoot::Node => ("node", ""),
-        ItemSourceRoot::Bundle { name } => ("bundle", name),
-        ItemSourceRoot::Search { label } => ("search", label),
-    }
-}
-
-#[derive(Serialize)]
-#[serde(deny_unknown_fields)]
-struct EffectiveReferenceEdgeV1 {
-    from_ref: String,
-    to_ref: String,
-    to_source_space: crate::contracts::ItemSpace,
-    trust_class: TrustClass,
-    added_by: ResolutionStepName,
-}
-
-impl EffectiveReferenceEdgeV1 {
-    fn sort_key(&self) -> (&str, &str, &str, &str, &str) {
-        (
-            &self.from_ref,
-            &self.to_ref,
-            self.to_source_space.as_str(),
-            trust_class_name(self.trust_class),
-            resolution_step_name(self.added_by),
-        )
-    }
-}
-
-impl TryFrom<&ResolutionEdge> for EffectiveReferenceEdgeV1 {
-    type Error = EffectiveDefinitionDigestError;
-
-    fn try_from(value: &ResolutionEdge) -> Result<Self, Self::Error> {
-        require_canonical_ref("reference edge source", &value.from_ref)?;
-        require_canonical_ref("reference edge target", &value.to_ref)?;
-        Ok(Self {
-            from_ref: value.from_ref.clone(),
-            to_ref: value.to_ref.clone(),
-            to_source_space: value.to_source_space,
-            trust_class: value.trust_class,
-            added_by: value.added_by,
-        })
-    }
-}
-
-fn require_canonical_ref(label: &str, value: &str) -> Result<(), EffectiveDefinitionDigestError> {
-    crate::canonical_ref::CanonicalRef::parse(value)
-        .map(|_| ())
-        .map_err(|error| {
-            EffectiveDefinitionDigestError(format!(
-                "effective-definition seed {label} `{value}` is not canonical: {error}"
-            ))
-        })
-}
-
-fn require_lower_sha256(label: &str, value: &str) -> Result<(), EffectiveDefinitionDigestError> {
-    EffectiveDefinitionDigest::parse(value.to_string())
-        .map(|_| ())
-        .map_err(|_| EffectiveDefinitionDigestError(format!("invalid {label}: `{value}`")))
-}
-
-fn trust_class_name(value: TrustClass) -> &'static str {
-    match value {
-        TrustClass::TrustedBundle => "trusted_bundle",
-        TrustClass::TrustedProject => "trusted_project",
-        TrustClass::TrustedNode => "trusted_node",
-        TrustClass::UntrustedProject => "untrusted_project",
-        TrustClass::Unsigned => "unsigned",
-    }
-}
-
-fn resolution_step_name(value: ResolutionStepName) -> &'static str {
-    match value {
-        ResolutionStepName::PipelineInit => "pipeline_init",
-        ResolutionStepName::ResolveExtendsChain => "resolve_extends_chain",
-        ResolutionStepName::ResolveReferences => "resolve_references",
-    }
-}
 
 /// One node (root or extends ancestor) in an as-launched digest: the
 /// resolved ref plus the content digest that pins the exact bytes the
@@ -1266,6 +1049,78 @@ mod tests {
         assert_eq!(
             original.effective_definition_digest().unwrap(),
             reordered.effective_definition_digest().unwrap()
+        );
+    }
+
+    #[test]
+    fn effective_definition_v2_canonical_bytes_are_frozen_before_refactor() {
+        let mut resolution = effective_digest_fixture();
+
+        let mut second_ancestor = resolution.ancestors[0].clone();
+        second_ancestor.requested_id = "graph:test/aaa".to_string();
+        second_ancestor.resolved_ref = "graph:test/aaa".to_string();
+        second_ancestor.raw_content_digest = "d".repeat(64);
+        second_ancestor.source_content_digest = "d".repeat(64);
+        resolution.ancestors.push(second_ancestor);
+
+        let mut second_reference = resolution.referenced_items[0].clone();
+        second_reference.requested_id = "tool:test/alpha".to_string();
+        second_reference.resolved_ref = "tool:test/alpha".to_string();
+        second_reference.raw_content_digest = "e".repeat(64);
+        second_reference.source_content_digest = "e".repeat(64);
+        resolution.referenced_items.push(second_reference);
+
+        let mut second_edge = resolution.references_edges[0].clone();
+        second_edge.to_ref = "tool:test/alpha".to_string();
+        resolution.references_edges.push(second_edge);
+        resolution.composed.derived.insert(
+            EXTERNAL_REALIZATIONS_DERIVED_KEY.to_string(),
+            serde_json::json!([{"manifest_hash": "9".repeat(64)}]),
+        );
+
+        let effective = resolution.effective_definition_document().unwrap();
+        let authored = resolution.authored_definition_document().unwrap();
+        let effective_canonical = effective.canonical_json().unwrap();
+        assert_eq!(
+            effective_canonical,
+            include_str!("fixtures/effective_definition_v2.json").trim_end()
+        );
+        assert_eq!(
+            authored.canonical_json().unwrap(),
+            include_str!("fixtures/authored_definition_v2.json").trim_end()
+        );
+        assert_eq!(
+            resolution.effective_definition_digest().unwrap().as_str(),
+            "51b557e50314dc76d89717daf17366717b2e6e31079d85eee4053513a190d270"
+        );
+        assert_eq!(
+            resolution.authored_definition_digest().unwrap().as_str(),
+            "bc9b992d51ab21470dd50a7d4e6b1443f24397401840bd845858e044bc9e55ab"
+        );
+
+        let mut reordered_sets = resolution.clone();
+        reordered_sets.referenced_items.reverse();
+        reordered_sets.references_edges.reverse();
+        assert_eq!(
+            reordered_sets
+                .effective_definition_document()
+                .unwrap()
+                .canonical_json()
+                .unwrap(),
+            effective_canonical,
+            "referenced contributors and edges retain their exact canonical sort"
+        );
+
+        let mut reordered_ancestors = resolution;
+        reordered_ancestors.ancestors.reverse();
+        assert_ne!(
+            reordered_ancestors
+                .effective_definition_document()
+                .unwrap()
+                .canonical_json()
+                .unwrap(),
+            effective_canonical,
+            "ancestor order remains semantic"
         );
     }
 
