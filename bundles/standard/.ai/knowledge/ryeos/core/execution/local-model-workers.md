@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-10T01:24:43Z:8cd3cb8d3aeb2e17cb18f56c17224b18903fe968da81683532aeed01775c5a84:SVfpkpvUy5TCjctJO5ZcEi1u7L4Kyp5vQ5o9MDy1A8OG6jc4tzFku4ofMFS0TU+vyAsyEUsSVOqAn9oJrWHWDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-10T01:36:58Z:95ac00577412f44dfb8e765327bb1d687dce349bb4197fb300ad92a60beeeadb:GW8dSP8PW7GZp6nncKaoDZDTdl6B/LLURP1dnXTq0tOZ088ONc1amxya+vn/VEBkyrDm2nYDda0d6gaRlPnsDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/execution
 tags: [execution, external-content, persistent-session, local-model, replay]
@@ -141,8 +141,13 @@ environment:
     - CACHELEVEL
     - CCACHE
     - DEV
+    - HOME
+    - HTTPS_PROXY
+    - HTTP_PROXY
     - LANG
     - LC_ALL
+    - LC_CTYPE
+    - NO_PROXY
     - PATH
     - PYTHONHASHSEED
     - PYTHONHOME
@@ -150,8 +155,35 @@ environment:
     - PYTHONSAFEPATH
     - PYTHONDONTWRITEBYTECODE
     - PYTHONUNBUFFERED
+    - RUST_BACKTRACE
+    - RUST_LOG
+    - RYEOSD_CALLBACK_TOKEN
+    - RYEOSD_PROJECT_PATH
+    - RYEOSD_SOCKET_PATH
+    - RYEOSD_THREAD_AUTH_TOKEN
+    - RYEOSD_THREAD_ID
+    - RYEOS_APP_ROOT
+    - RYEOS_CHAIN_ROOT_ID
+    - RYEOS_CHECKPOINT_DIR
     - RYEOS_EXTERNAL_REALIZATIONS
+    - RYEOS_ITEM_KIND
+    - RYEOS_ITEM_PATH
+    - RYEOS_ITEM_REF
+    - RYEOS_NATIVE_ASYNC
+    - RYEOS_ORIGIN_SITE_ID
+    - RYEOS_PROJECT_PATH
+    - RYEOS_PROJECT_ROOT
+    - RYEOS_PYTHON
+    - RYEOS_RESUME
     - RYEOS_SESSION_FD
+    - RYEOS_SITE_ID
+    - RYEOS_THREAD_ID
+    - SSL_CERT_DIR
+    - SSL_CERT_FILE
+    - TZ
+    - http_proxy
+    - https_proxy
+    - no_proxy
 limits:
   open_files: 1024
   stdout_bytes: 8388608
@@ -171,9 +203,14 @@ ryeos node isolation-apply /path/to/isolation.yaml
 Isolation is the separate fixed bootstrap policy rather than a signed
 node-config section. The command strictly validates and atomically publishes
 it; backend resolution and artifact inspection remain doctor/startup admission
-steps. The shipped worker additionally declares `linux` and `x86_64` as its
-supported node substrate; admission checks that constraint before capturing
-content or contacting a process.
+steps. The environment list is the current generic RyeOS base, engine, and
+protocol vocabulary plus this worker's signed bindings. Add an
+application-specific authorized secret name deliberately when that application
+needs one; do not replace the ceiling with ambient passthrough. The captured
+persistent-session plan is narrower again and contains only its sealed authored
+and daemon-owned bindings. The shipped worker additionally declares `linux`
+and `x86_64` as its supported node substrate; admission checks that constraint
+before capturing content or contacting a process.
 
 ## Exact acceptance realization
 
