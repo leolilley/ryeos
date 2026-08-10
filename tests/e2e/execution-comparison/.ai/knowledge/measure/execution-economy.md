@@ -1,4 +1,3 @@
-<!-- ryeos:signed:2026-08-10T10:33:53Z:98f5e09f55ce7cab1666a88ffa68c2a5e9536fc1e5e3b6ae0e2f94a847d190b7:RpYj5+u77CkIP9O4yvvEo7uefRExhxuufomqGKnNvtrkM6Ba+Al09RXZvjIylSM18cvanPUAifUKI10cNJb5CQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 kind: knowledge
 id: measure/execution-economy

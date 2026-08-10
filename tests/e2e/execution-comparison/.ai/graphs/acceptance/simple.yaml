@@ -1,0 +1,23 @@
+version: "1.0.0"
+category: acceptance
+description: "One deterministic zero-effect graph step for generic execution comparison acceptance"
+requires:
+  capabilities:
+    declared: []
+config:
+  start: done
+  config_schema:
+    type: object
+    required: [label]
+    properties:
+      label: { type: string }
+  max_steps: 1
+  on_error: fail
+  nodes:
+    done:
+      node_type: return
+      output:
+        label: "${inputs.label}"
+        definition_ref: "${run.definition_ref}"
+        effective_definition_digest: "${run.effective_definition_digest}"
+        graph_run_id: "${run.graph_run_id}"

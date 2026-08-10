@@ -77,10 +77,9 @@ logs/
 
 ## User AI spaces (these are user-specific, not part of the system)
 # System bundle .ai/ dirs are INCLUDED
-# Project .ai/knowledge/ and .ai/graphs/ are INCLUDED (repository-authored content)
+# Project .ai/knowledge/ is INCLUDED (project documentation)
 /.ai/*
 !.ai/knowledge/
-!.ai/graphs/
 */.ai/
 !bundles/.ai/
 !bundles/.ai/**

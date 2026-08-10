@@ -1,4 +1,3 @@
-# ryeos:signed:2026-08-10T10:33:54Z:c518ac0ac921999a4a94d08a5d49d69c69abb377e90a06972878f0a394feb6b1:s2eRR6aaHHwnvqFGAW0XI/6WY+tsOf/fd6Khnaei2x0Ad0c9JlLV8fGcHhTUpjHCmEv6u17bDEKNtXeMu6GtDA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 version: "1.0.0"
 category: measure
 description: "Evaluate one terminal graph thread under the signed execution-economy frame"
