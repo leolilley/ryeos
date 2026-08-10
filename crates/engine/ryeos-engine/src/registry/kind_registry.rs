@@ -2579,10 +2579,7 @@ fn validate_execution_external_content_decl(
     }
     let mut seen = std::collections::BTreeSet::new();
     for root in &declaration.allowed_roots {
-        if !matches!(
-            root.as_str(),
-            "project_ai" | "project_files" | "node_files" | "bundle:own"
-        ) {
+        if !matches!(root.as_str(), "project_files" | "node_files" | "bundle:own") {
             return Err(EngineError::SchemaLoaderError {
                 reason: format!(
                     "{display}: execution.external_content.allowed_roots contains unsupported root class `{root}`"
@@ -5060,7 +5057,7 @@ metadata:
     fn external_content_contract_loads_from_a_signed_schema() {
         let registry = load_external_content_schema(&[
             "realization_derived: effective_external_realizations",
-            "allowed_roots: [\"project_ai\", \"bundle:own\"]",
+            "allowed_roots: [\"project_files\", \"bundle:own\"]",
             "max_declarations: 4",
         ])
         .unwrap();
@@ -5073,7 +5070,7 @@ metadata:
             contract.realization_derived,
             "effective_external_realizations"
         );
-        assert_eq!(contract.allowed_roots, ["project_ai", "bundle:own"]);
+        assert_eq!(contract.allowed_roots, ["project_files", "bundle:own"]);
         assert_eq!(contract.max_declarations, 4);
     }
 
@@ -5081,7 +5078,7 @@ metadata:
     fn external_content_contract_rejects_a_foreign_derived_slot() {
         let error = load_external_content_schema(&[
             "realization_derived: some_other_slot",
-            "allowed_roots: [\"project_ai\"]",
+            "allowed_roots: [\"project_files\"]",
             "max_declarations: 4",
         ])
         .unwrap_err();
@@ -5096,7 +5093,7 @@ metadata:
         for bad in ["max_declarations: 0", "max_declarations: 9"] {
             let error = load_external_content_schema(&[
                 "realization_derived: effective_external_realizations",
-                "allowed_roots: [\"project_ai\"]",
+                "allowed_roots: [\"project_files\"]",
                 bad,
             ])
             .unwrap_err();
@@ -5138,7 +5135,7 @@ metadata:
     fn external_content_contract_refuses_unknown_fields() {
         let error = load_external_content_schema(&[
             "realization_derived: effective_external_realizations",
-            "allowed_roots: [\"project_ai\"]",
+            "allowed_roots: [\"project_files\"]",
             "max_declarations: 4",
             "surprise: true",
         ])

@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-05T07:04:40Z:41d19203c7ebec256a423d835d1151bba1646b23b86c85c7a44e2c548951bca1:xD52su/ZmcKSmQ7DPfzN2PTR0vPnFpdHCOEf6/3EbJ2U4nrdlN7591ooq5Ig6E9uQUf6edTiQU4mmcdWSzHiCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-10T11:19:11Z:3024c3aac89893eb277c24450328d0593314a88efb5484305baee691e34f50f6:/UnkKdBmRRHNT9wjYXlLpXmLIRg+6bnlamR1lzWkPzeLXHJt71EWB6itO62yuIbyc7QgBzwXtSTn+R2JmOVOAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, directory, layout, filesystem]
-version: "1.1.0"
+version: "1.2.0"
 description: >
   The exact .ai/ directory layout — bundle structure and the daemon
   state directory, and how they relate.
@@ -12,6 +12,13 @@ description: >
 
 Rye OS uses `.ai/` directories across two spaces. Each space has a
 different layout serving different purposes.
+
+The project `.ai/` tree is an authored RyeOS control and item surface, not a
+general dependency directory. Opaque runtimes, datasets, simulator closures,
+model files, and other content trees live outside `.ai/`. Executable items
+refer to those bytes through `external_content` with a `project_files` locator
+and an exact admitted manifest digest. This keeps kind coverage meaningful and
+prevents arbitrary dependency files from being mistaken for RyeOS items.
 
 ## Bundle Layout (Core)
 
