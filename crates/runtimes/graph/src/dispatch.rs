@@ -228,24 +228,12 @@ pub async fn dispatch_action(
     // failure rather than a silent `null`. Only success peels to the bare
     // leaf value; a leaf that still requests inline continuation
     // (`continuation_id` at its top level) is then rejected loudly.
-    // The `thread` snapshot is the spawned child (a native directive/sub-graph
-    // child); capture its id BEFORE classifying `result` so the walker can emit a
-    // `child_thread_spawned` event. Empty/absent for subprocess/tool/bare leaves,
-    // which spawn no child thread.
-    let callback_child_thread_id = response
-        .thread
-        .get("thread_id")
-        .or_else(|| response.thread.get("id"));
-    let (child_thread_id, child_thread_id_error) = match callback_child_thread_id {
-        None => (None, None),
-        Some(Value::String(thread_id)) => {
-            match ryeos_runtime::validate_runtime_thread_id(thread_id) {
-                Ok(()) => (Some(thread_id.clone()), None),
-                Err(error) => (None, Some(error)),
-            }
-        }
-        Some(_) => (None, Some("runtime thread_id is not a string".to_string())),
-    };
+    // A native child snapshot identifies a spawned directive/sub-graph child;
+    // capture its id BEFORE classifying `result` so the walker can emit a
+    // `child_thread_spawned` event. In-process service envelopes instead carry
+    // invocation/audit metadata and are explicitly excluded below.
+    let (child_thread_id, child_thread_id_error) =
+        callback_child_thread_identity(&response.thread);
 
     response
         .dispatch
@@ -343,6 +331,40 @@ pub async fn dispatch_action(
             }
             Ok(ActionOutcome::Success(success))
         }
+    }
+}
+
+/// Extract the identity of a native child launched by one callback action.
+///
+/// In-process services also return a `thread` object, but its `svc-*`
+/// identity is invocation/audit metadata rather than a spawned runtime child.
+/// The service envelope carries the explicit `recorded` discriminator, so it
+/// must never produce a graph lineage edge. Native child snapshots have no
+/// such discriminator and retain the strict runtime thread-id contract.
+fn callback_child_thread_identity(thread: &Value) -> (Option<String>, Option<String>) {
+    match thread.get("recorded") {
+        Some(Value::Bool(_)) => return (None, None),
+        Some(_) => {
+            return (
+                None,
+                Some("service invocation recorded marker is not a boolean".to_string()),
+            );
+        }
+        None => {}
+    }
+
+    let callback_child_thread_id = thread
+        .get("thread_id")
+        .or_else(|| thread.get("id"));
+    match callback_child_thread_id {
+        None => (None, None),
+        Some(Value::String(thread_id)) => {
+            match ryeos_runtime::validate_runtime_thread_id(thread_id) {
+                Ok(()) => (Some(thread_id.clone()), None),
+                Err(error) => (None, Some(error)),
+            }
+        }
+        Some(_) => (None, Some("runtime thread_id is not a string".to_string())),
     }
 }
 
@@ -1111,6 +1133,45 @@ mod tests {
             replayed_from: None,
         })
         .unwrap()
+    }
+
+    #[test]
+    fn service_invocation_metadata_is_not_a_spawned_child() {
+        for recorded in [false, true] {
+            let (child, error) = callback_child_thread_identity(&json!({
+                "thread_id": "svc-1786320000000-deadbeef",
+                "recorded": recorded,
+                "kind": "service_run",
+            }));
+            assert!(child.is_none());
+            assert!(error.is_none());
+        }
+    }
+
+    #[test]
+    fn service_invocation_metadata_requires_a_boolean_discriminator() {
+        let (child, error) = callback_child_thread_identity(&json!({
+            "thread_id": "svc-1786320000000-deadbeef",
+            "recorded": "false",
+        }));
+        assert!(child.is_none());
+        assert_eq!(
+            error.as_deref(),
+            Some("service invocation recorded marker is not a boolean")
+        );
+    }
+
+    #[test]
+    fn native_child_metadata_retains_strict_runtime_identity() {
+        let (child, error) =
+            callback_child_thread_identity(&json!({"thread_id": "T-child_1"}));
+        assert_eq!(child.as_deref(), Some("T-child_1"));
+        assert!(error.is_none());
+
+        let (child, error) =
+            callback_child_thread_identity(&json!({"thread_id": "svc-not-a-child"}));
+        assert!(child.is_none());
+        assert_eq!(error.as_deref(), Some("runtime thread_id is invalid"));
     }
 
     struct MockClient {
