@@ -79,7 +79,7 @@ fn plant_permitted_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Res
     // the cap shape mirrors
     // `enforce_callback_caps` in runtime_dispatch.rs — `ryeos.execute.<kind>.<bare_id>`
     // where the bare id keeps its `/` separators (canonical Capability format).
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 requires:
   capabilities:
@@ -536,6 +536,59 @@ async fn graph_action_completes_with_permitted_cap() {
         "graph:flow",
         "greet",
         Some("ok"),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pinned_graph_action_borrows_parent_workspace_after_tool_thread_birth() {
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        plant_vault_with_zen_key(state_path)?;
+        Ok(())
+    };
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_echo_tool(project.path()).expect("plant echo tool");
+    plant_permitted_graph(project.path(), &fixture.publisher).expect("plant permitted graph");
+
+    let (status, body) = h
+        .post_json(
+            "/execute",
+            serde_json::json!({
+                "item_ref": "graph:flow",
+                "ref_bindings": {},
+                "project_path": project.path(),
+                "parameters": {},
+                "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_pinned_capture(
+                    ryeos_app::execution_policy::ExecutionResponse::Wait,
+                ),
+            }),
+        )
+        .await
+        .expect("execute pinned graph action");
+    assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
+    assert_eq!(
+        body.pointer("/result/status").and_then(Value::as_str),
+        Some("completed"),
+        "pinned graph action must complete without a phantom runtime-pin subject: {body:#}"
+    );
+    assert_eq!(
+        body.pointer("/result/success").and_then(Value::as_bool),
+        Some(true),
+        "body={body:#}"
+    );
+
+    let graph_thread = graph_thread_id(&body, "pinned graph action");
+    let events = persisted_thread_events(&h.state_path, graph_thread);
+    assert!(
+        events.iter().any(|(event_type, payload)| {
+            event_type == "tool_call_result"
+                && payload.get("status").and_then(Value::as_str) == Some("ok")
+        }),
+        "the born tool child must return through the graph callback: {events:#?}"
     );
 }
 

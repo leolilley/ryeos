@@ -617,9 +617,7 @@ struct PreparedCasContext {
 fn prepare_cas_context(
     state: &AppState,
     provenance: &ExecutionProvenance,
-    _origin_site: &str,
     thread_id: &str,
-    launch_owner: &ryeos_app::runtime_db::LaunchOwner,
     guard: &mut ExecutionGuard,
 ) -> Result<PreparedCasContext> {
     let prepared_result: Result<PreparedCasContext> = match provenance {
@@ -742,18 +740,22 @@ fn prepare_cas_context(
             })
         }
     };
-    let prepared = prepared_result?;
-    bind_workspace_if_unbound(state, provenance, thread_id, launch_owner)?;
-    Ok(prepared)
+    prepared_result
 }
 
-fn bind_workspace_if_unbound(
+/// Bind a daemon-owned workspace only after its durable thread birth.
+///
+/// Callback children borrow their parent's operational workspace. They may
+/// execute within it, but must never adopt its journal row or independently
+/// drive its create/freeze/destroy lifecycle.
+pub(crate) fn bind_owned_workspace_after_thread_birth(
     state: &AppState,
     provenance: &ExecutionProvenance,
     thread_id: &str,
-    launch_owner: &ryeos_app::runtime_db::LaunchOwner,
+    launch_owner: &str,
 ) -> Result<()> {
-    if !provenance.project_authority().requires_project_foldback() {
+    if provenance.is_borrowed_child() || !provenance.project_authority().requires_project_foldback()
+    {
         return Ok(());
     }
     let Some(lifeline) = provenance.workspace_lifeline() else {
@@ -769,17 +771,16 @@ fn bind_workspace_if_unbound(
     let Some(record) = state.state_store.execution_workspace(workspace_id)? else {
         anyhow::bail!("execution workspace journal row is missing: {workspace_id}");
     };
-    let launch_owner_json = lillux::canonical_json(&serde_json::to_value(launch_owner)?)?;
     if record.state == WorkspaceState::Constructing
         && (record.thread_id.is_none()
             || (record.thread_id.as_deref() == Some(thread_id)
-                && record.launch_owner.as_deref() == Some(launch_owner_json.as_str())))
+                && record.launch_owner.as_deref() == Some(launch_owner)))
     {
         let layout = super::workspace::WorkspaceLayout::from_root(root.clone());
         state.state_store.claim_execution_workspace_construction(
             workspace_id,
             thread_id,
-            &launch_owner_json,
+            launch_owner,
         )?;
         let (backend_id, backend_version) = state
             .isolation
@@ -788,7 +789,7 @@ fn bind_workspace_if_unbound(
         state.state_store.prepare_execution_workspace_backend(
             workspace_id,
             thread_id,
-            &launch_owner_json,
+            launch_owner,
             backend_id,
             backend_version,
         )?;
@@ -797,7 +798,7 @@ fn bind_workspace_if_unbound(
             .workspace_lifecycle(ryeos_engine::isolation::WorkspaceLifecycleInvocation {
                 operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create,
                 workspace_id,
-                launch_owner: &launch_owner_json,
+                launch_owner,
                 lower_snapshot: &record.lower_snapshot,
                 lower_path: &layout.lower,
                 upper_path: &layout.upper,
@@ -811,7 +812,7 @@ fn bind_workspace_if_unbound(
             .bind_execution_workspace(ryeos_app::runtime_db::WorkspaceBinding {
                 workspace_id,
                 thread_id,
-                launch_owner: Some(&launch_owner_json),
+                launch_owner: Some(launch_owner),
                 backend_id: Some(&created.backend_id),
                 backend_version: Some(&created.backend_version),
                 pinned_root_identities: Some(&pinned_root_identities),
@@ -819,7 +820,7 @@ fn bind_workspace_if_unbound(
             })?;
     } else if record.state != WorkspaceState::Ready
         || record.thread_id.as_deref() != Some(thread_id)
-        || record.launch_owner.as_deref() != Some(launch_owner_json.as_str())
+        || record.launch_owner.as_deref() != Some(launch_owner)
     {
         anyhow::bail!(
             "execution workspace {workspace_id} cannot be adopted from state {}",
@@ -827,6 +828,51 @@ fn bind_workspace_if_unbound(
         );
     }
     Ok(())
+}
+
+/// Activate an owner-bound workspace only after the held process identity is
+/// durable. Borrowed children pass `owns_workspace = false` and leave the
+/// parent's workspace lifecycle untouched.
+pub(crate) fn activate_workspace_after_process_attachment(
+    state: &AppState,
+    workspace_lifeline: Option<&Arc<TempDirGuard>>,
+    owns_workspace: bool,
+    thread_id: &str,
+    launch_owner: &str,
+    process_identity: &ryeos_app::process::ExecutionProcessIdentity,
+) -> Result<()> {
+    if !owns_workspace {
+        return Ok(());
+    }
+    let Some(root) = workspace_lifeline.and_then(|guard| guard.path()) else {
+        anyhow::bail!("owned execution workspace was released before process attachment");
+    };
+    let layout = super::workspace::WorkspaceLayout::from_root(root.clone());
+    if !layout.lower.is_dir() {
+        anyhow::bail!("owned execution workspace has no materialized lower directory");
+    }
+    let workspace_id = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("workspace id is not valid UTF-8"))?;
+    let record = state
+        .state_store
+        .execution_workspace(workspace_id)?
+        .ok_or_else(|| anyhow::anyhow!("owned execution workspace journal row is missing"))?;
+    if record.thread_id.as_deref() != Some(thread_id)
+        || record.launch_owner.as_deref() != Some(launch_owner)
+    {
+        anyhow::bail!("execution workspace {workspace_id} is not owned by this launch");
+    }
+    let identity = serde_json::to_string(process_identity)?;
+    state.state_store.transition_execution_workspace_owned(
+        workspace_id,
+        thread_id,
+        launch_owner,
+        &[WorkspaceState::Ready],
+        WorkspaceState::Active,
+        Some(&identity),
+    )
 }
 
 fn transition_owned_workspace(
@@ -1182,6 +1228,8 @@ struct PendingAttachParams<'a> {
     launch_metadata: &'a ryeos_app::launch_metadata::RuntimeLaunchMetadata,
     failed_outcome_code: &'a str,
     launch_owner: &'a str,
+    workspace_lifeline: Option<&'a Arc<TempDirGuard>>,
+    owns_workspace: bool,
 }
 
 #[derive(Debug)]
@@ -1204,6 +1252,8 @@ fn attach_pending_process(
         launch_metadata,
         failed_outcome_code,
         launch_owner,
+        workspace_lifeline,
+        owns_workspace,
     } = params;
     if let Err(err) = state.threads.attach_new_process_owned(
         &ThreadAttachProcessParams {
@@ -1223,40 +1273,14 @@ fn attach_pending_process(
             error: err,
         });
     }
-    let workspace_activation = (|| -> Result<()> {
-        let Some(resume) = launch_metadata.resume_context.as_ref() else {
-            return Ok(());
-        };
-        let ryeos_engine::contracts::ProjectContext::LocalPath { path } = &resume.project_context
-        else {
-            return Ok(());
-        };
-        let Ok(layout) = super::workspace::WorkspaceLayout::from_lower(path) else {
-            return Ok(());
-        };
-        let workspace_id = layout
-            .root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| anyhow::anyhow!("workspace id is not valid UTF-8"))?;
-        let identity = serde_json::to_string(process_identity)?;
-        let record = state
-            .state_store
-            .execution_workspace(workspace_id)?
-            .ok_or_else(|| anyhow::anyhow!("workspace journal row is missing"))?;
-        let launch_owner = record
-            .launch_owner
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("workspace has no launch owner"))?;
-        state.state_store.transition_execution_workspace_owned(
-            workspace_id,
-            thread_id,
-            launch_owner,
-            &[WorkspaceState::Ready],
-            WorkspaceState::Active,
-            Some(&identity),
-        )
-    })();
+    let workspace_activation = activate_workspace_after_process_attachment(
+        state,
+        workspace_lifeline,
+        owns_workspace,
+        thread_id,
+        launch_owner,
+        process_identity,
+    );
     if let Err(error) = workspace_activation {
         return Err(PendingAttachFailure {
             operation: "activate workspace",
@@ -2372,14 +2396,7 @@ pub async fn run_and_wait(
         pre_policy_hash,
         resume_snapshot_hash,
         mut tree_publication,
-    } = prepare_cas_context(
-        &state,
-        &params.provenance,
-        &params.resolved.origin_site_id,
-        &thread_id,
-        launch_claim.owner(),
-        &mut guard,
-    )?;
+    } = prepare_cas_context(&state, &params.provenance, &thread_id, &mut guard)?;
     verify_fresh_root_admission(&params).context("revalidate exact admitted waiting root")?;
     let wait_project_authority = params.provenance.project_authority().clone();
     let wait_isolation_live_access_authority =
@@ -2500,6 +2517,13 @@ pub async fn run_and_wait(
         .inspect_err(|_e| {
             guard.cleanup();
         })?;
+    guard.track_thread(&created.thread_id);
+    bind_owned_workspace_after_thread_birth(
+        &state,
+        &params.provenance,
+        &created.thread_id,
+        &wait_launch_owner,
+    )?;
     drop(wait_cas_guard);
     // The row and its capsule are durable, so realization roots are
     // capsule-reachable; retire the staging lease. Failure before this point
@@ -2509,7 +2533,6 @@ pub async fn run_and_wait(
             anyhow::anyhow!("publish direct external realization roots: {error:#}")
         })?;
     }
-    guard.track_thread(&created.thread_id);
     if let Some(parent_thread_id) = params.parent_thread_id.as_deref() {
         let inherited_stop = match state.state_store.record_child_link(
             parent_thread_id,
@@ -2647,7 +2670,9 @@ pub async fn run_and_wait(
     let thread_state_dir =
         ryeos_app::launch_metadata::daemon_thread_state_dir(&state.config.app_root, &tid);
     let wait_snapshot = resume_snapshot_hash.clone();
-    let wait_requires_foldback = wait_project_authority.requires_project_foldback();
+    let wait_owns_workspace = !params.provenance.is_borrowed_child()
+        && wait_project_authority.requires_project_foldback();
+    let wait_requires_foldback = wait_owns_workspace;
     let wait_records_terminal_generation =
         wait_project_authority.records_terminal_project_generation();
     let wait_state_root = params
@@ -2797,6 +2822,8 @@ pub async fn run_and_wait(
         launch_metadata: &spawned.launch_metadata,
         failed_outcome_code: "attach_failed",
         launch_owner: &wait_launch_owner,
+        workspace_lifeline: guard.temp_dir.as_ref(),
+        owns_workspace: wait_owns_workspace,
     }) {
         let failure = abort_and_settle_pending_attach_failure(
             &state,
@@ -3171,14 +3198,7 @@ pub async fn run_detached(
         pre_policy_hash,
         resume_snapshot_hash,
         tree_publication,
-    } = prepare_cas_context(
-        &state,
-        &params.provenance,
-        &params.resolved.origin_site_id,
-        &thread_id,
-        launch_claim.owner(),
-        &mut guard,
-    )?;
+    } = prepare_cas_context(&state, &params.provenance, &thread_id, &mut guard)?;
     verify_fresh_root_admission(&params).context("revalidate exact admitted detached root")?;
     let bg_project_authority = params.provenance.project_authority().clone();
     let bg_isolation_live_access_authority = params.provenance.isolation_live_access_authority()?;
@@ -3227,6 +3247,13 @@ pub async fn run_detached(
         .inspect_err(|_e| {
             guard.cleanup();
         })?;
+    guard.track_thread(&created.thread_id);
+    bind_owned_workspace_after_thread_birth(
+        &state,
+        &params.provenance,
+        &created.thread_id,
+        &detached_launch_owner,
+    )?;
     drop(bg_cas_guard);
     // Row and capsule are durable: realization roots are capsule-reachable,
     // so retire the staging lease before scheduling the detached task.
@@ -3235,7 +3262,6 @@ pub async fn run_detached(
             anyhow::anyhow!("publish direct external realization roots: {error:#}")
         })?;
     }
-    guard.track_thread(&created.thread_id);
     if let Some(parent_thread_id) = params.parent_thread_id.as_deref() {
         let inherited_stop = match state.state_store.record_child_link(
             parent_thread_id,
@@ -3606,7 +3632,8 @@ async fn dispatch_detached_bg_task(
     let vault_for_spawn = bg_vault;
     let protocol_env_for_spawn = bg_protocol_env_bindings;
     let snap_for_spawn = bg_resume_snapshot_hash.clone();
-    let bg_requires_foldback = bg_project_authority.requires_project_foldback();
+    let bg_requires_foldback =
+        !bg_skip_resume_snapshot_pin && bg_project_authority.requires_project_foldback();
     let bg_records_terminal_generation = bg_project_authority.records_terminal_project_generation();
     let state_root_for_spawn = bg_state_root;
     let isolation_for_spawn = bg_state.isolation.clone();
@@ -3859,6 +3886,8 @@ async fn dispatch_detached_bg_task(
         launch_metadata: &spawned.launch_metadata,
         failed_outcome_code: attach_outcome_code,
         launch_owner: &launch_owner,
+        workspace_lifeline: bg_temp_dir.as_ref(),
+        owns_workspace: bg_requires_foldback,
     }) {
         let failure = abort_and_settle_pending_attach_failure(
             &bg_state,
@@ -4791,14 +4820,7 @@ async fn run_existing_recovered_thread(
         pre_policy_hash,
         resume_snapshot_hash,
         tree_publication,
-    } = match prepare_cas_context(
-        &state,
-        &params.provenance,
-        &params.resolved.origin_site_id,
-        &thread_id,
-        resume_claim.owner(),
-        &mut guard,
-    ) {
+    } = match prepare_cas_context(&state, &params.provenance, &thread_id, &mut guard) {
         Ok(ctx) => ctx,
         Err(err) => {
             guard.fail_thread("cas_context_failed");
@@ -4806,6 +4828,13 @@ async fn run_existing_recovered_thread(
             return Err(ResumeError::CasContext(err));
         }
     };
+    bind_owned_workspace_after_thread_birth(
+        &state,
+        &params.provenance,
+        &thread_id,
+        &resume_launch_owner,
+    )
+    .map_err(ResumeError::CasContext)?;
 
     // Update plan_context to point at the materialized path so the
     // engine resolves item refs from there.

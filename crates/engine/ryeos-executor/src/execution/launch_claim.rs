@@ -77,10 +77,6 @@ impl ThreadLaunchClaim {
         }
     }
 
-    pub(crate) fn owner(&self) -> &ryeos_app::runtime_db::LaunchOwner {
-        &self.owner
-    }
-
     pub(crate) fn canonical_owner(&self) -> anyhow::Result<String> {
         Ok(lillux::canonical_json(&serde_json::to_value(&self.owner)?)?)
     }

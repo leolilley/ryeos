@@ -382,7 +382,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         let workspace_lifeline = context.temp_dir.clone().ok_or_else(|| {
             anyhow::anyhow!("follow: pinned admission context has no workspace lifeline")
         })?;
-        cap.provenance.clone_for_pinned_child_workspace(
+        cap.provenance.root_for_pinned_child_workspace(
             context.request_engine.clone(),
             context.pinned_materialization.clone().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -1135,7 +1135,7 @@ async fn prepare_follow_children(
         }
         let existing_row = existing_created_indices.contains(&item_index);
         let mut fresh_request = None;
-        let meta = if existing_row {
+        let mut meta = if existing_row {
             persisted_launch_metadata
                 .get(&item_index)
                 .cloned()
@@ -1265,7 +1265,7 @@ async fn prepare_follow_children(
             let child_lifeline = child_context
                 .temp_dir
                 .ok_or_else(|| anyhow::anyhow!("follow: child workspace has no lifecycle guard"))?;
-            cap.provenance.clone_for_pinned_child_workspace(
+            cap.provenance.root_for_pinned_child_workspace(
                 child_context.request_engine,
                 child_context.pinned_materialization.ok_or_else(|| {
                     anyhow::anyhow!(
@@ -1280,6 +1280,34 @@ async fn prepare_follow_children(
         };
         if launch_provenance.project_authority() != child_project_authority {
             bail!("follow: child launch provenance differs from sealed child authority");
+        }
+        if let Some(cohort_request) = fresh_request.take() {
+            let runtime_ref = meta
+                .resume_context
+                .as_ref()
+                .and_then(|resume| resume.runtime_ref.as_deref())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "follow: fresh child resume has no runtime at index {item_index}"
+                    )
+                })?;
+            let launch_request = readmit_fresh_follow_child_for_launch(
+                state,
+                child,
+                &cohort_request,
+                runtime_ref,
+                &launch_provenance,
+            )
+            .with_context(|| {
+                format!(
+                    "follow: bind fresh child admission to launch materialization at index {item_index}"
+                )
+            })?;
+            meta.resume_context
+                .as_mut()
+                .expect("fresh follow metadata was constructed with a resume context")
+                .project_context = launch_request.plan_context.project_context.clone();
+            fresh_request = Some(launch_request);
         }
         let prepared = if existing_row
             || matches!(
@@ -1314,6 +1342,132 @@ async fn prepare_follow_children(
         child_metadata,
         prepared_children,
     })
+}
+
+/// Re-admit a fresh follow root against the exact materialization it will
+/// execute from. Cohort admission proves that every requested child is valid
+/// against the selected immutable generation before identities are allocated;
+/// this second use of the same admission implementation binds the executable
+/// request snapshot to the per-root materialization that the launcher retains.
+/// Materialization identity is never weakened to path or snapshot equivalence.
+fn readmit_fresh_follow_child_for_launch(
+    state: &AppState,
+    child: &ryeos_runtime::callback::FollowChildSpec,
+    cohort_request: &ResolvedExecutionRequest,
+    cohort_runtime_ref: &str,
+    launch_provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+) -> Result<ResolvedExecutionRequest> {
+    let engine = launch_provenance.request_engine();
+    let child_ref = CanonicalRef::parse(&child.item_ref)
+        .with_context(|| format!("follow: invalid admitted child ref '{}'", child.item_ref))?;
+    let runtime = engine
+        .runtimes
+        .resolve_for_launch(None, &child_ref.kind)
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "follow: child kind '{}' has no managed runtime in its launch materialization: {error}",
+                child_ref.kind
+            )
+        })?;
+    if runtime.canonical_ref.to_string() != cohort_runtime_ref {
+        bail!("follow: child runtime changed between cohort admission and launch materialization");
+    }
+
+    let project_context = match launch_provenance.project_authority() {
+        ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => ProjectContext::None,
+        ryeos_state::objects::ExecutionProjectAuthority::LiveProject { .. }
+        | ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. } => {
+            ProjectContext::LocalPath {
+                path: launch_provenance.effective_path().to_path_buf(),
+            }
+        }
+    };
+    let mut plan_context = cohort_request.plan_context.clone();
+    plan_context.project_context = project_context;
+    plan_context.subject_resolution_authority = launch_provenance.subject_resolution_authority();
+    let project_binding = ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
+        engine,
+        &plan_context,
+        launch_provenance,
+    )?;
+    let preflight = ryeos_app::thread_lifecycle::preflight_root_execution(
+        ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
+            engine,
+            plan_context,
+            project_binding,
+            node_history_policy: &state.node_history_policy,
+            item_ref: &child.item_ref,
+            launch_mode: "detached",
+            parameters: child.parameters.clone(),
+            ref_bindings: child.ref_bindings.clone(),
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+            creates_chain_root: true,
+        },
+    )?;
+    let launch_request = preflight.root_admission.execution_request(
+        ryeos_app::thread_lifecycle::RootExecutionRoute::ManagedRuntimeForKind(
+            &runtime.canonical_ref,
+        ),
+        "detached".to_string(),
+        child.parameters.clone(),
+    )?;
+    ensure_follow_admission_semantics_match(cohort_request, &launch_request)?;
+    Ok(launch_request)
+}
+
+/// The two admissions intentionally differ in their operational workspace
+/// binding. Everything that can change executable meaning, history policy, or
+/// invocation identity must remain exact across that relocation.
+fn ensure_follow_admission_semantics_match(
+    cohort: &ResolvedExecutionRequest,
+    launch: &ResolvedExecutionRequest,
+) -> Result<()> {
+    if cohort.kind != launch.kind
+        || cohort.item_ref != launch.item_ref
+        || cohort.executor_ref != launch.executor_ref
+        || cohort.launch_mode != launch.launch_mode
+        || cohort.current_site_id != launch.current_site_id
+        || cohort.origin_site_id != launch.origin_site_id
+        || cohort.target_site_id != launch.target_site_id
+        || cohort.requested_by != launch.requested_by
+        || cohort.usage_subject != launch.usage_subject
+        || cohort.usage_subject_asserted_by != launch.usage_subject_asserted_by
+        || cohort.parameters != launch.parameters
+        || cohort.ref_bindings != launch.ref_bindings
+        || cohort.root_raw_content_digest != launch.root_raw_content_digest
+        || cohort.resolved_item.canonical_ref != launch.resolved_item.canonical_ref
+        || cohort.resolved_item.kind != launch.resolved_item.kind
+        || cohort.resolved_item.content_hash != launch.resolved_item.content_hash
+    {
+        bail!(
+            "follow: child executable identity changed between cohort admission and launch materialization"
+        );
+    }
+    let cohort_admission = cohort
+        .root_admission
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("follow: cohort child request has no root admission"))?;
+    let launch_admission = launch
+        .root_admission
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("follow: launch child request has no root admission"))?;
+    let cohort_digest = cohort_admission
+        .resolution_output()
+        .effective_definition_digest()?;
+    let launch_digest = launch_admission
+        .resolution_output()
+        .effective_definition_digest()?;
+    if cohort_digest != launch_digest
+        || cohort_admission.thread_profile() != launch_admission.thread_profile()
+        || serde_json::to_value(cohort_admission.captured_history_policy())?
+            != serde_json::to_value(launch_admission.captured_history_policy())?
+    {
+        bail!(
+            "follow: child admitted semantics changed between cohort admission and launch materialization"
+        );
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -751,7 +751,12 @@ impl ExecutionProvenance {
         }
     }
 
-    pub fn clone_for_pinned_child_workspace(
+    /// Construct provenance for a fresh child chain root that executes from
+    /// its own pinned materialization. This is deliberately a root provenance:
+    /// unlike a callback child created with `clone_for_borrowed_child`, the
+    /// new chain owns this workspace's claim, process attachment, and terminal
+    /// fold/discard lifecycle.
+    pub fn root_for_pinned_child_workspace(
         &self,
         request_engine: Arc<Engine>,
         pinned_materialization: ryeos_state::PinnedProjectMaterialization,
@@ -773,12 +778,12 @@ impl ExecutionProvenance {
         if project_authority.operational_snapshot_projection() != Some(snapshot_hash.as_str()) {
             anyhow::bail!("pinned child authority does not match child snapshot");
         }
-        let provenance = Self::ChildPinnedGeneration {
+        let provenance = Self::RootPinnedGeneration {
             request_engine,
             original_project_path: self.original_project_path().to_path_buf(),
             effective_path,
             workspace_lifeline,
-            base_snapshot_hash: snapshot_hash,
+            snapshot_hash,
             pinned_materialization: PinnedMaterializationAuthority::Verified(
                 pinned_materialization,
             ),

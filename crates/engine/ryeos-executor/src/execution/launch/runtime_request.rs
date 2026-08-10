@@ -23,6 +23,10 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub live_access: Option<ryeos_engine::isolation::IsolationLiveAccessAuthority>,
     pub state_root: Option<&'a Path>,
     pub workspace_lifeline: Option<std::sync::Arc<ryeos_app::temp_dir_guard::TempDirGuard>>,
+    /// Whether this launch owns the journal lifecycle for the supplied
+    /// workspace. Callback children may borrow the path but never its owner
+    /// transitions.
+    pub owns_workspace: bool,
     pub envelope: &'a LaunchEnvelope,
     pub timeout_secs: u64,
     pub callback: &'a EnvelopeCallback,
@@ -133,6 +137,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         live_access,
         state_root,
         workspace_lifeline,
+        owns_workspace,
         envelope,
         timeout_secs,
         callback,
@@ -362,6 +367,29 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
             }
             None => Err(error),
         };
+    }
+    if let Err(error) = super::super::runner::activate_workspace_after_process_attachment(
+        state,
+        workspace_lifeline.as_ref(),
+        owns_workspace,
+        thread_id,
+        launch_owner,
+        &process_identity,
+    ) {
+        let cleanup = spawned.abort_and_reap().err();
+        let clear = state
+            .state_store
+            .clear_thread_process_if_matches_owned(thread_id, &process_identity, launch_owner)
+            .err();
+        drop(workspace_lifeline);
+        let mut error = error.context("activate managed-runtime workspace after attachment");
+        if let Some(clear) = clear {
+            error = error.context(format!("attached-process cleanup failed: {clear:#}"));
+        }
+        if let Some(cleanup) = cleanup {
+            error = error.context(format!("pending-process cleanup failed: {cleanup}"));
+        }
+        return Err(error);
     }
     let attached_process = AttachedProcessGuard {
         state: state.clone(),

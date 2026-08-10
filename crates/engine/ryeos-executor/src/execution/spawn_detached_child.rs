@@ -309,7 +309,7 @@ pub async fn spawn_detached_child(
         let child_lifeline = child_context
             .temp_dir
             .ok_or_else(|| anyhow::anyhow!("detach: child workspace has no lifecycle guard"))?;
-        child_provenance = cap.provenance.clone_for_pinned_child_workspace(
+        child_provenance = cap.provenance.root_for_pinned_child_workspace(
             child_context.request_engine,
             child_context.pinned_materialization.ok_or_else(|| {
                 anyhow::anyhow!("detach: child context has no verified materialization authority")

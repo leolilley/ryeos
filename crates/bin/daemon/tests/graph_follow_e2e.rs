@@ -74,7 +74,7 @@ fn plant_child_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
     // `output:` sets GraphResult.result — the child's terminal envelope `result`.
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 config:
   start: work
@@ -107,7 +107,7 @@ fn plant_parent_follow_graph(project_dir: &Path, signer: &SigningKey) -> anyhow:
     // the authored value rather than the graph runtime's internal GraphResult
     // envelope. `done` re-returns it so the successor's persisted result carries
     // the sentinel iff the follow result was consumed correctly.
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 requires:
   capabilities:
@@ -413,6 +413,89 @@ async fn graph_follow_suspends_launches_child_and_resumes_parent() {
         "the resumed parent's persisted result must carry the child's returned value \
          `{CHILD_SENTINEL}` (proves the follow result was consumed); threads/get={get_body:#}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pinned_graph_follow_binds_parent_workspace_before_handoff() {
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        plant_vault_with_zen_key(state_path)?;
+        Ok(())
+    };
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_child_graph(project.path(), &fixture.publisher).expect("plant child graph");
+    plant_parent_follow_graph(project.path(), &fixture.publisher).expect("plant parent graph");
+
+    let (status, body) = h
+        .post_json(
+            "/execute",
+            serde_json::json!({
+                "item_ref": "graph:parent",
+                "ref_bindings": {},
+                "project_path": project.path(),
+                "parameters": {},
+                "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_pinned_capture(
+                    ryeos_app::execution_policy::ExecutionResponse::Wait,
+                ),
+            }),
+        )
+        .await
+        .expect("execute pinned parent");
+    assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
+    assert_eq!(
+        body.pointer("/result/status").and_then(Value::as_str),
+        Some("continued"),
+        "pinned parent must cross the follow handoff: {body:#}"
+    );
+    let parent_thread_id = body
+        .pointer("/thread/thread_id")
+        .and_then(Value::as_str)
+        .expect("parent thread id")
+        .to_string();
+
+    let runtime_db = h
+        .state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("state/runtime.sqlite3");
+    let runtime = rusqlite::Connection::open(runtime_db).expect("open runtime database");
+    let owned_workspaces: i64 = runtime
+        .query_row(
+            "SELECT COUNT(*) FROM execution_workspace \
+             WHERE thread_id = ?1 AND launch_owner IS NOT NULL",
+            [&parent_thread_id],
+            |row| row.get(0),
+        )
+        .expect("read parent workspace owner");
+    assert_eq!(
+        owned_workspaces, 1,
+        "the durable parent must own its pinned workspace before follow"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let events = all_events(&h.state_path);
+        let child_done = threads_that_ran(&events, "work")
+            .into_iter()
+            .any(|thread| thread_has_event(&events, &thread, "thread_completed"));
+        let successor_done = threads_that_ran(&events, "mark").into_iter().any(|thread| {
+            thread != parent_thread_id && thread_has_event(&events, &thread, "thread_completed")
+        });
+        if child_done && successor_done {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!(
+                "pinned follow did not complete (child_done={child_done}, \
+                 successor_done={successor_done})\n--- daemon stderr ---\n{stderr}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 // ══ #25 daemon e2e: child failure routes the parent into on_error ══════════════

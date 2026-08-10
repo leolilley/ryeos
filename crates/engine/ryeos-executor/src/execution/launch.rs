@@ -5338,6 +5338,16 @@ async fn run_claimed_thread_row_inner(
         augmentation_audits,
         freshly_minted_accounting_scope,
     } = authority;
+    let thread_id = thread.thread_id.clone();
+    let owns_workspace = !provenance.is_borrowed_child()
+        && provenance.project_authority().requires_project_foldback();
+    super::runner::bind_owned_workspace_after_thread_birth(
+        state,
+        provenance,
+        &thread_id,
+        launch_owner,
+    )
+    .map_err(BuildAndLaunchError::Internal)?;
     let resolution = effective_program.resolution();
     let post_publication_timer = launch_timings
         .as_ref()
@@ -5360,7 +5370,6 @@ async fn run_claimed_thread_row_inner(
         state_root = %runtime_state_root.display(),
         "launching native runtime"
     );
-    let thread_id = thread.thread_id.clone();
     // Authoritative chain root from the freshly-created thread row (a successor
     // inherits its source's root; a fresh launch is its own root). Used to set
     // the callback cap's chain root.
@@ -6234,6 +6243,7 @@ async fn run_claimed_thread_row_inner(
             live_access: isolation_live_access,
             state_root: isolation_state_root.as_deref(),
             workspace_lifeline: isolation_workspace_lifeline,
+            owns_workspace,
             envelope: &envelope,
             timeout_secs: duration,
             callback: &callback_owned,
@@ -6856,7 +6866,7 @@ async fn prepare_follow_child_launch_inner(
     };
 
     let project_path = execution.provenance.effective_path().to_path_buf();
-    let authority = prepare_managed_launch_authority(
+    let mut authority = prepare_managed_launch_authority(
         &BuildAndLaunchParams {
             state,
             lifecycle_authority: resume.lifecycle_authority,
@@ -6913,6 +6923,25 @@ async fn prepare_follow_child_launch_inner(
                 &authority.effective_program,
             )?;
         prepared.set_sealed_root_request(augmented_sealed_request);
+        let realization_contract_ref = authority.selected_runtime.canonical_ref.to_string();
+        let realization_contract_digest = authority.selected_runtime.raw_content_digest.clone();
+        let realization_admission = super::execution_realization::admit_or_verify(
+            state,
+            &prepared,
+            authority.effective_program.resolution(),
+            authority
+                .effective_program
+                .effective_definition_digest()
+                .as_str(),
+            &realization_contract_ref,
+            &realization_contract_digest,
+            authority.pending_external_realization.as_mut(),
+        )
+        .map_err(BuildAndLaunchError::Internal)?;
+        if authority.pending_external_realization.is_none() {
+            authority.pending_external_realization = realization_admission.publication;
+        }
+        prepared = prepared.with_execution_realization_hash(realization_admission.hash);
         (prepared, prepared_resume)
     } else {
         // An existing child already has an immutable durable birth record.
