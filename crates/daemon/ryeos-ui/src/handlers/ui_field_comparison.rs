@@ -158,9 +158,32 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         }
     };
 
-    let mut document = assemble_document(&model, model.complete(), false)?;
+    let mut document = match assemble_document(&model, model.complete(), false) {
+        Ok(document) => document,
+        Err(error) => {
+            tracing::error!(error = %error, "execution comparison field assembly failed");
+            return refused_response(
+                &request,
+                "comparison_field_invalid",
+                "comparison facts could not be finalized within their contract",
+            );
+        }
+    };
     if document.truncated && model.complete() {
-        document = assemble_document(&model, false, true)?;
+        document = match assemble_document(&model, false, true) {
+            Ok(document) => document,
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "incomplete execution comparison field assembly failed"
+                );
+                return refused_response(
+                    &request,
+                    "comparison_field_invalid",
+                    "comparison facts could not be finalized within their contract",
+                );
+            }
+        };
     }
     serde_json::to_value(document).map_err(Into::into)
 }
