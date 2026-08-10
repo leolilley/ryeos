@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde_json::{Map, Value};
 
 use crate::context::ExecutionContext;
-use crate::evaluation::{ExpressionScope, validate_runtime_value};
+use crate::evaluation::{ExpressionScope, GraphRunExpressionContext, validate_runtime_value};
 use crate::model::{DispatchObservation, ErrorRecord, GraphNode, GraphToolCallStatus, RetryConfig};
 use ryeos_graph_definition::CompiledNode;
 use ryeos_runtime::callback_client::CallbackClient;
@@ -500,9 +500,13 @@ pub async fn run_foreach_sequential(
             &candidate_state,
             inputs,
             execution.as_ref(),
-            Some(graph_run_id),
+            GraphRunExpressionContext::new(
+                graph_run_id,
+                step,
+                definition_ref,
+                effective_definition_digest,
+            ),
         )
-        .with_run_identity(definition_ref, effective_definition_digest)
         .with_foreach(var, item);
 
         let action = match &compiled.action {
@@ -672,9 +676,13 @@ pub async fn run_foreach_sequential(
                         &candidate_state,
                         inputs,
                         execution.as_ref(),
-                        Some(graph_run_id),
+                        GraphRunExpressionContext::new(
+                            graph_run_id,
+                            step,
+                            definition_ref,
+                            effective_definition_digest,
+                        ),
                     )
-                    .with_run_identity(definition_ref, effective_definition_digest)
                     .with_foreach(var, item)
                     .with_result(&val)
                     .with_dispatch_option(dispatch.as_ref())
@@ -976,31 +984,39 @@ pub async fn run_foreach_parallel(
                 Some(action) => action,
                 None => continue,
             };
-            let mut rendered =
-                match ExpressionScope::new(state, inputs, Some(&execution), Some(graph_run_id))
-                    .with_run_identity(definition_ref, effective_definition_digest)
-                    .with_foreach(var, item)
-                    .render_action(action)
-                {
-                    Ok(value) => value,
-                    Err(error) => {
-                        work.push(ParallelWork::Ready(ParallelItem::Failure {
-                            diagnostic: bounded_parallel_diagnostic(format!(
-                                "expression evaluation failed in foreach action: {error}"
-                            )),
-                            cost: None,
-                            status: GraphToolCallStatus::ExpressionFailed,
-                            item_id: None,
-                            child_thread_id: None,
-                            integrity: false,
-                            dispatch: None,
-                        }));
-                        if !continue_on_error {
-                            break;
-                        }
-                        continue;
+            let mut rendered = match ExpressionScope::new(
+                state,
+                inputs,
+                Some(&execution),
+                GraphRunExpressionContext::new(
+                    graph_run_id,
+                    step,
+                    definition_ref,
+                    effective_definition_digest,
+                ),
+            )
+            .with_foreach(var, item)
+            .render_action(action)
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    work.push(ParallelWork::Ready(ParallelItem::Failure {
+                        diagnostic: bounded_parallel_diagnostic(format!(
+                            "expression evaluation failed in foreach action: {error}"
+                        )),
+                        cost: None,
+                        status: GraphToolCallStatus::ExpressionFailed,
+                        item_id: None,
+                        child_thread_id: None,
+                        integrity: false,
+                        dispatch: None,
+                    }));
+                    if !continue_on_error {
+                        break;
                     }
-                };
+                    continue;
+                }
+            };
             fold_launch_window(node, &mut rendered, graph_run_id, current_node);
             stamp_detached_operation(
                 &mut rendered,

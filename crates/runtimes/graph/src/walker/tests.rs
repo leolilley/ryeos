@@ -281,6 +281,97 @@ config:
 }
 
 #[tokio::test]
+async fn run_step_is_consistent_across_action_assignment_branch_and_return() {
+    let graph = make_graph(
+        r#"
+version: "1.0.0"
+category: test
+config:
+  start: capture
+  state: {visits: 0}
+  nodes:
+    capture:
+      action:
+        item_id: "tool:test/echo"
+        ref_bindings: {}
+        params: {action_step: "${run.step}"}
+      assign:
+        visits: "${state.visits + 1}"
+        assigned_step: "${run.step}"
+        dispatch_source: "${dispatch.source}"
+      next:
+        type: conditional
+        branches:
+          - when: 'run.step == 0 && state.assigned_step == 0'
+            to: done
+          - to: wrong
+    wrong:
+      node_type: return
+      output: {wrong: true}
+    done:
+      node_type: return
+      output:
+        return_step: "${run.step}"
+        assigned_step: "${state.assigned_step}"
+        dispatch_source: "${state.dispatch_source}"
+"#,
+    );
+    let (walker, recorder) = make_recording_walker(graph, vec![json!({"ok": true})], None);
+    let result = walker
+        .execute(json!({}), Some("gr-run-step".to_string()))
+        .await;
+
+    assert!(result.success, "unexpected result: {result:?}");
+    let requests = recorder.recorded_dispatch_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].action.params["action_step"], 0);
+    let output = result.result.expect("return output");
+    assert_eq!(output["return_step"], 1);
+    assert_eq!(output["assigned_step"], 0);
+    assert_eq!(output["dispatch_source"], "executed");
+}
+
+#[tokio::test]
+async fn run_step_advances_when_a_node_is_revisited() {
+    let graph = make_graph(
+        r#"
+version: "1.0.0"
+category: test
+config:
+  start: loop
+  state: {visits: 0}
+  nodes:
+    loop:
+      action:
+        item_id: "tool:test/echo"
+        ref_bindings: {}
+        params: {step: "${run.step}"}
+      assign: {visits: "${state.visits + 1}"}
+      next:
+        type: conditional
+        branches:
+          - when: 'state.visits < 2'
+            to: loop
+          - to: done
+    done:
+      node_type: return
+      output: {step: "${run.step}"}
+"#,
+    );
+    let (walker, recorder) = make_recording_walker(graph, vec![json!({}), json!({})], None);
+    let result = walker
+        .execute(json!({}), Some("gr-run-loop".to_string()))
+        .await;
+
+    assert!(result.success, "unexpected result: {result:?}");
+    let requests = recorder.recorded_dispatch_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].action.params["step"], 0);
+    assert_eq!(requests[1].action.params["step"], 1);
+    assert_eq!(result.result.expect("return output")["step"], 2);
+}
+
+#[tokio::test]
 async fn assignment_keys_are_simultaneous_and_branch_reads_candidate_state() {
     let graph = make_graph(
         r#"
@@ -2743,6 +2834,82 @@ fn retryable_dispatch_failure() -> Value {
 }
 
 #[tokio::test]
+async fn retry_attempt_receives_the_advanced_run_step() {
+    let graph = make_graph(
+        r#"
+version: "1.0.0"
+category: test
+config:
+  start: flaky
+  nodes:
+    flaky:
+      action:
+        item_id: "tool:test/flaky"
+        ref_bindings: {}
+        params: {step: "${run.step}"}
+      retry: {attempts: 2, backoff_ms: 1}
+      next: {type: unconditional, to: done}
+    done: {node_type: return, output: {step: "${run.step}"}}
+"#,
+    );
+    let (walker, recorder) = make_recording_walker(
+        graph,
+        vec![retryable_dispatch_failure(), json!({"ok": true})],
+        None,
+    );
+    let result = walker
+        .execute(json!({}), Some("gr-run-retry".to_string()))
+        .await;
+
+    assert!(result.success, "unexpected result: {result:?}");
+    let requests = recorder.recorded_dispatch_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].action.params["step"], 0);
+    assert_eq!(requests[1].action.params["step"], 1);
+    assert_eq!(result.result.expect("return output")["step"], 2);
+}
+
+#[tokio::test]
+async fn resumed_action_receives_the_checkpoint_run_step() {
+    let graph = make_graph(
+        r#"
+version: "1.0.0"
+category: test
+config:
+  start: capture
+  nodes:
+    capture:
+      action:
+        item_id: "tool:test/echo"
+        ref_bindings: {}
+        params: {step: "${run.step}"}
+      next: {type: unconditional, to: done}
+    done: {node_type: return, output: {step: "${run.step}"}}
+"#,
+    );
+    let resume = strict_resume_params(
+        &graph,
+        "capture",
+        7,
+        json!({}),
+        "gr-run-resume",
+        None,
+        None,
+        0,
+    );
+    let (walker, recorder) = make_recording_walker(graph, vec![json!({})], None);
+    let result = walker
+        .execute(resume, Some("gr-run-resume".to_string()))
+        .await;
+
+    assert!(result.success, "unexpected result: {result:?}");
+    let requests = recorder.recorded_dispatch_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].action.params["step"], 7);
+    assert_eq!(result.result.expect("return output")["step"], 8);
+}
+
+#[tokio::test]
 async fn retry_redispatches_until_success() {
     // First dispatch fails, the retry re-dispatches and succeeds. The
     // failed attempt consumed a walker step, so `done` is reached at step 2.
@@ -3959,7 +4126,10 @@ config:
       action:
         item_id: "directive:${job.kind}"
         ref_bindings: {}
-        params: {value: "${job.value}", run: "${_run.graph_run_id}"}
+        params:
+          value: "${job.value}"
+          run: "${run.graph_run_id}"
+          step: "${run.step}"
       on_error: recover
       next:
         type: conditional
@@ -4056,7 +4226,12 @@ async fn follow_fanout_spawns_one_ordered_rendered_cohort() {
     let children = &request.children;
     assert_eq!(children.len(), 2);
     assert_eq!(children[0].item_ref, "directive:alpha");
-    assert_eq!(children[0].parameters, json!({"value":1,"run":"gr-fan"}));
+    assert_eq!(children[0].parameters["step"], 0);
+    assert_eq!(children[1].parameters["step"], 0);
+    assert_eq!(
+        children[0].parameters,
+        json!({"value":1,"run":"gr-fan","step":0})
+    );
     assert_eq!(children[0].facets, Some(json!({"lane":"red"})));
     assert_eq!(children[1].item_ref, "directive:beta");
     let checkpoint: Value =

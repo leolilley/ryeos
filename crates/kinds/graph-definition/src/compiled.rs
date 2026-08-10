@@ -109,7 +109,7 @@ impl CompiledNode {
             None
         };
         let state_roots = allowed_roots(false, false, None);
-        // `_dispatch` becomes available only after this node's action has
+        // `dispatch` becomes available only after this node's action has
         // returned daemon-owned dispatch evidence.
         let action_roots = allowed_roots(false, false, foreach_root);
         let result_available = node.action.is_some();
@@ -328,12 +328,12 @@ fn allowed_roots(
     include_dispatch: bool,
     foreach_root: Option<&str>,
 ) -> HashSet<&str> {
-    let mut roots = HashSet::from(["state", "inputs", "_execution", "_run"]);
+    let mut roots = HashSet::from(["state", "inputs", "execution", "run"]);
     if include_result {
         roots.insert("result");
     }
     if include_dispatch {
-        roots.insert("_dispatch");
+        roots.insert("dispatch");
     }
     if let Some(root) = foreach_root {
         roots.insert(root);
@@ -359,7 +359,7 @@ fn validate_references(
         }
         if matches!(
             reference.root(),
-            "state" | "inputs" | "_execution" | "_run" | "_dispatch"
+            "state" | "inputs" | "execution" | "run" | "dispatch"
         ) && matches!(
             reference.segments().first(),
             Some(ReferenceSegment::Index(_))
@@ -415,9 +415,9 @@ fn validate_iteration_variable(name: &str, node: &GraphNode) -> Result<()> {
             | "state"
             | "inputs"
             | "result"
-            | "_execution"
-            | "_run"
-            | "_dispatch"
+            | "execution"
+            | "run"
+            | "dispatch"
     ) {
         bail!("node `{name}` iteration variable `{variable}` is reserved by rye-expr/1");
     }

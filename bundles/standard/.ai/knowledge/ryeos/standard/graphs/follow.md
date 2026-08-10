@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-26T23:29:56Z:e4dc03bedaf74ed58fb28e98cc3d48adbdc167fc0b11f7cb133d8bf228327b40:Lgq9Fg8m2Wokk5/jXpXPoY/xieGsggN282ZTfI8d9kZ6X/YhbUJ9lxIqJ7RkMfvL25liorRPidHk4cSwaKKdAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-10T03:37:52Z:ae2ae96478f3449a01f7856b32280c50b654c2bfc02f5784dba10d32490fae64:zdjzXFQd1uz5Zx+WXk4dbUs6beGkiCOHMHN/LaJzPqojT3UNQRYxp5o8AEIYAwFP3XXTRiueFkiOXgecKlF7Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, follow, authoring, lineage, budget]
@@ -43,7 +43,7 @@ be between 1 and 256.
 `action.item_id`, all of `action.params`, and `facets` are recursively
 interpolated per item. The item is available under the declared `as` name;
 normal `state`, `inputs`, and execution context remain available. Use
-`${_run.graph_run_id}` for the current durable graph-run identity, for example
+`${run.graph_run_id}` for the current durable graph-run identity, for example
 to stamp every child with a cohort facet.
 
 An empty `over` array launches no children and succeeds immediately. Its result
@@ -106,9 +106,9 @@ config:
         params:
           subject: "${job.subject}"
           context_ref: "knowledge:example/${job.context}"
-          cohort_run: "${_run.graph_run_id}"
+          cohort_run: "${run.graph_run_id}"
       facets:
-        cohort: "${_run.graph_run_id}"
+        cohort: "${run.graph_run_id}"
         subject: "${job.subject}"
       collect: reviews
       next: {type: unconditional, to: done}

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-05T07:04:40Z:0447c3bfc35804d2c252bc77ae1b96d126dafa7eef8a336e3e6af3fcf78cc26d:5QqpJhU9cTyoViaZmi+lBynO6GOFhV/N+BBRyLTiCH6RmirVybU42F4thdA7JBKB2cOJ5tnW3bdIPIwfYzrmDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-10T03:37:52Z:f3259293e58a961e99ad9ab520b72aaf0200b6422acb95f07432b390dcbefd93:NTyGD4v0XZUrB9MNeCTQXKmNE27PS3oHiDfMMsqfp+2X4eF99ShoOkv3yUQ35QlYlQ+RV4MJnrsOzP2NjJbPDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, graphs, dag, state-machine]
 version: "1.0.0"
@@ -189,8 +189,8 @@ review_all:
     item_id: "directive:example/review"
     params:
       subject: "${subject}"
-      run_id: "${_run.graph_run_id}"
-  facets: {cohort: "${_run.graph_run_id}", subject: "${subject}"}
+      run_id: "${run.graph_run_id}"
+  facets: {cohort: "${run.graph_run_id}", subject: "${subject}"}
   collect: reviews
   on_error: handle-failure
   next: {type: unconditional, to: finish}
@@ -203,7 +203,7 @@ launched-and-live child chains.
 Collection is input-ordered and failed slots are `null`. Under `continue`, the
 ordered collection commits; an explicit redirect or failure discards the
 candidate collection. An empty input succeeds with `[]`. Actions, params, and
-facets render per item, including `${_run.graph_run_id}`. The parent's effective
+facets render per item, including `${run.graph_run_id}`. The parent's effective
 capabilities and hard limits bound every child. The complete rendered launch
 cohort is also held to one rye-expr/1 JSON result budget; exceeding it fails the
 node before suspension or daemon handoff. See

@@ -1,4 +1,5 @@
 use super::*;
+use crate::evaluation::GraphRunExpressionContext;
 
 impl Walker {
     pub(super) async fn commit_expression_failed(
@@ -365,11 +366,12 @@ impl Walker {
                     state,
                     inputs,
                     Some(execution),
-                    Some(graph_run_id),
-                    Some((
+                    GraphRunExpressionContext::new(
+                        graph_run_id,
+                        step,
                         &self.graph.definition_ref,
                         &self.graph.effective_definition_digest,
-                    )),
+                    ),
                 ) {
                     Ok(Some(next_node)) => {
                         let next_step = step + 1;
@@ -561,11 +563,12 @@ impl Walker {
                     state,
                     inputs,
                     Some(execution),
-                    Some(graph_run_id),
-                    Some((
+                    GraphRunExpressionContext::new(
+                        graph_run_id,
+                        step,
                         &self.graph.definition_ref,
                         &self.graph.effective_definition_digest,
-                    )),
+                    ),
                 ) {
                     Ok(Some(next_node)) => {
                         let next_step = step + 1;

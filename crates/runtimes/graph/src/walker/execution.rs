@@ -4,7 +4,8 @@ use std::time::Instant;
 use serde_json::{Map, Value, json};
 
 use crate::evaluation::{
-    ExpressionScope, validate_runtime_array_shape, validate_runtime_shape, validate_runtime_value,
+    ExpressionScope, GraphRunExpressionContext, validate_runtime_array_shape,
+    validate_runtime_shape, validate_runtime_value,
 };
 use crate::model::*;
 use crate::{dispatch, edges, env_preflight};
@@ -70,11 +71,12 @@ impl Walker {
                     state,
                     inputs,
                     Some(&execution),
-                    Some(graph_run_id),
-                    Some((
+                    GraphRunExpressionContext::new(
+                        graph_run_id,
+                        step,
                         &self.graph.definition_ref,
                         &self.graph.effective_definition_digest,
-                    )),
+                    ),
                 );
                 return match next {
                     Ok(Some(n)) => StepOutcome::ActionOk(Box::new(ActionOkOutcome {
@@ -123,28 +125,33 @@ impl Walker {
         // caps at the callback boundary (enforce_callback_caps in
         // runtime_dispatch.rs). The walker is the executor only.
 
-        let mut rendered_action =
-            match ExpressionScope::new(state, inputs, Some(&execution), Some(graph_run_id))
-                .with_run_identity(
-                    &self.graph.definition_ref,
-                    &self.graph.effective_definition_digest,
-                )
-                .render_action(action)
-            {
-                Ok(value) => value,
-                Err(err) => {
-                    return StepOutcome::ExpressionFailed(ExpressionFailedOutcome {
-                        item_id: Some(item_id),
-                        error: format!(
-                            "expression evaluation failed in action for node `{current}`: {err}"
-                        ),
-                        next_on_error: resolve_next_on_error(node, cfg),
-                        elapsed_ms: elapsed,
-                        cost: None,
-                        effects: ExpressionFailureEffects::default(),
-                    });
-                }
-            };
+        let mut rendered_action = match ExpressionScope::new(
+            state,
+            inputs,
+            Some(&execution),
+            GraphRunExpressionContext::new(
+                graph_run_id,
+                step,
+                &self.graph.definition_ref,
+                &self.graph.effective_definition_digest,
+            ),
+        )
+        .render_action(action)
+        {
+            Ok(value) => value,
+            Err(err) => {
+                return StepOutcome::ExpressionFailed(ExpressionFailedOutcome {
+                    item_id: Some(item_id),
+                    error: format!(
+                        "expression evaluation failed in action for node `{current}`: {err}"
+                    ),
+                    next_on_error: resolve_next_on_error(node, cfg),
+                    elapsed_ms: elapsed,
+                    cost: None,
+                    effects: ExpressionFailureEffects::default(),
+                });
+            }
+        };
         if rendered_action.get("thread").and_then(Value::as_str) == Some("detached") {
             let operation = lillux::canonical_json(&json!({
                 "graph_run_id": graph_run_id,
@@ -529,11 +536,12 @@ impl Walker {
                         state,
                         inputs,
                         Some(&execution),
-                        Some(graph_run_id),
-                    )
-                    .with_run_identity(
-                        &self.graph.definition_ref,
-                        &self.graph.effective_definition_digest,
+                        GraphRunExpressionContext::new(
+                            graph_run_id,
+                            step,
+                            &self.graph.definition_ref,
+                            &self.graph.effective_definition_digest,
+                        ),
                     )
                     .with_result(&val)
                     .with_dispatch_option(dispatch.as_ref())
@@ -580,11 +588,12 @@ impl Walker {
                     inputs,
                     &val,
                     Some(&execution),
-                    Some(graph_run_id),
-                    Some((
+                    GraphRunExpressionContext::new(
+                        graph_run_id,
+                        step,
                         &self.graph.definition_ref,
                         &self.graph.effective_definition_digest,
-                    )),
+                    ),
                     dispatch.as_ref(),
                 ) {
                     Ok(next) => next,
@@ -662,12 +671,18 @@ impl Walker {
                 .over
                 .as_ref()
                 .expect("validated follow fanout has compiled over expression");
-            match ExpressionScope::new(state, inputs, Some(execution), Some(graph_run_id))
-                .with_run_identity(
+            match ExpressionScope::new(
+                state,
+                inputs,
+                Some(execution),
+                GraphRunExpressionContext::new(
+                    graph_run_id,
+                    step,
                     &self.graph.definition_ref,
                     &self.graph.effective_definition_digest,
-                )
-                .render_template(over)
+                ),
+            )
+            .render_template(over)
             {
                 Ok(Value::Array(items)) => items,
                 Ok(other) => {
@@ -801,6 +816,7 @@ impl Walker {
                     inputs,
                     execution,
                     graph_run_id,
+                    step,
                     &results,
                     &self.graph.definition_ref,
                     &self.graph.effective_definition_digest,
@@ -854,6 +870,7 @@ impl Walker {
                 inputs,
                 execution,
                 graph_run_id,
+                step,
                 &[],
                 &self.graph.definition_ref,
                 &self.graph.effective_definition_digest,
@@ -920,12 +937,18 @@ impl Walker {
         let mut children = Vec::new();
         let mut launch_budget = RuntimeJsonArrayBudget::new("follow fanout launch cohort");
         for (index, item) in over.iter().enumerate() {
-            let scope = ExpressionScope::new(state, inputs, Some(execution), Some(graph_run_id))
-                .with_run_identity(
+            let scope = ExpressionScope::new(
+                state,
+                inputs,
+                Some(execution),
+                GraphRunExpressionContext::new(
+                    graph_run_id,
+                    step,
                     &self.graph.definition_ref,
                     &self.graph.effective_definition_digest,
-                )
-                .with_foreach(&var, item);
+                ),
+            )
+            .with_foreach(&var, item);
             let mut action = match scope.render_action(
                 compiled
                     .action
@@ -1111,6 +1134,7 @@ fn evaluate_fanout_next(
     inputs: &Value,
     execution: &Value,
     graph_run_id: &str,
+    step: u32,
     results: &[Value],
     definition_ref: &str,
     effective_definition_digest: &str,
@@ -1136,8 +1160,12 @@ fn evaluate_fanout_next(
         inputs,
         &result,
         Some(execution),
-        Some(graph_run_id),
-        Some((definition_ref, effective_definition_digest)),
+        GraphRunExpressionContext::new(
+            graph_run_id,
+            step,
+            definition_ref,
+            effective_definition_digest,
+        ),
         None,
     )
     .map_err(FanoutNextError::Expression)

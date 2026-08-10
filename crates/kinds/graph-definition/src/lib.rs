@@ -836,13 +836,74 @@ mod tests {
     }
 
     #[test]
+    fn run_step_is_admitted_everywhere_run_metadata_is_available() {
+        let mut composed = composed_graph();
+        composed["config"]["nodes"]["inherited"] = serde_json::json!({
+            "action": {
+                "item_id": "tool:test/audit",
+                "ref_bindings": {},
+                "params": {
+                    "execution": "${execution}",
+                    "step": "${run.step}"
+                }
+            },
+            "assign": {
+                "action_step": "${run.step}",
+                "dispatch_source": "${dispatch.source}"
+            },
+            "next": {
+                "type": "conditional",
+                "branches": [
+                    {"when": "run.step >= 0", "to": "finish"},
+                    {"to": "finish"}
+                ]
+            }
+        });
+        composed["config"]["nodes"]["finish"]["output"] =
+            serde_json::json!({"step": "${run.step}"});
+
+        validate_view(&view(composed, Vec::new())).unwrap();
+    }
+
+    #[test]
+    fn dispatch_remains_unavailable_in_action_templates() {
+        let mut composed = composed_graph();
+        composed["config"]["nodes"]["inherited"] = serde_json::json!({
+            "action": {
+                "item_id": "tool:test/audit",
+                "ref_bindings": {},
+                "params": {"source": "${dispatch.source}"}
+            },
+            "next": {"type": "unconditional", "to": "finish"}
+        });
+
+        let error = validate_view(&view(composed, Vec::new())).unwrap_err();
+        assert!(format!("{error:#}").contains("expression root `dispatch` is unavailable"));
+    }
+
+    #[test]
+    fn underscored_runtime_roots_are_not_compatibility_aliases() {
+        for root in ["_execution", "_run", "_dispatch"] {
+            let mut composed = composed_graph();
+            composed["config"]["nodes"]["finish"]["output"] =
+                serde_json::json!(format!("${{{root}}}"));
+
+            let error = validate_view(&view(composed, Vec::new())).unwrap_err();
+            assert!(
+                format!("{error:#}").contains(&format!("expression root `{root}` is unavailable")),
+                "unexpected error for {root}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_runtime_reserved_iteration_variable_during_admission() {
         let mut composed = composed_graph();
         composed["config"]["nodes"]["inherited"] = serde_json::json!({
             "node_type": "foreach",
             "action": {"item_id": "tool:test/audit"},
             "over": "${state.goal}",
-            "as": "_dispatch",
+            "as": "dispatch",
             "next": {"type": "unconditional", "to": "finish"}
         });
         let error = validate_view(&view(composed, Vec::new())).unwrap_err();

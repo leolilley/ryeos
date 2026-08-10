@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-27T23:40:19Z:59c364588166774104f39759d08b4ee8120b8fd6034800fc8126f309555d321c:+tn7ix5fqcUpS8ydghDQNCo10Yr/GweIRj4N8RVZrDK5CZq9xUNHdUVXS+5wRKWqvuXMU3uNsE4noL0aEa9KAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-10T03:37:52Z:28382b6a82fbcc1258ba6e3e58e9b2a24db3e982fd3d120b660e6f58dd73cf37:hts6fyrFm5diWYOiYH2x/t3H2kQ1Xze+iB1BW0uHiZtOWceYvB8c8rvIjLQSFGhkiiHhyoewH16VwdYrwfx9Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -226,9 +226,12 @@ a second template.
 
 - Directive bodies expose only `inputs`, and direct references must name one
   exact input so unreferenced inputs can still be appended once.
-- Graph fields expose `state` and `inputs`; `_execution` and `_run` are present
-  only when supplied by the launch context. A declared foreach/fanout variable
-  is available in that node's per-item fields.
+- Graph fields expose `state`, `inputs`, `execution`, and `run`. `run` carries
+  the exact graph-run identity and current step. `dispatch` becomes available
+  only after an action returns daemon-owned dispatch evidence. A declared
+  foreach/fanout variable is available in that node's per-item fields; the
+  runtime roots `execution`, `run`, and `dispatch` are reserved names.
+  Underscored spellings are not aliases and fail graph admission.
 - `result` is available after an action for that node's `assign` and conditional
   `next`. It is not a store of prior-node results; persist values needed later
   into `state`.

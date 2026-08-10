@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use crate::cache::NodeCache;
 use crate::context;
 use crate::edges;
-use crate::evaluation::{ExpressionScope, validate_runtime_value};
+use crate::evaluation::{ExpressionScope, GraphRunExpressionContext, validate_runtime_value};
 use crate::foreach;
 use crate::model::*;
 use ryeos_runtime::callback_client::CallbackClient;
@@ -1118,11 +1118,12 @@ impl Walker {
                         state,
                         inputs,
                         Some(&execution),
-                        Some(graph_run_id),
-                    )
-                    .with_run_identity(
-                        &self.graph.definition_ref,
-                        &self.graph.effective_definition_digest,
+                        GraphRunExpressionContext::new(
+                            graph_run_id,
+                            step,
+                            &self.graph.definition_ref,
+                            &self.graph.effective_definition_digest,
+                        ),
                     )
                     .render_json(output)
                     {
@@ -1157,11 +1158,12 @@ impl Walker {
                     state,
                     inputs,
                     Some(&execution),
-                    Some(graph_run_id),
-                    Some((
+                    GraphRunExpressionContext::new(
+                        graph_run_id,
+                        step,
                         &self.graph.definition_ref,
                         &self.graph.effective_definition_digest,
-                    )),
+                    ),
                 ) {
                     Ok(target) => StepOutcome::GateTaken(GateTakenOutcome { target }),
                     Err(error) => StepOutcome::ExpressionFailed(ExpressionFailedOutcome {
@@ -1209,11 +1211,12 @@ impl Walker {
                     state,
                     inputs,
                     Some(&execution),
-                    Some(graph_run_id),
-                )
-                .with_run_identity(
-                    &self.graph.definition_ref,
-                    &self.graph.effective_definition_digest,
+                    GraphRunExpressionContext::new(
+                        graph_run_id,
+                        step,
+                        &self.graph.definition_ref,
+                        &self.graph.effective_definition_digest,
+                    ),
                 )
                 .render_template(over)
                 {
@@ -1431,11 +1434,12 @@ impl Walker {
                     &candidate_state,
                     inputs,
                     Some(&execution),
-                    Some(graph_run_id),
-                    Some((
+                    GraphRunExpressionContext::new(
+                        graph_run_id,
+                        step,
                         &self.graph.definition_ref,
                         &self.graph.effective_definition_digest,
-                    )),
+                    ),
                 ) {
                     Ok(next) => next,
                     Err(error) => {

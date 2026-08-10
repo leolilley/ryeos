@@ -30,15 +30,52 @@ pub(crate) fn validate_runtime_array_shape(
     EvaluationSession::with_context(&context, &limits).validate_array(values, field)
 }
 
+/// Complete graph-run identity exposed to every expression scope as `run`.
+///
+/// Keeping the current step in the constructor makes it impossible for one
+/// runtime evaluation path to admit `run.step` but omit it at execution.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GraphRunExpressionContext<'a> {
+    pub(crate) graph_run_id: &'a str,
+    pub(crate) step: u32,
+    pub(crate) definition_ref: &'a str,
+    pub(crate) effective_definition_digest: &'a str,
+}
+
+impl GraphRunExpressionContext<'_> {
+    pub(crate) const fn new<'a>(
+        graph_run_id: &'a str,
+        step: u32,
+        definition_ref: &'a str,
+        effective_definition_digest: &'a str,
+    ) -> GraphRunExpressionContext<'a> {
+        GraphRunExpressionContext {
+            graph_run_id,
+            step,
+            definition_ref,
+            effective_definition_digest,
+        }
+    }
+
+    pub(crate) fn to_value(self) -> Value {
+        json!({
+            "graph_run_id": self.graph_run_id,
+            "step": self.step,
+            "definition_ref": self.definition_ref,
+            "effective_definition_digest": self.effective_definition_digest,
+        })
+    }
+}
+
 /// Borrowed runtime roots for one compiled graph evaluation. The only owned
-/// value is the small `_run` object; state, inputs, result, execution, and a
+/// value is the small `run` object; state, inputs, result, execution, and a
 /// foreach item are never cloned merely to assemble an expression context.
 pub(crate) struct ExpressionScope<'a> {
     state: &'a Value,
     inputs: &'a Value,
     result: Option<&'a Value>,
     execution: Option<&'a Value>,
-    run: Option<Value>,
+    run: Value,
     dispatch: Option<&'a ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
     foreach: Option<(&'a str, &'a Value)>,
     limits: EvaluationLimits,
@@ -68,8 +105,9 @@ mod tests {
     #[test]
     fn post_dispatch_scope_exposes_exact_run_and_dispatch_evidence() {
         let source = json!({
-            "run": "${_run}",
-            "dispatch": "${_dispatch}",
+            "execution": "${execution}",
+            "run": "${run}",
+            "dispatch": "${dispatch}",
             "answer": "${result.answer}",
         });
         let compiled = CompiledJsonTemplate::compile(
@@ -80,16 +118,29 @@ mod tests {
         .unwrap();
         let state = json!({});
         let inputs = json!({});
+        let execution = json!({"thread_id": "thread-1"});
         let result = json!({"answer": 7});
         let dispatch = live_dispatch();
-        let rendered = ExpressionScope::new(&state, &inputs, None, Some("run-1"))
-            .with_run_identity("graph:test/solve", &"d".repeat(64))
-            .with_result(&result)
-            .with_dispatch(&dispatch)
-            .render_json(&compiled)
-            .unwrap();
+        let digest = "d".repeat(64);
+        let rendered = ExpressionScope::new(
+            &state,
+            &inputs,
+            Some(&execution),
+            GraphRunExpressionContext {
+                graph_run_id: "run-1",
+                step: 7,
+                definition_ref: "graph:test/solve",
+                effective_definition_digest: &digest,
+            },
+        )
+        .with_result(&result)
+        .with_dispatch(&dispatch)
+        .render_json(&compiled)
+        .unwrap();
 
         assert_eq!(rendered["run"]["graph_run_id"], "run-1");
+        assert_eq!(rendered["execution"], execution);
+        assert_eq!(rendered["run"]["step"], 7);
         assert_eq!(rendered["run"]["definition_ref"], "graph:test/solve");
         assert_eq!(
             rendered["run"]["effective_definition_digest"],
@@ -108,14 +159,14 @@ impl<'a> ExpressionScope<'a> {
         state: &'a Value,
         inputs: &'a Value,
         execution: Option<&'a Value>,
-        graph_run_id: Option<&str>,
+        run: GraphRunExpressionContext<'_>,
     ) -> Self {
         Self {
             state,
             inputs,
             result: None,
             execution,
-            run: graph_run_id.map(|id| json!({"graph_run_id": id})),
+            run: run.to_value(),
             dispatch: None,
             foreach: None,
             limits: EvaluationLimits::default(),
@@ -124,21 +175,6 @@ impl<'a> ExpressionScope<'a> {
 
     pub(crate) fn with_result(mut self, result: &'a Value) -> Self {
         self.result = Some(result);
-        self
-    }
-
-    pub(crate) fn with_run_identity(
-        mut self,
-        definition_ref: &str,
-        effective_definition_digest: &str,
-    ) -> Self {
-        if let Some(run) = self.run.as_mut().and_then(Value::as_object_mut) {
-            run.insert("definition_ref".to_owned(), json!(definition_ref));
-            run.insert(
-                "effective_definition_digest".to_owned(),
-                json!(effective_definition_digest),
-            );
-        }
         self
     }
 
@@ -197,16 +233,14 @@ impl<'a> ExpressionScope<'a> {
             context.insert("result", result);
         }
         if let Some(execution) = self.execution {
-            context.insert("_execution", execution);
+            context.insert("execution", execution);
         }
-        if let Some(run) = self.run.as_ref() {
-            context.insert("_run", run);
-        }
+        context.insert("run", &self.run);
         let dispatch_value;
         if let Some(dispatch) = self.dispatch {
             dispatch_value = serde_json::to_value(dispatch)
                 .expect("typed dispatch evidence is infallibly serializable");
-            context.insert("_dispatch", &dispatch_value);
+            context.insert("dispatch", &dispatch_value);
         }
         if let Some((name, item)) = self.foreach {
             context.insert(name, item);
