@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:29Z:83ea8d77db7a468bf5aeac253383dd7919204b0c5f42ca73a0d328f667fcc206:1bGq9gvAee7tql6zYPFop8lgl0mO3G3/iXuKAxMH/4t3BTARx4OxZ1K5xhyyWzzL9dhB6wTXfTUJUQospFLODA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:34:31Z:0279a5e184f6084bae7a86446268476e2852f00e5ab1b0ec52407ae2d5e6b3d8:TH15vANRC39dLse6mHmXum5Y6gpWWLNBZls8hg+VdmoqD7VPJm8GuzAS6k2Qs0EQDncySwT1osFNq5tPNw1FBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/engine
 tags: [engine, composition, identity, hooks, recovery, field]
@@ -17,12 +17,14 @@ The admission order is fixed:
 
 1. resolve and verify the root, ancestors, and declared references;
 2. compose the kind's effective value using its signed field rules;
-3. run every kind-declared launch augmentation;
-4. capture authored and signed configured hook policy;
-5. run the kind-declared semantic validator over the complete value;
-6. revalidate every mutable capture dependency;
-7. compute `effective_definition_digest` once;
-8. seal the exact program and only then mint callback authority and spawn.
+3. resolve the signed executor chain and its kind-owned source ceiling;
+4. capture and verify adjacent executable source and external realizations;
+5. run every kind-declared launch augmentation;
+6. capture authored and signed configured hook policy;
+7. run the kind-declared semantic validator over the complete value;
+8. revalidate every mutable capture dependency;
+9. compute `effective_definition_digest` once;
+10. seal the exact program and only then mint callback authority and spawn.
 
 The engine exposes an opaque validated candidate and a candidate-bound
 authority proof. Only their checked consumption can construct
@@ -42,6 +44,8 @@ The identity fields are deliberately separate:
 |---|---|
 | `root_raw_content_digest` | signature-stripped root-source bytes |
 | `source_content_digest` | complete signed source bytes, including its envelope |
+| `source_closure_manifest_hash` | content-only identity of adjacent executable files |
+| `effective_source_binding_hash` | source owner, testimony, loader policy, kind ceiling, and manifest identity |
 | `effective_definition_digest` | exact effective resolution, composed/derived value, policy facts, and authority provenance |
 | `admitted_launch_capsule_hash` | exact sealed program plus runtime/executor closure and invocation authority |
 
@@ -57,6 +61,13 @@ project hook policy therefore creates a new effective version for subsequent
 launches. The canonical item ref is the conceptual family used for comparing
 runs; the effective digest is the exact executable version. No weaker program
 hash is an execution join key.
+
+Adjacent source follows the same rule. Its content-only manifest permits blob
+reuse, while the effective source binding retains who owns those bytes, which
+signed kind ceiling and executor policy admitted them, and how they are exposed
+to the process. The binding projection is part of the effective definition but
+not the authored-definition scope. A support-file change therefore moves the
+effective program without pretending the root item body changed.
 
 ## Captured hook policy
 
@@ -119,6 +130,12 @@ invocation-stripped program equals `exact_program`, rechecks current signer
 revocation for every definition and configured-policy contributor, recomputes
 the effective digest, and compares checkpoint and trace identity before spawn.
 
+When the program owns adjacent source, recovery also reloads the retained
+effective source binding, its content manifest, and every addressed blob. It
+rechecks the exact signed kind ceiling and current source-owner trust, then
+materializes only those retained bytes. It never recaptures the live item
+directory.
+
 Live source or config changes affect future launches only. They never mutate an
 admitted run. Current revocation policy still applies, so exact bytes are not a
 way to continue trusting a revoked signer.
@@ -137,6 +154,11 @@ They join only when their effective digests match. Source-version and
 policy-source entities retain the separate source digests, signers, spaces,
 trust, layer, and contribution role so an operator can see why two effective
 versions differ.
+
+Executable-source entities expose the admitted binding/content identities,
+owner, testimony class, executor policy, and bounded file/byte counts. Missing
+or malformed retained source evidence becomes a bounded source warning; it
+does not turn one bad run into a failed field document.
 
 ## Standing disciplines
 

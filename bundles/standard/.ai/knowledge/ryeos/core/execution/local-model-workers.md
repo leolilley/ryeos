@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:29Z:5c634618036372252cfddebd6ed1040147b8f6dc5f66991ef92b604977506498:nnm/Z042Q+XKN4b1vYngWRBSP3BPy8eZrf8v28LFtfW+hOqze1NqWdc4WPAqo5Qkf+XtmJXW91Yl3u5+Tq0gBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:34:32Z:01613c63aa870d4662fb5748d250bf1d4bca32beb17543237e196a4351a5a74f:RNFX3XPTPhVX1+VUyT6t5llYYpjJ+bL62rj4dAGBJNIJ1aaKYjqgLA2tzRycrHqPQitYh22zE8bYEdvr0yb7CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/execution
 tags: [execution, external-content, persistent-session, local-model, replay]
@@ -268,10 +268,12 @@ another publisher, or another consumer cannot reuse this binding.
 
 ## Clean-cut activation
 
-The effect and runtime authority contracts use clean-cut epochs. An installed
-node with predecessor state refuses startup rather than translating it. With
-the daemon stopped, inspect first and then perform only the reset the refusal
-names:
+The effect, source, and runtime authority contracts use clean-cut epochs. This
+source-closure cut moves admitted launch capsules to schema 13,
+persistent-session capsules to schema 3, and the runtime operator epoch to 4.
+An installed node with predecessor state refuses startup rather than
+translating it. With the daemon stopped, inspect first and then perform only
+the reset the refusal names:
 
 ```text
 ryeos node gc --discard-thread-history --dry-run
@@ -281,13 +283,16 @@ ryeos node external-content-reset --dry-run
 ryeos node external-content-reset --confirm-discard-external-content-bindings
 ```
 
-The thread-history command is destructive: it retires all thread/recovery
-history, including references to persistent-session capsule schema 1; the
-path-free retained-resolution wire is capsule schema 2. Identity, trust,
+The thread-history command is destructive: it retires all predecessor
+thread/recovery history, including launch capsules before schema 13 and
+persistent-session capsules before schema 3. Schema 3 retains the admitted
+source binding alongside the path-free retained resolution. Identity, trust,
 installed bundles, vault data, project heads, and durable provider evidence
 roots are preserved. No predecessor capsule is translated. The replay reset
-discards only predecessor graph/provider replay
-indexes. These commands are a cutover operation, not normal startup procedure.
+discards only predecessor graph/provider replay indexes. The runtime database
+reset named by a startup refusal establishes operator epoch 4; it never
+rewrites predecessor rows. These commands are a cutover operation, not normal
+startup procedure.
 The external-content reset retires every predecessor binding head because
 current tree manifests use the
 `ryeos.external_content.tree.v2` and

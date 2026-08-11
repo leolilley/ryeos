@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:35Z:04c985679c14c5304e1907e819d3428f50a3fd4c1439cfa9f5903762b3970c6c:Qld55Scx7TZ2V7lQJzGNTnNlsKyhHYC3yLNWV970ldW9+a6et9Kh1Z2zKdTKZ/Kr7McGdwMk1pUZTCxhtGioAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:34:37Z:662852a4a39cc27e6dc93f2db4aa3fb8c0d6fc47f3a70c3317fe1b79cbcad74d:oYtB+AkQpTHHYSYpq0sQTpj+TxOhwZxAQi3ezdm9m/cybbVyXdhgC+UtRzNehkbp7Q6Tk2eQxEnjITOxVpQmBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -48,6 +48,15 @@ serialized to canonical JSON and SHA-256 hashed before storage.
 
 Every object — events, snapshots, manifests, chain state — is an
 immutable JSON blob in CAS. The hash is the identity.
+
+Executable source uses two ordinary typed CAS objects. A
+`ryeos.source_closure_manifest` is a content-only, regular-file manifest whose
+edges retain its file blobs. A separate `ryeos.effective_source_binding`
+retains the owner, testimony, signed kind ceiling, executor policy, logical
+mount identity, and an edge to that manifest. Launch and persistent-session
+capsules retain the binding, so online and offline closure traversal and GC
+reach the complete source tree without consulting a live project or bundle
+path.
 
 #### Canonical JSON Contract
 
