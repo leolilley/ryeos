@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:21Z:e1dd79f3926773420584d0557eaa27be24157eaacc9853339e5de612f2c3b43d:V+piRdhRfawAhP9xVPgJkZhDep8KdqZqIDPi9zgbi5yKbqseNErgidLwhKMBOytnnzyRy1xjwKI913VnmjFEBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T03:06:22Z:7a0c9f5decfa9c93a1a21d79fa7079c006d3b775792cdc4c915f3ffab000dd29:C5kZd0myCZOX+VT1x/DByF6JD18ZrqGWVI9a2L/ixVFoUr97o9GSx0IHGTitZF7GpGGFOgOF8pjNrTbAEvbrDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/runtimes/python"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -13,6 +13,7 @@ env_config:
     var: RYE_PYTHON
     path_candidates: [python3]
   env:
+    PYTHONDONTWRITEBYTECODE: "1"
     PYTHONUNBUFFERED: "1"
     PROJECT_VENV_PYTHON: "${interpreter}"
 

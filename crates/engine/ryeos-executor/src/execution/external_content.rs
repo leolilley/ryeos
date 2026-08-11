@@ -8,7 +8,6 @@ use std::io::{Read as _, Seek as _};
 use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
 
-use anyhow::Context as _;
 use ryeos_engine::external_content::ExternalContentKind;
 use ryeos_engine::external_realization::RealizedExternalContentSet;
 
@@ -737,16 +736,14 @@ fn publish_private_generation<P, V, E>(
 where
     P: FnOnce(&lillux::PinnedDirectory) -> anyhow::Result<()>,
     V: FnOnce(&lillux::PinnedDirectory) -> anyhow::Result<()>,
-    E: FnOnce(lillux::PinnedDirectoryEntry) -> anyhow::Result<()>,
+    E: Fn(&mut lillux::PinnedDirectoryEntry) -> anyhow::Result<()>,
 {
     let (parent, mount_name) = ensure_materialization_parent(workspace, mount)?;
-    if let Some(existing) = parent.open_entry(&mount_name, false)? {
-        verify_existing(existing).with_context(|| {
-            format!(
-                "verify existing private external realization {}",
-                parent.path().join(&mount_name).display()
-            )
-        })?;
+    let mut existing = parent.open_entry(&mount_name, false)?;
+    if existing
+        .as_mut()
+        .is_some_and(|entry| verify_existing(entry).is_ok())
+    {
         return Ok(());
     }
     let staging_name = OsString::from(format!(
@@ -759,6 +756,37 @@ where
     let result = (|| {
         populate(&staging)?;
         verify(&staging)?;
+        if let Some(existing) = existing.as_mut() {
+            // The destination belongs to this admitted realization. A pinned
+            // project copy may already contain live-source or runtime-created
+            // bytes at that path; those bytes are not part of the admitted
+            // identity and must never remain visible as an ambient fallback.
+            // Recheck after staging so a concurrent exact publisher wins
+            // without being replaced.
+            if verify_existing(existing).is_ok() {
+                staging.remove_contents_recursive()?;
+                if !parent.remove_empty_child_if_same(&staging_name, &staging)? {
+                    anyhow::bail!(
+                        "unused external realization staging directory remained non-empty"
+                    );
+                }
+                return Ok(());
+            }
+            match existing {
+                lillux::PinnedDirectoryEntry::Directory(directory) => {
+                    directory.remove_contents_recursive()?;
+                    if !parent.remove_empty_child_if_same(&mount_name, directory)? {
+                        anyhow::bail!(
+                            "private external realization destination remained non-empty: {}",
+                            parent.path().join(&mount_name).display()
+                        );
+                    }
+                }
+                lillux::PinnedDirectoryEntry::Regular(file) => {
+                    parent.remove_if_same(&mount_name, file)?;
+                }
+            }
+        }
         match kind {
             ExternalContentKind::Tree => {
                 parent.rename_child_directory_noreplace(&staging_name, &mount_name, &staging)?;
@@ -965,13 +993,13 @@ fn bind_external_realizations_with(
                             lillux::PinnedDirectoryEntry::Directory(directory),
                         ) => verify_large_materialized_tree(
                             &cas,
-                            &directory,
+                            directory,
                             &manifest,
                             LargeMaterializationVerification::PrivateDigest,
                         ),
                         (
                             ExternalContentKind::File,
-                            lillux::PinnedDirectoryEntry::Regular(mut file),
+                            lillux::PinnedDirectoryEntry::Regular(file),
                         ) => {
                             let expected = expected_file.ok_or_else(|| {
                                 anyhow::anyhow!(
@@ -979,7 +1007,7 @@ fn bind_external_realizations_with(
                                 )
                             })?;
                             verify_open_regular_exact(
-                                &mut file,
+                                file,
                                 expected.size.expect("validated file has a size"),
                                 expected.mode.expect("validated file has a mode"),
                                 expected
@@ -1037,16 +1065,13 @@ fn bind_external_realizations_with(
                     (
                         ExternalContentKind::Tree,
                         lillux::PinnedDirectoryEntry::Directory(directory),
-                    ) => verify_materialized_tree(&cas, &directory, closure.manifest()),
-                    (
-                        ExternalContentKind::File,
-                        lillux::PinnedDirectoryEntry::Regular(mut file),
-                    ) => {
+                    ) => verify_materialized_tree(&cas, directory, closure.manifest()),
+                    (ExternalContentKind::File, lillux::PinnedDirectoryEntry::Regular(file)) => {
                         let expected = expected_file.ok_or_else(|| {
                             anyhow::anyhow!("file-shaped realization has no canonical file entry")
                         })?;
                         verify_open_regular_exact(
-                            &mut file,
+                            file,
                             expected.size.expect("validated file has a size"),
                             expected.mode.expect("validated file has a mode"),
                             expected
@@ -1952,7 +1977,7 @@ mod tests {
             |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
             |existing| match existing {
                 lillux::PinnedDirectoryEntry::Directory(directory) => {
-                    verify_materialized_tree(&cas, &directory, closure.manifest())
+                    verify_materialized_tree(&cas, directory, closure.manifest())
                 }
                 lillux::PinnedDirectoryEntry::Regular(_) => {
                     anyhow::bail!("tree realization destination is a regular file")
@@ -1972,7 +1997,7 @@ mod tests {
             |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
             |existing| match existing {
                 lillux::PinnedDirectoryEntry::Directory(directory) => {
-                    verify_materialized_tree(&cas, &directory, closure.manifest())
+                    verify_materialized_tree(&cas, directory, closure.manifest())
                 }
                 lillux::PinnedDirectoryEntry::Regular(_) => {
                     anyhow::bail!("tree realization destination is a regular file")
@@ -1989,24 +2014,33 @@ mod tests {
             );
         }
         std::fs::write(&private_file, b"private mutation").unwrap();
+        std::fs::create_dir_all(workspace_path.join("runtime/content/__pycache__")).unwrap();
+        std::fs::write(
+            workspace_path.join("runtime/content/__pycache__/module.pyc"),
+            b"ambient bytecode",
+        )
+        .unwrap();
         assert_eq!(std::fs::read(cached_file).unwrap(), b"sealed");
+        publish_private_generation(
+            &workspace,
+            "runtime/content",
+            ExternalContentKind::Tree,
+            |staging| copy_materialized_tree(&generation.root, staging, closure.manifest()),
+            |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
+            |existing| match existing {
+                lillux::PinnedDirectoryEntry::Directory(directory) => {
+                    verify_materialized_tree(&cas, directory, closure.manifest())
+                }
+                lillux::PinnedDirectoryEntry::Regular(_) => {
+                    anyhow::bail!("tree realization destination is a regular file")
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&private_file).unwrap(), b"sealed");
         assert!(
-            publish_private_generation(
-                &workspace,
-                "runtime/content",
-                ExternalContentKind::Tree,
-                |staging| { copy_materialized_tree(&generation.root, staging, closure.manifest()) },
-                |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
-                |existing| match existing {
-                    lillux::PinnedDirectoryEntry::Directory(directory) => {
-                        verify_materialized_tree(&cas, &directory, closure.manifest())
-                    }
-                    lillux::PinnedDirectoryEntry::Regular(_) => {
-                        anyhow::bail!("tree realization destination is a regular file")
-                    }
-                },
-            )
-            .is_err()
+            !workspace_path.join("runtime/content/__pycache__").exists(),
+            "excluded or runtime-created paths must not remain visible beside an exact realization"
         );
     }
 
@@ -2166,7 +2200,7 @@ mod tests {
                 lillux::PinnedDirectoryEntry::Directory(directory) => {
                     verify_large_materialized_tree(
                         &cas,
-                        &directory,
+                        directory,
                         &manifest,
                         LargeMaterializationVerification::PrivateDigest,
                     )
@@ -2246,7 +2280,7 @@ mod tests {
             |staging| copy_materialized_tree(&generation.root, staging, closure.manifest()),
             |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
             |existing| match existing {
-                lillux::PinnedDirectoryEntry::Regular(mut file) => {
+                lillux::PinnedDirectoryEntry::Regular(file) => {
                     let expected = closure
                         .manifest()
                         .entries
@@ -2257,7 +2291,7 @@ mod tests {
                         })
                         .unwrap();
                     verify_open_regular_exact(
-                        &mut file,
+                        file,
                         expected.size.unwrap(),
                         expected.mode.unwrap(),
                         expected.blob_hash.as_deref().unwrap(),
@@ -2282,7 +2316,7 @@ mod tests {
             |staging| copy_materialized_tree(&generation.root, staging, closure.manifest()),
             |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
             |existing| match existing {
-                lillux::PinnedDirectoryEntry::Regular(mut file) => {
+                lillux::PinnedDirectoryEntry::Regular(file) => {
                     let expected = closure
                         .manifest()
                         .entries
@@ -2293,7 +2327,7 @@ mod tests {
                         })
                         .unwrap();
                     verify_open_regular_exact(
-                        &mut file,
+                        file,
                         expected.size.unwrap(),
                         expected.mode.unwrap(),
                         expected.blob_hash.as_deref().unwrap(),
@@ -2307,37 +2341,39 @@ mod tests {
         .unwrap();
 
         std::fs::write(workspace_path.join("config/model.bin"), b"mutated").unwrap();
-        assert!(
-            publish_private_generation(
-                &workspace,
-                "config/model.bin",
-                ExternalContentKind::File,
-                |staging| { copy_materialized_tree(&generation.root, staging, closure.manifest()) },
-                |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
-                |existing| match existing {
-                    lillux::PinnedDirectoryEntry::Regular(mut file) => {
-                        let expected = closure
-                            .manifest()
-                            .entries
-                            .iter()
-                            .find(|entry| {
-                                entry.path
-                                    == ryeos_engine::external_content::FILE_REALIZATION_ENTRY_PATH
-                            })
-                            .unwrap();
-                        verify_open_regular_exact(
-                            &mut file,
-                            expected.size.unwrap(),
-                            expected.mode.unwrap(),
-                            expected.blob_hash.as_deref().unwrap(),
-                        )
-                    }
-                    lillux::PinnedDirectoryEntry::Directory(_) => {
-                        anyhow::bail!("file realization destination is a directory")
-                    }
-                },
-            )
-            .is_err()
+        publish_private_generation(
+            &workspace,
+            "config/model.bin",
+            ExternalContentKind::File,
+            |staging| copy_materialized_tree(&generation.root, staging, closure.manifest()),
+            |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
+            |existing| match existing {
+                lillux::PinnedDirectoryEntry::Regular(file) => {
+                    let expected = closure
+                        .manifest()
+                        .entries
+                        .iter()
+                        .find(|entry| {
+                            entry.path
+                                == ryeos_engine::external_content::FILE_REALIZATION_ENTRY_PATH
+                        })
+                        .unwrap();
+                    verify_open_regular_exact(
+                        file,
+                        expected.size.unwrap(),
+                        expected.mode.unwrap(),
+                        expected.blob_hash.as_deref().unwrap(),
+                    )
+                }
+                lillux::PinnedDirectoryEntry::Directory(_) => {
+                    anyhow::bail!("file realization destination is a directory")
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(workspace_path.join("config/model.bin")).unwrap(),
+            b"payload"
         );
     }
 
