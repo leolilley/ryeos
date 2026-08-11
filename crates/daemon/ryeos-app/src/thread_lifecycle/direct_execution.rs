@@ -105,6 +105,8 @@ impl PreparedItemPlan {
     pub fn bind_persistent_session_spawn_environment(
         &mut self,
         external_realizations: Option<&str>,
+        admitted_source: Option<&str>,
+        admitted_source_entry: Option<&Path>,
     ) -> Result<()> {
         let spec = first_subprocess_spec_mut(&mut self.plan)?;
         if let Some(realizations) = external_realizations {
@@ -116,6 +118,43 @@ impl PreparedItemPlan {
                 "RYEOS_EXTERNAL_REALIZATIONS".to_owned(),
                 RuntimeEnvSource::EnginePlan,
             );
+        }
+        if let Some(source) = admitted_source {
+            if spec.env.contains_key("RYEOS_ADMITTED_SOURCE") {
+                bail!("persistent-session plan attempts to override admitted source identity");
+            }
+            spec.env
+                .insert("RYEOS_ADMITTED_SOURCE".to_owned(), source.to_owned());
+            spec.env_sources.insert(
+                "RYEOS_ADMITTED_SOURCE".to_owned(),
+                RuntimeEnvSource::EnginePlan,
+            );
+        }
+        let source_entry = admitted_source_entry
+            .map(|path| {
+                path.to_str()
+                    .ok_or_else(|| anyhow!("admitted source entry path is not valid UTF-8"))
+            })
+            .transpose()?;
+        let mut bound_entries = 0usize;
+        for argument in &mut spec.args {
+            if matches!(argument, PlanArgument::AdmittedSourceEntry) {
+                let entry = source_entry.ok_or_else(|| {
+                    anyhow!("persistent-session plan requires an admitted source entry")
+                })?;
+                *argument = PlanArgument::literal(entry);
+                bound_entries += 1;
+            }
+        }
+        match (source_entry.is_some(), bound_entries) {
+            (false, 0) | (true, 1) => {}
+            (false, _) => bail!("persistent-session plan has an unowned source entry"),
+            (true, 0) => {
+                bail!("persistent-session plan does not consume its admitted source entry")
+            }
+            (true, _) => {
+                bail!("persistent-session plan consumes its admitted source entry more than once")
+            }
         }
         Ok(())
     }
@@ -644,8 +683,8 @@ fn admitted_execution_plan_value(plan: &ExecutionPlan) -> Result<Value> {
         let execution_text = execution_path.to_str().expect("constant path is UTF-8");
         spec.cmd = execution_text.to_owned();
         for argument in &mut spec.args {
-            if argument == original_text {
-                *argument = execution_text.to_owned();
+            if argument.literal_value() == Some(original_text) {
+                *argument = PlanArgument::literal(execution_text);
             }
         }
         for value in spec.env.values_mut() {
@@ -763,7 +802,9 @@ fn relocate_admitted_direct_plan(
             relocate_path(cwd)?;
         }
         for arg in &mut spec.args {
-            relocate_string("argument", arg)?;
+            if let PlanArgument::Literal { value } = arg {
+                relocate_string("argument", value)?;
+            }
         }
         for value in spec.env.values_mut() {
             relocate_string("environment value", value)?;
@@ -1008,6 +1049,9 @@ pub struct SpawnItemParams<'a> {
     /// runtime references the identity it executes under without
     /// re-observing any content.
     pub external_realizations_env: Option<String>,
+    /// Canonical, path-free identity of the source closure whose exact bytes
+    /// are mounted for this spawn.
+    pub admitted_source_env: Option<String>,
     /// Exact daemon socket requested by the verified callback channel, or
     /// `None` for a callback-free launch.
     pub isolation_daemon_socket_path: Option<&'a std::path::Path>,
@@ -1049,6 +1093,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItemAwaitingAtta
         isolation_workspace,
         inherited_fds,
         external_realizations_env,
+        admitted_source_env,
         isolation_daemon_socket_path,
         thread_state_dir,
         is_resume,
@@ -1169,6 +1214,13 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItemAwaitingAtta
             if let Some(sealed) = &external_realizations_env {
                 builder = builder.with_typed_bindings([EnvBinding::new(
                     "RYEOS_EXTERNAL_REALIZATIONS",
+                    sealed.clone(),
+                    EnvSourceDetail::PerSpawnDaemon,
+                )])?;
+            }
+            if let Some(sealed) = &admitted_source_env {
+                builder = builder.with_typed_bindings([EnvBinding::new(
+                    "RYEOS_ADMITTED_SOURCE",
                     sealed.clone(),
                     EnvSourceDetail::PerSpawnDaemon,
                 )])?;
@@ -1334,7 +1386,10 @@ mod tests {
                             "content_hash": "a".repeat(64)
                         }
                     },
-                    "args": [project_root.join("tool.py")],
+                    "args": [{
+                        "kind": "literal",
+                        "value": project_root.join("tool.py")
+                    }],
                     "cwd": project_root,
                     "env": {
                         "RYEOS_PROJECT_FILE": project_root.join("data.json")
@@ -1403,8 +1458,8 @@ mod tests {
         };
         assert_eq!(spec.cwd.as_deref(), Some(effective));
         assert_eq!(
-            spec.args[0],
-            effective.join("tool.py").display().to_string()
+            spec.args[0].literal_value(),
+            Some(effective.join("tool.py").display().to_string().as_str())
         );
         assert_eq!(
             spec.env["RYEOS_PROJECT_FILE"],
@@ -1523,7 +1578,7 @@ mod tests {
         else {
             panic!("fixture must dispatch");
         };
-        spec.args[0] = format!("--script={}/tool.py", admitted.display());
+        spec.args[0] = format!("--script={}/tool.py", admitted.display()).into();
 
         let error = validate_direct_plan_portability(&plan, Some(admitted)).unwrap_err();
         assert!(
@@ -1587,7 +1642,7 @@ mod tests {
         else {
             panic!("fixture must dispatch");
         };
-        spec.args[0] = format!("{}/../outside", admitted.display());
+        spec.args[0] = format!("{}/../outside", admitted.display()).into();
         *tool_path = Some(admitted.join("../outside.yaml"));
 
         let error =

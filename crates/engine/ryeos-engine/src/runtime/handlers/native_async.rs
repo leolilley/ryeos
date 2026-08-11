@@ -13,7 +13,7 @@
 //!
 //! Phase / cardinality: `DecorateSpec` / `FirstWins`. Cancellation
 //! policy must be unambiguous; the FIRST chain element that declares
-//! the block wins, matching how `verify_deps` resolves chain
+//! the block wins, matching other single-owner runtime declarations
 //! conflicts.
 //!
 //! ## YAML shapes accepted

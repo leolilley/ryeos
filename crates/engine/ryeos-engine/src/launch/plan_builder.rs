@@ -667,7 +667,7 @@ pub fn resolve_executor_source_policy(
         &Path,
         &dyn crate::project_content::AuthoritativeProjectContent,
     )>,
-) -> Result<ExecutorSourcePolicyProjection, EngineError> {
+) -> Result<Option<ExecutorSourcePolicyProjection>, EngineError> {
     let terminal = resolve_executor_chain(
         starting_executor_id,
         root_source_path,
@@ -718,10 +718,9 @@ pub fn resolve_executor_source_policy(
         }
         selected = Some((policy, authority.clone()));
     }
-    let (policy, declarer) = selected.ok_or_else(|| EngineError::InvalidRuntimeConfig {
-        path: root_source_path.display().to_string(),
-        reason: "executor chain has no exact source_scope owner".to_owned(),
-    })?;
+    let Some((policy, declarer)) = selected else {
+        return Ok(None);
+    };
     let value = serde_json::json!({
         "schema": "ryeos.executor_source_chain.v1",
         "authorities": &terminal.verified_chain,
@@ -731,12 +730,12 @@ pub fn resolve_executor_source_policy(
             .map_err(|error| EngineError::Internal(error.to_string()))?
             .as_bytes(),
     );
-    Ok(ExecutorSourcePolicyProjection {
+    Ok(Some(ExecutorSourcePolicyProjection {
         policy,
         declarer,
         chain_authorities: terminal.verified_chain,
         chain_digest,
-    })
+    }))
 }
 
 // ── Terminal executor descriptor ─────────────────────────────────────────
@@ -2245,7 +2244,11 @@ config:
         assert_eq!(spec.cmd, "python3");
         assert_eq!(
             spec.args,
-            vec!["/project/.ai/tools/echo.py", "--project-path", "/project"]
+            vec![
+                PlanArgument::literal("/project/.ai/tools/echo.py"),
+                PlanArgument::literal("--project-path"),
+                PlanArgument::literal("/project"),
+            ]
         );
         let crate::contracts::PlanStdin::RuntimeParameters {
             parameters,
@@ -2650,17 +2653,24 @@ category: ryeos/core/subprocess\n";
 
         // Args should have tool_path and --project-path expanded
         assert_eq!(dispatch.args.len(), 4);
-        assert_eq!(dispatch.args[0], "print(f'{tool_path}')");
+        assert_eq!(
+            dispatch.args[0].literal_value(),
+            Some("print(f'{tool_path}')")
+        );
         // args[1] = ${tool_path} → root tool source path
         assert!(
-            dispatch.args[1].contains("my_tool"),
+            dispatch.args[1]
+                .literal_value()
+                .is_some_and(|value| value.contains("my_tool")),
             "args[1] should contain my_tool, got: {:?}",
             dispatch.args[1],
         );
-        assert_eq!(dispatch.args[2], "--project-path");
+        assert_eq!(dispatch.args[2].literal_value(), Some("--project-path"));
         // args[3] = ${project_path} → project root
         assert!(
-            dispatch.args[3].contains("rye_plan_test"),
+            dispatch.args[3]
+                .literal_value()
+                .is_some_and(|value| value.contains("rye_plan_test")),
             "args[3] should be project path, got: {:?}",
             dispatch.args[3],
         );

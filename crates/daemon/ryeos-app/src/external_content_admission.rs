@@ -245,6 +245,31 @@ pub fn admit_external_realizations(
     roots: &ryeos_engine::item_resolution::ResolutionRoots,
     inherited: Option<&RealizedExternalContentSet>,
 ) -> anyhow::Result<Option<AdmittedExternalRealizations>> {
+    let mut publication = None;
+    let mut admitted = admit_external_realizations_in_publication(
+        state,
+        engine,
+        kind,
+        resolution,
+        roots,
+        inherited,
+        &mut publication,
+    )?;
+    if let Some(admitted) = admitted.as_mut() {
+        admitted.publication = publication;
+    }
+    Ok(admitted)
+}
+
+pub fn admit_external_realizations_in_publication(
+    state: &AppState,
+    engine: &ryeos_engine::engine::Engine,
+    kind: &str,
+    resolution: &mut ryeos_engine::resolution::ResolutionOutput,
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    inherited: Option<&RealizedExternalContentSet>,
+    publication: &mut Option<PendingCasPublication>,
+) -> anyhow::Result<Option<AdmittedExternalRealizations>> {
     let contract = engine
         .kinds
         .get(kind)
@@ -260,7 +285,21 @@ pub fn admit_external_realizations(
         return inherit_external_realizations(state, resolution, inherited);
     };
 
-    let authority = pinned_state_authority(state)?;
+    if publication.is_none() {
+        let authority = pinned_state_authority(state)?;
+        let guard = authority.acquire_shared_guard()?;
+        authority.ensure_guard(&guard)?;
+        let staged_roots = authority
+            .require_recovery()?
+            .begin_staged_cas_roots_admitted(&guard, "launch-realization")?;
+        drop(guard);
+        *publication = Some(PendingCasPublication::new(authority, staged_roots));
+    }
+    let authority = publication
+        .as_ref()
+        .expect("external admission initialized its publication")
+        .authority()
+        .try_clone()?;
     let proof_authority = authority.try_clone()?;
     let guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&guard)?;
@@ -269,15 +308,16 @@ pub fn admit_external_realizations(
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
     let cas = authority.cas_store()?;
-    let mut staged_roots = authority
-        .require_recovery()?
-        .begin_staged_cas_roots_admitted(&guard, "external-content-realization")?;
+    let staged_roots = publication
+        .as_mut()
+        .expect("external admission initialized its publication")
+        .staged_roots_mut();
     let mut budget = LaunchCaptureBudget::default();
     let mut realized = Vec::with_capacity(declarations.len());
     let mut sink = GuardedCasBlobSink {
         guard: &guard,
         cas: &cas,
-        staged_roots: &mut staged_roots,
+        staged_roots,
         stored_blobs: 0,
         reused_blobs: 0,
     };
@@ -425,7 +465,7 @@ pub fn admit_external_realizations(
     Ok(Some(AdmittedExternalRealizations {
         proof,
         store,
-        publication: Some(PendingCasPublication::new(authority, staged_roots)),
+        publication: None,
     }))
 }
 

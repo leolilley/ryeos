@@ -23,6 +23,7 @@ pub(crate) mod process_attachment;
 pub mod project_source;
 pub mod runner;
 pub mod runtime_dispatch;
+pub(crate) mod source_closure;
 pub mod spawn_detached_child;
 pub mod spawn_follow_child;
 pub mod thread_meta;
@@ -517,7 +518,7 @@ pub fn checkout_project_lower(
     Ok((realized_path, lease, materialization))
 }
 
-fn pinned_output_parent(
+pub(super) fn pinned_output_parent(
     root: &lillux::secure_fs::PinnedDirectory,
     relative: &str,
 ) -> Result<(lillux::secure_fs::PinnedDirectory, OsString)> {
@@ -554,7 +555,14 @@ fn admitted_operational_shadow_paths(
     let Some(evidence) = state.state_store.admitted_program_evidence(thread_id)? else {
         return Ok(Vec::new());
     };
-    external_content::admitted_realization_mounts(&evidence.resolution)
+    let mut paths = external_content::admitted_realization_mounts(&evidence.resolution)?;
+    if let Some(source_mount) = source_closure::admitted_source_mount(state, &evidence.resolution)?
+    {
+        paths.push(source_mount);
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }
 
 /// Capture the authoritative post-execution tree under the exact immutable

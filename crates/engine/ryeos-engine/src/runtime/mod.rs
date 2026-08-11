@@ -3,7 +3,7 @@
 //!
 //! Mirrors the composer pattern (`crate::composers`):
 //!   * Each top-level YAML block on a chain intermediate (e.g. `config`,
-//!     `env_config`, `verify_deps`, `runtime_config`) is claimed by
+//!     `env_config`, `runtime_config`) is claimed by
 //!     exactly one `RuntimeHandler` registered under a string key.
 //!   * `compile_with_handlers` walks the chain in order; for each block
 //!     it dispatches to the registered handler, which owns
@@ -24,7 +24,9 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
-use crate::contracts::{ExecutionDecorations, PlanStdin, PlanSubprocessSpec, RuntimeEnvSource};
+use crate::contracts::{
+    ExecutionDecorations, PlanArgument, PlanStdin, PlanSubprocessSpec, RuntimeEnvSource,
+};
 use crate::error::EngineError;
 use crate::item_resolution::ResolutionRoots;
 use crate::kind_registry::KindRegistry;
@@ -282,10 +284,21 @@ fn compile_stdin_template(
 fn render_runtime_argument(
     argument: RuntimeArgument,
     ctx: &TemplateContext,
-) -> Result<String, EngineError> {
+) -> Result<PlanArgument, EngineError> {
     match argument {
-        RuntimeArgument::Template(template) => expand_template(&template, ctx),
-        RuntimeArgument::Literal(literal) => Ok(literal.literal),
+        RuntimeArgument::Template(template) if template == "${source.entry}" => {
+            Ok(PlanArgument::AdmittedSourceEntry)
+        }
+        RuntimeArgument::Template(template) if template.contains("${source.") => {
+            Err(EngineError::InvalidRuntimeConfig {
+                path: "config.args".to_owned(),
+                reason: "source entry must occupy one complete argument".to_owned(),
+            })
+        }
+        RuntimeArgument::Template(template) => {
+            expand_template(&template, ctx).map(PlanArgument::literal)
+        }
+        RuntimeArgument::Literal(literal) => Ok(PlanArgument::literal(literal.literal)),
     }
 }
 
@@ -386,8 +399,6 @@ pub enum HandlerPhase {
     /// (cancellation_mode, resume_mode, execution_owner). Used by
     /// `native_async`, `native_resume`, `execution_owner`.
     DecorateSpec,
-    /// Post-build integrity / safety checks. Used by `verify_deps`.
-    Verify,
 }
 
 /// Multiplicity semantics: how many chain elements may declare this
@@ -474,7 +485,6 @@ impl RuntimeHandlerRegistry {
         reg.register(Arc::new(handlers::runtime_config::RuntimeConfigHandler));
         reg.register(Arc::new(handlers::env_config::EnvConfigHandler));
         reg.register(Arc::new(handlers::config_resolve::ConfigResolveHandler));
-        reg.register(Arc::new(handlers::verify_deps::VerifyDepsHandler));
         reg.register(Arc::new(handlers::execution_params::ExecutionParamsHandler));
         reg.register(Arc::new(handlers::native_async::NativeAsyncHandler));
         reg.register(Arc::new(handlers::native_resume::NativeResumeHandler));
@@ -651,7 +661,6 @@ pub fn compile_with_handlers(
         HandlerPhase::ResolveContext,
         HandlerPhase::BuildSpec,
         HandlerPhase::DecorateSpec,
-        HandlerPhase::Verify,
     ];
 
     for phase in phases {
@@ -791,7 +800,7 @@ pub fn compile_with_handlers(
     };
 
     let authored_args = spec_overrides.args.unwrap_or_default();
-    let args: Result<Vec<String>, EngineError> = authored_args
+    let args: Result<Vec<PlanArgument>, EngineError> = authored_args
         .into_iter()
         .map(|argument| render_runtime_argument(argument, &template_ctx))
         .collect();
@@ -971,7 +980,34 @@ mod tests {
             literal: source.into(),
         });
 
-        assert_eq!(render_runtime_argument(argument, &ctx).unwrap(), source);
+        assert_eq!(
+            render_runtime_argument(argument, &ctx)
+                .unwrap()
+                .literal_value(),
+            Some(source)
+        );
+    }
+
+    #[test]
+    fn source_entry_argument_remains_typed_until_admitted_materialization() {
+        let ctx = TemplateContext::new(PathBuf::from("/worker.yaml"));
+        let argument = RuntimeArgument::Template("${source.entry}".to_owned());
+        assert_eq!(
+            render_runtime_argument(argument, &ctx).unwrap(),
+            PlanArgument::AdmittedSourceEntry
+        );
+    }
+
+    #[test]
+    fn source_entry_refuses_partial_string_interpolation() {
+        let ctx = TemplateContext::new(PathBuf::from("/worker.yaml"));
+        let argument = RuntimeArgument::Template("--entry=${source.entry}".to_owned());
+        let error = render_runtime_argument(argument, &ctx).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("source entry must occupy one complete argument")
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@
 use serde_json::Value;
 
 use crate::contracts::{
-    EngineContext, ExecutionCompletion, ExecutionPlan, PlanNode, PlanSubprocessSpec,
+    EngineContext, ExecutionCompletion, ExecutionPlan, PlanArgument, PlanNode, PlanSubprocessSpec,
     ThreadTerminalStatus,
 };
 use crate::error::EngineError;
@@ -104,7 +104,16 @@ impl DebugCapture {
         env_keys.sort_unstable();
         Self {
             cmd: spec.cmd.clone(),
-            args: spec.args.clone(),
+            args: spec
+                .args
+                .iter()
+                .map(|argument| match argument {
+                    PlanArgument::Literal { value } => value.clone(),
+                    PlanArgument::AdmittedSourceEntry => {
+                        "<unbound-admitted-source-entry>".to_owned()
+                    }
+                })
+                .collect(),
             cwd: spec.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
             env_keys,
         }
@@ -160,10 +169,22 @@ fn spec_to_request(spec: &PlanSubprocessSpec) -> Result<lillux::SubprocessReques
         })
         .transpose()?;
 
+    let args = spec
+        .args
+        .iter()
+        .map(|argument| match argument {
+            PlanArgument::Literal { value } => Ok(value.clone()),
+            PlanArgument::AdmittedSourceEntry => Err(EngineError::InvalidRuntimeConfig {
+                path: "config.args".to_owned(),
+                reason: "admitted source entry was not bound before subprocess dispatch".to_owned(),
+            }),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
     Ok(lillux::SubprocessRequest {
         cmd: spec.cmd.clone(),
         argv0: None,
-        args: spec.args.clone(),
+        args,
         cwd: spec.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
         envs,
         stdin_data,
@@ -840,7 +861,7 @@ mod tests {
                 spec: Box::new(PlanSubprocessSpec {
                     cmd: host_executable("python3"),
                     verified_command: None,
-                    args: vec![script.to_string_lossy().to_string()],
+                    args: vec![script.to_string_lossy().to_string().into()],
                     cwd: Some(dir),
                     env: HashMap::new(),
                     env_sources: HashMap::new(),
@@ -941,7 +962,7 @@ mod tests {
                 spec: Box::new(PlanSubprocessSpec {
                     cmd: host_executable("python3"),
                     verified_command: None,
-                    args: vec![script.to_string_lossy().to_string()],
+                    args: vec![script.to_string_lossy().to_string().into()],
                     cwd: Some(dir),
                     env: HashMap::new(),
                     env_sources: HashMap::new(),
@@ -999,7 +1020,7 @@ mod tests {
                 spec: Box::new(PlanSubprocessSpec {
                     cmd: host_executable("python3"),
                     verified_command: None,
-                    args: vec![script.to_string_lossy().to_string()],
+                    args: vec![script.to_string_lossy().to_string().into()],
                     cwd: Some(dir),
                     env: HashMap::new(),
                     env_sources: HashMap::new(),
@@ -1088,7 +1109,7 @@ mod tests {
                 spec: Box::new(PlanSubprocessSpec {
                     cmd: host_executable("python3"),
                     verified_command: None,
-                    args: vec![script.to_string_lossy().to_string()],
+                    args: vec![script.to_string_lossy().to_string().into()],
                     cwd: Some(dir),
                     env,
                     env_sources: HashMap::new(),

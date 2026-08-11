@@ -1812,7 +1812,7 @@ while True:
         let spec = PlanSubprocessSpec {
             cmd: host_executable("python3"),
             verified_command: None,
-            args: vec!["-S".to_owned(), "-c".to_owned(), script.to_owned()],
+            args: vec!["-S".into(), "-c".into(), script.into()],
             cwd: None,
             env: HashMap::from([("RYEOS_SESSION_FD".to_owned(), worker_fd.to_string())]),
             env_sources: HashMap::new(),

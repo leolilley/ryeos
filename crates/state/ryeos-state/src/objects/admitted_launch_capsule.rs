@@ -6,7 +6,7 @@ use super::{
     ExecutionRecoveryAuthority, validate_trimmed_control_free,
 };
 
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 12;
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 13;
 pub const ADMITTED_DIRECT_COMMAND_ROOT: &str = "/ryeos/admitted-direct-command";
 
 pub fn admitted_direct_command_execution_path(
@@ -530,6 +530,10 @@ pub struct AdmittedLaunchCapsule {
     /// canonical launch-authority digest; it never back-references this final
     /// capsule hash, avoiding an impossible content-addressed cycle.
     pub execution_realization_hash: String,
+    /// Exact adjacent-source authority retained by this launch, when the
+    /// effective program declares one. Required-nullable on the current wire.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub source_binding_hash: Option<String>,
     /// Sealed accounting scope for launches whose runtime declares a
     /// financial authority. `None` states the launch performs no direct paid
     /// provider work.
@@ -613,6 +617,22 @@ impl AdmittedLaunchAuthority {
 }
 
 impl AdmittedLaunchCapsule {
+    pub fn source_binding_hash_in_program(
+        exact_program: &serde_json::Value,
+    ) -> anyhow::Result<Option<String>> {
+        let Some(value) = exact_program
+            .get("resolution_output")
+            .and_then(|resolution| resolution.get("composed"))
+            .and_then(|composed| composed.get("derived"))
+            .and_then(|derived| derived.get(super::SOURCE_CLOSURE_DERIVED_KEY))
+        else {
+            return Ok(None);
+        };
+        Ok(Some(
+            super::EffectiveSourceClosureProjection::from_value(value)?.binding_hash,
+        ))
+    }
+
     /// Verify the complete realization/substrate evidence named by this
     /// capsule against retained bytes and the current trust store.
     pub fn verify_retained_execution_realization(
@@ -847,6 +867,12 @@ impl AdmittedLaunchCapsule {
             "launch capsule execution realization hash",
             &self.execution_realization_hash,
         )?;
+        if self.source_binding_hash != Self::source_binding_hash_in_program(&self.exact_program)? {
+            anyhow::bail!("launch capsule source binding contradicts its exact program");
+        }
+        if let Some(hash) = &self.source_binding_hash {
+            super::thread_snapshot::validate_canonical_hash("launch capsule source binding", hash)?;
+        }
         match (&self.artifact_identity, &self.execution_closure) {
             (
                 AdmittedLaunchArtifactIdentity::ManagedRuntime {
@@ -1154,6 +1180,7 @@ mod tests {
                 admitted_project_root: None,
             },
             execution_realization_hash: "9".repeat(64),
+            source_binding_hash: None,
             accounting_scope: None,
             effective_caps: vec!["ryeos.read.project.live".to_string()],
             runtime_ref: "runtime:direct".to_string(),
@@ -1224,6 +1251,7 @@ mod tests {
                 executor_blob_hash: "c".repeat(64),
             },
             execution_realization_hash: "9".repeat(64),
+            source_binding_hash: None,
             accounting_scope: None,
             effective_caps: vec!["ryeos.read.project.live".to_string()],
             runtime_ref: "runtime:test/directive".to_string(),

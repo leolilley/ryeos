@@ -27,7 +27,7 @@ pub(crate) fn admit_or_verify(
     let launch_authority = metadata
         .admitted_launch_authority()?
         .ok_or_else(|| anyhow::anyhow!("subprocess launch has no admitted launch authority"))?;
-    let components = external_components(state, resolution)?;
+    let components = execution_components(state, resolution)?;
     let launch_authority_digest = launch_authority.digest()?;
     let artifact_identity_digest = launch_authority.artifact_identity_digest()?;
     let execution_closure_digest = launch_authority.execution_closure_digest()?;
@@ -93,7 +93,7 @@ pub(crate) fn admit_persistent_session(
         authority.execution_closure_digest()?,
         contract_ref,
         contract_digest,
-        external_components(state, resolution)?,
+        execution_components(state, resolution)?,
         ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution,
         ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::Isolated,
         staged_publication,
@@ -122,7 +122,7 @@ pub(crate) fn verify_persistent_session(
         || existing.execution_closure_digest != authority.execution_closure_digest()?
         || existing.contract_ref != contract_ref
         || existing.contract_digest != contract_digest
-        || existing.components != external_components(state, resolution)?
+        || existing.components != execution_components(state, resolution)?
         || existing.properties != properties
     {
         anyhow::bail!("persistent-session execution realization contradicts its admitted capsule");
@@ -407,44 +407,67 @@ fn verify_attestation(
     Ok(())
 }
 
-fn external_components(
+fn execution_components(
     state: &AppState,
     resolution: &ryeos_engine::resolution::ResolutionOutput,
 ) -> Result<Vec<ExecutionComponentReference>> {
-    let Some(value) = resolution
+    let external = resolution
         .composed
         .derived
         .get(ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY)
-    else {
-        return Ok(Vec::new());
-    };
-    let set = ryeos_state::objects::ExternalContentRealizationSet::from_value(value)?;
+        .map(ryeos_state::objects::ExternalContentRealizationSet::from_value)
+        .transpose()?;
+    let source = resolution
+        .composed
+        .derived
+        .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY)
+        .map(ryeos_state::objects::EffectiveSourceClosureProjection::from_value)
+        .transpose()?;
     let authority = state
         .state_store
         .with_state_db(|db| db.pinned_authority())?;
     let cas = authority.cas_store()?;
-    let mut components = Vec::with_capacity(set.iter().len());
-    for external in set.iter() {
-        let object = cas.get_object(&external.manifest_hash)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "external realization `{}` manifest {} is missing",
-                external.id,
-                external.manifest_hash
-            )
-        })?;
-        let kind = object
-            .get("kind")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("external realization manifest has no kind"))?;
-        if !ryeos_state::object_closure::current_object_kinds().contains(&kind) {
-            anyhow::bail!("external realization manifest kind `{kind}` is unsupported");
+    let mut components = Vec::new();
+    if let Some(set) = external.as_ref() {
+        for external in set.iter() {
+            let object = cas.get_object(&external.manifest_hash)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "external realization `{}` manifest {} is missing",
+                    external.id,
+                    external.manifest_hash
+                )
+            })?;
+            let kind = object
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("external realization manifest has no kind"))?;
+            if !ryeos_state::object_closure::current_object_kinds().contains(&kind) {
+                anyhow::bail!("external realization manifest kind `{kind}` is unsupported");
+            }
+            components.push(ExecutionComponentReference {
+                role: format!("external/{}", external.id),
+                content_digest: external.manifest_hash.clone(),
+                material: ExecutionComponentStorage::CasObject {
+                    hash: external.manifest_hash.clone(),
+                    expected_kind: kind.to_owned(),
+                },
+            });
+        }
+    }
+    if let Some(source) = source {
+        let value = cas
+            .get_object(&source.binding_hash)?
+            .ok_or_else(|| anyhow::anyhow!("admitted source binding is missing"))?;
+        let binding = ryeos_state::objects::EffectiveSourceBinding::from_value(&value)?;
+        if binding.digest()? != source.binding_hash || binding.owner_key()? != source.owner_key {
+            anyhow::bail!("admitted source binding contradicts its effective projection");
         }
         components.push(ExecutionComponentReference {
-            role: format!("external/{}", external.id),
-            content_digest: external.manifest_hash.clone(),
+            role: format!("source/{}", source.owner_key),
+            content_digest: source.binding_hash.clone(),
             material: ExecutionComponentStorage::CasObject {
-                hash: external.manifest_hash.clone(),
-                expected_kind: kind.to_owned(),
+                hash: source.binding_hash,
+                expected_kind: ryeos_state::objects::EFFECTIVE_SOURCE_BINDING_KIND.to_owned(),
             },
         });
     }

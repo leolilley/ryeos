@@ -549,6 +549,13 @@ pub(super) const EXTERNAL_MANIFEST_KINDS: &[&str] = &[
 
 fn links_admitted_launch_capsule(value: &Value) -> Result<ContractLinks, String> {
     let mut links = ContractLinks::leaf();
+    super::push_optional_object_edge(
+        value,
+        "source_binding_hash",
+        ExpectedObject::Kind(crate::objects::EFFECTIVE_SOURCE_BINDING_KIND),
+        None,
+        &mut links.object_edges,
+    )?;
     super::push_required_object_edge(
         value,
         "execution_realization_hash",
@@ -628,6 +635,13 @@ fn links_admitted_launch_capsule(value: &Value) -> Result<ContractLinks, String>
 
 fn links_persistent_session_capsule(value: &Value) -> Result<ContractLinks, String> {
     let mut links = ContractLinks::leaf();
+    super::push_optional_object_edge(
+        value,
+        "source_binding_hash",
+        ExpectedObject::Kind(crate::objects::EFFECTIVE_SOURCE_BINDING_KIND),
+        None,
+        &mut links.object_edges,
+    )?;
     super::push_required_object_edge(
         value,
         "execution_realization_hash",

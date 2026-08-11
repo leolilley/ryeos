@@ -25,9 +25,9 @@ use crate::state_store::{
 };
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{
-    EffectivePrincipal, EngineContext, ExecutionArtifact, ExecutionCompletion,
-    ExecutionHints, ExecutionPlan, FinalCost, ItemMetadata, ItemSourceRoot, ItemSpace, LaunchMode,
-    PinnedVersion, PlanContext, PlanSubprocessSpec, Principal, ProjectContext, ResolvedItem,
+    EffectivePrincipal, EngineContext, ExecutionArtifact, ExecutionCompletion, ExecutionHints,
+    ExecutionPlan, FinalCost, ItemMetadata, ItemSourceRoot, ItemSpace, LaunchMode, PinnedVersion,
+    PlanArgument, PlanContext, PlanSubprocessSpec, Principal, ProjectContext, ResolvedItem,
     ResolvedSourceFormat, RuntimeEnvSource, ShadowedCandidate, SignatureEnvelope, SignatureHeader,
     SignerFingerprint, ThreadTerminalStatus, TrustClass, VerifiedItem,
 };

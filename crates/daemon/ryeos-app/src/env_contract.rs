@@ -55,7 +55,7 @@ const DAEMON_RESUME_NAMES: &[&str] = &["RYEOS_CHECKPOINT_DIR", "RYEOS_RESUME"];
 /// Sealed external-realization facts injected per spawn: the canonical JSON
 /// of the launch's admitted realization set, so a runtime can reference the
 /// identity it executes under without re-observing any content.
-const DAEMON_REALIZATION_NAMES: &[&str] = &["RYEOS_EXTERNAL_REALIZATIONS"];
+const DAEMON_REALIZATION_NAMES: &[&str] = &["RYEOS_EXTERNAL_REALIZATIONS", "RYEOS_ADMITTED_SOURCE"];
 
 const PROXY_AND_CA_NAMES: &[&str] = &[
     "HTTP_PROXY",

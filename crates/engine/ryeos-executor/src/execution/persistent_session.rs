@@ -90,11 +90,11 @@ pub(crate) fn admit_or_verify_prepared_sessions(
             if admitted_sessions.contains_key(name) {
                 bail!("fresh session dependency `{name}` already carries a capsule hash");
             }
-            let (hash, publication) =
+            let (hash, admitted_publications) =
                 admit_session_capsule(state, engine, dependency, &declaration, &protocol)
                     .with_context(|| format!("admit persistent-session dependency `{name}`"))?;
             admitted_sessions.insert(name.clone(), hash);
-            publications.push(publication);
+            publications.extend(admitted_publications);
         }
     }
     let actual_names = admitted_sessions.keys().cloned().collect::<BTreeSet<_>>();
@@ -176,17 +176,30 @@ fn admit_session_capsule(
     dependency: &mut PreparedExecutionDependency,
     declaration: &PersistentSessionDecl,
     protocol: &VerifiedProtocol,
-) -> Result<(String, ryeos_state::PendingCasPublication)> {
+) -> Result<(String, Vec<ryeos_state::PendingCasPublication>)> {
     let roots = engine.resolution_roots(None);
     let mut resolution = dependency.resolution.clone();
-    let captured_external = ryeos_app::external_content_admission::admit_external_realizations(
+    let mut publication = None;
+    let captured_source = ryeos_app::source_closure_admission::admit_source_closure_in_publication(
         state,
         engine,
         &dependency.captured_verified_subject()?.resolved.kind,
         &mut resolution,
         &roots,
         None,
+        None,
+        &mut publication,
     )?;
+    let captured_external =
+        ryeos_app::external_content_admission::admit_external_realizations_in_publication(
+            state,
+            engine,
+            &dependency.captured_verified_subject()?.resolved.kind,
+            &mut resolution,
+            &roots,
+            None,
+            &mut publication,
+        )?;
     let validation = engine.effective_validators.validate(
         &dependency.captured_verified_subject()?.resolved.kind,
         &resolution,
@@ -201,7 +214,9 @@ fn admit_session_capsule(
         captured_external
             .as_ref()
             .map(|captured| captured.finalization_evidence()),
-        None,
+        captured_source
+            .as_ref()
+            .map(|captured| captured.finalization_evidence()),
     )?;
     let finalized = ryeos_engine::effective_program::finalize_effective_program(candidate, proof)?;
     // The outer runtime capsule must retain the exact augmented dependency the
@@ -240,7 +255,6 @@ fn admit_session_capsule(
     plan.bind_persistent_session_workspace(&workspace)?;
     let artifact_identity = plan.admitted_artifact_identity(&request, protocol)?;
 
-    let mut publication = captured_external.and_then(|captured| captured.into_publication());
     let authority = publication
         .as_ref()
         .map(|publication| publication.authority().try_clone())
@@ -301,6 +315,10 @@ fn admit_session_capsule(
         artifact_identity,
         execution_closure,
         execution_realization_hash: realization.hash,
+        source_binding_hash: captured_source
+            .as_ref()
+            .map(|captured| captured.binding().digest())
+            .transpose()?,
         runtime_ref: session_authority.runtime_ref,
         executor_ref,
     };
@@ -321,7 +339,7 @@ fn admit_session_capsule(
             "persistent-session capsule hash mismatch: expected {expected_hash}, stored {stored}"
         );
     }
-    Ok((stored, publication))
+    Ok((stored, vec![publication]))
 }
 
 fn verify_session_capsule(
@@ -348,6 +366,7 @@ fn verify_session_capsule(
     validate_capsule_current_trust(engine, &capsule)?;
     let (protocol_ref, protocol_digest) = capsule_protocol_identity(&capsule)?;
     let resolution = exact.resolution_output.restore();
+    ryeos_app::source_closure_admission::recover_source_closure(state, &state.engine, &resolution)?;
     super::execution_realization::verify_persistent_session(
         state,
         &capsule,
@@ -372,6 +391,7 @@ pub fn inspect_capsule(
         bail!("persistent-session exact program digest does not reproduce");
     }
     let resolution = exact.resolution_output.restore();
+    ryeos_app::source_closure_admission::recover_source_closure(state, &state.engine, &resolution)?;
     super::execution_realization::verify_persistent_session(
         state,
         &capsule,
@@ -466,6 +486,22 @@ fn start_capsule_process(
         }
         None => (Vec::new(), None, Vec::new()),
     };
+    let source = if state.isolation.is_enforced() {
+        super::source_closure::bind_source(state, &resolution, &workspace)?
+    } else {
+        super::source_closure::bind_source_in_private_workspace(state, &resolution, &workspace)?
+    };
+    let mut mounts = mounts;
+    let (source_env, source_entry) = match source.as_ref() {
+        Some(source) => {
+            mounts.extend_from_slice(source.mounts());
+            (
+                Some(source.sealed_identity_env()),
+                Some(source.entry_path()),
+            )
+        }
+        None => (None, None),
+    };
     let authority = state
         .state_store
         .with_state_db(|db| db.pinned_authority())?;
@@ -485,7 +521,11 @@ fn start_capsule_process(
         worker_socket,
         capsule.wire.channel_env.clone(),
     )?;
-    plan.bind_persistent_session_spawn_environment(external_env.as_deref())?;
+    plan.bind_persistent_session_spawn_environment(
+        external_env.as_deref(),
+        source_env,
+        source_entry,
+    )?;
     let running = plan.spawn_persistent_session(
         state,
         &workspace,
@@ -501,6 +541,9 @@ fn start_capsule_process(
             .into_iter()
             .map(|lease| Box::new(lease) as Box<dyn Send + Sync>),
     );
+    if let Some(source) = source {
+        lifelines.push(Box::new(source));
+    }
     Ok(StartedPersistentSession {
         running,
         socket: daemon_socket,
@@ -813,6 +856,7 @@ mod tests {
                 admitted_project_root: Some(logical_admission_workspace()),
             },
             execution_realization_hash: "8".repeat(64),
+            source_binding_hash: None,
             runtime_ref: "runtime:fixture/session".to_owned(),
             executor_ref: "native:fixture".to_owned(),
         }

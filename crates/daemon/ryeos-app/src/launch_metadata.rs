@@ -1004,12 +1004,17 @@ impl RuntimeLaunchMetadata {
         let mut effective_caps = resume.effective_caps.clone();
         effective_caps.sort();
         effective_caps.dedup();
+        let exact_program = sealed.admitted_program_value()?;
+        let source_binding_hash =
+            ryeos_state::objects::AdmittedLaunchCapsule::source_binding_hash_in_program(
+                &exact_program,
+            )?;
         let capsule = ryeos_state::objects::AdmittedLaunchCapsule {
             schema: self
                 .admitted_launch_capsule_schema
                 .ok_or_else(|| anyhow::anyhow!("sealed launch has no admitted capsule schema"))?,
             kind: "admitted_launch_capsule".to_string(),
-            exact_program: sealed.admitted_program_value()?,
+            exact_program,
             exact_program_hash: sealed.admitted_program_hash()?,
             sealed_invocation: serde_json::to_value(sealed)
                 .context("serialize sealed admitted invocation")?,
@@ -1027,6 +1032,7 @@ impl RuntimeLaunchMetadata {
             execution_realization_hash: self.execution_realization_hash.clone().ok_or_else(
                 || anyhow::anyhow!("sealed launch has no admitted execution realization"),
             )?,
+            source_binding_hash,
             accounting_scope: self.accounting_scope.clone(),
             effective_caps,
             runtime_ref: sealed.runtime_ref().to_string(),

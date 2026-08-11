@@ -302,6 +302,7 @@ pub enum SourceLogicalBinding {
         root_entry: String,
     },
     Worker {
+        root: String,
         entry: String,
     },
 }
@@ -536,7 +537,8 @@ impl EffectiveSourceBinding {
                 }
                 super::validate_canonical_project_relative_path(root_entry)?;
             }
-            SourceLogicalBinding::Worker { entry } => {
+            SourceLogicalBinding::Worker { root, entry } => {
+                super::validate_canonical_project_relative_path(root)?;
                 super::validate_canonical_project_relative_path(entry)?;
             }
         }

@@ -53,6 +53,33 @@ pub fn admit_source_closure(
     project: Option<(&Path, &dyn AuthoritativeProjectContent, String)>,
     executor_policy: Option<&ExecutorSourcePolicyProjection>,
 ) -> anyhow::Result<Option<AdmittedSourceClosure>> {
+    let mut publication = None;
+    let mut admitted = admit_source_closure_in_publication(
+        state,
+        engine,
+        kind,
+        resolution,
+        roots,
+        project,
+        executor_policy,
+        &mut publication,
+    )?;
+    if let Some(admitted) = admitted.as_mut() {
+        admitted.publication = publication;
+    }
+    Ok(admitted)
+}
+
+pub fn admit_source_closure_in_publication(
+    state: &AppState,
+    engine: &ryeos_engine::engine::Engine,
+    kind: &str,
+    resolution: &mut ryeos_engine::resolution::ResolutionOutput,
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    project: Option<(&Path, &dyn AuthoritativeProjectContent, String)>,
+    executor_policy: Option<&ExecutorSourcePolicyProjection>,
+    publication: &mut Option<PendingCasPublication>,
+) -> anyhow::Result<Option<AdmittedSourceClosure>> {
     if resolution
         .composed
         .derived
@@ -78,6 +105,13 @@ pub fn admit_source_closure(
         }
         return Ok(None);
     };
+    if matches!(
+        &contract.location,
+        ryeos_engine::kind_registry::SourceClosureLocationDecl::ItemNamespace
+    ) && executor_policy.is_none()
+    {
+        return Ok(None);
+    }
     let kind_evidence = engine.kinds.schema_evidence(kind).ok_or_else(|| {
         anyhow::anyhow!("source closure kind `{kind}` has no retained signed schema evidence")
     })?;
@@ -159,9 +193,15 @@ pub fn admit_source_closure(
                         }
                         Box::new(ProjectSourceContent { content, identity })
                     }
-                    (ItemSpace::Project, None) => {
-                        anyhow::bail!("project source has no admitted project content authority")
-                    }
+                    (ItemSpace::Project, None) => Box::new(DirectorySourceContent::new(
+                        content_root,
+                        format!(
+                            "live:{}:{}",
+                            root_identity_key(&resolution.root.source_root),
+                            resolution.root.source_content_digest
+                        ),
+                        state.ignore_matcher.as_ref(),
+                    )?),
                     (_, _) => Box::new(DirectorySourceContent::new(
                         content_root,
                         root_identity_key(&resolution.root.source_root),
@@ -287,6 +327,11 @@ pub fn admit_source_closure(
         }
     } else {
         ryeos_state::objects::SourceLogicalBinding::Worker {
+            root: worker_declaration
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("worker source declaration is absent"))?
+                .root
+                .clone(),
             entry: root_entry.clone(),
         }
     };
@@ -317,9 +362,23 @@ pub fn admit_source_closure(
     };
     binding.validate()?;
 
-    let authority = state
-        .state_store
-        .with_state_db(|db| db.pinned_authority())?;
+    if publication.is_none() {
+        let authority = state
+            .state_store
+            .with_state_db(|db| db.pinned_authority())?;
+        let guard = authority.acquire_shared_guard()?;
+        authority.ensure_guard(&guard)?;
+        let staged = authority
+            .require_recovery()?
+            .begin_staged_cas_roots_admitted(&guard, "launch-realization")?;
+        drop(guard);
+        *publication = Some(PendingCasPublication::new(authority, staged));
+    }
+    let authority = publication
+        .as_ref()
+        .expect("source admission initialized its publication")
+        .authority()
+        .try_clone()?;
     let proof_authority = authority.try_clone()?;
     let guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&guard)?;
@@ -328,9 +387,10 @@ pub fn admit_source_closure(
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
     let cas = authority.cas_store()?;
-    let mut staged = authority
-        .require_recovery()?
-        .begin_staged_cas_roots_admitted(&guard, "source-closure")?;
+    let staged = publication
+        .as_mut()
+        .expect("source admission initialized its publication")
+        .staged_roots_mut();
     for blob in &candidate.blobs {
         let outcome = cas.put_blob(&blob.bytes)?;
         if outcome.hash != blob.blob_hash {
@@ -365,7 +425,7 @@ pub fn admit_source_closure(
     Ok(Some(AdmittedSourceClosure {
         proof,
         store,
-        publication: Some(PendingCasPublication::new(authority, staged)),
+        publication: None,
         binding,
         manifest: candidate.manifest,
     }))

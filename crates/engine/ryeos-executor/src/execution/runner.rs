@@ -1927,6 +1927,7 @@ fn ensure_restart_eligible_artifact(
 struct DirectExternalRealizations {
     publication: Option<super::PendingCasPublication>,
     bound: Option<super::external_content::BoundExternalRealizations>,
+    source: Option<super::source_closure::BoundSourceClosure>,
 }
 
 fn admitted_root_launch_metadata(
@@ -1943,8 +1944,11 @@ fn admitted_root_launch_metadata(
         Some(runtime_ref) => runtime_ref.clone(),
         None => prepared_plan.runtime_ref()?.to_owned(),
     };
-    let (finalized_program, mut external_publication) =
+    let (finalized_program, mut external_publication, source_policy) =
         finalize_direct_effective_program(state, params)?;
+    if let Some(source_policy) = source_policy.as_ref() {
+        source_policy.assert_matches_plan(prepared_plan.execution_plan())?;
+    }
     let sealed = SealedRootExecutionRequest::capture_finalized(
         &params.resolved,
         runtime_ref.clone(),
@@ -2061,11 +2065,18 @@ fn admitted_root_launch_metadata(
         params.provenance.effective_path(),
         params.provenance.project_authority(),
     )?;
+    let bound_source = super::source_closure::bind_source_for_execution(
+        state,
+        finalized_program.resolution(),
+        params.provenance.effective_path(),
+        params.provenance.project_authority(),
+    )?;
     Ok((
         metadata,
         DirectExternalRealizations {
             publication: external_publication,
             bound: bound_external,
+            source: bound_source,
         },
     ))
 }
@@ -2080,6 +2091,7 @@ fn finalize_direct_effective_program(
 ) -> Result<(
     ryeos_engine::effective_program::FinalizedEffectiveProgram,
     Option<super::PendingCasPublication>,
+    Option<ryeos_engine::launch::plan_builder::ExecutorSourcePolicyProjection>,
 )> {
     let admission = params.resolved.root_admission.as_ref().ok_or_else(|| {
         anyhow::anyhow!("cannot finalize a direct root execution without root admission")
@@ -2126,28 +2138,81 @@ fn finalize_direct_effective_program(
         })
         .transpose()?
         .flatten();
-    let captured_external = ryeos_app::external_content_admission::admit_external_realizations(
+    let materialization = admission.resolution_materialization_binding()?;
+    let project_content = materialization.authoritative_project_content()?;
+    let project = project_content.as_ref().map(|(root, content)| {
+        (
+            *root,
+            *content as &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+        )
+    });
+    let source_contract = engine
+        .kinds
+        .get(&params.resolved.kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .and_then(|execution| execution.source_closure.as_ref());
+    let source_policy = if source_contract.is_some() {
+        let executor_id = params
+            .resolved
+            .resolved_item
+            .metadata
+            .executor_id
+            .as_deref()
+            .ok_or_else(|| ryeos_engine::error::EngineError::InvalidRuntimeConfig {
+                path: params.resolved.item_ref.clone(),
+                reason: "source-owning direct item has no executor chain".to_owned(),
+            })?;
+        ryeos_engine::launch::plan_builder::resolve_executor_source_policy(
+            executor_id,
+            &resolution.root.source_path,
+            &params.resolved.kind,
+            &engine.kinds,
+            &engine.parser_dispatcher,
+            &roots,
+            &engine.trust_store,
+            &engine.node_trust_store,
+            project,
+        )?
+    } else {
+        None
+    };
+    let project_identity = params.provenance.pinned_snapshot_hash().map(str::to_owned);
+    let mut publication = None;
+    let captured_source = ryeos_app::source_closure_admission::admit_source_closure_in_publication(
         state,
         engine,
         &params.resolved.kind,
         &mut resolution,
         &roots,
-        inherited_external.as_ref(),
+        project
+            .map(|(root, content)| {
+                Ok::<_, anyhow::Error>((
+                    root,
+                    content,
+                    project_identity.clone().ok_or_else(|| {
+                        anyhow::anyhow!("pinned project content has no snapshot identity")
+                    })?,
+                ))
+            })
+            .transpose()?,
+        source_policy.as_ref(),
+        &mut publication,
     )?;
+    let captured_external =
+        ryeos_app::external_content_admission::admit_external_realizations_in_publication(
+            state,
+            engine,
+            &params.resolved.kind,
+            &mut resolution,
+            &roots,
+            inherited_external.as_ref(),
+            &mut publication,
+        )?;
     let validation = engine
         .effective_validators
         .validate(&params.resolved.kind, &resolution)?;
     let candidate =
         ryeos_engine::effective_program::lock_validated_effective_program(resolution, validation)?;
-    let materialization = admission.resolution_materialization_binding()?;
-    let project = materialization
-        .authoritative_project_content()?
-        .map(|(root, content)| {
-            (
-                root,
-                content as &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
-            )
-        });
     let proof = ryeos_engine::effective_program::prove_finalization_authority(
         &candidate,
         &[],
@@ -2156,13 +2221,12 @@ fn finalize_direct_effective_program(
         captured_external
             .as_ref()
             .map(|captured| captured.finalization_evidence()),
-        None,
+        captured_source
+            .as_ref()
+            .map(|captured| captured.finalization_evidence()),
     )?;
     let finalized = ryeos_engine::effective_program::finalize_effective_program(candidate, proof)?;
-    Ok((
-        finalized,
-        captured_external.and_then(|captured| captured.into_publication()),
-    ))
+    Ok((finalized, publication, source_policy))
 }
 
 fn recovered_direct_protocol(
@@ -2703,6 +2767,17 @@ pub async fn run_and_wait(
         .bound
         .as_ref()
         .map(|bound| bound.sealed_set_env().to_string());
+    let wait_source_sealed_env = wait_external
+        .source
+        .as_ref()
+        .map(|bound| bound.sealed_identity_env().to_string());
+    let mut wait_source_mounts = wait_external
+        .source
+        .as_ref()
+        .map(|bound| bound.mounts().to_vec())
+        .unwrap_or_default();
+    let mut wait_external_mounts = wait_external_mounts;
+    wait_external_mounts.append(&mut wait_source_mounts);
     let spawn_workspace_lifeline = guard.temp_dir.clone();
     let wait_node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
     let spawn_handle = task::spawn_blocking(move || {
@@ -2724,6 +2799,7 @@ pub async fn run_and_wait(
             isolation_workspace: None,
             inherited_fds: Vec::new(),
             external_realizations_env: wait_external_sealed_env,
+            admitted_source_env: wait_source_sealed_env,
             isolation_daemon_socket_path: wait_isolation_daemon_socket_path.as_deref(),
             thread_state_dir: Some(thread_state_dir.as_path()),
             is_resume: false,
@@ -3444,6 +3520,7 @@ pub async fn run_detached(
         bg_skip_resume_snapshot_pin,
         bg_terminal_publication,
         bg_fresh_external.bound,
+        bg_fresh_external.source,
         bg_runtime_state_dir,
         DetachedDispatchKind::Detached,
         Some(
@@ -3527,6 +3604,7 @@ impl DetachedDispatchKind {
         bg_project_authority,
         bg_isolation_project_authority, bg_isolation_daemon_socket_path, bg_temp_dir,
         bg_skip_resume_snapshot_pin, bg_terminal_publication, bg_external_realizations,
+        bg_source_closure,
         bg_runtime_state_dir,
         prior_status_for_mark_running,
         bg_cb_token, bg_tat_token, launch_claim
@@ -3564,6 +3642,7 @@ async fn dispatch_detached_bg_task(
     bg_skip_resume_snapshot_pin: bool,
     bg_terminal_publication: Option<ryeos_state::objects::PinnedTerminalPublication>,
     bg_external_realizations: Option<super::external_content::BoundExternalRealizations>,
+    bg_source_closure: Option<super::source_closure::BoundSourceClosure>,
     bg_runtime_state_dir: PathBuf,
     dispatch_kind: DetachedDispatchKind,
     prior_status_for_mark_running: Option<String>,
@@ -3585,6 +3664,15 @@ async fn dispatch_detached_bg_task(
     let bg_external_sealed_env = bg_external_realizations
         .as_ref()
         .map(|bound| bound.sealed_set_env().to_string());
+    let bg_source_sealed_env = bg_source_closure
+        .as_ref()
+        .map(|bound| bound.sealed_identity_env().to_string());
+    let mut bg_source_mounts = bg_source_closure
+        .as_ref()
+        .map(|bound| bound.mounts().to_vec())
+        .unwrap_or_default();
+    let mut bg_external_mounts = bg_external_mounts;
+    bg_external_mounts.append(&mut bg_source_mounts);
     let launch_owner = match launch_claim_guard
         .as_ref()
         .map(ThreadLaunchClaim::canonical_owner)
@@ -3700,6 +3788,7 @@ async fn dispatch_detached_bg_task(
             isolation_workspace: None,
             inherited_fds: Vec::new(),
             external_realizations_env: bg_external_sealed_env,
+            admitted_source_env: bg_source_sealed_env,
             isolation_daemon_socket_path: isolation_daemon_socket_path_for_spawn.as_deref(),
             thread_state_dir: Some(thread_state_dir.as_path()),
             is_resume,
@@ -5076,17 +5165,29 @@ async fn run_existing_recovered_thread(
     // restored admission carries the derived-bearing sealed resolution, and
     // a missing manifest or blob refuses recovery here rather than letting
     // the runtime read live content under a realized identity.
+    let retained_resolution = bg_resolved
+        .root_admission
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("restored sealed root has no admission"))?
+        .resolution_output();
+    ryeos_app::source_closure_admission::recover_source_closure(
+        &bg_state,
+        &bg_engine,
+        retained_resolution,
+    )?;
     let bg_external_realizations =
         super::external_content::bind_external_realizations_for_execution(
             &bg_state,
-            bg_resolved
-                .root_admission
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("restored sealed root has no admission"))?
-                .resolution_output(),
+            retained_resolution,
             params.provenance.effective_path(),
             params.provenance.project_authority(),
         )?;
+    let bg_source_closure = super::source_closure::bind_source_for_execution(
+        &bg_state,
+        retained_resolution,
+        params.provenance.effective_path(),
+        params.provenance.project_authority(),
+    )?;
 
     tokio::spawn(dispatch_detached_bg_task(
         bg_state,
@@ -5112,6 +5213,7 @@ async fn run_existing_recovered_thread(
         bg_skip_resume_snapshot_pin,
         bg_terminal_publication,
         bg_external_realizations,
+        bg_source_closure,
         bg_runtime_state_dir,
         dispatch_kind,
         Some(prior_status),

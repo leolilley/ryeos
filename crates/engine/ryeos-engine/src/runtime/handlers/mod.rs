@@ -9,4 +9,3 @@ pub mod execution_params;
 pub mod native_async;
 pub mod native_resume;
 pub mod runtime_config;
-pub mod verify_deps;

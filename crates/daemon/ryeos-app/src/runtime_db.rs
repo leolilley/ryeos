@@ -1002,7 +1002,7 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // older store may contain resumable occurrences under superseded identity and is deliberately refused by
 // ordinary open; the explicit runtime-history reset is permitted only after
 // admission has stopped and resumable work has been drained/terminalized.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 3;
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 4;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

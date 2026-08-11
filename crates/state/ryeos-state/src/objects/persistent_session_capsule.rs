@@ -14,7 +14,17 @@ use super::{
 };
 
 pub const PERSISTENT_SESSION_CAPSULE_KIND: &str = "persistent_session_capsule";
-pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 2;
+pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 3;
+
+fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
 pub const MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,6 +184,8 @@ pub struct AdmittedPersistentSessionCapsule {
     pub artifact_identity: AdmittedLaunchArtifactIdentity,
     pub execution_closure: AdmittedExecutionClosure,
     pub execution_realization_hash: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub source_binding_hash: Option<String>,
     pub runtime_ref: String,
     pub executor_ref: String,
 }
@@ -213,6 +225,24 @@ impl AdmittedPersistentSessionCapsule {
             "persistent-session execution realization hash",
             &self.execution_realization_hash,
         )?;
+        let admitted = self
+            .exact_program
+            .get("resolution_output")
+            .and_then(|resolution| resolution.get("composed"))
+            .and_then(|composed| composed.get("derived"))
+            .and_then(|derived| derived.get(super::SOURCE_CLOSURE_DERIVED_KEY))
+            .map(super::EffectiveSourceClosureProjection::from_value)
+            .transpose()?
+            .map(|projection| projection.binding_hash);
+        if self.source_binding_hash != admitted {
+            anyhow::bail!("persistent-session source binding contradicts its exact program");
+        }
+        if let Some(hash) = &self.source_binding_hash {
+            super::thread_snapshot::validate_canonical_hash(
+                "persistent-session source binding",
+                hash,
+            )?;
+        }
         Ok(())
     }
 

@@ -370,7 +370,7 @@ pub struct PlanSubprocessSpec {
     /// plan. System executables and project-local interpreters use `None`.
     pub verified_command: Option<PlanVerifiedCommand>,
     #[serde(default)]
-    pub args: Vec<String>,
+    pub args: Vec<PlanArgument>,
     pub cwd: Option<PathBuf>,
     #[serde(default)]
     pub env: HashMap<String, String>,
@@ -387,6 +387,40 @@ pub struct PlanSubprocessSpec {
     /// behavior for tools that declare none of these.
     #[serde(default)]
     pub execution: ExecutionDecorations,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PlanArgument {
+    Literal { value: String },
+    AdmittedSourceEntry,
+}
+
+impl PlanArgument {
+    pub fn literal(value: impl Into<String>) -> Self {
+        Self::Literal {
+            value: value.into(),
+        }
+    }
+
+    pub fn literal_value(&self) -> Option<&str> {
+        match self {
+            Self::Literal { value } => Some(value),
+            Self::AdmittedSourceEntry => None,
+        }
+    }
+}
+
+impl From<String> for PlanArgument {
+    fn from(value: String) -> Self {
+        Self::literal(value)
+    }
+}
+
+impl From<&str> for PlanArgument {
+    fn from(value: &str) -> Self {
+        Self::literal(value)
+    }
 }
 
 fn default_timeout_secs() -> u64 {
