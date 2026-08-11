@@ -71,6 +71,26 @@ pub struct EffectiveValidationSuccess {
     effect_authorizations: Vec<ryeos_effect_contract::EffectAuthorizationProjection>,
 }
 
+/// Engine-owned capture of the reserved derived projection carried by an
+/// admitted program during recovery. Construction removes that projection
+/// before the effective validator runs; relocking succeeds only when the
+/// validator reconstructs the byte-identical value.
+#[derive(Debug)]
+pub struct RecoveredEffectiveProgramDerived {
+    effect_authorizations: Option<serde_json::Value>,
+}
+
+pub fn take_recovered_effective_program_derived(
+    resolution: &mut ResolutionOutput,
+) -> RecoveredEffectiveProgramDerived {
+    RecoveredEffectiveProgramDerived {
+        effect_authorizations: resolution
+            .composed
+            .derived
+            .remove(ryeos_effect_contract::EFFECT_AUTHORIZATIONS_DERIVED_KEY),
+    }
+}
+
 impl EffectiveValidationSuccess {
     pub(crate) fn from_normalized(
         normalized: &serde_json::Value,
@@ -133,6 +153,31 @@ pub fn lock_validated_effective_program(
         binding,
         instance: Arc::new(()),
     })
+}
+
+/// Relock a recovered admitted program after recomputing its semantic
+/// validation against a view with no pre-populated engine-owned projection.
+/// Missing, malformed, stale, or divergent captured authority fails before
+/// the program can be finalized or launched.
+pub fn relock_recovered_effective_program(
+    resolution: ResolutionOutput,
+    validation: EffectiveValidationSuccess,
+    recovered: RecoveredEffectiveProgramDerived,
+) -> Result<ValidatedEffectiveProgramCandidate, EngineError> {
+    let candidate = lock_validated_effective_program(resolution, validation)?;
+    let recomputed = candidate
+        .resolution
+        .composed
+        .derived
+        .get(ryeos_effect_contract::EFFECT_AUTHORIZATIONS_DERIVED_KEY)
+        .cloned();
+    if recomputed != recovered.effect_authorizations {
+        return Err(EngineError::Internal(
+            "recovered admitted effect authorizations differ from current semantic validation"
+                .to_string(),
+        ));
+    }
+    Ok(candidate)
 }
 
 /// Revalidate every mutable launch-config proof against the same resolution
@@ -357,6 +402,73 @@ mod tests {
                 policy_facts: HashMap::new(),
             },
         }
+    }
+
+    fn effect_validation(authorization_id: &str, policy_seed: char) -> EffectiveValidationSuccess {
+        EffectiveValidationSuccess::from_normalized(
+            &serde_json::json!({"kind": "fixture"}),
+            vec![ryeos_effect_contract::EffectAuthorizationProjection {
+                authorization_id: authorization_id.to_string(),
+                policy_digest: policy_seed.to_string().repeat(64),
+                action_contract_digest: "c".repeat(64),
+                class: ryeos_effect_contract::EffectClass::Recorded,
+            }],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn recovered_effect_authority_is_removed_recomputed_and_matched() {
+        let mut admitted = resolution("recover");
+        admitted.composed.derived.insert(
+            ryeos_effect_contract::EFFECT_AUTHORIZATIONS_DERIVED_KEY.to_string(),
+            serde_json::to_value(vec![ryeos_effect_contract::EffectAuthorizationProjection {
+                authorization_id: "node".to_string(),
+                policy_digest: "a".repeat(64),
+                action_contract_digest: "c".repeat(64),
+                class: ryeos_effect_contract::EffectClass::Recorded,
+            }])
+            .unwrap(),
+        );
+
+        let recovered = take_recovered_effective_program_derived(&mut admitted);
+        assert!(
+            !admitted
+                .composed
+                .derived
+                .contains_key(ryeos_effect_contract::EFFECT_AUTHORIZATIONS_DERIVED_KEY)
+        );
+        let candidate =
+            relock_recovered_effective_program(admitted, effect_validation("node", 'a'), recovered)
+                .unwrap();
+        assert!(
+            candidate
+                .resolution
+                .composed
+                .derived
+                .contains_key(ryeos_effect_contract::EFFECT_AUTHORIZATIONS_DERIVED_KEY)
+        );
+    }
+
+    #[test]
+    fn recovered_effect_authority_divergence_fails_closed() {
+        let mut admitted = resolution("recover");
+        admitted.composed.derived.insert(
+            ryeos_effect_contract::EFFECT_AUTHORIZATIONS_DERIVED_KEY.to_string(),
+            serde_json::to_value(vec![ryeos_effect_contract::EffectAuthorizationProjection {
+                authorization_id: "node".to_string(),
+                policy_digest: "a".repeat(64),
+                action_contract_digest: "c".repeat(64),
+                class: ryeos_effect_contract::EffectClass::Recorded,
+            }])
+            .unwrap(),
+        );
+
+        let recovered = take_recovered_effective_program_derived(&mut admitted);
+        let error =
+            relock_recovered_effective_program(admitted, effect_validation("node", 'b'), recovered)
+                .unwrap_err();
+        assert!(error.to_string().contains("effect authorizations differ"));
     }
 
     #[test]

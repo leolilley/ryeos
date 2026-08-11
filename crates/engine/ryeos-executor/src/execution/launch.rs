@@ -4475,12 +4475,18 @@ async fn prepare_managed_launch_authority(
                 &resolution,
             )
             .map_err(BuildAndLaunchError::Internal)?;
+        let recovered_derived =
+            ryeos_engine::effective_program::take_recovered_effective_program_derived(
+                &mut resolution,
+            );
         let validation = engine
             .effective_validators
             .validate(&params.resolved.resolved_item.kind, &resolution)
             .map_err(BuildAndLaunchError::from)?;
-        let candidate = ryeos_engine::effective_program::lock_validated_effective_program(
-            resolution, validation,
+        let candidate = ryeos_engine::effective_program::relock_recovered_effective_program(
+            resolution,
+            validation,
+            recovered_derived,
         )
         .map_err(BuildAndLaunchError::from)?;
         let finalization_materialization = params
