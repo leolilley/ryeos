@@ -4510,6 +4510,7 @@ async fn prepare_managed_launch_authority(
             recovered_external
                 .as_ref()
                 .map(|captured| captured.finalization_evidence()),
+            None,
         )
         .map_err(BuildAndLaunchError::from)?;
         (

@@ -201,6 +201,7 @@ fn admit_session_capsule(
         captured_external
             .as_ref()
             .map(|captured| captured.finalization_evidence()),
+        None,
     )?;
     let finalized = ryeos_engine::effective_program::finalize_effective_program(candidate, proof)?;
     // The outer runtime capsule must retain the exact augmented dependency the

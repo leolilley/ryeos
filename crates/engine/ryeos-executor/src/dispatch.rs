@@ -7578,6 +7578,7 @@ requires:
             launch_augmentations: Vec::new(),
             hooks: None,
             external_content: None,
+            source_closure: None,
             persistent_session: None,
             effective_validator: None,
             effect_class_ceiling: None,

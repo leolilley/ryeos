@@ -608,6 +608,7 @@ fn capture_and_finalize_with_hook_snapshots(
         &config_roots,
         project,
         external_realization.map(|captured| captured.finalization_evidence()),
+        None,
     )
     .map_err(|error| match error {
         ryeos_engine::error::EngineError::MutableEffectiveProgramAuthorityChanged => {

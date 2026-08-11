@@ -30,6 +30,7 @@ pub enum DefinitionChangeCategory {
     HookPlan,
     Policy,
     ExternalRealization,
+    SourceClosure,
     ComposedProgram,
 }
 
@@ -123,10 +124,28 @@ impl DefinitionIdentityScope {
     fn composed_view(self, composed: &KindComposedView) -> KindComposedView {
         let mut view = composed.clone();
         if matches!(self, Self::Authored) {
-            view.derived
-                .retain(|key, _| key != EXTERNAL_REALIZATIONS_DERIVED_KEY);
+            view.derived.retain(|key, _| {
+                !matches!(
+                    realization_derived_kind(key),
+                    Some(RealizationDerivedKind::External | RealizationDerivedKind::Source)
+                )
+            });
         }
         view
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RealizationDerivedKind {
+    External,
+    Source,
+}
+
+fn realization_derived_kind(key: &str) -> Option<RealizationDerivedKind> {
+    match key {
+        EXTERNAL_REALIZATIONS_DERIVED_KEY => Some(RealizationDerivedKind::External),
+        ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY => Some(RealizationDerivedKind::Source),
+        _ => None,
     }
 }
 
@@ -712,6 +731,8 @@ impl DefinitionDiffBuilder {
                 );
             } else if key == EXTERNAL_REALIZATIONS_DERIVED_KEY {
                 self.diff_external_realizations(left_value, right_value)?;
+            } else if key == ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY {
+                self.diff_source_closure(left_value, right_value)?;
             } else {
                 let coordinate = format!("derived.slot[{opaque_slot:04}]");
                 opaque_slot += 1;
@@ -811,6 +832,36 @@ impl DefinitionDiffBuilder {
                 false,
             );
         }
+        Ok(())
+    }
+
+    fn diff_source_closure(
+        &mut self,
+        left: Option<&serde_json::Value>,
+        right: Option<&serde_json::Value>,
+    ) -> Result<(), EffectiveDefinitionDigestError> {
+        let parse = |value: Option<&serde_json::Value>| {
+            value
+                .map(ryeos_state::objects::EffectiveSourceClosureProjection::from_value)
+                .transpose()
+                .map_err(|error| {
+                    EffectiveDefinitionDigestError(format!(
+                        "invalid effective source closure identity slot: {error}"
+                    ))
+                })
+        };
+        let left = parse(left)?
+            .map(|projection| serde_json::to_value(projection).expect("projection serializes"));
+        let right = parse(right)?
+            .map(|projection| serde_json::to_value(projection).expect("projection serializes"));
+        self.diff_json(
+            DefinitionChangeCategory::SourceClosure,
+            "derived.source_closure".to_owned(),
+            left.as_ref(),
+            right.as_ref(),
+            JsonDisclosure::TypeOnly,
+            false,
+        );
         Ok(())
     }
 
@@ -1320,6 +1371,42 @@ mod tests {
             change.right.as_ref().unwrap().public_scalar.as_deref(),
             Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
         );
+    }
+
+    #[test]
+    fn source_closure_changes_have_a_typed_category_and_strict_shape() {
+        let projection = |binding: char| {
+            serde_json::json!({
+                "schema": 1,
+                "binding_hash": binding.to_string().repeat(64),
+                "content_manifest_hash": "b".repeat(64),
+                "owner_key": "c".repeat(64),
+                "file_count": 2,
+                "total_bytes": 10
+            })
+        };
+        let mut left = document();
+        let mut right = document();
+        left.composed.derived.insert(
+            ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY.to_owned(),
+            projection('a'),
+        );
+        right.composed.derived.insert(
+            ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY.to_owned(),
+            projection('d'),
+        );
+        let diff = left.diff(&right).unwrap();
+        assert!(
+            diff.changes
+                .iter()
+                .any(|change| change.category == DefinitionChangeCategory::SourceClosure)
+        );
+
+        right.composed.derived.insert(
+            ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY.to_owned(),
+            serde_json::json!({"binding_hash": "not-current"}),
+        );
+        assert!(right.diff(&left).is_err());
     }
 
     #[test]

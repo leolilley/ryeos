@@ -773,6 +773,7 @@ mod tests {
                 launch_augmentations: Vec::new(),
                 hooks: None,
                 external_content: None,
+                source_closure: None,
                 effective_validator: None,
                 persistent_session: None,
             }),

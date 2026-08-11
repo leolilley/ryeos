@@ -24,6 +24,7 @@ pub mod registry;
 pub mod roots;
 pub mod runtime;
 pub mod scope;
+pub mod source_closure;
 
 // The grouped modules above nest this crate physically; these re-exports pin
 // every pre-grouping public path, so no caller inside or outside the crate

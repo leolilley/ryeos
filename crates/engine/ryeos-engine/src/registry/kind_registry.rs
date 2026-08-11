@@ -800,6 +800,36 @@ pub struct ExecutionLargeContentGrant {
     pub max_total_bytes: Option<u64>,
 }
 
+/// Signed, kind-owned ceiling for executable source adjacent to an item.
+/// The declaration grants no filesystem authority by itself: launch admission
+/// intersects it with the exact item root and, for direct tools, the executor
+/// chain's independently signed loader policy.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionSourceClosureDecl {
+    pub derived: String,
+    pub location: SourceClosureLocationDecl,
+    pub testimony: SourceClosureTestimonyDecl,
+    pub max_files: usize,
+    pub max_total_bytes: u64,
+    pub max_file_bytes: u64,
+    pub max_depth: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SourceClosureLocationDecl {
+    ItemNamespace,
+    OwnerRelativeSource { path: Vec<String> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceClosureTestimonyDecl {
+    OwnerSignedFiles,
+    OwnerSignedDigest,
+}
+
 /// Optional signed semantic validator for the complete effective value.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -895,6 +925,10 @@ pub struct ExecutionSchema {
     /// of this kind may not declare the top-level `external_content` field.
     #[serde(default)]
     pub external_content: Option<ExecutionExternalContentDecl>,
+    /// Optional executable-source closure ceiling. Absence means adjacent
+    /// source cannot enter execution through this kind.
+    #[serde(default)]
+    pub source_closure: Option<ExecutionSourceClosureDecl>,
     /// Optional generic persistent-session mechanics. Presence does not name
     /// a domain and is actionable only with a subprocess terminator whose
     /// signed protocol descriptor declares a session channel.
@@ -1026,6 +1060,21 @@ pub struct KindSchema {
     pub inventory_policy: InventoryPolicy,
 }
 
+/// Path-free retained evidence for the exact signed kind document that
+/// admitted an executable item. Recovery consumes this record rather than
+/// consulting a mutable current registry and pretending it was historical
+/// authority.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KindSchemaEvidence {
+    pub canonical_ref: String,
+    pub source_content_digest: String,
+    pub raw_content_digest: String,
+    pub signer_fingerprint: String,
+    pub signature_header: String,
+    pub document: Value,
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct InventoryPolicy {
@@ -1109,6 +1158,7 @@ impl KindSchema {
 pub struct KindRegistry {
     schemas: HashMap<String, KindSchema>,
     schema_content_hashes: HashMap<String, String>,
+    schema_evidence: HashMap<String, KindSchemaEvidence>,
     fingerprint: String,
 }
 
@@ -1118,6 +1168,7 @@ impl KindRegistry {
         Self {
             schemas: HashMap::new(),
             schema_content_hashes: HashMap::new(),
+            schema_evidence: HashMap::new(),
             fingerprint: "empty".to_owned(),
         }
     }
@@ -1143,6 +1194,7 @@ impl KindRegistry {
     ) -> Result<Self, EngineError> {
         let mut schemas: HashMap<String, KindSchema> = HashMap::new();
         let mut schema_content_hashes = HashMap::new();
+        let mut schema_evidence = HashMap::new();
         let mut fingerprint_data = Vec::new();
 
         for root in search_roots {
@@ -1153,6 +1205,7 @@ impl KindRegistry {
                 root,
                 &mut schemas,
                 &mut schema_content_hashes,
+                &mut schema_evidence,
                 &mut fingerprint_data,
                 trust_store,
             )?;
@@ -1173,6 +1226,7 @@ impl KindRegistry {
         Ok(Self {
             schemas,
             schema_content_hashes,
+            schema_evidence,
             fingerprint,
         })
     }
@@ -1189,6 +1243,10 @@ impl KindRegistry {
     /// Verified content hash of the signed schema which registered `kind`.
     pub fn schema_content_hash(&self, kind: &str) -> Option<&str> {
         self.schema_content_hashes.get(kind).map(String::as_str)
+    }
+
+    pub fn schema_evidence(&self, kind: &str) -> Option<&KindSchemaEvidence> {
+        self.schema_evidence.get(kind)
     }
 
     /// Check whether a kind is registered.
@@ -1300,7 +1358,7 @@ impl Default for KindRegistry {
 fn load_and_verify_kind_schema(
     yaml_path: &Path,
     trust_store: &TrustStore,
-) -> Result<(KindSchema, String), EngineError> {
+) -> Result<(KindSchema, String, KindSchemaEvidence), EngineError> {
     let content =
         std::fs::read_to_string(yaml_path).map_err(|e| EngineError::SchemaLoaderError {
             reason: format!("cannot read {}: {e}", yaml_path.display()),
@@ -1315,7 +1373,7 @@ fn load_and_verify_kind_schema(
         suffix,
     );
 
-    let content_hash = match sig_header {
+    let header = match sig_header {
         Some(header) => {
             let body = lillux::signature::strip_signature_lines(&content);
             let actual_hash = lillux::signature::content_hash(&body);
@@ -1345,7 +1403,7 @@ fn load_and_verify_kind_schema(
                     reason: "Ed25519 signature verification failed".into(),
                 });
             }
-            actual_hash
+            header
         }
         None => {
             return Err(EngineError::SignatureMissing {
@@ -1354,8 +1412,27 @@ fn load_and_verify_kind_schema(
         }
     };
 
+    let clean_content = lillux::signature::strip_signature_lines(&content);
+    let document = yaml_to_json(
+        serde_yaml::from_str::<serde_yaml::Value>(&clean_content).map_err(|error| {
+            EngineError::SchemaLoaderError {
+                reason: format!("cannot parse YAML {}: {error}", yaml_path.display()),
+            }
+        })?,
+    )
+    .map_err(|error| EngineError::SchemaLoaderError {
+        reason: format!("cannot normalize YAML {}: {error}", yaml_path.display()),
+    })?;
     let schema = parse_kind_schema_content(&yaml_path.display().to_string(), &content)?;
-    Ok((schema, content_hash))
+    let evidence = KindSchemaEvidence {
+        canonical_ref: format!("node:{}", infer_node_id(yaml_path)),
+        source_content_digest: lillux::sha256_hex(content.as_bytes()),
+        raw_content_digest: header.content_hash.clone(),
+        signer_fingerprint: header.signer_fingerprint.clone(),
+        signature_header: content.lines().next().unwrap_or_default().to_owned(),
+        document,
+    };
+    Ok((schema, header.content_hash, evidence))
 }
 
 /// Reverse-map a kind-schema filesystem path to a node item ID.
@@ -2074,6 +2151,7 @@ fn parse_execution_schema(
         "history_policy",
         "hooks",
         "external_content",
+        "source_closure",
         "persistent_session",
         "effective_validator",
         "effect_class_ceiling",
@@ -2182,6 +2260,18 @@ fn parse_execution_schema(
                     ),
                 })?;
             validate_execution_external_content_decl(&declaration, display)?;
+            Some(declaration)
+        }
+        None => None,
+    };
+
+    let source_closure = match execution_value.get("source_closure") {
+        Some(value) => {
+            let declaration = serde_yaml::from_value::<ExecutionSourceClosureDecl>(value.clone())
+                .map_err(|error| EngineError::SchemaLoaderError {
+                reason: format!("{display}: invalid execution.source_closure declaration: {error}"),
+            })?;
+            validate_execution_source_closure_decl(&declaration, display)?;
             Some(declaration)
         }
         None => None,
@@ -2480,6 +2570,7 @@ fn parse_execution_schema(
         history_policy,
         hooks,
         external_content,
+        source_closure,
         persistent_session,
         effective_validator,
         effect_class_ceiling,
@@ -2593,6 +2684,79 @@ fn validate_execution_external_content_decl(
                 ),
             });
         }
+    }
+    Ok(())
+}
+
+fn validate_execution_source_closure_decl(
+    declaration: &ExecutionSourceClosureDecl,
+    display: &str,
+) -> Result<(), EngineError> {
+    if declaration.derived != ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: execution.source_closure.derived must be `{}`",
+                ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY
+            ),
+        });
+    }
+    if declaration.max_files == 0
+        || declaration.max_files > ryeos_state::objects::MAX_SOURCE_FILES
+        || declaration.max_total_bytes == 0
+        || declaration.max_total_bytes > ryeos_state::objects::MAX_SOURCE_TOTAL_BYTES
+        || declaration.max_file_bytes == 0
+        || declaration.max_file_bytes > ryeos_state::objects::MAX_SOURCE_FILE_BYTES
+        || declaration.max_file_bytes > declaration.max_total_bytes
+        || declaration.max_depth == 0
+        || declaration.max_depth > 64
+    {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: execution.source_closure bounds exceed the substrate ceiling"
+            ),
+        });
+    }
+    match (&declaration.location, declaration.testimony) {
+        (
+            SourceClosureLocationDecl::ItemNamespace,
+            SourceClosureTestimonyDecl::OwnerSignedFiles,
+        ) => {}
+        (
+            SourceClosureLocationDecl::OwnerRelativeSource { path },
+            SourceClosureTestimonyDecl::OwnerSignedDigest,
+        ) => {
+            if path.len() != 1 {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: owner-relative source must name one root-verbatim item field"
+                    ),
+                });
+            }
+            validate_source_declaration_path(&path[0]).map_err(|reason| {
+                EngineError::SchemaLoaderError {
+                    reason: format!("{display}: {reason}"),
+                }
+            })?;
+        }
+        _ => {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: execution.source_closure location and testimony are incompatible"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_source_declaration_path(value: &str) -> Result<(), &'static str> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value
+            .bytes()
+            .all(|byte| byte == b'_' || byte == b'-' || byte.is_ascii_alphanumeric())
+    {
+        return Err("source declaration path is not a canonical field name");
     }
     Ok(())
 }
@@ -5146,5 +5310,77 @@ metadata:
                 .contains("invalid execution.external_content declaration"),
             "got {error}"
         );
+    }
+
+    fn load_source_closure_schema(contract_lines: &[&str]) -> Result<KindRegistry, EngineError> {
+        let mut yaml = String::from(
+            "location:\n  directory: tools\nexecution:\n  aliases:\n    \"@base\": \"tool:ryeos/base/base\"\n  source_closure:\n",
+        );
+        for line in contract_lines {
+            yaml.push_str("    ");
+            yaml.push_str(line);
+            yaml.push('\n');
+        }
+        yaml.push_str(
+            "formats:\n  - extensions: [\".yaml\"]\n    parser: parser:ryeos/core/yaml/yaml\n    signature:\n      prefix: \"#\"\nmetadata:\n  rules:\n    name:\n      from: filename\n",
+        );
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        sign_and_write_schema(&tmp, "tool", &yaml, &sk);
+        let result = KindRegistry::load_base(std::slice::from_ref(&tmp), &ts);
+        let _ = fs::remove_dir_all(&tmp);
+        result
+    }
+
+    #[test]
+    fn source_closure_contract_loads_from_a_signed_schema() {
+        let registry = load_source_closure_schema(&[
+            "derived: effective_source_closure",
+            "location: {type: item_namespace}",
+            "testimony: owner_signed_files",
+            "max_files: 4096",
+            "max_total_bytes: 67108864",
+            "max_file_bytes: 8388608",
+            "max_depth: 64",
+        ])
+        .unwrap();
+        let contract = registry
+            .get("tool")
+            .and_then(|schema| schema.execution.as_ref())
+            .and_then(|execution| execution.source_closure.as_ref())
+            .expect("source closure ceiling");
+        assert_eq!(contract.location, SourceClosureLocationDecl::ItemNamespace);
+        assert_eq!(
+            contract.testimony,
+            SourceClosureTestimonyDecl::OwnerSignedFiles
+        );
+    }
+
+    #[test]
+    fn source_closure_contract_refuses_foreign_slot_and_incompatible_testimony() {
+        let foreign = load_source_closure_schema(&[
+            "derived: author_controlled",
+            "location: {type: item_namespace}",
+            "testimony: owner_signed_files",
+            "max_files: 1",
+            "max_total_bytes: 1",
+            "max_file_bytes: 1",
+            "max_depth: 1",
+        ])
+        .unwrap_err();
+        assert!(foreign.to_string().contains("derived must be"));
+
+        let incompatible = load_source_closure_schema(&[
+            "derived: effective_source_closure",
+            "location: {type: item_namespace}",
+            "testimony: owner_signed_digest",
+            "max_files: 1",
+            "max_total_bytes: 1",
+            "max_file_bytes: 1",
+            "max_depth: 1",
+        ])
+        .unwrap_err();
+        assert!(incompatible.to_string().contains("incompatible"));
     }
 }

@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::error::EngineError;
 use crate::trust::TrustStore;
 
-use super::{KindSchema, load_and_verify_kind_schema};
+use super::{KindSchema, KindSchemaEvidence, load_and_verify_kind_schema};
 
 const KIND_SCHEMA_SUFFIX: &str = ".kind-schema.yaml";
 
@@ -12,6 +12,7 @@ pub(super) fn load_schemas_from_dir(
     kinds_root: &Path,
     schemas: &mut HashMap<String, KindSchema>,
     schema_content_hashes: &mut HashMap<String, String>,
+    schema_evidence: &mut HashMap<String, KindSchemaEvidence>,
     fingerprint_data: &mut Vec<u8>,
     trust_store: &TrustStore,
 ) -> Result<(), EngineError> {
@@ -61,9 +62,11 @@ pub(super) fn load_schemas_from_dir(
                 continue;
             }
 
-            let (parsed, content_hash) = load_and_verify_kind_schema(&yaml_path, trust_store)?;
+            let (parsed, content_hash, evidence) =
+                load_and_verify_kind_schema(&yaml_path, trust_store)?;
             schemas.insert(kind_name.clone(), parsed);
             schema_content_hashes.insert(kind_name.clone(), content_hash);
+            schema_evidence.insert(kind_name.clone(), evidence);
             if let Ok(content) = std::fs::read(&yaml_path) {
                 fingerprint_data.extend_from_slice(&content);
             }

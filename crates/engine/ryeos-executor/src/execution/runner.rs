@@ -2156,6 +2156,7 @@ fn finalize_direct_effective_program(
         captured_external
             .as_ref()
             .map(|captured| captured.finalization_evidence()),
+        None,
     )?;
     let finalized = ryeos_engine::effective_program::finalize_effective_program(candidate, proof)?;
     Ok((

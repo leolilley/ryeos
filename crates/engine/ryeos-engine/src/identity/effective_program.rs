@@ -147,6 +147,10 @@ pub fn prove_finalization_authority(
         &crate::external_realization::ExternalRealizationProof,
         &dyn crate::external_realization::RealizationStore,
     )>,
+    source_closure: Option<(
+        &crate::source_closure::SourceClosureProof,
+        &dyn crate::source_closure::SourceClosureStore,
+    )>,
 ) -> Result<FinalizationAuthorityProof, EngineError> {
     let mut identities = Vec::with_capacity(proofs.len());
     for proof in proofs {
@@ -219,6 +223,43 @@ pub fn prove_finalization_authority(
                 return Err(EngineError::MutableEffectiveProgramAuthorityChanged);
             }
             identities.push(format!("external:{}", proof.identity_digest()?));
+        }
+    }
+    let captured_source = candidate
+        .resolution
+        .composed
+        .derived
+        .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY)
+        .map(ryeos_state::objects::EffectiveSourceClosureProjection::from_value)
+        .transpose()
+        .map_err(|error| {
+            EngineError::Internal(format!(
+                "invalid effective source closure at finalization: {error}"
+            ))
+        })?;
+    match (captured_source.as_ref(), source_closure) {
+        (None, None) => {}
+        (Some(_), None) => {
+            return Err(EngineError::Internal(
+                "effective program carries an admitted source closure without a source proof"
+                    .to_owned(),
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(EngineError::Internal(
+                "source closure proof does not belong to this effective program".to_owned(),
+            ));
+        }
+        (Some(captured), Some((proof, store))) => {
+            if proof.projection() != captured {
+                return Err(EngineError::Internal(
+                    "source closure proof belongs to a different effective program".to_owned(),
+                ));
+            }
+            if proof.revalidate(store) != crate::source_closure::SourceClosureProofStatus::Current {
+                return Err(EngineError::MutableEffectiveProgramAuthorityChanged);
+            }
+            identities.push(format!("source:{}", proof.identity_digest()?));
         }
     }
     identities.sort();
@@ -331,6 +372,7 @@ mod tests {
             &ResolutionRoots::from_flat(None, Vec::new()),
             None,
             None,
+            None,
         )
         .unwrap();
         let candidate_b = lock_validated_effective_program(
@@ -356,6 +398,7 @@ mod tests {
             &ResolutionRoots::from_flat(None, Vec::new()),
             None,
             None,
+            None,
         )
         .unwrap();
         let candidate_b = lock_validated_effective_program(
@@ -379,6 +422,7 @@ mod tests {
             &candidate,
             &[],
             &ResolutionRoots::from_flat(None, Vec::new()),
+            None,
             None,
             None,
         )
@@ -427,8 +471,8 @@ mod tests {
         )
         .unwrap();
 
-        let error =
-            prove_finalization_authority(&candidate, &[proof], &roots, None, None).unwrap_err();
+        let error = prove_finalization_authority(&candidate, &[proof], &roots, None, None, None)
+            .unwrap_err();
         assert!(error.to_string().contains("authority changed"));
     }
 
@@ -453,6 +497,7 @@ mod tests {
             &ResolutionRoots::from_flat(None, Vec::new()),
             None,
             None,
+            None,
         )
         .unwrap_err();
         assert!(error.to_string().contains("never realized"));
@@ -475,6 +520,82 @@ mod tests {
             &ResolutionRoots::from_flat(None, Vec::new()),
             None,
             None,
+            None,
+        )
+        .unwrap();
+    }
+
+    struct PresentSource;
+
+    impl crate::source_closure::SourceClosureStore for PresentSource {
+        fn source_closure_available(
+            &self,
+            _binding_hash: &str,
+            _manifest_hash: &str,
+        ) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+    }
+
+    fn source_projection(seed: char) -> ryeos_state::objects::EffectiveSourceClosureProjection {
+        ryeos_state::objects::EffectiveSourceClosureProjection {
+            schema: ryeos_state::objects::EFFECTIVE_SOURCE_BINDING_SCHEMA,
+            binding_hash: seed.to_string().repeat(64),
+            content_manifest_hash: "b".repeat(64),
+            owner_key: "c".repeat(64),
+            file_count: 1,
+            total_bytes: 1,
+        }
+    }
+
+    #[test]
+    fn source_finalization_proof_is_required_and_candidate_bound() {
+        let projection = source_projection('a');
+        let source_proof =
+            crate::source_closure::prove_source_closure(projection.clone(), &PresentSource)
+                .unwrap();
+        let mut resolution = resolution("source");
+        resolution.composed.derived.insert(
+            ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY.to_owned(),
+            projection.to_value().unwrap(),
+        );
+        let candidate = lock_validated_effective_program(
+            resolution,
+            EffectiveValidationSuccess::no_declared_validator(),
+        )
+        .unwrap();
+        let missing = prove_finalization_authority(
+            &candidate,
+            &[],
+            &ResolutionRoots::from_flat(None, Vec::new()),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(missing.to_string().contains("without a source proof"));
+
+        let wrong =
+            crate::source_closure::prove_source_closure(source_projection('d'), &PresentSource)
+                .unwrap();
+        let mismatch = prove_finalization_authority(
+            &candidate,
+            &[],
+            &ResolutionRoots::from_flat(None, Vec::new()),
+            None,
+            None,
+            Some((&wrong, &PresentSource)),
+        )
+        .unwrap_err();
+        assert!(mismatch.to_string().contains("different effective program"));
+
+        prove_finalization_authority(
+            &candidate,
+            &[],
+            &ResolutionRoots::from_flat(None, Vec::new()),
+            None,
+            None,
+            Some((&source_proof, &PresentSource)),
         )
         .unwrap();
     }

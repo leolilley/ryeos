@@ -318,6 +318,53 @@ pub struct EffectiveSourceBinding {
     pub logical_binding: SourceLogicalBinding,
 }
 
+/// Bounded daemon-owned projection placed in the effective composed view.
+/// The full authority remains in the CAS binding object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectiveSourceClosureProjection {
+    pub schema: u32,
+    pub binding_hash: String,
+    pub content_manifest_hash: String,
+    pub owner_key: String,
+    pub file_count: usize,
+    pub total_bytes: u64,
+}
+
+impl EffectiveSourceClosureProjection {
+    pub fn from_value(value: &Value) -> anyhow::Result<Self> {
+        let projection: Self = serde_json::from_value(value.clone())?;
+        projection.validate()?;
+        Ok(projection)
+    }
+
+    pub fn to_value(&self) -> anyhow::Result<Value> {
+        self.validate()?;
+        Ok(serde_json::to_value(self)?)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != EFFECTIVE_SOURCE_BINDING_SCHEMA {
+            anyhow::bail!("effective source projection schema is not current");
+        }
+        validate_hashes([
+            ("effective source binding", &self.binding_hash),
+            (
+                "effective source content manifest",
+                &self.content_manifest_hash,
+            ),
+            ("effective source owner key", &self.owner_key),
+        ])?;
+        if self.file_count == 0 || self.file_count > MAX_SOURCE_FILES {
+            anyhow::bail!("effective source projection file count is invalid");
+        }
+        if self.total_bytes > MAX_SOURCE_TOTAL_BYTES {
+            anyhow::bail!("effective source projection byte count is invalid");
+        }
+        Ok(())
+    }
+}
+
 impl EffectiveSourceBinding {
     pub fn from_value(value: &Value) -> anyhow::Result<Self> {
         let binding: Self = serde_json::from_value(value.clone())?;
