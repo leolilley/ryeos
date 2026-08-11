@@ -69,6 +69,8 @@ pub(super) const CURRENT_OBJECT_KINDS: &[&str] = &[
     "project_snapshot",
     "project_snapshot_policy",
     "project_tree",
+    "ryeos.effective_source_binding",
+    "ryeos.source_closure_manifest",
     "source_manifest",
     "state_manifest",
     "thread_event",
@@ -160,6 +162,16 @@ const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
         kind: "project_tree",
         validate: validate_project_tree,
         links: links_project_tree,
+    },
+    ObjectContract {
+        kind: crate::objects::EFFECTIVE_SOURCE_BINDING_KIND,
+        validate: validate_effective_source_binding,
+        links: links_effective_source_binding,
+    },
+    ObjectContract {
+        kind: crate::objects::SOURCE_CLOSURE_MANIFEST_KIND,
+        validate: validate_source_closure_manifest,
+        links: links_source_closure_manifest,
     },
     ObjectContract {
         kind: "source_manifest",
@@ -261,6 +273,14 @@ fn validate_dispatch_effect_record(value: &Value) -> anyhow::Result<()> {
     crate::objects::DispatchEffectRecord::from_current_value(value).map(|_| ())
 }
 
+fn validate_effective_source_binding(value: &Value) -> anyhow::Result<()> {
+    crate::objects::EffectiveSourceBinding::from_value(value).map(|_| ())
+}
+
+fn validate_source_closure_manifest(value: &Value) -> anyhow::Result<()> {
+    crate::objects::SourceClosureManifest::from_value(value).map(|_| ())
+}
+
 fn validate_item_source(value: &Value) -> anyhow::Result<()> {
     crate::objects::ItemSource::from_value(value).map(|_| ())
 }
@@ -308,6 +328,26 @@ fn validate_thread_snapshot(value: &Value) -> anyhow::Result<()> {
 
 fn links_leaf(_value: &Value) -> Result<ContractLinks, String> {
     Ok(ContractLinks::leaf())
+}
+
+fn links_effective_source_binding(value: &Value) -> Result<ContractLinks, String> {
+    let mut links = ContractLinks::leaf();
+    super::push_required_object_edge(
+        value,
+        "content_manifest_hash",
+        ExpectedObject::Kind(crate::objects::SOURCE_CLOSURE_MANIFEST_KIND),
+        None,
+        &mut links.object_edges,
+    )?;
+    Ok(links)
+}
+
+fn links_source_closure_manifest(value: &Value) -> Result<ContractLinks, String> {
+    let manifest = crate::objects::SourceClosureManifest::from_value(value)
+        .map_err(|error| error.to_string())?;
+    let mut links = ContractLinks::leaf();
+    links.blob_hashes = manifest.blob_hashes();
+    Ok(links)
 }
 
 fn links_dispatch_effect_record(value: &Value) -> Result<ContractLinks, String> {

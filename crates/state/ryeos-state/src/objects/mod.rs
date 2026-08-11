@@ -31,6 +31,7 @@ pub mod project_file;
 pub mod project_snapshot;
 pub mod project_snapshot_policy;
 pub mod project_tree;
+pub mod source_closure;
 pub mod source_manifest;
 pub mod state_anchor;
 pub mod state_manifest;
@@ -110,6 +111,15 @@ pub use project_file::ProjectFile;
 pub use project_snapshot::ProjectSnapshot;
 pub use project_snapshot_policy::ProjectSnapshotPolicy;
 pub use project_tree::ProjectTree;
+pub use source_closure::{
+    EFFECTIVE_SOURCE_BINDING_KIND, EFFECTIVE_SOURCE_BINDING_SCHEMA, EffectiveSourceBinding,
+    LogicalSourceRoot, MAX_SOURCE_BINDING_BYTES, MAX_SOURCE_FILE_BYTES, MAX_SOURCE_FILES,
+    MAX_SOURCE_MANIFEST_BYTES, MAX_SOURCE_PATH_BYTES, MAX_SOURCE_ROOTS, MAX_SOURCE_TOTAL_BYTES,
+    SOURCE_CLOSURE_DERIVED_KEY, SOURCE_CLOSURE_MANIFEST_KIND, SOURCE_CLOSURE_MANIFEST_SCHEMA,
+    SignedKindSourceCeiling, SourceClosureFile, SourceClosureManifest, SourceClosureTotals,
+    SourceExecutionPolicyIdentity, SourceFileMode, SourceLoaderRoot, SourceLogicalBinding,
+    SourceOwnerIdentity, SourceRootIdentity, SourceSpaceIdentity, SourceTestimonyProof,
+};
 pub use source_manifest::SourceManifest;
 pub use state_anchor::{STATE_ANCHOR_SCHEMA_VERSION, StateAnchorMilestone, StateAnchorPayload};
 pub use state_manifest::{
