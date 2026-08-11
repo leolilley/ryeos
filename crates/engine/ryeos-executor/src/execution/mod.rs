@@ -395,18 +395,30 @@ fn store_project_snapshot(
     staged_roots.store_object_admitted(guard, cas, &snapshot.to_value())
 }
 
-/// Materialize one immutable snapshot lower tree without copying payload bytes
-/// per snapshot or per launch. Content inodes are keyed by blob digest *and*
-/// normalized mode; snapshot and launch trees contain only hard links to those
-/// daemon-private immutable inodes.
+/// Select how an immutable snapshot becomes visible to one execution.
 ///
-/// The returned tree must never be exposed writable. Normal durable execution
-/// presents it as the read-only lower of a verified workspace overlay.
-pub fn checkout_project_lower(
+/// A shared cache and an enforced overlay lower remain read-only, so both may
+/// safely share verified content inodes. Disabled isolation executes directly
+/// in its daemon-owned workspace, making that tree writable; it must receive
+/// independent inodes materialized from CAS instead of links into the immutable
+/// cache.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ProjectLowerMaterialization<'a> {
+    SharedReadOnly,
+    EnforcedOverlayLower(&'a Path),
+    PrivateWritableWorkspace(&'a Path),
+}
+
+/// Materialize one immutable snapshot for the selected execution boundary.
+/// Content inodes in shared/read-only trees are keyed by blob digest and
+/// normalized mode. Writable private workspaces receive byte-identical but
+/// inode-independent files so one execution can never mutate another
+/// execution's snapshot authority.
+pub(crate) fn checkout_project_lower(
     authority: &ryeos_state::PinnedStateAuthority,
     cas_mutation_guard: &ryeos_state::CasMutationGuard,
     snapshot_hash: &str,
-    target_dir: Option<&Path>,
+    materialization: ProjectLowerMaterialization<'_>,
     cache: &MaterializationCache,
 ) -> Result<(
     PathBuf,
@@ -462,16 +474,36 @@ pub fn checkout_project_lower(
         }
         construction?;
     }
-    let realized_path = if let Some(target_dir) = target_dir {
-        let target_root = lillux::secure_fs::PinnedDirectory::open_or_create(target_dir)?;
-        for (relative, project_file) in project_files {
-            let content = cache.ensure_content_file(&cas, project_file)?;
-            let (parent, name) = pinned_output_parent(&target_root, relative)?;
-            content.link_to(&parent, &name)?;
+    let realized_path = match materialization {
+        ProjectLowerMaterialization::SharedReadOnly => cache.cache_dir(snapshot_hash),
+        ProjectLowerMaterialization::EnforcedOverlayLower(target_dir) => {
+            let target_root = lillux::secure_fs::PinnedDirectory::open_or_create(target_dir)?;
+            for (relative, project_file) in project_files {
+                let content = cache.ensure_content_file(&cas, project_file)?;
+                let (parent, name) = pinned_output_parent(&target_root, relative)?;
+                content.link_to(&parent, &name)?;
+            }
+            target_dir.to_path_buf()
         }
-        target_dir.to_path_buf()
-    } else {
-        cache.cache_dir(snapshot_hash)
+        ProjectLowerMaterialization::PrivateWritableWorkspace(target_dir) => {
+            let target_root = lillux::secure_fs::PinnedDirectory::open_or_create(target_dir)?;
+            for (relative, project_file) in project_files {
+                let (parent, name) = pinned_output_parent(&target_root, relative)?;
+                let materialized = cas.materialize_blob_to_new_regular(
+                    &project_file.blob_hash,
+                    &parent,
+                    &name,
+                    project_file.normalized_mode,
+                )?;
+                if materialized != project_file.size {
+                    anyhow::bail!(
+                        "private workspace file {relative} materialized {materialized} bytes, expected {}",
+                        project_file.size
+                    );
+                }
+            }
+            target_dir.to_path_buf()
+        }
     };
     let materialization = match ryeos_state::PinnedProjectMaterialization::verify_from_closure(
         authority,
@@ -480,7 +512,7 @@ pub fn checkout_project_lower(
         &realized_path,
     ) {
         Ok(materialization) => materialization,
-        Err(error) if target_dir.is_none() => {
+        Err(error) if matches!(materialization, ProjectLowerMaterialization::SharedReadOnly) => {
             // A valid marker beside a mutated generation is not authority.
             // Rebuild once beneath the still-held construction lock, then
             // mint the proof from the rebuilt descriptor tree.
@@ -1046,10 +1078,106 @@ pub(crate) fn ensure_control_tree_unchanged(
 #[cfg(test)]
 mod pinned_child_authority_tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
     use ryeos_state::objects::{
         ChildProjectAuthorityPolicy, EnvironmentAuthority, ExecutionProjectAuthority,
-        LiveFilesystemConfinement, LiveProjectAccess, PinnedChildProjectRealization,
+        LiveFilesystemConfinement, LiveProjectAccess, PinnedChildProjectRealization, ProjectFile,
+        ProjectSnapshot, ProjectSnapshotPolicy, ProjectTree,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_private_workspaces_do_not_share_snapshot_cache_inodes() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let state_root = tempfile::tempdir().unwrap();
+        let state_db =
+            ryeos_state::StateDb::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
+                .unwrap();
+        let authority = state_db.pinned_authority().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        let cas = authority.cas_store().unwrap();
+
+        let bytes = b"immutable snapshot bytes\n";
+        let blob_hash = cas.store_blob(bytes).unwrap();
+        let project_file = ProjectFile {
+            blob_hash,
+            size: bytes.len() as u64,
+            normalized_mode: ProjectFile::REGULAR_MODE,
+        };
+        let file_hash = cas.store_object(&project_file.to_value()).unwrap();
+        let tree = ProjectTree {
+            files: BTreeMap::from([("vendor/runtime/stable.txt".to_owned(), file_hash)]),
+        };
+        let tree_hash = cas.store_object(&tree.to_value()).unwrap();
+        let policy = ProjectSnapshotPolicy::from_matcher(
+            ryeos_state::project_sync::ProjectSyncScope::FullProject,
+            &ryeos_state::ignore::matcher_from_builtins(),
+        )
+        .unwrap();
+        let policy_hash = cas.store_object(&policy.to_value()).unwrap();
+        let snapshot = ProjectSnapshot {
+            project_tree_hash: tree_hash,
+            effective_policy_hash: policy_hash,
+            message: None,
+            parent_hashes: Vec::new(),
+            created_at: "2026-08-11T00:00:00Z".to_owned(),
+            source: "private-workspace-test".to_owned(),
+        };
+        let snapshot_hash = cas.store_object(&snapshot.to_value()).unwrap();
+        let cache_root = tempfile::tempdir().unwrap();
+        let cache = MaterializationCache::new(cache_root.path().to_path_buf());
+
+        let (shared_path, _shared_lease, shared) = checkout_project_lower(
+            &authority,
+            &guard,
+            &snapshot_hash,
+            ProjectLowerMaterialization::SharedReadOnly,
+            &cache,
+        )
+        .unwrap();
+        let first_root = tempfile::tempdir().unwrap();
+        let second_root = tempfile::tempdir().unwrap();
+        let (first_path, _first_lease, _first) = checkout_project_lower(
+            &authority,
+            &guard,
+            &snapshot_hash,
+            ProjectLowerMaterialization::PrivateWritableWorkspace(first_root.path()),
+            &cache,
+        )
+        .unwrap();
+        let (second_path, _second_lease, second) = checkout_project_lower(
+            &authority,
+            &guard,
+            &snapshot_hash,
+            ProjectLowerMaterialization::PrivateWritableWorkspace(second_root.path()),
+            &cache,
+        )
+        .unwrap();
+
+        let relative = Path::new("vendor/runtime/stable.txt");
+        let shared_file = shared_path.join(relative);
+        let first_file = first_path.join(relative);
+        let second_file = second_path.join(relative);
+        assert_ne!(
+            std::fs::metadata(&shared_file).unwrap().ino(),
+            std::fs::metadata(&first_file).unwrap().ino(),
+            "a writable workspace must not share the immutable cache inode"
+        );
+        assert_ne!(
+            std::fs::metadata(&first_file).unwrap().ino(),
+            std::fs::metadata(&second_file).unwrap().ino(),
+            "two writable workspaces must not share one another's inode"
+        );
+
+        std::fs::write(&first_file, b"first workspace mutation\n").unwrap();
+        assert_eq!(std::fs::read(&shared_file).unwrap(), bytes);
+        assert_eq!(std::fs::read(&second_file).unwrap(), bytes);
+        shared.ensure_path_binding().unwrap();
+        second.ensure_path_binding().unwrap();
+    }
 
     #[test]
     fn pin_at_spawn_preserves_the_sealed_parent_capability_ceiling() {

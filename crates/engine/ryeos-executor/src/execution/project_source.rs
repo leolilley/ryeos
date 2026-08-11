@@ -461,12 +461,19 @@ fn resolve_pinned_snapshot_context_admitted(
             )
         }
     };
+    let lower_materialization = match target_path.as_deref() {
+        None => crate::execution::ProjectLowerMaterialization::SharedReadOnly,
+        Some(path) if state.isolation.is_enforced() => {
+            crate::execution::ProjectLowerMaterialization::EnforcedOverlayLower(path)
+        }
+        Some(path) => crate::execution::ProjectLowerMaterialization::PrivateWritableWorkspace(path),
+    };
     let (effective_path, generation_lease, pinned_materialization) =
         crate::execution::checkout_project_lower(
             authority,
             cas_mutation_guard,
             snapshot_hash,
-            target_path.as_deref(),
+            lower_materialization,
             &materialization_cache,
         )
         .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
