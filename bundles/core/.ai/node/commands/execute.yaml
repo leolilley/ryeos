@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-10T09:04:33Z:d5e6c78516a302c521aedb9b29cfa27948ed18e65615441e4fa12aa4be075b66:Dexf6Z6oUZpnjEGExsxhjpQtw96t2Q4hJcwg347qB1e+dSHQc32oY2ksUbz7yfCqMMXaQUKF5lHvnAGP3VKNDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:07Z:d5e6c78516a302c521aedb9b29cfa27948ed18e65615441e4fa12aa4be075b66:Dexf6Z6oUZpnjEGExsxhjpQtw96t2Q4hJcwg347qB1e+dSHQc32oY2ksUbz7yfCqMMXaQUKF5lHvnAGP3VKNDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - execute
 description: "Execute an item (tool, directive, service, graph). On a terminal, streams the live execution log then prints the final result; --no-stream/--json print only the buffered JSON result (also the default when piped), and --stream forces streaming even when piped."

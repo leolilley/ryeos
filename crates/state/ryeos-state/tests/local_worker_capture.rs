@@ -1,29 +1,9 @@
 use std::collections::BTreeMap;
-use std::io::Read as _;
 use std::path::Path;
 
-use ryeos_state::{
-    ExternalCapturePolicy, ExternalContentBlobSink, LaunchCaptureBudget, capture_tree,
+use ryeos_state::objects::{
+    LogicalSourceRoot, SourceClosureFile, SourceClosureManifest, SourceFileMode,
 };
-
-struct DigestOnlySink;
-
-impl ExternalContentBlobSink for DigestOnlySink {
-    fn store_file(
-        &mut self,
-        mut file: std::fs::File,
-        _path: &str,
-        expected_size: u64,
-    ) -> anyhow::Result<(String, u64)> {
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        anyhow::ensure!(
-            bytes.len() as u64 == expected_size,
-            "fixture changed while read"
-        );
-        Ok((lillux::sha256_hex(&bytes), expected_size))
-    }
-}
 
 #[test]
 fn shipped_local_worker_pins_the_production_capture_digest() {
@@ -31,31 +11,61 @@ fn shipped_local_worker_pins_the_production_capture_digest() {
         .ancestors()
         .nth(3)
         .expect("ryeos-state lives below the repository root");
-    let worker_root =
-        repository.join("bundles/standard/.ai/workers/standard/lib/tinygrad_qwen");
-    let pinned = lillux::PinnedDirectory::open(&worker_root)
-        .unwrap()
-        .expect("shipped local worker tree exists");
-    let ignore = ryeos_state::ignore::matcher_from_builtins();
-    let policy =
-        ExternalCapturePolicy::new(
-            ".ai/workers/standard/lib/tinygrad_qwen".to_owned(),
-            &ignore,
-        )
-        .unwrap();
-    let manifest = capture_tree(
-        &pinned,
-        &[],
-        &policy,
-        &mut LaunchCaptureBudget::default(),
-        &mut DigestOnlySink,
-    )
-    .unwrap();
-    let observed = lillux::sha256_hex(
-        lillux::canonical_json(&serde_json::to_value(&manifest).unwrap())
+    let worker_root = repository.join("bundles/standard/.ai/workers/standard/lib/local-tinygrad");
+    let mut pending = vec![worker_root.clone()];
+    let mut entries = Vec::new();
+    while let Some(directory) = pending.pop() {
+        let mut children = std::fs::read_dir(&directory)
             .unwrap()
-            .as_bytes(),
-    );
+            .map(|entry| entry.unwrap())
+            .collect::<Vec<_>>();
+        children.sort_by_key(|entry| entry.file_name());
+        for child in children {
+            let file_type = child.file_type().unwrap();
+            if file_type.is_dir() {
+                pending.push(child.path());
+                continue;
+            }
+            assert!(
+                file_type.is_file(),
+                "worker source contains only regular files"
+            );
+            let child_path = child.path();
+            let bytes = std::fs::read(&child_path).unwrap();
+            let relative = child_path.strip_prefix(&worker_root).unwrap();
+            let path = relative
+                .to_str()
+                .expect("worker source paths are UTF-8")
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            #[cfg(unix)]
+            let mode = {
+                use std::os::unix::fs::PermissionsExt as _;
+                if child.metadata().unwrap().permissions().mode() & 0o111 == 0 {
+                    SourceFileMode::ReadOnly
+                } else {
+                    SourceFileMode::Executable
+                }
+            };
+            #[cfg(not(unix))]
+            let mode = SourceFileMode::ReadOnly;
+            entries.push(SourceClosureFile {
+                root: "source".to_owned(),
+                path,
+                blob_hash: lillux::sha256_hex(&bytes),
+                size: bytes.len() as u64,
+                mode,
+            });
+        }
+    }
+    let observed = SourceClosureManifest::new(
+        vec![LogicalSourceRoot {
+            id: "source".to_owned(),
+        }],
+        entries,
+    )
+    .unwrap()
+    .digest()
+    .unwrap();
 
     let worker_item = std::fs::read_to_string(
         repository.join("bundles/standard/.ai/workers/standard/local-tinygrad.yaml"),
@@ -63,9 +73,9 @@ fn shipped_local_worker_pins_the_production_capture_digest() {
     .unwrap();
     let body = lillux::signature::strip_signature_lines(&worker_item);
     let value: serde_yaml::Value = serde_yaml::from_str(&body).unwrap();
-    let declared = value["external_content"][0]["digest"]
+    let declared = value["source"]["digest"]
         .as_str()
-        .expect("worker item declares its own source-tree digest");
+        .expect("worker item declares its adjacent source digest");
     assert_eq!(observed, declared);
 }
 

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-21T00:24:30Z:1ca3fce6dbb862d6a33c702f767598a9e3b2d8c133e64cccf68c2ffccfbcc590:XRwZW/EasOXP+eXcuhhIMw4k7vNEIpuqXlZ2OSDQESamQoE42P8feGXPzorOPct0imt1qCuQkdAHac75UurXCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:31Z:1ca3fce6dbb862d6a33c702f767598a9e3b2d8c133e64cccf68c2ffccfbcc590:XRwZW/EasOXP+eXcuhhIMw4k7vNEIpuqXlZ2OSDQESamQoE42P8feGXPzorOPct0imt1qCuQkdAHac75UurXCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]

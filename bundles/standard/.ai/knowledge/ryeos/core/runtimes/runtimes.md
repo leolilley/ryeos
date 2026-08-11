@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-03T06:49:21Z:f672df56075471eae40efa4b4c553263266dd4b1c12c50ac52d3cd1ed21cfb32:BzwrEKEVQe7tqxeAgl2BfIpWN0y4czkb4GYwGkemFG2okVjvKp25c/atcsduL0W/6BEWtYBUUseeLLNmqpSdAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:34Z:f672df56075471eae40efa4b4c553263266dd4b1c12c50ac52d3cd1ed21cfb32:BzwrEKEVQe7tqxeAgl2BfIpWN0y4czkb4GYwGkemFG2okVjvKp25c/atcsduL0W/6BEWtYBUUseeLLNmqpSdAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, runtimes, execution, subprocess]

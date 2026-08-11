@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-23T15:25:30Z:5b3e1227e4bc5dda860ff4407802e9e346af8b6c4685363b393d807cfe73ff6a:kJcYLevDpEGSNHpZ03lRVexGgYhzngH6YcfqHrU9wPpWWT2bbRDTJpGwfubx7pPh4yOsjC7dJ0bBExMsmn6UDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:27Z:5b3e1227e4bc5dda860ff4407802e9e346af8b6c4685363b393d807cfe73ff6a:kJcYLevDpEGSNHpZ03lRVexGgYhzngH6YcfqHrU9wPpWWT2bbRDTJpGwfubx7pPh4yOsjC7dJ0bBExMsmn6UDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Example continuation hook target that summarizes the live context window for a successor directive run."
 version: "1.0.0"

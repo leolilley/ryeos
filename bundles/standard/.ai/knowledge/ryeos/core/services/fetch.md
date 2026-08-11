@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:0f6fcd0389d29758b9c33ffd0193cc1994eed059228e12636958a2b07d681079:xvaPJm/wSnHKgV5YxxZDLyC7ttntCqaizNGm2Qy5ybjNYHwcyAnP/Eo3gmpOdrf3F9RNh/o8veU5LqsTRU6RCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:34Z:0f6fcd0389d29758b9c33ffd0193cc1994eed059228e12636958a2b07d681079:xvaPJm/wSnHKgV5YxxZDLyC7ttntCqaizNGm2Qy5ybjNYHwcyAnP/Eo3gmpOdrf3F9RNh/o8veU5LqsTRU6RCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, fetch, resolution, offline]

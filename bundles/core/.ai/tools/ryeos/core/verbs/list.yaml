@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-09T05:54:23Z:f4898a281b1c0cd6930aab4a3ee265a3b60614038e099a1cb5dc960e56fd3f3d:eM0aU3qXjgKPKU8/Ps8bHDSn9tPu2aQPIgil+Ay8sLVlIhUJfCrQ7J6n5/OSnDIpQ5SOkDe3pKFJ/W6wFI9SBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:21Z:f4898a281b1c0cd6930aab4a3ee265a3b60614038e099a1cb5dc960e56fd3f3d:eM0aU3qXjgKPKU8/Ps8bHDSn9tPu2aQPIgil+Ay8sLVlIhUJfCrQ7J6n5/OSnDIpQ5SOkDe3pKFJ/W6wFI9SBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # version: "1.0.0"
 category: "ryeos/core/verbs"
 executor_id: "@subprocess"

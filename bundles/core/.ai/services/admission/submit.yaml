@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-09T05:54:16Z:ca9154c0674916f5278c759ed78c5ffdf27b3b7b5d8c23bdf00f93ff5c3e6d2a:OKfIzGD5OXsN2+b1iIIfHmu5M6W2sd79PVfyl5JgO4eBs07yku7XVWsxF8A0WEJ4+Hwr+yobOEmq5Bj4nTTpBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:13Z:ca9154c0674916f5278c759ed78c5ffdf27b3b7b5d8c23bdf00f93ff5c3e6d2a:OKfIzGD5OXsN2+b1iIIfHmu5M6W2sd79PVfyl5JgO4eBs07yku7XVWsxF8A0WEJ4+Hwr+yobOEmq5Bj4nTTpBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: admission.submit
 required_caps: ["ryeos.execute.service.admission/submit"]

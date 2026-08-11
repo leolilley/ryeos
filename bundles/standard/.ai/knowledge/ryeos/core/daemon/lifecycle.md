@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-21T00:24:29Z:54e02f447648fa25b24d6f00b1f88a41e93877da9739968f91eca327b6e3cb77:yxkfBOgUnPhIv1XKovx2NL9NnLY6lGBA+sQNJJ4Od76b+wVTEhBIp1jk3k05Kj27VhDteXLTdGkPjNSffVEbBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:28Z:54e02f447648fa25b24d6f00b1f88a41e93877da9739968f91eca327b6e3cb77:yxkfBOgUnPhIv1XKovx2NL9NnLY6lGBA+sQNJJ4Od76b+wVTEhBIp1jk3k05Kj27VhDteXLTdGkPjNSffVEbBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, startup, shutdown, lifecycle, state-lock, uds]

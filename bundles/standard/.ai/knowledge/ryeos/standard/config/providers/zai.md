@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-24T07:51:50Z:a4ae500d2bd246b1301f647156322f436b877c204fdcd677a11a7f5a351ccb6d:RzeA/rCQpxvzr9Zjg6MxAZt6Qtiq64ztQUx3untFjqFPqCU0wRWe2tESDz3cgdeoujCYfNCUq3zXc4JPvoJZAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:37Z:a4ae500d2bd246b1301f647156322f436b877c204fdcd677a11a7f5a351ccb6d:RzeA/rCQpxvzr9Zjg6MxAZt6Qtiq64ztQUx3untFjqFPqCU0wRWe2tESDz3cgdeoujCYfNCUq3zXc4JPvoJZAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/config/providers
 tags: [provider, zai, glm, models]

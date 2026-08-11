@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-09T05:54:22Z:6de7793f0194443d3fc0d4365097fe78ea1d2b754178737780da9518494fb9f5:asMWLCVLFPfuUV1Dobdh45U5jRnfxU/SsK69jovIjWnYy3V22wGiyo36TvsRTQyihe5qgQsLUMd3SImFMUYhBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:20Z:6de7793f0194443d3fc0d4365097fe78ea1d2b754178737780da9518494fb9f5:asMWLCVLFPfuUV1Dobdh45U5jRnfxU/SsK69jovIjWnYy3V22wGiyo36TvsRTQyihe5qgQsLUMd3SImFMUYhBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/bundle"
 name: "manifest-sign"
 executor_id: "@subprocess"

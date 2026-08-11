@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-09T05:54:23Z:9778bf3e953ecf9721caeb4a51f69779c5fec56155447841e38b12594800eb53:/8TW/EKYzCScCf/AutUlFNHD8CC6Ugc39F87/hia8nE+06P007OQyCETQ9kSTHNXbmIpSVMvW9vBho77cyN+Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:21Z:f5b84b8d28b57b021531b0dff749f50d74432d58c72144cacd1d5eba9a49d3a8:cy3kAnpOIovLKDVJrnQkvbvBVuyLlRbeRUnbRyscjKpru5muZlql6dQGuHDqhprI30+v/qnC9qbpV3bjOgKzDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/runtimes/python"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -16,12 +16,10 @@ env_config:
     PYTHONUNBUFFERED: "1"
     PROJECT_VENV_PYTHON: "${interpreter}"
 
-verify_deps:
-  enabled: true
-  scope: tool_dir
-  recursive: true
-  extensions: [".py", ".yaml", ".yml", ".json"]
-  exclude_dirs: ["__pycache__", ".venv", "node_modules", ".git", "config"]
+source_scope:
+  location: item_namespace
+  load_roots: [item_directory, namespace_root, namespace_lib]
+  materialization: read_only
 
 config_resolve:
   type: single
@@ -54,8 +52,7 @@ config:
         actual_hash = hashlib.sha256(source).hexdigest()
         if actual_hash != entry["content_hash"]:
             raise SystemExit("RyeOS Python runtime: sealed tool digest mismatch")
-        runtime_lib = Path(sys.argv[2]).resolve()
-        project_path = sys.argv[3]
+        project_path = sys.argv[2]
 
         tools_root = None
         for candidate in [tool_path.parent, *tool_path.parents]:
@@ -72,7 +69,7 @@ config:
         tool_namespace_root = tools_root / rel.parts[0] if len(rel.parts) > 1 else tools_root
         tool_dir = tool_path.parent
 
-        for path in reversed([tool_dir, tool_namespace_root, tool_namespace_root / "lib", runtime_lib]):
+        for path in reversed([tool_dir, tool_namespace_root, tool_namespace_root / "lib"]):
             prepend(path)
 
         sys.argv = [str(tool_path), "--project-path", project_path]
@@ -85,7 +82,6 @@ config:
         )
         exec(compile(source, str(tool_path), "exec"), globals_dict)
     - "${tool_path}"
-    - "${runtime_dir}/lib"
     - "${project_path}"
   input_data: "${params_json}"
   timeout_secs: 300

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-10T01:36:58Z:95ac00577412f44dfb8e765327bb1d687dce349bb4197fb300ad92a60beeeadb:GW8dSP8PW7GZp6nncKaoDZDTdl6B/LLURP1dnXTq0tOZ088ONc1amxya+vn/VEBkyrDm2nYDda0d6gaRlPnsDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:29Z:5c634618036372252cfddebd6ed1040147b8f6dc5f66991ef92b604977506498:nnm/Z042Q+XKN4b1vYngWRBSP3BPy8eZrf8v28LFtfW+hOqze1NqWdc4WPAqo5Qkf+XtmJXW91Yl3u5+Tq0gBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/execution
 tags: [execution, external-content, persistent-session, local-model, replay]
@@ -19,6 +19,13 @@ This does not remove live-filesystem execution. Project and bundle authoring can
 still resolve current live files. Durable recorded execution additionally
 captures the external bytes that affected one admitted worker so restart and
 replay never need to reopen their original paths.
+
+The worker's own publisher-authored source is not one of those external
+inputs. It lives beside the descriptor under
+`.ai/workers/standard/lib/local-tinygrad/`; the descriptor atomically signs its
+root, entry, and aggregate source-manifest digest. RyeOS admits that source
+closure directly from the exact installed bundle generation. Only the runtime,
+Tinygrad, toolchain, and model are operator-imported external realizations.
 
 The shipped `worker:standard/local-tinygrad` route is deliberately
 `recorded`. It is not `sealed`: no node qualification currently proves a
@@ -165,6 +172,7 @@ environment:
     - RYEOS_APP_ROOT
     - RYEOS_CHAIN_ROOT_ID
     - RYEOS_CHECKPOINT_DIR
+    - RYEOS_ADMITTED_SOURCE
     - RYEOS_EXTERNAL_REALIZATIONS
     - RYEOS_ITEM_KIND
     - RYEOS_ITEM_PATH

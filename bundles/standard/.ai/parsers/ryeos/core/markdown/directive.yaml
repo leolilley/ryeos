@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-02T08:58:48Z:da1587f8ec2c3933e6e9a8f63ca31f489f70991908ccdace0fc21243b957df85:WVtiINt/mgMVFPUefwcg1QaXcjXPcjk3SVbeNYOnJ1gpGeu5vo73s8bfLq3y2qZ63C6gt6JaQXQB3SuWGRGsDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:23Z:da1587f8ec2c3933e6e9a8f63ca31f489f70991908ccdace0fc21243b957df85:WVtiINt/mgMVFPUefwcg1QaXcjXPcjk3SVbeNYOnJ1gpGeu5vo73s8bfLq3y2qZ63C6gt6JaQXQB3SuWGRGsDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: "ryeos/core/markdown"
 description: "Directive parser: extracts YAML header (frontmatter or fenced block) and body from markdown"

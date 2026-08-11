@@ -7,11 +7,10 @@ from pathlib import Path
 
 
 workspace = Path.cwd()
-worker_root = (workspace / "worker").resolve(strict=True)
+worker_root = Path(__file__).resolve(strict=True).parent
 tinygrad_root = (workspace / "tinygrad").resolve(strict=True)
-for root in (worker_root, tinygrad_root):
-    if workspace not in root.parents:
-        raise RuntimeError("worker import root escaped the admitted workspace")
+if workspace not in tinygrad_root.parents:
+    raise RuntimeError("tinygrad import root escaped the admitted workspace")
 sys.path[:0] = [str(worker_root), str(tinygrad_root)]
 
 from session import main

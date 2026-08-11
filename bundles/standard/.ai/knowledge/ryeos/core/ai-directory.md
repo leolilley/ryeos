@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-10T11:19:11Z:3024c3aac89893eb277c24450328d0593314a88efb5484305baee691e34f50f6:/UnkKdBmRRHNT9wjYXlLpXmLIRg+6bnlamR1lzWkPzeLXHJt71EWB6itO62yuIbyc7QgBzwXtSTn+R2JmOVOAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:28Z:baa6b413182606c869bc739272005e100c533e6a27d2fc1072d74a8de053d39f:HGJWhS3mz5nNVBZwpkGshRiwZ8gPbv13iXZWXlgI35bgHnTp/W94L4hxoou553b9ocK44wSKouMUhWK0EbXLAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, directory, layout, filesystem]
@@ -14,11 +14,18 @@ Rye OS uses `.ai/` directories across two spaces. Each space has a
 different layout serving different purposes.
 
 The project `.ai/` tree is an authored RyeOS control and item surface, not a
-general dependency directory. Opaque runtimes, datasets, simulator closures,
-model files, and other content trees live outside `.ai/`. Executable items
-refer to those bytes through `external_content` with a `project_files` locator
-and an exact admitted manifest digest. This keeps kind coverage meaningful and
-prevents arbitrary dependency files from being mistaken for RyeOS items.
+general dependency directory. Source that belongs to one executable item stays
+beside that item under its kind directory: a namespaced tool may keep helpers
+under its tool namespace, and a worker may keep publisher-owned source under
+its worker namespace. RyeOS admits that adjacent source as one exact source
+closure before execution; it is not declared as external content.
+
+Opaque runtimes, datasets, simulator closures, model files, and other content
+trees live outside `.ai/`. Executable items refer to those bytes through
+`external_content` with a `project_files` locator and an exact admitted
+manifest digest. This keeps kind coverage meaningful, keeps source intuitive
+to author, and prevents arbitrary dependency files from being mistaken for
+RyeOS items.
 
 ## Bundle Layout (Core)
 
@@ -38,7 +45,7 @@ machine, not the LLM workflow layer:
 │   ├── aliases/                         # core CLI aliases + remote/vault aliases
 │   ├── engine/kinds/                    # config, handler, parser, protocol,
 │   │                                     # runtime, service, node, tool,
-│   │                                     # streaming_tool
+│   │                                     # streaming_tool, worker
 │   ├── routes/                          # execute, health, public-key,
 │   │                                     # objects, vault, remote status, push-head
 │   └── verbs/                           # core, bundle, remote, vault, maintenance verbs
@@ -86,6 +93,9 @@ kinds, composers, runtime binaries, model routing, and workflow services:
 │   ├── directive-runtime.yaml
 │   ├── graph-runtime.yaml
 │   └── knowledge-runtime.yaml
+├── workers/standard/
+│   ├── local-tinygrad.yaml
+│   └── lib/local-tinygrad/              # descriptor-admitted adjacent source
 └── services/                            # threads, scheduler, events, commands
 ```
 
@@ -152,6 +162,7 @@ kind live relative to any `.ai/` root:
 | `service`       | `services/`    | Yes         | In-process service endpoints |
 | `streaming_tool`| `tools/`       | Yes         | Same dir as tool, streaming protocol |
 | `tool`          | `tools/`       | Yes         | `.py`, `.yaml`, `.js`, `.ts` |
+| `worker`        | `workers/`     | Yes         | Persistent subprocess definition + adjacent source |
 
 Note: `tool` and `streaming_tool` share the `tools/` directory.
 Differentiation is by execution protocol, not directory.

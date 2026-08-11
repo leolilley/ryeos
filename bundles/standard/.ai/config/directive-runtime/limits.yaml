@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-03T05:24:44Z:c1735b26410c7ed7fa78cc8bd6747c6b84e2df85c296516fc81b7249230e89f8:ujujz7i3OWZZSha6gVonfY2mttYFxZ0OhIJ9n11rzF6y5q1g2DnfTiCWz2w17ZnZa6bNxnfBhk7lUxN0OXUlAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:26Z:c1735b26410c7ed7fa78cc8bd6747c6b84e2df85c296516fc81b7249230e89f8:ujujz7i3OWZZSha6gVonfY2mttYFxZ0OhIJ9n11rzF6y5q1g2DnfTiCWz2w17ZnZa6bNxnfBhk7lUxN0OXUlAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "directive-runtime"
 defaults:
   # 0 means unlimited. By default RyeOS applies no hard execution limits; runaways

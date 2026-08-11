@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-11T05:13:18Z:fbadb31125d8201ce9bef465cc5dfd6e17bc1eb8b96a31ac2e591b93c6406bba:ADE+LC07KpTihxfqCoEegE+TQgvRLyiOIW9eD3yl0sUN6bxGVLqHIVLqMQghwhuFHJ3tjC/A4LJC032a5kpXBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:34Z:fbadb31125d8201ce9bef465cc5dfd6e17bc1eb8b96a31ac2e591b93c6406bba:ADE+LC07KpTihxfqCoEegE+TQgvRLyiOIW9eD3yl0sUN6bxGVLqHIVLqMQghwhuFHJ3tjC/A4LJC032a5kpXBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, bundle, install, export]

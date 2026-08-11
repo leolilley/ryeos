@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-10T03:16:08Z:5ded5c49e6dda4423e4dc3852782b2f81640172d6b966adf05062efe99e1992c:N2zvNjg6S770DrJpui+RfWaAs2WGTMA9q8FPEoZ4oz8JFU0SVg5XmcobOheX0LEuI/VWJD/3quDRZyiSIqBCDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:47Z:ed4a34a19e569564dfd35cfb1d56a9bea9b3cfb6011330c56149d3c78c2a5f12:9rBwZ4D0O3Yx6CPqm3Il9z7jRnlu0F2k9fRQougMG5F0biwKQTo/wPdojh9GhZbNE3VbobjveTYWsABEq0RNCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "standard"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -7,15 +7,12 @@ supported_target:
   os: linux
   arch: x86_64
 
+source:
+  root: "lib/local-tinygrad"
+  entry: "bootstrap.py"
+  digest: "ca8c7512498889743a91ed91cd697819d65e79db25a96f0afef0c5ca76dd933d"
+
 external_content:
-  - id: worker
-    kind: tree
-    locator:
-      root: "bundle:standard"
-      path: ".ai/workers/standard/lib/tinygrad_qwen"
-    mode: pinned
-    digest: "2bfe77240022d95bd88eac7e01dcced97df6b2cf9d5f9cfec68f05a0fd4c8631"
-    mount: worker
   - id: runtime
     kind: tree
     mode: pinned
@@ -50,7 +47,7 @@ config:
     - "runtime/python/bin/python3.14"
     - "-P"
     - "-S"
-    - "worker/bootstrap.py"
+    - "${source.entry}"
   env:
     PYTHONHOME: "runtime/python"
     PYTHONHASHSEED: "0"

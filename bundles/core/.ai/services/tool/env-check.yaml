@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-09T05:54:21Z:7749b5022ba0d6a3563f0fbe74a5a241eaeff343b2599706706bb92d70a57e8f:KjHFlJ/kDYY5st52xer5KCitqzlBVhZWyA7WLBfKQvRN+Meaoj5fazo/5l52RBC+5Cm/ZUeQ3v3z1kh5pldhBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:19Z:7749b5022ba0d6a3563f0fbe74a5a241eaeff343b2599706706bb92d70a57e8f:KjHFlJ/kDYY5st52xer5KCitqzlBVhZWyA7WLBfKQvRN+Meaoj5fazo/5l52RBC+5Cm/ZUeQ3v3z1kh5pldhBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: tool.env-check
 availability: daemon_only

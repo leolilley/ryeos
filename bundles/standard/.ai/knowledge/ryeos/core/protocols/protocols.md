@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-15T07:49:19Z:e33daacbc42ec9cc709bdc5fa15be6d45706f165679862ca15c4397534a11faf:TlyJulmQfCK1DodVnf44690vw0QqRN5oD8NxHPjdOmkl5BixBl8FTsgOBOX+W6/SO/M8M093GVTU3xGG24FJAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:33Z:e33daacbc42ec9cc709bdc5fa15be6d45706f165679862ca15c4397534a11faf:TlyJulmQfCK1DodVnf44690vw0QqRN5oD8NxHPjdOmkl5BixBl8FTsgOBOX+W6/SO/M8M093GVTU3xGG24FJAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, protocols, wire, subprocess]

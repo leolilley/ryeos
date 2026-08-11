@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T10:54:58Z:1c926ceecdff2878925db9a22dcd7aeeb5cff36772ac0d15a4bd1382d73b0772:VjlqiOERvh0yfs9NsJEBSpBj2eLGvGwjqreSDzyUaqGbxAqu49Ru0DE0sZfUKl6++3iu2LIKJiwbux28YYBGCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:37Z:1c926ceecdff2878925db9a22dcd7aeeb5cff36772ac0d15a4bd1382d73b0772:VjlqiOERvh0yfs9NsJEBSpBj2eLGvGwjqreSDzyUaqGbxAqu49Ru0DE0sZfUKl6++3iu2LIKJiwbux28YYBGCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [bundle-events, runtime-authority, manifest, capabilities, vault]

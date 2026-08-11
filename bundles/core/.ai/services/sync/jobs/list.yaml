@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-09T05:54:21Z:463bc95ec94aa9f2f060c18ec4b5e96a4d194263ba80f7434c9fb643aba73f17:m5jen+6seoLIA9F30SyD1plZWhDox6c6PPJFE3g3dmJbhZmwNjXw9bDVtZjabmSVH5i7OApRZNB+Vf90CGHtDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:18Z:463bc95ec94aa9f2f060c18ec4b5e96a4d194263ba80f7434c9fb643aba73f17:m5jen+6seoLIA9F30SyD1plZWhDox6c6PPJFE3g3dmJbhZmwNjXw9bDVtZjabmSVH5i7OApRZNB+Vf90CGHtDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: sync.jobs.list
 required_caps: ["ryeos.execute.service.sync/jobs/list"]

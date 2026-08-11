@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-24T04:44:15Z:cb8ce53ccf8e5e76a71db97b246b6c93186cc2e7a9729a8c78cc98bd2047fe4e:pA4UMz7siRYQH3xRjXaa6v0aPBgFvOJ+Hk7WL3mpTcSWh2WfsEV76kpVR/BtNt8Nz361o2MNanes9ee0JsOLCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:28Z:cb8ce53ccf8e5e76a71db97b246b6c93186cc2e7a9729a8c78cc98bd2047fe4e:pA4UMz7siRYQH3xRjXaa6v0aPBgFvOJ+Hk7WL3mpTcSWh2WfsEV76kpVR/BtNt8Nz361o2MNanes9ee0JsOLCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, addressing, refs]

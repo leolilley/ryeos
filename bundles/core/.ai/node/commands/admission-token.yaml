@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-09T05:54:07Z:e7e557e538c5c8cda2a984b5cc6b1b0452bf99917dd2143518b3a90a859ac4c3:ZhngxmZDagAhif1kR9H2+oq1+iEb+xJ1F+aHla4m7KuyaDyLk7KAeet3HcBUX9zXIqLXeU3uRhYrCOmLYZdcBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:06Z:e7e557e538c5c8cda2a984b5cc6b1b0452bf99917dd2143518b3a90a859ac4c3:ZhngxmZDagAhif1kR9H2+oq1+iEb+xJ1F+aHla4m7KuyaDyLk7KAeet3HcBUX9zXIqLXeU3uRhYrCOmLYZdcBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - admission-token
 description: Mint a one-time node-local admission token for remote bootstrap

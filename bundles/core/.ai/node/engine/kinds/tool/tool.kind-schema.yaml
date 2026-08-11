@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-09T05:54:05Z:e06a341375f99afb310118e9da4b07633157e3f1a948f58c680caf69611c7a3f:N+BwZQXdmLyHPIZUNTo6g4AZZOG9aA/TTN4WESCUAAm6RBlTjf2fMGmQItlWP0OtIXb71lTIvcnB0qUZKtpjAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:03Z:3ebd600f2c9724d64ca868cd8f479abec87d360fcb73f4daeacde4e6dc88da66:vKwatG6QfIM2zkspRNa2t8q7VExLt+vgBOS7TeJhYwfzA2v13HgwSBYLh94H4n5YUE1fpZBwxBvwxn6Yl1ynCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
 version: "1.0.0"
 location:
@@ -8,6 +8,15 @@ effective_trust:
   include_references: false
 resolution: []
 execution:
+  source_closure:
+    derived: effective_source_closure
+    location:
+      type: item_namespace
+    testimony: owner_signed_files
+    max_files: 4096
+    max_total_bytes: 67108864
+    max_file_bytes: 8388608
+    max_depth: 64
   # Kind-owned location of the author's durable-effect ceiling. Generic
   # dispatch consumes only this signed mechanical projection; it never names
   # or interprets the tool document's `effects` field directly.
@@ -71,12 +80,14 @@ composed_value_contract:
     effects:
       type: single
       prim: string
+    source_scope:
+      type: single
+      prim: mapping
 runtime:
   handlers:
     - type: config
     - type: env_config
     - type: config_resolve
-    - type: verify_deps
     - type: execution_params
     - type: native_async
     - type: native_resume
@@ -108,6 +119,9 @@ runtime:
     # (runtime block parser) so items may declare it without triggering
     # UnknownRuntimeBlock.
     - effects
+    # Signed executor-chain policy for adjacent source admission. The daemon
+    # consumes this before plan compilation; it is not a runtime handler.
+    - source_scope
     # `config_schema` is validated as a pre-pass against the user's
     # ROOT tool item (see plan_builder.rs::build_plan and
     # runtime/config_schema.rs). Wrapper / runtime YAMLs may declare

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:afdee3729b1d239a16478a0c7e20c4affd97677ca5069637deaa587cb86996d0:TCV3wIPPoxWbWz+lkmmDPIBHjXRBZzwi5tIWrQclCwxf4/udo4gGDRwhdjIS2v7qiSliJfnsMOs4tD/GGyjkDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:31Z:afdee3729b1d239a16478a0c7e20c4affd97677ca5069637deaa587cb86996d0:TCV3wIPPoxWbWz+lkmmDPIBHjXRBZzwi5tIWrQclCwxf4/udo4gGDRwhdjIS2v7qiSliJfnsMOs4tD/GGyjkDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/kinds
 tags: [kind, service, daemon, offline, availability]

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T03:44:58Z:e7acddc6cafb3edad95b7044339ac4b9258ee9024b89a382a2ec498ee5727775:Mzf4/wOnRGC0fOAAPIzGzHCHzHuXDC2scZMKVxJzAw3R1yjHGp8LmKvwlKnBmJ/HgLuj14nQd91rJN2HFgHWAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:29Z:e7acddc6cafb3edad95b7044339ac4b9258ee9024b89a382a2ec498ee5727775:Mzf4/wOnRGC0fOAAPIzGzHCHzHuXDC2scZMKVxJzAw3R1yjHGp8LmKvwlKnBmJ/HgLuj14nQd91rJN2HFgHWAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, state, cas, sqlite, vault, locks, ownership]

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-05T07:04:40Z:e39426740e637c823f8791e22cb5b46e3a8a25fb0b2f86c0bd100f89f046d9ff:FDzW/zRiiQ1xBW0DyNsR0ae2yhLTppqF/1xpFnoBr4k2rNysI+JDNKCgdGMt14hLQuwlQ+eh0TCNCBfhKV/NCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:32Z:e39426740e637c823f8791e22cb5b46e3a8a25fb0b2f86c0bd100f89f046d9ff:FDzW/zRiiQ1xBW0DyNsR0ae2yhLTppqF/1xpFnoBr4k2rNysI+JDNKCgdGMt14hLQuwlQ+eh0TCNCBfhKV/NCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, kinds, schema, types]

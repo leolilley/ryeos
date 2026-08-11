@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-05T07:04:40Z:059e8f01daf80d561690895183d14e9d702e0661039c62b44f821c4732e2dc5b:u5kkAhlO9Ft1QXBrJjYB0eFpCD1g724nVgniFFvLyT/OmK00xtpQh/2rBC26CBbSRfecTiVfhzPSCmlxipjrAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:33Z:059e8f01daf80d561690895183d14e9d702e0661039c62b44f821c4732e2dc5b:u5kkAhlO9Ft1QXBrJjYB0eFpCD1g724nVgniFFvLyT/OmK00xtpQh/2rBC26CBbSRfecTiVfhzPSCmlxipjrAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/protocols
 tags: [protocol, runtime-v1, callbacks]

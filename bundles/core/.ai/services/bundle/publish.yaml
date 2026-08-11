@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-09T05:54:16Z:2bfc63e29b5c5feb42d30b2e7b65c92d3e3604b6fde631dba866f52e3f05008f:dWGhSOLExuGI3MFzSXKlLNMRWnu92wZ+PXdLET7dQWPS/utwc38XNgrKDos6+Mq/Fgn57RLzS4Ge7CJuasGZBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-11T02:28:14Z:2bfc63e29b5c5feb42d30b2e7b65c92d3e3604b6fde631dba866f52e3f05008f:dWGhSOLExuGI3MFzSXKlLNMRWnu92wZ+PXdLET7dQWPS/utwc38XNgrKDos6+Mq/Fgn57RLzS4Ge7CJuasGZBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.publish
 availability: offline

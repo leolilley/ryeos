@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-03T05:24:51Z:8fcd98d138254788124716424dc3bb31bb56fca66f3523bc90414e1d26dd9fcb:yndZCZe8A1L64gKi0A93KqFdxrdgrchJAubHr2gdzFFenXxAc7udRIRCSt15NMJxMWzBLo8657Wmqm2WSLHxBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T02:28:37Z:8fcd98d138254788124716424dc3bb31bb56fca66f3523bc90414e1d26dd9fcb:yndZCZe8A1L64gKi0A93KqFdxrdgrchJAubHr2gdzFFenXxAc7udRIRCSt15NMJxMWzBLo8657Wmqm2WSLHxBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/config/providers
 tags: [provider, deepseek, v4, models]
