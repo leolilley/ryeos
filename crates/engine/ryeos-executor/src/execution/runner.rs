@@ -2115,27 +2115,31 @@ pub(crate) fn finalize_direct_effective_program(
         anyhow::anyhow!("cannot finalize a direct root execution without root admission")
     })?;
     let engine = admission.request_engine();
+    // `ResolvedExecutionRequest.kind` is the lifecycle row kind (`tool_run`,
+    // `service_run`, ...). Kind-schema composition and execution contracts are
+    // owned by the verified item's canonical kind. Conflating the two makes a
+    // direct tool ask the registry for a synthetic thread kind and can move
+    // source/external policy outside the authority that declared it.
+    let item_kind = resolved.resolved_item.kind.as_str();
     if engine
         .kinds
-        .get(&resolved.kind)
+        .get(item_kind)
         .and_then(|schema| schema.execution.as_ref())
         .and_then(|execution| execution.hooks.as_ref())
         .is_some()
     {
         anyhow::bail!(
             "hook-capable kind `{}` must use managed effective-program finalization",
-            resolved.kind
+            item_kind
         );
     }
 
     let mut resolution = admission.resolution_output().clone();
-    let roots = engine.resolution_roots(match provenance.project_authority() {
-        ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => None,
-        ryeos_state::objects::ExecutionProjectAuthority::LiveProject { .. }
-        | ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. } => {
-            Some(provenance.original_project_path().to_path_buf())
-        }
-    });
+    let roots = engine.resolution_roots(
+        admission
+            .execution_workspace()
+            .map(std::path::Path::to_path_buf),
+    );
     // A declaring kind captures here exactly as the managed path does, and a
     // direct launch dispatched as a child (`parent_thread_id`) inherits its
     // parent's sealed realization under the same inheritance rule — resolved from the
@@ -2164,7 +2168,7 @@ pub(crate) fn finalize_direct_effective_program(
     });
     let source_contract = engine
         .kinds
-        .get(&resolved.kind)
+        .get(item_kind)
         .and_then(|schema| schema.execution.as_ref())
         .and_then(|execution| execution.source_closure.as_ref());
     let source_policy = if source_contract.is_some() {
@@ -2180,7 +2184,7 @@ pub(crate) fn finalize_direct_effective_program(
         ryeos_engine::launch::plan_builder::resolve_executor_source_policy(
             executor_id,
             &resolution.root.source_path,
-            &resolved.kind,
+            item_kind,
             &engine.kinds,
             &engine.parser_dispatcher,
             &roots,
@@ -2196,7 +2200,7 @@ pub(crate) fn finalize_direct_effective_program(
     let captured_source = ryeos_app::source_closure_admission::admit_source_closure_in_publication(
         state,
         engine,
-        &resolved.kind,
+        item_kind,
         &mut resolution,
         &roots,
         project
@@ -2218,7 +2222,7 @@ pub(crate) fn finalize_direct_effective_program(
         ryeos_app::external_content_admission::admit_external_realizations_in_publication(
             state,
             engine,
-            &resolved.kind,
+            item_kind,
             &mut resolution,
             &roots,
             inherited_external.as_ref(),
@@ -2226,7 +2230,7 @@ pub(crate) fn finalize_direct_effective_program(
         )?;
     let validation = engine
         .effective_validators
-        .validate(&resolved.kind, &resolution)?;
+        .validate(item_kind, &resolution)?;
     let candidate =
         ryeos_engine::effective_program::lock_validated_effective_program(resolution, validation)?;
     let proof = ryeos_engine::effective_program::prove_finalization_authority(
