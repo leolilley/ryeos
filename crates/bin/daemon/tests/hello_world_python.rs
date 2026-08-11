@@ -673,13 +673,13 @@ fn engine_pipeline_emits_resolve_verify_build_plan_span_tree() {
         "engine:build_plan should carry canonical_ref"
     );
 
-    // The python script chain declares config_resolve + env_config +
-    // verify_deps + config (runtime_config). At least one per-handler
-    // span must appear as a descendant of build_plan.
+    // The python script chain declares config_resolve + env_config + config
+    // (runtime_config). Adjacent-source policy is projected before compilation,
+    // not dispatched as a runtime handler. At least one per-handler span must
+    // appear as a descendant of build_plan.
     let handler_present = ryeos_tracing::test::find_span(&spans, "engine:env_config")
         .or_else(|| ryeos_tracing::test::find_span(&spans, "engine:config_resolve"))
         .or_else(|| ryeos_tracing::test::find_span(&spans, "engine:runtime_config"))
-        .or_else(|| ryeos_tracing::test::find_span(&spans, "engine:verify_deps"))
         .is_some();
     assert!(
         handler_present,

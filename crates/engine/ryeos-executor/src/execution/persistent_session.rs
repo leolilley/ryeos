@@ -471,6 +471,7 @@ fn start_capsule_process(
         &workspace_name,
     )?;
     let resolution = exact.resolution_output.restore();
+    super::source_closure::validate_external_mount_separation(state, &resolution)?;
     let bound = if state.isolation.is_enforced() {
         super::external_content::bind_external_realizations(state, &resolution, &workspace)?
     } else {

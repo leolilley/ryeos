@@ -36,24 +36,26 @@ impl WorkerSourceDeclaration {
         composed: &serde_json::Value,
         contract: Option<&ExecutionSourceClosureDecl>,
     ) -> anyhow::Result<Option<Self>> {
-        let authored = composed.get("source");
         let Some(contract) = contract else {
-            if authored.is_some() {
+            if composed.get("source").is_some() {
                 anyhow::bail!(
                     "item declares `source` but its signed kind has no execution.source_closure contract"
                 );
             }
             return Ok(None);
         };
-        if !matches!(
-            contract.location,
-            crate::kind_registry::SourceClosureLocationDecl::OwnerRelativeSource { .. }
-        ) {
-            if authored.is_some() {
+        let crate::kind_registry::SourceClosureLocationDecl::OwnerRelativeSource { path } =
+            &contract.location
+        else {
+            if composed.get("source").is_some() {
                 anyhow::bail!("item source declaration is incompatible with its signed kind");
             }
             return Ok(None);
-        }
+        };
+        let field = path
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("source declaration path is absent"))?;
+        let authored = composed.get(field);
         let value = authored.ok_or_else(|| {
             anyhow::anyhow!("source-owning item is missing its required source declaration")
         })?;
@@ -67,24 +69,26 @@ impl WorkerSourceDeclaration {
         composed: &serde_json::Value,
         contract: Option<&ExecutionSourceClosureDecl>,
     ) -> anyhow::Result<Option<Self>> {
-        let authored = composed.get("source");
         let Some(contract) = contract else {
-            if authored.is_some() {
+            if composed.get("source").is_some() {
                 anyhow::bail!(
                     "item declares `source` but its signed kind has no execution.source_closure contract"
                 );
             }
             return Ok(None);
         };
-        if !matches!(
-            contract.location,
-            crate::kind_registry::SourceClosureLocationDecl::OwnerRelativeSource { .. }
-        ) {
-            if authored.is_some() {
+        let crate::kind_registry::SourceClosureLocationDecl::OwnerRelativeSource { path } =
+            &contract.location
+        else {
+            if composed.get("source").is_some() {
                 anyhow::bail!("item source declaration is incompatible with its signed kind");
             }
             return Ok(None);
-        }
+        };
+        let field = path
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("source declaration path is absent"))?;
+        let authored = composed.get(field);
         let value = authored.ok_or_else(|| {
             anyhow::anyhow!("source-owning item is missing its required source declaration")
         })?;
@@ -614,5 +618,34 @@ mod tests {
                 .is_some()
         );
         assert!(WorkerSourceDeclaration::from_composed(&composed, Some(&contract)).is_err());
+    }
+
+    #[test]
+    fn worker_source_uses_the_signed_declaration_path() {
+        let contract = ExecutionSourceClosureDecl {
+            derived: ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY.to_owned(),
+            location: crate::kind_registry::SourceClosureLocationDecl::OwnerRelativeSource {
+                path: vec!["adjacent".to_owned()],
+            },
+            testimony: crate::kind_registry::SourceClosureTestimonyDecl::OwnerSignedDigest,
+            max_files: 32,
+            max_total_bytes: 1024,
+            max_file_bytes: 512,
+            max_depth: 8,
+        };
+        let composed = serde_json::json!({
+            "adjacent": {
+                "root": "lib/session",
+                "entry": "bootstrap.py",
+                "digest": "a".repeat(64),
+            }
+        });
+        assert_eq!(
+            WorkerSourceDeclaration::from_composed(&composed, Some(&contract))
+                .unwrap()
+                .unwrap()
+                .root,
+            "lib/session"
+        );
     }
 }

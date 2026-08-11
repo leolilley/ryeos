@@ -1305,6 +1305,18 @@ async fn dispatch_tool_subprocess(
         }));
     }
 
+    let parent_thread_id = request
+        .parent_execution_context
+        .as_ref()
+        .map(|parent| parent.parent_thread_id.clone());
+    let finalized_direct = crate::execution::runner::finalize_direct_effective_program(
+        state,
+        &resolved,
+        &request.provenance,
+        parent_thread_id.as_deref(),
+    )
+    .map_err(DispatchError::Internal)?;
+
     let item_ref_for_error = resolved.item_ref.clone();
     let effective_caps =
         derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, ctx)?;
@@ -1362,11 +1374,9 @@ async fn dispatch_tool_subprocess(
         // Fresh dispatch: no captured runtime ref. The thread's runtime identity
         // is captured in launch metadata; resume reads it back from there.
         runtime_ref: None,
-        parent_thread_id: request
-            .parent_execution_context
-            .as_ref()
-            .map(|parent| parent.parent_thread_id.clone()),
+        parent_thread_id,
         effect_authority: request.effect_authority.clone(),
+        finalized_direct: Some(finalized_direct),
     };
 
     if request.launch_mode == "detached" {

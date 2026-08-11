@@ -108,6 +108,9 @@ impl PreparedItemPlan {
         admitted_source: Option<&str>,
         admitted_source_entry: Option<&Path>,
     ) -> Result<()> {
+        if admitted_source.is_some() != admitted_source_entry.is_some() {
+            bail!("persistent-session source identity and entry must be bound together");
+        }
         let spec = first_subprocess_spec_mut(&mut self.plan)?;
         if let Some(realizations) = external_realizations {
             spec.env.insert(
@@ -1425,6 +1428,92 @@ mod tests {
         };
         *tool_path = Some(project_root.join(".ai/tools/test/run.yaml"));
         plan
+    }
+
+    fn prepared_plan(plan: ExecutionPlan) -> PreparedItemPlan {
+        PreparedItemPlan {
+            timeout_secs: 300,
+            plan,
+            root_subject_source_identity: ryeos_state::objects::DirectRootSourceIdentity::Project,
+            admitted_command: None,
+        }
+    }
+
+    #[test]
+    fn persistent_session_binds_one_typed_source_entry_and_protected_identity() {
+        let mut plan = portable_direct_plan(Path::new("/ryeos/persistent-session-workspace"));
+        let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = &mut plan.nodes[0]
+        else {
+            panic!("fixture must dispatch");
+        };
+        spec.args = vec![PlanArgument::AdmittedSourceEntry];
+        let mut prepared = prepared_plan(plan);
+        let entry = Path::new(
+            "/ryeos/persistent-session-workspace/.ai/workers/standard/lib/local-tinygrad/bootstrap.py",
+        );
+
+        prepared
+            .bind_persistent_session_spawn_environment(
+                None,
+                Some("{\"binding_hash\":\"fixture\"}"),
+                Some(entry),
+            )
+            .unwrap();
+
+        let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } =
+            &prepared.plan.nodes[0]
+        else {
+            panic!("fixture must dispatch");
+        };
+        assert_eq!(spec.args[0].literal_value(), Some(entry.to_str().unwrap()));
+        assert_eq!(
+            spec.env.get("RYEOS_ADMITTED_SOURCE").map(String::as_str),
+            Some("{\"binding_hash\":\"fixture\"}")
+        );
+        assert_eq!(
+            spec.env_sources.get("RYEOS_ADMITTED_SOURCE"),
+            Some(&RuntimeEnvSource::EnginePlan)
+        );
+    }
+
+    #[test]
+    fn persistent_session_refuses_incoherent_or_authored_source_bindings() {
+        let project_root = Path::new("/ryeos/persistent-session-workspace");
+        let mut plan = portable_direct_plan(project_root);
+        let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = &mut plan.nodes[0]
+        else {
+            panic!("fixture must dispatch");
+        };
+        spec.args = vec![PlanArgument::AdmittedSourceEntry];
+        spec.env
+            .insert("RYEOS_ADMITTED_SOURCE".to_owned(), "authored".to_owned());
+        let mut prepared = prepared_plan(plan);
+        assert!(
+            prepared
+                .bind_persistent_session_spawn_environment(
+                    None,
+                    Some("sealed"),
+                    Some(&project_root.join("bootstrap.py")),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("override admitted source identity")
+        );
+
+        let mut plan = portable_direct_plan(project_root);
+        let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = &mut plan.nodes[0]
+        else {
+            panic!("fixture must dispatch");
+        };
+        spec.args = vec![PlanArgument::AdmittedSourceEntry];
+        let mut prepared = prepared_plan(plan);
+        assert!(
+            prepared
+                .bind_persistent_session_spawn_environment(None, Some("sealed"), None)
+                .unwrap_err()
+                .to_string()
+                .contains("must be bound together")
+        );
     }
 
     #[test]

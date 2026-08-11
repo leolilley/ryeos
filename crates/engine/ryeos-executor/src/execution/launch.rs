@@ -6864,6 +6864,7 @@ async fn prepare_follow_child_launch_inner(
         runtime_ref: operational_resume.runtime_ref.clone(),
         parent_thread_id: None,
         effect_authority: None,
+        finalized_direct: None,
     };
 
     let project_path = execution.provenance.effective_path().to_path_buf();

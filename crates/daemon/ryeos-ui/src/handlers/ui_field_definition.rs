@@ -524,7 +524,17 @@ fn add_definition_sources(
         .derived
         .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY)
     {
-        let source = ryeos_state::objects::EffectiveSourceClosureProjection::from_value(value)?;
+        let source = match ryeos_state::objects::EffectiveSourceClosureProjection::from_value(value)
+        {
+            Ok(source) => source,
+            Err(_) => {
+                builder.warn(
+                    "source_closure_invalid",
+                    "admitted source projection is invalid".to_owned(),
+                );
+                return Ok(());
+            }
+        };
         let source_id = format!("admitted-source:{}", source.binding_hash);
         builder.add_entity(FieldFactEntity {
             id: source_id.clone(),

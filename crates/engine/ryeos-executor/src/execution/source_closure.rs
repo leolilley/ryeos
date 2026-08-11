@@ -49,6 +49,30 @@ pub(crate) fn admitted_source_mount(
     Ok(Some(logical_mount(&binding)?))
 }
 
+/// Source is the only admitted layer allowed to shadow the corresponding live
+/// project namespace. It may never shadow, or be shadowed by, an independently
+/// admitted external realization.
+pub(crate) fn validate_external_mount_separation(
+    state: &ryeos_app::state::AppState,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+) -> anyhow::Result<()> {
+    let Some(source) = admitted_source_mount(state, resolution)? else {
+        return Ok(());
+    };
+    let source = Path::new(&source);
+    for external in super::external_content::admitted_realization_mounts(resolution)? {
+        let external = Path::new(&external);
+        if mount_destinations_overlap(source, external) {
+            anyhow::bail!("admitted source and external realization destinations overlap");
+        }
+    }
+    Ok(())
+}
+
+fn mount_destinations_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
 pub(crate) fn bind_source_for_execution(
     state: &ryeos_app::state::AppState,
     resolution: &ryeos_engine::resolution::ResolutionOutput,
@@ -229,6 +253,7 @@ fn retained_source_records(
     {
         anyhow::bail!("admitted source records contradict their effective projection");
     }
+    binding.validate_content_manifest(&manifest)?;
     Ok(Some((binding, manifest, projection)))
 }
 
@@ -310,8 +335,13 @@ fn publish_private_source(
     for entry in &manifest.entries {
         let (output, filename) = super::pinned_output_parent(&target, &entry.path)?;
         let mode = match entry.mode {
-            ryeos_state::objects::SourceFileMode::ReadOnly => 0o444,
-            ryeos_state::objects::SourceFileMode::Executable => 0o555,
+            // The CAS materializer accepts the same normalized regular-file
+            // modes used by project capture. Enforced execution remounts this
+            // tree read-only; disabled execution receives an independent
+            // daemon-private copy, so child writes cannot mutate retained CAS
+            // bytes or any live project tree.
+            ryeos_state::objects::SourceFileMode::ReadOnly => 0o644,
+            ryeos_state::objects::SourceFileMode::Executable => 0o755,
         };
         let observed = cas
             .materialize_blob_to_new_regular(&entry.blob_hash, &output, &filename, mode)
@@ -322,4 +352,75 @@ fn publish_private_source(
     }
     target.sync_tree()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_and_external_mounts_refuse_exact_or_nested_overlap() {
+        let source = Path::new(".ai/tools/arc");
+        assert!(mount_destinations_overlap(
+            source,
+            Path::new(".ai/tools/arc")
+        ));
+        assert!(mount_destinations_overlap(
+            source,
+            Path::new(".ai/tools/arc/vendor")
+        ));
+        assert!(mount_destinations_overlap(source, Path::new(".ai/tools")));
+        assert!(!mount_destinations_overlap(
+            source,
+            Path::new("vendor/simulator")
+        ));
+    }
+
+    #[test]
+    fn private_source_shadow_contains_only_retained_cas_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas_root = dir.path().join("cas");
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::create_dir_all(workspace.join(".ai/tools/arc")).unwrap();
+        std::fs::write(workspace.join(".ai/tools/arc/solve.py"), b"live").unwrap();
+        std::fs::write(workspace.join(".ai/tools/arc/ambient.py"), b"ambient").unwrap();
+        let cas = lillux::CasStore::new(cas_root);
+        let solve = cas.store_blob(b"sealed solve").unwrap();
+        let helper = cas.store_blob(b"sealed helper").unwrap();
+        let manifest = ryeos_state::objects::SourceClosureManifest::new(
+            vec![ryeos_state::objects::LogicalSourceRoot {
+                id: "source".to_owned(),
+            }],
+            vec![
+                ryeos_state::objects::SourceClosureFile {
+                    root: "source".to_owned(),
+                    path: "solve.py".to_owned(),
+                    blob_hash: solve,
+                    size: 12,
+                    mode: ryeos_state::objects::SourceFileMode::ReadOnly,
+                },
+                ryeos_state::objects::SourceClosureFile {
+                    root: "source".to_owned(),
+                    path: "lib/helper.py".to_owned(),
+                    blob_hash: helper,
+                    size: 13,
+                    mode: ryeos_state::objects::SourceFileMode::ReadOnly,
+                },
+            ],
+        )
+        .unwrap();
+
+        publish_private_source(&cas, &workspace, ".ai/tools/arc", &manifest).unwrap();
+
+        assert_eq!(
+            std::fs::read(workspace.join(".ai/tools/arc/solve.py")).unwrap(),
+            b"sealed solve"
+        );
+        assert_eq!(
+            std::fs::read(workspace.join(".ai/tools/arc/lib/helper.py")).unwrap(),
+            b"sealed helper"
+        );
+        assert!(!workspace.join(".ai/tools/arc/ambient.py").exists());
+    }
 }

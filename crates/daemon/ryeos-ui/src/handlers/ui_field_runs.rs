@@ -462,20 +462,30 @@ fn add_run_source_closure(
     };
     let cas_read = match state.acquire_cas_read() {
         Ok(read) => read,
-        Err(error) => {
+        Err(_) => {
             builder.warn(
                 "source_closure_unavailable",
-                format!("admitted source evidence is unavailable: {error}"),
+                "admitted source evidence is unavailable".to_owned(),
             );
             return Ok(());
         }
     };
-    let Some(binding_value) = cas_read.cas().get_object(binding_hash)? else {
-        builder.warn(
-            "source_closure_unavailable",
-            "admitted source binding is missing".to_owned(),
-        );
-        return Ok(());
+    let binding_value = match cas_read.cas().get_object(binding_hash) {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            builder.warn(
+                "source_closure_unavailable",
+                "admitted source binding is missing".to_owned(),
+            );
+            return Ok(());
+        }
+        Err(_) => {
+            builder.warn(
+                "source_closure_unavailable",
+                "admitted source binding cannot be read".to_owned(),
+            );
+            return Ok(());
+        }
     };
     let binding = match ryeos_state::objects::EffectiveSourceBinding::from_value(&binding_value) {
         Ok(binding) => binding,
@@ -487,19 +497,41 @@ fn add_run_source_closure(
             return Ok(());
         }
     };
-    if binding.digest()? != binding_hash {
+    if binding.digest().ok().as_deref() != Some(binding_hash) {
         builder.warn(
             "source_closure_invalid",
             "admitted source binding hash does not reproduce".to_owned(),
         );
         return Ok(());
     }
-    let manifest_value = cas_read
-        .cas()
-        .get_object(&binding.content_manifest_hash)?
-        .ok_or_else(|| anyhow::anyhow!("admitted source manifest is missing"))?;
-    let manifest = ryeos_state::objects::SourceClosureManifest::from_value(&manifest_value)?;
-    if manifest.digest()? != binding.content_manifest_hash {
+    let manifest_value = match cas_read.cas().get_object(&binding.content_manifest_hash) {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            builder.warn(
+                "source_closure_unavailable",
+                "admitted source manifest is missing".to_owned(),
+            );
+            return Ok(());
+        }
+        Err(_) => {
+            builder.warn(
+                "source_closure_unavailable",
+                "admitted source manifest cannot be read".to_owned(),
+            );
+            return Ok(());
+        }
+    };
+    let manifest = match ryeos_state::objects::SourceClosureManifest::from_value(&manifest_value) {
+        Ok(manifest) => manifest,
+        Err(_) => {
+            builder.warn(
+                "source_closure_invalid",
+                "admitted source manifest is invalid".to_owned(),
+            );
+            return Ok(());
+        }
+    };
+    if manifest.digest().ok().as_deref() != Some(binding.content_manifest_hash.as_str()) {
         builder.warn(
             "source_closure_invalid",
             "admitted source manifest hash does not reproduce".to_owned(),

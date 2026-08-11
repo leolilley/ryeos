@@ -391,6 +391,67 @@ impl EffectiveSourceBinding {
         ))
     }
 
+    pub fn validate_content_manifest(
+        &self,
+        manifest: &SourceClosureManifest,
+    ) -> anyhow::Result<()> {
+        self.validate()?;
+        manifest.validate()?;
+        if manifest.digest()? != self.content_manifest_hash {
+            anyhow::bail!("source manifest contradicts its authority binding");
+        }
+        match &self.testimony {
+            SourceTestimonyProof::OwnerSignedFiles { file_count, .. }
+                if *file_count != manifest.entries.len() =>
+            {
+                anyhow::bail!("source file testimony count contradicts its manifest");
+            }
+            SourceTestimonyProof::OwnerSignedDigest {
+                expected_manifest_hash,
+            } if expected_manifest_hash != &self.content_manifest_hash => {
+                anyhow::bail!("source digest testimony contradicts its manifest");
+            }
+            _ => {}
+        }
+        let entry = match &self.logical_binding {
+            SourceLogicalBinding::Tool { root_entry, .. } => root_entry,
+            SourceLogicalBinding::Worker { entry, .. } => entry,
+        };
+        if !manifest
+            .entries
+            .iter()
+            .any(|file| file.root == "source" && file.path.as_str() == entry)
+        {
+            anyhow::bail!("source manifest does not contain its admitted entry");
+        }
+
+        let declaration = self
+            .kind_ceiling
+            .normalized_declaration
+            .as_object()
+            .expect("binding validation proved a declaration object");
+        let limit = |name: &str| -> anyhow::Result<u64> {
+            declaration
+                .get(name)
+                .and_then(Value::as_u64)
+                .ok_or_else(|| anyhow::anyhow!("source kind declaration has no `{name}` limit"))
+        };
+        let max_files = limit("max_files")?;
+        let max_total_bytes = limit("max_total_bytes")?;
+        let max_file_bytes = limit("max_file_bytes")?;
+        let max_depth = limit("max_depth")?;
+        if manifest.entries.len() as u64 > max_files
+            || manifest.totals.total_bytes > max_total_bytes
+            || manifest.entries.iter().any(|file| {
+                file.size > max_file_bytes
+                    || std::path::Path::new(&file.path).components().count() as u64 > max_depth
+            })
+        {
+            anyhow::bail!("source manifest exceeds its signed kind ceiling");
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.schema != EFFECTIVE_SOURCE_BINDING_SCHEMA {
             anyhow::bail!("effective source binding schema is not current");
@@ -405,6 +466,25 @@ impl EffectiveSourceBinding {
             &self.owner.logical_item_key,
             512,
         )?;
+        let (canonical_kind, _) = self
+            .owner
+            .canonical_ref
+            .split_once(':')
+            .ok_or_else(|| anyhow::anyhow!("source owner canonical ref is not canonical"))?;
+        if canonical_kind != self.owner.item_kind {
+            anyhow::bail!("source owner item kind contradicts its canonical ref");
+        }
+        if !matches!(
+            (&self.owner.source_space, &self.owner.source_root),
+            (SourceSpaceIdentity::Project, SourceRootIdentity::Project)
+                | (
+                    SourceSpaceIdentity::Bundle,
+                    SourceRootIdentity::Bundle { .. }
+                )
+                | (SourceSpaceIdentity::Node, SourceRootIdentity::Node)
+        ) {
+            anyhow::bail!("source owner space contradicts its typed source root");
+        }
         validate_hashes([
             (
                 "source owner source-content digest",
@@ -542,6 +622,49 @@ impl EffectiveSourceBinding {
                 super::validate_canonical_project_relative_path(entry)?;
             }
         }
+        let declaration = self
+            .kind_ceiling
+            .normalized_declaration
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("source kind declaration is not an object"))?;
+        if declaration.get("derived").and_then(Value::as_str) != Some(SOURCE_CLOSURE_DERIVED_KEY) {
+            anyhow::bail!("source kind declaration names a foreign derived slot");
+        }
+        let location = declaration
+            .get("location")
+            .and_then(Value::as_object)
+            .and_then(|location| location.get("type"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("source kind declaration has no location type"))?;
+        let testimony = declaration
+            .get("testimony")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("source kind declaration has no testimony type"))?;
+        let coherent = matches!(
+            (
+                location,
+                testimony,
+                &self.testimony,
+                &self.execution_policy,
+                &self.logical_binding,
+            ),
+            (
+                "item_namespace",
+                "owner_signed_files",
+                SourceTestimonyProof::OwnerSignedFiles { .. },
+                SourceExecutionPolicyIdentity::Executor { .. },
+                SourceLogicalBinding::Tool { .. },
+            ) | (
+                "owner_relative_source",
+                "owner_signed_digest",
+                SourceTestimonyProof::OwnerSignedDigest { .. },
+                SourceExecutionPolicyIdentity::Worker { .. },
+                SourceLogicalBinding::Worker { .. },
+            )
+        );
+        if !coherent {
+            anyhow::bail!("source binding contradicts its signed kind source contract");
+        }
         let canonical = lillux::canonical_json(&serde_json::to_value(self)?)?;
         if canonical.len() > MAX_SOURCE_BINDING_BYTES {
             anyhow::bail!("effective source binding exceeds the serialized byte bound");
@@ -663,7 +786,15 @@ mod tests {
                 signature_header: "signed".to_owned(),
                 schema_body,
                 schema_document: serde_json::json!({"kind": "kind"}),
-                normalized_declaration: serde_json::json!({"derived": SOURCE_CLOSURE_DERIVED_KEY}),
+                normalized_declaration: serde_json::json!({
+                    "derived": SOURCE_CLOSURE_DERIVED_KEY,
+                    "location": {"type": "item_namespace"},
+                    "testimony": "owner_signed_files",
+                    "max_files": 8,
+                    "max_total_bytes": 1024,
+                    "max_file_bytes": 512,
+                    "max_depth": 8,
+                }),
                 root_kind_format: serde_json::json!({"extensions": ["yaml"]}),
                 root_signature_envelope: serde_json::json!({"style": "header"}),
             },
@@ -687,6 +818,29 @@ mod tests {
             },
         };
         binding.validate().unwrap();
+        let manifest = SourceClosureManifest::new(
+            vec![LogicalSourceRoot {
+                id: "source".to_owned(),
+            }],
+            vec![file("run.py", 'a'), file("lib/z.py", 'b')],
+        )
+        .unwrap();
+        let mut retained = binding.clone();
+        retained.content_manifest_hash = manifest.digest().unwrap();
+        retained.validate_content_manifest(&manifest).unwrap();
+        let SourceTestimonyProof::OwnerSignedFiles { file_count, .. } = &mut retained.testimony
+        else {
+            unreachable!()
+        };
+        *file_count = 1;
+        assert!(retained.validate_content_manifest(&manifest).is_err());
+
+        let mut wrong_contract = binding.clone();
+        wrong_contract.testimony = SourceTestimonyProof::OwnerSignedDigest {
+            expected_manifest_hash: wrong_contract.content_manifest_hash.clone(),
+        };
+        assert!(wrong_contract.validate().is_err());
+
         let first = binding.digest().unwrap();
         let mut other = binding.clone();
         other.owner.canonical_ref = "tool:test/other".to_owned();

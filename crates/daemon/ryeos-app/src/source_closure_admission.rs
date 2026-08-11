@@ -132,15 +132,16 @@ pub fn admit_source_closure_in_publication(
     let registered = roots.authoritative_root(
         &resolution.root.source_root,
         resolution.root.source_space,
-        Some(&resolution.root.source_path),
+        None,
     )?;
     let content_root = registered.content_root.as_deref().ok_or_else(|| {
         anyhow::anyhow!("source closure typed root has no registered content authority")
     })?;
 
-    let (source, requests, root_entry, worker_declaration): (
+    let (source, requests, root_entry, root_item_extension, worker_declaration): (
         Box<dyn AuthoritativeSourceContent + '_>,
         Vec<SourceRootRequest>,
+        String,
         String,
         Option<ryeos_engine::source_closure::WorkerSourceDeclaration>,
     ) = match &contract.location {
@@ -154,49 +155,6 @@ pub fn admit_source_closure_in_publication(
             ) {
                 anyhow::bail!("executor source policy exceeds the signed kind location ceiling");
             }
-            let relative_source = resolution
-                .root
-                .source_path
-                .strip_prefix(content_root)
-                .map_err(|_| anyhow::anyhow!("source item is outside its typed content root"))?;
-            let kind_root = Path::new(ryeos_engine::AI_DIR).join(&kind_schema.directory);
-            let relative_item = relative_source
-                .strip_prefix(&kind_root)
-                .map_err(|_| anyhow::anyhow!("source item is outside its signed kind namespace"))?;
-            let components = relative_item.components().collect::<Vec<_>>();
-            if components.is_empty() {
-                anyhow::bail!("source item has no logical item coordinate");
-            }
-            let (request, entry) = if components.len() == 1 {
-                (
-                    SourceRootRequest {
-                        id: "source".to_owned(),
-                        selection: SourceRootSelection::File {
-                            path: relative_source.to_path_buf(),
-                        },
-                    },
-                    relative_item
-                        .to_str()
-                        .ok_or_else(|| anyhow::anyhow!("source item path is not UTF-8"))?
-                        .to_owned(),
-                )
-            } else {
-                let namespace = PathBuf::from(components[0].as_os_str());
-                let prefix = kind_root.join(&namespace);
-                let entry = relative_source
-                    .strip_prefix(&prefix)
-                    .map_err(|_| anyhow::anyhow!("source item escaped its namespace"))?
-                    .to_str()
-                    .ok_or_else(|| anyhow::anyhow!("source item path is not UTF-8"))?
-                    .to_owned();
-                (
-                    SourceRootRequest {
-                        id: "source".to_owned(),
-                        selection: SourceRootSelection::Tree { prefix },
-                    },
-                    entry,
-                )
-            };
             let source: Box<dyn AuthoritativeSourceContent> =
                 match (resolution.root.source_space, project) {
                     (ItemSpace::Project, Some((project_root, content, identity))) => {
@@ -222,7 +180,20 @@ pub fn admit_source_closure_in_publication(
                         state.ignore_matcher.as_ref(),
                     )?),
                 };
-            (source, vec![request], entry, None)
+            let (request, entry) = item_namespace_source_request(
+                source.as_ref(),
+                kind,
+                kind_schema,
+                &resolution.root.resolved_ref,
+                &resolution.root.source_content_digest,
+                contract.max_file_bytes,
+            )?;
+            let extension = Path::new(&entry)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(|extension| format!(".{extension}"))
+                .ok_or_else(|| anyhow::anyhow!("source owner has no kind-owned extension"))?;
+            (source, vec![request], entry, extension, None)
         }
         ryeos_engine::kind_registry::SourceClosureLocationDecl::OwnerRelativeSource { .. } => {
             if executor_policy.is_some() {
@@ -256,11 +227,43 @@ pub fn admit_source_closure_in_publication(
                 .join(owner_namespace)
                 .join(&declaration.root);
             let source: Box<dyn AuthoritativeSourceContent> =
-                Box::new(DirectorySourceContent::new(
-                    content_root,
-                    root_identity_key(&resolution.root.source_root),
-                    state.ignore_matcher.as_ref(),
-                )?);
+                match (resolution.root.source_space, project) {
+                    (ItemSpace::Project, Some((project_root, content, identity))) => {
+                        if project_root != content_root {
+                            anyhow::bail!(
+                                "project source authority root differs from typed resolution root"
+                            );
+                        }
+                        Box::new(ProjectSourceContent { content, identity })
+                    }
+                    (ItemSpace::Project, None) => Box::new(DirectorySourceContent::new(
+                        content_root,
+                        format!(
+                            "live:{}:{}",
+                            root_identity_key(&resolution.root.source_root),
+                            resolution.root.source_content_digest
+                        ),
+                        state.ignore_matcher.as_ref(),
+                    )?),
+                    (_, _) => Box::new(DirectorySourceContent::new(
+                        content_root,
+                        root_identity_key(&resolution.root.source_root),
+                        state.ignore_matcher.as_ref(),
+                    )?),
+                };
+            let descriptor_path = canonical_item_source_path(
+                source.as_ref(),
+                kind,
+                kind_schema,
+                &resolution.root.resolved_ref,
+                &resolution.root.source_content_digest,
+                contract.max_file_bytes,
+            )?;
+            let descriptor_extension = descriptor_path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(|extension| format!(".{extension}"))
+                .ok_or_else(|| anyhow::anyhow!("source owner has no kind-owned extension"))?;
             let entry = declaration.entry.clone();
             (
                 source,
@@ -269,6 +272,7 @@ pub fn admit_source_closure_in_publication(
                     selection: SourceRootSelection::Tree { prefix },
                 }],
                 entry,
+                descriptor_extension,
                 Some(declaration),
             )
         }
@@ -333,15 +337,8 @@ pub fn admit_source_closure_in_publication(
     let content_manifest_hash = candidate.manifest.digest()?;
     let owner = source_owner_identity(resolution)?;
     let normalized_declaration = serde_json::to_value(contract)?;
-    let root_extension = resolution
-        .root
-        .source_path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| format!(".{extension}"))
-        .ok_or_else(|| anyhow::anyhow!("source owner has no signed file extension"))?;
     let root_format = kind_schema
-        .spec_for(&root_extension)
+        .spec_for(&root_item_extension)
         .ok_or_else(|| anyhow::anyhow!("source owner extension is absent from its signed kind"))?;
     let execution_policy = if let Some(policy) = executor_policy {
         ryeos_state::objects::SourceExecutionPolicyIdentity::Executor {
@@ -405,6 +402,7 @@ pub fn admit_source_closure_in_publication(
         logical_binding,
     };
     binding.validate()?;
+    binding.validate_content_manifest(&candidate.manifest)?;
 
     if let Some(preview) = preview {
         let expected_digest = match &binding.testimony {
@@ -559,7 +557,19 @@ pub fn recover_source_closure(
     {
         anyhow::bail!("retained source closure contradicts its effective projection");
     }
-    require_current_kind_testimony(&engine.node_trust_store, &engine.trust_store, &binding)?;
+    binding.validate_content_manifest(&manifest)?;
+    if source_owner_identity(resolution)? != binding.owner {
+        anyhow::bail!("retained source owner contradicts its admitted resolution");
+    }
+    let schema =
+        require_current_kind_testimony(&engine.node_trust_store, &engine.trust_store, &binding)?;
+    require_current_source_policy(
+        &engine.node_trust_store,
+        &engine.trust_store,
+        resolution,
+        &binding,
+        &schema,
+    )?;
     let store = RetainedSourceClosureStore { authority };
     let proof = ryeos_engine::source_closure::prove_source_closure(projection, &store)?;
     Ok(Some(AdmittedSourceClosure {
@@ -575,8 +585,10 @@ fn require_current_kind_testimony(
     node_trust: &ryeos_engine::trust::TrustStore,
     item_trust: &ryeos_engine::trust::TrustStore,
     binding: &ryeos_state::objects::EffectiveSourceBinding,
-) -> anyhow::Result<()> {
-    if item_trust.get(&binding.owner.signer_fingerprint).is_none() {
+) -> anyhow::Result<ryeos_engine::kind_registry::KindSchema> {
+    if item_trust.get(&binding.owner.signer_fingerprint).is_none()
+        && node_trust.get(&binding.owner.signer_fingerprint).is_none()
+    {
         anyhow::bail!("retained source testimony signer is no longer trusted");
     }
     let evidence = ryeos_engine::kind_registry::KindSchemaEvidence {
@@ -597,6 +609,66 @@ fn require_current_kind_testimony(
         .ok_or_else(|| anyhow::anyhow!("retained kind no longer proves source authority"))?;
     if serde_json::to_value(declaration)? != binding.kind_ceiling.normalized_declaration {
         anyhow::bail!("retained source ceiling contradicts its signed kind declaration");
+    }
+    let extension = binding
+        .kind_ceiling
+        .root_kind_format
+        .get("extension")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("retained source format has no extension"))?;
+    let format = schema.spec_for(extension).ok_or_else(|| {
+        anyhow::anyhow!("retained source format extension is absent from its kind")
+    })?;
+    let expected_format = serde_json::json!({
+        "extension": format.ext,
+        "parser": format.parser,
+        "signature": format.signature,
+    });
+    if expected_format != binding.kind_ceiling.root_kind_format
+        || serde_json::to_value(&format.signature)? != binding.kind_ceiling.root_signature_envelope
+    {
+        anyhow::bail!("retained source format contradicts its signed kind");
+    }
+    Ok(schema)
+}
+
+fn require_current_source_policy(
+    node_trust: &ryeos_engine::trust::TrustStore,
+    item_trust: &ryeos_engine::trust::TrustStore,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    binding: &ryeos_state::objects::EffectiveSourceBinding,
+    schema: &ryeos_engine::kind_registry::KindSchema,
+) -> anyhow::Result<()> {
+    match &binding.execution_policy {
+        ryeos_state::objects::SourceExecutionPolicyIdentity::Executor {
+            signer_fingerprint,
+            ..
+        } => {
+            if item_trust.get(signer_fingerprint).is_none()
+                && node_trust.get(signer_fingerprint).is_none()
+            {
+                anyhow::bail!("retained source policy signer is no longer trusted");
+            }
+        }
+        ryeos_state::objects::SourceExecutionPolicyIdentity::Worker {
+            source_declaration_digest,
+        } => {
+            let contract = schema
+                .execution
+                .as_ref()
+                .and_then(|execution| execution.source_closure.as_ref())
+                .ok_or_else(|| anyhow::anyhow!("retained worker kind has no source contract"))?;
+            let declaration = ryeos_engine::source_closure::WorkerSourceDeclaration::from_composed(
+                &resolution.composed.composed,
+                Some(contract),
+            )?
+            .ok_or_else(|| anyhow::anyhow!("retained worker source declaration is absent"))?;
+            if declaration.identity_digest()? != *source_declaration_digest
+                || declaration.digest != binding.content_manifest_hash
+            {
+                anyhow::bail!("retained worker source policy contradicts its signed declaration");
+            }
+        }
     }
     Ok(())
 }
@@ -682,6 +754,99 @@ fn verify_owner_signed_files(
             entries_digest,
         },
     )
+}
+
+/// Resolve the root executable from the canonical item coordinate and the
+/// signed kind's extension order. Host paths are deliberately absent: the
+/// typed content root has already selected the authority, while the kind
+/// schema defines the only filenames that may represent this canonical ref.
+fn item_namespace_source_request(
+    source: &dyn AuthoritativeSourceContent,
+    expected_kind: &str,
+    kind_schema: &ryeos_engine::kind_registry::KindSchema,
+    canonical_ref: &str,
+    expected_source_digest: &str,
+    max_file_bytes: u64,
+) -> anyhow::Result<(SourceRootRequest, String)> {
+    let selected = canonical_item_source_path(
+        source,
+        expected_kind,
+        kind_schema,
+        canonical_ref,
+        expected_source_digest,
+        max_file_bytes,
+    )?;
+    let (_, bare_id) = canonical_ref
+        .split_once(':')
+        .expect("canonical item lookup validated the ref");
+    let kind_root = Path::new(ryeos_engine::AI_DIR).join(&kind_schema.directory);
+    let components = Path::new(bare_id).components().collect::<Vec<_>>();
+    if components.len() == 1 {
+        let entry = selected
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow::anyhow!("source item path is not UTF-8"))?
+            .to_owned();
+        return Ok((
+            SourceRootRequest {
+                id: "source".to_owned(),
+                selection: SourceRootSelection::File { path: selected },
+            },
+            entry,
+        ));
+    }
+
+    let prefix = kind_root.join(components[0].as_os_str());
+    let entry = selected
+        .strip_prefix(&prefix)
+        .map_err(|_| anyhow::anyhow!("source item escaped its canonical namespace"))?
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("source item path is not UTF-8"))?
+        .to_owned();
+    Ok((
+        SourceRootRequest {
+            id: "source".to_owned(),
+            selection: SourceRootSelection::Tree { prefix },
+        },
+        entry,
+    ))
+}
+
+fn canonical_item_source_path(
+    source: &dyn AuthoritativeSourceContent,
+    expected_kind: &str,
+    kind_schema: &ryeos_engine::kind_registry::KindSchema,
+    canonical_ref: &str,
+    expected_source_digest: &str,
+    max_file_bytes: u64,
+) -> anyhow::Result<PathBuf> {
+    let (kind, bare_id) = canonical_ref
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("source owner ref is not canonical"))?;
+    if kind != expected_kind {
+        anyhow::bail!("source owner ref contradicts its signed kind");
+    }
+    ryeos_state::objects::validate_canonical_project_relative_path(bare_id)?;
+    let kind_root = Path::new(ryeos_engine::AI_DIR).join(&kind_schema.directory);
+
+    let mut selected = None;
+    for format in &kind_schema.extensions {
+        let relative = kind_root.join(format!("{bare_id}{}", format.ext));
+        let Some(bytes) = source.read_file(&relative, max_file_bytes)? else {
+            continue;
+        };
+        if lillux::sha256_hex(&bytes) != expected_source_digest {
+            anyhow::bail!(
+                "canonical source coordinate contradicts the resolved executable identity"
+            );
+        }
+        selected = Some(relative);
+        break;
+    }
+    let selected = selected.ok_or_else(|| {
+        anyhow::anyhow!("canonical source coordinate is absent from its typed content root")
+    })?;
+    Ok(selected)
 }
 
 fn require_manifest_entry(candidate: &CapturedSourceCandidate, entry: &str) -> anyhow::Result<()> {

@@ -101,6 +101,9 @@ pub struct ExecutionParams {
     /// Kind-neutral durable-effect authority selected and bounded before this
     /// exact terminal launch was prepared.
     pub effect_authority: Option<ryeos_effect_contract::PreparedEffectDispatchAuthority>,
+    /// Fresh direct-program evidence captured before capability projection,
+    /// vault access, executor compilation, or callback credential minting.
+    pub(crate) finalized_direct: Option<FinalizedDirectAdmission>,
 }
 
 /// Tracks execution state for explicit cleanup, with a conservative Drop net.
@@ -1930,10 +1933,20 @@ struct DirectExternalRealizations {
     source: Option<super::source_closure::BoundSourceClosure>,
 }
 
+/// Fresh direct-program authority captured before executor compilation. A
+/// failed later compile drops the staged publication; it never turns source
+/// bytes discovered after compilation into admitted behavior.
+pub(crate) struct FinalizedDirectAdmission {
+    program: ryeos_engine::effective_program::FinalizedEffectiveProgram,
+    publication: Option<super::PendingCasPublication>,
+    source_policy: Option<ryeos_engine::launch::plan_builder::ExecutorSourcePolicyProjection>,
+}
+
 fn admitted_root_launch_metadata(
     state: &AppState,
     params: &ExecutionParams,
     project_authority: ryeos_state::objects::ExecutionProjectAuthority,
+    finalized: FinalizedDirectAdmission,
     prepared_plan: &mut thread_lifecycle::PreparedItemPlan,
     protocol: &ryeos_engine::protocols::VerifiedProtocol,
 ) -> Result<(
@@ -1944,8 +1957,11 @@ fn admitted_root_launch_metadata(
         Some(runtime_ref) => runtime_ref.clone(),
         None => prepared_plan.runtime_ref()?.to_owned(),
     };
-    let (finalized_program, mut external_publication, source_policy) =
-        finalize_direct_effective_program(state, params)?;
+    let FinalizedDirectAdmission {
+        program: finalized_program,
+        publication: mut external_publication,
+        source_policy,
+    } = finalized;
     if let Some(source_policy) = source_policy.as_ref() {
         source_policy.assert_matches_plan(prepared_plan.execution_plan())?;
     }
@@ -2059,6 +2075,10 @@ fn admitted_root_launch_metadata(
     }
     metadata = metadata.with_execution_realization_hash(realization_admission.hash);
     metadata.validate()?;
+    super::source_closure::validate_external_mount_separation(
+        state,
+        finalized_program.resolution(),
+    )?;
     let bound_external = super::external_content::bind_external_realizations_for_execution(
         state,
         finalized_program.resolution(),
@@ -2085,46 +2105,42 @@ fn admitted_root_launch_metadata(
 /// it becomes restart authority. Hook-capable kinds are deliberately excluded:
 /// their configured policy must be captured by the managed-launch finalizer,
 /// never bypassed by this direct protocol path.
-fn finalize_direct_effective_program(
+pub(crate) fn finalize_direct_effective_program(
     state: &AppState,
-    params: &ExecutionParams,
-) -> Result<(
-    ryeos_engine::effective_program::FinalizedEffectiveProgram,
-    Option<super::PendingCasPublication>,
-    Option<ryeos_engine::launch::plan_builder::ExecutorSourcePolicyProjection>,
-)> {
-    let admission = params.resolved.root_admission.as_ref().ok_or_else(|| {
+    resolved: &ResolvedExecutionRequest,
+    provenance: &ExecutionProvenance,
+    parent_thread_id: Option<&str>,
+) -> Result<FinalizedDirectAdmission> {
+    let admission = resolved.root_admission.as_ref().ok_or_else(|| {
         anyhow::anyhow!("cannot finalize a direct root execution without root admission")
     })?;
     let engine = admission.request_engine();
     if engine
         .kinds
-        .get(&params.resolved.kind)
+        .get(&resolved.kind)
         .and_then(|schema| schema.execution.as_ref())
         .and_then(|execution| execution.hooks.as_ref())
         .is_some()
     {
         anyhow::bail!(
             "hook-capable kind `{}` must use managed effective-program finalization",
-            params.resolved.kind
+            resolved.kind
         );
     }
 
     let mut resolution = admission.resolution_output().clone();
-    let roots = engine.resolution_roots(match params.provenance.project_authority() {
+    let roots = engine.resolution_roots(match provenance.project_authority() {
         ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => None,
         ryeos_state::objects::ExecutionProjectAuthority::LiveProject { .. }
         | ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. } => {
-            Some(params.provenance.original_project_path().to_path_buf())
+            Some(provenance.original_project_path().to_path_buf())
         }
     });
     // A declaring kind captures here exactly as the managed path does, and a
     // direct launch dispatched as a child (`parent_thread_id`) inherits its
     // parent's sealed realization under the same inheritance rule — resolved from the
     // parent's durable capsule, fail-closed on missing or malformed lineage.
-    let inherited_external = params
-        .parent_thread_id
-        .as_deref()
+    let inherited_external = parent_thread_id
         .map(|parent_thread_id| {
             state
                 .state_store
@@ -2148,24 +2164,23 @@ fn finalize_direct_effective_program(
     });
     let source_contract = engine
         .kinds
-        .get(&params.resolved.kind)
+        .get(&resolved.kind)
         .and_then(|schema| schema.execution.as_ref())
         .and_then(|execution| execution.source_closure.as_ref());
     let source_policy = if source_contract.is_some() {
-        let executor_id = params
-            .resolved
+        let executor_id = resolved
             .resolved_item
             .metadata
             .executor_id
             .as_deref()
             .ok_or_else(|| ryeos_engine::error::EngineError::InvalidRuntimeConfig {
-                path: params.resolved.item_ref.clone(),
+                path: resolved.item_ref.clone(),
                 reason: "source-owning direct item has no executor chain".to_owned(),
             })?;
         ryeos_engine::launch::plan_builder::resolve_executor_source_policy(
             executor_id,
             &resolution.root.source_path,
-            &params.resolved.kind,
+            &resolved.kind,
             &engine.kinds,
             &engine.parser_dispatcher,
             &roots,
@@ -2176,12 +2191,12 @@ fn finalize_direct_effective_program(
     } else {
         None
     };
-    let project_identity = params.provenance.pinned_snapshot_hash().map(str::to_owned);
+    let project_identity = provenance.pinned_snapshot_hash().map(str::to_owned);
     let mut publication = None;
     let captured_source = ryeos_app::source_closure_admission::admit_source_closure_in_publication(
         state,
         engine,
-        &params.resolved.kind,
+        &resolved.kind,
         &mut resolution,
         &roots,
         project
@@ -2203,7 +2218,7 @@ fn finalize_direct_effective_program(
         ryeos_app::external_content_admission::admit_external_realizations_in_publication(
             state,
             engine,
-            &params.resolved.kind,
+            &resolved.kind,
             &mut resolution,
             &roots,
             inherited_external.as_ref(),
@@ -2211,7 +2226,7 @@ fn finalize_direct_effective_program(
         )?;
     let validation = engine
         .effective_validators
-        .validate(&params.resolved.kind, &resolution)?;
+        .validate(&resolved.kind, &resolution)?;
     let candidate =
         ryeos_engine::effective_program::lock_validated_effective_program(resolution, validation)?;
     let proof = ryeos_engine::effective_program::prove_finalization_authority(
@@ -2227,7 +2242,11 @@ fn finalize_direct_effective_program(
             .map(|captured| captured.finalization_evidence()),
     )?;
     let finalized = ryeos_engine::effective_program::finalize_effective_program(candidate, proof)?;
-    Ok((finalized, publication, source_policy))
+    Ok(FinalizedDirectAdmission {
+        program: finalized,
+        publication,
+        source_policy,
+    })
 }
 
 fn recovered_direct_protocol(
@@ -2468,6 +2487,9 @@ pub async fn run_and_wait(
     let wait_isolation_live_access_authority =
         params.provenance.isolation_live_access_authority()?;
     let engine = params.provenance.request_engine().clone();
+    let finalized_direct = params.finalized_direct.take().ok_or_else(|| {
+        anyhow::anyhow!("fresh direct launch has no pre-authorized effective program")
+    })?;
     // Block-scoped: the sealed-bytes source holds non-Send descriptor state
     // and plan build is fully synchronous, so it must be statically dead
     // before this future's next await point.
@@ -2494,6 +2516,7 @@ pub async fn run_and_wait(
         &state,
         &params,
         wait_project_authority.clone(),
+        finalized_direct,
         &mut prepared_plan,
         protocol,
     )?;
@@ -3281,6 +3304,9 @@ pub async fn run_detached(
     let bg_project_authority = params.provenance.project_authority().clone();
     let bg_isolation_live_access_authority = params.provenance.isolation_live_access_authority()?;
     let engine = params.provenance.request_engine().clone();
+    let finalized_direct = params.finalized_direct.take().ok_or_else(|| {
+        anyhow::anyhow!("fresh direct launch has no pre-authorized effective program")
+    })?;
     // Block-scoped: the sealed-bytes source holds non-Send descriptor state
     // and plan build is fully synchronous, so it must be statically dead
     // before this future's next await point.
@@ -3307,6 +3333,7 @@ pub async fn run_detached(
         &state,
         &params,
         bg_project_authority.clone(),
+        finalized_direct,
         &mut prepared_plan,
         protocol,
     )?;
@@ -4778,6 +4805,7 @@ pub fn execution_params_from_sealed_root_request(
         // reconstruction must not try to attach it a second time at launch.
         parent_thread_id: None,
         effect_authority: None,
+        finalized_direct: None,
     })
 }
 
