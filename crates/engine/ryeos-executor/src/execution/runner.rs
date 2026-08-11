@@ -1617,7 +1617,7 @@ fn publish_dispatch_effect_record(
         first_observation: ryeos_effect_contract::EffectFirstObservation {
             produced_by_thread: produced_by_thread.to_string(),
             response_digest: normalized.observed_response_digest,
-            observed_at: lillux::time::iso8601_now(),
+            observed_at: ryeos_effect_contract::canonical_observation_timestamp_now(),
             execution_identity_digest: Some(substrate_identity.identity_digest()?),
             execution_identity_attestation_hash: Some(
                 realization.substrate_attestation_hash.clone(),

@@ -425,6 +425,17 @@ pub fn canonical_value_digest(value: &Value) -> anyhow::Result<String> {
     Ok(lillux::sha256_hex(canonical.as_bytes()))
 }
 
+/// Produce the canonical timestamp spelling used by durable effect and
+/// provider observations.
+///
+/// Authoritative thread/state timestamps deliberately use a different,
+/// whole-second domain. Observation producers must call this constructor
+/// instead of the general state clock so they cannot emit a value their own
+/// durable contract refuses.
+pub fn canonical_observation_timestamp_now() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
 pub fn require_hex64(field: &str, value: &str) -> anyhow::Result<()> {
     if value.len() != 64
         || !value
@@ -539,5 +550,13 @@ mod tests {
         assert_eq!(replay["result"], serde_json::json!({"answer": 42}));
         assert_eq!(answer.digest().unwrap(), digest);
         assert_eq!(replay["replayed_from"], "ab".repeat(32));
+    }
+
+    #[test]
+    fn observation_clock_emits_the_contracts_canonical_timestamp() {
+        let timestamp = canonical_observation_timestamp_now();
+        parse_canonical_timestamp(&timestamp).unwrap();
+        assert!(timestamp.ends_with('Z'));
+        assert_eq!(timestamp.len(), "2026-08-11T00:00:00.000Z".len());
     }
 }

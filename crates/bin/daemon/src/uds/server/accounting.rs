@@ -681,9 +681,10 @@ fn publish_provider_call(
             produced_by_thread: thread_id.to_owned(),
             attempt_id: attempt_id.to_owned(),
             response_digest: answer_digest.clone(),
-            observed_at: local_observation.map_or_else(lillux::time::iso8601_now, |observation| {
-                observation.observed_at.clone()
-            }),
+            observed_at: local_observation.map_or_else(
+                ryeos_effect_contract::canonical_observation_timestamp_now,
+                |observation| observation.observed_at.clone(),
+            ),
             observation_class: if local_observation.is_some() {
                 ObservationClass::DaemonWorkerObserved
             } else {
@@ -1157,7 +1158,7 @@ fn persist_local_worker_observation(
         capsule_hash: capsule_hash.clone(),
         admitted_execution_realization_hash: execution_realization_hash.clone(),
         observed_execution_realization_hash: None,
-        observed_at: lillux::time::iso8601_now(),
+        observed_at: ryeos_effect_contract::canonical_observation_timestamp_now(),
         terminal_digest: terminal_digest.clone(),
         terminal: terminal.clone(),
         execution_identity_digest: realization.substrate_identity_hash.clone(),
