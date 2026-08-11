@@ -329,9 +329,11 @@ pub(super) struct FollowFanoutSuspendOutcome {
 
 pub(super) struct FollowFanoutDoneOutcome {
     pub(super) results: Vec<Value>,
+    pub(super) child_thread_ids: Vec<String>,
     pub(super) statuses: Vec<FanoutItemStatus>,
     pub(super) errors: Vec<ErrorRecord>,
     pub(super) collect_key: Option<String>,
+    pub(super) collect_threads_key: Option<String>,
     pub(super) item_id: String,
     pub(super) next: Option<String>,
     pub(super) next_on_error: NextOnError,

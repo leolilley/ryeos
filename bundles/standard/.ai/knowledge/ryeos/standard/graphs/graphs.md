@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:38Z:1873ebffd01c72ac8e6f5b685c3a7de7b244e57eb3f7860d63da9657e42dd7c8:DfwdJpAY4QFN9J9JDlzYdavkp8rNKRs9rljh06Jg714yjX67DzMqJSNXNqJ4N6bi5gBS8A8sSYebyaxTUYo6Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T06:25:48Z:eee3b909f22072e0add705c34c5edf3abf99a8368e3ca039e52ebd6f6561d704:CrevOlUaCA9lwsN0AUxU4YlyPETLKY73nrH0AN+mJ7jFTlfBuppH/qjWJaJuE0pzxHpCR6ywfE2A1aYLkPLrCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, graphs, dag, state-machine]
 version: "1.0.0"
@@ -214,21 +214,25 @@ review_all:
       run_id: "${run.graph_run_id}"
   facets: {cohort: "${run.graph_run_id}", subject: "${subject}"}
   collect: reviews
+  collect_threads: review_threads
   on_error: handle-failure
   next: {type: unconditional, to: finish}
 ```
 
-This cohort form requires `as` and `parallel: true`; `collect`, when present,
-must differ from `as`, and the node must not declare `assign`, `retry`, caching,
-or `detach`. `max_concurrency`, when set, must be between 1 and 256 and bounds
-launched-and-live child chains.
-Collection is input-ordered and failed slots are `null`. Under `continue`, the
-ordered collection commits; an explicit redirect or failure discards the
-candidate collection. An empty input succeeds with `[]`. Actions, params, and
-facets render per item, including `${run.graph_run_id}`. The parent's effective
-capabilities and hard limits bound every child. The complete rendered launch
-cohort is also held to one rye-expr/1 JSON result budget; exceeding it fails the
-node before suspension or daemon handoff. See
+This cohort form requires `as` and `parallel: true`; `collect` and
+`collect_threads`, when present, must use distinct state keys and differ from
+`as`, and the node must not declare `assign`, `retry`, caching, or `detach`.
+`max_concurrency`, when set, must be between 1 and 256 and bounds
+launched-and-live child chains. Result collection is input-ordered and failed
+slots are `null`. `collect_threads` independently records the exact daemon-owned
+terminal thread id for every aligned child chain, including a failed child;
+it does not alter the child's return value. Under `continue`, both ordered
+collections commit atomically; an explicit redirect or failure discards both.
+An empty input contributes `[]` to every declared collection. Actions, params,
+and facets render per item, including `${run.graph_run_id}`. The parent's
+effective capabilities and hard limits bound every child. The complete rendered
+launch cohort is also held to one rye-expr/1 JSON result budget; exceeding it
+fails the node before suspension or daemon handoff. See
 `graphs/follow.md` for capability wildcard examples, cancellation/resume
 behavior, and a complete authoring example.
 

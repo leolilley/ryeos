@@ -281,9 +281,11 @@ impl Walker {
         } = input;
         let FollowFanoutDoneOutcome {
             results,
+            child_thread_ids,
             statuses,
             errors,
             collect_key,
+            collect_threads_key,
             item_id,
             next,
             next_on_error,
@@ -329,9 +331,25 @@ impl Walker {
                 .unwrap()
                 .insert(key, Value::Array(results.clone()));
         }
+        if commit_candidate && let Some(key) = collect_threads_key {
+            if !state.is_object() {
+                *state = Value::Object(serde_json::Map::new());
+            }
+            state.as_object_mut().unwrap().insert(
+                key,
+                Value::Array(
+                    child_thread_ids
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            );
+        }
         // The fanout variable is lexical, not a temporary state key.
         let result_hash = match hash_json_value(&json!({
             "results": &results,
+            "child_thread_ids": &child_thread_ids,
             "statuses": &statuses,
         })) {
             Ok(hash) => hash,

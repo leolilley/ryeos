@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:38Z:ae2ae96478f3449a01f7856b32280c50b654c2bfc02f5784dba10d32490fae64:zdjzXFQd1uz5Zx+WXk4dbUs6beGkiCOHMHN/LaJzPqojT3UNQRYxp5o8AEIYAwFP3XXTRiueFkiOXgecKlF7Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T06:25:48Z:1fb61a88cebeedc704f1138c9524ad89c5c79a307739604b9936487c2c2c8197:yg0k2AQVTw83i6LzPlsybJlTNTT42PS75cIqKDgiwAvn6M62wM8yO228hLwjZhHIFEjF1JpO86Z62RPDugkfDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, follow, authoring, lineage, budget]
@@ -35,10 +35,11 @@ review:
 Adding `over` selects **cohort follow**: the action is interpolated and followed
 once per array item, and the parent resumes only after the whole cohort is hard
 terminal. Cohort follow is an action node (`node_type: action`), not a foreach
-node. It must declare `as` and set `parallel: true`. `collect` is optional; when
-present, it must differ from `as`. A cohort follow cannot declare `assign`,
-`retry`, `cache_result`, or `detach`. If present, `max_concurrency` must
-be between 1 and 256.
+node. It must declare `as` and set `parallel: true`. `collect` and
+`collect_threads` are optional; when present, they must name distinct state keys
+and differ from `as`. A cohort follow cannot declare `assign`, `retry`,
+`cache_result`, or `detach`. If present, `max_concurrency` must be between 1 and
+256.
 
 `action.item_id`, all of `action.params`, and `facets` are recursively
 interpolated per item. The item is available under the declared `as` name;
@@ -47,7 +48,7 @@ normal `state`, `inputs`, and execution context remain available. Use
 to stamp every child with a cohort facet.
 
 An empty `over` array launches no children and succeeds immediately. Its result
-is an empty array; `collect`, when declared, contributes that empty array to the
+is an empty array; each declared collection contributes an empty array to the
 candidate state, and normal success routing is evaluated.
 
 ## Cohort result and state semantics
@@ -56,15 +57,21 @@ candidate state, and normal success routing is evaluated.
   `collect: reviews` adds that aligned array to the node-local candidate as
   `state.reviews`. The node's `next` expressions see that candidate and receive
   the same ordered array as `result`.
+- `collect_threads: review_threads` adds a second aligned array containing the
+  exact daemon-authored terminal thread id for each followed child chain. That
+  id names the precise chain accepted by thread services. A child that reaches a
+  terminal failure still contributes its id; failure before child birth fails
+  the handoff instead of inventing a nullable identity. The id collection never
+  changes the authored child return values.
 - A failed child occupies its original slot as `null`; indices never collapse
   or reorder. Cohort follow has no per-item `assign` surface.
-- With no failures, the candidate (including `collect`) commits and normal
+- With no failures, the candidate (including both collections) commits and normal
   `next` routing is used.
 - With a failure and `on_error: <node>`, the candidate is discarded before the
   graph routes to that node. With the effective `config.on_error: fail` policy,
   it is discarded and the graph fails. With `config.on_error: continue`, the
-  aligned partial results commit, the failure is recorded as suppressed, normal
-  `next` routing is used, and the eventual graph result is
+  aligned partial results and thread ids commit atomically, the failure is
+  recorded as suppressed, normal `next` routing is used, and the eventual graph result is
   `completed_with_errors`.
 
 ## Complete cohort example
@@ -111,6 +118,7 @@ config:
         cohort: "${run.graph_run_id}"
         subject: "${job.subject}"
       collect: reviews
+      collect_threads: review_threads
       next: {type: unconditional, to: done}
 
     done:

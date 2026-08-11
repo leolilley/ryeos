@@ -3769,9 +3769,17 @@ fn follow_resume_params(graph: &GraphDefinition, follow_result: Option<Value>) -
 }
 
 fn follow_terminal_envelope(status: RuntimeResultStatus, result: Value) -> Value {
+    follow_terminal_envelope_for_thread("T-follow-child", status, result)
+}
+
+fn follow_terminal_envelope_for_thread(
+    child_thread_id: &str,
+    status: RuntimeResultStatus,
+    result: Value,
+) -> Value {
     json!({
         "success": status.is_success(),
-        "child_thread_id": "T-follow-child",
+        "child_thread_id": child_thread_id,
         "status": status,
         "result": result,
         "outputs": null,
@@ -4136,6 +4144,7 @@ config:
       parallel: true
       max_concurrency: 2
       collect: gathered
+      collect_threads: gathered_threads
       facets: {lane: "${job.lane}"}
       action:
         item_id: "directive:${job.kind}"
@@ -4148,7 +4157,7 @@ config:
       next:
         type: conditional
         branches:
-          - when: 'length(state.gathered) >= 0'
+          - when: 'length(state.gathered) == length(state.gathered_threads)'
             to: done
           - to: recover
     recover:
@@ -4342,6 +4351,7 @@ async fn follow_fanout_empty_completes_without_spawn() {
         .await;
     assert!(result.success);
     assert_eq!(result.state["gathered"], json!([]));
+    assert_eq!(result.state["gathered_threads"], json!([]));
     assert_eq!(result.state["job"], json!("persistent"));
     assert!(rec.recorded_follow_requests().is_empty());
 }
@@ -4397,11 +4407,13 @@ async fn graph_follow_fanout_collects_authored_child_returns_in_order() {
         "failed": 0,
         "statuses": [FanoutItemStatus::Completed, FanoutItemStatus::Completed],
         "items": [
-            follow_terminal_envelope(
+            follow_terminal_envelope_for_thread(
+                "T-follow-child-1",
                 RuntimeResultStatus::Completed,
                 completed_child_graph_result("graph:a", json!({"child_ran": "a"})),
             ),
-            follow_terminal_envelope(
+            follow_terminal_envelope_for_thread(
+                "T-follow-child-2",
                 RuntimeResultStatus::Completed,
                 completed_child_graph_result("graph:b", json!({"child_ran": "b"})),
             ),
@@ -4417,8 +4429,45 @@ async fn graph_follow_fanout_collects_authored_child_returns_in_order() {
         result.state["gathered"],
         json!([{"child_ran": "a"}, {"child_ran": "b"}])
     );
+    assert_eq!(
+        result.state["gathered_threads"],
+        json!(["T-follow-child-1", "T-follow-child-2"])
+    );
     assert!(recorder.recorded_follow_requests().is_empty());
     assert_eq!(recorder.dispatch_count(), 0);
+}
+
+#[tokio::test]
+async fn follow_fanout_can_collect_child_threads_without_collecting_results() {
+    let yaml = FOLLOW_FANOUT_YAML
+        .replace("      collect: gathered\n", "")
+        .replace(
+            "      next:\n        type: conditional\n        branches:\n          - when: 'length(state.gathered) == length(state.gathered_threads)'\n            to: done\n          - to: recover\n",
+            "      next: {type: unconditional, to: done}\n",
+        );
+    let snapshot = json!([{"kind":"a","value":1,"lane":"a"}]);
+    let wrapper = json!({
+        "fanout": true,
+        "expected": 1,
+        "failed": 0,
+        "statuses": [FanoutItemStatus::Completed],
+        "items": [follow_terminal_envelope_for_thread(
+            "T-follow-only-thread",
+            RuntimeResultStatus::Completed,
+            json!({"private": "return"}),
+        )],
+    });
+    let graph = make_graph(&yaml);
+    let params = fanout_resume(&graph, snapshot, Some(wrapper));
+    let (walker, _) = make_recording_walker(graph, vec![], None);
+    let result = walker.execute(params, Some("gr-fan".into())).await;
+
+    assert!(result.success, "{result:?}");
+    assert!(result.state.get("gathered").is_none());
+    assert_eq!(
+        result.state["gathered_threads"],
+        json!(["T-follow-only-thread"])
+    );
 }
 
 #[tokio::test]
@@ -4459,6 +4508,7 @@ async fn follow_fanout_error_redirect_rolls_back_collected_candidate() {
     let result = w.execute(params, Some("gr-fan".into())).await;
     assert_eq!(result.status, GraphRunStatus::Completed);
     assert!(result.state.get("gathered").is_none());
+    assert!(result.state.get("gathered_threads").is_none());
     assert_eq!(result.cost.unwrap().input_tokens, 7);
     assert!(rec.recorded_follow_requests().is_empty());
     assert_eq!(rec.dispatch_count(), 0);
@@ -4479,11 +4529,13 @@ async fn follow_fanout_continue_commits_ordered_results() {
         "failed": 1,
         "statuses": [FanoutItemStatus::Completed, FanoutItemStatus::Failed],
         "items": [
-            follow_terminal_envelope(
+            follow_terminal_envelope_for_thread(
+                "T-follow-child-1",
                 RuntimeResultStatus::Completed,
                 json!({"ok": 1}),
             ),
-            follow_terminal_envelope(
+            follow_terminal_envelope_for_thread(
+                "T-follow-child-2",
                 RuntimeResultStatus::Failed,
                 json!({"error": "boom"}),
             ),
@@ -4496,12 +4548,19 @@ async fn follow_fanout_continue_commits_ordered_results() {
 
     assert_eq!(result.status, GraphRunStatus::CompletedWithErrors);
     assert_eq!(result.state["gathered"], json!([{"ok": 1}, null]));
+    assert_eq!(
+        result.state["gathered_threads"],
+        json!(["T-follow-child-1", "T-follow-child-2"])
+    );
     assert_eq!(result.errors_suppressed, Some(1));
 }
 
 #[tokio::test]
 async fn follow_fanout_branch_error_rolls_back_collected_candidate() {
-    let yaml = FOLLOW_FANOUT_YAML.replace("length(state.gathered) >= 0", "1 / inputs.zero > 0");
+    let yaml = FOLLOW_FANOUT_YAML.replace(
+        "length(state.gathered) == length(state.gathered_threads)",
+        "1 / inputs.zero > 0",
+    );
     let snapshot = json!([{"kind":"a","value":1,"lane":"a"}]);
     let wrapper = json!({
         "fanout": true,
@@ -4521,6 +4580,7 @@ async fn follow_fanout_branch_error_rolls_back_collected_candidate() {
 
     assert_eq!(result.status, GraphRunStatus::Completed);
     assert!(result.state.get("gathered").is_none());
+    assert!(result.state.get("gathered_threads").is_none());
 }
 
 #[tokio::test]

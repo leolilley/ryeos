@@ -750,9 +750,11 @@ impl Walker {
             let item_count = wrapper.items.len();
             let statuses = wrapper.statuses;
             let mut results = vec![Value::Null; item_count];
+            let mut child_thread_ids = Vec::with_capacity(item_count);
             let mut errors = Vec::new();
             let mut total_cost: Option<RuntimeCost> = None;
             for (index, classified) in wrapper.items.into_iter().enumerate() {
+                child_thread_ids.push(classified.child_thread_id);
                 match classified.outcome {
                     dispatch::ActionOutcome::Success(success) => {
                         results[index] = success.result;
@@ -805,6 +807,25 @@ impl Walker {
                     effects: ExpressionFailureEffects::fanout(results, statuses, errors),
                 });
             }
+            let child_thread_values = child_thread_ids
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect::<Vec<_>>();
+            if let Err(error) = validate_runtime_array_shape(
+                &child_thread_values,
+                "follow fanout collected child threads",
+            ) {
+                return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
+                    item_id: Some(raw_item_id),
+                    error: format!(
+                        "follow fanout child thread identities for node `{current}` exceeded rye-expr/1 bounds: {error}"
+                    ),
+                    elapsed_ms: start.elapsed().as_millis() as u64,
+                    cost: total_cost,
+                    effects: ExpressionFailureEffects::fanout(results, statuses, errors),
+                });
+            }
             let route = resolve_next_on_error(node, cfg);
             let evaluate_normal_branch =
                 errors.is_empty() || matches!(&route, super::outcome::NextOnError::PolicyContinue);
@@ -818,6 +839,7 @@ impl Walker {
                     graph_run_id,
                     step,
                     &results,
+                    &child_thread_ids,
                     &self.graph.definition_ref,
                     &self.graph.effective_definition_digest,
                 ) {
@@ -851,9 +873,11 @@ impl Walker {
             };
             return StepOutcome::FollowFanoutDone(Box::new(FollowFanoutDoneOutcome {
                 results,
+                child_thread_ids,
                 statuses,
                 errors,
                 collect_key: node.collect.clone(),
+                collect_threads_key: node.collect_threads.clone(),
                 item_id: raw_item_id,
                 next,
                 next_on_error: route,
@@ -871,6 +895,7 @@ impl Walker {
                 execution,
                 graph_run_id,
                 step,
+                &[],
                 &[],
                 &self.graph.definition_ref,
                 &self.graph.effective_definition_digest,
@@ -910,9 +935,11 @@ impl Walker {
             };
             return StepOutcome::FollowFanoutDone(Box::new(FollowFanoutDoneOutcome {
                 results: vec![],
+                child_thread_ids: vec![],
                 statuses: vec![],
                 errors: vec![],
                 collect_key: node.collect.clone(),
+                collect_threads_key: node.collect_threads.clone(),
                 item_id: raw_item_id,
                 next,
                 next_on_error: resolve_next_on_error(node, cfg),
@@ -1136,6 +1163,7 @@ fn evaluate_fanout_next(
     graph_run_id: &str,
     step: u32,
     results: &[Value],
+    child_thread_ids: &[String],
     definition_ref: &str,
     effective_definition_digest: &str,
 ) -> Result<Option<String>, FanoutNextError> {
@@ -1150,6 +1178,21 @@ fn evaluate_fanout_next(
             .as_object_mut()
             .unwrap()
             .insert(collect.clone(), Value::Array(results.to_vec()));
+    }
+    if let Some(collect_threads) = &node.collect_threads {
+        if !candidate.is_object() {
+            candidate = Value::Object(serde_json::Map::new());
+        }
+        candidate.as_object_mut().unwrap().insert(
+            collect_threads.clone(),
+            Value::Array(
+                child_thread_ids
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
     }
     validate_runtime_shape(&candidate, "follow fanout candidate state")
         .map_err(FanoutNextError::Integrity)?;

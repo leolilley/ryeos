@@ -452,6 +452,7 @@ fn classify_envelope_with_projection(
 #[derive(Debug)]
 pub(crate) struct ClassifiedFollowEnvelope {
     pub(crate) outcome: ActionOutcome,
+    pub(crate) child_thread_id: String,
     status: RuntimeResultStatus,
 }
 
@@ -613,6 +614,7 @@ fn classify_follow_envelope_with_projection(
         Some(cost)
     };
 
+    let child_thread_id = envelope_child_thread_id.clone();
     let outcome = if status.is_success() {
         let result = native_success_value(result, outputs, projection)
             .map_err(|error| format!("malformed follow result envelope: {error}"))?;
@@ -670,7 +672,11 @@ fn classify_follow_envelope_with_projection(
         })
     };
 
-    Ok(ClassifiedFollowEnvelope { outcome, status })
+    Ok(ClassifiedFollowEnvelope {
+        outcome,
+        child_thread_id,
+        status,
+    })
 }
 
 /// Parse and classify the exact daemon-managed cohort result for a checkpointed

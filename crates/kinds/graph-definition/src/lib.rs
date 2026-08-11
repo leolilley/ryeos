@@ -154,6 +154,8 @@ pub struct GraphNode {
     pub r#as: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collect: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collect_threads: Option<String>,
     #[serde(default)]
     pub parallel: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -538,9 +540,16 @@ fn validate_node(name: &str, node: &GraphNode, config: &GraphConfig) -> Result<(
         bail!("node `{name}` cannot declare action on a gate or return node");
     }
     if !iterates
-        && (node.over.is_some() || node.r#as.is_some() || node.collect.is_some() || node.parallel)
+        && (node.over.is_some()
+            || node.r#as.is_some()
+            || node.collect.is_some()
+            || node.collect_threads.is_some()
+            || node.parallel)
     {
         bail!("node `{name}` declares iteration fields without foreach or follow fanout");
+    }
+    if node.collect_threads.is_some() && !follow_fanout {
+        bail!("node `{name}` collect_threads requires follow fanout");
     }
     if node.node_type == NodeType::Action && node.action.is_none() && name != config.start {
         bail!("node `{name}` is an ambiguous action node without action");
@@ -700,6 +709,21 @@ fn validate_iteration_keys(
     {
         bail!("node `{name}` uses `{collect}` as both its collect and assign key");
     }
+    if let (Some(collect_threads), Some(as_var)) = (&node.collect_threads, &node.r#as)
+        && collect_threads == as_var
+    {
+        bail!("node `{name}` cannot use `{collect_threads}` for both collect_threads and as");
+    }
+    if let (Some(collect_threads), Some(collect)) = (&node.collect_threads, &node.collect)
+        && collect_threads == collect
+    {
+        bail!("node `{name}` cannot use `{collect_threads}` for both collect_threads and collect");
+    }
+    if let Some(collect_threads) = &node.collect_threads
+        && assign_keys.contains(collect_threads.as_str())
+    {
+        bail!("node `{name}` uses `{collect_threads}` as both its collect_threads and assign key");
+    }
     Ok(())
 }
 
@@ -822,6 +846,78 @@ mod tests {
         composed["config"]["nodes"]["inherited"]["node_type"] = serde_json::json!("gate");
         let error = validate_view(&view(composed, Vec::new())).unwrap_err();
         assert!(error.to_string().contains("conditional next"));
+    }
+
+    #[test]
+    fn admits_follow_fanout_child_thread_collection() {
+        let mut graph = composed_graph();
+        graph["config"]["nodes"]["inherited"] = serde_json::json!({
+            "follow": true,
+            "over": "${state.jobs}",
+            "as": "job",
+            "parallel": true,
+            "collect": "results",
+            "collect_threads": "child_threads",
+            "action": {
+                "item_id": "graph:test/child",
+                "ref_bindings": {},
+                "params": {"job": "${job}"}
+            },
+            "next": {"type": "unconditional", "to": "finish"}
+        });
+
+        validate_view(&view(graph, Vec::new())).unwrap();
+    }
+
+    #[test]
+    fn rejects_child_thread_collection_outside_follow_fanout() {
+        let mut graph = composed_graph();
+        graph["config"]["nodes"]["inherited"] = serde_json::json!({
+            "node_type": "foreach",
+            "over": "${state.jobs}",
+            "as": "job",
+            "parallel": true,
+            "collect_threads": "child_threads",
+            "action": {
+                "item_id": "tool:test/audit",
+                "ref_bindings": {},
+                "params": {"job": "${job}"}
+            },
+            "next": {"type": "unconditional", "to": "finish"}
+        });
+
+        let error = validate_view(&view(graph, Vec::new())).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("collect_threads requires follow fanout")
+        );
+    }
+
+    #[test]
+    fn rejects_colliding_follow_fanout_collection_keys() {
+        let mut graph = composed_graph();
+        graph["config"]["nodes"]["inherited"] = serde_json::json!({
+            "follow": true,
+            "over": "${state.jobs}",
+            "as": "job",
+            "parallel": true,
+            "collect": "children",
+            "collect_threads": "children",
+            "action": {
+                "item_id": "graph:test/child",
+                "ref_bindings": {},
+                "params": {"job": "${job}"}
+            },
+            "next": {"type": "unconditional", "to": "finish"}
+        });
+
+        let error = validate_view(&view(graph, Vec::new())).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("for both collect_threads and collect")
+        );
     }
 
     #[test]

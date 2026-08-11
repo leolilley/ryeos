@@ -65,6 +65,7 @@ mod tests {
             over: None,
             r#as: None,
             collect: None,
+            collect_threads: None,
             parallel: false,
             max_concurrency: None,
             output: None,
