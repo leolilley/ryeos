@@ -1,5 +1,11 @@
 use super::*;
 
+/// Stable target-side root for project-relative paths retained in a direct
+/// execution plan. A daemon workspace is operational state selected after
+/// admission; its thread-specific host path must not fragment artifact,
+/// capsule, or replay identity.
+pub const ADMITTED_DIRECT_PROJECT_ROOT: &str = "/ryeos/admitted-project";
+
 /// Result of spawning the engine pipeline.
 pub struct SpawnedItemAwaitingAttachment {
     pub pid: u32,
@@ -64,6 +70,24 @@ pub struct PreparedItemPlan {
 impl PreparedItemPlan {
     pub fn execution_plan(&self) -> &ExecutionPlan {
         &self.plan
+    }
+
+    /// Replace the concrete project workspace with its stable logical target
+    /// before artifact identity and closure admission. The returned root is
+    /// retained in the capsule; a mutable spawn copy is relocated to the
+    /// selected concrete workspace immediately before execution.
+    pub fn bind_logical_project_root(
+        &mut self,
+        concrete_project_root: Option<&Path>,
+    ) -> Result<Option<PathBuf>> {
+        let logical_project_root =
+            concrete_project_root.map(|_| PathBuf::from(ADMITTED_DIRECT_PROJECT_ROOT));
+        relocate_admitted_direct_plan(
+            &mut self.plan,
+            concrete_project_root,
+            logical_project_root.as_deref(),
+        )?;
+        Ok(logical_project_root)
     }
 
     pub fn runtime_ref(&self) -> Result<&str> {
@@ -1564,6 +1588,35 @@ mod tests {
             panic!("fixture must carry runtime parameters");
         };
         assert_eq!(project_path.as_deref(), Some(effective));
+    }
+
+    #[test]
+    fn direct_admission_identity_is_stable_across_concrete_project_roots() {
+        let first_root = Path::new("/var/lib/ryeos/executions/thread-a/project");
+        let second_root = Path::new("/var/lib/ryeos/executions/thread-b/project");
+        let mut first = prepared_plan(portable_direct_plan(first_root));
+        let mut second = prepared_plan(portable_direct_plan(second_root));
+
+        assert_eq!(
+            first.bind_logical_project_root(Some(first_root)).unwrap(),
+            Some(PathBuf::from(ADMITTED_DIRECT_PROJECT_ROOT))
+        );
+        assert_eq!(
+            second.bind_logical_project_root(Some(second_root)).unwrap(),
+            Some(PathBuf::from(ADMITTED_DIRECT_PROJECT_ROOT))
+        );
+
+        let first =
+            lillux::canonical_json(&admitted_execution_plan_value(first.execution_plan()).unwrap())
+                .unwrap();
+        let second = lillux::canonical_json(
+            &admitted_execution_plan_value(second.execution_plan()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        assert!(first.contains(ADMITTED_DIRECT_PROJECT_ROOT));
+        assert!(!first.contains(first_root.to_str().unwrap()));
+        assert!(!first.contains(second_root.to_str().unwrap()));
     }
 
     #[test]

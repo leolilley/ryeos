@@ -352,12 +352,8 @@ fn links_source_closure_manifest(value: &Value) -> Result<ContractLinks, String>
 
 fn links_dispatch_effect_record(value: &Value) -> Result<ContractLinks, String> {
     let mut links = ContractLinks::leaf();
-    let subject = value
-        .get("identity")
-        .and_then(|identity| identity.get("subject"))
-        .ok_or_else(|| "dispatch_effect_record missing identity.subject".to_string())?;
     super::push_required_object_edge(
-        subject,
+        value,
         "admission_evidence_hash",
         ExpectedObject::Any,
         None,
@@ -905,5 +901,18 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(registry.windows(2).all(|pair| pair[0] < pair[1]));
         assert_eq!(registry, CURRENT_OBJECT_KINDS);
+    }
+
+    #[test]
+    fn dispatch_effect_record_roots_record_level_admission_evidence() {
+        let evidence = "a".repeat(64);
+        let links = links_dispatch_effect_record(&serde_json::json!({
+            "admission_evidence_hash": evidence,
+            "first_observation": {}
+        }))
+        .unwrap();
+
+        assert_eq!(links.object_edges.len(), 1);
+        assert_eq!(links.object_edges[0].hash, "a".repeat(64));
     }
 }

@@ -389,8 +389,8 @@ fn run_node_isolation_apply_command(argv: &[String], console: &crate::tty::Conso
 #[derive(Parser, Debug)]
 #[command(
     name = "ryeos node replay-reset",
-    about = "Discard predecessor graph/provider replay indexes",
-    long_about = "Perform the explicit clean-cut replay-index activation. The daemon must be stopped. Only runtime-only graph and provider replay rows are discarded; thread history, CAS content, sync state, admission attestations, and accounting state are preserved.",
+    about = "Activate the current replay-index contract",
+    long_about = "Perform the explicit clean-cut replay-index activation. The daemon must be stopped. Predecessor dispatch-effect rows are discarded; provider-call evidence, thread history, CAS content, sync state, admission attestations, and accounting state are preserved.",
     no_binary_name = true
 )]
 struct NodeReplayResetArgs {
@@ -435,11 +435,12 @@ fn run_node_replay_reset_command(argv: &[String], console: &crate::tty::Console)
         crate::tty::write_json(&serde_json::json!({
             "status": "activated",
             "database": path,
-            "discarded": ["graph_effect_records", "provider_call_records"],
+            "discarded": ["dispatch_effect_records"],
+            "preserved": ["provider_call_records"],
         }))?;
     } else {
         console.text(&format!(
-            "Replay indexes activated: {}\nThread history and other operational state were preserved.\n",
+            "Replay indexes activated: {}\nPredecessor dispatch-effect records were discarded; provider-call records, thread history, and other operational state were preserved.\n",
             path.display()
         ))?;
     }

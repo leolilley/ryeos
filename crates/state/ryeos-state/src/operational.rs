@@ -16,7 +16,7 @@ use crate::sqlite_schema;
 
 const OPERATIONAL_APP_ID: i32 = 0x5259_4f50; // "RYOP"
 const OPERATIONAL_SCHEMA_VERSION: i32 = 4;
-const REPLAY_INDEX_EPOCH: i32 = 3;
+const REPLAY_INDEX_EPOCH: i32 = 4;
 pub const OPERATIONAL_DB_FILENAME: &str = "operational.sqlite3";
 pub(crate) const OPERATIONAL_INITIALIZED_FILENAME: &str = "operational.initialized";
 const OPERATIONAL_INITIALIZED_CONTENT: &[u8] = b"ryeos-operational-v1\n";
@@ -124,7 +124,7 @@ CREATE TABLE replay_index_epoch (
     epoch INTEGER NOT NULL CHECK (epoch > 0)
 );
 
-INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 3);
+INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 4);
 "#;
 
 /// Schema-v2 additions, applied verbatim by the v1→v2 forward migration. A
@@ -160,18 +160,28 @@ CREATE INDEX idx_provider_call_records_record_hash ON provider_call_records(reco
 
 /// The global operational layout can advance without translating runtime-only
 /// replay authority. A predecessor store receives only this marker; ordinary
-/// open then refuses until the operator explicitly recreates the two replay
-/// indexes under the current epoch.
+/// open then refuses until the operator explicitly activates the current
+/// replay contract.
 const REPLAY_INDEX_EPOCH_MARKER_DDL: &str = r#"
 CREATE TABLE replay_index_epoch (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     epoch INTEGER NOT NULL CHECK (epoch > 0)
 );
 
-INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 2);
+INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 3);
 "#;
 
+/// Exact epoch-3 → epoch-4 cut: only dispatch-effect keys changed. Provider
+/// call evidence remains current and must survive this activation.
 const REPLAY_INDEX_RESET_DDL: &str = r#"
+DELETE FROM replay_records WHERE namespace = 'dispatch.effect';
+UPDATE replay_index_epoch SET epoch = 4 WHERE singleton = 1;
+"#;
+
+/// A store upgraded directly from the pre-unified operational layout has no
+/// current namespace table to preserve. Its explicit clean cut discards both
+/// predecessor indexes before entering epoch 4; durable CAS objects remain.
+const LEGACY_REPLAY_INDEX_RESET_DDL: &str = r#"
 DROP TABLE effect_records;
 DROP TABLE provider_call_records;
 
@@ -189,7 +199,7 @@ CREATE INDEX idx_replay_records_retention
     ON replay_records(namespace, last_replayed_at, produced_at, cache_key);
 CREATE INDEX idx_replay_records_record_hash ON replay_records(record_hash);
 
-UPDATE replay_index_epoch SET epoch = 3 WHERE singleton = 1;
+UPDATE replay_index_epoch SET epoch = 4 WHERE singleton = 1;
 "#;
 
 fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
@@ -872,8 +882,10 @@ impl OperationalDb {
     ///
     /// This path is intentionally unavailable through ordinary open. The
     /// caller must already have stopped the daemon and obtained node-state
-    /// ownership. It preserves every other operational table and recreates
-    /// only graph/provider replay rows under the current immutable schema.
+    /// ownership. It preserves every other operational table. For the exact
+    /// unified predecessor it retires only dispatch-effect rows and preserves
+    /// provider-call evidence; older pre-unified layouts are discarded as one
+    /// explicit clean cut.
     pub fn open_for_explicit_replay_reset(path: &Path) -> Result<Self> {
         let (directory, name) = pin_operational_parent(path, false)?;
         let directory_lock = directory.lock_exclusive()?;
@@ -1607,13 +1619,28 @@ fn enforce_replay_index_epoch(conn: &Connection, path: &Path, explicit_reset: bo
             path.display()
         );
     }
+    let has_unified_replay_index: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'replay_records')",
+            [],
+            |row| row.get(0),
+        )
+        .context("inspect predecessor replay-index layout")?;
     let tx = conn
         .unchecked_transaction()
         .context("begin explicit replay-index reset")?;
-    tx.execute_batch(REPLAY_INDEX_RESET_DDL)
-        .context("recreate current replay indexes")?;
+    tx.execute_batch(if has_unified_replay_index {
+        REPLAY_INDEX_RESET_DDL
+    } else {
+        LEGACY_REPLAY_INDEX_RESET_DDL
+    })
+    .context("recreate current replay indexes")?;
     tx.commit().context("commit explicit replay-index reset")?;
-    tracing::warn!(database = %path.display(), "explicitly discarded predecessor replay indexes");
+    tracing::warn!(
+        database = %path.display(),
+        preserved_provider_records = has_unified_replay_index,
+        "explicitly activated current replay indexes"
+    );
     Ok(())
 }
 
@@ -3197,8 +3224,8 @@ mod tests {
     #[test]
     fn fresh_schema_declares_only_the_current_replay_epoch() {
         assert!(SCHEMA_SQL.contains("answer_digest TEXT NOT NULL"));
-        assert!(SCHEMA_SQL.contains("VALUES (1, 3)"));
-        assert!(!SCHEMA_SQL.contains("VALUES (1, 2)"));
+        assert!(SCHEMA_SQL.contains("VALUES (1, 4)"));
+        assert!(!SCHEMA_SQL.contains("VALUES (1, 3)"));
     }
 
     #[test]
@@ -3315,6 +3342,56 @@ mod tests {
         );
         let db = OperationalDb::open_for_explicit_replay_reset(&path).unwrap();
         assert!(db.list_replay_record_hashes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn effect_key_cut_preserves_current_provider_replay_rows() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        {
+            let db = OperationalDb::open(&path).unwrap();
+            db.conn
+                .execute_batch(
+                    "INSERT INTO replay_records VALUES (
+                        'dispatch.effect',
+                        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                        '2026-01-01T00:00:00Z',
+                        '2026-01-01T00:00:00Z'
+                     );
+                     INSERT INTO replay_records VALUES (
+                        'provider.call',
+                        'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                        'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+                        'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+                        '2026-01-01T00:00:00Z',
+                        '2026-01-01T00:00:00Z'
+                     );
+                     UPDATE replay_index_epoch SET epoch = 3 WHERE singleton = 1;",
+                )
+                .unwrap();
+        }
+
+        let error = OperationalDb::open(&path)
+            .err()
+            .expect("predecessor effect-key epoch must refuse");
+        assert!(
+            error
+                .downcast_ref::<ReplayIndexActivationRequired>()
+                .is_some()
+        );
+        let db = OperationalDb::open_for_explicit_replay_reset(&path).unwrap();
+        let rows: Vec<(String, String)> = db
+            .conn
+            .prepare("SELECT namespace, record_hash FROM replay_records ORDER BY namespace")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows, vec![("provider.call".to_string(), "f".repeat(64),)]);
+        assert_eq!(replay_index_epoch(&db.conn).unwrap(), REPLAY_INDEX_EPOCH);
     }
 
     #[test]

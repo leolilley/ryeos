@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:34:32Z:01613c63aa870d4662fb5748d250bf1d4bca32beb17543237e196a4351a5a74f:RNFX3XPTPhVX1+VUyT6t5llYYpjJ+bL62rj4dAGBJNIJ1aaKYjqgLA2tzRycrHqPQitYh22zE8bYEdvr0yb7CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-11T08:41:45Z:872f4829759e49222d29f08a1e9ef56d3a53b9b12eebb625a47834e4f9e0d757:exDvGJUJoSR8o/z7xVElE68SlVxaekPO6lg8loYwKShsrl/B/5ulHndxDsoDVqF4nqkfQ728WbbRo1YoeLoqAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/execution
 tags: [execution, external-content, persistent-session, local-model, replay]
@@ -289,7 +289,8 @@ persistent-session capsules before schema 3. Schema 3 retains the admitted
 source binding alongside the path-free retained resolution. Identity, trust,
 installed bundles, vault data, project heads, and durable provider evidence
 roots are preserved. No predecessor capsule is translated. The replay reset
-discards only predecessor graph/provider replay indexes. The runtime database
+discards only predecessor dispatch-effect indexes and preserves provider-call
+evidence. The runtime database
 reset named by a startup refusal establishes operator epoch 4; it never
 rewrites predecessor rows. These commands are a cutover operation, not normal
 startup procedure.

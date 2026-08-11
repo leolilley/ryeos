@@ -17,7 +17,7 @@
 //! all revoke the per-thread tokens.
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -1482,7 +1482,7 @@ fn verify_dispatch_effect_record(
             ),
         };
     }
-    let evidence_hash = &record.identity.subject.admission_evidence_hash;
+    let evidence_hash = &record.admission_evidence_hash;
     let evidence = match authority
         .cas_store()
         .and_then(|cas| cas.get_object(evidence_hash))
@@ -1510,6 +1510,22 @@ fn verify_dispatch_effect_record(
                     "admission evidence content hash {observed} contradicts {evidence_hash}"
                 );
             }
+            let (
+                subject_ref,
+                effective_definition_digest,
+                execution_closure_digest,
+                content_identity_digest,
+            ) = dispatch_subject_components_from_capsule(&capsule)?;
+            if subject_ref != record.identity.subject.subject_ref
+                || effective_definition_digest
+                    != record.identity.subject.effective_definition_digest
+                || execution_closure_digest != record.identity.subject.execution_closure_digest
+                || content_identity_digest != record.identity.subject.content_identity_digest
+            {
+                anyhow::bail!(
+                    "dispatch-effect admission evidence contradicts its admitted subject"
+                );
+            }
             Ok(())
         },
     ) {
@@ -1520,11 +1536,15 @@ fn verify_dispatch_effect_record(
     }
 }
 
-fn admitted_subject_from_capsule(
-    resolved: &ResolvedExecutionRequest,
+fn dispatch_subject_components_from_capsule(
     capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
-    ceiling: ryeos_effect_contract::EffectClass,
-) -> Result<ryeos_effect_contract::AdmittedDispatchSubject> {
+) -> Result<(String, String, String, String)> {
+    let subject_ref = capsule
+        .exact_program
+        .get("item_ref")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("admitted dispatch capsule has no subject ref"))?
+        .to_string();
     let effective_definition_digest = capsule
         .exact_program
         .get("effective_definition_digest")
@@ -1539,11 +1559,35 @@ fn admitted_subject_from_capsule(
     let content_identity_digest = ryeos_effect_contract::canonical_value_digest(
         &serde_json::to_value(&capsule.artifact_identity)?,
     )?;
+    Ok((
+        subject_ref,
+        effective_definition_digest,
+        execution_closure_digest,
+        content_identity_digest,
+    ))
+}
+
+fn admitted_subject_from_capsule(
+    resolved: &ResolvedExecutionRequest,
+    capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+    ceiling: ryeos_effect_contract::EffectClass,
+) -> Result<ryeos_effect_contract::AdmittedDispatchSubject> {
+    let (
+        capsule_subject_ref,
+        effective_definition_digest,
+        execution_closure_digest,
+        content_identity_digest,
+    ) = dispatch_subject_components_from_capsule(capsule)?;
+    if capsule_subject_ref != resolved.item_ref {
+        anyhow::bail!(
+            "admitted dispatch capsule subject `{capsule_subject_ref}` contradicts resolved subject `{}`",
+            resolved.item_ref
+        );
+    }
     let subject = ryeos_effect_contract::AdmittedDispatchSubject {
         subject_ref: resolved.item_ref.clone(),
         effective_definition_digest,
         execution_closure_digest,
-        admission_evidence_hash: capsule.content_hash()?,
         content_identity_digest,
         effect_class_ceiling: ceiling,
     };
@@ -1615,6 +1659,7 @@ fn publish_dispatch_effect_record(
         kind: ryeos_effect_contract::EFFECT_RECORD_KIND.to_string(),
         cache_key: cache_key.clone(),
         identity,
+        admission_evidence_hash: capsule.content_hash()?,
         answer_digest: answer_digest.clone(),
         answer: normalized.answer,
         first_observation: ryeos_effect_contract::EffectFirstObservation {
@@ -2011,6 +2056,13 @@ fn admitted_root_launch_metadata(
         executor_ref: Some(params.resolved.executor_ref.clone()),
         runtime_ref: Some(runtime_ref),
     };
+    let concrete_project_root = match &params.resolved.plan_context.project_context {
+        ProjectContext::LocalPath { path } => Some(path.as_path()),
+        ProjectContext::None
+        | ProjectContext::SnapshotHash { .. }
+        | ProjectContext::ProjectRef { .. } => None,
+    };
+    let admitted_project_root = prepared_plan.bind_logical_project_root(concrete_project_root)?;
     let admitted_artifact_identity =
         prepared_plan.admitted_artifact_identity(&params.resolved, protocol)?;
     let (realization_contract_ref, realization_contract_digest) = match &admitted_artifact_identity
@@ -2042,18 +2094,12 @@ fn admitted_root_launch_metadata(
     let cas_directory = lillux::PinnedDirectory::open(&cas_root)?
         .ok_or_else(|| anyhow::anyhow!("state CAS root is unavailable"))?;
     let cas = lillux::CasStore::from_pinned_root(cas_directory);
-    let admitted_project_root = match &params.resolved.plan_context.project_context {
-        ProjectContext::LocalPath { path } => Some(path.as_path()),
-        ProjectContext::None
-        | ProjectContext::SnapshotHash { .. }
-        | ProjectContext::ProjectRef { .. } => None,
-    };
     let execution_closure = prepared_plan.admit_execution_closure(
         &cas,
         state.isolation.as_ref(),
         protocol,
         &params.provenance.request_engine().node_trust_store,
-        admitted_project_root,
+        admitted_project_root.as_deref(),
     )?;
     let mut metadata = ryeos_app::launch_metadata::RuntimeLaunchMetadata::default()
         .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::DirectItemExecutor)
@@ -2671,22 +2717,18 @@ pub async fn run_and_wait(
     }
     tracing::Span::current().record("thread_id", created.thread_id.as_str());
 
-    // The capsule retains the exact admission workspace in its serialized plan,
-    // while this in-memory plan must execute against the CAS materialization
-    // selected for this launch. Rebind only the typed/validated project paths
-    // after birth has rooted the original closure.
+    // The capsule retains a stable logical project root. This in-memory spawn
+    // copy executes against the concrete live or pinned workspace selected for
+    // this launch. Rebind only typed/validated project paths after birth has
+    // rooted the logical closure.
     if matches!(
-        params.provenance.project_authority(),
-        ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. }
+        &params.resolved.plan_context.project_context,
+        ProjectContext::LocalPath { .. }
     ) {
-        let admitted_project_root = match &params.resolved.plan_context.project_context {
-            ProjectContext::LocalPath { path } => Some(path.clone()),
-            ProjectContext::None
-            | ProjectContext::SnapshotHash { .. }
-            | ProjectContext::ProjectRef { .. } => None,
-        };
+        let admitted_project_root =
+            Path::new(ryeos_app::thread_lifecycle::ADMITTED_DIRECT_PROJECT_ROOT);
         prepared_plan
-            .relocate_project_for_spawn(admitted_project_root.as_deref(), Some(&effective_path))?;
+            .relocate_project_for_spawn(Some(admitted_project_root), Some(&effective_path))?;
         params.resolved.plan_context.project_context =
             ryeos_engine::contracts::ProjectContext::LocalPath {
                 path: effective_path.clone(),
@@ -3416,20 +3458,16 @@ pub async fn run_detached(
     }
     tracing::Span::current().record("thread_id", created.thread_id.as_str());
 
-    // Keep the serialized admission plan sealed while rebinding this spawn's
-    // operational plan to the selected CAS materialization; see `run_and_wait`.
+    // Keep the serialized logical admission plan sealed while rebinding this
+    // spawn copy to the selected live or pinned workspace; see `run_and_wait`.
     if matches!(
-        params.provenance.project_authority(),
-        ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. }
+        &params.resolved.plan_context.project_context,
+        ProjectContext::LocalPath { .. }
     ) {
-        let admitted_project_root = match &params.resolved.plan_context.project_context {
-            ProjectContext::LocalPath { path } => Some(path.clone()),
-            ProjectContext::None
-            | ProjectContext::SnapshotHash { .. }
-            | ProjectContext::ProjectRef { .. } => None,
-        };
+        let admitted_project_root =
+            Path::new(ryeos_app::thread_lifecycle::ADMITTED_DIRECT_PROJECT_ROOT);
         prepared_plan
-            .relocate_project_for_spawn(admitted_project_root.as_deref(), Some(&effective_path))?;
+            .relocate_project_for_spawn(Some(admitted_project_root), Some(&effective_path))?;
         params.resolved.plan_context.project_context =
             ryeos_engine::contracts::ProjectContext::LocalPath {
                 path: effective_path.clone(),

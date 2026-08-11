@@ -49,8 +49,8 @@ mod sealed_request;
 mod validation;
 
 pub use direct_execution::{
-    PreparedItemPlan, RunningItem, SpawnItemParams, SpawnedItemAwaitingAttachment,
-    prepare_captured_item_plan, prepare_item_plan, spawn_item,
+    ADMITTED_DIRECT_PROJECT_ROOT, PreparedItemPlan, RunningItem, SpawnItemParams,
+    SpawnedItemAwaitingAttachment, prepare_captured_item_plan, prepare_item_plan, spawn_item,
 };
 #[cfg(test)]
 use sealed_request::SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION;

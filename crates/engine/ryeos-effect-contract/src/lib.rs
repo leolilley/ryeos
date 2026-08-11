@@ -9,8 +9,8 @@ use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const EFFECT_RECORD_SCHEMA_VERSION: u32 = 2;
-pub const EFFECT_KEY_SCHEMA: &str = "ryeos.dispatch_effect.key.v2";
+pub const EFFECT_RECORD_SCHEMA_VERSION: u32 = 3;
+pub const EFFECT_KEY_SCHEMA: &str = "ryeos.dispatch_effect.key.v3";
 pub const EFFECT_RECORD_KIND: &str = "dispatch_effect_record";
 pub const EFFECT_REPLAY_NAMESPACE: &str = "dispatch.effect";
 pub const EFFECT_AUTHORIZATIONS_DERIVED_KEY: &str = "admitted_effect_authorizations";
@@ -166,18 +166,18 @@ impl AdmittedEffectAuthorization {
     }
 }
 
-/// Exact admitted callee consumed by a cache miss.
+/// Exact behavior-bearing callee identity consumed by a cache miss.
 ///
 /// The substrate prepares this once and uses the same value for lookup and
-/// execution. `admission_evidence_hash` may name a launch capsule or another
-/// kind-neutral admitted-subject object; its interpretation is registry-owned.
+/// execution. Per-launch evidence is retained on [`DispatchEffectRecord`], not
+/// in this reusable key: a new thread or unrelated project generation must not
+/// masquerade as a changed admitted program.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmittedDispatchSubject {
     pub subject_ref: String,
     pub effective_definition_digest: String,
     pub execution_closure_digest: String,
-    pub admission_evidence_hash: String,
     pub content_identity_digest: String,
     pub effect_class_ceiling: EffectClass,
 }
@@ -193,10 +193,6 @@ impl AdmittedDispatchSubject {
             (
                 "dispatch subject execution-closure digest",
                 &self.execution_closure_digest,
-            ),
-            (
-                "dispatch subject admission-evidence hash",
-                &self.admission_evidence_hash,
             ),
             (
                 "dispatch subject content-identity digest",
@@ -360,6 +356,10 @@ pub struct DispatchEffectRecord {
     pub kind: String,
     pub cache_key: String,
     pub identity: DispatchEffectIdentity,
+    /// Exact launch capsule for the execution that first produced this
+    /// answer. This is durable provenance and a CAS closure edge, but is not
+    /// part of the reusable behavioral key.
+    pub admission_evidence_hash: String,
     pub answer_digest: String,
     pub answer: DispatchEffectAnswer,
     pub first_observation: EffectFirstObservation,
@@ -385,6 +385,10 @@ impl DispatchEffectRecord {
         if self.identity.cache_key()? != self.cache_key {
             bail!("dispatch-effect cache key contradicts its identity");
         }
+        require_hex64(
+            "dispatch-effect admission-evidence hash",
+            &self.admission_evidence_hash,
+        )?;
         if self.answer.digest()? != self.answer_digest {
             bail!("dispatch-effect answer digest contradicts its answer");
         }
@@ -510,7 +514,6 @@ mod tests {
                 subject_ref: "tool:example/classify".to_string(),
                 effective_definition_digest: "55".repeat(32),
                 execution_closure_digest: "66".repeat(32),
-                admission_evidence_hash: "77".repeat(32),
                 content_identity_digest: "88".repeat(32),
                 effect_class_ceiling: EffectClass::Sealed,
             },
@@ -540,6 +543,47 @@ mod tests {
         changed.subject.effective_definition_digest = "aa".repeat(32);
 
         assert_ne!(changed.cache_key().unwrap(), expected);
+    }
+
+    #[test]
+    fn launch_provenance_is_retained_without_fragmenting_the_effect_key() {
+        let identity = identity();
+        let answer = DispatchEffectAnswer::Bare {
+            result: serde_json::json!({"answer": 42}),
+        };
+        let answer_digest = answer.digest().unwrap();
+        let record = |admission_evidence_hash: String| DispatchEffectRecord {
+            schema: EFFECT_RECORD_SCHEMA_VERSION,
+            kind: EFFECT_RECORD_KIND.to_string(),
+            cache_key: identity.cache_key().unwrap(),
+            identity: identity.clone(),
+            admission_evidence_hash,
+            answer_digest: answer_digest.clone(),
+            answer: answer.clone(),
+            first_observation: EffectFirstObservation {
+                produced_by_thread: "T-example".to_string(),
+                response_digest: "99".repeat(32),
+                observed_at: "2026-08-11T00:00:00.000Z".to_string(),
+                execution_identity_digest: None,
+                execution_identity_attestation_hash: None,
+                admitted_execution_realization_hash: None,
+                observed_execution_realization_hash: None,
+            },
+        };
+        let first = record("aa".repeat(32));
+        let second = record("bb".repeat(32));
+
+        first.validate().unwrap();
+        second.validate().unwrap();
+        assert_eq!(first.cache_key, second.cache_key);
+        assert_ne!(
+            first.admission_evidence_hash,
+            second.admission_evidence_hash
+        );
+
+        let mut predecessor = first.to_value().unwrap();
+        predecessor["schema"] = serde_json::json!(2);
+        assert!(DispatchEffectRecord::from_current_value(&predecessor).is_err());
     }
 
     #[test]
