@@ -533,6 +533,16 @@ mod tests {
     }
 
     #[test]
+    fn key_moves_when_the_admitted_callee_definition_moves() {
+        let base = identity();
+        let expected = base.cache_key().unwrap();
+        let mut changed = base;
+        changed.subject.effective_definition_digest = "aa".repeat(32);
+
+        assert_ne!(changed.cache_key().unwrap(), expected);
+    }
+
+    #[test]
     fn ceiling_is_fail_closed() {
         let mut identity = identity();
         identity.authorization.class = EffectClass::Sealed;
