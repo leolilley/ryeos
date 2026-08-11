@@ -445,7 +445,139 @@ fn add_run_definition_versions(
                 );
             }
         }
+        add_run_source_closure(state, builder, &definition_id, &capsule, &evidence)?;
     }
+    Ok(())
+}
+
+fn add_run_source_closure(
+    state: &AppState,
+    builder: &mut FieldFactsBuilder,
+    definition_id: &str,
+    capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+    evidence: &[FieldEvidenceRef],
+) -> Result<()> {
+    let Some(binding_hash) = capsule.source_binding_hash.as_deref() else {
+        return Ok(());
+    };
+    let cas_read = match state.acquire_cas_read() {
+        Ok(read) => read,
+        Err(error) => {
+            builder.warn(
+                "source_closure_unavailable",
+                format!("admitted source evidence is unavailable: {error}"),
+            );
+            return Ok(());
+        }
+    };
+    let Some(binding_value) = cas_read.cas().get_object(binding_hash)? else {
+        builder.warn(
+            "source_closure_unavailable",
+            "admitted source binding is missing".to_owned(),
+        );
+        return Ok(());
+    };
+    let binding = match ryeos_state::objects::EffectiveSourceBinding::from_value(&binding_value) {
+        Ok(binding) => binding,
+        Err(error) => {
+            builder.warn(
+                "source_closure_invalid",
+                format!("admitted source binding is invalid: {error}"),
+            );
+            return Ok(());
+        }
+    };
+    if binding.digest()? != binding_hash {
+        builder.warn(
+            "source_closure_invalid",
+            "admitted source binding hash does not reproduce".to_owned(),
+        );
+        return Ok(());
+    }
+    let manifest_value = cas_read
+        .cas()
+        .get_object(&binding.content_manifest_hash)?
+        .ok_or_else(|| anyhow::anyhow!("admitted source manifest is missing"))?;
+    let manifest = ryeos_state::objects::SourceClosureManifest::from_value(&manifest_value)?;
+    if manifest.digest()? != binding.content_manifest_hash {
+        builder.warn(
+            "source_closure_invalid",
+            "admitted source manifest hash does not reproduce".to_owned(),
+        );
+        return Ok(());
+    }
+    let (testimony_class, testimony_identity) = match &binding.testimony {
+        ryeos_state::objects::SourceTestimonyProof::OwnerSignedFiles { entries_digest, .. } => {
+            ("owner_signed_files", entries_digest.clone())
+        }
+        ryeos_state::objects::SourceTestimonyProof::OwnerSignedDigest {
+            expected_manifest_hash,
+        } => ("owner_signed_digest", expected_manifest_hash.clone()),
+    };
+    let (execution_policy_class, execution_policy_owner, execution_policy_digest) =
+        match &binding.execution_policy {
+            ryeos_state::objects::SourceExecutionPolicyIdentity::Executor {
+                declarer_ref,
+                policy_digest,
+                chain_digest,
+                ..
+            } => (
+                "executor",
+                Some(declarer_ref.clone()),
+                Some(json!({"policy": policy_digest, "chain": chain_digest})),
+            ),
+            ryeos_state::objects::SourceExecutionPolicyIdentity::Worker {
+                source_declaration_digest,
+            } => (
+                "worker",
+                None,
+                Some(json!({"declaration": source_declaration_digest})),
+            ),
+        };
+    let source_id = format!("admitted-source:{binding_hash}");
+    builder.add_entity(FieldFactEntity {
+        id: source_id.clone(),
+        kind: "admitted_source_closure".to_owned(),
+        label: super::ui_graph_topology::label_for_bare_id(
+            binding
+                .owner
+                .canonical_ref
+                .split_once(':')
+                .map_or(&binding.owner.canonical_ref, |(_, bare)| bare),
+        ),
+        parent_id: Some(definition_id.to_owned()),
+        status: Some("admitted".to_owned()),
+        canonical_ref: Some(binding.owner.canonical_ref.clone()),
+        source_content_digest: Some(binding.owner.root_source_content_digest.clone()),
+        effective_definition_digest: None,
+        admitted_launch_capsule_hash: None,
+        event_ref: None,
+        artifact_ref: None,
+        attributes: json!({
+            "binding_hash": binding_hash,
+            "content_manifest_hash": binding.content_manifest_hash,
+            "owner_signer_fingerprint": binding.owner.signer_fingerprint,
+            "owner_source_space": binding.owner.source_space,
+            "testimony_class": testimony_class,
+            "testimony_identity": testimony_identity,
+            "execution_policy_class": execution_policy_class,
+            "execution_policy_owner": execution_policy_owner,
+            "execution_policy_identity": execution_policy_digest,
+            "file_count": manifest.totals.file_count,
+            "total_bytes": manifest.totals.total_bytes,
+        }),
+        provenance: builder.provenance(evidence.to_vec()),
+    })?;
+    builder.add_relation(FieldFactRelation {
+        id: format!("source-closure-contributes:{source_id}:{definition_id}"),
+        kind: "source_closure_contributes".to_owned(),
+        source_id,
+        target_id: definition_id.to_owned(),
+        status: None,
+        directed: true,
+        attributes: json!({}),
+        provenance: builder.provenance(evidence.to_vec()),
+    })?;
     Ok(())
 }
 

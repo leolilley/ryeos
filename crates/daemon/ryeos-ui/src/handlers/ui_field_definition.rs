@@ -519,6 +519,45 @@ fn add_definition_sources(
             })?;
         }
     }
+    if let Some(value) = resolution
+        .composed
+        .derived
+        .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY)
+    {
+        let source = ryeos_state::objects::EffectiveSourceClosureProjection::from_value(value)?;
+        let source_id = format!("admitted-source:{}", source.binding_hash);
+        builder.add_entity(FieldFactEntity {
+            id: source_id.clone(),
+            kind: "admitted_source_closure".to_owned(),
+            label: "admitted source".to_owned(),
+            parent_id: Some(definition_id.to_owned()),
+            status: Some("admitted".to_owned()),
+            canonical_ref: None,
+            source_content_digest: None,
+            effective_definition_digest: None,
+            admitted_launch_capsule_hash: None,
+            event_ref: None,
+            artifact_ref: None,
+            attributes: json!({
+                "binding_hash": source.binding_hash,
+                "content_manifest_hash": source.content_manifest_hash,
+                "owner_key": source.owner_key,
+                "file_count": source.file_count,
+                "total_bytes": source.total_bytes,
+            }),
+            provenance: builder.provenance(Vec::new()),
+        })?;
+        builder.add_relation(FieldFactRelation {
+            id: format!("source-closure-contributes:{source_id}:{definition_id}"),
+            kind: "source_closure_contributes".to_owned(),
+            source_id,
+            target_id: definition_id.to_owned(),
+            status: None,
+            directed: true,
+            attributes: json!({}),
+            provenance: builder.provenance(Vec::new()),
+        })?;
+    }
     Ok(())
 }
 
@@ -572,7 +611,7 @@ mod tests {
             "config:\n  start: inherited\n  nodes:\n    inherited:\n      next:\n        to: start\n    start:\n      next:\n        to: done\n    done: {}\n",
         )
         .unwrap();
-        let resolution = ryeos_engine::resolution::ResolutionOutput {
+        let mut resolution = ryeos_engine::resolution::ResolutionOutput {
             root: ryeos_engine::resolution::ResolvedAncestor {
                 requested_id: "graph:test/build".to_string(),
                 resolved_ref: "graph:test/build".to_string(),
@@ -611,6 +650,18 @@ mod tests {
             effective_trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
             composed: ryeos_engine::resolution::KindComposedView::identity(composed.clone()),
         };
+        let source_projection = ryeos_state::objects::EffectiveSourceClosureProjection {
+            schema: ryeos_state::objects::EFFECTIVE_SOURCE_BINDING_SCHEMA,
+            binding_hash: "b".repeat(64),
+            content_manifest_hash: "d".repeat(64),
+            owner_key: "e".repeat(64),
+            file_count: 4,
+            total_bytes: 4096,
+        };
+        resolution.composed.derived.insert(
+            ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY.to_owned(),
+            source_projection.to_value().unwrap(),
+        );
         let effective_definition_digest = resolution.effective_definition_digest().unwrap();
         let evidence = ryeos_app::state_store::AdmittedProgramEvidence {
             admitted_launch_capsule_hash: "c".repeat(64),
@@ -672,6 +723,11 @@ mod tests {
                 .any(|relation| relation.kind == "flows_to")
         );
         assert!(facts.warnings.is_empty());
+        assert!(facts.entities.iter().any(|entity| {
+            entity.id == format!("admitted-source:{}", "b".repeat(64))
+                && entity.attributes["content_manifest_hash"] == "d".repeat(64)
+                && entity.attributes["file_count"] == 4
+        }));
 
         let contributions = facts
             .relations

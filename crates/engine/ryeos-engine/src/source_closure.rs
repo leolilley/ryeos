@@ -63,6 +63,41 @@ impl WorkerSourceDeclaration {
         Ok(Some(declaration))
     }
 
+    pub fn from_composed_for_static_preview(
+        composed: &serde_json::Value,
+        contract: Option<&ExecutionSourceClosureDecl>,
+    ) -> anyhow::Result<Option<Self>> {
+        let authored = composed.get("source");
+        let Some(contract) = contract else {
+            if authored.is_some() {
+                anyhow::bail!(
+                    "item declares `source` but its signed kind has no execution.source_closure contract"
+                );
+            }
+            return Ok(None);
+        };
+        if !matches!(
+            contract.location,
+            crate::kind_registry::SourceClosureLocationDecl::OwnerRelativeSource { .. }
+        ) {
+            if authored.is_some() {
+                anyhow::bail!("item source declaration is incompatible with its signed kind");
+            }
+            return Ok(None);
+        }
+        let value = authored.ok_or_else(|| {
+            anyhow::anyhow!("source-owning item is missing its required source declaration")
+        })?;
+        let declaration: Self = serde_json::from_value(value.clone())
+            .map_err(|error| anyhow::anyhow!("invalid source declaration: {error}"))?;
+        validate_relative_path("source root", &declaration.root)?;
+        validate_relative_path("source entry", &declaration.entry)?;
+        if declaration.digest.is_empty() || declaration.digest.len() > 256 {
+            anyhow::bail!("source declaration digest placeholder is not bounded");
+        }
+        Ok(Some(declaration))
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_relative_path("source root", &self.root)?;
         validate_relative_path("source entry", &self.entry)?;
@@ -551,5 +586,33 @@ mod tests {
         let mut escaped = declaration;
         escaped.entry = "../bootstrap.py".to_owned();
         assert!(escaped.validate().is_err());
+    }
+
+    #[test]
+    fn static_worker_source_accepts_one_bounded_pending_digest_without_weakening_admission() {
+        let contract = ExecutionSourceClosureDecl {
+            derived: ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY.to_owned(),
+            location: crate::kind_registry::SourceClosureLocationDecl::OwnerRelativeSource {
+                path: vec!["source".to_owned()],
+            },
+            testimony: crate::kind_registry::SourceClosureTestimonyDecl::OwnerSignedDigest,
+            max_files: 32,
+            max_total_bytes: 1024,
+            max_file_bytes: 512,
+            max_depth: 8,
+        };
+        let composed = serde_json::json!({
+            "source": {
+                "root": "lib/session",
+                "entry": "bootstrap.py",
+                "digest": "pending"
+            }
+        });
+        assert!(
+            WorkerSourceDeclaration::from_composed_for_static_preview(&composed, Some(&contract))
+                .unwrap()
+                .is_some()
+        );
+        assert!(WorkerSourceDeclaration::from_composed(&composed, Some(&contract)).is_err());
     }
 }

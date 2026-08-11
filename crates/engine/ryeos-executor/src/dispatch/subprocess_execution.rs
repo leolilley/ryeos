@@ -1269,11 +1269,12 @@ async fn dispatch_tool_subprocess(
 
     if request.validate_only {
         let engine = ctx.engine.clone();
+        let validation_engine = engine.clone();
         let resolved_clone = resolved.clone();
         let workspace_lifeline = request.provenance.workspace_lifeline();
         let validated = tokio::task::spawn_blocking(move || {
             let _workspace_lifeline = workspace_lifeline;
-            ryeos_app::thread_lifecycle::validate_item(&engine, &resolved_clone)
+            ryeos_app::thread_lifecycle::validate_item(&validation_engine, &resolved_clone)
         })
         .await
         .map_err(|e| DispatchError::SubprocessRunFailed {
@@ -1281,13 +1282,26 @@ async fn dispatch_tool_subprocess(
             detail: format!("validate_only join failure: {e}"),
         })??;
 
+        let source_project_root = resolved
+            .root_admission
+            .as_ref()
+            .and_then(|admission| admission.execution_workspace())
+            .or(Some(request.project_path));
+        let source =
+            validate_direct_source_closure(state, &engine, &resolved, source_project_root)?;
+        let admission_ready = source
+            .as_ref()
+            .is_none_or(|preview| preview.ready_for_admission);
+
         return Ok(json!({
             "validated": true,
+            "admission_ready": admission_ready,
             "item_ref": resolved.item_ref,
             "kind": resolved.kind,
             "executor_ref": resolved.executor_ref,
             "trust_class": validated.trust_class,
             "plan_id": validated.plan_id,
+            "source": source,
         }));
     }
 
@@ -1400,6 +1414,91 @@ async fn dispatch_tool_subprocess(
             })),
         }
     }
+}
+
+fn validate_direct_source_closure(
+    state: &AppState,
+    engine: &ryeos_engine::engine::Engine,
+    resolved: &ryeos_app::thread_lifecycle::ResolvedExecutionRequest,
+    project_root: Option<&Path>,
+) -> Result<
+    Option<ryeos_app::source_closure_admission::SourceClosureValidationPreview>,
+    DispatchError,
+> {
+    let admission = resolved.root_admission.as_ref().ok_or_else(|| {
+        DispatchError::Internal(anyhow::anyhow!(
+            "direct static validation has no exact root admission"
+        ))
+    })?;
+    let resolution = admission.resolution_output();
+    let roots = engine.resolution_roots(project_root.map(Path::to_path_buf));
+    let materialization = admission
+        .resolution_materialization_binding()
+        .map_err(DispatchError::Internal)?;
+    let project_content = materialization
+        .authoritative_project_content()
+        .map_err(DispatchError::Internal)?;
+    let project = project_content.as_ref().map(|(root, content)| {
+        (
+            *root,
+            *content as &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+        )
+    });
+    let source_contract = engine
+        .kinds
+        .get(&resolved.kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .and_then(|execution| execution.source_closure.as_ref());
+    let source_policy = if source_contract.is_some() {
+        let executor_id = resolved
+            .resolved_item
+            .metadata
+            .executor_id
+            .as_deref()
+            .ok_or_else(|| {
+                DispatchError::Internal(anyhow::anyhow!(
+                    "source-owning direct item has no executor chain"
+                ))
+            })?;
+        ryeos_engine::launch::plan_builder::resolve_executor_source_policy(
+            executor_id,
+            &resolution.root.source_path,
+            &resolved.kind,
+            &engine.kinds,
+            &engine.parser_dispatcher,
+            &roots,
+            &engine.trust_store,
+            &engine.node_trust_store,
+            project,
+        )
+        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?
+    } else {
+        None
+    };
+    let project = project
+        .map(|(root, content)| {
+            let identity = materialization
+                .subject_authority()
+                .operational_generation()
+                .ok_or_else(|| {
+                    DispatchError::Internal(anyhow::anyhow!(
+                        "pinned source validation has no content generation"
+                    ))
+                })?
+                .to_owned();
+            Ok::<_, DispatchError>((root, content, identity))
+        })
+        .transpose()?;
+    ryeos_app::source_closure_admission::preview_source_closure(
+        state,
+        engine,
+        &resolved.kind,
+        resolution,
+        &roots,
+        project,
+        source_policy.as_ref(),
+    )
+    .map_err(DispatchError::Internal)
 }
 
 fn map_runner_error(item_ref: String, error: anyhow::Error) -> DispatchError {

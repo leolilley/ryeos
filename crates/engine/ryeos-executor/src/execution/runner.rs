@@ -2197,6 +2197,7 @@ fn finalize_direct_effective_program(
             .transpose()?,
         source_policy.as_ref(),
         &mut publication,
+        None,
     )?;
     let captured_external =
         ryeos_app::external_content_admission::admit_external_realizations_in_publication(

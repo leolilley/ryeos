@@ -26,6 +26,18 @@ pub struct AdmittedSourceClosure {
     manifest: ryeos_state::objects::SourceClosureManifest,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SourceClosureValidationPreview {
+    pub owner_ref: String,
+    pub expected_digest: Option<String>,
+    pub observed_digest: String,
+    pub binding_digest: Option<String>,
+    pub file_count: usize,
+    pub total_bytes: u64,
+    pub ready_for_admission: bool,
+    pub status: String,
+}
+
 impl AdmittedSourceClosure {
     pub fn finalization_evidence(&self) -> (&SourceClosureProof, &dyn SourceClosureStore) {
         (&self.proof, &self.store)
@@ -63,6 +75,7 @@ pub fn admit_source_closure(
         project,
         executor_policy,
         &mut publication,
+        None,
     )?;
     if let Some(admitted) = admitted.as_mut() {
         admitted.publication = publication;
@@ -79,6 +92,7 @@ pub fn admit_source_closure_in_publication(
     project: Option<(&Path, &dyn AuthoritativeProjectContent, String)>,
     executor_policy: Option<&ExecutorSourcePolicyProjection>,
     publication: &mut Option<PendingCasPublication>,
+    mut preview: Option<&mut Option<SourceClosureValidationPreview>>,
 ) -> anyhow::Result<Option<AdmittedSourceClosure>> {
     if resolution
         .composed
@@ -214,10 +228,17 @@ pub fn admit_source_closure_in_publication(
             if executor_policy.is_some() {
                 anyhow::bail!("self-launching source cannot borrow an executor source policy");
             }
-            let declaration = ryeos_engine::source_closure::WorkerSourceDeclaration::from_composed(
-                &resolution.composed.composed,
-                Some(contract),
-            )?
+            let declaration = if preview.is_some() {
+                ryeos_engine::source_closure::WorkerSourceDeclaration::from_composed_for_static_preview(
+                    &resolution.composed.composed,
+                    Some(contract),
+                )?
+            } else {
+                ryeos_engine::source_closure::WorkerSourceDeclaration::from_composed(
+                    &resolution.composed.composed,
+                    Some(contract),
+                )?
+            }
             .ok_or_else(|| anyhow::anyhow!("source declaration is absent"))?;
             let bare_id = resolution
                 .root
@@ -259,6 +280,29 @@ pub fn admit_source_closure_in_publication(
         contract,
     )?;
     require_manifest_entry(&candidate, &root_entry)?;
+    if let Some(output) = preview.as_deref_mut()
+        && let Some(declaration) = worker_declaration.as_ref()
+    {
+        let observed_digest = candidate.manifest.digest()?;
+        let (ready_for_admission, status) = if !lillux::valid_hash(&declaration.digest) {
+            (false, "pending")
+        } else if declaration.digest == observed_digest {
+            (true, "matched")
+        } else {
+            (false, "mismatched")
+        };
+        *output = Some(SourceClosureValidationPreview {
+            owner_ref: resolution.root.resolved_ref.to_string(),
+            expected_digest: Some(declaration.digest.clone()),
+            observed_digest,
+            binding_digest: None,
+            file_count: candidate.manifest.totals.file_count,
+            total_bytes: candidate.manifest.totals.total_bytes,
+            ready_for_admission,
+            status: status.to_owned(),
+        });
+        return Ok(None);
+    }
     let testimony = match contract.testimony {
         ryeos_engine::kind_registry::SourceClosureTestimonyDecl::OwnerSignedFiles => {
             verify_owner_signed_files(
@@ -362,6 +406,26 @@ pub fn admit_source_closure_in_publication(
     };
     binding.validate()?;
 
+    if let Some(preview) = preview {
+        let expected_digest = match &binding.testimony {
+            ryeos_state::objects::SourceTestimonyProof::OwnerSignedDigest {
+                expected_manifest_hash,
+            } => Some(expected_manifest_hash.clone()),
+            ryeos_state::objects::SourceTestimonyProof::OwnerSignedFiles { .. } => None,
+        };
+        *preview = Some(SourceClosureValidationPreview {
+            owner_ref: binding.owner.canonical_ref.clone(),
+            expected_digest,
+            observed_digest: content_manifest_hash,
+            binding_digest: Some(binding.digest()?),
+            file_count: candidate.manifest.totals.file_count,
+            total_bytes: candidate.manifest.totals.total_bytes,
+            ready_for_admission: true,
+            status: "matched".to_owned(),
+        });
+        return Ok(None);
+    }
+
     if publication.is_none() {
         let authority = state
             .state_store
@@ -429,6 +493,36 @@ pub fn admit_source_closure_in_publication(
         binding,
         manifest: candidate.manifest,
     }))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn preview_source_closure(
+    state: &AppState,
+    engine: &ryeos_engine::engine::Engine,
+    kind: &str,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    project: Option<(&Path, &dyn AuthoritativeProjectContent, String)>,
+    executor_policy: Option<&ExecutorSourcePolicyProjection>,
+) -> anyhow::Result<Option<SourceClosureValidationPreview>> {
+    let mut resolution = resolution.clone();
+    let mut publication = None;
+    let mut preview = None;
+    let admitted = admit_source_closure_in_publication(
+        state,
+        engine,
+        kind,
+        &mut resolution,
+        roots,
+        project,
+        executor_policy,
+        &mut publication,
+        Some(&mut preview),
+    )?;
+    if admitted.is_some() || publication.is_some() {
+        anyhow::bail!("static source validation attempted to mint launch authority");
+    }
+    Ok(preview)
 }
 
 pub fn recover_source_closure(

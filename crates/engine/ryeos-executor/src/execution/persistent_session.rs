@@ -189,6 +189,7 @@ fn admit_session_capsule(
         None,
         None,
         &mut publication,
+        None,
     )?;
     let captured_external =
         ryeos_app::external_content_admission::admit_external_realizations_in_publication(
