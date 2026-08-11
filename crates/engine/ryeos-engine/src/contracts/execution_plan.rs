@@ -280,6 +280,7 @@ pub struct PlanTrustAuthority {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub signer_fingerprint: Option<String>,
     pub content_hash: String,
+    pub raw_content_digest: String,
 }
 
 /// Signed executor-manifest identity of the installed bundle that supplied a

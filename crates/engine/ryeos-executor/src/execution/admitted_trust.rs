@@ -498,6 +498,7 @@ mod tests {
             trust_class: TrustClass::TrustedBundle,
             signer_fingerprint: Some(fingerprint),
             content_hash: "b".repeat(64),
+            raw_content_digest: "c".repeat(64),
         };
         let node = TrustStore::empty();
 

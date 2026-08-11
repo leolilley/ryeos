@@ -1072,7 +1072,79 @@ pub struct KindSchemaEvidence {
     pub raw_content_digest: String,
     pub signer_fingerprint: String,
     pub signature_header: String,
+    pub body: String,
     pub document: Value,
+}
+
+/// Verify and reparse retained kind-schema testimony without consulting a
+/// mutable filesystem location. The retained body is the exact signed bytes;
+/// the normalized document is checked only as a second representation of
+/// those bytes, never used as a substitute for signature verification.
+pub fn verify_retained_kind_schema_evidence(
+    evidence: &KindSchemaEvidence,
+    trust_store: &TrustStore,
+) -> Result<KindSchema, EngineError> {
+    let header = lillux::signature::parse_signature_line(&evidence.signature_header, "#", None)
+        .ok_or_else(|| EngineError::SignatureMissing {
+            canonical_ref: evidence.canonical_ref.clone(),
+        })?;
+    if header.content_hash != evidence.raw_content_digest
+        || header.signer_fingerprint != evidence.signer_fingerprint
+    {
+        return Err(EngineError::SignatureVerificationFailed {
+            canonical_ref: evidence.canonical_ref.clone(),
+            reason: "retained kind signature header contradicts its admitted identity".into(),
+        });
+    }
+    let actual_hash = lillux::signature::content_hash(&evidence.body);
+    if actual_hash != evidence.raw_content_digest {
+        return Err(EngineError::ContentHashMismatch {
+            canonical_ref: evidence.canonical_ref.clone(),
+            expected: evidence.raw_content_digest.clone(),
+            actual: actual_hash,
+        });
+    }
+    let signer = trust_store
+        .get(&evidence.signer_fingerprint)
+        .ok_or_else(|| EngineError::UntrustedSigner {
+            canonical_ref: evidence.canonical_ref.clone(),
+            fingerprint: evidence.signer_fingerprint.clone(),
+        })?;
+    if !lillux::signature::verify_signature(
+        &header.content_hash,
+        &header.signature_b64,
+        &signer.verifying_key,
+    ) {
+        return Err(EngineError::SignatureVerificationFailed {
+            canonical_ref: evidence.canonical_ref.clone(),
+            reason: "retained kind signature verification failed".into(),
+        });
+    }
+    let document = yaml_to_json(
+        serde_yaml::from_str::<serde_yaml::Value>(&evidence.body).map_err(|error| {
+            EngineError::SchemaLoaderError {
+                reason: format!(
+                    "cannot parse retained kind schema {}: {error}",
+                    evidence.canonical_ref
+                ),
+            }
+        })?,
+    )
+    .map_err(|error| EngineError::SchemaLoaderError {
+        reason: format!(
+            "cannot normalize retained kind schema {}: {error}",
+            evidence.canonical_ref
+        ),
+    })?;
+    if document != evidence.document {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "retained kind schema {} has divergent normalized testimony",
+                evidence.canonical_ref
+            ),
+        });
+    }
+    parse_kind_schema_content(&evidence.canonical_ref, &evidence.body)
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1430,6 +1502,7 @@ fn load_and_verify_kind_schema(
         raw_content_digest: header.content_hash.clone(),
         signer_fingerprint: header.signer_fingerprint.clone(),
         signature_header: content.lines().next().unwrap_or_default().to_owned(),
+        body: clean_content,
         document,
     };
     Ok((schema, header.content_hash, evidence))

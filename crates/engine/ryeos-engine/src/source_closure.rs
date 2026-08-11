@@ -66,11 +66,6 @@ impl WorkerSourceDeclaration {
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_relative_path("source root", &self.root)?;
         validate_relative_path("source entry", &self.entry)?;
-        let root = Path::new(&self.root);
-        let entry = Path::new(&self.entry);
-        if !entry.starts_with(root) || entry == root {
-            anyhow::bail!("source entry must be a regular file beneath source root");
-        }
         ryeos_state::objects::thread_snapshot::validate_canonical_hash(
             "source declaration digest",
             &self.digest,
@@ -136,7 +131,13 @@ impl ExecutorSourcePolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceRootRequest {
     pub id: String,
-    pub prefix: PathBuf,
+    pub selection: SourceRootSelection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceRootSelection {
+    Tree { prefix: PathBuf },
+    File { path: PathBuf },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,12 +217,14 @@ pub fn capture_source_candidate(
     let mut entries = Vec::with_capacity(observed.len());
     let mut blobs = Vec::with_capacity(observed.len());
     for observed in &observed {
-        let full_path = roots
+        let request = roots
             .iter()
             .find(|root| root.id == observed.root)
-            .expect("census root came from request")
-            .prefix
-            .join(&observed.path);
+            .expect("census root came from request");
+        let full_path = match &request.selection {
+            SourceRootSelection::Tree { prefix } => prefix.join(&observed.path),
+            SourceRootSelection::File { path } => path.clone(),
+        };
         let bytes = content
             .read_file(&full_path, ceiling.max_file_bytes)?
             .ok_or(EngineError::MutableEffectiveProgramAuthorityChanged)?;
@@ -292,7 +295,23 @@ fn census(
                 "source closure exceeds its signed file ceiling".to_owned(),
             ));
         }
-        let listed = content.list_files(&root.prefix, remaining)?;
+        let listed = match &root.selection {
+            SourceRootSelection::Tree { prefix } => content.list_files(prefix, remaining)?,
+            SourceRootSelection::File { path } => {
+                let parent = path.parent().unwrap_or_else(|| Path::new(""));
+                let name = path.file_name().ok_or_else(|| {
+                    EngineError::Internal("source file selection has no file name".to_owned())
+                })?;
+                let selected = content
+                    .list_files(parent, ryeos_state::objects::MAX_SOURCE_FILES)?
+                    .into_iter()
+                    .find(|entry| entry.relative_path == Path::new(name))
+                    .ok_or_else(|| {
+                        EngineError::Internal("source root entry is absent".to_owned())
+                    })?;
+                vec![selected]
+            }
+        };
         remaining = remaining.checked_sub(listed.len()).ok_or_else(|| {
             EngineError::Internal("source closure file count overflow".to_owned())
         })?;
@@ -496,7 +515,9 @@ mod tests {
             &first,
             &[SourceRootRequest {
                 id: "source".to_owned(),
-                prefix: PathBuf::from("install-a"),
+                selection: SourceRootSelection::Tree {
+                    prefix: PathBuf::from("install-a"),
+                },
             }],
             &ceiling(),
         )
@@ -505,7 +526,9 @@ mod tests {
             &second,
             &[SourceRootRequest {
                 id: "source".to_owned(),
-                prefix: PathBuf::from("install-b"),
+                selection: SourceRootSelection::Tree {
+                    prefix: PathBuf::from("install-b"),
+                },
             }],
             &ceiling(),
         )
@@ -520,13 +543,13 @@ mod tests {
     fn worker_source_is_atomic_and_entry_is_beneath_root() {
         let declaration: WorkerSourceDeclaration = serde_json::from_value(serde_json::json!({
             "root": "lib/session",
-            "entry": "lib/session/bootstrap.py",
+            "entry": "bootstrap.py",
             "digest": "a".repeat(64)
         }))
         .unwrap();
         declaration.validate().unwrap();
         let mut escaped = declaration;
-        escaped.entry = "bootstrap.py".to_owned();
+        escaped.entry = "../bootstrap.py".to_owned();
         assert!(escaped.validate().is_err());
     }
 }

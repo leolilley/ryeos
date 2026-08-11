@@ -358,6 +358,27 @@ struct ChainTerminal {
     runtime_identity: Option<PlanRuntimeIdentity>,
 }
 
+/// Verified, pre-compilation projection of the exact executor-chain element
+/// that owns adjacent-source loading. It can be obtained before source
+/// capture and compared with the later compiled plan without reinterpreting a
+/// mutable chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutorSourcePolicyProjection {
+    pub policy: crate::source_closure::ExecutorSourcePolicy,
+    pub declarer: crate::contracts::PlanTrustAuthority,
+    pub chain_authorities: Vec<crate::contracts::PlanTrustAuthority>,
+    pub chain_digest: String,
+}
+
+impl ExecutorSourcePolicyProjection {
+    pub fn assert_matches_plan(&self, plan: &ExecutionPlan) -> Result<(), EngineError> {
+        if plan.executor_authorities != self.chain_authorities {
+            return Err(EngineError::MutableEffectiveProgramAuthorityChanged);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ExecutorChainResolutionContext<'a> {
     kinds: &'a KindRegistry,
@@ -521,6 +542,12 @@ fn resolve_executor_chain(
         };
 
         let content_hash = crate::item_resolution::content_hash(&content);
+        let raw_content = lillux::signature::strip_signature_lines_with_envelope(
+            &content,
+            &source_format.signature.prefix,
+            source_format.signature.suffix.as_deref(),
+        );
+        let raw_content_digest = crate::item_resolution::content_hash(&raw_content);
         chain_content_hashes.push(content_hash.clone());
         let plan_trust_class = match (trust_class, source_space) {
             (ContractTrustClass::Trusted, crate::contracts::ItemSpace::Bundle) => {
@@ -542,6 +569,7 @@ fn resolve_executor_chain(
             trust_class: plan_trust_class,
             signer_fingerprint,
             content_hash: content_hash.clone(),
+            raw_content_digest,
         });
 
         if runtime_identity.is_none() {
@@ -622,6 +650,92 @@ fn resolve_executor_chain(
         chain_content_hashes,
         intermediates,
         runtime_identity,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_executor_source_policy(
+    starting_executor_id: &str,
+    root_source_path: &Path,
+    root_kind: &str,
+    kinds: &KindRegistry,
+    parsers: &ParserDispatcher,
+    roots: &ResolutionRoots,
+    trust_store: &TrustStore,
+    node_trust_store: &TrustStore,
+    project_authority: Option<(
+        &Path,
+        &dyn crate::project_content::AuthoritativeProjectContent,
+    )>,
+) -> Result<ExecutorSourcePolicyProjection, EngineError> {
+    let terminal = resolve_executor_chain(
+        starting_executor_id,
+        root_source_path,
+        root_kind,
+        ExecutorChainResolutionContext {
+            kinds,
+            parsers,
+            roots,
+            trust_store,
+            node_trust_store: Some(node_trust_store),
+            project_authority,
+        },
+    )?;
+    let mut selected = None;
+    for (intermediate, authority) in terminal
+        .intermediates
+        .iter()
+        .zip(terminal.verified_chain.iter())
+    {
+        let Some(value) = intermediate.parsed.get("source_scope") else {
+            continue;
+        };
+        if selected.is_some() {
+            return Err(EngineError::InvalidRuntimeConfig {
+                path: intermediate.resolved_ref.clone(),
+                reason: "executor chain declares more than one source_scope owner".to_owned(),
+            });
+        }
+        let policy =
+            crate::source_closure::ExecutorSourcePolicy::from_value(value).map_err(|error| {
+                EngineError::InvalidRuntimeConfig {
+                    path: intermediate.resolved_ref.clone(),
+                    reason: format!("invalid source_scope declaration: {error}"),
+                }
+            })?;
+        if !matches!(
+            authority.trust_class,
+            crate::resolution::TrustClass::TrustedBundle
+                | crate::resolution::TrustClass::TrustedNode
+                | crate::resolution::TrustClass::TrustedProject
+        ) || authority.signer_fingerprint.is_none()
+        {
+            return Err(EngineError::InvalidRuntimeConfig {
+                path: intermediate.resolved_ref.clone(),
+                reason: "source_scope owner is not signed by an admitted trusted principal"
+                    .to_owned(),
+            });
+        }
+        selected = Some((policy, authority.clone()));
+    }
+    let (policy, declarer) = selected.ok_or_else(|| EngineError::InvalidRuntimeConfig {
+        path: root_source_path.display().to_string(),
+        reason: "executor chain has no exact source_scope owner".to_owned(),
+    })?;
+    let value = serde_json::json!({
+        "schema": "ryeos.executor_source_chain.v1",
+        "authorities": &terminal.verified_chain,
+    });
+    let chain_digest = lillux::sha256_hex(
+        lillux::canonical_json(&value)
+            .map_err(|error| EngineError::Internal(error.to_string()))?
+            .as_bytes(),
+    );
+    Ok(ExecutorSourcePolicyProjection {
+        policy,
+        declarer,
+        chain_authorities: terminal.verified_chain,
+        chain_digest,
     })
 }
 

@@ -250,6 +250,7 @@ pub struct SignedKindSourceCeiling {
     pub raw_content_digest: String,
     pub signer_fingerprint: String,
     pub signature_header: String,
+    pub schema_body: String,
     pub schema_document: Value,
     pub normalized_declaration: Value,
     pub root_kind_format: Value,
@@ -430,6 +431,15 @@ impl EffectiveSourceBinding {
             &self.kind_ceiling.signature_header,
             8192,
         )?;
+        if self.kind_ceiling.schema_body.is_empty()
+            || self.kind_ceiling.schema_body.len() > 256 * 1024
+        {
+            anyhow::bail!("source kind signed body exceeds its retained ceiling");
+        }
+        let body_digest = lillux::signature::content_hash(&self.kind_ceiling.schema_body);
+        if body_digest != self.kind_ceiling.raw_content_digest {
+            anyhow::bail!("source kind signed body contradicts its raw-content digest");
+        }
         for (label, value) in [
             (
                 "source kind schema document",
@@ -628,6 +638,8 @@ mod tests {
 
     #[test]
     fn binding_identity_separates_owner_from_shared_content() {
+        let schema_body = "kind: kind\n".to_owned();
+        let schema_body_digest = lillux::signature::content_hash(&schema_body);
         let binding = EffectiveSourceBinding {
             schema: EFFECTIVE_SOURCE_BINDING_SCHEMA,
             kind: EFFECTIVE_SOURCE_BINDING_KIND.to_owned(),
@@ -644,9 +656,10 @@ mod tests {
             kind_ceiling: SignedKindSourceCeiling {
                 schema_ref: "kind:tool".to_owned(),
                 source_content_digest: "d".repeat(64),
-                raw_content_digest: "e".repeat(64),
+                raw_content_digest: schema_body_digest,
                 signer_fingerprint: "f".repeat(64),
                 signature_header: "signed".to_owned(),
+                schema_body,
                 schema_document: serde_json::json!({"kind": "kind"}),
                 normalized_declaration: serde_json::json!({"derived": SOURCE_CLOSURE_DERIVED_KEY}),
                 root_kind_format: serde_json::json!({"extensions": ["yaml"]}),
