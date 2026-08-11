@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 #[cfg(unix)]
 use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
@@ -88,6 +88,67 @@ impl VerifiedContentFile {
                     destination_parent.path().join(destination_name).display()
                 )
             })
+    }
+
+    /// Copy this already-verified cache inode into one ephemeral private
+    /// workspace file. The destination is a distinct inode, so target writes
+    /// cannot mutate the immutable cache or another execution. No durability
+    /// barrier is issued: private workspaces are reconstructible execution
+    /// state, and the caller verifies the completed tree against its admitted
+    /// snapshot before exposing it.
+    pub fn copy_to_private(
+        &self,
+        destination_parent: &lillux::secure_fs::PinnedDirectory,
+        destination_name: &OsStr,
+        normalized_mode: u32,
+    ) -> Result<u64> {
+        if !matches!(normalized_mode, 0o644 | 0o755) {
+            anyhow::bail!("unsupported private workspace mode {normalized_mode:#o}");
+        }
+        let mut destination = destination_parent.open_regular_create(
+            destination_name,
+            true,
+            true,
+            normalized_mode,
+        )?;
+        lillux::secure_fs::set_open_regular_file_mode(&destination, normalized_mode)?;
+        let result = (|| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::FileExt as _;
+
+                let expected_size = self.file.metadata()?.len();
+                let mut copied = 0_u64;
+                let mut buffer = vec![0_u8; 1024 * 1024];
+                while copied < expected_size {
+                    let remaining = expected_size - copied;
+                    let limit = usize::try_from(remaining.min(buffer.len() as u64))?;
+                    let read = self.file.read_at(&mut buffer[..limit], copied)?;
+                    if read == 0 {
+                        anyhow::bail!(
+                            "verified content cache entry ended after {copied} of {expected_size} bytes"
+                        );
+                    }
+                    destination.write_all(&buffer[..read])?;
+                    copied = copied
+                        .checked_add(read as u64)
+                        .ok_or_else(|| anyhow::anyhow!("private workspace byte count overflow"))?;
+                }
+                if self.file.metadata()?.len() != expected_size {
+                    anyhow::bail!("verified content cache entry changed while being copied");
+                }
+                Ok(copied)
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = &mut destination;
+                anyhow::bail!("descriptor-rooted private workspace copies are unavailable")
+            }
+        })();
+        if result.is_err() {
+            let _ = destination_parent.remove_if_same(destination_name, &destination);
+        }
+        result
     }
 }
 

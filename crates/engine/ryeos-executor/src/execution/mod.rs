@@ -488,13 +488,10 @@ pub(crate) fn checkout_project_lower(
         ProjectLowerMaterialization::PrivateWritableWorkspace(target_dir) => {
             let target_root = lillux::secure_fs::PinnedDirectory::open_or_create(target_dir)?;
             for (relative, project_file) in project_files {
+                let content = cache.ensure_content_file(&cas, project_file)?;
                 let (parent, name) = pinned_output_parent(&target_root, relative)?;
-                let materialized = cas.materialize_blob_to_new_regular(
-                    &project_file.blob_hash,
-                    &parent,
-                    &name,
-                    project_file.normalized_mode,
-                )?;
+                let materialized =
+                    content.copy_to_private(&parent, &name, project_file.normalized_mode)?;
                 if materialized != project_file.size {
                     anyhow::bail!(
                         "private workspace file {relative} materialized {materialized} bytes, expected {}",
