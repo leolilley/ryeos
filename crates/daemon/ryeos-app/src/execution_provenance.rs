@@ -650,6 +650,72 @@ impl ExecutionProvenance {
         Ok(root)
     }
 
+    /// Resolve the original project root for a daemon-mediated item
+    /// publication.
+    ///
+    /// This is deliberately distinct from live-project filesystem authority.
+    /// A pinned execution never receives ambient access to this path. The
+    /// callback service must separately prove the sealed caller project-write
+    /// ceiling and the item's exact authoring capability before using the
+    /// returned root. Pinned authority contributes only the path-and-identity
+    /// fence retained at admission.
+    pub fn durable_item_publication_root(&self, namespace: &str) -> anyhow::Result<&Path> {
+        if namespace != "project" {
+            anyhow::bail!(
+                "daemon-mediated item publication does not support namespace `{namespace}`"
+            );
+        }
+        let root = match self.project_authority() {
+            authority @ ryeos_state::objects::ExecutionProjectAuthority::LiveProject { .. } => {
+                authority.authorized_live_write_root(namespace)?
+            }
+            ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                stable_project_identity,
+                display_path,
+                environment,
+                ..
+            } => {
+                let root = display_path.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("pinned item publication has no admitted original project path")
+                })?;
+                let ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
+                    project_authority_id,
+                    ..
+                } = environment
+                else {
+                    anyhow::bail!(
+                        "pinned item publication has no original project authority binding"
+                    );
+                };
+                let expected_authority_id = lillux::sha256_hex(
+                    format!(
+                        "live-project\0{}\0{}",
+                        stable_project_identity,
+                        root.display(),
+                    )
+                    .as_bytes(),
+                );
+                if project_authority_id != &expected_authority_id {
+                    anyhow::bail!(
+                        "pinned item publication project authority identity is not canonical"
+                    );
+                }
+                root
+            }
+            ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => {
+                anyhow::bail!("projectless execution cannot publish project items")
+            }
+        };
+        if root != self.original_project_path() {
+            anyhow::bail!(
+                "durable item publication root {} does not match provenance project identity {}",
+                root.display(),
+                self.original_project_path().display()
+            );
+        }
+        Ok(root)
+    }
+
     pub fn advances_project_head(&self) -> bool {
         matches!(
             self.project_authority(),
@@ -1062,6 +1128,37 @@ mod tests {
         .unwrap()
     }
 
+    fn pinned_with_item_publication(
+        original_path: &Path,
+        snapshot_hash: &str,
+    ) -> ryeos_state::objects::ExecutionProjectAuthority {
+        let stable_project_identity = format!("local:{}", original_path.display());
+        let project_authority_id = lillux::sha256_hex(
+            format!(
+                "live-project\0{}\0{}",
+                stable_project_identity,
+                original_path.display()
+            )
+            .as_bytes(),
+        );
+        ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            stable_project_identity,
+            Some(original_path.to_path_buf()),
+            snapshot_hash.to_string(),
+            ryeos_state::objects::PinnedProjectRealization::Cow {
+                terminal_publication: ryeos_state::objects::PinnedTerminalPublication::RetainResult,
+            },
+            ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
+                project_authority_id,
+                source_identity: format!("dotenv:{}/.env", original_path.display()),
+                include_operator_vault: true,
+                name_authority: ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
+            },
+            vec![crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
+        )
+        .unwrap()
+    }
+
     #[test]
     fn root_live_fs_constructor_sets_paths_equal() {
         let p = live("/live", engine());
@@ -1309,6 +1406,60 @@ mod tests {
         assert_eq!(
             provenance.durable_live_write_root("project").unwrap(),
             durable.path()
+        );
+    }
+
+    #[test]
+    fn pinned_item_publication_uses_admitted_original_root_not_execution_view() {
+        let original = tempfile::tempdir().unwrap();
+        let materialized = tempfile::tempdir().unwrap();
+        let lifeline = Arc::new(TempDirGuard::new(materialized.path().to_path_buf()));
+        let provenance = ExecutionProvenance::root_pushed_head_for_test(
+            materialized.path().to_path_buf(),
+            original.path().to_path_buf(),
+            engine(),
+            lifeline,
+            "a".repeat(64),
+            pinned_with_item_publication(original.path(), &"a".repeat(64)),
+        )
+        .unwrap()
+        .clone_for_borrowed_child();
+
+        assert_eq!(provenance.effective_path(), materialized.path());
+        assert!(provenance.durable_live_write_root("project").is_err());
+        assert_eq!(
+            provenance.durable_item_publication_root("project").unwrap(),
+            original.path()
+        );
+        assert!(
+            provenance
+                .durable_item_publication_root("unsupported")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn pinned_item_publication_refuses_authority_without_original_project_binding() {
+        let original = tempfile::tempdir().unwrap();
+        let materialized = tempfile::tempdir().unwrap();
+        let lifeline = Arc::new(TempDirGuard::new(materialized.path().to_path_buf()));
+        let provenance = ExecutionProvenance::root_pushed_head_for_test(
+            materialized.path().to_path_buf(),
+            original.path().to_path_buf(),
+            engine(),
+            lifeline,
+            "a".repeat(64),
+            pinned(original.path(), &"a".repeat(64)),
+        )
+        .unwrap();
+
+        let error = provenance
+            .durable_item_publication_root("project")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("no original project authority binding"),
+            "{error}"
         );
     }
 

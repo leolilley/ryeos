@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::callback_token::{CallbackCapability, ThreadAuthState};
+use crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY;
 use crate::identity::NodeIdentity;
 
 const PROVENANCE_MARKER: &str = "ryeos:authored:";
@@ -71,10 +72,20 @@ impl RuntimeItemAuthorService {
         thread_auth: &ThreadAuthState,
         params: RuntimeAuthorItemParams,
     ) -> Result<RuntimeAuthorItemResponse> {
+        // The callback's item-specific grant is not by itself authority to
+        // mutate a live project. Preserve the caller's independently admitted
+        // project-write ceiling across pinned execution, while keeping the
+        // runtime confined to its immutable/COW project view.
+        authorizer
+            .authorize(
+                cap.provenance.project_authority().capability_ceiling(),
+                &AuthorizationPolicy::require(LIVE_PROJECT_WRITE_CAPABILITY),
+            )
+            .context("runtime item authoring requires admitted caller project-write authority")?;
         let project_root = cap
             .provenance
-            .durable_live_write_root("project")
-            .context("runtime item authoring requires durable live-project write authority")?;
+            .durable_item_publication_root("project")
+            .context("runtime item authoring requires durable project publication authority")?;
         if params.content.contains(PROVENANCE_MARKER) {
             bail!("runtime-authored item content must not contain `{PROVENANCE_MARKER}`");
         }
