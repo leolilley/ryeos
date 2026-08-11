@@ -777,27 +777,54 @@ impl SealedRootExecutionRequest {
         &self,
         resume: &crate::launch_metadata::ResumeContext,
     ) -> Result<()> {
-        if self.kind != resume.kind
-            || self.item_ref != resume.item_ref
-            || self.ref_bindings != resume.ref_bindings
-            || self.launch_mode != resume.launch_mode
-            || self.parameters != resume.parameters
-            || self.current_site_id != resume.current_site_id
-            || self.origin_site_id != resume.origin_site_id
-            || self.requested_by.as_deref() != Some(resume.principal_identifier())
-            || self.planning_principal != SealedPrincipal::from(&resume.requested_by)
-            || self.project_context != resume.project_context
-            || self.project_authority != resume.project_authority
-            || resume.executor_ref.as_deref() != Some(self.executor_ref())
-            || resume.runtime_ref.as_deref() != Some(self.runtime_ref())
-            || self.execution_hints != resume.execution_hints.values
-        {
+        if let Some(field) = self.invocation_resume_mismatch(resume) {
             bail!(
-                "sealed invocation and resume authority disagree for {}",
-                resume.item_ref
+                "sealed invocation and resume authority disagree for {} ({field})",
+                resume.item_ref,
             );
         }
         Ok(())
+    }
+
+    /// Name the first contradictory field without returning either side's
+    /// value. Invocation data may contain project paths or private parameters;
+    /// a refusal must identify the broken authority edge without disclosing
+    /// those values into a runtime-visible diagnostic.
+    fn invocation_resume_mismatch(
+        &self,
+        resume: &crate::launch_metadata::ResumeContext,
+    ) -> Option<&'static str> {
+        if self.kind != resume.kind {
+            Some("kind")
+        } else if self.item_ref != resume.item_ref {
+            Some("item_ref")
+        } else if self.ref_bindings != resume.ref_bindings {
+            Some("ref_bindings")
+        } else if self.launch_mode != resume.launch_mode {
+            Some("launch_mode")
+        } else if self.parameters != resume.parameters {
+            Some("parameters")
+        } else if self.current_site_id != resume.current_site_id {
+            Some("current_site_id")
+        } else if self.origin_site_id != resume.origin_site_id {
+            Some("origin_site_id")
+        } else if self.requested_by.as_deref() != Some(resume.principal_identifier()) {
+            Some("requested_by")
+        } else if self.planning_principal != SealedPrincipal::from(&resume.requested_by) {
+            Some("planning_principal")
+        } else if self.project_context != resume.project_context {
+            Some("project_context")
+        } else if self.project_authority != resume.project_authority {
+            Some("project_authority")
+        } else if resume.executor_ref.as_deref() != Some(self.executor_ref()) {
+            Some("executor_ref")
+        } else if resume.runtime_ref.as_deref() != Some(self.runtime_ref()) {
+            Some("runtime_ref")
+        } else if self.execution_hints != resume.execution_hints.values {
+            Some("execution_hints")
+        } else {
+            None
+        }
     }
 
     /// Rebind only the invocation envelope of an exact admitted program for a
@@ -833,7 +860,9 @@ impl SealedRootExecutionRequest {
             &resume.project_authority,
         )?;
         successor.execution_hints = resume.execution_hints.values.clone();
-        successor.validate_invocation_against_resume(resume)?;
+        successor
+            .validate_invocation_against_resume(resume)
+            .context("continuation invocation rebind validation")?;
         Ok(successor)
     }
 

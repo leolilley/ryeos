@@ -5980,28 +5980,21 @@ impl RuntimeDb {
         let launch_metadata_json = launch_metadata_json.ok_or_else(|| {
             anyhow::anyhow!("thread {thread_id} has no launch metadata for frozen workspace")
         })?;
-        let mut launch_metadata = decode_current_launch_metadata(&launch_metadata_json)
+        let launch_metadata = decode_current_launch_metadata(&launch_metadata_json)
             .context("decode launch metadata while binding frozen workspace")?;
-        let resume = launch_metadata.resume_context.as_mut().ok_or_else(|| {
-            anyhow::anyhow!("thread {thread_id} has no ResumeContext for frozen workspace")
-        })?;
-        match existing_frozen.as_deref() {
-            Some(_) if resume.original_snapshot_hash.as_deref() != Some(snapshot_hash) => {
-                bail!("frozen workspace and ResumeContext snapshot hashes contradict");
-            }
-            None if resume.durable_project_snapshot_hash() != Some(lower_snapshot.as_str()) => {
-                bail!("workspace lower snapshot and predecessor ResumeContext contradict");
-            }
-            _ => {}
+        let admitted_project_authority = launch_metadata
+            .admitted_project_authority
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "thread {thread_id} has no admitted project authority for frozen workspace"
+                )
+            })?;
+        if admitted_project_authority.operational_snapshot_projection()
+            != Some(lower_snapshot.as_str())
+        {
+            bail!("workspace lower snapshot and admitted launch authority contradict");
         }
-        resume.original_snapshot_hash = Some(snapshot_hash.to_string());
-        resume.original_pushed_head_ref = None;
-        resume.project_authority = resume.project_authority.transition_operational_generation(
-            ryeos_state::objects::OperationalProjectAuthorityTransition::SealPinnedCowCheckpoint {
-                snapshot_hash,
-            },
-        )?;
-        let launch_metadata_json = encode_current_launch_metadata(&launch_metadata)?;
         let workspace_updated = tx.execute(
             "UPDATE execution_workspace
                 SET frozen_snapshot_hash=?4, updated_at_ms=?5
@@ -6017,12 +6010,8 @@ impl RuntimeDb {
                 WorkspaceState::Freezing.as_str()
             ],
         )?;
-        let runtime_updated = tx.execute(
-            "UPDATE thread_runtime SET launch_metadata=?2 WHERE thread_id=?1",
-            params![thread_id, launch_metadata_json],
-        )?;
-        if workspace_updated != 1 || runtime_updated != 1 {
-            bail!("frozen workspace binding lost its durable owner rows");
+        if workspace_updated != 1 {
+            bail!("frozen workspace binding lost its durable owner row");
         }
         tx.commit()
             .context("commit atomic frozen workspace binding")

@@ -734,13 +734,13 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                     existing
                 } else {
                     let successor_id = new_thread_id();
-                    let mut successor_launch_metadata = parent_launch_metadata
-                        .as_ref()
-                        .ok_or_else(|| {
+                    let parent_source_metadata =
+                        parent_launch_metadata.as_ref().ok_or_else(|| {
                             anyhow::anyhow!(
                                 "follow: parent {parent_thread_id} has no persisted launch metadata"
                             )
-                        })?
+                        })?;
+                    let mut successor_launch_metadata = parent_source_metadata
                         .for_continuation_successor(
                             &parent_thread_id,
                             ryeos_app::launch_metadata::daemon_checkpoint_dir(
@@ -776,9 +776,9 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                         .ok_or_else(|| {
                             anyhow::anyhow!("follow: successor lost its durable ResumeContext")
                         })?;
-                    let successor_sealed_request = parent_launch_metadata
+                    let successor_sealed_request = parent_source_metadata
+                        .sealed_root_request
                         .as_ref()
-                        .and_then(|metadata| metadata.sealed_root_request.as_ref())
                         .ok_or_else(|| {
                             anyhow::anyhow!(
                                 "follow: parent {parent_thread_id} has no admitted launch capsule"
@@ -786,6 +786,14 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                         })?
                         .for_continuation_invocation(successor_resume)?;
                     successor_launch_metadata.set_sealed_root_request(successor_sealed_request);
+                    let successor_realization =
+                        crate::execution::execution_realization::transition_continuation_project_authority(
+                            state,
+                            parent_source_metadata,
+                            &successor_launch_metadata,
+                        )?;
+                    successor_launch_metadata = successor_launch_metadata
+                        .with_execution_realization_hash(successor_realization.hash);
                     // Via the lifecycle service so the parent-`continued` + successor-
                     // `created` events reach live subscribers, not just the event store.
                     state.threads.create_follow_resume_successor(
@@ -828,6 +836,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                         &successor_launch_metadata,
                         child_snapshot_hash.as_deref(),
                     )?;
+                    drop(successor_realization.publication);
                     if let Err(error) = state
                         .state_store
                         .set_follow_parent_successor(&follow_key, &successor_id)
@@ -1505,6 +1514,7 @@ fn commit_follow_child_roots(
             let fresh_prepared = prepared.take().ok_or_else(|| {
                 anyhow::anyhow!("follow: missing prepared authority for child index {item_index}")
             })?;
+            fresh_prepared.verify_fresh_launch_authority_unchanged()?;
             let mut initial_events = fresh_prepared.initial_audit_events()?;
             if let Some(Value::Object(facets)) = child.facets.as_ref() {
                 for (key, value) in facets {

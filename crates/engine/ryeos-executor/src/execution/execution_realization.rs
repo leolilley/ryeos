@@ -12,6 +12,7 @@ use ryeos_state::objects::{
 
 pub(crate) struct ExecutionRealizationAdmission {
     pub(crate) hash: String,
+    pub(crate) launch_authority_digest: String,
     pub(crate) publication: Option<ryeos_state::PendingCasPublication>,
 }
 
@@ -56,6 +57,7 @@ pub(crate) fn admit_or_verify(
         verify_realization_components(state, &existing)?;
         return Ok(ExecutionRealizationAdmission {
             hash: existing_hash.to_owned(),
+            launch_authority_digest,
             publication: None,
         });
     }
@@ -131,6 +133,52 @@ pub(crate) fn verify_persistent_session(
     verify_realization_components(state, &existing)
 }
 
+/// Rebind an exact retained execution realization to the one authority field
+/// a continuation is allowed to advance: its admitted project generation.
+/// Every other launch-authority component remains byte-identical to the
+/// source segment, and the retained substrate/components are copied from the
+/// already-verified source realization rather than re-resolved.
+pub(crate) fn transition_continuation_project_authority(
+    state: &AppState,
+    source: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    successor: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+) -> Result<ExecutionRealizationAdmission> {
+    let source_capsule = source
+        .admitted_launch_capsule()?
+        .ok_or_else(|| anyhow::anyhow!("continuation source has no admitted launch capsule"))?;
+    let successor_authority = successor.admitted_launch_authority()?.ok_or_else(|| {
+        anyhow::anyhow!("continuation successor has no admitted launch authority")
+    })?;
+    let mut permitted = source_capsule.launch_authority();
+    permitted.project_authority = successor_authority.project_authority.clone();
+    if permitted != successor_authority {
+        anyhow::bail!(
+            "continuation changed launch authority outside its admitted project generation"
+        );
+    }
+
+    let authority = state
+        .state_store
+        .with_state_db(|database| database.pinned_authority())?;
+    let source_realization = source_capsule.verify_retained_execution_realization(
+        &authority.cas_store()?,
+        &authority.large_object_store()?,
+        authority.trust_store(),
+    )?;
+    let successor_digest = successor_authority.digest()?;
+    if source_realization.launch_authority_digest == successor_digest {
+        return Ok(ExecutionRealizationAdmission {
+            hash: source_capsule.execution_realization_hash,
+            launch_authority_digest: successor_digest,
+            publication: None,
+        });
+    }
+
+    let mut candidate = source_realization;
+    candidate.launch_authority_digest = successor_digest.clone();
+    store_realization_candidate(state, candidate, None)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn store_new_realization(
     state: &AppState,
@@ -160,7 +208,7 @@ fn store_new_realization(
         kind: ADMITTED_EXECUTION_REALIZATION_KIND.to_owned(),
         substrate_identity_hash: node.identity_hash.clone(),
         substrate_attestation_hash: node.attestation_hash.clone(),
-        launch_authority_digest,
+        launch_authority_digest: launch_authority_digest.clone(),
         effective_definition_digest: effective_definition_digest.to_owned(),
         artifact_identity_digest,
         execution_closure_digest,
@@ -169,8 +217,18 @@ fn store_new_realization(
         components,
         properties,
     };
+    store_realization_candidate(state, candidate, staged_publication)
+}
+
+fn store_realization_candidate(
+    state: &AppState,
+    candidate: AdmittedExecutionRealization,
+    staged_publication: Option<&mut ryeos_state::PendingCasPublication>,
+) -> Result<ExecutionRealizationAdmission> {
     candidate.validate()?;
+    verify_realization_node_evidence(state, &candidate)?;
     verify_realization_components(state, &candidate)?;
+    let launch_authority_digest = candidate.launch_authority_digest.clone();
     let expected = candidate.content_hash()?;
     let value = candidate.to_value()?;
     let (stored, publication) = match staged_publication {
@@ -222,6 +280,7 @@ fn store_new_realization(
     }
     Ok(ExecutionRealizationAdmission {
         hash: stored,
+        launch_authority_digest,
         publication,
     })
 }

@@ -655,11 +655,21 @@ impl AdmittedLaunchCapsule {
             anyhow::bail!("admitted execution realization content hash is inconsistent");
         }
         let authority = self.launch_authority();
-        if realization.launch_authority_digest != authority.digest()?
-            || realization.artifact_identity_digest != authority.artifact_identity_digest()?
-            || realization.execution_closure_digest != authority.execution_closure_digest()?
-        {
-            anyhow::bail!("admitted execution realization contradicts launch authority");
+        let capsule_launch_authority_digest = authority.digest()?;
+        if realization.launch_authority_digest != capsule_launch_authority_digest {
+            anyhow::bail!(
+                "admitted execution realization contradicts the complete launch authority"
+            );
+        }
+        if realization.artifact_identity_digest != authority.artifact_identity_digest()? {
+            anyhow::bail!(
+                "admitted execution realization contradicts the launch artifact identity"
+            );
+        }
+        if realization.execution_closure_digest != authority.execution_closure_digest()? {
+            anyhow::bail!(
+                "admitted execution realization contradicts the launch execution closure"
+            );
         }
         let effective_definition_digest = self
             .exact_program
@@ -1059,6 +1069,16 @@ impl AdmittedLaunchCapsule {
     /// comparing those per-segment envelopes to one another would reject
     /// legitimate continuation inputs.
     pub fn same_continuation_admission(&self, other: &Self) -> anyhow::Result<bool> {
+        Ok(self.same_continuation_program_admission(other)?
+            && self.execution_realization_hash == other.execution_realization_hash)
+    }
+
+    /// Compare the immutable program and execution-policy authority shared by
+    /// continuation segments while permitting the realization object itself
+    /// to be rebound to an explicitly advanced pinned project generation.
+    /// Callers must separately prove that the two realization objects differ
+    /// only in their launch-authority digest.
+    pub fn same_continuation_program_admission(&self, other: &Self) -> anyhow::Result<bool> {
         self.validate()?;
         other.validate()?;
         Ok(self.schema == other.schema
@@ -1069,7 +1089,6 @@ impl AdmittedLaunchCapsule {
             && self.launch_driver == other.launch_driver
             && self.artifact_identity == other.artifact_identity
             && self.execution_closure == other.execution_closure
-            && self.execution_realization_hash == other.execution_realization_hash
             && self.accounting_scope == other.accounting_scope
             && self.effective_caps == other.effective_caps
             && self.runtime_ref == other.runtime_ref
@@ -1339,6 +1358,21 @@ mod tests {
         });
         let decoded = AdmittedLaunchCapsule::from_current_value(expected.to_value()).unwrap();
         assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn continuation_program_comparison_separates_realization_rebinding() {
+        let mut source = direct_capsule(DirectExecutableIdentity::NodePolicy);
+        source.lifecycle_authority = ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE;
+        let mut successor = source.clone();
+        successor.execution_realization_hash = "8".repeat(64);
+
+        assert!(
+            source
+                .same_continuation_program_admission(&successor)
+                .unwrap()
+        );
+        assert!(!source.same_continuation_admission(&successor).unwrap());
     }
 
     #[test]

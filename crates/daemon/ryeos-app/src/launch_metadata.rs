@@ -993,7 +993,14 @@ impl RuntimeLaunchMetadata {
             .resume_context
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("sealed launch has no persisted resume authority"))?;
-        sealed.validate_invocation_against_resume(resume)?;
+        if let Err(error) = sealed.validate_invocation_against_resume(resume) {
+            let role = if self.continuation_source_thread_id.is_some() {
+                "continuation successor"
+            } else {
+                "launch source"
+            };
+            anyhow::bail!("{role} admitted capsule invocation/resume validation: {error}");
+        }
         let admitted_project_authority = self
             .admitted_project_authority
             .as_ref()

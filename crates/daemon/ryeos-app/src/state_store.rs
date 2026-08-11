@@ -1275,6 +1275,15 @@ fn attach_admitted_launch_capsule(
             snapshot.thread_id
         );
     }
+    let metadata_authority_digest = launch_metadata
+        .expect("capsule construction requires launch metadata")
+        .admitted_launch_authority()?
+        .ok_or_else(|| anyhow!("managed launch metadata lost its admitted authority"))?
+        .digest()?;
+    let capsule_authority_digest = capsule.launch_authority_digest()?;
+    if metadata_authority_digest != capsule_authority_digest {
+        bail!("admitted launch capsule construction changed its source launch authority");
+    }
     state_authority.ensure_guard(cas_guard)?;
     capsule
         .verify_retained_execution_realization(
@@ -1391,7 +1400,7 @@ fn attach_continuation_launch_capsule(
     let source_capsule = source_snapshot
         .admitted_launch_capsule_hash
         .as_deref()
-        .map(|hash| load_admitted_launch_capsule(state_authority, hash))
+        .map(|hash| load_admitted_launch_capsule_with_realization(state_authority, hash))
         .transpose()?;
     let successor_capsule = launch_metadata
         .map(crate::launch_metadata::RuntimeLaunchMetadata::admitted_launch_capsule)
@@ -1409,14 +1418,31 @@ fn attach_continuation_launch_capsule(
             snapshot.thread_id,
             source_thread_id
         ),
-        (Some(source), Some(successor)) if !source.same_continuation_admission(successor)? => {
-            bail!(
-                "continuation successor {} changed immutable admitted launch capsule from source {}",
-                snapshot.thread_id,
-                source_thread_id
-            );
+        (Some((source, source_realization)), Some(successor)) => {
+            if !source.same_continuation_program_admission(successor)? {
+                bail!(
+                    "continuation successor {} changed immutable admitted launch capsule from source {}",
+                    snapshot.thread_id,
+                    source_thread_id
+                );
+            }
+            let successor_realization = successor
+                .verify_retained_execution_realization(
+                    &state_authority.cas_store()?,
+                    &state_authority.large_object_store()?,
+                    state_authority.trust_store(),
+                )
+                .context("verify continuation successor execution realization")?;
+            let mut expected_successor_realization = source_realization.clone();
+            expected_successor_realization.launch_authority_digest =
+                successor.launch_authority_digest()?;
+            if expected_successor_realization != successor_realization {
+                bail!(
+                    "continuation successor {} changed retained execution realization outside its launch authority",
+                    snapshot.thread_id
+                );
+            }
         }
-        (Some(_), Some(_)) => {}
     }
     let snapshot =
         attach_admitted_launch_capsule(state_authority, cas_guard, snapshot, launch_metadata)?;

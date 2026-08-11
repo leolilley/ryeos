@@ -6663,6 +6663,7 @@ pub struct PreparedFollowChildLaunch {
     parent_context: crate::dispatch::ParentExecutionContext,
     execution: crate::execution::runner::ExecutionParams,
     launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    fresh_launch_authority_digest: Option<String>,
     authority: PreparedManagedLaunchAuthority,
     launch_audit: LaunchAuditDisposition,
 }
@@ -6685,6 +6686,21 @@ impl PreparedFollowChildLaunch {
 
     pub fn launch_metadata(&self) -> &ryeos_app::launch_metadata::RuntimeLaunchMetadata {
         &self.launch_metadata
+    }
+
+    pub fn verify_fresh_launch_authority_unchanged(&self) -> anyhow::Result<()> {
+        let Some(expected) = self.fresh_launch_authority_digest.as_deref() else {
+            return Ok(());
+        };
+        let observed = self
+            .launch_metadata
+            .admitted_launch_authority()?
+            .ok_or_else(|| anyhow::anyhow!("fresh follow child lost its launch authority"))?
+            .digest()?;
+        if observed != expected {
+            anyhow::bail!("fresh follow-child launch authority changed before durable birth");
+        }
+        Ok(())
     }
 
     /// Mark that `initial_audit_events` committed atomically with this fresh
@@ -6900,57 +6916,81 @@ async fn prepare_follow_child_launch_inner(
         Some(launch_metadata),
     )
     .await?;
-    let (launch_metadata, prepared_resume) = if capture_project_snapshot {
-        let mut prepared =
-            authority.launch_metadata.as_ref().cloned().ok_or_else(|| {
+    let (launch_metadata, prepared_resume, fresh_launch_authority_digest) =
+        if capture_project_snapshot {
+            let mut prepared = authority.launch_metadata.as_ref().cloned().ok_or_else(|| {
                 anyhow::anyhow!("follow-child authority produced no launch metadata")
             })?;
-        let prepared_resume = prepared.resume_context.as_mut().ok_or_else(|| {
-            anyhow::anyhow!("follow-child launch metadata lost its ResumeContext")
-        })?;
-        // The separately materialized launch workspace is operational only.
-        // Persist the admission workspace named by the original sealed pair;
-        // recovery reconstructs and transiently rebinds it from provenance.
-        prepared_resume.project_context = resume.project_context.clone();
-        let prepared_resume = prepared_resume.clone();
-        // The inherited request is only the child's initial identity. A fresh
-        // child may add launch-augmentation outputs (for example
-        // `rendered_contexts`) during its authoritative pass; seal that
-        // augmented resolution so a retry/relaunch receives the same runtime
-        // envelope instead of reusing the parent's pre-augmentation view.
-        let augmented_sealed_request =
-            ryeos_app::thread_lifecycle::SealedRootExecutionRequest::capture_finalized(
-                &execution.resolved,
-                authority.selected_runtime.canonical_ref.to_string(),
-                &authority.effective_program,
-            )?;
-        prepared.set_sealed_root_request(augmented_sealed_request);
-        let realization_contract_ref = authority.selected_runtime.canonical_ref.to_string();
-        let realization_contract_digest = authority.selected_runtime.raw_content_digest.clone();
-        let realization_admission = super::execution_realization::admit_or_verify(
-            state,
-            &prepared,
-            authority.effective_program.resolution(),
-            authority
-                .effective_program
-                .effective_definition_digest()
-                .as_str(),
-            &realization_contract_ref,
-            &realization_contract_digest,
-            authority.pending_external_realization.as_mut(),
-        )
-        .map_err(BuildAndLaunchError::Internal)?;
-        if authority.pending_external_realization.is_none() {
-            authority.pending_external_realization = realization_admission.publication;
-        }
-        prepared = prepared.with_execution_realization_hash(realization_admission.hash);
-        (prepared, prepared_resume)
-    } else {
-        // An existing child already has an immutable durable birth record.
-        // Re-drive may re-materialize its workspace, but it must not rewrite
-        // either persisted copy of that identity.
-        (launch_metadata.clone(), resume.clone())
-    };
+            let prepared_resume = prepared.resume_context.as_mut().ok_or_else(|| {
+                anyhow::anyhow!("follow-child launch metadata lost its ResumeContext")
+            })?;
+            // The separately materialized launch workspace is operational only.
+            // Persist the admission workspace named by the original sealed pair;
+            // recovery reconstructs and transiently rebinds it from provenance.
+            prepared_resume.project_context = resume.project_context.clone();
+            let prepared_resume = prepared_resume.clone();
+            let admitted_project_authority = execution
+                .resolved
+                .root_admission
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("fresh follow child lost its root admission"))?
+                .project_authority();
+            if admitted_project_authority != &prepared_resume.project_authority {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "fresh follow-child prepared resume authority differs from its admitted request"
+                )));
+            }
+            // The inherited request is only the child's initial identity. A fresh
+            // child may add launch-augmentation outputs (for example
+            // `rendered_contexts`) during its authoritative pass; seal that
+            // augmented resolution so a retry/relaunch receives the same runtime
+            // envelope instead of reusing the parent's pre-augmentation view.
+            let augmented_sealed_request =
+                ryeos_app::thread_lifecycle::SealedRootExecutionRequest::capture_finalized(
+                    &execution.resolved,
+                    authority.selected_runtime.canonical_ref.to_string(),
+                    &authority.effective_program,
+                )?;
+            prepared.set_sealed_root_request(augmented_sealed_request);
+            let realization_contract_ref = authority.selected_runtime.canonical_ref.to_string();
+            let realization_contract_digest = authority.selected_runtime.raw_content_digest.clone();
+            let realization_admission = super::execution_realization::admit_or_verify(
+                state,
+                &prepared,
+                authority.effective_program.resolution(),
+                authority
+                    .effective_program
+                    .effective_definition_digest()
+                    .as_str(),
+                &realization_contract_ref,
+                &realization_contract_digest,
+                authority.pending_external_realization.as_mut(),
+            )
+            .map_err(BuildAndLaunchError::Internal)?;
+            if authority.pending_external_realization.is_none() {
+                authority.pending_external_realization = realization_admission.publication;
+            }
+            prepared = prepared.with_execution_realization_hash(realization_admission.hash);
+            let prepared_launch_authority_digest = prepared
+                .admitted_launch_authority()?
+                .ok_or_else(|| anyhow::anyhow!("fresh follow child lost its launch authority"))?
+                .digest()?;
+            if prepared_launch_authority_digest != realization_admission.launch_authority_digest {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "fresh follow-child metadata changed after execution-realization admission"
+                )));
+            }
+            (
+                prepared,
+                prepared_resume,
+                Some(realization_admission.launch_authority_digest),
+            )
+        } else {
+            // An existing child already has an immutable durable birth record.
+            // Re-drive may re-materialize its workspace, but it must not rewrite
+            // either persisted copy of that identity.
+            (launch_metadata.clone(), resume.clone(), None)
+        };
 
     Ok(PreparedFollowChildLaunch {
         thread_id: thread_id.to_string(),
@@ -6958,6 +6998,7 @@ async fn prepare_follow_child_launch_inner(
         parent_context,
         execution,
         launch_metadata,
+        fresh_launch_authority_digest,
         authority,
         launch_audit: LaunchAuditDisposition::AppendForAttempt,
     })
