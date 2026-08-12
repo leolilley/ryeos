@@ -1098,6 +1098,8 @@ struct Inner {
 struct StateStoreGuard<'a> {
     inner: std::sync::MutexGuard<'a, Inner>,
     _fork_sensitive_descriptors: lillux::ForkSensitiveDescriptorLease,
+    acquired_at: std::time::Instant,
+    caller: &'static std::panic::Location<'static>,
 }
 
 impl std::ops::Deref for StateStoreGuard<'_> {
@@ -1111,6 +1113,21 @@ impl std::ops::Deref for StateStoreGuard<'_> {
 impl std::ops::DerefMut for StateStoreGuard<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
+    }
+}
+
+impl Drop for StateStoreGuard<'_> {
+    fn drop(&mut self) {
+        let held = self.acquired_at.elapsed();
+        if held >= std::time::Duration::from_millis(100) {
+            tracing::warn!(
+                hold_ms = held.as_millis() as u64,
+                caller_file = self.caller.file(),
+                caller_line = self.caller.line(),
+                caller_column = self.caller.column(),
+                "StateStore lock was held by a slow caller"
+            );
+        }
     }
 }
 
@@ -3685,8 +3702,10 @@ impl StateStore {
         )
     }
 
+    #[track_caller]
     fn lock(&self) -> Result<StateStoreGuard<'_>> {
         let started = std::time::Instant::now();
+        let caller = std::panic::Location::caller();
         let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
         let inner = self
             .inner
@@ -3696,12 +3715,17 @@ impl StateStore {
         if waited >= std::time::Duration::from_millis(100) {
             tracing::warn!(
                 wait_ms = waited.as_millis() as u64,
+                caller_file = caller.file(),
+                caller_line = caller.line(),
+                caller_column = caller.column(),
                 "StateStore lock acquisition was delayed"
             );
         }
         Ok(StateStoreGuard {
             _fork_sensitive_descriptors: fork_sensitive_descriptors,
             inner,
+            acquired_at: std::time::Instant::now(),
+            caller,
         })
     }
 
