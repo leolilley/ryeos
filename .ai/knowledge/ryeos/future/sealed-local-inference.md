@@ -1,7 +1,7 @@
-<!-- ryeos:signed:2026-08-10T03:16:08Z:39e6620092c9488fcb0ca6caddf8787c21dfab13413a1049b1c990bf2646d90c:0iDwlTSBzfUIhaLGlF9GhOa+xoi26tTSLn8+ArQVko3M14hyPOJSDthClRoWaGywThtWMj5si3G4LfqbTln0Bw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-12T07:28:15Z:ac60b0b91ed1abec088f1700d27064337baab81f0f3adced00df7c70bfe62e4e:GeUTPj248UUjQVYCyzKpRrezzunODT/rpPGWE6rkNIMDy3d2Y9rTsUH8gSt9r4XRtHcUp8JQL65MWRJ34MHWBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
-tags: [future, determinism, inference, tinygrad, sealed, replay, arc]
-version: "0.2.0"
+tags: [future, determinism, inference, tinygrad, sealed, replay]
+version: "0.2.1"
 status: deferred
 description: >
   The destination for LLM execution in ryeos: local inference on tinygrad as
@@ -58,8 +58,8 @@ admitted content:
   captured as artifacts; the BEAM search cache is pinned as a realization
   so kernel *selection* is sealed, not just kernel source.
 - **runtime** — the tinygrad tree itself under a realization mount
-  (precedent: `simulator_runtime`, 1,276 files — realizing a whole runtime
-  is proven), plus the inference server as a managed runtime on the
+  (whole-runtime tree realization is already proven), plus the inference
+  server as a managed runtime on the
   existing framed-streaming protocol surface.
 - **sampler** — RNG seed and sampler config in the action identity, like
   any other param.
@@ -99,28 +99,24 @@ context. Checkpoints land at declared segment boundaries (the
 `segment_steps` idea, not per-token), with the same retention-lane
 honesty as every other cache here.
 
-## What this means for ARC
+## What this enables for search and evaluation
 
-- **The dev→competition gap collapses to a digest change.** The endgame
-  is offline; under this design there is no port — the hosted-model
-  solver and the competition solver are the same sealed program with the
-  provider route swapped for weights + kernels + runtime realizations.
-  The submission artifact is a capsule.
-- **Search becomes the solver's native move.** Turn budgets and harvest
-  levers are adaptations to hosted economics. Fork + prefix-KV make wide
-  deliberate search — best-of-N rule conjectures, MCTS over solver
-  strategies — the cheap default, and the search tree itself is
-  auditable evidence.
+- **Hosted-to-local movement becomes an identity change.** A workflow may keep
+  the same sealed program while replacing a remote provider route with exact
+  weights, kernels, and runtime realizations. The resulting difference is
+  explicit in the admitted identity rather than hidden behind an API choice.
+- **Search becomes a native execution shape.** Fork + prefix-KV make wide
+  deliberate search and speculative evaluation cheaper, while the search tree
+  itself remains auditable evidence.
 - **The banked corpus becomes a flywheel.** Sealed solve traces are
   training data with exact provenance; tinygrad trains as well as it
   infers. Solve → bank → distill → new weights = new realization = new
-  digest → campaign re-run as the eval harness → typed divergence report
-  as the model-iteration scorecard. The campaign instrument, unchanged,
-  is the controlled-experiment harness for self-improvement.
-- **Certification by recomputation.** The blind-run drill plus sealed
-  inference is an airtight no-leakage proof: the digest decomposes into
-  named realizations, none containing the hidden games, and the solve
-  re-derives bit-for-bit on a clean node.
+  digest → evaluation re-run → typed divergence report as the model-iteration
+  scorecard. The same execution instrument remains the controlled-experiment
+  harness for self-improvement.
+- **Certification by recomputation.** A blind evaluation plus sealed inference
+  can prove that the digest decomposes into named realizations that exclude
+  withheld inputs and that the result re-derives bit-for-bit on a clean node.
 
 ## What this means for ryeos
 
@@ -128,8 +124,7 @@ honesty as every other cache here.
 bottoms out in an unownable remote effect. This removes the asterisk —
 program includes the model — and the substrate's claim becomes
 whole-agent reproducibility: re-derive an entire agent run bit-for-bit or
-receive a typed proof naming which tranche moved. The three standing
-directions turn out to be one architecture: the campaign instrument is
+receive a typed proof naming which tranche moved. The execution instrument is
 the proving ground, while portable execution eventually becomes "export the
 complete authenticated capsule closure, re-derive where the execution identity
 matches, recorded-replay where it doesn't." That independently complete export
@@ -163,7 +158,7 @@ landed foundation. The remaining work is narrower and evidence-gated:
    `knowledge:ryeos/future/generation-state-capsules`; a recorded terminal
    replay does not prove an in-flight tensor checkpoint resumable.
 6. **Sealed training runs** (later) — data manifests as realizations, seeded
-   runs, campaign-as-eval; parallelism nondeterminism honestly classed
+   runs, repeated evaluation; parallelism nondeterminism honestly classed
    (`sealed` single-device or deterministic-reduction, `recorded` otherwise).
 
 ## Non-goals
@@ -175,9 +170,9 @@ landed foundation. The remaining work is narrower and evidence-gated:
 
 ## Triggers to revisit
 
-- the ARC measurement (turns replayed, spend saved, and first divergence) is in
-  hand;
+- a representative measurement of turns replayed, spend saved, and first
+  divergence is in hand;
 - an available CPU/device target can retain and close its full compiled
   artifact/numerics set;
-- ARC's offline deadline is scheduled — the forcing function for the
-  whole ladder.
+- an offline or independently reproducible deployment becomes a scheduled
+  requirement.

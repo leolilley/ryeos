@@ -1,10 +1,10 @@
-<!-- ryeos:signed:2026-07-21T00:24:56Z:f287ce7c0875d77584e369fb08d640b00943874ca7fc1a44671876687ea2f8c5:HzronJ/foOjSp/S/cMXv0Jcna4hKN5InmodrZ8Z5+vwX9hwo0v1tdnHqnAsVe7NtMdlPKbFWQiQ0xiFdddbQAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-12T07:28:15Z:bec731d5e1a7f6b9eaa39ab6f6d560be7d2f97af1ca96b301cc7d66186a58659:J5K8SLA/54xyCbZdSdhIP20JV/cYywt6pwZ9b7hyz/2QJzxObrU36+xgEGDR/X6D34KrderehNKbPE5Z/r6YBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: distributed-substrate-deferred-advanced
 title: Distributed Substrate Deferred Advanced Implementation
 entry_type: implementation_guide
-version: "0.4.1"
+version: "0.4.2"
 author: amp
 created_at: 2026-05-30T00:00:00Z
 description: Future implementation notes intentionally left out of the immediate distributed substrate hardening path, with triggers for when to pull them forward.
@@ -23,10 +23,17 @@ tags:
 
 This note records the advanced implementation work that should stay out of the immediate substrate hardening pass, while preserving the conditions that should pull each item forward.
 
-The current implementation path is:
+The cross-horizon ordering is owned by
+`knowledge:ryeos/future/substrate-growth-roadmap`. Distribution starts from
+the exact single-node capsule/effect/evidence model and a hosted principal
+boundary; it does not replace either one.
+
+When distributed work is pulled forward, its implementation path is:
 
 ```text
-bounded closure transfer
+verification-only export profile
+  → hosted principal/job isolation
+  → bounded closure transfer
   → staged imports
   → durable jobs
   → generic signed heads
@@ -240,9 +247,12 @@ The correct constraint is not "no daemon-to-daemon." The constraint is:
 
 > Daemon-to-daemon behavior must be signed, bounded, staged, policy-admitted, observable, and recoverable.
 
-## Immediate implementation boundary
+## First distributed implementation boundary
 
-The next implementation pass should focus on hardening the committed substrate slice:
+This is not the next global RyeOS implementation merely because the local
+substrate exists. Once a real cross-node consumer activates this track, its
+first implementation pass should focus on hardening the committed substrate
+slice:
 
 1. object and response byte caps for closure transfer;
 2. per-object read and link caps in closure traversal;

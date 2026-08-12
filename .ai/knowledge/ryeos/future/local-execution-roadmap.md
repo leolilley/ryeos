@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-08-10T03:16:08Z:b9439ec0cae2409ffe3df7a2675df8110ca841993e05348779600cacfa1fba20:KlvGi1UjJMEA3KFmaTCAtXJJcm/IQsUR0GJX8rPdutmgI+J+SogYX80NCduA+w6Aud7cJ8Zv/RAaiAArt+c3Dg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-12T07:28:15Z:5b7d562ee601bb9076d7f6e3181121c1c754d63982b94b8ec0f3f731df9b928c:Eh4yop9CfMsB+vxw76DC+vOHTm/HWpa/s8DZ7r7FRN38C5xvi6hXz1cZBMsoO8xGra9Kl+CvJ8bJDbkomHnYDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: local-execution-roadmap
 title: Local Execution Roadmap
 description: Landed local-execution foundation and the deferred boundaries for sealed inference, generation capsules, and leased latency workers
 entry_type: reference
-version: "0.1.0"
+version: "0.2.0"
 ```
 
 # Local execution roadmap
@@ -13,6 +13,11 @@ version: "0.1.0"
 This note is the boundary map for the local-execution work. It is not another
 implementation plan and it does not replace the current operating contract in
 `knowledge:ryeos/core/execution/local-model-workers`.
+
+Its place in the larger RyeOS sequence is defined by
+`knowledge:ryeos/future/substrate-growth-roadmap`. The local worker track is
+one branch after single-node execution truth; it is not the route by which
+hosted-node isolation or federation is implemented.
 
 ## Landed foundation
 
@@ -118,15 +123,18 @@ Owner: `knowledge:ryeos/future/hosted-node-trust-boundaries`.
 
 ## Pull-forward order
 
-1. Prove the landed record/evidence path on a real ARC re-solve and make the
-   execution field show the same facts the campaign reports.
-2. Use that evidence to decide whether sealed local qualification has immediate
-   ARC value on the available hardware.
-3. Pull generation capsules only after qualification is positive and an ARC
-   search workload needs prefix, park/resume, or fork.
-4. Pull leased latency workers only when a new latency distribution passes the
+1. Complete representative deep and broad runs without project-side substrate
+   workarounds, then make the web and terminal execution field show the same
+   durable facts their project evidence exposes.
+2. Complete the landed two-run comparison against a real cost-bearing pair
+   and retain first-bank versus replay evidence distinctly.
+3. Use that evidence to decide whether sealed local qualification has immediate
+   workload value on the available hardware.
+4. Pull generation capsules only after qualification is positive and a search
+   workload needs prefix, park/resume, or fork.
+5. Pull leased latency workers only when a new latency distribution passes the
    existing measurement gate.
-5. Pull portable export when a solve must be independently verified outside
+6. Pull portable export when a solve must be independently verified outside
    the producing node.
 
 This order is evidence-driven. Landing a generic mechanism does not, by itself,

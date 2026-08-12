@@ -1,10 +1,10 @@
-<!-- ryeos:signed:2026-07-21T00:24:56Z:c00d32003d343ebc3a0bba941fb8adf111f90cc342aabbfbb5ce8be389180da5:dQelDZ9sMbg8KtrJwSv+0rkl3rH2LaBnHk5Xar4PBKYFcc2JQe1RvAP7AyPfDOmr9egFGlBX9wAFVbDaY/PCBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-12T07:28:15Z:16e7c053ffca08a6f7c0b201f2c72e3dbe6e5d38c0fae7ea110dc6343d54ff9c:vDEUYKciaa/wopenKAO/1Z8uZVRR0YL+T45F47XF5DnVDxOZ/4lDq1KkzIrm7Xyb4TYm30niP2shMwtw0DA+Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: hosted-node-trust-boundaries
 title: Hosted-Node Trust Boundaries
 entry_type: implementation_guide
-version: "0.6.0"
+version: "0.6.1"
 description: The remaining trust boundaries for hosting other principals, including deployment-grade isolation around typed signed backends.
 tags:
   - hosted-node
@@ -52,6 +52,13 @@ multi-principal resolution, storage and secret partitioning, quotas, audit, and
 distributed retention only become concrete when a node hosts other principals
 or federates. This document indexes those remaining decisions rather than
 treating them as one backlog item.
+
+The sequencing relationship to local workers, portable evidence, and
+federation is summarized by
+`knowledge:ryeos/future/substrate-growth-roadmap`. In particular, this hosted
+outer boundary is not a lifecycle of the signed `worker` item kind. It may host
+such a worker, but it owns tenant and kernel containment rather than the
+worker's admitted application protocol.
 
 ## The four boundaries
 
@@ -147,7 +154,9 @@ Do not describe a deployment as hostile multi-tenant until it has, at minimum:
 
 ## Trigger
 
-An actual hosted or federation deployment decision. Related groundwork and
-sequencing for the distributed side lives in
+An actual hosted deployment decision or the first remote job that would run
+code for a principal outside the node owner's trust boundary. Hosting is the
+principal/isolation stage before full federation, not a synonym for it.
+Related groundwork and sequencing for the distributed side lives in
 `ryeos/future/distributed-substrate-deferred-advanced`; this doc carries
 the trust-boundary half.

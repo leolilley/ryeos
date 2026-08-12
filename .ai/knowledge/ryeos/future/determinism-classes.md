@@ -1,7 +1,7 @@
-<!-- ryeos:signed:2026-08-07T07:17:23Z:8b9a8a4c9dad3ce19c615387560e8be0d684882cd8283b9fa492637d221b6fd3:XS0O30kLgqio9btbu9EAos9BT4lyiBzOFRTuJ/+t176LHOwraao+Kx21b+Kkb8HQKoKnlhNmdc4+gc7+g0Y7Bg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-12T07:28:15Z:837402dabe5f07e8c1b86d6ca5cf4b120ea08c25ffac6db5bd1def994198de1d:dxrkDFw5Pa/MxL5wxX/t+7LlrRfYNGOpzWixikJ7/7ev/LA5t5FDSVGzW3SVG7eM69sesH6LGpIw+3vQQl3bBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [future, determinism, replay, evidence, effects]
-version: "0.2.0"
+version: "0.2.1"
 status: implementable
 description: >
   Effect-class contract (sealed/recorded/live) making chain re-execution mean
@@ -10,12 +10,11 @@ description: >
 
 # Determinism classes: the effect-class contract
 
-RyeOS already contains two instances of a pattern it has never named: the hook
-dispatch ledger replays recorded child responses byte-identically, and ARC's
-offline mode replays recorded simulator interactions deterministically. Both
-are the same idea — a nondeterministic effect recorded as admitted evidence at
-first execution and served from the record thereafter. This note names the
-general contract.
+RyeOS already contains multiple instances of one pattern: the hook dispatch
+ledger and the provider and graph-node effect stores replay recorded outcomes
+byte-identically. They are the same idea — a nondeterministic effect recorded
+as admitted evidence at first execution and served from the record thereafter.
+This note names the general contract.
 
 ## The three classes
 
@@ -71,8 +70,7 @@ enough to name which boundary the world moved at.
    realization** — declared trees captured into CAS, sealed into the
    effective digest, executed from read-only realization mounts, inherited
    by every descendant. Landed, activated on the graph kind, and proven
-   live (pinned `arc_tooling` on `graph:arc/game_solver`; first realized
-   solve `T-dd12da9b-…`). A divergence proof can now distinguish "the
+   against a whole realized tool tree. A divergence proof can now distinguish "the
    runtime changed" from "the tool misbehaved" for everything declared;
    what remains ambient is named as ambient. Workers *consume* this
    identity; they were never its source.
@@ -86,21 +84,21 @@ now-truthful node cache identity.
 
 ## What may be pulled forward independently
 
-- **Class annotation of existing evidence.** Hook-ledger entries and ARC
-  offline simulator responses are already recorded-class; stamping the class
+- **Class annotation of existing evidence.** Hook-ledger entries and recorded
+  simulator responses are already recorded-class; stamping the class
   marker on that evidence now means history is pre-classified when replay
   lands. Cheap, additive, no semantics change.
 - The `execution.effects` schema design — now shaped by its first real
   consumer (the effect-record store), not by the workers package.
 
-## ARC payoff
+## Evaluation payoff
 
-The banked-solution corpus becomes a regression instrument: re-derive banked
-solves under a changed solver or engine and receive either identical evidence
+A banked execution corpus becomes a regression instrument: re-derive retained
+runs under a changed program or engine and receive either identical evidence
 spines or divergence proofs naming exactly where behavior moved. Combined with
-execution families, that is the difference between "the new solver seems
-better" and "the new solver wins game X at the same cost and regresses game Y
-at step 41."
+execution families, that is the difference between "the new version seems
+better" and an exact statement of which evaluation changed, at what cost, and
+at which step.
 
 ## Triggers to revisit
 

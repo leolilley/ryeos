@@ -1,7 +1,7 @@
-<!-- ryeos:signed:2026-08-10T03:16:08Z:15bc5a4d81f61da0e90fac00fe220d37c0e723c3ff36d549fbf5f8e9f21e322f:wmtptcO0gpwjYWNQnkAXRn5qSo3kmlWmeEUYZgQ5quMbLkYLrQqtuk3J+jbhnRwpYdKURWO14IZlVXl92TWmAg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-12T07:28:15Z:51d18dd4f4578f249d4967f822d2f836ff5c88bbbd1855725ab71addddf66d5f:m3EHORhEIUo56i4DFU71056TzKKkdV18gXXxT4bdp5smfRZ4L/9TrrvTG+W8UOsiFAT5n5/zMFnTPeaLVi7aBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [future, portable-execution, execution-graph, architecture, export]
-version: "0.3.0"
+version: "0.3.1"
 status: deferred
 description: >
   Remaining deferred scope for portable execution: capsule/evidence export and
@@ -29,6 +29,8 @@ until "stable identity breadcrumbs" existed, and described a
   `bundles/standard/.ai/knowledge/ryeos/core/engine/effective-programs.md`.
 
 What remains deferred is only the word **portable**: a chain leaving its node.
+Its place between single-node acceptance and hosted/federated continuation is
+summarized by `knowledge:ryeos/future/substrate-growth-roadmap`.
 
 ## Remaining scope
 
@@ -59,6 +61,11 @@ identity-shaped:
    isolation handoff) and gated on `key-lifecycle.md` (a traveling capsule
    makes signer succession the importer's problem too).
 
+The preferred first consumer is a completed execution proof exported for
+independent verification. That keeps the first portable slice read-only and
+gives closure completeness, disclosure, and attestation claims a concrete
+acceptance case before remote continuation is authorized.
+
 ## Guardrails (carried forward)
 
 - No export API until the format/profile above are contracts.
@@ -68,8 +75,8 @@ identity-shaped:
 ## Triggers to revisit
 
 - a chain needs to be shown to anyone who does not trust the node (audit,
-  benchmark submission, publication of an ARC solve);
-- an ARC campaign report needs to become an independently verifiable solve
+  benchmark submission, publication of an execution result);
+- a project report needs to become an independently verifiable execution
   proof rather than a node-local projection;
 - distributed-substrate pull-forward work starts (closure transfer wants this
   format);

@@ -1,7 +1,7 @@
-<!-- ryeos:signed:2026-08-10T04:56:54Z:c0f72cacc67a9bc0ef1ece275cc1ce385d0db0dd689de7ce2283c8832b809c80:4SenZZ/YoKYriJH685S+cD5v9nH8eAs5m14FExv612i9nDdnDqJGnlVwwfofrd/wSGbhRjG7tG5QVgf2o1maAA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-12T07:28:15Z:3dbf0f4eb7ddbdbc159997a135c941db8cc368be534d49acc2d94cd96fe90747:YSKkVbZxrRo5Sb6q5a8Kh4Uu93iB57Jvpl7az3pL0TGr9UaVTlKNI19+oLRSbBqcwU3NdDG8wNKgAI6VkgW1Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [future, determinism, replay, provider, directive, evidence, certification]
-version: "0.2.0"
+version: "0.2.1"
 status: deferred
 description: >
   Deferred measurement, certification, retention, and export work over the
@@ -84,9 +84,10 @@ without claiming the original provider emitted those replayed chunks live.
 
 ## Deferred work
 
-### 1. ARC end-to-end measurement
+### 1. End-to-end replay measurement
 
-Run one solved ARC game twice under an unchanged effective program and retain:
+Run one completed cost-bearing execution twice under an unchanged effective
+program and retain:
 
 - provider calls executed, banked, folded, and replayed;
 - provider spend/contact avoided;
@@ -95,9 +96,9 @@ Run one solved ARC game twice under an unchanged effective program and retain:
 - agreement between graph-owned proof rows, provider turn evidence, and the
   execution field.
 
-This is the next implementation slice. It must distinguish outer graph-effect
-replay from inner provider-turn replay and must not read receipts or threads
-sideways from an ARC tool.
+This is the next acceptance slice. It must distinguish outer graph-effect
+replay from inner provider-turn replay and must not require a project tool to
+read receipts or threads sideways.
 
 ### 2. Certification retention
 
@@ -134,7 +135,7 @@ store does not infer or grant that class.
 
 ## Triggers to revisit
 
-- the ARC campaign acceptance run produces its first measured bank/replay set;
+- a representative acceptance run produces its first measured bank/replay set;
 - a solve must be certified or exported beyond the producing node;
 - ordinary record eviction prevents a required audit; or
 - sealed local qualification begins.

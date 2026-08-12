@@ -1,7 +1,7 @@
-<!-- ryeos:signed:2026-08-06T03:37:10Z:ad7d693266df6967391f0b2756b30b82c582ea18d84bc5b1837e99b7a5122e69:JsT51sSnWc3iDqBBi5TkmYhTGTWqucOl7SOoD1n7TrkQTUkagoARlqSLn/cQTNxZyw1rNQAeDhAteM1QogdkAw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-12T07:28:15Z:860fec30fa34025fc70aaf4b167d8a0cba3526f01a2d499087cf95247f8680a3:z/tsoTBExFg4d0QE9tKkJWl6yWHS5EtuWx0mHq3vIIpMtW0kWapVkfBWfumdtOazL2FKEoHHQBG151aVsiZnCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [future, signing, trust, keys, revocation, recovery]
-version: "0.1.0"
+version: "0.1.1"
 status: deferred
 description: >
   Signer rotation, succession, and delegation for a substrate whose sealed
@@ -21,6 +21,11 @@ in the present.
 That last property is why lifecycle needs design *before* it needs
 implementation: every month of sealed history accumulated under today's keys
 raises the cost of getting succession wrong later.
+
+This is not a prerequisite for completing current single-node workload
+execution. It becomes a design gate before portable attestations or execution
+authority must remain meaningful across a signer rotation, hosted principal,
+or node boundary. See `knowledge:ryeos/future/substrate-growth-roadmap`.
 
 ## What is currently true
 

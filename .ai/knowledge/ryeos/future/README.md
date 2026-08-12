@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-08-10T03:16:08Z:6c1e312f080fc2a205839d84a5f80203215916aed47819f3f161c05e6804f816:j150K4yrjjakadDPG7EpLek5vkyCHMF4K/8J6NFfzA6v5K2oFoLc23vpA0dL/BgSKIhIZ2P2p7OTB9YEtv6LDg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-12T07:28:15Z:fcb2194f1a4380cae5b0952194125a0df6e09fc4e950211ace20f822bd9ee99d:FIW5DV5fni29lnaiGsfmpoYbbC9ClRF6gNxvnG8j4XUlxje3Z873hOQ2ivMhngTcuaUqs3jZpBB5PskRbbJyBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: README
 title: Future RyeOS Design Notes
 description: Index and ownership rules for explicitly deferred RyeOS design work
 entry_type: reference
-version: "1.1.0"
+version: "1.2.0"
 ```
 
 # Future RyeOS Design Notes
@@ -28,6 +28,9 @@ Completed work from the June 2026 planning scratch files includes:
 Deferred entries are individual knowledge items in this directory. Notes moved
 from the former top-level `docs/future` tree include:
 
+- [`substrate-growth-roadmap.md`](substrate-growth-roadmap.md) — the current
+  sequencing spine from single-node workload acceptance through managed
+  workers, portable evidence, hosted principal boundaries, and federation;
 - [`local-execution-roadmap.md`](local-execution-roadmap.md) — the current
   local-execution foundation and the exact remaining boundaries for sealed
   inference, generation capsules, and leased latency workers;
@@ -45,8 +48,8 @@ from the former top-level `docs/future` tree include:
   — deferred storage/composition/operational work over the landed semantically
   blind large-content tier;
 - [`provider-call-effect-records.md`](provider-call-effect-records.md) — the
-  remaining ARC measurement, certification, and retention/export work over
-  the landed provider record boundary;
+  remaining provider replay measurement, certification, and retention/export
+  work over the landed provider record boundary;
 - [`mcp-server-auth.md`](mcp-server-auth.md) — authentication for any future
   non-local MCP transport;
 - [`native-resume-snapshot-pinning.md`](native-resume-snapshot-pinning.md) —
@@ -58,7 +61,7 @@ from the former top-level `docs/future` tree include:
 - [`determinism-classes.md`](determinism-classes.md) — effect-class contract
   (sealed/recorded/live) and replay-or-divergence-proof semantics;
 - [`execution-family-analytics.md`](execution-family-analytics.md) — seed-diff
-  attribution and cost series over effective-definition families;
+  and cost-series work beyond the landed exact two-run comparison;
 - [`key-lifecycle.md`](key-lifecycle.md) — signer rotation, succession, and
   delegation for a substrate whose history is gated by revocation;
 - [`reflexive-deployment.md`](reflexive-deployment.md) — activation sets as

@@ -1,7 +1,7 @@
-<!-- ryeos:signed:2026-08-10T03:16:08Z:4f75a2e58e34732016d40e5e635bf5d0fea00b3f379f0816bc23fde819bc2b6b:RqMUJ5J+rE3vjBBVxZU+rQfLW38QWB//hW0Fovx3+BVYGg/YQ+4ytOn3/TlxmV5+z5EkLkU25JPdbWP9vlsOBg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-12T07:28:15Z:406b78371b7a1aabbbf5ab00380c0b57164a9fd5995a71ef168748021156ddf0:EFlfS2lAHMKdcodTi3fjfdRUinz5G8Xo3UH/OylDXUuktZt7rB+zmNdFXyI0hLYDZDO+ASyYDZ3YVZtLHMXxCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [future, inference, checkpoint, capsule, tinygrad, search, sealed]
-version: "0.2.0"
+version: "0.2.1"
 status: deferred
 description: >
   Checkpoint, park, resume, prefix reuse, and fork for qualified local
@@ -106,6 +106,7 @@ exact duplicate folds; divergent content under one coordinate fails closed.
 ## Triggers to revisit
 
 - sealed local qualification passes on a target node;
-- ARC search needs prefix reuse, mid-turn park/resume, or token-level fork;
+- an admitted search workload needs prefix reuse, mid-turn park/resume, or
+  token-level fork;
 - retained KV sizes establish realistic segment and storage budgets; or
 - deployment windows need in-turn parking rather than turn-boundary replay.

@@ -1,7 +1,7 @@
-<!-- ryeos:signed:2026-08-07T07:17:24Z:801e6abd7759f2b54b28955388586a86eb40ebec64214c6160936075f4d7ac71:1AK3FpnS+oC9y09CFM4qdD1xrVHIY66Snv4QC/JvCSmaBPMSb81f56s7tOAe87H3Ol3iu0C08Quq+TsBbxvTCQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-12T07:28:15Z:f3e973ba9511f9239678afedcea11b2781ac70885ef20817d92cff471fede804:VMJWhMqYg9NFcILOCrcushTo2pUCbZ5Y4yPshSsRBFN3NBMOkjgi2j8J2yeJ/tzWaMfm3427Vk8MxFoqx01GBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [future, determinism, replay, cache, evidence, graph]
-version: "0.1.0"
+version: "0.1.1"
 status: implementable
 description: >
   Cross-run replay of graph node results as recorded-class effect records:
@@ -54,7 +54,7 @@ Durability is opt-in per node, authored and signed:
 nodes:
   probe_grid:
     effects: recorded          # sealed | recorded | live (default: live)
-    action: { item_id: "tool:arc/probe", ... }
+    action: { item_id: "tool:example/probe", ... }
 ```
 
 Default `live` keeps every existing graph's semantics byte-identical until an
@@ -109,7 +109,7 @@ first adoption review:
    `recorded` record is honest loss: the next run executes live and is a
    different run, and evidence referencing the record hash detects the
    absence rather than silently absorbing it. Banked evidence that must pin
-   its records durably (ARC certification) adds closure edges in a later
+   its records durably for certification adds closure edges in a later
    increment.
 
 ## Non-goals (v1)
@@ -126,8 +126,8 @@ first adoption review:
    by construction: the table is the record store for that boundary, its
    rows carry their own seed version, and a replay engine maps
    table → class statically. A redundant marker column in a
-   CHECK-constrained ledger would be churn without a consumer. The ARC
-   offline-simulator half belongs to the ARC repository.
+   CHECK-constrained ledger would be churn without a consumer. Any
+   project-specific recorded simulator adoption belongs to its consumer.
 1. **DONE (`ec264c155`)** — `effects: sealed|recorded|live` on graph nodes:
    one shared enum across both strict decoders, default `live` off the wire
    (checkpoints byte-stable), foreach/follow/detach refuse durable classes,
@@ -209,15 +209,15 @@ first adoption review:
    reaches the UI with zero code, because receipts flow as opaque bounded
    artifact metadata and now carry `replayed_from` only when a record was
    actually served.
-5. Measure on ARC: re-solve a solved game; count replayed nodes and saved
-   cost/latency. That number decides how hard to push increment 6
+5. Measure on a representative completed evaluation: count replayed nodes and
+   saved cost/latency. That number decides how hard to push increment 6
    (cross-digest *analysis* — never reuse — for divergence attribution).
 
 ## Measurement gate
 
-Implement through increment 3, then measure before polishing: an ARC
-re-solve of an already-solved game under an unchanged digest should replay
-its probe/measurement nodes. If the replay rate on real re-solves is not
+Implement through increment 3, then measure before polishing: re-executing a
+completed evaluation under an unchanged digest should replay its
+probe/measurement nodes. If the replay rate on real repeated runs is not
 material, this stays a determinism instrument (still worth increment 2–3 for
 divergence proofs) rather than a performance feature — and the honest
 conclusion is recorded here either way.
