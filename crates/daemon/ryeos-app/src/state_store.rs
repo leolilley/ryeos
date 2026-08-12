@@ -3752,6 +3752,32 @@ impl StateStore {
         })
     }
 
+    /// Delete one auxiliary runtime row and keep the process-attachment
+    /// projection at the same StateStore linearization point. Runtime rows are
+    /// normally removed before target release, but rollback must remain exact
+    /// if a future caller reaches this path after an attachment was recorded.
+    fn delete_thread_runtime_locked(&self, g: &Inner, thread_id: &str) -> Result<usize> {
+        let deleted = g.runtime_db.delete_thread_runtime(thread_id)?;
+        if deleted > 0 {
+            self.attached_process_registry().remove(thread_id);
+        }
+        Ok(deleted)
+    }
+
+    /// Rebuild the derived attachment projection after a transactional
+    /// chain-runtime retirement. That operation deliberately removes the
+    /// signed chain members plus any auxiliary rows attributed to the same
+    /// chain, so its exact affected thread-id set is owned by RuntimeDb.
+    fn refresh_attached_process_registry_locked(&self, g: &Inner) -> Result<()> {
+        let attached = g
+            .runtime_db
+            .list_attached_thread_ids()?
+            .into_iter()
+            .collect();
+        *self.attached_process_registry() = attached;
+        Ok(())
+    }
+
     fn warn_slow_lock_hold(operation: &'static str, started: std::time::Instant) {
         let held = started.elapsed();
         if held >= std::time::Duration::from_millis(100) {
@@ -3990,7 +4016,7 @@ impl StateStore {
         let result = match committed {
             Ok(committed) => committed_value(committed),
             Err(error) => {
-                let _ = g.runtime_db.delete_thread_runtime(&thread.thread_id);
+                let _ = self.delete_thread_runtime_locked(&g, &thread.thread_id);
                 return Err(error);
             }
         };
@@ -4186,7 +4212,7 @@ impl StateStore {
                     .runtime_db
                     .set_launch_metadata(&thread.thread_id, launch_metadata)
             {
-                let _ = g.runtime_db.delete_thread_runtime(&thread.thread_id);
+                let _ = self.delete_thread_runtime_locked(&g, &thread.thread_id);
                 return Err(error);
             }
         }
@@ -4326,8 +4352,7 @@ impl StateStore {
                             }
                         })
                 } else {
-                    g.runtime_db
-                        .delete_thread_runtime(&thread.thread_id)
+                    self.delete_thread_runtime_locked(&g, &thread.thread_id)
                         .map(|_| ())
                 };
                 if let Err(cleanup_error) = cleanup {
@@ -5287,7 +5312,7 @@ impl StateStore {
                     .runtime_db
                     .set_launch_metadata(&successor.thread_id, launch_metadata)
             {
-                let _ = g.runtime_db.delete_thread_runtime(&successor.thread_id);
+                let _ = self.delete_thread_runtime_locked(&g, &successor.thread_id);
                 return Err(error);
             }
         }
@@ -5419,7 +5444,8 @@ impl StateStore {
                         "failed to settle launch planning after continuation creation failed"
                     );
                 }
-                if let Err(cleanup_error) = g.runtime_db.delete_thread_runtime(&successor.thread_id)
+                if let Err(cleanup_error) =
+                    self.delete_thread_runtime_locked(&g, &successor.thread_id)
                 {
                     tracing::error!(
                         thread_id = %successor.thread_id,
@@ -5831,7 +5857,7 @@ impl StateStore {
                 .runtime_db
                 .set_launch_metadata(&successor.thread_id, &successor_meta);
             if let Err(error) = metadata_result {
-                let _ = g.runtime_db.delete_thread_runtime(&successor.thread_id);
+                let _ = self.delete_thread_runtime_locked(&g, &successor.thread_id);
                 return Err(error);
             }
         }
@@ -5954,7 +5980,8 @@ impl StateStore {
                     }
                     Ok(ContinuationCommitReadback::ProvenAbsent) => {}
                 }
-                if let Err(cleanup_error) = g.runtime_db.delete_thread_runtime(&successor.thread_id)
+                if let Err(cleanup_error) =
+                    self.delete_thread_runtime_locked(&g, &successor.thread_id)
                 {
                     tracing::error!(
                         thread_id = %successor.thread_id,
@@ -6140,7 +6167,7 @@ impl StateStore {
             if let Some(meta) = effective_launch_metadata.as_ref()
                 && let Err(error) = g.runtime_db.set_launch_metadata(&successor.thread_id, meta)
             {
-                let _ = g.runtime_db.delete_thread_runtime(&successor.thread_id);
+                let _ = self.delete_thread_runtime_locked(&g, &successor.thread_id);
                 return Err(error);
             }
         }
@@ -6233,7 +6260,8 @@ impl StateStore {
                     }
                     Ok(ContinuationCommitReadback::ProvenAbsent) => {}
                 }
-                if let Err(cleanup_error) = g.runtime_db.delete_thread_runtime(&successor.thread_id)
+                if let Err(cleanup_error) =
+                    self.delete_thread_runtime_locked(&g, &successor.thread_id)
                 {
                     tracing::error!(
                         thread_id = %successor.thread_id,
@@ -6735,6 +6763,7 @@ impl StateStore {
     }
 
     fn finish_terminal_chain_removal(
+        &self,
         g: &Inner,
         chain: &ryeos_state::AuthoritativeTerminalChain,
         chain_lock: &ChainLock,
@@ -6755,6 +6784,7 @@ impl StateStore {
         result.deleted_runtime_rows += g
             .runtime_db
             .delete_chain_runtime(&chain.chain_root_id, &chain.thread_ids)?;
+        self.refresh_attached_process_registry_locked(g)?;
         result.deleted_runtime_files += delete_thread_runtime_files(runtime_paths)?;
         result.deleted_projection_rows += g
             .state_db
@@ -6832,7 +6862,7 @@ impl StateStore {
                     )?;
                     result.pending_retirements_recovered += 1;
                     if !dry_run {
-                        Self::finish_terminal_chain_removal(
+                        self.finish_terminal_chain_removal(
                             &g,
                             &chain,
                             &chain_lock,
@@ -6895,7 +6925,7 @@ impl StateStore {
             result.pending_retirements_recovered += 1;
             result.retired_chains += 1;
             if !dry_run {
-                Self::finish_terminal_chain_removal(
+                self.finish_terminal_chain_removal(
                     &g,
                     &chain,
                     &chain_lock,
@@ -7015,7 +7045,7 @@ impl StateStore {
                 )?;
                 result.retired_chains += 1;
                 if !dry_run {
-                    Self::finish_terminal_chain_removal(
+                    self.finish_terminal_chain_removal(
                         &g,
                         &chain,
                         &chain_lock,
@@ -13502,6 +13532,32 @@ mod tests {
             store
                 .list_attached_thread_ids()
                 .expect("list after clear")
+                .is_empty()
+        );
+
+        store
+            .attach_new_thread_process(
+                thread_id,
+                identity.target_pid,
+                identity.group_leader_pid,
+                &identity,
+                &crate::launch_metadata::RuntimeLaunchMetadata::default(),
+                None,
+            )
+            .expect("reattach fixture process");
+        {
+            let global_guard = store.lock().expect("lock for runtime-row rollback");
+            assert_eq!(
+                store
+                    .delete_thread_runtime_locked(&global_guard, thread_id)
+                    .expect("delete attached runtime row"),
+                1
+            );
+        }
+        assert!(
+            store
+                .list_attached_thread_ids()
+                .expect("list after runtime-row deletion")
                 .is_empty()
         );
     }
