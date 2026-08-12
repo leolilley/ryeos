@@ -16,7 +16,6 @@ pub(super) struct ParseResultCacheKey {
     dispatcher_fingerprint: String,
     parser_ref: String,
     content_digest: String,
-    source_path: Option<String>,
 }
 
 impl ParseResultCacheKey {
@@ -24,13 +23,11 @@ impl ParseResultCacheKey {
         dispatcher_fingerprint: String,
         parser_ref: String,
         content_digest: String,
-        source_path: Option<String>,
     ) -> Self {
         Self {
             dispatcher_fingerprint,
             parser_ref,
             content_digest,
-            source_path,
         }
     }
 
@@ -39,7 +36,6 @@ impl ParseResultCacheKey {
             .len()
             .saturating_add(self.parser_ref.len())
             .saturating_add(self.content_digest.len())
-            .saturating_add(self.source_path.as_ref().map(String::len).unwrap_or(0))
     }
 }
 
@@ -247,22 +243,24 @@ mod tests {
     use std::sync::Barrier;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn key(content: &str, path: Option<&str>) -> ParseResultCacheKey {
+    fn key(content: &str) -> ParseResultCacheKey {
         ParseResultCacheKey::new(
             "dispatcher".to_string(),
             "parser:test/example".to_string(),
             content.to_string(),
-            path.map(str::to_string),
         )
     }
 
     #[test]
-    fn identical_key_reuses_successful_result() {
+    fn successful_content_is_reused_independently_of_diagnostic_source_path() {
         let cache = ParseResultCache::default();
         let builds = AtomicUsize::new(0);
+        // ParserDispatcher deliberately keeps source_path out of this key.
+        // These two lookups model identical signed bytes reached through two
+        // pinned workspaces with different diagnostic paths.
         for _ in 0..2 {
             let value = cache
-                .get_or_build(key("content-one", Some("/source")), 11, || {
+                .get_or_build(key("content-one"), 11, || {
                     builds.fetch_add(1, Ordering::SeqCst);
                     Ok(serde_json::json!({"value": 1}))
                 })
@@ -273,14 +271,10 @@ mod tests {
     }
 
     #[test]
-    fn content_and_source_path_are_distinct_keys() {
+    fn content_digest_distinguishes_cache_keys() {
         let cache = ParseResultCache::default();
         let builds = AtomicUsize::new(0);
-        for cache_key in [
-            key("content-one", Some("/source")),
-            key("content-two", Some("/source")),
-            key("content-two", Some("/other-source")),
-        ] {
+        for cache_key in [key("content-one"), key("content-two")] {
             cache
                 .get_or_build(cache_key, 11, || {
                     builds.fetch_add(1, Ordering::SeqCst);
@@ -288,7 +282,7 @@ mod tests {
                 })
                 .unwrap();
         }
-        assert_eq!(builds.load(Ordering::SeqCst), 3);
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -296,7 +290,7 @@ mod tests {
         let cache = ParseResultCache::default();
         let builds = AtomicUsize::new(0);
         for _ in 0..2 {
-            let result = cache.get_or_build(key("content", None), 7, || {
+            let result = cache.get_or_build(key("content"), 7, || {
                 builds.fetch_add(1, Ordering::SeqCst);
                 Err(EngineError::Internal("expected failure".to_string()))
             });
@@ -319,7 +313,7 @@ mod tests {
                 let release_build = Arc::clone(&release_build);
                 scope.spawn(move || {
                     cache
-                        .get_or_build(key("content", Some("/source")), 7, || {
+                        .get_or_build(key("content"), 7, || {
                             builds.fetch_add(1, Ordering::SeqCst);
                             build_started.wait();
                             release_build.wait();

@@ -109,7 +109,6 @@ impl ParserDispatcher {
                 self.fingerprint(),
                 parser_ref.to_string(),
                 content_digest,
-                source_path,
             );
             self.parse_results.get_or_build(key, source_bytes, || {
                 self.execute_parse(handler, &request, parser_ref)
