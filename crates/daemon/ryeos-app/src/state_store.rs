@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1142,6 +1142,15 @@ pub struct StateStore {
     /// StateStore mutex (never a mutex probe followed by permit acquisition).
     write_barrier: WriteBarrier,
     process_attachment_admission_open: AtomicBool,
+    /// Exact process attachments currently recorded in durable runtime state.
+    ///
+    /// Durable `thread_runtime.process_identity` rows remain authoritative and
+    /// seed this set at open. Keeping their live projection outside the global
+    /// store mutex prevents periodic recovery and shutdown audits from scanning
+    /// the accumulated runtime table while blocking unrelated chain commits.
+    /// Attach and clear update it at the same existing StateStore linearization
+    /// points as the durable row.
+    attached_thread_ids: Mutex<BTreeSet<String>>,
     /// Exact durable owners whose executor guards are alive in this process.
     /// Persisted claims prove fencing identity; this registry separately proves
     /// that a current task still owns the post-exit settlement window.
@@ -3143,6 +3152,7 @@ impl StateStore {
             allow_projection_rebuild: false,
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
+            attached_thread_ids: Mutex::new(BTreeSet::new()),
             active_launch_owners: Mutex::new(HashSet::new()),
             launch_task_abort_handles: Mutex::new(HashMap::new()),
             active_in_process_handlers: Mutex::new(HashMap::new()),
@@ -3168,6 +3178,7 @@ impl StateStore {
         let thread_runtime_authority =
             ThreadRuntimeAuthority::capture(&app_root, &runtime_state_authority, false)?;
         let runtime_db = runtime_db::RuntimeDb::open_existing_current(&runtime_db_path)?;
+        let attached_thread_ids = runtime_db.list_attached_thread_ids()?.into_iter().collect();
         let state_db = StateDb::open_for_projection_rebuild(&runtime_state_dir, head_trust)?;
         projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
         let state_authority = state_db.pinned_authority()?;
@@ -3184,6 +3195,7 @@ impl StateStore {
             allow_projection_rebuild: true,
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
+            attached_thread_ids: Mutex::new(attached_thread_ids),
             active_launch_owners: Mutex::new(HashSet::new()),
             launch_task_abort_handles: Mutex::new(HashMap::new()),
             active_in_process_handlers: Mutex::new(HashMap::new()),
@@ -3280,6 +3292,7 @@ impl StateStore {
         ensure_current_external_content_bindings(&state_db)?;
         projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
         let state_authority = state_db.pinned_authority()?;
+        let attached_thread_ids = runtime_db.list_attached_thread_ids()?.into_iter().collect();
         Ok(Self {
             state_authority,
             thread_runtime_authority: Some(thread_runtime_authority),
@@ -3293,6 +3306,7 @@ impl StateStore {
             allow_projection_rebuild: false,
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
+            attached_thread_ids: Mutex::new(attached_thread_ids),
             active_launch_owners: Mutex::new(HashSet::new()),
             launch_task_abort_handles: Mutex::new(HashMap::new()),
             active_in_process_handlers: Mutex::new(HashMap::new()),
@@ -3726,6 +3740,15 @@ impl StateStore {
             inner,
             acquired_at: std::time::Instant::now(),
             caller,
+        })
+    }
+
+    fn attached_process_registry(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
+        self.attached_thread_ids.lock().unwrap_or_else(|poisoned| {
+            tracing::error!(
+                "attached process registry mutex was poisoned; retaining its derived state"
+            );
+            poisoned.into_inner()
         })
     }
 
@@ -8676,7 +8699,10 @@ impl StateStore {
         } else {
             g.runtime_db
                 .attach_process(thread_id, pid, pgid, process_identity, launch_metadata)
-        }
+        }?;
+        self.attached_process_registry()
+            .insert(thread_id.to_string());
+        Ok(())
     }
 
     /// Linearization point between durable process attachment and target
@@ -8914,8 +8940,13 @@ impl StateStore {
         process_identity: &crate::process::ExecutionProcessIdentity,
     ) -> Result<bool> {
         let g = self.lock()?;
-        g.runtime_db
-            .clear_process_if_matches(thread_id, process_identity)
+        let cleared = g
+            .runtime_db
+            .clear_process_if_matches(thread_id, process_identity)?;
+        if cleared {
+            self.attached_process_registry().remove(thread_id);
+        }
+        Ok(cleared)
     }
 
     pub fn clear_thread_process_if_matches_owned(
@@ -8932,13 +8963,18 @@ impl StateStore {
         if claim.claimed_by != launch_owner {
             bail!("stale launch owner cannot detach process from {thread_id}");
         }
-        g.runtime_db
-            .clear_process_if_matches(thread_id, process_identity)
+        let cleared = g
+            .runtime_db
+            .clear_process_if_matches(thread_id, process_identity)?;
+        if cleared {
+            self.attached_process_registry().remove(thread_id);
+        }
+        Ok(cleared)
     }
 
     pub fn list_attached_thread_ids(&self) -> Result<Vec<String>> {
-        let g = self.lock()?;
-        g.runtime_db.list_attached_thread_ids()
+        let attached = self.attached_process_registry();
+        Ok(attached.iter().cloned().collect())
     }
 
     pub fn in_process_handler_reservations_after(
@@ -13400,6 +13436,139 @@ mod tests {
             .authorize_attached_process_release(thread_id, &identity, None)
             .expect_err("stop tombstone must fence release");
         assert!(stopped.to_string().contains("cancel request"));
+    }
+
+    #[test]
+    fn attached_process_listing_does_not_wait_for_the_global_store_lock() {
+        let store = Arc::new(test_store());
+        let thread_id = "T-attached-process-registry";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .expect("create attachment fixture");
+        let identity = crate::process::ExecutionProcessIdentity {
+            schema_version: crate::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+            boot_id: "test-boot".to_string(),
+            target_pid: 12346,
+            target_start_time_ticks: 11,
+            group_leader_pid: 12346,
+            group_leader_start_time_ticks: 11,
+        };
+        store
+            .attach_new_thread_process(
+                thread_id,
+                identity.target_pid,
+                identity.group_leader_pid,
+                &identity,
+                &crate::launch_metadata::RuntimeLaunchMetadata::default(),
+                None,
+            )
+            .expect("attach exact held identity");
+
+        let global_guard = store.lock().expect("hold global state lock");
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let listing_store = Arc::clone(&store);
+        let listing = std::thread::spawn(move || {
+            sender
+                .send(listing_store.list_attached_thread_ids())
+                .expect("send listing result");
+        });
+        let ids = receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("attached listing must not wait for the global state lock")
+            .expect("list attached threads");
+        assert_eq!(ids, vec![thread_id.to_string()]);
+        drop(global_guard);
+        listing.join().expect("join listing thread");
+
+        let wrong_identity = crate::process::ExecutionProcessIdentity {
+            target_start_time_ticks: 12,
+            ..identity.clone()
+        };
+        assert!(
+            !store
+                .clear_thread_process_if_matches(thread_id, &wrong_identity)
+                .expect("mismatched clear is a proven no-op")
+        );
+        assert_eq!(
+            store.list_attached_thread_ids().expect("list after no-op"),
+            vec![thread_id.to_string()]
+        );
+        assert!(
+            store
+                .clear_thread_process_if_matches(thread_id, &identity)
+                .expect("clear exact attachment")
+        );
+        assert!(
+            store
+                .list_attached_thread_ids()
+                .expect("list after clear")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn attached_process_registry_is_seeded_from_durable_runtime_state() {
+        let tmp = tempdir().expect("tempdir").keep();
+        let runtime_state_dir = tmp.join(".ai/state");
+        let runtime_db_path = runtime_state_dir.join("runtime.sqlite3");
+        let identity = crate::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+            .expect("test node identity");
+        let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
+        let mut head_trust = ryeos_state::refs::TrustStore::new();
+        head_trust.insert(
+            identity.fingerprint().to_string(),
+            *identity.verifying_key(),
+        );
+        let head_trust = Arc::new(head_trust);
+        let open_store = || {
+            StateStore::new_with_head_trust(
+                tmp.clone(),
+                runtime_state_dir.clone(),
+                runtime_db_path.clone(),
+                Arc::clone(&signer),
+                WriteBarrier::new(),
+                Arc::clone(&head_trust),
+            )
+            .expect("state store")
+        };
+
+        let thread_id = "T-attached-process-reopen";
+        let process_identity = crate::process::ExecutionProcessIdentity {
+            schema_version: crate::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+            boot_id: "test-boot".to_string(),
+            target_pid: 12347,
+            target_start_time_ticks: 12,
+            group_leader_pid: 12347,
+            group_leader_start_time_ticks: 12,
+        };
+        let store = open_store();
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .expect("create attachment fixture");
+        store
+            .attach_new_thread_process(
+                thread_id,
+                process_identity.target_pid,
+                process_identity.group_leader_pid,
+                &process_identity,
+                &crate::launch_metadata::RuntimeLaunchMetadata::default(),
+                None,
+            )
+            .expect("attach fixture process");
+        drop(store);
+
+        let reopened = open_store();
+        assert_eq!(
+            reopened
+                .list_attached_thread_ids()
+                .expect("list seeded attachments"),
+            vec![thread_id.to_string()]
+        );
+        assert!(
+            reopened
+                .clear_thread_process_if_matches(thread_id, &process_identity)
+                .expect("clear seeded attachment")
+        );
     }
 
     fn continuation_resume_context(
