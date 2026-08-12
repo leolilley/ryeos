@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T08:41:45Z:872f4829759e49222d29f08a1e9ef56d3a53b9b12eebb625a47834e4f9e0d757:exDvGJUJoSR8o/z7xVElE68SlVxaekPO6lg8loYwKShsrl/B/5ulHndxDsoDVqF4nqkfQ728WbbRo1YoeLoqAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-12T07:28:15Z:751521f9eacf3ffc00b9ff9432dcbbf1bcf5f0d9852644c738cbc0f004ec90b4:UBZSDyp50Yw801+V041w89d/O1ptPXcY61KNO4IzBbpBu7ZX7xJjRYjkFrmfXZlGjcS0QrgDLQpn6uOtsNmgAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/execution
 tags: [execution, external-content, persistent-session, local-model, replay]
@@ -166,6 +166,7 @@ environment:
     - RUST_LOG
     - RYEOSD_CALLBACK_TOKEN
     - RYEOSD_PROJECT_PATH
+    - RYEOSD_PROJECT_STATE_SCOPE
     - RYEOSD_SOCKET_PATH
     - RYEOSD_THREAD_AUTH_TOKEN
     - RYEOSD_THREAD_ID

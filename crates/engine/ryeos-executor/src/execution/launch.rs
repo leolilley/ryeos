@@ -6176,6 +6176,10 @@ async fn run_claimed_thread_row_inner(
     )?;
     let isolation = state.isolation.clone();
     let isolation_project_authority = provenance.isolation_project_authority();
+    let project_state_scope = provenance
+        .project_authority()
+        .project_state_scope_id()
+        .map_err(BuildAndLaunchError::Internal)?;
     let isolation_live_access = provenance
         .isolation_live_access_authority()
         .map_err(BuildAndLaunchError::Internal)?;
@@ -6247,6 +6251,7 @@ async fn run_claimed_thread_row_inner(
             binary: &binary_path,
             project_path: &project_owned,
             project_authority: isolation_project_authority,
+            project_state_scope: project_state_scope.as_deref(),
             live_access: isolation_live_access,
             state_root: isolation_state_root.as_deref(),
             workspace_lifeline: isolation_workspace_lifeline,

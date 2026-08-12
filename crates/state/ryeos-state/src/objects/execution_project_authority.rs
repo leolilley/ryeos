@@ -710,6 +710,32 @@ impl ExecutionProjectAuthority {
         }
     }
 
+    /// Opaque namespace identity for durable state owned by one logical
+    /// project.
+    ///
+    /// This deliberately excludes the execution workspace and the current
+    /// operational snapshot. A pinned COW continuation may relocate and
+    /// advance its executable generation without becoming a different
+    /// project. The value names a namespace only; it grants no authority to
+    /// read or mutate state.
+    pub fn project_state_scope_id(&self) -> anyhow::Result<Option<String>> {
+        self.validate()?;
+        let stable_identity = match self {
+            Self::Projectless { .. } => return Ok(None),
+            Self::LiveProject {
+                authored_project_identity,
+                ..
+            } => authored_project_identity,
+            Self::PinnedGeneration {
+                stable_project_identity,
+                ..
+            } => stable_project_identity,
+        };
+        Ok(Some(lillux::sha256_hex(
+            format!("ryeos.project-state-scope\0{stable_identity}").as_bytes(),
+        )))
+    }
+
     /// Stable execution-authority identity for content-addressed preparation
     /// caches. Diagnostic realization paths are deliberately excluded from
     /// pinned authority: the same admitted generation has the same preparation
@@ -1210,6 +1236,79 @@ mod tests {
         assert_ne!(
             left.stable_cache_identity().unwrap(),
             advanced.stable_cache_identity().unwrap()
+        );
+    }
+
+    #[test]
+    fn project_state_scope_survives_pinning_relocation_and_generation_advance() {
+        let root = tempfile::tempdir().unwrap();
+        let stable_identity = format!("local:{}", root.path().display());
+        let live = ExecutionProjectAuthority::live(
+            root.path().to_path_buf(),
+            stable_identity.clone(),
+            LiveProjectAccess::ReadWrite,
+            LiveFilesystemConfinement::standard_descriptor_rooted(),
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let pinned = ExecutionProjectAuthority::pinned(
+            stable_identity,
+            Some(PathBuf::from("/different/materialization")),
+            "a".repeat(64),
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::Discard,
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let advanced = pinned
+            .transition_operational_generation(
+                OperationalProjectAuthorityTransition::AdvancePinnedCowContinuation {
+                    result_snapshot_hash: &"b".repeat(64),
+                },
+            )
+            .unwrap();
+
+        let scope = live.project_state_scope_id().unwrap().unwrap();
+        assert_eq!(scope.len(), 64);
+        assert_eq!(
+            pinned.project_state_scope_id().unwrap(),
+            Some(scope.clone())
+        );
+        assert_eq!(advanced.project_state_scope_id().unwrap(), Some(scope));
+        assert_eq!(
+            ExecutionProjectAuthority::PROJECTLESS
+                .project_state_scope_id()
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn project_state_scope_separates_logical_projects() {
+        let left = ExecutionProjectAuthority::pinned(
+            "local:/project/left".to_string(),
+            None,
+            "a".repeat(64),
+            PinnedProjectRealization::ReadOnly,
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let right = ExecutionProjectAuthority::pinned(
+            "local:/project/right".to_string(),
+            None,
+            "a".repeat(64),
+            PinnedProjectRealization::ReadOnly,
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        assert_ne!(
+            left.project_state_scope_id().unwrap(),
+            right.project_state_scope_id().unwrap()
         );
     }
 

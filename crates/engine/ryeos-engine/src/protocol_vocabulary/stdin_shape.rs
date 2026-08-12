@@ -81,6 +81,7 @@ mod tests {
             callback_token: None,
             callback_socket_path: None,
             callback_project_path: None,
+            project_state_scope: None,
             thread_auth_token: None,
             params,
             resolution_output: None,

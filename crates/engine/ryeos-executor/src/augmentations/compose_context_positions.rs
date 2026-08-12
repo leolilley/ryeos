@@ -731,6 +731,11 @@ pub async fn run(
                 None
             },
             callback_project_path: Some(callback_project_path.clone()),
+            project_state_scope: cap
+                .provenance
+                .project_authority()
+                .project_state_scope_id()
+                .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?,
             thread_auth_token: thread_auth.as_ref().map(|auth| auth.token.clone()),
             params: envelope.payload.clone(),
             resolution_output: None,

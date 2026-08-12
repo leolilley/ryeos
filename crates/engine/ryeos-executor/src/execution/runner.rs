@@ -1819,6 +1819,7 @@ fn build_protocol_launch_env(
         .map_err(|error| anyhow::anyhow!("canonical item ref parse: {error}"))?;
     let authority = super::pinned_state_authority(state)?;
     let cas_root = authority.cas_directory().path().to_path_buf();
+    let project_state_scope = provenance.project_authority().project_state_scope_id()?;
 
     // Run-scoped credentials cover the run's full duration plus finalization.
     let ttl = launch_token_ttl(duration_seconds);
@@ -1886,6 +1887,7 @@ fn build_protocol_launch_env(
         callback_token: callback_token.clone(),
         callback_socket_path,
         callback_project_path: Some(callback_project_path.to_path_buf()),
+        project_state_scope,
         thread_auth_token: thread_auth_token.clone(),
         params: json!({}),
         resolution_output: None,

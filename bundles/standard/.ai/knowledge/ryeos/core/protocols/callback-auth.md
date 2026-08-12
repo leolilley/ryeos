@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:33Z:9d8336c3e12436c838c9228d0cf1f5cbcdf8d9c0e68a94f9616dd243e152bccb:kjacWFQ5gPJ7mH0AoKSdSyOBbmsWQL5aEzEfaGY+3zlQ8PAPMDJzwTTEToRFUG3fOg6JoqFeQcbyD0bmTCZyAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-12T07:28:15Z:8df110ebd02b79225b53887e618d61cc15acb998591d7fbf558605087a0a2ed3:d2naxjTV6/xkvjeJjEaniD4A66OzZLJuQpPAll0A1RulMBP4F66sLrQIS7MMiS7d7IRpHRF4m/38mUDSq1VmBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/protocols
 tags: [callbacks, auth, uds, runtime, tokens, capabilities]
@@ -48,6 +48,8 @@ composition as typed protocol bindings. `runtime`, `method_runtime`, and
 - `RYEOSD_THREAD_ID`
 - `RYEOSD_PROJECT_PATH` — callback authorization/state anchor, which may differ
   from `RYE_PROJECT_PATH`
+- `RYEOSD_PROJECT_STATE_SCOPE` — opaque logical-project namespace identity;
+  stable across pinned COW successors and not itself an authority
 - `RYEOSD_THREAD_AUTH_TOKEN`
 
 Callback capability authority is minted only when the verified descriptor's

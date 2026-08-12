@@ -821,6 +821,9 @@ pub fn validate_protocol_builder(
             cwd: dummy_path,
             project_path: dummy_path,
             callback_project_path: dummy_path,
+            project_state_scope: Some(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
             thread_id: "boot-check",
             // Supplying synthetic callback authority lets callback-capable
             // descriptors exercise their declared injection sources. A
@@ -2008,6 +2011,9 @@ composed_value_contract:
             cwd: dummy,
             project_path: dummy,
             callback_project_path: dummy,
+            project_state_scope: Some(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
             thread_id: "test",
             callback: None,
             launch_envelope: None,
@@ -2068,6 +2074,9 @@ composed_value_contract:
             cwd: dummy,
             project_path: dummy,
             callback_project_path: dummy,
+            project_state_scope: Some(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
             thread_id: "test",
             callback: None,
             launch_envelope: None, // <-- triggers EnvelopeRequired

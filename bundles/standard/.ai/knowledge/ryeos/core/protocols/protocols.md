@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:33Z:e33daacbc42ec9cc709bdc5fa15be6d45706f165679862ca15c4397534a11faf:TlyJulmQfCK1DodVnf44690vw0QqRN5oD8NxHPjdOmkl5BixBl8FTsgOBOX+W6/SO/M8M093GVTU3xGG24FJAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-12T07:28:15Z:6f1d2b39d567fa496e6523dc9c5c74c56e5fd767145a0cb1e6586db77cb455c1:QAxWS2xX8Ia1IZZbif09KHnDwZgI4DpMSFrP6wbFM5JC/0ULCm3ajfocmB5hCMtVbx8BUNW73EFFHrkMEJC4AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, protocols, wire, subprocess]
@@ -52,7 +52,7 @@ graph-runtime). Used by the `runtime` kind.
 |-------------|-------------------------------|
 | **stdin**   | `launch_envelope` — structured launch payload |
 | **stdout**  | `runtime_result` — structured result |
-| **env**     | `RYEOSD_SOCKET_PATH`, `RYEOSD_CALLBACK_TOKEN`, `RYEOSD_THREAD_ID`, `RYEOSD_PROJECT_PATH`, `RYEOSD_THREAD_AUTH_TOKEN` |
+| **env**     | `RYEOSD_SOCKET_PATH`, `RYEOSD_CALLBACK_TOKEN`, `RYEOSD_THREAD_ID`, `RYEOSD_PROJECT_PATH`, `RYEOSD_PROJECT_STATE_SCOPE`, `RYEOSD_THREAD_AUTH_TOKEN` |
 | **lifecycle** | `managed` — daemon tracks process lifetime |
 | **callback**  | `http` — HTTP callback channel for async |
 

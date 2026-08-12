@@ -47,6 +47,7 @@ const DAEMON_CALLBACK_NAMES: &[&str] = &[
     "RYEOSD_CALLBACK_TOKEN",
     "RYEOSD_THREAD_ID",
     "RYEOSD_PROJECT_PATH",
+    "RYEOSD_PROJECT_STATE_SCOPE",
     "RYEOSD_THREAD_AUTH_TOKEN",
 ];
 
@@ -404,6 +405,10 @@ fn validate_protocol_injection_name(
                 EnvInjectionSource::CallbackProjectPath,
                 "RYEOSD_PROJECT_PATH"
             )
+            | (
+                EnvInjectionSource::ProjectStateScope,
+                "RYEOSD_PROJECT_STATE_SCOPE"
+            )
             | (EnvInjectionSource::ProjectPath, "RYE_PROJECT_PATH")
             | (EnvInjectionSource::ProjectPath, "RYEOS_PROJECT_PATH")
             | (
@@ -687,6 +692,26 @@ mod tests {
             )])
             .unwrap_err();
         assert!(format!("{err:#}").contains("RYEOSD_THREAD_AUTH_TOKEN"));
+
+        EnvContractBuilder::new()
+            .with_typed_bindings(vec![EnvBinding::new(
+                "RYEOSD_PROJECT_STATE_SCOPE",
+                "a".repeat(64),
+                EnvSourceDetail::ProtocolInjection {
+                    source: EnvInjectionSource::ProjectStateScope,
+                },
+            )])
+            .unwrap();
+        let err = EnvContractBuilder::new()
+            .with_typed_bindings(vec![EnvBinding::new(
+                "RYEOSD_PROJECT_STATE_SCOPE",
+                "a".repeat(64),
+                EnvSourceDetail::ProtocolInjection {
+                    source: EnvInjectionSource::CallbackProjectPath,
+                },
+            )])
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("RYEOSD_PROJECT_STATE_SCOPE"));
     }
 
     #[test]

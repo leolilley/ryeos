@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:29Z:40786b51cb025dba7737ce3514144169592f9afe4b026579e69a2a1f325f8b4e:dkalhxICPSMF27cZu1xzUnt4ENsXkd275VCjFkM1jexRIsc2HSzkBzX7YyxB4ZniTmoOzXPn0rOfQMsfH/BrDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-12T07:28:15Z:18237d511c69c485f3e1b5f92e4fd9620cf1c8d4f886009e5ed5a890b61955e7:P6T2v9x53BwH/BwRlDURuhazJSUO8MLP0fI7mTE3t8PIFmGrLaDk8TGSreejx9z3WueuX9BBdtqihJ7u6n89CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/engine
@@ -116,6 +116,7 @@ protocol and lifecycle bindings, not a list granted to every subprocess:
 | `RYEOSD_THREAD_AUTH_TOKEN` | Per-thread auth token |
 | `RYEOSD_THREAD_ID` | Thread identifier |
 | `RYEOSD_PROJECT_PATH` | Callback authorization/state anchor; a deliberate state-root override when present, otherwise the effective project root |
+| `RYEOSD_PROJECT_STATE_SCOPE` | Opaque logical-project state namespace; stable across pinned COW relocation and generation advance, empty for projectless execution, and never an authority token |
 | `RYE_THREAD_ID` | Thread ID for tool primitives |
 | `RYEOS_ITEM_PATH` | Resolved item source path |
 | `RYEOS_ITEM_KIND` | Resolved item kind |

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:13Z:a8d181cb8465baebfe81645d55976eeb334c2c0c4a4bbc517b17e6796ee2ff12:qD0n8ucFSg9x3MBdsZlJgWbBi0Xy/ckE6XpfDxzL/OUpoS30AAvFC6KdwMtew01V0cFyRJaKaUPopfXbJX6lDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-12T07:28:15Z:ffb6c9718db532e52e91aa8c5938f9bcb86640bd32c47c354b5ff46d59e5fd84:EsVhdZNCOVAKm1nNfl7JwXnOE17G2q/jh7tf11V9etyTk3i9H2WSgPzlAfP+8x7nF0rSmGlpjmqO3kBtfGpoBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
 name: runtime
 category: ryeos/core
@@ -14,6 +14,7 @@ env_injections:
   - { name: RYEOSD_CALLBACK_TOKEN, source: callback_token }
   - { name: RYEOSD_THREAD_ID, source: thread_id }
   - { name: RYEOSD_PROJECT_PATH, source: callback_project_path }
+  - { name: RYEOSD_PROJECT_STATE_SCOPE, source: project_state_scope }
   - { name: RYEOSD_THREAD_AUTH_TOKEN, source: thread_auth_token }
 capabilities:
   allows_pushed_head: true

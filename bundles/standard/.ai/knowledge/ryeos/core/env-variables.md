@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:29Z:9fbc7529e4b7f944499675deb8b3a5f8a705bf35d0cc8ed770b4aaf168bb897e:cELcoxmLqVz3kcYLjg8Ttk8bs+L+Nv92Wxnb449UzxzPNmw8ewrntG3dxRDPhEacKkKfnfnQJ1osrObQOXnJAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-12T07:28:15Z:7cc47ba3fa746728f3fda2670327ae9822b65e5505d679dbb022bd5f7ea2e375:G5bgfvCFOoiLzt9BxDvqHLVysa5DcEPutjvj3RU73io+9XBJ8Eus5hfgfUKlyrMe+AiTWzXQDPJGIFmfBtOHBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, env, daemon, cli, runtimes, lifecycle]
@@ -41,12 +41,18 @@ process. A child receives only the environment selected by its verified
 protocol plus daemon-root, engine-plan, secret, and resume bindings. In
 particular, callback variables (`RYEOSD_SOCKET_PATH`,
 `RYEOSD_CALLBACK_TOKEN`, `RYEOSD_THREAD_AUTH_TOKEN`, `RYEOSD_THREAD_ID`, and
-`RYEOSD_PROJECT_PATH`) are declared by callback-capable protocols such as
+`RYEOSD_PROJECT_PATH`) plus the identity-only `RYEOSD_PROJECT_STATE_SCOPE` are declared by callback-capable protocols such as
 `runtime` and the default tool protocol `tool_callback`; callback-free
 protocols receive none of that authority. `RYEOSD_PROJECT_PATH` is the callback
 authorization/state anchor: a deliberate state-root override when present,
 otherwise the effective project root. It may intentionally differ from the
 source-oriented `RYE_PROJECT_PATH`.
+
+`RYEOSD_PROJECT_STATE_SCOPE` is an opaque lowercase digest naming the admitted
+logical project's durable state namespace. It stays stable when a pinned COW
+continuation relocates or advances its operational snapshot. It is empty for
+projectless execution and grants no state access by itself; the callback token
+still supplies authority.
 
 Engine-plan and lifecycle bindings can include `RYEOS_THREAD_ID`,
 `RYEOS_CHAIN_ROOT_ID`, `RYEOS_ITEM_PATH`, `RYEOS_ITEM_KIND`, `RYEOS_ITEM_REF`,

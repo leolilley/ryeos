@@ -697,6 +697,11 @@ async fn dispatch_streaming_subprocess(
         callback_token: None,
         callback_socket_path: None,
         callback_project_path: None,
+        project_state_scope: request
+            .provenance
+            .project_authority()
+            .project_state_scope_id()
+            .map_err(DispatchError::Internal)?,
         thread_auth_token: None,
         params: request.params.clone(),
         resolution_output: None,

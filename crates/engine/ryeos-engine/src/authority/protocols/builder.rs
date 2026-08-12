@@ -77,6 +77,10 @@ pub struct BuildRequest<'a> {
     /// when execution provenance deliberately overrides the state root.
     pub callback_project_path: &'a Path,
 
+    /// Opaque namespace for durable state owned by the admitted logical
+    /// project. Absent for projectless execution.
+    pub project_state_scope: Option<&'a str>,
+
     /// Thread identity used by callback bookkeeping.
     pub thread_id: &'a str,
 
@@ -201,6 +205,9 @@ pub fn build_subprocess_spec(
                     path_kind: "callback project",
                 })?
                 .to_owned(),
+            EnvInjectionSource::ProjectStateScope => {
+                request.project_state_scope.unwrap_or_default().to_string()
+            }
             EnvInjectionSource::ActingPrincipal => request.acting_principal.to_string(),
             EnvInjectionSource::CasRoot => request
                 .cas_root
@@ -418,6 +425,9 @@ mod tests {
             cwd: Path::new("/project"),
             project_path: Path::new("/project"),
             callback_project_path: Path::new("/project-state"),
+            project_state_scope: Some(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
             thread_id: "T-test-thread",
             callback: Some(callback),
             launch_envelope: None, // set per-test

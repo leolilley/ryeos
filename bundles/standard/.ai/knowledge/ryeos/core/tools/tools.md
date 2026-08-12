@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:36Z:27ed684f5bacbe1f845220667cd0dc827ca4b1cfc1320d16197753143b5de796:TIzqidBv19XI1wd5s8QtNpMh6yAeEOLJqFT41ELRADrvENJjKmn5pWFQaVHQt0NdsSX2eeeBZdoAerJPiMYpDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-12T07:28:15Z:5a22d7401f60509c8b41841b3be54d55263f98aeb3d557f1784c4675d1939e75:tIKKUd/mow1HfrRl+D3RsGDpeI+ImMn/LsACgAf9VFlGrOrRvfCsv+UmaJJQM2Opv75W5hCBuvAN0429rXx9Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, tools, execution, subprocess]
@@ -141,6 +141,7 @@ declare the basic tool variables:
 | `RYEOSD_CALLBACK_TOKEN`     | Auth token for callback channel    |
 | `RYEOSD_THREAD_ID`          | Thread ID (redundant with RYE_)    |
 | `RYEOSD_PROJECT_PATH`       | Callback authorization/state anchor; may differ from `RYE_PROJECT_PATH` under a state-root override |
+| `RYEOSD_PROJECT_STATE_SCOPE` | Opaque logical-project state namespace; stable across pinned COW successors and not an authority token |
 | `RYEOSD_THREAD_AUTH_TOKEN`  | Thread-specific auth token         |
 
 Environment is protocol-authoritative. The default tool protocol explicitly

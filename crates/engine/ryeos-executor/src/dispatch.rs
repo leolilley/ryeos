@@ -2360,6 +2360,11 @@ pub(crate) async fn dispatch_method(
                 None
             },
             callback_project_path: Some(callback_project_path.clone()),
+            project_state_scope: request
+                .provenance
+                .project_authority()
+                .project_state_scope_id()
+                .map_err(DispatchError::Internal)?,
             thread_auth_token: thread_auth.as_ref().map(|auth| auth.token.clone()),
             params: envelope.payload.clone(),
             resolution_output: None,
