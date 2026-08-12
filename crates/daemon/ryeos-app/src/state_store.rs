@@ -4068,6 +4068,24 @@ impl StateStore {
                 self.ensure_in_process_handler_owner(&thread.thread_id, owner)?;
             }
         }
+        // Capsule verification and CAS publication are protected by the
+        // mutation permit above, not by the daemon's process-local store
+        // mutex. Do them before taking that mutex so independent root births
+        // do not serialize every runtime/projection operation behind content
+        // verification. Admission state, the auxiliary runtime row, the
+        // authoritative chain commit, and its projection remain one fenced
+        // critical section below.
+        let birth_snapshot = attach_admitted_launch_capsule(
+            &self.state_authority,
+            permit.cas_guard(),
+            build_snapshot(thread),
+            launch_metadata,
+        )?;
+        let expected_birth_snapshot = birth_snapshot.clone();
+        let thread_runtime = RuntimeInfo {
+            launch_metadata: launch_metadata.cloned(),
+            ..RuntimeInfo::default()
+        };
         let g = self.lock()?;
         if !self
             .process_attachment_admission_open
@@ -4108,16 +4126,6 @@ impl StateStore {
         });
         events.extend(initial_events);
         let thread_events = convert_events(&events, &thread.chain_root_id, &thread.thread_id);
-        let birth_snapshot = attach_admitted_launch_capsule(
-            &self.state_authority,
-            permit.cas_guard(),
-            build_snapshot(thread),
-            launch_metadata,
-        )?;
-        let thread_runtime = RuntimeInfo {
-            launch_metadata: launch_metadata.cloned(),
-            ..RuntimeInfo::default()
-        };
         let event_successor_snapshot = if launch_metadata
             .and_then(|metadata| metadata.launch_driver)
             == Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
@@ -4135,7 +4143,6 @@ impl StateStore {
         } else {
             None
         };
-        let expected_birth_snapshot = birth_snapshot.clone();
         let expected_event_successor_snapshot = event_successor_snapshot.clone();
         let expected_thread_events = thread_events.clone();
         // Establish the auxiliary runtime row before the authoritative commit.
