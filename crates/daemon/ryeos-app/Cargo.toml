@@ -24,6 +24,7 @@ rusqlite = { workspace = true }
 ryeos-accounting = { workspace = true }
 ryeos-bundle = { workspace = true }
 ryeos-engine = { workspace = true }
+ryeos-graph-definition = { workspace = true }
 ryeos-effect-contract = { workspace = true }
 ryeos-isolation-protocol = { workspace = true }
 ryeos-runtime = { workspace = true }

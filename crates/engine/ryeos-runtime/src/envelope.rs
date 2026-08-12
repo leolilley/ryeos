@@ -25,7 +25,7 @@ struct ManagedNativeEnvelope {
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ManagedFollowEnvelope {
+struct ManagedRuntimeTerminalWire {
     success: bool,
     child_thread_id: String,
     status: RuntimeResultStatus,
@@ -35,16 +35,41 @@ struct ManagedFollowEnvelope {
     cost: serde_json::Value,
 }
 
-/// Strictly decoded daemon-managed terminal envelope stored for follow resume
-/// and callback-authoritative subprocess reconciliation.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagedFollowEnvelope {
+    projection: String,
+    success: bool,
+    child_thread_id: String,
+    status: RuntimeResultStatus,
+    result: serde_json::Value,
+    cost: serde_json::Value,
+}
+
+pub const FOLLOW_ACTION_RESULT_PROJECTION: &str = "action_result";
+
+/// Complete callback-authoritative runtime terminal shape retained on the
+/// child thread. This is distinct from the compact follow-resume projection.
 #[derive(Debug)]
-pub struct FollowTerminalEnvelope {
+pub struct ManagedRuntimeTerminalEnvelope {
     pub success: bool,
     pub child_thread_id: String,
     pub status: RuntimeResultStatus,
     pub result: serde_json::Value,
     pub outputs: serde_json::Value,
     pub warnings: Vec<String>,
+    pub cost: Option<RuntimeCost>,
+}
+
+/// Strictly decoded compact terminal envelope stored only for parent follow
+/// resume. The child thread retains the complete callback-authoritative
+/// runtime terminal separately.
+#[derive(Debug)]
+pub struct FollowTerminalEnvelope {
+    pub success: bool,
+    pub child_thread_id: String,
+    pub status: RuntimeResultStatus,
+    pub result: serde_json::Value,
     pub cost: Option<RuntimeCost>,
 }
 
@@ -434,14 +459,18 @@ pub fn decode_follow_terminal_envelope(
     let envelope: ManagedFollowEnvelope = serde_json::from_value(value.clone())
         .map_err(|error| format!("malformed follow terminal envelope: {error}"))?;
     let ManagedFollowEnvelope {
+        projection,
         success,
         child_thread_id,
         status,
         result,
-        outputs,
-        warnings,
         cost,
     } = envelope;
+    if projection != FOLLOW_ACTION_RESULT_PROJECTION {
+        return Err(format!(
+            "malformed follow terminal envelope: projection `{projection}` is not `{FOLLOW_ACTION_RESULT_PROJECTION}`"
+        ));
+    }
     crate::validate_runtime_thread_id(&child_thread_id)
         .map_err(|error| format!("malformed follow terminal envelope: {error}"))?;
     if status == RuntimeResultStatus::Continued {
@@ -469,10 +498,99 @@ pub fn decode_follow_terminal_envelope(
         child_thread_id,
         status,
         result,
+        cost,
+    })
+}
+
+/// Decode the complete runtime terminal envelope before any parent-action
+/// projection is applied.
+pub fn decode_managed_runtime_terminal_envelope(
+    value: &serde_json::Value,
+) -> Result<ManagedRuntimeTerminalEnvelope, String> {
+    let envelope: ManagedRuntimeTerminalWire = serde_json::from_value(value.clone())
+        .map_err(|error| format!("malformed managed runtime terminal envelope: {error}"))?;
+    let ManagedRuntimeTerminalWire {
+        success,
+        child_thread_id,
+        status,
+        result,
+        outputs,
+        warnings,
+        cost,
+    } = envelope;
+    crate::validate_runtime_thread_id(&child_thread_id)
+        .map_err(|error| format!("malformed managed runtime terminal envelope: {error}"))?;
+    if success != status.is_success() {
+        return Err(format!(
+            "malformed managed runtime terminal envelope: success={success} contradicts status `{}`",
+            status.as_str()
+        ));
+    }
+    let cost = if cost.is_null() {
+        None
+    } else {
+        let cost: RuntimeCost = serde_json::from_value(cost)
+            .map_err(|error| format!("malformed managed runtime terminal cost: {error}"))?;
+        cost.validate()
+            .map_err(|error| format!("invalid managed runtime terminal cost: {error}"))?;
+        Some(cost)
+    };
+    Ok(ManagedRuntimeTerminalEnvelope {
+        success,
+        child_thread_id,
+        status,
+        result,
         outputs,
         warnings,
         cost,
     })
+}
+
+/// Encode the compact parent-visible terminal contract for one followed child.
+/// The child thread retains its complete terminal result; the resume payload
+/// carries only the value that an ordinary authored action would observe.
+pub fn encode_follow_terminal_envelope(
+    child_thread_id: &str,
+    status: RuntimeResultStatus,
+    result: serde_json::Value,
+    cost: Option<&RuntimeCost>,
+) -> Result<serde_json::Value, String> {
+    crate::validate_runtime_thread_id(child_thread_id)
+        .map_err(|error| format!("invalid follow terminal child identity: {error}"))?;
+    if status == RuntimeResultStatus::Continued {
+        return Err("continued is not a terminal follow status".to_string());
+    }
+    if let Some(cost) = cost {
+        cost.validate()
+            .map_err(|error| format!("invalid follow terminal envelope cost: {error}"))?;
+    }
+    Ok(serde_json::json!({
+        "projection": FOLLOW_ACTION_RESULT_PROJECTION,
+        "success": status.is_success(),
+        "child_thread_id": child_thread_id,
+        "status": status,
+        "result": result,
+        "cost": cost,
+    }))
+}
+
+/// Apply the default native-kind action projection shared by direct dispatch
+/// and followed-child settlement. Kinds with a stronger contract, such as
+/// graph, project through their kind-owned decoder instead.
+pub fn project_kind_defined_action_result(
+    result: serde_json::Value,
+    outputs: serde_json::Value,
+) -> serde_json::Value {
+    let has_outputs = match &outputs {
+        serde_json::Value::Null => false,
+        serde_json::Value::Object(map) => !map.is_empty(),
+        _ => true,
+    };
+    if has_outputs {
+        serde_json::json!({ "result": result, "outputs": outputs })
+    } else {
+        result
+    }
 }
 
 /// Validate the exact daemon-managed follow envelope and return its closed
@@ -644,12 +762,11 @@ mod tests {
     #[test]
     fn follow_envelope_requires_child_identity_and_consistent_closed_status() {
         let valid = json!({
+            "projection": FOLLOW_ACTION_RESULT_PROJECTION,
             "success": true,
             "child_thread_id": "T-follow-child",
             "status": RuntimeResultStatus::Completed,
             "result": null,
-            "outputs": null,
-            "warnings": [],
             "cost": null,
         });
         let decoded = decode_follow_terminal_envelope(&valid).unwrap();
@@ -657,8 +774,6 @@ mod tests {
         assert_eq!(decoded.child_thread_id, "T-follow-child");
         assert_eq!(decoded.status, RuntimeResultStatus::Completed);
         assert_eq!(decoded.result, serde_json::Value::Null);
-        assert_eq!(decoded.outputs, serde_json::Value::Null);
-        assert!(decoded.warnings.is_empty());
         assert!(decoded.cost.is_none());
         assert_eq!(
             follow_envelope_terminal_status(&valid).unwrap(),
@@ -668,28 +783,32 @@ mod tests {
         for malformed in [
             json!({
                 "success": true,
+                "child_thread_id": "T-follow-child",
                 "status": RuntimeResultStatus::Completed,
                 "result": null,
-                "outputs": null,
-                "warnings": [],
                 "cost": null,
             }),
             json!({
+                "projection": FOLLOW_ACTION_RESULT_PROJECTION,
+                "success": true,
+                "status": RuntimeResultStatus::Completed,
+                "result": null,
+                "cost": null,
+            }),
+            json!({
+                "projection": FOLLOW_ACTION_RESULT_PROJECTION,
                 "success": true,
                 "child_thread_id": "T-follow-child",
                 "status": RuntimeResultStatus::Failed,
                 "result": null,
-                "outputs": null,
-                "warnings": [],
                 "cost": null,
             }),
             json!({
+                "projection": FOLLOW_ACTION_RESULT_PROJECTION,
                 "success": true,
                 "child_thread_id": "T-follow-child",
                 "status": RuntimeResultStatus::Completed,
                 "result": null,
-                "outputs": null,
-                "warnings": [],
                 "cost": null,
                 "unexpected": true,
             }),

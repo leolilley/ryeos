@@ -3,9 +3,11 @@ use serde_json::Value;
 
 #[cfg(test)]
 use ryeos_graph_definition::GraphFile;
-pub use ryeos_graph_definition::{ErrorMode, GraphConfig, GraphNode, NodeType, RetryConfig};
+pub use ryeos_graph_definition::{
+    ErrorMode, ErrorRecord, GraphConfig, GraphNode, GraphResult, GraphRunStatus, HookCostRecord,
+    NodeCostRecord, NodeType, RetryConfig,
+};
 use ryeos_runtime::envelope::RuntimeCost;
-use ryeos_runtime::events::RuntimeEventType;
 
 #[cfg(test)]
 pub const MAX_RETRY_BACKOFF_MS: u64 = ryeos_graph_definition::MAX_RETRY_BACKOFF_MS;
@@ -295,36 +297,6 @@ impl GraphDefinition {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum GraphRunStatus {
-    Valid,
-    Invalid,
-    Completed,
-    CompletedWithErrors,
-    Continued,
-    Error,
-    MaxStepsExceeded,
-    Cancelled,
-    Killed,
-}
-
-impl GraphRunStatus {
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::Valid => "valid",
-            Self::Invalid => "invalid",
-            Self::Completed => "completed",
-            Self::CompletedWithErrors => "completed_with_errors",
-            Self::Continued => "continued",
-            Self::Error => "error",
-            Self::MaxStepsExceeded => "max_steps_exceeded",
-            Self::Cancelled => "cancelled",
-            Self::Killed => "killed",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum GraphStepStatus {
     Ok,
     Error,
@@ -364,68 +336,6 @@ impl GraphToolCallStatus {
 }
 
 pub use ryeos_runtime::checkpoint::FanoutItemStatus;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GraphResult {
-    pub success: bool,
-    pub graph_id: String,
-    pub definition_ref: String,
-    pub effective_definition_digest: String,
-    pub graph_run_id: String,
-    pub status: GraphRunStatus,
-    pub steps: u32,
-    pub state: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub errors_suppressed: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub errors: Option<Vec<ErrorRecord>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// Aggregate token/spend cost across every cost-bearing node in the
-    /// run. `None` when no node reported cost (e.g. a pure-tool graph).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cost: Option<RuntimeCost>,
-    /// Per-node cost breakdown, one record per cost-bearing node. Empty
-    /// when no node reported cost.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub node_costs: Vec<NodeCostRecord>,
-    /// Cost incurred by observer hooks, retained separately from node actions
-    /// while still contributing to the graph's aggregate `cost`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub hook_costs: Vec<HookCostRecord>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ErrorRecord {
-    pub step: u32,
-    pub node: String,
-    pub error: String,
-}
-
-/// Cost attributed to a single node's action (a directive or sub-graph
-/// child that reported usage). Foreach nodes aggregate all iteration
-/// costs into one record.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NodeCostRecord {
-    pub node: String,
-    pub step: u32,
-    pub item_id: String,
-    pub cost: RuntimeCost,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HookCostRecord {
-    pub event: RuntimeEventType,
-    /// Present for step/completion events and absent for `graph_started`.
-    pub step: Option<u32>,
-    pub cost: RuntimeCost,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

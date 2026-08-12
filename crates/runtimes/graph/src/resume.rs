@@ -487,12 +487,11 @@ config:
             json!({"error": "child failed"})
         };
         json!({
+            "projection": ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION,
             "success": status.is_success(),
             "child_thread_id": "T-resume-child",
             "status": status,
             "result": result,
-            "outputs": null,
-            "warnings": [],
             "cost": null,
         })
     }

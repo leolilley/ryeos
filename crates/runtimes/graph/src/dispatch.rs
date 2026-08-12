@@ -7,7 +7,9 @@ use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::{RuntimeCost, RuntimeResultStatus};
 
 use crate::context::ExecutionContext;
-use crate::model::{FanoutItemStatus, GraphResult, GraphRunStatus};
+use crate::model::FanoutItemStatus;
+#[cfg(test)]
+use crate::model::GraphRunStatus;
 
 const NATIVE_FAILURE_DIAGNOSTIC_CHARS: usize = 4_096;
 
@@ -89,7 +91,7 @@ pub struct ActionSuccess {
     /// `result` of a directive return is the synthetic sentinel
     /// `"directive_return"` — not meaningful graph data — so the outputs
     /// are the payload. A `graph:*` child keeps its complete typed
-    /// [`GraphResult`] in the durable runtime envelope while exposing that
+    /// `GraphResult` in the durable runtime envelope while exposing that
     /// DTO's authored `result` here. For every other leaf (subprocess, bare
     /// value, native return with no outputs) this is the bare inner result and
     /// the shape is unchanged.
@@ -232,8 +234,7 @@ pub async fn dispatch_action(
     // capture its id BEFORE classifying `result` so the walker can emit a
     // `child_thread_spawned` event. In-process service envelopes instead carry
     // invocation/audit metadata and are explicitly excluded below.
-    let (child_thread_id, child_thread_id_error) =
-        callback_child_thread_identity(&response.thread);
+    let (child_thread_id, child_thread_id_error) = callback_child_thread_identity(&response.thread);
 
     response
         .dispatch
@@ -353,9 +354,7 @@ fn callback_child_thread_identity(thread: &Value) -> (Option<String>, Option<Str
         None => {}
     }
 
-    let callback_child_thread_id = thread
-        .get("thread_id")
-        .or_else(|| thread.get("id"));
+    let callback_child_thread_id = thread.get("thread_id").or_else(|| thread.get("id"));
     match callback_child_thread_id {
         None => (None, None),
         Some(Value::String(thread_id)) => {
@@ -396,7 +395,7 @@ fn classify_envelope(value: Value) -> ActionOutcome {
 /// Classify a live dispatch result using the exact kind selected by the
 /// authored canonical item reference.
 ///
-/// Graph runtimes retain their complete [`GraphResult`] in the durable native
+/// Graph runtimes retain their complete `GraphResult` in the durable native
 /// envelope. At the graph-expression boundary, however, a graph action exposes
 /// the child graph's authored return value. Kind-directed projection keeps that
 /// contract explicit and prevents arbitrary non-graph payloads that happen to
@@ -529,12 +528,11 @@ struct SubprocessResultEnvelope {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FollowResultEnvelope {
+    projection: String,
     success: bool,
     child_thread_id: String,
     status: RuntimeResultStatus,
     result: Value,
-    outputs: Value,
-    warnings: Vec<String>,
     cost: Value,
 }
 
@@ -559,7 +557,7 @@ struct FollowFanoutResumeEnvelope {
 /// closed status, `success` must agree exactly with the status outcome.
 #[cfg(test)]
 fn classify_follow_envelope(value: Value) -> Result<ClassifiedFollowEnvelope, String> {
-    classify_follow_envelope_with_projection(value, NativeResultProjection::KindDefined)
+    classify_follow_envelope_value(value)
 }
 
 /// Classify a single followed child using the canonical item ref captured in
@@ -569,25 +567,31 @@ pub(crate) fn classify_follow_envelope_for_item(
     value: Value,
     item_ref: &str,
 ) -> Result<ClassifiedFollowEnvelope, String> {
-    let projection = native_result_projection(item_ref)?;
-    classify_follow_envelope_with_projection(value, projection)
+    // The daemon has already applied the kind-owned action projection before
+    // persisting this bounded resume envelope. Still reject a corrupt
+    // checkpointed item reference instead of silently accepting it.
+    let _ = native_result_projection(item_ref)?;
+    classify_follow_envelope_value(value)
 }
 
-fn classify_follow_envelope_with_projection(
-    value: Value,
-    projection: NativeResultProjection,
-) -> Result<ClassifiedFollowEnvelope, String> {
+fn classify_follow_envelope_value(value: Value) -> Result<ClassifiedFollowEnvelope, String> {
     let envelope: FollowResultEnvelope = serde_json::from_value(value)
         .map_err(|error| format!("malformed follow result envelope: {error}"))?;
     let FollowResultEnvelope {
+        projection,
         success,
         child_thread_id: envelope_child_thread_id,
         status,
         result,
-        outputs,
-        warnings: _warnings,
         cost,
     } = envelope;
+
+    if projection != ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION {
+        return Err(format!(
+            "malformed follow result envelope: projection `{projection}` is not `{}`",
+            ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION
+        ));
+    }
 
     ryeos_runtime::validate_runtime_thread_id(&envelope_child_thread_id)
         .map_err(|error| format!("malformed follow result envelope: {error}"))?;
@@ -616,8 +620,6 @@ fn classify_follow_envelope_with_projection(
 
     let child_thread_id = envelope_child_thread_id.clone();
     let outcome = if status.is_success() {
-        let result = native_success_value(result, outputs, projection)
-            .map_err(|error| format!("malformed follow result envelope: {error}"))?;
         ActionOutcome::Success(ActionSuccess {
             result,
             cost,
@@ -896,7 +898,7 @@ fn classify_subprocess_envelope(value: Value) -> ActionOutcome {
 
 /// Graph-visible success value for a native-runtime envelope.
 ///
-/// A graph runtime's durable result is the complete typed [`GraphResult`], but
+/// A graph runtime's durable result is the complete typed `GraphResult`, but
 /// an authored graph action observes only that DTO's `result` field. Other
 /// native kinds retain their kind-defined result projection: directives with
 /// declared outputs expose `{result, outputs}`, while a native return with no
@@ -907,14 +909,12 @@ fn native_success_value(
     projection: NativeResultProjection,
 ) -> Result<Value, String> {
     match projection {
-        NativeResultProjection::GraphReturn => project_graph_return(result, outputs),
-        NativeResultProjection::KindDefined => {
-            if has_meaningful_outputs(&outputs) {
-                Ok(json!({ "result": result, "outputs": outputs }))
-            } else {
-                Ok(result)
-            }
+        NativeResultProjection::GraphReturn => {
+            ryeos_graph_definition::project_graph_action_result(result, outputs)
         }
+        NativeResultProjection::KindDefined => Ok(
+            ryeos_runtime::envelope::project_kind_defined_action_result(result, outputs),
+        ),
     }
 }
 
@@ -932,55 +932,6 @@ fn native_result_projection(item_ref: &str) -> Result<NativeResultProjection, St
     } else {
         NativeResultProjection::KindDefined
     })
-}
-
-fn project_graph_return(result: Value, outputs: Value) -> Result<Value, String> {
-    if !outputs.is_null() {
-        return Err("graph runtime envelope must carry null `outputs`".to_string());
-    }
-
-    let graph_result: GraphResult = serde_json::from_value(result)
-        .map_err(|error| format!("graph runtime returned malformed GraphResult: {error}"))?;
-    let definition_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(
-        &graph_result.definition_ref,
-    )
-    .map_err(|error| {
-        format!(
-            "graph runtime returned GraphResult with invalid definition_ref `{}`: {error}",
-            graph_result.definition_ref
-        )
-    })?;
-    if definition_ref.kind != "graph" {
-        return Err(format!(
-            "graph runtime returned GraphResult with non-graph definition_ref `{}`",
-            graph_result.definition_ref
-        ));
-    }
-    let successful_status = matches!(
-        graph_result.status,
-        GraphRunStatus::Valid | GraphRunStatus::Completed | GraphRunStatus::CompletedWithErrors
-    );
-    if !graph_result.success || !successful_status {
-        return Err(format!(
-            "graph runtime returned success envelope with contradictory GraphResult success={} status=`{}`",
-            graph_result.success,
-            graph_result.status.as_str()
-        ));
-    }
-
-    Ok(graph_result.result.unwrap_or(Value::Null))
-}
-
-/// Whether a native envelope's `outputs` carries declared data. A
-/// directive with no declared outputs emits `outputs: {}`; treating that
-/// (and `null`) as absent keeps the bare-result shape for the common case
-/// so `${result.foo}` does not silently become `${result.result.foo}`.
-fn has_meaningful_outputs(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Object(map) => !map.is_empty(),
-        _ => true,
-    }
 }
 
 /// Parse the required nullable `cost` field of a native envelope into a typed
@@ -1169,8 +1120,7 @@ mod tests {
 
     #[test]
     fn native_child_metadata_retains_strict_runtime_identity() {
-        let (child, error) =
-            callback_child_thread_identity(&json!({"thread_id": "T-child_1"}));
+        let (child, error) = callback_child_thread_identity(&json!({"thread_id": "T-child_1"}));
         assert_eq!(child.as_deref(), Some("T-child_1"));
         assert!(error.is_none());
 
@@ -1656,12 +1606,11 @@ mod tests {
         result: Value,
     ) -> Value {
         json!({
+            "projection": ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION,
             "success": success,
             "child_thread_id": "T-follow-child",
             "status": status,
             "result": result,
-            "outputs": null,
-            "warnings": [],
             "cost": null,
         })
     }
@@ -1722,11 +1671,7 @@ mod tests {
     fn single_graph_follow_projects_authored_return() {
         let authored = json!({"child_ran": "sentinel"});
         let classified = classify_follow_envelope_for_item(
-            canonical_follow_envelope(
-                true,
-                RuntimeResultStatus::Completed,
-                completed_graph_result(authored.clone()),
-            ),
+            canonical_follow_envelope(true, RuntimeResultStatus::Completed, authored.clone()),
             "graph:test/child",
         )
         .expect("canonical graph follow envelope");
@@ -1838,9 +1783,8 @@ mod tests {
     }
 
     #[test]
-    fn graph_follow_fanout_projects_each_item_by_its_checkpointed_kind() {
+    fn graph_follow_fanout_consumes_daemon_projected_items_in_order() {
         let graph_authored = json!({"child_ran": "graph"});
-        let graph_result = completed_graph_result(graph_authored.clone());
         let graph_shaped_directive_result =
             completed_graph_result(json!({"child_ran": "directive"}));
         let wrapper = json!({
@@ -1852,7 +1796,7 @@ mod tests {
                 canonical_follow_envelope(
                     true,
                     RuntimeResultStatus::Completed,
-                    graph_result,
+                    graph_authored.clone(),
                 ),
                 canonical_follow_envelope(
                     true,
@@ -1893,14 +1837,9 @@ mod tests {
         assert!(failure.integrity);
         assert!(failure.diagnostic.contains("malformed GraphResult"));
 
-        let follow_envelope = canonical_follow_envelope(
-            true,
-            RuntimeResultStatus::Completed,
-            json!({"child_ran": "missing graph result contract"}),
-        );
-        let error =
-            classify_follow_envelope_for_item(follow_envelope, "graph:test/child").unwrap_err();
-        assert!(error.contains("malformed GraphResult"), "{error}");
+        // Follow persistence applies this same kind-owned projection before
+        // constructing the compact action-result envelope; the resumed runtime
+        // therefore never reparses a complete GraphResult.
     }
 
     #[test]
@@ -2345,11 +2284,11 @@ mod tests {
     #[test]
     fn classify_follow_envelope_rejects_unknown_status_and_fields() {
         let unknown_status = json!({
+            "projection": ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION,
             "success": false,
+            "child_thread_id": "T-follow-child",
             "status": "error",
             "result": null,
-            "outputs": null,
-            "warnings": [],
             "cost": null,
         });
         assert!(

@@ -999,10 +999,14 @@ const RUNTIME_OPERATOR_APP_ID_PREFIX: u32 = 0x5259_0000;
 const RUNTIME_OPERATOR_APP_ID_MASK: u32 = 0xffff_ff00;
 const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 3 is the clean effective-program/hook-dispatch activation barrier. An
-// older store may contain resumable occurrences under superseded identity and is deliberately refused by
-// ordinary open; the explicit runtime-history reset is permitted only after
-// admission has stopped and resumable work has been drained/terminalized.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 4;
+// older store may contain resumable occurrences under superseded identity and
+// is deliberately refused by ordinary open; the explicit runtime-history
+// reset is permitted only after admission has stopped and resumable work has
+// been drained/terminalized.
+// Epoch 5 stores only the daemon-projected action result in follow waiter
+// terminal envelopes. Predecessor rows retained complete runtime results and
+// cannot be reinterpreted as the compact parent-resume contract.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 5;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

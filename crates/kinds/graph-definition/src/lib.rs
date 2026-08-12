@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, HashSet};
 use anyhow::{Context, Result, anyhow, bail};
 use ryeos_engine::hooks::{EffectiveHookPlan, ExpressionCondition, HookDefinition};
 use ryeos_engine::resolution::KindComposedView;
+use ryeos_runtime::envelope::RuntimeCost;
+use ryeos_runtime::events::RuntimeEventType;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -20,6 +22,128 @@ pub const MAX_GRAPH_STEPS: u32 = 500;
 pub const MAX_GRAPH_SEGMENT_STEPS: u32 = MAX_GRAPH_STEPS;
 pub const MAX_RETRY_BACKOFF_MS: u64 = 300_000;
 pub const MAX_NODE_CONCURRENCY: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphRunStatus {
+    Valid,
+    Invalid,
+    Completed,
+    CompletedWithErrors,
+    Continued,
+    Error,
+    MaxStepsExceeded,
+    Cancelled,
+    Killed,
+}
+
+impl GraphRunStatus {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::Invalid => "invalid",
+            Self::Completed => "completed",
+            Self::CompletedWithErrors => "completed_with_errors",
+            Self::Continued => "continued",
+            Self::Error => "error",
+            Self::MaxStepsExceeded => "max_steps_exceeded",
+            Self::Cancelled => "cancelled",
+            Self::Killed => "killed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphResult {
+    pub success: bool,
+    pub graph_id: String,
+    pub definition_ref: String,
+    pub effective_definition_digest: String,
+    pub graph_run_id: String,
+    pub status: GraphRunStatus,
+    pub steps: u32,
+    pub state: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub errors_suppressed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub errors: Option<Vec<ErrorRecord>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<RuntimeCost>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub node_costs: Vec<NodeCostRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hook_costs: Vec<HookCostRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ErrorRecord {
+    pub step: u32,
+    pub node: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeCostRecord {
+    pub node: String,
+    pub step: u32,
+    pub item_id: String,
+    pub cost: RuntimeCost,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookCostRecord {
+    pub event: RuntimeEventType,
+    pub step: Option<u32>,
+    pub cost: RuntimeCost,
+}
+
+/// Project a graph runtime's complete durable result to the value exposed to
+/// an authored parent action. The complete state remains on the child thread;
+/// follow transport carries only this return value.
+pub fn project_graph_action_result(result: Value, outputs: Value) -> Result<Value, String> {
+    if !outputs.is_null() {
+        return Err("graph runtime envelope must carry null `outputs`".to_string());
+    }
+
+    let graph_result: GraphResult = serde_json::from_value(result)
+        .map_err(|error| format!("graph runtime returned malformed GraphResult: {error}"))?;
+    let definition_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(
+        &graph_result.definition_ref,
+    )
+    .map_err(|error| {
+        format!(
+            "graph runtime returned GraphResult with invalid definition_ref `{}`: {error}",
+            graph_result.definition_ref
+        )
+    })?;
+    if definition_ref.kind != "graph" {
+        return Err(format!(
+            "graph runtime returned GraphResult with non-graph definition_ref `{}`",
+            graph_result.definition_ref
+        ));
+    }
+    let successful_status = matches!(
+        graph_result.status,
+        GraphRunStatus::Valid | GraphRunStatus::Completed | GraphRunStatus::CompletedWithErrors
+    );
+    if !graph_result.success || !successful_status {
+        return Err(format!(
+            "graph runtime returned success envelope with contradictory GraphResult success={} status=`{}`",
+            graph_result.success,
+            graph_result.status.as_str()
+        ));
+    }
+
+    Ok(graph_result.result.unwrap_or(Value::Null))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

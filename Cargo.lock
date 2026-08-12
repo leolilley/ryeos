@@ -2423,6 +2423,7 @@ dependencies = [
  "ryeos-bundle",
  "ryeos-effect-contract",
  "ryeos-engine",
+ "ryeos-graph-definition",
  "ryeos-isolation-protocol",
  "ryeos-provider-contract",
  "ryeos-runtime",

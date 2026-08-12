@@ -9300,21 +9300,19 @@ mod tests {
             true,
             vec![
                 json!({
+                    "projection": ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION,
                     "success": true,
                     "child_thread_id": "T-follow-child-1",
                     "status": "completed",
                     "result": {"answer": 1},
-                    "outputs": null,
-                    "warnings": [],
                     "cost": null,
                 }),
                 json!({
+                    "projection": ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION,
                     "success": false,
                     "child_thread_id": "T-follow-child-2",
                     "status": "failed",
                     "result": {"error": "boom"},
-                    "outputs": null,
-                    "warnings": [],
                     "cost": null,
                 }),
             ],

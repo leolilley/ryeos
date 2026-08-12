@@ -3778,29 +3778,12 @@ fn follow_terminal_envelope_for_thread(
     result: Value,
 ) -> Value {
     json!({
+        "projection": ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION,
         "success": status.is_success(),
         "child_thread_id": child_thread_id,
         "status": status,
         "result": result,
-        "outputs": null,
-        "warnings": [],
         "cost": null,
-    })
-}
-
-fn completed_child_graph_result(definition_ref: &str, result: Value) -> Value {
-    json!({
-        "success": true,
-        "graph_id": definition_ref.trim_start_matches("graph:"),
-        "definition_ref": definition_ref,
-        "effective_definition_digest": "sha256:test-child",
-        "graph_run_id": "gr-child",
-        "status": GraphRunStatus::Completed,
-        "steps": 1,
-        "state": {"child_private": true},
-        "result": result,
-        "node_costs": [],
-        "hook_costs": [],
     })
 }
 
@@ -3822,7 +3805,7 @@ async fn graph_follow_resume_exposes_authored_child_return_to_parent_expressions
         })),
         Some(follow_terminal_envelope(
             RuntimeResultStatus::Completed,
-            completed_child_graph_result("graph:test/child", authored),
+            authored,
         )),
         0,
     );
@@ -4410,12 +4393,12 @@ async fn graph_follow_fanout_collects_authored_child_returns_in_order() {
             follow_terminal_envelope_for_thread(
                 "T-follow-child-1",
                 RuntimeResultStatus::Completed,
-                completed_child_graph_result("graph:a", json!({"child_ran": "a"})),
+                json!({"child_ran": "a"}),
             ),
             follow_terminal_envelope_for_thread(
                 "T-follow-child-2",
                 RuntimeResultStatus::Completed,
-                completed_child_graph_result("graph:b", json!({"child_ran": "b"})),
+                json!({"child_ran": "b"}),
             ),
         ],
     });

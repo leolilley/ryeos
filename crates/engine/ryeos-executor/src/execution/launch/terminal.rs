@@ -3,7 +3,9 @@ use serde_json::{Value, json};
 use super::RuntimeResult;
 use ryeos_app::state_store::ThreadTerminalAuthority;
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
-use ryeos_runtime::envelope::{RuntimeCost, RuntimeResultStatus, decode_follow_terminal_envelope};
+use ryeos_runtime::envelope::{
+    RuntimeCost, RuntimeResultStatus, decode_managed_runtime_terminal_envelope,
+};
 use ryeos_state::objects::ThreadStatus;
 
 pub(super) struct FallbackFinalization {
@@ -65,7 +67,7 @@ pub(super) fn reconcile_callback_finalization(
             "callback-authoritative terminal snapshot is missing its managed runtime envelope"
         )
     })?;
-    let envelope = decode_follow_terminal_envelope(raw_envelope).map_err(|error| {
+    let envelope = decode_managed_runtime_terminal_envelope(raw_envelope).map_err(|error| {
         anyhow::anyhow!("callback-authoritative managed runtime envelope is malformed: {error}")
     })?;
     if envelope.child_thread_id != runtime_result.thread_id {
@@ -157,8 +159,9 @@ pub(super) fn reconcile_terminal_finalization(
     })
 }
 
-/// Materialize the canonical DB finalization and managed follow envelope when
-/// a runtime exits without finalizing itself through its callback.
+/// Materialize the canonical DB finalization and complete managed terminal
+/// envelope when a runtime exits without finalizing itself through its
+/// callback.
 pub(super) fn fallback_finalization(
     thread_id: &str,
     runtime_result: &RuntimeResult,

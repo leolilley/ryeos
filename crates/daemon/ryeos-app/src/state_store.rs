@@ -319,19 +319,6 @@ pub struct FinalizeThreadRecord {
     pub result_project_snapshot_hash: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ManagedTerminalEnvelope {
-    success: bool,
-    child_thread_id: String,
-    status: ryeos_runtime::envelope::RuntimeResultStatus,
-    result: Value,
-    outputs: Value,
-    warnings: Vec<String>,
-    /// Kept as `Value` so `cost` is a required key even when explicitly null.
-    cost: Value,
-}
-
 fn runtime_status_for_thread_status(
     status: ThreadStatus,
 ) -> Result<ryeos_runtime::envelope::RuntimeResultStatus> {
@@ -360,8 +347,9 @@ fn validate_managed_terminal_envelope(
 ) -> Result<()> {
     validate_checkpoint_shape(raw, "managed runtime terminal envelope")
         .context("validate managed runtime terminal envelope")?;
-    let envelope: ManagedTerminalEnvelope =
-        serde_json::from_value(raw.clone()).context("decode managed runtime terminal envelope")?;
+    let envelope = ryeos_runtime::envelope::decode_managed_runtime_terminal_envelope(raw)
+        .map_err(anyhow::Error::msg)
+        .context("decode managed runtime terminal envelope")?;
     if envelope.child_thread_id != thread_id {
         bail!(
             "managed runtime envelope child_thread_id `{}` contradicts settlement thread `{thread_id}`",
@@ -393,16 +381,7 @@ fn validate_managed_terminal_envelope(
         bail!("managed runtime envelope result contradicts settlement result/error payload");
     }
 
-    let envelope_cost = if envelope.cost.is_null() {
-        None
-    } else {
-        let cost: ryeos_runtime::envelope::RuntimeCost = serde_json::from_value(envelope.cost)
-            .context("decode managed runtime envelope cost")?;
-        cost.validate()
-            .context("validate managed runtime envelope cost")?;
-        Some(cost)
-    };
-    match (final_cost, envelope_cost.as_ref()) {
+    match (final_cost, envelope.cost.as_ref()) {
         (None, None) => {}
         (Some(final_cost), Some(runtime_cost))
             if final_cost.input_tokens == runtime_cost.input_tokens
@@ -482,29 +461,30 @@ fn terminal_facets(
 
 const FOLLOW_ENVELOPE_LIMIT_CODE: &str = "follow_terminal_envelope_limit_exceeded";
 
-fn follow_envelope_limit_failure(child_thread_id: &str, cost: Option<&Value>) -> Value {
+fn follow_envelope_limit_failure(
+    child_thread_id: &str,
+    cost: Option<&ryeos_runtime::envelope::RuntimeCost>,
+) -> Value {
     let status = ryeos_runtime::envelope::RuntimeResultStatus::Failed;
-    json!({
-        "success": false,
-        "child_thread_id": child_thread_id,
-        "status": status,
-        "result": {
+    ryeos_runtime::envelope::encode_follow_terminal_envelope(
+        child_thread_id,
+        status,
+        json!({
             "code": FOLLOW_ENVELOPE_LIMIT_CODE,
             "message": "follow child terminal envelope exceeded the bounded parent resume payload",
-        },
-        "outputs": Value::Null,
-        "warnings": [FOLLOW_ENVELOPE_LIMIT_CODE],
-        "cost": cost.cloned(),
-    })
+        }),
+        cost,
+    )
+    .expect("bounded follow failure envelope is statically valid")
 }
 
 fn follow_envelope_limit_reservation() -> Value {
-    let maximum_cost = json!({
-        "input_tokens": i64::MAX as u64,
-        "output_tokens": i64::MAX as u64,
-        "total_usd": ryeos_engine::launch_envelope_types::UsdNanos::MAX.to_canonical_string(),
-        "basis": ryeos_engine::launch_envelope_types::COST_BASIS_ROLLUP,
-    });
+    let maximum_cost = ryeos_runtime::envelope::RuntimeCost {
+        input_tokens: i64::MAX as u64,
+        output_tokens: i64::MAX as u64,
+        total_usd: ryeos_engine::launch_envelope_types::UsdNanos::MAX,
+        basis: Some(ryeos_engine::launch_envelope_types::COST_BASIS_ROLLUP.to_string()),
+    };
     let maximum_thread_id = format!("T-{}", "x".repeat(126));
     follow_envelope_limit_failure(&maximum_thread_id, Some(&maximum_cost))
 }
@@ -527,7 +507,9 @@ fn validate_final_cost(cost: &ryeos_engine::contracts::FinalCost) -> Result<Vali
     })
 }
 
-fn validated_follow_candidate_cost(candidate: &Value) -> Result<Option<Value>> {
+fn validated_follow_candidate_cost(
+    candidate: &Value,
+) -> Result<Option<ryeos_runtime::envelope::RuntimeCost>> {
     let Some(raw_cost) = candidate.get("cost") else {
         return Ok(None);
     };
@@ -537,9 +519,69 @@ fn validated_follow_candidate_cost(candidate: &Value) -> Result<Option<Value>> {
     let cost: ryeos_runtime::envelope::RuntimeCost =
         serde_json::from_value(raw_cost.clone()).context("decode follow terminal cost")?;
     cost.validate().context("validate follow terminal cost")?;
-    Ok(Some(
-        serde_json::to_value(cost).context("encode validated follow terminal cost")?,
+    Ok(Some(cost))
+}
+
+fn project_follow_action_result(item_ref: &str, result: Value, outputs: Value) -> Result<Value> {
+    let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref)
+        .with_context(|| format!("parse followed item reference `{item_ref}`"))?;
+    if canonical.kind == "graph" {
+        return ryeos_graph_definition::project_graph_action_result(result, outputs)
+            .map_err(anyhow::Error::msg)
+            .context("project followed graph return");
+    }
+    Ok(ryeos_runtime::envelope::project_kind_defined_action_result(
+        result, outputs,
     ))
+}
+
+fn compact_follow_terminal_envelope(
+    waiter: &runtime_db::FollowWaiter,
+    child_chain_root_id: &str,
+    child_terminal_thread_id: &str,
+    candidate: &Value,
+) -> Result<Value> {
+    let envelope = ryeos_runtime::envelope::decode_managed_runtime_terminal_envelope(candidate)
+        .map_err(anyhow::Error::msg)
+        .context("decode managed follow terminal candidate")?;
+    if envelope.child_thread_id != child_terminal_thread_id {
+        bail!(
+            "follow terminal envelope child_thread_id `{}` does not match terminal child `{child_terminal_thread_id}`",
+            envelope.child_thread_id
+        );
+    }
+    if envelope.status == ryeos_runtime::envelope::RuntimeResultStatus::Continued {
+        bail!("continued is not a terminal follow status");
+    }
+    if envelope.success != envelope.status.is_success() {
+        bail!("managed follow terminal success contradicts its status");
+    }
+    let child = waiter
+        .children
+        .iter()
+        .find(|child| child.child_chain_root_id == child_chain_root_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "follow waiter {} does not contain child chain {child_chain_root_id}",
+                waiter.follow_key
+            )
+        })?;
+    let result = if envelope.status.is_success() {
+        project_follow_action_result(&child.item_ref, envelope.result, envelope.outputs)?
+    } else {
+        envelope.result
+    };
+    let compact = ryeos_runtime::envelope::encode_follow_terminal_envelope(
+        child_terminal_thread_id,
+        envelope.status,
+        result,
+        envelope.cost.as_ref(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    ryeos_runtime::envelope::decode_follow_terminal_envelope(&compact)
+        .map_err(anyhow::Error::msg)
+        .context("validate compact follow terminal envelope")?;
+    Ok(compact)
 }
 
 fn validate_follow_reservation_shape(seed: &runtime_db::NewFollowWaiter) -> Result<()> {
@@ -706,19 +748,16 @@ fn admit_follow_terminal_envelope(
     child_terminal_thread_id: &str,
     candidate: &Value,
 ) -> Result<(Value, bool)> {
-    let decoded = ryeos_runtime::envelope::decode_follow_terminal_envelope(candidate)
-        .map_err(anyhow::Error::msg)
-        .context("validate canonical follow terminal envelope")?;
-    if decoded.child_thread_id != child_terminal_thread_id {
-        bail!(
-            "follow terminal envelope child_thread_id `{}` does not match terminal child `{child_terminal_thread_id}`",
-            decoded.child_thread_id
-        );
-    }
-    match validate_prospective_follow_resume_payload(waiter, child_chain_root_id, candidate) {
-        Ok(()) => Ok((candidate.clone(), false)),
+    let compact = compact_follow_terminal_envelope(
+        waiter,
+        child_chain_root_id,
+        child_terminal_thread_id,
+        candidate,
+    )?;
+    match validate_prospective_follow_resume_payload(waiter, child_chain_root_id, &compact) {
+        Ok(()) => Ok((compact, false)),
         Err(candidate_error) => {
-            let cost = validated_follow_candidate_cost(candidate)?;
+            let cost = validated_follow_candidate_cost(&compact)?;
             let degraded = follow_envelope_limit_failure(child_terminal_thread_id, cost.as_ref());
             validate_prospective_follow_resume_payload(waiter, child_chain_root_id, &degraded)
                 .with_context(|| {
@@ -11923,15 +11962,13 @@ mod tests {
     #[test]
     fn follow_terminal_admission_reserves_space_for_pending_children() {
         let waiter = follow_waiter_for_admission();
-        let candidate = json!({
-            "success": true,
-            "child_thread_id": "T-child",
-            "status": "completed",
-            "result": 1,
-            "outputs": null,
-            "warnings": [],
-            "cost": null,
-        });
+        let candidate = ryeos_runtime::envelope::encode_follow_terminal_envelope(
+            "T-child",
+            ryeos_runtime::envelope::RuntimeResultStatus::Completed,
+            json!(1),
+            None,
+        )
+        .unwrap();
 
         validate_prospective_follow_resume_payload(&waiter, "T-child", &candidate).unwrap();
     }
@@ -11956,11 +11993,86 @@ mod tests {
         let (admitted, degraded) =
             admit_follow_terminal_envelope(&waiter, "T-child", "T-terminal", &candidate).unwrap();
         assert!(degraded);
+        assert_eq!(
+            admitted["projection"],
+            ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION
+        );
         assert_eq!(admitted["success"], false);
         assert_eq!(admitted["child_thread_id"], "T-terminal");
         assert_eq!(admitted["result"]["code"], FOLLOW_ENVELOPE_LIMIT_CODE);
         assert_eq!(admitted["cost"]["input_tokens"], 11);
         assert_eq!(admitted["cost"]["output_tokens"], 7);
+    }
+
+    #[test]
+    fn graph_follow_cohort_retains_returns_without_private_child_state() {
+        let mut waiter = follow_waiter_for_admission();
+        waiter.expected_children = 12;
+        waiter.children = (0..12)
+            .map(|index| runtime_db::FollowWaiterChild {
+                item_index: index,
+                item_ref: "graph:farm/match".to_string(),
+                spec_hash: format!("spec-{index}"),
+                child_thread_id: format!("T-child-{index}"),
+                child_chain_root_id: format!("T-child-{index}"),
+                sealed_root_request:
+                    crate::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture(),
+                terminal_thread_id: None,
+                terminal_status: None,
+                terminal_envelope: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+            })
+            .collect();
+
+        for index in 0..12 {
+            let child_thread_id = format!("T-child-{index}");
+            let candidate = json!({
+                "success": true,
+                "child_thread_id": child_thread_id,
+                "status": "completed",
+                "result": {
+                    "success": true,
+                    "graph_id": "farm/match",
+                    "definition_ref": "graph:farm/match",
+                    "effective_definition_digest": "a".repeat(64),
+                    "graph_run_id": format!("gr-child-{index}"),
+                    "status": "completed",
+                    "steps": 31,
+                    "state": {"private_child_state": "x".repeat(512 * 1024)},
+                    "result": {"seed": index, "winner": "melon"},
+                    "node_costs": [],
+                    "hook_costs": [],
+                },
+                "outputs": null,
+                "warnings": [],
+                "cost": null,
+            });
+            validate_checkpoint_shape(&candidate, "large managed child terminal").unwrap();
+            let (admitted, degraded) = admit_follow_terminal_envelope(
+                &waiter,
+                &child_thread_id,
+                &child_thread_id,
+                &candidate,
+            )
+            .unwrap();
+            assert!(!degraded, "child {index} was incorrectly degraded");
+            assert_eq!(
+                admitted["result"],
+                json!({"seed": index, "winner": "melon"})
+            );
+            assert!(serde_json::to_vec(&admitted).unwrap().len() < 1024);
+            waiter.children[index as usize].terminal_envelope = Some(admitted);
+        }
+
+        for child in &waiter.children {
+            validate_prospective_follow_resume_payload(
+                &waiter,
+                &child.child_chain_root_id,
+                child.terminal_envelope.as_ref().unwrap(),
+            )
+            .unwrap();
+        }
     }
 
     #[test]
