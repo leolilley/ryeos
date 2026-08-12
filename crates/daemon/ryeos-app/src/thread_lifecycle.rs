@@ -3579,14 +3579,7 @@ impl ThreadLifecycleService {
         completion: &ExecutionCompletion,
         managed_envelope: Option<Value>,
     ) -> Result<ThreadDetail> {
-        self.finalize_from_completion_inner(
-            thread_id,
-            completion,
-            managed_envelope,
-            None,
-            false,
-            None,
-        )
+        self.finalize_from_completion_inner(thread_id, completion, managed_envelope, None, None)
     }
 
     pub fn finalize_from_completion_with_project_snapshot(
@@ -3601,7 +3594,6 @@ impl ThreadLifecycleService {
             completion,
             managed_envelope,
             Some(result_project_snapshot_hash),
-            false,
             None,
         )
     }
@@ -3618,46 +3610,28 @@ impl ThreadLifecycleService {
             completion,
             None,
             result_project_snapshot_hash,
-            false,
             Some(launch_owner),
         )
     }
 
-    /// Finalization reported by the runtime callback boundary. The StateStore
-    /// atomically fences daemon shutdown and lets durable Cancel/Kill intent
-    /// dominate the runtime's self-reported terminal status.
-    pub fn finalize_from_runtime_completion(
-        &self,
-        thread_id: &str,
-        completion: &ExecutionCompletion,
-        managed_envelope: Option<Value>,
-    ) -> Result<ThreadDetail> {
-        self.finalize_from_completion_inner(
-            thread_id,
-            completion,
-            managed_envelope,
-            None,
-            true,
-            None,
-        )
-    }
-
-    /// Runtime-reported completion fenced by the exact launch owner carried on
-    /// its callback capability. The owner comparison is performed under the
-    /// same StateStore lock as terminal persistence.
+    /// Runtime-reported completion fenced by its exact launch owner and the
+    /// project generation sealed while the callback is still a synchronous
+    /// execution barrier. A retained generation must join the terminal state
+    /// transition; attaching it after terminal commit would make the durable
+    /// result depend on a best-effort cleanup phase.
     pub fn finalize_from_runtime_completion_owned(
         &self,
         thread_id: &str,
         launch_owner: &str,
         completion: &ExecutionCompletion,
         managed_envelope: Option<Value>,
+        result_project_snapshot_hash: Option<&str>,
     ) -> Result<ThreadDetail> {
         self.finalize_from_completion_inner(
             thread_id,
             completion,
             managed_envelope,
-            None,
-            false,
+            result_project_snapshot_hash,
             Some(launch_owner),
         )
     }
@@ -3668,7 +3642,6 @@ impl ThreadLifecycleService {
         completion: &ExecutionCompletion,
         managed_envelope: Option<Value>,
         result_project_snapshot_hash: Option<&str>,
-        runtime_callback: bool,
         launch_owner: Option<&str>,
     ) -> Result<ThreadDetail> {
         let reported_status = completion.status.as_str();
@@ -3693,10 +3666,7 @@ impl ThreadLifecycleService {
             managed_envelope: managed_envelope.clone(),
             result_project_snapshot_hash: result_project_snapshot_hash.map(ToOwned::to_owned),
         };
-        let (persisted, effective) = if runtime_callback {
-            self.state_store
-                .finalize_thread_from_runtime(thread_id, &requested)?
-        } else if let Some(launch_owner) = launch_owner {
+        let (persisted, effective) = if let Some(launch_owner) = launch_owner {
             self.state_store
                 .finalize_thread_effective_owned(thread_id, launch_owner, &requested)?
         } else {
@@ -3805,7 +3775,7 @@ impl ThreadLifecycleService {
         // failure). A follow child that finalizes here degrades to a visible
         // failure envelope; the normal follow terminal carries its envelope via
         // the callback or `finalize_thread_with_managed_envelope`.
-        self.finalize_thread_inner(params, None, false, None)
+        self.finalize_thread_inner(params, None, None, None)
     }
 
     pub fn finalize_thread_owned(
@@ -3813,7 +3783,7 @@ impl ThreadLifecycleService {
         params: &ThreadFinalizeParams,
         launch_owner: &str,
     ) -> Result<ThreadDetail> {
-        self.finalize_thread_inner(params, None, false, Some(launch_owner))
+        self.finalize_thread_inner(params, None, None, Some(launch_owner))
     }
 
     /// Like [`Self::finalize_thread`], but carries the runtime's canonical managed
@@ -3825,7 +3795,25 @@ impl ThreadLifecycleService {
         params: &ThreadFinalizeParams,
         managed_envelope: Value,
     ) -> Result<ThreadDetail> {
-        self.finalize_thread_inner(params, Some(managed_envelope), false, None)
+        self.finalize_thread_inner(params, Some(managed_envelope), None, None)
+    }
+
+    /// Supervisor fallback settlement for a managed runtime that exited
+    /// before self-finalizing. The exact launch owner and any post-exit sealed
+    /// result generation join the same terminal transition.
+    pub fn finalize_thread_with_managed_envelope_owned(
+        &self,
+        params: &ThreadFinalizeParams,
+        managed_envelope: Value,
+        launch_owner: &str,
+        result_project_snapshot_hash: Option<&str>,
+    ) -> Result<ThreadDetail> {
+        self.finalize_thread_inner(
+            params,
+            Some(managed_envelope),
+            result_project_snapshot_hash,
+            Some(launch_owner),
+        )
     }
 
     /// Settle a link-failure row only if it is atomically proven to remain a
@@ -4137,7 +4125,7 @@ impl ThreadLifecycleService {
         &self,
         params: &ThreadFinalizeParams,
         managed_envelope: Option<Value>,
-        execution_result: bool,
+        result_project_snapshot_hash: Option<&str>,
         launch_owner: Option<&str>,
     ) -> Result<ThreadDetail> {
         let reported_status = normalize_terminal_status(&params.status)?;
@@ -4149,7 +4137,7 @@ impl ThreadLifecycleService {
             artifacts: params.artifacts.iter().map(artifact_to_record).collect(),
             final_cost: params.final_cost.clone(),
             managed_envelope: managed_envelope.clone(),
-            result_project_snapshot_hash: None,
+            result_project_snapshot_hash: result_project_snapshot_hash.map(ToOwned::to_owned),
         };
         let (persisted, effective) = if let Some(launch_owner) = launch_owner {
             self.state_store.finalize_thread_effective_owned(
@@ -4157,9 +4145,6 @@ impl ThreadLifecycleService {
                 launch_owner,
                 &requested,
             )?
-        } else if execution_result {
-            self.state_store
-                .finalize_thread_from_runtime(&params.thread_id, &requested)?
         } else {
             self.state_store
                 .finalize_thread_effective(&params.thread_id, &requested)?

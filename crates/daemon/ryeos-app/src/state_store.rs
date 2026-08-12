@@ -4668,18 +4668,6 @@ impl StateStore {
         self.finalize_thread_with_guard(&g, permit.cas_guard(), thread_id, update, false)
     }
 
-    /// Runtime-callback finalization with stop/shutdown policy enforced under
-    /// the same StateStore lock as the terminal commit. A durable Cancel/Kill
-    /// dominates any self-reported status; shutdown without an explicit stop
-    /// rejects the commit so recovery can resume the preserved row.
-    pub fn finalize_thread_from_runtime(
-        &self,
-        thread_id: &str,
-        update: &FinalizeThreadRecord,
-    ) -> Result<(Vec<PersistedEventRecord>, FinalizeThreadRecord)> {
-        self.finalize_thread_locked(thread_id, update)
-    }
-
     fn finalize_thread_locked(
         &self,
         thread_id: &str,
@@ -9368,6 +9356,32 @@ impl StateStore {
             .get_runtime_info(thread_id)?
             .and_then(|runtime| runtime.process_identity)
             .ok_or_else(|| anyhow!("thread {thread_id} has no attached process identity"))
+    }
+
+    /// Prove under the same owner-fenced StateStore lock that the supervised
+    /// process identity has been compare-cleared. Post-exit workspace capture
+    /// must not infer this boundary from a PID probe or an earlier wait result.
+    pub fn assert_execution_process_detached_owned(
+        &self,
+        thread_id: &str,
+        launch_owner: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        let claim = g
+            .runtime_db
+            .get_launch_claim(thread_id)?
+            .ok_or_else(|| anyhow!("thread {thread_id} has no current launch owner"))?;
+        if claim.claimed_by != launch_owner {
+            bail!("stale launch owner for thread {thread_id}");
+        }
+        if g.runtime_db
+            .get_runtime_info(thread_id)?
+            .and_then(|runtime| runtime.process_identity)
+            .is_some()
+        {
+            bail!("thread {thread_id} still has an attached process identity");
+        }
+        Ok(())
     }
 
     pub fn reserve_execution_workspace(

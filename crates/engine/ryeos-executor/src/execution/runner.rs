@@ -922,6 +922,80 @@ fn close_owned_workspace(
     lifeline: Option<&Arc<TempDirGuard>>,
     thread_id: &str,
 ) -> Result<()> {
+    close_owned_workspace_from_states(state, lifeline, thread_id, &[WorkspaceState::Freezing])
+}
+
+/// Destroy a managed runtime's owned workspace only after its process has
+/// exited and terminal state is authoritative. Retained/advanced generations
+/// must already be frozen and named by terminal state; `Discard` deliberately
+/// skips capture and may close directly from `active`.
+pub(crate) fn close_managed_runtime_workspace(
+    state: &AppState,
+    lifeline: Option<&Arc<TempDirGuard>>,
+    thread_id: &str,
+    terminal_publication: &ryeos_state::objects::PinnedTerminalPublication,
+    result_project_snapshot_hash: Option<&str>,
+) -> Result<()> {
+    let Some(guard) = lifeline else {
+        return Ok(());
+    };
+    let Some(root) = guard.path() else {
+        return Ok(());
+    };
+    let workspace_id = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("execution workspace id is not valid UTF-8"))?;
+    let record = state
+        .state_store
+        .execution_workspace(workspace_id)?
+        .ok_or_else(|| anyhow::anyhow!("execution workspace journal row is missing"))?;
+    let expected = managed_workspace_close_source(
+        terminal_publication,
+        record.state,
+        record.frozen_snapshot_hash.as_deref(),
+        result_project_snapshot_hash,
+    )?;
+    close_owned_workspace_from_states(state, lifeline, thread_id, &[expected])
+}
+
+fn managed_workspace_close_source(
+    terminal_publication: &ryeos_state::objects::PinnedTerminalPublication,
+    workspace_state: WorkspaceState,
+    frozen_snapshot_hash: Option<&str>,
+    result_project_snapshot_hash: Option<&str>,
+) -> Result<WorkspaceState> {
+    match terminal_publication {
+        ryeos_state::objects::PinnedTerminalPublication::Discard => match workspace_state {
+            WorkspaceState::Ready => Ok(WorkspaceState::Ready),
+            WorkspaceState::Active => Ok(WorkspaceState::Active),
+            WorkspaceState::Freezing => Ok(WorkspaceState::Freezing),
+            state => anyhow::bail!("discarded managed workspace cannot close from state {state}"),
+        },
+        ryeos_state::objects::PinnedTerminalPublication::RetainResult
+        | ryeos_state::objects::PinnedTerminalPublication::AdvanceHead { .. } => {
+            if workspace_state != WorkspaceState::Freezing {
+                anyhow::bail!("retained managed workspace was not frozen before terminal commit");
+            }
+            let frozen = frozen_snapshot_hash.ok_or_else(|| {
+                anyhow::anyhow!("retained managed workspace has no frozen result generation")
+            })?;
+            if result_project_snapshot_hash != Some(frozen) {
+                anyhow::bail!(
+                    "retained managed workspace result generation disagrees with terminal state"
+                );
+            }
+            Ok(WorkspaceState::Freezing)
+        }
+    }
+}
+
+fn close_owned_workspace_from_states(
+    state: &AppState,
+    lifeline: Option<&Arc<TempDirGuard>>,
+    thread_id: &str,
+    expected_states: &[WorkspaceState],
+) -> Result<()> {
     let Some(guard) = lifeline else {
         return Ok(());
     };
@@ -948,7 +1022,7 @@ fn close_owned_workspace(
         state,
         Some(guard),
         thread_id,
-        &[WorkspaceState::Freezing],
+        expected_states,
         WorkspaceState::Destroying,
         None,
     )?;
@@ -5303,6 +5377,71 @@ mod tests {
     use super::*;
     use ryeos_app::launch_metadata::OriginalPushedHeadRef;
     use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal};
+
+    #[test]
+    fn managed_workspace_close_requires_terminal_generation_coherence() {
+        use ryeos_state::objects::PinnedTerminalPublication;
+
+        assert_eq!(
+            managed_workspace_close_source(
+                &PinnedTerminalPublication::Discard,
+                WorkspaceState::Ready,
+                None,
+                None,
+            )
+            .unwrap(),
+            WorkspaceState::Ready
+        );
+        assert_eq!(
+            managed_workspace_close_source(
+                &PinnedTerminalPublication::Discard,
+                WorkspaceState::Active,
+                None,
+                None,
+            )
+            .unwrap(),
+            WorkspaceState::Active
+        );
+        assert_eq!(
+            managed_workspace_close_source(
+                &PinnedTerminalPublication::Discard,
+                WorkspaceState::Freezing,
+                Some("ignored"),
+                None,
+            )
+            .unwrap(),
+            WorkspaceState::Freezing
+        );
+
+        let retained = PinnedTerminalPublication::RetainResult;
+        assert!(
+            managed_workspace_close_source(&retained, WorkspaceState::Active, None, None,)
+                .unwrap_err()
+                .to_string()
+                .contains("not frozen")
+        );
+        assert!(
+            managed_workspace_close_source(
+                &retained,
+                WorkspaceState::Freezing,
+                Some("frozen"),
+                Some("other"),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("disagrees")
+        );
+        assert_eq!(
+            managed_workspace_close_source(
+                &retained,
+                WorkspaceState::Freezing,
+                Some("frozen"),
+                Some("frozen"),
+            )
+            .unwrap(),
+            WorkspaceState::Freezing
+        );
+    }
 
     #[test]
     fn restartable_node_policy_direct_execution_is_refused_before_metadata_birth() {

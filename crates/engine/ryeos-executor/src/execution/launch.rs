@@ -6387,11 +6387,25 @@ async fn run_claimed_thread_row_inner(
         {
             terminal_status = ryeos_state::objects::ThreadStatus::Killed;
         }
+        let result_project_snapshot_hash = if owns_workspace {
+            super::prepare_stopped_managed_runtime_terminal_project_result(
+                state,
+                provenance,
+                &thread_id,
+                launch_owner,
+            )
+            .map_err(BuildAndLaunchError::Internal)?
+        } else {
+            None
+        };
         let fallback = fallback_finalization(&thread_id, &runtime_result, terminal_status);
         runtime_result = fallback.runtime_result;
-        let finalized = state
-            .threads
-            .finalize_thread_with_managed_envelope(&fallback.params, fallback.managed_envelope)?;
+        let finalized = state.threads.finalize_thread_with_managed_envelope_owned(
+            &fallback.params,
+            fallback.managed_envelope,
+            launch_owner,
+            result_project_snapshot_hash.as_deref(),
+        )?;
         // Live parent-resume kick: a followed child finalized on this fallback
         // (abnormal exit, no self-finalize over the callback) still flips its waiter
         // to `ready`, so wake the parent now instead of waiting for a restart.
@@ -6409,6 +6423,40 @@ async fn run_claimed_thread_row_inner(
             })?;
         runtime_result = reconcile_terminal_finalization(&authority, &runtime_result)
             .map_err(BuildAndLaunchError::Internal)?;
+    }
+
+    // Managed native runtimes own the same COW lifecycle as ordinary direct
+    // executions. Terminal callbacks seal retained generations before commit;
+    // once the exact runtime process has exited, destroy the backend workspace
+    // synchronously instead of delegating normal success to orphan recovery.
+    if owns_workspace {
+        let terminal_publication = provenance
+            .project_authority()
+            .terminal_publication()
+            .ok_or_else(|| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "managed COW runtime has no terminal publication authority"
+                ))
+            })?;
+        let result_project_snapshot_hash = state
+            .state_store
+            .authoritative_result_project_snapshot(&thread_id)
+            .map_err(BuildAndLaunchError::Internal)?;
+        let workspace_lifeline = provenance.workspace_lifeline();
+        if let Err(error) = super::runner::close_managed_runtime_workspace(
+            state,
+            workspace_lifeline.as_ref(),
+            &thread_id,
+            terminal_publication,
+            result_project_snapshot_hash.as_deref(),
+        ) {
+            if let Some(workspace) = workspace_lifeline.as_ref() {
+                workspace.disarm();
+            }
+            return Err(BuildAndLaunchError::Internal(
+                error.context("close managed runtime workspace"),
+            ));
+        }
     }
 
     // The audit record follows the execution to its settled state: the real

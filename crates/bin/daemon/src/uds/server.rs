@@ -434,7 +434,10 @@ pub(crate) async fn dispatch_runtime_method(
         "runtime.finalize_thread" => {
             let owner = callback_launch_owner
                 .ok_or_else(|| anyhow!("runtime.finalize_thread requires a launch owner"))?;
-            let result = handle_finalize(&clean_params, state, owner)?;
+            let capability = callback_cap.as_ref().ok_or_else(|| {
+                anyhow!("runtime.finalize_thread requires callback capability authority")
+            })?;
+            let result = handle_finalize(&clean_params, state, owner, capability).await?;
             // A self-finalizing follow child (the normal path) flips its waiter to
             // `ready` here — kick the parent resume live, keyed on the child's chain.
             if let Some(chain_root_id) = result.get("chain_root_id").and_then(|v| v.as_str()) {
@@ -911,10 +914,11 @@ fn final_cost_from_runtime(
     })
 }
 
-fn handle_finalize(
+async fn handle_finalize(
     params: &serde_json::Value,
     state: &AppState,
     launch_owner: &str,
+    capability: &ryeos_app::callback_token::CallbackCapability,
 ) -> Result<serde_json::Value> {
     let params: RuntimeFinalizeParams =
         serde_json::from_value(params.clone()).context("invalid runtime.finalize_thread params")?;
@@ -962,12 +966,32 @@ fn handle_finalize(
         Some(launch_owner),
         ryeos_accounting::ReconciliationReason::OwnerGenerationFenced,
     )?;
+    // A retained COW generation is part of terminal truth, not cleanup. Seal
+    // it while this authenticated callback still blocks the managed runtime;
+    // terminal state then commits the exact snapshot identity in the same
+    // transition. Discard-only and borrowed executions return `None`.
+    let pending_project_result =
+        ryeos_executor::execution::prepare_managed_runtime_terminal_project_result(
+            state,
+            capability,
+            &completion.status,
+        )
+        .await?;
+    let result_project_snapshot_hash = pending_project_result
+        .as_ref()
+        .map(|pending| pending.snapshot_hash().to_string());
     let finalized = state.threads.finalize_from_runtime_completion_owned(
         &params.thread_id,
         launch_owner,
         &completion,
         Some(managed_envelope),
+        result_project_snapshot_hash.as_deref(),
     )?;
+    if let Some(pending) = pending_project_result {
+        pending
+            .publish()
+            .context("release terminal project-generation recovery roots")?;
+    }
     // Terminal thread state (the CAS publication) is durable; clear the
     // gate's terminal-publication marker. Startup recovery completes this if
     // we crash in between.
@@ -2539,6 +2563,42 @@ mod tests {
         assert_eq!(envelope["result"], "4");
         assert_eq!(envelope["outputs"], Value::Null);
         assert_eq!(envelope["warnings"], json!([]));
+    }
+
+    #[test]
+    fn terminal_project_generation_is_part_of_authoritative_finalize() {
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread_for_test(&make_create_params("T-project", "T-project"))
+            .unwrap();
+        state
+            .threads
+            .finalize_from_completion_with_project_snapshot(
+                "T-project",
+                &ryeos_engine::contracts::ExecutionCompletion {
+                    status: ryeos_engine::contracts::ThreadTerminalStatus::Completed,
+                    outcome_code: Some("success".to_string()),
+                    result: Some(json!({"ok": true})),
+                    error: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    continuation_request: None,
+                    metadata: None,
+                },
+                None,
+                &"b".repeat(64),
+            )
+            .unwrap();
+
+        assert_eq!(
+            state
+                .state_store
+                .authoritative_result_project_snapshot("T-project")
+                .unwrap()
+                .as_deref(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
     }
 
     #[test]

@@ -171,6 +171,25 @@ impl PendingProjectResult {
     }
 }
 
+/// A managed runtime's result generation captured while its terminal callback
+/// is still a synchronous execution barrier. The inner staged publication is
+/// intentionally opaque outside the executor: the daemon may read the exact
+/// snapshot identity and may release its recovery roots only after that same
+/// identity is present in authoritative terminal state.
+pub struct PreparedManagedRuntimeProjectResult {
+    pending: PendingProjectResult,
+}
+
+impl PreparedManagedRuntimeProjectResult {
+    pub fn snapshot_hash(&self) -> &str {
+        self.pending.snapshot_hash()
+    }
+
+    pub fn publish(self) -> Result<()> {
+        self.pending.publish()
+    }
+}
+
 /// Internal one-traversal tree capture. It is never launch authority by itself;
 /// only promotion to [`CapturedProjectGeneration`] may cross thread birth.
 pub(crate) struct StagedProjectTree {
@@ -914,6 +933,234 @@ pub(crate) fn seal_callback_workspace_generation(
         publication: Some(publication),
         quiesced: Some(quiesced),
     })
+}
+
+/// Seal the result generation required by a managed runtime's terminal
+/// project authority. This runs before terminal state commits and while the
+/// runtime is blocked in its authenticated callback, so no process in the
+/// execution group can mutate the generation between capture and admission.
+///
+/// `Discard` owns a COW workspace but deliberately publishes no generation;
+/// its workspace is destroyed after the runtime process has exited. Borrowed
+/// children never settle the workspace owned by their parent.
+pub async fn prepare_managed_runtime_terminal_project_result(
+    state: &ryeos_app::state::AppState,
+    capability: &ryeos_app::callback_token::CallbackCapability,
+    reported_status: &ryeos_engine::contracts::ThreadTerminalStatus,
+) -> Result<Option<PreparedManagedRuntimeProjectResult>> {
+    let provenance = &capability.provenance;
+    if provenance.is_borrowed_child() || !provenance.project_authority().requires_project_foldback()
+    {
+        return Ok(None);
+    }
+    let terminal_publication = provenance
+        .project_authority()
+        .terminal_publication()
+        .ok_or_else(|| {
+            anyhow::anyhow!("managed COW runtime has no terminal publication authority")
+        })?
+        .clone();
+    if matches!(
+        terminal_publication,
+        ryeos_state::objects::PinnedTerminalPublication::Discard
+    ) {
+        return Ok(None);
+    }
+
+    let base_snapshot_hash = provenance
+        .pinned_snapshot_hash()
+        .ok_or_else(|| anyhow::anyhow!("managed COW runtime has no admitted base generation"))?
+        .to_string();
+    let effective_path = provenance.effective_path().to_path_buf();
+    let thread_id = capability.thread_id.clone();
+    let launch_owner = capability
+        .launch_owner
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("managed runtime callback has no launch owner"))?
+        .to_string();
+    state
+        .state_store
+        .assert_launch_owner(&thread_id, &launch_owner)?;
+
+    let capture_state = state.clone();
+    let capture_thread_id = thread_id.clone();
+    let pending = run_bounded_project_capture(move || {
+        seal_callback_workspace_generation(
+            &capture_state,
+            &capture_thread_id,
+            &effective_path,
+            &base_snapshot_hash,
+        )
+    })
+    .await?;
+
+    let authoritative_status = state
+        .threads
+        .get_thread(&thread_id)?
+        .ok_or_else(|| anyhow::anyhow!("managed runtime thread disappeared during finalization"))?
+        .status;
+    let is_continuation_segment = *reported_status
+        == ryeos_engine::contracts::ThreadTerminalStatus::Continued
+        || authoritative_status == ryeos_state::objects::ThreadStatus::Continued.as_str();
+    if !is_continuation_segment
+        && let ryeos_state::objects::PinnedTerminalPublication::AdvanceHead {
+            head_ref,
+            expected_hash,
+        } = &terminal_publication
+    {
+        advance_head_to_frozen_runtime_result(
+            state,
+            &thread_id,
+            &launch_owner,
+            head_ref,
+            expected_hash,
+            pending.snapshot_hash(),
+        )?;
+    }
+
+    Ok(Some(PreparedManagedRuntimeProjectResult { pending }))
+}
+
+/// Seal a retained generation after the supervisor has proved the managed
+/// runtime process dead but before fallback terminal state is written. This is
+/// the crash/timeout counterpart to the synchronous callback barrier above;
+/// it must never be used while an execution process remains attached.
+pub(crate) fn prepare_stopped_managed_runtime_terminal_project_result(
+    state: &ryeos_app::state::AppState,
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+    thread_id: &str,
+    launch_owner: &str,
+) -> Result<Option<String>> {
+    if provenance.is_borrowed_child() || !provenance.project_authority().requires_project_foldback()
+    {
+        return Ok(None);
+    }
+    let terminal_publication = provenance
+        .project_authority()
+        .terminal_publication()
+        .ok_or_else(|| {
+            anyhow::anyhow!("managed COW runtime has no terminal publication authority")
+        })?;
+    if matches!(
+        terminal_publication,
+        ryeos_state::objects::PinnedTerminalPublication::Discard
+    ) {
+        return Ok(None);
+    }
+    state
+        .state_store
+        .assert_execution_process_detached_owned(thread_id, launch_owner)?;
+
+    let layout = workspace::WorkspaceLayout::from_lower(provenance.effective_path())?;
+    let workspace_id = layout
+        .root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("execution workspace id is not valid UTF-8"))?;
+    let mut record = state
+        .state_store
+        .execution_workspace(workspace_id)?
+        .ok_or_else(|| anyhow::anyhow!("execution workspace journal row is missing"))?;
+    if record.thread_id.as_deref() != Some(thread_id)
+        || record.launch_owner.as_deref() != Some(launch_owner)
+    {
+        anyhow::bail!("stopped managed workspace belongs to another execution owner");
+    }
+    match record.state {
+        WorkspaceState::Ready | WorkspaceState::Active => {
+            state.state_store.transition_execution_workspace_owned(
+                workspace_id,
+                thread_id,
+                launch_owner,
+                &[record.state],
+                WorkspaceState::Freezing,
+                None,
+            )?;
+            record = state
+                .state_store
+                .execution_workspace(workspace_id)?
+                .ok_or_else(|| anyhow::anyhow!("execution workspace disappeared while freezing"))?;
+        }
+        WorkspaceState::Freezing => {}
+        state => anyhow::bail!("stopped managed workspace cannot freeze from state {state}"),
+    }
+    let snapshot_hash = recover_interrupted_workspace_freeze(state, &record)?;
+    if let ryeos_state::objects::PinnedTerminalPublication::AdvanceHead {
+        head_ref,
+        expected_hash,
+    } = terminal_publication
+    {
+        advance_head_to_frozen_runtime_result(
+            state,
+            thread_id,
+            launch_owner,
+            head_ref,
+            expected_hash,
+            &snapshot_hash,
+        )?;
+    }
+    Ok(Some(snapshot_hash))
+}
+
+fn advance_head_to_frozen_runtime_result(
+    state: &ryeos_app::state::AppState,
+    thread_id: &str,
+    launch_owner: &str,
+    head_ref: &str,
+    expected_hash: &str,
+    result_snapshot_hash: &str,
+) -> Result<()> {
+    let mut components = head_ref.split('/');
+    let (Some("projects"), Some(principal_key), Some(project_hash), Some("head"), None) = (
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+    ) else {
+        anyhow::bail!("managed runtime advance-head authority has a non-canonical ref");
+    };
+    let canonical_component = |value: &str| {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    if !canonical_component(principal_key) || !canonical_component(project_hash) {
+        anyhow::bail!("managed runtime advance-head authority has a non-canonical identity");
+    }
+
+    let authority = pinned_state_authority(state)?;
+    let cas_guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&cas_guard)?;
+    let _permit = state
+        .write_barrier
+        .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
+        .map_err(|error| anyhow::anyhow!("acquire result-generation write permit: {error}"))?;
+    let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
+    state
+        .state_store
+        .with_state_db_owned(thread_id, launch_owner, |db| {
+            let current = db
+                .read_project_head(principal_key, project_hash)?
+                .ok_or_else(|| anyhow::anyhow!("managed runtime project HEAD is absent"))?;
+            if current == result_snapshot_hash {
+                return Ok(());
+            }
+            if current != expected_hash {
+                anyhow::bail!(
+                    "managed runtime project HEAD conflict: expected {expected_hash}, got {current}"
+                );
+            }
+            db.advance_project_head_ref(
+                principal_key,
+                project_hash,
+                result_snapshot_hash,
+                expected_hash,
+                &signer,
+                &cas_guard,
+            )
+        })
 }
 
 /// Complete a write-ahead callback freeze whose runtime owner died after the
