@@ -206,8 +206,16 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             CallbackError::Transport(anyhow::anyhow!("serialize spawn_follow_child: {e}"))
         })?;
         self.inject_callback_token(&mut params);
+        // This is the graph's suspend/continue commit, not a prompt callback.
+        // The daemon may need to seal and admit a bounded cohort before it can
+        // durably create the parent successor and acknowledge the handoff. A
+        // transport timeout after child-root mutation would let the graph fail
+        // its parent while the daemon continues publishing the cohort. Wait on
+        // a dedicated connection for the authoritative result instead; daemon
+        // death still closes the socket, and admitted execution/cancellation
+        // policy remains the actual bound.
         self.rpc
-            .request("runtime.spawn_follow_child", params)
+            .request_authoritative_handoff("runtime.spawn_follow_child", params)
             .await
             .map_err(Self::map_rpc_error)
     }
