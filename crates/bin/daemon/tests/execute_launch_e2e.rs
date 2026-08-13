@@ -19,6 +19,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use common::DaemonHarness;
+use common::build_signed_headers_for_bytes;
 use common::fast_fixture::{
     FastFixture, register_config_fixture_bundle, register_standard_bundle,
     write_authorized_key_with_scopes,
@@ -26,6 +27,8 @@ use common::fast_fixture::{
 use common::mock_provider::{MockProvider, MockResponse};
 use lillux::crypto::SigningKey;
 use serde_json::{Value, json};
+
+const TEST_LAUNCH_ID: &str = "L-0123456789abcdef0123456789abcdef";
 
 fn accepted_policy(has_project: bool) -> ryeos_app::execution_policy::ExecutionPolicy {
     use ryeos_app::execution_policy::{ExecutionPolicy, ExecutionResponse};
@@ -89,10 +92,32 @@ async fn wait_for_terminal_thread(h: &DaemonHarness, thread_id: &str) -> Value {
 fn unwrap_accepted(status: reqwest::StatusCode, body: &Value) -> String {
     assert_eq!(status, reqwest::StatusCode::ACCEPTED, "body={body}");
     assert_eq!(body.get("status").and_then(Value::as_str), Some("accepted"));
+    assert_eq!(
+        body.get("launch_id").and_then(Value::as_str),
+        Some(TEST_LAUNCH_ID),
+        "accepted response did not echo the caller-retained launch coordinate: {body}"
+    );
     body.get("thread_id")
         .and_then(Value::as_str)
         .unwrap_or_else(|| panic!("accepted response missing thread_id: {body}"))
         .to_string()
+}
+
+async fn signed_launch_status_get(
+    h: &DaemonHarness,
+    key: &SigningKey,
+    launch_id: &str,
+) -> (reqwest::StatusCode, Value) {
+    let path = format!("/launches/{launch_id}");
+    let node_key = h.node_key.as_ref().expect("fast fixture node key");
+    let mut request = reqwest::Client::new().get(format!("http://{}{}", h.bind, path));
+    for (name, value) in build_signed_headers_for_bytes(key, node_key, "GET", &path, &[]) {
+        request = request.header(name, value);
+    }
+    let response = request.send().await.expect("signed launch status GET");
+    let status = response.status();
+    let body = response.json().await.unwrap_or_else(|_| json!({}));
+    (status, body)
 }
 
 /// Assert that the inspectable thread's id matches the accepted id and that
@@ -346,6 +371,7 @@ async fn execute_launch_returns_inspectable_thread_id() {
             "/execute/launch",
             json!({
                 "item_ref": "tool:ryeos/core/identity/public_key",
+                "launch_id": TEST_LAUNCH_ID,
                 "ref_bindings": {},
                 "project_path": null,
                 "parameters": {},
@@ -356,8 +382,87 @@ async fn execute_launch_returns_inspectable_thread_id() {
         .expect("post /execute/launch");
 
     let thread_id = unwrap_accepted(status, &body);
+    let (status, launch_status) = h
+        .post_execute(
+            "service:launch/status",
+            ".",
+            json!({ "launch_id": TEST_LAUNCH_ID }),
+        )
+        .await
+        .expect("post launch/status");
+    let launch_status = unwrap_result(status, &launch_status, "launch.status");
+    assert_eq!(
+        launch_status.get("thread_id").and_then(Value::as_str),
+        Some(thread_id.as_str())
+    );
+    assert_eq!(
+        launch_status.get("status").and_then(Value::as_str),
+        Some("bound")
+    );
     let thread = wait_for_terminal_thread(&h, &thread_id).await;
     assert_completed(&thread, &thread_id);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn accepted_launch_owner_recovers_lost_ack_through_intrinsic_status_route() {
+    let foreign = SigningKey::generate(&mut rand::rngs::OsRng);
+    let foreign_for_plant = foreign.clone();
+    let plant =
+        move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            write_authorized_key_with_scopes(
+                state_path,
+                &fixture.user,
+                &fixture.node,
+                &["ryeos.execute.tool.ryeos/core/identity/public_key"],
+            )?;
+            write_authorized_key_with_scopes(state_path, &foreign_for_plant, &fixture.node, &[])
+        };
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon with narrow launch owner");
+
+    // Treat the accepted response as a lost acknowledgement: the caller keeps
+    // only the coordinate it generated before contact and resolves it through
+    // the intrinsic owner route.
+    let (accepted_status, _discarded_ack) = h
+        .post_json(
+            "/execute/launch",
+            json!({
+                "item_ref": "tool:ryeos/core/identity/public_key",
+                "launch_id": TEST_LAUNCH_ID,
+                "ref_bindings": {},
+                "project_path": null,
+                "parameters": {},
+                "execution_policy": accepted_policy(false)
+            }),
+        )
+        .await
+        .expect("post accepted launch");
+    assert_eq!(accepted_status, reqwest::StatusCode::ACCEPTED);
+
+    let (owner_status, owner_body) =
+        signed_launch_status_get(&h, &fixture.user, TEST_LAUNCH_ID).await;
+    assert_eq!(owner_status, reqwest::StatusCode::OK, "body={owner_body}");
+    let owner_result = owner_body.get("result").unwrap_or(&owner_body);
+    assert_eq!(
+        owner_result.get("launch_id").and_then(Value::as_str),
+        Some(TEST_LAUNCH_ID)
+    );
+    assert!(
+        owner_result
+            .get("thread_id")
+            .and_then(Value::as_str)
+            .is_some(),
+        "bound launch status did not expose its authoritative root: {owner_body}"
+    );
+
+    let nonexistent = "L-ffffffffffffffffffffffffffffffff";
+    let (foreign_status, foreign_body) =
+        signed_launch_status_get(&h, &foreign, TEST_LAUNCH_ID).await;
+    let (missing_status, missing_body) = signed_launch_status_get(&h, &foreign, nonexistent).await;
+    assert_eq!(foreign_status, reqwest::StatusCode::NOT_FOUND);
+    assert_eq!(missing_status, reqwest::StatusCode::NOT_FOUND);
+    assert_eq!(foreign_body, missing_body);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -379,6 +484,7 @@ async fn execute_launch_admits_graph_ref() {
             "/execute/launch",
             json!({
                 "item_ref": "graph:smoke",
+                "launch_id": TEST_LAUNCH_ID,
                 "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "parameters": {},
@@ -420,6 +526,7 @@ async fn execute_launch_admits_directive_ref() {
             "/execute/launch",
             json!({
                 "item_ref": "directive:test/launch",
+                "launch_id": TEST_LAUNCH_ID,
                 "ref_bindings": { "model": "directive:test/launch" },
                 "project_path": project.path().to_str().unwrap(),
                 "parameters": {},
@@ -456,6 +563,7 @@ async fn execute_launch_admits_knowledge_query() {
             "/execute/launch",
             json!({
                 "item_ref": "knowledge:test/fact",
+                "launch_id": TEST_LAUNCH_ID,
                 "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "call": { "method": "query", "args": { "query": "accepted" } },
@@ -492,6 +600,7 @@ async fn execute_launch_method_missing_required_arg_is_rejected() {
             "/execute/launch",
             json!({
                 "item_ref": "knowledge:test/fact",
+                "launch_id": TEST_LAUNCH_ID,
                 "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "call": { "method": "query", "args": {} },
@@ -530,6 +639,7 @@ async fn execute_launch_unsigned_knowledge_is_rejected_by_trust_policy() {
             "/execute/launch",
             json!({
                 "item_ref": "knowledge:test/unsigned",
+                "launch_id": TEST_LAUNCH_ID,
                 "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "call": { "method": "query", "args": { "query": "x" } },
@@ -562,6 +672,7 @@ async fn execute_launch_unsigned_directive_is_rejected_by_trust_policy() {
             "/execute/launch",
             json!({
                 "item_ref": "directive:test/unsigned",
+                "launch_id": TEST_LAUNCH_ID,
                 "ref_bindings": { "model": "directive:test/unsigned" },
                 "project_path": project.path().to_str().unwrap(),
                 "parameters": {},
@@ -597,6 +708,7 @@ async fn execute_launch_terminal_tool_without_executor_id_is_rejected() {
             "/execute/launch",
             json!({
                 "item_ref": "tool:ryeos/core/subprocess/execute",
+                "launch_id": TEST_LAUNCH_ID,
                 "ref_bindings": {},
                 "project_path": null,
                 "parameters": {},
@@ -634,6 +746,7 @@ async fn execute_launch_terminal_tool_bad_manifest_requires_is_rejected() {
             "/execute/launch",
             json!({
                 "item_ref": "tool:test/wrapper",
+                "launch_id": TEST_LAUNCH_ID,
                 "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "parameters": {},
@@ -662,6 +775,7 @@ async fn execute_launch_in_process_service_is_rejected() {
             "/execute/launch",
             json!({
                 "item_ref": "service:node/status",
+                "launch_id": TEST_LAUNCH_ID,
                 "ref_bindings": {},
                 "project_path": null,
                 "parameters": {},
@@ -692,6 +806,7 @@ async fn execute_launch_non_root_executable_ref_does_not_return_phantom_thread_i
             "/execute/launch",
             json!({
                 "item_ref": "config:some/thing",
+                "launch_id": TEST_LAUNCH_ID,
                 "ref_bindings": {},
                 "project_path": null,
                 "parameters": {},
@@ -722,6 +837,7 @@ async fn execute_launch_invalid_item_does_not_return_phantom_thread_id() {
             "/execute/launch",
             json!({
                 "item_ref": "tool:no/such-tool",
+                "launch_id": TEST_LAUNCH_ID,
                 "ref_bindings": {},
                 "project_path": null,
                 "parameters": {},
@@ -764,6 +880,7 @@ async fn execute_launch_direct_runtime_missing_cap_is_rejected() {
             "/execute/launch",
             json!({
                 "item_ref": "runtime:directive-runtime",
+                "launch_id": TEST_LAUNCH_ID,
                 "ref_bindings": {},
                 "project_path": null,
                 "parameters": {},

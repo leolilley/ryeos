@@ -81,3 +81,8 @@ pub use ryeos_state::{
     PROJECT_OBSERVATION_SCHEMA, ProjectObservationOccurrence, ProjectObservationRecordedPayload,
     ProjectObservationRequest, project_observation_id,
 };
+
+/// Default daemon-enforced width for a fanout whose author omitted a narrower
+/// concurrency bound. All runtime and executor producers share this value so
+/// omission cannot create an unwindowed cohort or divergent defaults.
+pub const DEFAULT_LIVE_FANOUT_WINDOW_WIDTH: u32 = 8;

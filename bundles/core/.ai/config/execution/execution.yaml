@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:05Z:7840fdd35b288aa257160ffc7ff4b6b5e20f4f815efd8e74bd77099f7dd08e71:m01vLTOK2BBPDIhu8zQuXPDgSCxHFtegf+A9L8wGUyQm5M9HemXxQTyAYxAuaSioEtqTxEQrPfZVvDQvbWu4Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-13T05:00:11Z:db1eef1da96ab9274fc704cc31e2f71caf2b77f2d4648c5bd775d8aee2c2c3a9:B4dpXcnNwdhA2HfpAShR6wGOCfSZNGdSgXrp7K3tCbO0/I8HcOnGlmcBO1fO2joWEskZElzO41CBKsSX+aLtAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Execution config — system defaults
 # Override per-project: .ai/config/execution/execution.yaml
 category: "execution"
@@ -40,8 +40,9 @@ history:
 # which is the operator's overlay. Per-launch policy reads use the project
 # as overlay and never read this section, so a project cannot set
 # node-wide limits.
-# node:
-#   # Ceiling on launched-and-live launch-window members across ALL
-#   # fanouts on this node (a member is a child chain; see the graph
-#   # foreach `max_concurrency` launch window). Absent or 0 = unbounded.
-#   max_live_fanout: 16
+node:
+  # Ceiling on launched-and-live launch-window members across ALL fanouts on
+  # this node (a member is a child chain; see the graph foreach
+  # `max_concurrency` launch window). The node may replace this signed default,
+  # but project and item layers cannot widen it.
+  max_live_fanout: 8

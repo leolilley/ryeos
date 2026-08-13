@@ -66,9 +66,10 @@ fn fold_launch_window(
     if !node.detach {
         return;
     }
-    let Some(width) = node.max_concurrency else {
-        return;
-    };
+    let width = node.max_concurrency.unwrap_or_else(|| {
+        usize::try_from(ryeos_runtime::DEFAULT_LIVE_FANOUT_WINDOW_WIDTH)
+            .expect("fanout window width fits usize")
+    });
     if let Some(obj) = action.as_object_mut() {
         obj.insert(
             ryeos_runtime::callback::action_keys::LAUNCH_WINDOW.to_string(),
@@ -944,7 +945,10 @@ pub async fn run_foreach_parallel(
         step,
     };
     let retry_cfg = node.retry.clone();
-    let max_conc = node.max_concurrency.unwrap_or(8);
+    let max_conc = node.max_concurrency.unwrap_or_else(|| {
+        usize::try_from(ryeos_runtime::DEFAULT_LIVE_FANOUT_WINDOW_WIDTH)
+            .expect("fanout window width fits usize")
+    });
     let execution = exec_ctx.as_context_value();
     let mut results = Vec::new();
     let mut errors = Vec::new();
@@ -1428,12 +1432,15 @@ mod tests {
     }
 
     #[test]
-    fn no_window_without_max_concurrency_or_detach() {
+    fn default_window_is_stamped_without_authored_max_concurrency() {
         let node = detach_node(None);
         let mut action = node.action.clone().unwrap();
         node.fold_detach_into_action(&mut action);
         fold_launch_window(&node, &mut action, "gr-1", "fan");
-        assert!(action.get("launch_window").is_none());
+        assert_eq!(
+            action["launch_window"],
+            json!({ "key": "gr-1:fan", "width": 8 })
+        );
 
         let mut inline_node = detach_node(Some(12));
         inline_node.detach = false;

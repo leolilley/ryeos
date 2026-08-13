@@ -330,8 +330,40 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     } else {
         "/execute"
     };
+    let launch_id = resolved
+        .async_launch
+        .then(|| format!("L-{}", uuid::Uuid::new_v4().simple()));
+    if let Some(launch_id) = launch_id.as_ref() {
+        body["launch_id"] = Value::String(launch_id.clone());
+        // Publish the recovery coordinate before network contact. If the CLI
+        // is interrupted after the daemon accepts but before it acknowledges,
+        // the terminal/log still retains the exact owner-bound lookup key.
+        console.info(&crate::tty::Diagnostic::info(format!(
+            "accepted launch coordinate: {launch_id}"
+        )))?;
+    }
     let rendered_lines = presenter.loading(&command_label, route_path)?;
-    let result = post_to_daemon(&app_root, route_path, &body).await?;
+    let result = match post_to_daemon(&app_root, route_path, &body).await {
+        Ok(result) => result,
+        Err(error) if launch_id.is_some() && accepted_launch_delivery_is_uncertain(&error) => {
+            let launch_id = launch_id.expect("guarded accepted launch id");
+            return Err(CliError::Local {
+                detail: format!(
+                    "{error}; accepted-launch acknowledgement was not received. The request's exact owner-bound coordinate is {launch_id}; query the authenticated owner route GET /launches/{launch_id} before deciding whether to launch again"
+                ),
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(expected_launch_id) = launch_id.as_deref()
+        && result.get("launch_id").and_then(Value::as_str) != Some(expected_launch_id)
+    {
+        return Err(CliError::Local {
+            detail: format!(
+                "accepted launch response did not echo the exact caller-retained launch_id {expected_launch_id}; query the authenticated owner route GET /launches/{expected_launch_id} before deciding whether to launch again"
+            ),
+        });
+    }
 
     // A service may resolve to a live stream rather than a buffered value: the
     // daemon mediates by returning a stream descriptor (the signed SSE route to
@@ -358,6 +390,21 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         rendered_lines,
     )?;
     Ok(())
+}
+
+fn accepted_launch_delivery_is_uncertain(error: &CliError) -> bool {
+    matches!(
+        error,
+        CliError::Dispatch(crate::error::CliDispatchError::Transport(
+            crate::error::CliTransportError::Unreachable { .. }
+                | crate::error::CliTransportError::BodyDecode { .. }
+        ))
+    ) || matches!(
+        error,
+        CliError::Dispatch(crate::error::CliDispatchError::Transport(
+            crate::error::CliTransportError::HttpError { status, .. }
+        )) if *status == 408 || *status >= 500
+    )
 }
 
 fn execution_policy_value(
@@ -1559,6 +1606,40 @@ mod tests {
         assert!(!should_stream_direct_execute(true, false, true, false, true));
         assert!(!should_stream_direct_execute(true, false, false, true, true));
         assert!(!should_stream_direct_execute(true, false, false, false, false));
+    }
+
+    #[test]
+    fn accepted_launch_reports_coordinate_only_for_uncertain_delivery() {
+        use crate::error::{CliDispatchError, CliTransportError};
+
+        assert!(accepted_launch_delivery_is_uncertain(&CliError::Dispatch(
+            CliDispatchError::Transport(CliTransportError::Unreachable {
+                bind: "http://127.0.0.1:7400/execute/launch".to_string(),
+                detail: "connection closed".to_string(),
+            })
+        )));
+        assert!(accepted_launch_delivery_is_uncertain(&CliError::Dispatch(
+            CliDispatchError::Transport(CliTransportError::BodyDecode {
+                detail: "empty body".to_string(),
+            })
+        )));
+        for status in [408, 500, 504] {
+            assert!(accepted_launch_delivery_is_uncertain(&CliError::Dispatch(
+                CliDispatchError::Transport(CliTransportError::HttpError {
+                    status,
+                    body: "uncertain".to_string(),
+                })
+            )));
+        }
+        assert!(!accepted_launch_delivery_is_uncertain(&CliError::Dispatch(
+            CliDispatchError::Transport(CliTransportError::HttpError {
+                status: 400,
+                body: "refused".to_string(),
+            })
+        )));
+        assert!(!accepted_launch_delivery_is_uncertain(&CliError::Local {
+            detail: "request never submitted".to_string(),
+        }));
     }
 
     #[test]

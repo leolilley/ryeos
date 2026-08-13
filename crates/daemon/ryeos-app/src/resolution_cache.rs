@@ -1194,7 +1194,16 @@ pub fn emit_resolution_cache_metric(
     reason: Option<ResolutionCacheReason>,
     entry_bytes: usize,
 ) {
-    tracing::info!(
+    ryeos_tracing::record_cache_metric(ryeos_tracing::CacheMetricSample {
+        metric: metric.as_str(),
+        namespace: Some(phase.as_str()),
+        outcome: outcome.as_str(),
+        reason: reason.map(ResolutionCacheReason::as_str),
+        source_bytes: 0,
+        entry_bytes,
+        wait_microseconds: 0,
+    });
+    tracing::debug!(
         target: "ryeos.metrics",
         metric = metric.as_str(),
         phase = phase.as_str(),

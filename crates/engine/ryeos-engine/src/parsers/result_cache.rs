@@ -225,7 +225,16 @@ fn emit_metric(
     entry_bytes: usize,
     wait_us: u64,
 ) {
-    tracing::info!(
+    ryeos_tracing::record_cache_metric(ryeos_tracing::CacheMetricSample {
+        metric: "parser_result_cache",
+        namespace: None,
+        outcome,
+        reason: Some(reason),
+        source_bytes,
+        entry_bytes,
+        wait_microseconds: wait_us,
+    });
+    tracing::debug!(
         target: "ryeos.metrics",
         metric = "parser_result_cache",
         outcome,

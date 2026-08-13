@@ -37,6 +37,10 @@ pub struct LaunchPlanningRecord {
 #[error("pending launch planning admission reached its bounded capacity")]
 pub struct LaunchPlanningCapacityExceeded;
 
+#[derive(Debug, thiserror::Error)]
+#[error("launch planning coordinate is already reserved")]
+pub struct LaunchPlanningAlreadyReserved;
+
 /// Result of recording one operational parent/child lineage edge.
 ///
 /// Exact replays are expected when a durable launch is re-driven. A child is
@@ -3056,14 +3060,15 @@ fn prune_launch_planning(conn: &Connection, now_ms: i64) -> Result<()> {
     const MAX_TERMINAL_ROWS: i64 = 4_096;
     conn.execute(
         "DELETE FROM launch_planning
-          WHERE state <> 'planning' AND finished_at_ms < ?1",
+          WHERE state IN ('cancelled', 'failed', 'expired')
+            AND finished_at_ms < ?1",
         params![now_ms.saturating_sub(TERMINAL_RETENTION_MS)],
     )?;
     conn.execute(
         "DELETE FROM launch_planning
           WHERE launch_id IN (
               SELECT launch_id FROM launch_planning
-               WHERE state <> 'planning'
+               WHERE state IN ('cancelled', 'failed', 'expired')
                ORDER BY finished_at_ms DESC, launch_id DESC
                LIMIT -1 OFFSET ?1
           )",
@@ -3118,6 +3123,14 @@ impl RuntimeDb {
         }
         let now = lillux::time::timestamp_millis() as i64;
         let tx = self.conn.unchecked_transaction()?;
+        let already_reserved: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM launch_planning WHERE launch_id = ?1)",
+            [launch_id],
+            |row| row.get(0),
+        )?;
+        if already_reserved {
+            return Err(LaunchPlanningAlreadyReserved.into());
+        }
         let pending_rows: i64 = tx.query_row(
             "SELECT COUNT(*) FROM launch_planning WHERE state = 'planning'",
             [],
@@ -3221,14 +3234,26 @@ impl RuntimeDb {
     }
 
     pub fn fail_launch_planning(&self, reserved_thread_id: &str) -> Result<bool> {
+        self.fail_launch_planning_with_outcome(reserved_thread_id, "thread_creation_failed")
+    }
+
+    pub fn fail_launch_planning_admission(&self, reserved_thread_id: &str) -> Result<bool> {
+        self.fail_launch_planning_with_outcome(reserved_thread_id, "launch_admission_failed")
+    }
+
+    fn fail_launch_planning_with_outcome(
+        &self,
+        reserved_thread_id: &str,
+        outcome_code: &str,
+    ) -> Result<bool> {
         let now = lillux::time::timestamp_millis() as i64;
         let tx = self.conn.unchecked_transaction()?;
         let changed = tx.execute(
             "UPDATE launch_planning
-                SET state = 'failed', outcome_code = 'thread_creation_failed',
-                    updated_at_ms = ?2, finished_at_ms = ?2
+                SET state = 'failed', outcome_code = ?2,
+                    updated_at_ms = ?3, finished_at_ms = ?3
               WHERE reserved_thread_id = ?1 AND state = 'planning'",
-            params![reserved_thread_id, now],
+            params![reserved_thread_id, outcome_code, now],
         )? == 1;
         prune_launch_planning(&tx, now)?;
         tx.commit()?;
@@ -4959,6 +4984,13 @@ impl RuntimeDb {
                 cleanup_thread_ids.extend(runtime_thread_ids);
             }
             for thread_id in cleanup_thread_ids {
+                // A bound accepted-launch coordinate has exactly the lifetime
+                // of its authoritative thread history. It is not a response
+                // cache and must not expire while that root can still exist.
+                deleted += self.conn.execute(
+                    "DELETE FROM launch_planning WHERE reserved_thread_id=?1",
+                    params![&thread_id],
+                )?;
                 deleted += self.conn.execute(
                     "DELETE FROM detached_spawn_intent WHERE parent_thread_id=?1",
                     params![&thread_id],
@@ -7249,9 +7281,23 @@ impl RuntimeDb {
         )?)
     }
 
+    /// Node-resource occupancy, distinct from each window's logical width.
+    /// A launched chain that is durably suspended in `follow` keeps its
+    /// originating window slot, but it has no running runtime and must yield
+    /// its node slot to the followed child. Excluding exactly `waiting`
+    /// parents prevents a finite global ceiling from deadlocking nested
+    /// fanout while `ready`/`resuming` parents count again before execution.
     fn launch_window_live_total(&self) -> Result<u32> {
         Ok(self.conn.query_row(
-            "SELECT COUNT(*) FROM launch_window WHERE launched_at_ms IS NOT NULL",
+            "SELECT COUNT(*)
+               FROM launch_window AS lw
+              WHERE lw.launched_at_ms IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM follow_waiter AS fw
+                     WHERE fw.parent_chain_root_id = lw.child_chain_root_id
+                       AND fw.phase = 'waiting'
+                )",
             [],
             |r| r.get(0),
         )?)
@@ -7261,7 +7307,8 @@ impl RuntimeDb {
     /// width and the optional daemon-global live ceiling. Marks admitted
     /// rows launched and returns their chain roots — the caller owns
     /// actually launching them.
-    pub fn launch_window_admit(
+    #[cfg(test)]
+    fn launch_window_admit(
         &self,
         window_key: &str,
         global_live_limit: Option<u32>,
@@ -7320,6 +7367,75 @@ impl RuntimeDb {
         Ok(admitted)
     }
 
+    fn launch_window_phase_is_eligible(&self, window_key: &str) -> Result<bool> {
+        let Some(follow_key) = window_key.strip_prefix("follow:") else {
+            return Ok(true);
+        };
+        let phase = self
+            .conn
+            .query_row(
+                "SELECT phase FROM follow_waiter WHERE follow_key = ?1",
+                params![follow_key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(phase.as_deref() == Some(follow_phase::WAITING))
+    }
+
+    /// Admit the oldest eligible members across every launch window. This is
+    /// the node-wide fairness boundary: freeing a slot in one cohort must wake
+    /// an older queued member in another cohort immediately, not at the next
+    /// maintenance sweep.
+    pub fn launch_window_admit_global(
+        &self,
+        global_live_limit: Option<u32>,
+        now_ms: i64,
+    ) -> Result<Vec<String>> {
+        let mut admitted = Vec::new();
+        loop {
+            if let Some(cap) = global_live_limit
+                && self.launch_window_live_total()? >= cap
+            {
+                break;
+            }
+            let mut statement = self.conn.prepare(
+                "SELECT child_chain_root_id, window_key, width
+                   FROM launch_window
+                  WHERE launched_at_ms IS NULL AND cancelled_at_ms IS NULL
+                  ORDER BY created_at_ms ASC, rowid ASC",
+            )?;
+            let candidates = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, u32>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut selected = None;
+            for (chain_root, window_key, width) in candidates {
+                if self.launch_window_phase_is_eligible(&window_key)?
+                    && self.launch_window_live_count(&window_key)? < width
+                {
+                    selected = Some(chain_root);
+                    break;
+                }
+            }
+            let Some(chain_root) = selected else {
+                break;
+            };
+            self.conn.execute(
+                "UPDATE launch_window SET launched_at_ms = ?2
+                  WHERE child_chain_root_id = ?1
+                    AND launched_at_ms IS NULL AND cancelled_at_ms IS NULL",
+                params![chain_root, now_ms],
+            )?;
+            admitted.push(chain_root);
+        }
+        Ok(admitted)
+    }
+
     /// Release a finished window member (its chain reached a hard terminal)
     /// and admit the window's next queued members. Empty for a chain that
     /// holds no window row.
@@ -7329,22 +7445,19 @@ impl RuntimeDb {
         global_live_limit: Option<u32>,
         now_ms: i64,
     ) -> Result<Vec<String>> {
-        let key: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT window_key FROM launch_window WHERE child_chain_root_id = ?1",
-                params![child_chain_root_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let Some(key) = key else {
+        let exists: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM launch_window WHERE child_chain_root_id = ?1)",
+            params![child_chain_root_id],
+            |r| r.get(0),
+        )?;
+        if !exists {
             return Ok(Vec::new());
-        };
+        }
         self.conn.execute(
             "DELETE FROM launch_window WHERE child_chain_root_id = ?1",
             params![child_chain_root_id],
         )?;
-        self.launch_window_admit(&key, global_live_limit, now_ms)
+        self.launch_window_admit_global(global_live_limit, now_ms)
     }
 
     /// Remove exactly the requested members that are still queued. This is used
@@ -9367,20 +9480,90 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        // The release under the same ceiling hands the slot across windows
-        // only via that window's own admit — the sweep drives other keys.
+        // Release wakes the globally oldest eligible row immediately; a
+        // different window never waits for the maintenance sweep.
         assert_eq!(
             db.launch_window_release("a1", Some(1), 5).unwrap(),
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            db.launch_window_admit("Q:two", Some(1), 6).unwrap(),
             vec!["b1"]
         );
         assert_eq!(
             db.launch_window_keys_with_queue().unwrap(),
             Vec::<String>::new()
         );
+    }
+
+    #[test]
+    fn suspended_window_member_yields_global_slot_to_nested_follow() {
+        let (_tmp, db) = fresh_db();
+        db.launch_window_insert("chain-parent", "outer", 1, 1)
+            .unwrap();
+        assert_eq!(
+            db.launch_window_admit("outer", Some(1), 2).unwrap(),
+            vec!["chain-parent"]
+        );
+
+        let follow_key = "nested-follow";
+        db.reserve_follow(&seed_follow(follow_key)).unwrap();
+        set_single_follow_child(&db, follow_key, "nested-thread", "nested-chain").unwrap();
+        db.set_follow_parent_successor(follow_key, "parent-successor")
+            .unwrap();
+        assert_eq!(db.mark_follow_waiting(follow_key).unwrap(), "waiting");
+
+        let nested_window = format!("follow:{follow_key}");
+        db.launch_window_insert("nested-chain", &nested_window, 1, 3)
+            .unwrap();
+        assert_eq!(
+            db.launch_window_admit(&nested_window, Some(1), 4).unwrap(),
+            vec!["nested-chain"],
+            "a suspended parent must not consume the only node execution slot"
+        );
+        assert_eq!(db.launch_window_live_total().unwrap(), 1);
+    }
+
+    #[test]
+    fn cap_one_nested_completion_releases_child_before_parent_resume() {
+        let (_tmp, db) = fresh_db();
+        db.launch_window_insert("chain-parent", "outer", 1, 1)
+            .unwrap();
+        assert_eq!(
+            db.launch_window_admit_global(Some(1), 2).unwrap(),
+            vec!["chain-parent"]
+        );
+
+        let follow_key = "nested-follow-completion";
+        db.reserve_follow(&seed_follow(follow_key)).unwrap();
+        set_single_follow_child(&db, follow_key, "nested-thread", "nested-chain").unwrap();
+        db.set_follow_parent_successor(follow_key, "parent-successor")
+            .unwrap();
+        db.mark_follow_waiting(follow_key).unwrap();
+        db.launch_window_insert("nested-chain", &format!("follow:{follow_key}"), 1, 3)
+            .unwrap();
+        assert_eq!(
+            db.launch_window_admit_global(Some(1), 4).unwrap(),
+            vec!["nested-chain"]
+        );
+
+        assert!(
+            db.mark_follow_child_terminal(
+                "nested-chain",
+                "nested-tail",
+                "completed",
+                &serde_json::json!({"status":"completed","result":{}}),
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            db.launch_window_live_total().unwrap(),
+            2,
+            "READY parent counts again until the terminal child releases its slot"
+        );
+        assert!(
+            db.launch_window_release("nested-chain", Some(1), 5)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(db.launch_window_live_total().unwrap(), 1);
+        assert!(!db.launch_window_is_member("nested-chain").unwrap());
     }
 
     #[test]
@@ -9415,6 +9598,27 @@ mod tests {
         db.launch_window_discard_member("admitted").unwrap();
         db.launch_window_discard_member("queued").unwrap();
         assert!(db.launch_window_cancelled_members().unwrap().is_empty());
+    }
+
+    #[test]
+    fn discarded_cancelled_member_wakes_oldest_global_replacement() {
+        let (_tmp, mut db) = fresh_db();
+        db.launch_window_insert("cancelled", "A", 1, 1).unwrap();
+        db.launch_window_insert("replacement", "B", 1, 2).unwrap();
+        assert_eq!(
+            db.launch_window_admit_global(Some(1), 3).unwrap(),
+            vec!["cancelled"]
+        );
+        assert_eq!(
+            db.launch_window_cancel_members(&["cancelled".into()], 4)
+                .unwrap(),
+            vec!["cancelled"]
+        );
+        db.launch_window_discard_member("cancelled").unwrap();
+        assert_eq!(
+            db.launch_window_admit_global(Some(1), 5).unwrap(),
+            vec!["replacement"]
+        );
     }
 
     /// Unknown owned state must fail without mutation. Normal open never
@@ -10711,6 +10915,39 @@ mod tests {
     }
 
     #[test]
+    fn bound_launch_planning_lives_with_authoritative_chain_history() {
+        let (_tmp, db) = fresh_db();
+        db.reserve_launch_planning("L-bound", "T-bound", "fp:owner")
+            .unwrap();
+        assert!(db.bind_launch_planning("T-bound").unwrap());
+        db.conn
+            .execute(
+                "UPDATE launch_planning SET finished_at_ms = 1 WHERE launch_id = 'L-bound'",
+                [],
+            )
+            .unwrap();
+        // More than the terminal-row cap cannot evict a bound coordinate.
+        for index in 0..4_100 {
+            db.conn
+                .execute(
+                    "INSERT INTO launch_planning (
+                        launch_id, reserved_thread_id, requested_by,
+                        daemon_generation_id, state, created_at_ms,
+                        updated_at_ms, finished_at_ms, outcome_code
+                     ) VALUES (?1, ?2, 'fp:owner', 'generation', 'failed', 1, 1, 1, 'failed')",
+                    params![format!("L-failed-{index}"), format!("T-failed-{index}")],
+                )
+                .unwrap();
+        }
+        prune_launch_planning(&db.conn, 24 * 60 * 60 * 1_000 + 2).unwrap();
+        assert!(db.launch_planning_by_id("L-bound").unwrap().is_some());
+
+        db.delete_chain_runtime("T-bound", &["T-bound".to_string()])
+            .unwrap();
+        assert!(db.launch_planning_by_id("L-bound").unwrap().is_none());
+    }
+
+    #[test]
     fn restart_generation_expires_only_unbound_predecessor_planning() {
         let (_tmp, db) = fresh_db();
         db.reserve_launch_planning("L-stale", "T-stale", "fp:owner")
@@ -10754,5 +10991,18 @@ mod tests {
         db.reserve_launch_planning_bounded("L-three", "T-three", "fp:owner", 2)
             .unwrap();
         assert_eq!(db.pending_launch_planning().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn launch_planning_coordinate_cannot_be_reused() {
+        let (_tmp, db) = fresh_db();
+        db.reserve_launch_planning("L-one", "T-one", "fp:owner")
+            .unwrap();
+        let error = db
+            .reserve_launch_planning("L-one", "T-two", "fp:owner")
+            .expect_err("one coordinate cannot name two launch attempts");
+        assert!(error.is::<LaunchPlanningAlreadyReserved>());
+        let retained = db.launch_planning_by_id("L-one").unwrap().unwrap();
+        assert_eq!(retained.reserved_thread_id, "T-one");
     }
 }

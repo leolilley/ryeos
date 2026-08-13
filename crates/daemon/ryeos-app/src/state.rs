@@ -196,6 +196,9 @@ impl AppState {
 
     pub fn status(&self) -> anyhow::Result<StatusResponse> {
         let pending_head_transitions = self.state_store.pending_head_transition_status()?;
+        self.state_store
+            .projection_health()
+            .observe_pending_transitions(pending_head_transitions.pending);
         Ok(StatusResponse {
             version: self.daemon_build.version.to_string(),
             revision: self.daemon_build.revision.to_string(),

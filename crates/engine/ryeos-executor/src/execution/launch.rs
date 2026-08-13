@@ -1424,7 +1424,16 @@ fn emit_executor_verification_cache_metric(
     outcome: ExecutorVerificationCacheOutcome,
     reason: ExecutorVerificationCacheReason,
 ) {
-    tracing::info!(
+    ryeos_tracing::record_cache_metric(ryeos_tracing::CacheMetricSample {
+        metric: "native_executor_verification_cache",
+        namespace: None,
+        outcome: outcome.as_str(),
+        reason: Some(reason.as_str()),
+        source_bytes: 0,
+        entry_bytes: 0,
+        wait_microseconds: 0,
+    });
+    tracing::debug!(
         target: "ryeos.metrics",
         metric = "native_executor_verification_cache",
         outcome = outcome.as_str(),
@@ -6414,8 +6423,8 @@ async fn run_claimed_thread_row_inner(
         // Live parent-resume kick: a followed child finalized on this fallback
         // (abnormal exit, no self-finalize over the callback) still flips its waiter
         // to `ready`, so wake the parent now instead of waiting for a restart.
-        kick_follow_resume_if_ready(state, &finalized.chain_root_id);
         kick_launch_window_for_terminal(state, &finalized.chain_root_id);
+        kick_follow_resume_if_ready(state, &finalized.chain_root_id);
         thread_detail = finalized;
     } else {
         let authority = state
@@ -6582,8 +6591,8 @@ pub fn settle_recovery_preparation_refusal(
     {
         ryeos_app::thread_lifecycle::FinalizeIfNonterminalOutcome::Finalized(thread) => {
             let chain_root_id = thread.chain_root_id.clone();
-            kick_follow_resume_if_ready(state, &chain_root_id);
             kick_launch_window_for_terminal(state, &chain_root_id);
+            kick_follow_resume_if_ready(state, &chain_root_id);
             Ok(RecoveryRefusalOutcome::Finalized)
         }
         ryeos_app::thread_lifecycle::FinalizeIfNonterminalOutcome::AlreadyTerminal { .. } => {
@@ -8409,6 +8418,7 @@ async fn launch_follow_child_with_claim(
         );
         cancelled?;
         state.state_store.discard_window_member(&chain_root)?;
+        kick_launch_window_after_discard(&state);
         kick_follow_resume_if_ready(&state, &chain_root);
         return Ok(SuccessorLaunchOutcome::Skipped("cancelled"));
     }
@@ -8488,8 +8498,8 @@ pub fn finalize_failed_and_kick_follow(
         Some(error),
     )?;
     if outcome != crate::dispatch::MethodFinalizeOutcome::PreservedForShutdown {
-        kick_follow_resume_if_ready(state, child_chain_root_id);
         kick_launch_window_for_terminal(state, child_chain_root_id);
+        kick_follow_resume_if_ready(state, child_chain_root_id);
     }
     Ok(())
 }
@@ -8595,6 +8605,30 @@ pub fn kick_launch_window_for_terminal(state: &AppState, chain_root_id: &str) {
     }
 }
 
+/// Refill globally available launch-window capacity after cancellation removed
+/// a queued or admitted-but-unspawned member directly. Unlike terminal release,
+/// the canceled row no longer exists to identify a source window; global FIFO
+/// selection is therefore the only complete wakeup boundary.
+pub fn kick_launch_window_after_discard(state: &AppState) {
+    match state
+        .state_store
+        .launch_window_admit_global(global_live_fanout_limit(), lillux::time::timestamp_millis())
+    {
+        Ok(admitted) => {
+            for id in admitted {
+                tracing::info!(
+                    child_thread_id = %id,
+                    "discarded launch-window member freed capacity — launching queued member",
+                );
+                launch_admitted_window_member(state, &id);
+            }
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "launch-window admission after discard failed");
+        }
+    }
+}
+
 /// Startup/maintenance sweep for launch windows: release members whose
 /// chain settled without a kick landing (the crash window), then admit and
 /// launch queued members up to each window's width and the global ceiling.
@@ -8633,31 +8667,20 @@ pub fn sweep_launch_windows(state: &AppState) {
         }
         Err(e) => tracing::warn!(error = %e, "launch-window sweep member listing failed"),
     }
-    match state.state_store.launch_window_keys_with_queue() {
-        Ok(keys) => {
-            for key in keys {
-                let admission =
-                    state
-                        .state_store
-                        .launch_window_admit(&key, global_live_fanout_limit(), now_ms);
-                match admission {
-                    Ok(admitted) => {
-                        for id in admitted {
-                            tracing::info!(
-                                child_thread_id = %id,
-                                window_key = %key,
-                                "launch-window sweep admission — launching queued member",
-                            );
-                            launch_admitted_window_member(state, &id);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(window_key = %key, error = %e, "launch-window sweep admission failed")
-                    }
-                }
+    match state
+        .state_store
+        .launch_window_admit_global(global_live_fanout_limit(), now_ms)
+    {
+        Ok(admitted) => {
+            for id in admitted {
+                tracing::info!(
+                    child_thread_id = %id,
+                    "launch-window global sweep admission — launching queued member",
+                );
+                launch_admitted_window_member(state, &id);
             }
         }
-        Err(e) => tracing::warn!(error = %e, "launch-window sweep queue listing failed"),
+        Err(e) => tracing::warn!(error = %e, "launch-window global sweep admission failed"),
     }
 }
 
@@ -8694,21 +8717,15 @@ pub fn prepare_launch_window_recovery(
         }
     }
 
-    for window_key in state.state_store.launch_window_keys_with_queue()? {
-        let admitted = state.state_store.launch_window_admit(
-            &window_key,
-            global_live_fanout_limit(),
-            now_ms,
-        )?;
-        for child_thread_id in admitted {
-            let outcome = prepare_and_spawn_follow_child_recovery(state.clone(), &child_thread_id)
-                .with_context(|| {
-                    format!(
-                        "prepare launch-window child {child_thread_id} admitted from {window_key}"
-                    )
-                })?;
-            outcomes.push((child_thread_id, outcome));
-        }
+    for child_thread_id in state
+        .state_store
+        .launch_window_admit_global(global_live_fanout_limit(), now_ms)?
+    {
+        let outcome = prepare_and_spawn_follow_child_recovery(state.clone(), &child_thread_id)
+            .with_context(|| {
+                format!("prepare globally admitted launch-window child {child_thread_id}")
+            })?;
+        outcomes.push((child_thread_id, outcome));
     }
 
     Ok(outcomes)

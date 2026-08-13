@@ -212,6 +212,9 @@ pub async fn handle(
         ))
     })?
     .map_err(|error| HandlerError::Internal(error.to_string()))?;
+    if !queued_cancelled.is_empty() {
+        ryeos_executor::execution::launch::kick_launch_window_after_discard(&state);
+    }
     for root in &queued_cancelled {
         ryeos_executor::execution::launch::kick_follow_resume_if_ready(&state, root);
     }
@@ -231,11 +234,11 @@ pub async fn handle(
     // just flipped the awaiting waiter to `ready` (a degraded failure envelope) —
     // kick the parent resume live so it does not wait for the next daemon restart.
     // A no-op for a non-follow thread.
-    ryeos_executor::execution::launch::kick_follow_resume_if_ready(
+    ryeos_executor::execution::launch::kick_launch_window_for_terminal(
         &state,
         &finalized.chain_root_id,
     );
-    ryeos_executor::execution::launch::kick_launch_window_for_terminal(
+    ryeos_executor::execution::launch::kick_follow_resume_if_ready(
         &state,
         &finalized.chain_root_id,
     );

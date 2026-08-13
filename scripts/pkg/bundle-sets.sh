@@ -16,6 +16,8 @@
 ryeos_bundle_set_names() {
   case "$1" in
     full)            printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node ;;
+    full-local-inference)
+                     printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node sandbox-linux-bubblewrap local-inference ;;
     central-host)    printf '%s\n' core central-auth standard web tv-tracker-authoring ;;
     standard)        printf '%s\n' core central-auth standard ;;
     hosted-node)     printf '%s\n' core central-auth hosted-node ;;
@@ -31,7 +33,7 @@ ryeos_bundle_set_bin_managed_names() {
   ryeos_bundle_set_names "$1" | while IFS= read -r name; do
 # central-auth (Python tool support) and tv-tracker-authoring (reuses bin:core/
     # ryeos-core-tools) own no compiled binaries — exclude from bin staging.
-    [[ "$name" == "central-auth" || "$name" == "tv-tracker-authoring" ]] && continue
+    [[ "$name" == "central-auth" || "$name" == "tv-tracker-authoring" || "$name" == "local-inference" || "$name" == "sandbox-linux-bubblewrap" ]] && continue
     printf '%s\n' "$name"
   done
 }

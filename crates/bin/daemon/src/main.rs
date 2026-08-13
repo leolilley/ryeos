@@ -554,7 +554,7 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
 
             // Execution admission limits must be armed before projection recovery
             // or any later runtime recovery action is classified or enqueued.
-            let node_fanout = load_node_max_live_fanout(&engine, &config.app_root);
+            let node_fanout = load_node_max_live_fanout(&engine)?;
             ryeos_executor::execution::launch::arm_global_live_fanout_limit(node_fanout);
             if let Some(n) = node_fanout {
                 tracing::info!(max_live_fanout = n, "node execution limits armed");
@@ -1302,21 +1302,18 @@ async fn settle_uds_listener(task: &mut tokio::task::JoinHandle<Result<()>>) -> 
 
 /// Read `node.max_live_fanout` from the layered signed execution config,
 /// bundle defaults first and the node's own `.ai` tree last (last layer
-/// wins, matching execution-policy layering). A layer that fails signature
-/// verification is skipped loudly rather than trusted.
-fn load_node_max_live_fanout(
-    engine: &ryeos_engine::engine::Engine,
-    app_root: &std::path::Path,
-) -> Option<u32> {
-    let roots = engine.resolution_roots(Some(app_root.to_path_buf()));
+/// wins, matching execution-policy layering). A present malformed or
+/// unverifiable layer refuses startup; load shedding must not fail open.
+fn load_node_max_live_fanout(engine: &ryeos_engine::engine::Engine) -> Result<Option<u32>> {
+    let ordinary_roots = engine.resolution_roots(None);
+    let roots = engine.launch_config_roots(&ordinary_roots);
     let parsers = match engine.effective_parser_dispatcher(
-        Some(app_root),
+        None,
         &ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
     ) {
         Ok(p) => p,
         Err(err) => {
-            tracing::warn!(error = %err, "node execution limits: parser dispatcher unavailable");
-            return None;
+            return Err(err).context("node execution limits: parser dispatcher unavailable");
         }
     };
     let ctx = ryeos_engine::config_loading::ConfigLoadContext {
@@ -1327,7 +1324,10 @@ fn load_node_max_live_fanout(
         project_authority: None,
     };
     let mut limit: Option<u32> = None;
-    for root in &roots.ordered {
+    // Resolution roots are ordered highest precedence first. Apply them in
+    // reverse so trusted bundle defaults land first and the exact node config
+    // layer, inserted ahead of bundle roots, wins last.
+    for root in roots.ordered.iter().rev() {
         let candidate = root
             .ai_root
             .join("config")
@@ -1336,26 +1336,67 @@ fn load_node_max_live_fanout(
         if !candidate.exists() {
             continue;
         }
-        match ryeos_engine::config_loading::load_and_verify_config_file(&candidate, &ctx) {
-            Ok(value) => {
-                if let Some(n) = value
-                    .get("node")
-                    .and_then(|n| n.get("max_live_fanout"))
-                    .and_then(|v| v.as_u64())
-                {
-                    limit = Some(n as u32);
-                }
-            }
-            Err(err) => {
-                tracing::warn!(
-                    path = %candidate.display(),
-                    error = %err,
-                    "node execution limits: config layer failed verification — ignoring"
-                );
-            }
-        }
+        let value =
+            ryeos_engine::config_loading::load_and_verify_trusted_config_file(&candidate, &ctx)
+                .with_context(|| {
+                    format!(
+                        "node execution limits: config layer failed verification at {}",
+                        candidate.display()
+                    )
+                })?;
+        limit = apply_node_max_live_fanout_layer(limit, &value, &candidate)?;
     }
-    limit.filter(|n| *n > 0)
+    if limit.is_none() {
+        anyhow::bail!(
+            "node execution limits: signed execution configuration must declare node.max_live_fanout"
+        );
+    }
+    Ok(limit)
+}
+
+fn apply_node_max_live_fanout_layer(
+    current: Option<u32>,
+    value: &serde_json::Value,
+    source: &std::path::Path,
+) -> Result<Option<u32>> {
+    Ok(decode_node_max_live_fanout(value, source)?.or(current))
+}
+
+fn decode_node_max_live_fanout(
+    value: &serde_json::Value,
+    source: &std::path::Path,
+) -> Result<Option<u32>> {
+    let Some(node) = value.get("node") else {
+        return Ok(None);
+    };
+    let node = node.as_object().ok_or_else(|| {
+        anyhow::anyhow!(
+            "node execution limits: node at {} must be an object",
+            source.display()
+        )
+    })?;
+    let Some(raw) = node.get("max_live_fanout") else {
+        return Ok(None);
+    };
+    let parsed = raw.as_u64().ok_or_else(|| {
+        anyhow::anyhow!(
+            "node execution limits: node.max_live_fanout at {} must be a positive integer",
+            source.display()
+        )
+    })?;
+    let parsed = u32::try_from(parsed).with_context(|| {
+        format!(
+            "node execution limits: node.max_live_fanout at {} exceeds u32",
+            source.display()
+        )
+    })?;
+    if parsed == 0 {
+        anyhow::bail!(
+            "node execution limits: node.max_live_fanout at {} must be greater than zero",
+            source.display()
+        );
+    }
+    Ok(Some(parsed))
 }
 
 /// Cross the durable ownership boundary for every active-thread resume intent.
@@ -1819,6 +1860,24 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
     }
 }
 
+async fn run_cache_metric_flush_loop() -> Result<()> {
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+    let period = Duration::from_secs(5);
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => {
+                ryeos_tracing::flush_cache_metrics();
+                return Ok(());
+            }
+            _ = tick.tick() => ryeos_tracing::flush_cache_metrics_due(),
+        }
+    }
+}
+
 async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
     ryeos_app::cascade::repair_cancelled_window_members(state)
         .context("periodic cancelled launch-window repair")?;
@@ -1960,6 +2019,8 @@ async fn supervise_background_tasks(
             run_periodic_recovery(periodic_state).await,
         )
     });
+
+    tasks.spawn(async move { ("cache metric flush", run_cache_metric_flush_loop().await) });
 
     let hint_hub = state.event_streams.clone();
     tasks.spawn(async move { ("UI hint fanout", run_ui_hint_loop(hint_hub, ui).await) });
@@ -2752,5 +2813,43 @@ mod shutdown_mapping_tests {
             resolve_shutdown_action(Some(CancellationMode::Graceful { grace_secs: 0 })),
             ShutdownAction::Graceful(Duration::from_secs(0))
         );
+    }
+}
+
+#[cfg(test)]
+mod execution_limit_tests {
+    use super::{apply_node_max_live_fanout_layer, decode_node_max_live_fanout};
+    use serde_json::json;
+    use std::path::Path;
+
+    #[test]
+    fn fanout_limit_accepts_positive_u32_and_rejects_invalid_values() {
+        let source = Path::new("execution.yaml");
+        assert_eq!(
+            decode_node_max_live_fanout(&json!({"node":{"max_live_fanout":8}}), source).unwrap(),
+            Some(8)
+        );
+        for invalid in [
+            json!({"node":{"max_live_fanout":0}}),
+            json!({"node":{"max_live_fanout":"8"}}),
+            json!({"node":{"max_live_fanout":u64::from(u32::MAX)+1}}),
+            json!({"node":8}),
+            json!({"node":[]}),
+        ] {
+            assert!(decode_node_max_live_fanout(&invalid, source).is_err());
+        }
+    }
+
+    #[test]
+    fn later_node_layer_replaces_the_bundle_default() {
+        let bundle = Path::new("bundle/execution.yaml");
+        let node = Path::new("node/execution.yaml");
+        let limit =
+            apply_node_max_live_fanout_layer(None, &json!({"node":{"max_live_fanout":8}}), bundle)
+                .unwrap();
+        let limit =
+            apply_node_max_live_fanout_layer(limit, &json!({"node":{"max_live_fanout":3}}), node)
+                .unwrap();
+        assert_eq!(limit, Some(3));
     }
 }

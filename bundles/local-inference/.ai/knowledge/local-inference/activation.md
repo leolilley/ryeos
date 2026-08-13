@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-13T03:35:01Z:2a151e356731dc52b04bbfabc6bc135e5540491325583874d8ca2db85c437185:jCwcwsLzdtVexeum6ZHklQ2oacIxms32Ur+s/LqWubrHkxmQpQuv+qhPFFWHxuRuZnRvyAA+uXFQQr1iiPusCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-13T05:08:38Z:5d2ee895a60d87debdb82f8814c08d5fe1f911e4b25b89bc5721c1bb513fd0ab:me/CR49tOJSI6wBWBX8nKe+dnXBhc7eWOrAtkR4DZz5KNJn9ODMe2Nl4olfCmSuevgxNcgd5mjrpVqh6XGvvCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: local-inference
 tags: [execution, external-content, persistent-session, local-model, replay]
@@ -8,6 +8,20 @@ description: >
 ---
 
 # Admitted local model workers
+
+The concrete worker/provider content is an optional bundle. A source-checkout
+node builds the separately authored isolation payload, installs both optional
+bundles with `full-local-inference`, and keeps using that set for updates:
+
+```text
+./bundles/sandbox-linux-bubblewrap/build-payload.sh
+sudo scripts/pkg/install-local-direct.sh --populate --all \
+  --bundle-set full-local-inference --trust-source-publishers
+```
+
+The ordinary `full` set intentionally retires optional bundle sources and
+registrations; it is not an update path for a node that has activated this
+bundle.
 
 RyeOS runs a local model as admitted RyeOS content, not as an ambient HTTP
 sidecar. The signed worker item identifies the program and declares its exact
@@ -107,13 +121,14 @@ isolated even when the node ceiling permits host networking for unrelated
 admitted tools. Persistent-session and external-content policy alone do not
 activate the route. RyeOS installs no backend by default.
 
-Build and publish the current `sandbox-linux-bubblewrap` bundle with the
-ordinary bundle-authoring tools and install it while the daemon is stopped:
+Build the current `sandbox-linux-bubblewrap` payload explicitly before running
+the `full-local-inference` populate/install command. The set publishes and
+retains that exact payload; it never downloads or builds it implicitly:
 
 ```text
 ./bundles/sandbox-linux-bubblewrap/build-payload.sh
-ryeos bundle publish bundles/sandbox-linux-bubblewrap
-ryeos bundle install sandbox-linux-bubblewrap bundles/sandbox-linux-bubblewrap
+sudo scripts/pkg/install-local-direct.sh --populate --all \
+  --bundle-set full-local-inference --trust-source-publishers
 ```
 
 The node policy is a ceiling shared by ordinary parser, handler, tool, and
@@ -306,18 +321,26 @@ Perform activation in this order so doctor and the first launch observe one
 coherent contract generation:
 
 1. Assemble the external inputs and verify that the assembly helper completed.
-2. Stop the daemon. Install the current RyeOS build and freshly published
-   `core` and `standard` bundles. Publish and install `local-inference` against
-   those dependencies:
+2. Build the Bubblewrap payload and verify that both static executables pass
+   the bundle helper's inspection. This is the only step that builds the
+   independently authored isolation implementation:
 
    ```text
-   ryeos bundle publish bundles/local-inference
-   ryeos bundle install local-inference bundles/local-inference
+   ./bundles/sandbox-linux-bubblewrap/build-payload.sh
    ```
 
-   The installed engine must understand `persistent_session.target_path` and
-   `ipc.target_unix_stream` before doctor inspects the new declarations.
-3. Build, publish, and install the current `sandbox-linux-bubblewrap` bundle.
+3. Stop the daemon. Publish and install the current RyeOS build and both
+   optional bundles as one coherent set:
+
+   ```text
+   sudo scripts/pkg/install-local-direct.sh --populate --all \
+     --bundle-set full-local-inference --trust-source-publishers
+   ```
+
+   The set publishes `core` and `standard` first, then closes the already-built
+   sandbox payload and `local-inference` against those dependencies. The
+   installed engine therefore understands `persistent_session.target_path`
+   and `ipc.target_unix_stream` before doctor inspects the new declarations.
 4. Apply the external-content and persistent-session sources through `ryeos
    node policy-apply`, then apply isolation through `ryeos node
    isolation-apply`. Keep isolation in `mode: enforce`; the node ceiling may

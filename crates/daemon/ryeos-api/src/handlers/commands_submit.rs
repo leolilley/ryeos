@@ -89,6 +89,9 @@ pub async fn handle(
         .await;
         match stop_result {
             Ok(Ok((report, cancelled_roots))) => {
+                if !cancelled_roots.is_empty() {
+                    ryeos_executor::execution::launch::kick_launch_window_after_discard(&state);
+                }
                 for root in cancelled_roots {
                     ryeos_executor::execution::launch::kick_follow_resume_if_ready(&state, &root);
                 }

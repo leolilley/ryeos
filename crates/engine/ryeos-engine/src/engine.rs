@@ -442,7 +442,16 @@ fn emit_immutable_request_cache_metric(
     outcome: ImmutableRequestCacheOutcome,
     reason: ImmutableRequestCacheReason,
 ) {
-    tracing::info!(
+    ryeos_tracing::record_cache_metric(ryeos_tracing::CacheMetricSample {
+        metric: "immutable_request_snapshot_cache",
+        namespace: None,
+        outcome: outcome.as_str(),
+        reason: Some(reason.as_str()),
+        source_bytes: 0,
+        entry_bytes: 0,
+        wait_microseconds: 0,
+    });
+    tracing::debug!(
         target: "ryeos.metrics",
         metric = "immutable_request_snapshot_cache",
         outcome = outcome.as_str(),
@@ -611,7 +620,16 @@ fn emit_static_verification_cache_metric(
     outcome: StaticVerificationCacheOutcome,
     reason: StaticVerificationCacheReason,
 ) {
-    tracing::info!(
+    ryeos_tracing::record_cache_metric(ryeos_tracing::CacheMetricSample {
+        metric: "static_verification_cache",
+        namespace: None,
+        outcome: outcome.as_str(),
+        reason: Some(reason.as_str()),
+        source_bytes: 0,
+        entry_bytes: 0,
+        wait_microseconds: 0,
+    });
+    tracing::debug!(
         target: "ryeos.metrics",
         metric = "static_verification_cache",
         outcome = outcome.as_str(),

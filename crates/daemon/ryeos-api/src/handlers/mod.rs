@@ -41,6 +41,7 @@ pub mod identity_public_key;
 pub mod ingest_ignore;
 pub mod items_effective;
 pub mod launch_cancel;
+pub mod launch_status;
 pub mod maintenance_gc;
 pub mod model_providers_validate;
 pub mod node_sign;
@@ -133,6 +134,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     project_apply_snapshot::DESCRIPTOR,
     project_status::DESCRIPTOR,
     launch_cancel::DESCRIPTOR,
+    launch_status::DESCRIPTOR,
     threads_list::DESCRIPTOR,
     threads_get::DESCRIPTOR,
     threads_receipts::DESCRIPTOR,

@@ -955,7 +955,10 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
         ],
         "setup" => &[("--app-root <DIR>", "Application root")],
         "execute" => &[
-            ("--async", "Launch in the background and return a thread ID"),
+            (
+                "--async",
+                "Launch in the background; retain a launch ID and return the thread ID",
+            ),
             (
                 "--input <FILE>",
                 "Read JSON parameters from a file, or - for stdin",

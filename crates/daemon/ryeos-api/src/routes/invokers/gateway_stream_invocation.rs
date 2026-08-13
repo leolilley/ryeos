@@ -142,6 +142,12 @@ fn map_launch_planning_reservation_error(
     error: ryeos_app::state_store::LaunchPlanningReservationError,
 ) -> RouteDispatchError {
     match error {
+        ryeos_app::state_store::LaunchPlanningReservationError::AlreadyReserved(_) => {
+            RouteDispatchError::Conflict(
+                "launch_id is unavailable; query its owner-bound status or submit a fresh coordinate"
+                    .to_string(),
+            )
+        }
         ryeos_app::state_store::LaunchPlanningReservationError::CapacityExceeded(_) => {
             RouteDispatchError::ServiceUnavailable {
                 code: "launch_planning_capacity_exceeded".to_string(),

@@ -104,9 +104,18 @@ pub async fn spawn_detached_child(
     // The callback capability carries the chain root it was minted under; confirm
     // it against authoritative state before minting a linked child.
     cap.assert_chain_root(&parent.chain_root_id)?;
-    let persisted_launch_window = launch_window.map(|window| FollowLaunchWindow {
-        key: format!("{parent_thread_id}:{}", window.key),
-        width: window.width,
+    // Every detached child is windowed. Authored cohorts retain their shared
+    // width; a generic caller that omits one receives a stable one-child
+    // window, so it still participates in the node-wide live ceiling.
+    let persisted_launch_window = Some(match launch_window {
+        Some(window) => FollowLaunchWindow {
+            key: format!("{parent_thread_id}:{}", window.key),
+            width: window.width,
+        },
+        None => FollowLaunchWindow {
+            key: format!("{parent_thread_id}:detached:{operation_id}"),
+            width: 1,
+        },
     });
     let child_thread_id = state.state_store.reserve_detached_spawn_intent(
         operation_id,
@@ -546,11 +555,11 @@ pub async fn spawn_detached_child(
                 );
                 match cleanup {
                     Ok(outcome) if outcome.is_settled() => {
-                        crate::execution::launch::kick_follow_resume_if_ready(
+                        crate::execution::launch::kick_launch_window_for_terminal(
                             state,
                             &child_thread_id,
                         );
-                        crate::execution::launch::kick_launch_window_for_terminal(
+                        crate::execution::launch::kick_follow_resume_if_ready(
                             state,
                             &child_thread_id,
                         );
@@ -680,7 +689,7 @@ pub async fn spawn_detached_child(
             );
         }
     }
-    // Members of the same window that this enqueue admitted alongside (slots
+    // Other globally eligible members admitted alongside this enqueue (slots
     // opened without a kick landing) launch on the reconcile-parity path.
     for other in &co_admitted {
         crate::execution::launch::launch_admitted_window_member(state, other);
@@ -734,8 +743,8 @@ fn settle_detached_pre_handoff_failure(
         json!({ "code": code, "reason": reason }),
     )?;
     if outcome.is_settled() {
-        crate::execution::launch::kick_follow_resume_if_ready(state, child_thread_id);
         crate::execution::launch::kick_launch_window_for_terminal(state, child_thread_id);
+        crate::execution::launch::kick_follow_resume_if_ready(state, child_thread_id);
     }
     Ok(())
 }

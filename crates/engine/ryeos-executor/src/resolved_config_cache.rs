@@ -511,7 +511,16 @@ pub(crate) fn emit_metric(
     entry_bytes: usize,
     wait_milliseconds: u64,
 ) {
-    tracing::info!(
+    ryeos_tracing::record_cache_metric(ryeos_tracing::CacheMetricSample {
+        metric: "resolved_config_snapshot_cache",
+        namespace: Some(namespace),
+        outcome: outcome.as_str(),
+        reason: Some(reason.as_str()),
+        source_bytes: 0,
+        entry_bytes,
+        wait_microseconds: wait_milliseconds.saturating_mul(1_000),
+    });
+    tracing::debug!(
         target: "ryeos.metrics",
         metric = "resolved_config_snapshot_cache",
         namespace,

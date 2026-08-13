@@ -2429,6 +2429,7 @@ dependencies = [
  "ryeos-runtime",
  "ryeos-scheduler",
  "ryeos-state",
+ "ryeos-tracing",
  "ryeos-vault",
  "serde",
  "serde_json",
@@ -2505,6 +2506,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-width",
+ "uuid",
  "zeroize",
 ]
 

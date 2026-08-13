@@ -2,9 +2,11 @@
 
 This is the independently installed Linux implementation of RyeOS's
 data-driven isolation protocol. It remains outside every default bundle set,
-local install, container image, release artifact, and RyeOS build. The admitted
-local-worker acceptance route uses it only after an operator explicitly builds,
-publishes, installs, and selects it.
+ordinary local install, container image, release artifact, and RyeOS build. The
+explicit `full-local-inference` source-checkout set preserves and publishes an
+operator-built payload; it never builds or downloads one implicitly. The
+admitted local-worker acceptance route uses it only after an operator explicitly
+builds, installs, and selects it.
 
 RyeOS runs normally with isolation disabled and no selected backend. Nothing
 downloads, builds, installs, or probes Bubblewrap unless an operator explicitly

@@ -31,7 +31,7 @@ pub async fn handle(
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     ctx.require_verified()?;
-    if !req.launch_id.starts_with("L-") || req.launch_id.len() > 96 {
+    if !ryeos_app::state_store::is_canonical_launch_id(&req.launch_id) {
         return Err(HandlerError::NotFound);
     }
     let resolution = state

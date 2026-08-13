@@ -86,7 +86,8 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     let params: SpawnFollowChildParams = serde_json::from_value(params.clone())
         .context("invalid runtime.spawn_follow_child params")?;
 
-    let fanout = validate_follow_launch(params.children.len(), params.launch_window_width)?;
+    let (fanout, launch_window_width) =
+        validate_follow_launch(params.children.len(), params.launch_window_width)?;
     let children = params.children;
 
     let parent_thread_id = params.thread_id.clone();
@@ -463,12 +464,10 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     // The waiter phase says whether the parent suspension committed; it does not
     // say which child roots committed before a crash. Reuse durable slot IDs and
     // allocate fresh IDs in memory, then classify each child from its own row.
-    let window_key = params
-        .launch_window_width
-        .map(|_| format!("follow:{follow_key}"));
-    let expected_launch_window = params.launch_window_width.map(|width| FollowLaunchWindow {
+    let window_key = format!("follow:{follow_key}");
+    let expected_launch_window = Some(FollowLaunchWindow {
         key: format!("follow:{follow_key}"),
-        width,
+        width: launch_window_width,
     });
 
     // Select the exact stable identities before launch authority is prepared.
@@ -671,24 +670,17 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             .iter()
             .map(|item_index| child_thread_ids[*item_index].clone())
             .collect()
-    } else if let (Some(width), Some(window_key)) =
-        (params.launch_window_width, window_key.as_deref())
-    {
+    } else {
         for item_index in fresh_indices.iter().copied() {
             let child_id = &child_thread_ids[item_index];
             state.state_store.launch_window_insert_only(
                 child_id,
-                window_key,
-                width,
+                &window_key,
+                launch_window_width,
                 lillux::time::timestamp_millis(),
             )?;
         }
         Vec::new()
-    } else {
-        authority_indices
-            .iter()
-            .map(|item_index| child_thread_ids[*item_index].clone())
-            .collect()
     };
 
     // 4. Parent successor row (created, NOT launched). This atomically settles the
@@ -880,15 +872,27 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 );
             }
         }
-        if response_phase == follow_phase::WAITING
-            && let Some(window_key) = window_key.as_deref()
-        {
-            match state.state_store.launch_window_admit(
-                window_key,
+        if response_phase == follow_phase::WAITING {
+            match state.state_store.launch_window_admit_global(
                 crate::execution::launch::global_live_fanout_limit(),
                 lillux::time::timestamp_millis(),
             ) {
-                Ok(newly_admitted) => admitted = newly_admitted,
+                Ok(newly_admitted) => {
+                    admitted.clear();
+                    for child_id in newly_admitted {
+                        if prepared_by_child.contains_key(&child_id) {
+                            admitted.push(child_id);
+                        } else {
+                            // Yielding this parent may free the node slot for
+                            // an older member of another window. Its own
+                            // durable metadata is the launch authority; this
+                            // cohort must not consume its preparation.
+                            crate::execution::launch::launch_admitted_window_member(
+                                state, &child_id,
+                            );
+                        }
+                    }
+                }
                 Err(error) => {
                     // Membership and `waiting` are durable. Report a truthful
                     // queued acceptance and let the periodic/startup window
@@ -1605,11 +1609,11 @@ fn commit_follow_child_roots(
                     );
                     match cleanup {
                         Ok(outcome) if outcome.is_settled() => {
-                            crate::execution::launch::kick_follow_resume_if_ready(
+                            crate::execution::launch::kick_launch_window_for_terminal(
                                 state,
                                 &child_thread_id,
                             );
-                            crate::execution::launch::kick_launch_window_for_terminal(
+                            crate::execution::launch::kick_follow_resume_if_ready(
                                 state,
                                 &child_thread_id,
                             );
@@ -1671,14 +1675,20 @@ fn commit_follow_child_roots(
     Ok(prepared_by_child)
 }
 
-fn validate_follow_launch(children_len: usize, launch_window_width: Option<u32>) -> Result<bool> {
+fn validate_follow_launch(
+    children_len: usize,
+    launch_window_width: Option<u32>,
+) -> Result<(bool, u32)> {
     if children_len == 0 {
         bail!("follow: children must be nonempty");
     }
     if launch_window_width == Some(0) {
         bail!("follow: launch_window_width must be greater than zero");
     }
-    Ok(children_len > 1 || launch_window_width.is_some())
+    let cohort_width = u32::try_from(children_len).context("follow: too many children")?;
+    let width = launch_window_width
+        .unwrap_or_else(|| cohort_width.min(ryeos_runtime::DEFAULT_LIVE_FANOUT_WINDOW_WIDTH));
+    Ok((children_len > 1, width))
 }
 
 #[cfg(test)]
@@ -1687,8 +1697,9 @@ mod launch_shape_tests {
 
     #[test]
     fn single_child_can_use_a_launch_window() {
-        assert!(validate_follow_launch(1, Some(1)).expect("single-item launch window is valid"));
-        assert!(validate_follow_launch(1, Some(8)).expect("window may exceed cohort size"));
+        assert_eq!(validate_follow_launch(1, None).unwrap(), (false, 1));
+        assert_eq!(validate_follow_launch(1, Some(8)).unwrap(), (false, 8));
+        assert_eq!(validate_follow_launch(24, None).unwrap(), (true, 8));
     }
 
     #[test]

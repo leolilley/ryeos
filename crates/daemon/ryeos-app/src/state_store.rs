@@ -23,8 +23,9 @@ use crate::projection_health::ThreadProjectionHealth;
 use crate::runtime_db;
 use crate::write_barrier::{WriteBarrier, WritePermit};
 pub use runtime_db::{
-    CommandRecord, HookDispatchReservation, LaunchPlanningCapacityExceeded, LaunchPlanningRecord,
-    NewCommandRecord, NewHookDispatch, RuntimeInfo, StopIntent,
+    CommandRecord, HookDispatchReservation, LaunchPlanningAlreadyReserved,
+    LaunchPlanningCapacityExceeded, LaunchPlanningRecord, NewCommandRecord, NewHookDispatch,
+    RuntimeInfo, StopIntent,
 };
 
 mod projection_access;
@@ -97,13 +98,47 @@ pub enum LaunchTaskAbortRegistrationError {
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchPlanningReservationError {
     #[error(transparent)]
+    AlreadyReserved(#[from] LaunchPlanningAlreadyReserved),
+    #[error(transparent)]
     CapacityExceeded(#[from] LaunchPlanningCapacityExceeded),
     #[error(transparent)]
     Internal(anyhow::Error),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LaunchPlanningStatus {
+    pub launch_id: String,
+    pub thread_id: Option<String>,
+    pub status: String,
+    pub outcome_code: Option<String>,
+}
+
+pub fn is_canonical_launch_id(launch_id: &str) -> bool {
+    launch_id.starts_with("L-")
+        && launch_id.len() == 34
+        && launch_id[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn validate_launch_planning_owner(
+    record: &runtime_db::LaunchPlanningRecord,
+    thread_requested_by: Option<&str>,
+) -> Result<()> {
+    if thread_requested_by != Some(record.requested_by.as_str()) {
+        bail!(
+            "launch planning owner disagrees with authoritative thread requester for reserved thread {}",
+            record.reserved_thread_id
+        );
+    }
+    Ok(())
+}
+
 fn map_launch_planning_reservation_error(error: anyhow::Error) -> LaunchPlanningReservationError {
     if error
+        .chain()
+        .any(|cause| cause.is::<LaunchPlanningAlreadyReserved>())
+    {
+        LaunchPlanningReservationError::AlreadyReserved(LaunchPlanningAlreadyReserved)
+    } else if error
         .chain()
         .any(|cause| cause.is::<LaunchPlanningCapacityExceeded>())
     {
@@ -1120,14 +1155,118 @@ impl Drop for StateStoreGuard<'_> {
     fn drop(&mut self) {
         let held = self.acquired_at.elapsed();
         if held >= std::time::Duration::from_millis(100) {
-            tracing::warn!(
-                hold_ms = held.as_millis() as u64,
-                caller_file = self.caller.file(),
-                caller_line = self.caller.line(),
-                caller_column = self.caller.column(),
-                "StateStore lock was held by a slow caller"
-            );
+            record_store_contention(StoreContentionKind::Hold, held, self.caller);
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StoreContentionKind {
+    Wait,
+    Hold,
+}
+
+struct StoreContentionCounters {
+    count: std::sync::atomic::AtomicU64,
+    total_ms: std::sync::atomic::AtomicU64,
+    max_ms: std::sync::atomic::AtomicU64,
+    last_report_ms: std::sync::atomic::AtomicU64,
+}
+
+impl StoreContentionCounters {
+    const fn new() -> Self {
+        Self {
+            count: std::sync::atomic::AtomicU64::new(0),
+            total_ms: std::sync::atomic::AtomicU64::new(0),
+            max_ms: std::sync::atomic::AtomicU64::new(0),
+            last_report_ms: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+static STORE_WAIT_CONTENTION: StoreContentionCounters = StoreContentionCounters::new();
+static STORE_HOLD_CONTENTION: StoreContentionCounters = StoreContentionCounters::new();
+
+fn contention_monotonic_millis() -> u64 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    u64::try_from(
+        EPOCH
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}
+
+/// Aggregate lock pressure into one bounded diagnostic per interval. Emitting
+/// one warning for every delayed callback turned overload into additional
+/// synchronous stderr/NDJSON work and obscured the actual queue shape.
+fn record_store_contention(
+    kind: StoreContentionKind,
+    duration: std::time::Duration,
+    caller: &'static std::panic::Location<'static>,
+) {
+    use std::sync::atomic::Ordering;
+
+    const REPORT_INTERVAL_MS: u64 = 5_000;
+    let counters = match kind {
+        StoreContentionKind::Wait => &STORE_WAIT_CONTENTION,
+        StoreContentionKind::Hold => &STORE_HOLD_CONTENTION,
+    };
+    let duration_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+    counters.count.fetch_add(1, Ordering::Relaxed);
+    counters.total_ms.fetch_add(duration_ms, Ordering::Relaxed);
+    counters.max_ms.fetch_max(duration_ms, Ordering::Relaxed);
+
+    let now_ms = contention_monotonic_millis();
+    let previous = counters.last_report_ms.load(Ordering::Relaxed);
+    let report_at = now_ms.max(1);
+    if (previous != 0 && now_ms.saturating_sub(previous) < REPORT_INTERVAL_MS)
+        || counters
+            .last_report_ms
+            .compare_exchange(previous, report_at, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+    {
+        return;
+    }
+
+    let count = counters.count.swap(0, Ordering::AcqRel);
+    let total_ms = counters.total_ms.swap(0, Ordering::AcqRel);
+    let max_ms = counters.max_ms.swap(0, Ordering::AcqRel);
+    let average_ms = total_ms.checked_div(count).unwrap_or(0);
+    tracing::warn!(
+        contention = match kind {
+            StoreContentionKind::Wait => "wait",
+            StoreContentionKind::Hold => "hold",
+        },
+        samples = count,
+        total_ms,
+        average_ms,
+        max_ms,
+        latest_caller_file = caller.file(),
+        latest_caller_line = caller.line(),
+        latest_caller_column = caller.column(),
+        "StateStore contention summary"
+    );
+}
+
+/// Run a short, potentially blocking synchronization boundary without parking
+/// one of Tokio's asynchronous worker threads.
+///
+/// StateStore remains a synchronous authority used by startup, offline tools,
+/// tests, and blocking workers as well as by daemon request tasks.  A plain
+/// `std::sync::Mutex::lock` is correct in all of those contexts, but on a
+/// multi-thread Tokio worker it can starve unrelated lifecycle and HTTP work
+/// when many runtime callbacks queue behind the store at once.  `block_in_place`
+/// lets Tokio replace that worker while preserving the mutex's existing exact
+/// ordering and linearization point.  Current-thread runtimes cannot perform
+/// that handoff, so they retain the ordinary synchronous behavior.
+fn cooperate_while_blocking<T>(operation: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(operation)
+        }
+        _ => operation(),
     }
 }
 
@@ -3720,20 +3859,17 @@ impl StateStore {
     fn lock(&self) -> Result<StateStoreGuard<'_>> {
         let started = std::time::Instant::now();
         let caller = std::panic::Location::caller();
-        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|e| anyhow!("StateStore lock poisoned: {e}"))?;
+        let (fork_sensitive_descriptors, inner) = cooperate_while_blocking(|| {
+            let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
+            let inner = self
+                .inner
+                .lock()
+                .map_err(|e| anyhow!("StateStore lock poisoned: {e}"))?;
+            Ok::<_, anyhow::Error>((fork_sensitive_descriptors, inner))
+        })?;
         let waited = started.elapsed();
         if waited >= std::time::Duration::from_millis(100) {
-            tracing::warn!(
-                wait_ms = waited.as_millis() as u64,
-                caller_file = caller.file(),
-                caller_line = caller.line(),
-                caller_column = caller.column(),
-                "StateStore lock acquisition was delayed"
-            );
+            record_store_contention(StoreContentionKind::Wait, waited, caller);
         }
         Ok(StateStoreGuard {
             _fork_sensitive_descriptors: fork_sensitive_descriptors,
@@ -3776,17 +3912,6 @@ impl StateStore {
             .collect();
         *self.attached_process_registry() = attached;
         Ok(())
-    }
-
-    fn warn_slow_lock_hold(operation: &'static str, started: std::time::Instant) {
-        let held = started.elapsed();
-        if held >= std::time::Duration::from_millis(100) {
-            tracing::warn!(
-                operation,
-                hold_ms = held.as_millis() as u64,
-                "StateStore lock was held by a slow operation"
-            );
-        }
     }
 
     /// Acquire a write permit from the write barrier.
@@ -4143,11 +4268,13 @@ impl StateStore {
             bail!("thread creation is closed for daemon shutdown");
         }
         let launch_planning = g.runtime_db.launch_planning_by_thread(&thread.thread_id)?;
-        if let Some(planning) = launch_planning.as_ref()
-            && (planning.state != "planning"
-                || planning.daemon_generation_id != runtime_db::daemon_generation_id())
-        {
-            return Err(LaunchPlanningInactive.into());
+        if let Some(planning) = launch_planning.as_ref() {
+            if planning.state != "planning"
+                || planning.daemon_generation_id != runtime_db::daemon_generation_id()
+            {
+                return Err(LaunchPlanningInactive.into());
+            }
+            validate_launch_planning_owner(planning, thread.requested_by.as_deref())?;
         }
         // Initial facet events are subject to the same collection/key/value
         // limits as ordinary appends. The new thread is not projected yet, so
@@ -5212,11 +5339,13 @@ impl StateStore {
         let launch_planning = g
             .runtime_db
             .launch_planning_by_thread(&successor.thread_id)?;
-        if let Some(planning) = launch_planning.as_ref()
-            && (planning.state != "planning"
-                || planning.daemon_generation_id != runtime_db::daemon_generation_id())
-        {
-            return Err(LaunchPlanningInactive.into());
+        if let Some(planning) = launch_planning.as_ref() {
+            if planning.state != "planning"
+                || planning.daemon_generation_id != runtime_db::daemon_generation_id()
+            {
+                return Err(LaunchPlanningInactive.into());
+            }
+            validate_launch_planning_owner(planning, successor.requested_by.as_deref())?;
         }
         validate_facet_event_admission(&g, &successor.thread_id, &initial_events)?;
         if !self
@@ -6349,17 +6478,87 @@ impl StateStore {
         reserved_thread_id: &str,
         requested_by: &str,
     ) -> std::result::Result<String, LaunchPlanningReservationError> {
+        let launch_id = format!("L-{}", uuid::Uuid::new_v4().simple());
+        self.reserve_launch_planning_with_id(&launch_id, reserved_thread_id, requested_by)?;
+        Ok(launch_id)
+    }
+
+    /// Reserve a caller-retained opaque launch coordinate before background
+    /// execution starts. The coordinate is not authority by itself: every
+    /// later read/cancel also proves the authenticated owner.
+    pub fn reserve_launch_planning_with_id(
+        &self,
+        launch_id: &str,
+        reserved_thread_id: &str,
+        requested_by: &str,
+    ) -> std::result::Result<(), LaunchPlanningReservationError> {
+        if !is_canonical_launch_id(launch_id) {
+            return Err(LaunchPlanningReservationError::Internal(anyhow!(
+                "launch id must be L- followed by exactly 32 hexadecimal characters"
+            )));
+        }
         let _permit = self
             .acquire_write_permit()
             .map_err(LaunchPlanningReservationError::Internal)?;
         let g = self
             .lock()
             .map_err(LaunchPlanningReservationError::Internal)?;
-        let launch_id = format!("L-{}", uuid::Uuid::new_v4().simple());
         g.runtime_db
-            .reserve_launch_planning(&launch_id, reserved_thread_id, requested_by)
+            .reserve_launch_planning(launch_id, reserved_thread_id, requested_by)
             .map_err(map_launch_planning_reservation_error)?;
-        Ok(launch_id)
+        Ok(())
+    }
+
+    pub fn launch_planning_status(
+        &self,
+        launch_id: &str,
+        requested_by: &str,
+    ) -> Result<Option<LaunchPlanningStatus>> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let Some(mut record) = g.runtime_db.launch_planning_by_id(launch_id)? else {
+            return Ok(None);
+        };
+        if record.requested_by != requested_by {
+            return Ok(None);
+        }
+        // Root publication is authoritative; the planning row is auxiliary.
+        // Repair an interrupted bind while answering the exact owner rather
+        // than leaving the caller unable to distinguish admission from loss.
+        if record.state == "planning"
+            && let Some(thread) = g.state_db.get_thread(&record.reserved_thread_id)?
+        {
+            validate_launch_planning_owner(&record, thread.requested_by.as_deref())?;
+            g.runtime_db
+                .bind_launch_planning(&record.reserved_thread_id)?;
+            record = g
+                .runtime_db
+                .launch_planning_by_id(launch_id)?
+                .ok_or_else(|| anyhow!("launch planning disappeared during status repair"))?;
+        }
+        let thread_id = match record.state.as_str() {
+            "bound" => {
+                let bound_thread_id = record.bound_thread_id.ok_or_else(|| {
+                    anyhow!(
+                        "bound launch planning record `{launch_id}` has no authoritative thread binding"
+                    )
+                })?;
+                if bound_thread_id != record.reserved_thread_id {
+                    bail!(
+                        "bound launch planning record `{launch_id}` has divergent reserved and authoritative thread identities"
+                    );
+                }
+                Some(bound_thread_id)
+            }
+            "planning" | "cancelled" | "failed" | "expired" => None,
+            other => bail!("launch planning record `{launch_id}` has unknown state `{other}`"),
+        };
+        Ok(Some(LaunchPlanningStatus {
+            launch_id: record.launch_id,
+            thread_id,
+            status: record.state,
+            outcome_code: record.outcome_code,
+        }))
     }
 
     pub fn ensure_launch_planning_active(&self, reserved_thread_id: &str) -> Result<()> {
@@ -6452,10 +6651,33 @@ impl StateStore {
         if record.state != "planning" {
             return Ok(());
         }
-        if g.state_db.get_thread(reserved_thread_id)?.is_some() {
+        if let Some(thread) = g.state_db.get_thread(reserved_thread_id)? {
+            validate_launch_planning_owner(&record, thread.requested_by.as_deref())?;
             g.runtime_db.bind_launch_planning(reserved_thread_id)?;
         } else {
             g.runtime_db.fail_launch_planning(reserved_thread_id)?;
+        }
+        Ok(())
+    }
+
+    /// Settle an accepted request that was durably reserved but refused before
+    /// its background task took ownership. The exact coordinate remains
+    /// queryable, proving that no authoritative thread was launched.
+    pub fn settle_launch_planning_admission_exit(&self, reserved_thread_id: &str) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let Some(record) = g.runtime_db.launch_planning_by_thread(reserved_thread_id)? else {
+            return Ok(());
+        };
+        if record.state != "planning" {
+            return Ok(());
+        }
+        if let Some(thread) = g.state_db.get_thread(reserved_thread_id)? {
+            validate_launch_planning_owner(&record, thread.requested_by.as_deref())?;
+            g.runtime_db.bind_launch_planning(reserved_thread_id)?;
+        } else {
+            g.runtime_db
+                .fail_launch_planning_admission(reserved_thread_id)?;
         }
         Ok(())
     }
@@ -6478,7 +6700,8 @@ impl StateStore {
             return Ok(None);
         }
         if record.state == "planning" {
-            if g.state_db.get_thread(&record.reserved_thread_id)?.is_some() {
+            if let Some(thread) = g.state_db.get_thread(&record.reserved_thread_id)? {
+                validate_launch_planning_owner(&record, thread.requested_by.as_deref())?;
                 g.runtime_db
                     .bind_launch_planning(&record.reserved_thread_id)?;
                 self.launch_task_abort_handles
@@ -6526,11 +6749,13 @@ impl StateStore {
         let g = self.lock()?;
         let mut repaired = 0usize;
         for record in g.runtime_db.pending_launch_planning()? {
-            if g.state_db.get_thread(&record.reserved_thread_id)?.is_some()
-                && g.runtime_db
+            if let Some(thread) = g.state_db.get_thread(&record.reserved_thread_id)? {
+                validate_launch_planning_owner(&record, thread.requested_by.as_deref())?;
+                if g.runtime_db
                     .bind_launch_planning(&record.reserved_thread_id)?
-            {
-                repaired += 1;
+                {
+                    repaired += 1;
+                }
             }
         }
         repaired += g.runtime_db.expire_stale_launch_planning()?;
@@ -7789,10 +8014,8 @@ impl StateStore {
     ) -> Result<Vec<ThreadListItem>> {
         let (thread_rows, successor_payloads) = {
             let g = self.lock()?;
-            let hold_started = std::time::Instant::now();
             let rows = queries::list_threads_query(g.state_db.projection(), limit, filter, sort)?;
             let payloads = Self::continuation_payloads_for_rows(&g, &rows)?;
-            Self::warn_slow_lock_hold("list_threads_query", hold_started);
             (rows, payloads)
         };
         Self::rows_to_list_items(thread_rows, successor_payloads)
@@ -7810,7 +8033,6 @@ impl StateStore {
     ) -> Result<ExecutionTreePage> {
         let (mut tree_rows, successor_payloads) = {
             let g = self.lock()?;
-            let hold_started = std::time::Instant::now();
             let rows = queries::execution_tree(
                 g.state_db.projection(),
                 selected_thread_id,
@@ -7823,7 +8045,6 @@ impl StateStore {
                 .map(|row| row.thread.clone())
                 .collect::<Vec<_>>();
             let payloads = Self::continuation_payloads_for_rows(&g, &thread_rows)?;
-            Self::warn_slow_lock_hold("execution_tree", hold_started);
             (rows, payloads)
         };
         let node_truncated = tree_rows.len() > max_nodes;
@@ -7925,7 +8146,6 @@ impl StateStore {
     pub fn thread_list_enrichment(&self, thread_ids: &[String]) -> Result<ThreadListEnrichment> {
         let (facet_rows, graph_node_payloads, follow_waiters, terminal_error_previews) = {
             let g = self.lock()?;
-            let hold_started = std::time::Instant::now();
             let result = (
                 load_bounded_facets_many(&g, thread_ids)?,
                 queries::current_graph_node_payloads(
@@ -7946,7 +8166,6 @@ impl StateStore {
                     MAX_THREAD_LIST_ERROR_PREVIEW_BYTES,
                 )?,
             );
-            Self::warn_slow_lock_hold("thread_list_enrichment", hold_started);
             result
         };
         Self::assemble_thread_list_enrichment(
@@ -8027,7 +8246,6 @@ impl StateStore {
     ) -> Result<ThreadListEnrichment> {
         let (facet_rows, graph_node_payloads, terminal_error_previews) = {
             let g = self.lock()?;
-            let hold_started = std::time::Instant::now();
             let result = (
                 load_bounded_facets_many(&g, thread_ids)?,
                 queries::current_graph_node_payloads(
@@ -8044,7 +8262,6 @@ impl StateStore {
                     MAX_THREAD_LIST_ERROR_PREVIEW_BYTES,
                 )?,
             );
-            Self::warn_slow_lock_hold("thread_list_enrichment_with_waiters", hold_started);
             result
         };
         Self::assemble_thread_list_enrichment(
@@ -8106,7 +8323,6 @@ impl StateStore {
     pub fn follow_parent_list_snapshot(&self) -> Result<FollowParentListSnapshot> {
         let (waiters, rows, successor_payloads) = {
             let g = self.lock()?;
-            let hold_started = std::time::Instant::now();
             let waiters = g
                 .runtime_db
                 .follow_waiter_summaries_bounded(MAX_THREAD_LIST_ENRICHMENT_THREADS)?;
@@ -8118,7 +8334,6 @@ impl StateStore {
             parent_ids.dedup();
             let rows = queries::get_threads_many(g.state_db.projection(), &parent_ids)?;
             let payloads = Self::continuation_payloads_for_rows(&g, &rows)?;
-            Self::warn_slow_lock_hold("follow_parent_list_snapshot", hold_started);
             (waiters, rows, payloads)
         };
         let parents = Self::rows_to_list_items(rows, successor_payloads)?;
@@ -10655,7 +10870,7 @@ impl StateStore {
         g.runtime_db
             .launch_window_insert(child_chain_root_id, window_key, width, now_ms)?;
         g.runtime_db
-            .launch_window_admit(window_key, global_live_limit, now_ms)
+            .launch_window_admit_global(global_live_limit, now_ms)
     }
 
     /// Repair membership without admitting it; used when launch metadata proves
@@ -10743,15 +10958,14 @@ impl StateStore {
         g.runtime_db.launch_window_keys_with_queue()
     }
 
-    pub fn launch_window_admit(
+    pub fn launch_window_admit_global(
         &self,
-        window_key: &str,
         global_live_limit: Option<u32>,
         now_ms: i64,
     ) -> Result<Vec<String>> {
         let g = self.lock()?;
         g.runtime_db
-            .launch_window_admit(window_key, global_live_limit, now_ms)
+            .launch_window_admit_global(global_live_limit, now_ms)
     }
 
     pub fn complete_command(
@@ -10994,6 +11208,36 @@ mod tests {
     use super::*;
     use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
     use tempfile::tempdir;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn blocking_store_wait_does_not_starve_unrelated_async_work() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+
+        let waiter = tokio::spawn(async move {
+            cooperate_while_blocking(|| {
+                started_tx.send(()).expect("test still awaits the waiter");
+                release_rx.recv().expect("test releases the waiter");
+            });
+        });
+        started_rx.await.expect("blocking boundary started");
+
+        tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            tokio::task::yield_now().await;
+        })
+        .await
+        .expect("the sole async worker remains available");
+
+        release_tx.send(()).expect("release blocking boundary");
+        waiter.await.expect("waiter task");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn blocking_store_boundary_is_valid_from_spawn_blocking_workers() {
+        tokio::task::spawn_blocking(|| cooperate_while_blocking(|| 42usize))
+            .await
+            .expect("blocking worker must not panic at the cooperative boundary");
+    }
 
     #[test]
     fn state_anchor_publish_wire_contract_requires_effective_definition_digest() {
@@ -11444,6 +11688,91 @@ mod tests {
                 outcome_code: Some("cancelled_by_requester".to_string()),
             })
         );
+    }
+
+    #[test]
+    fn caller_retained_launch_status_is_exact_owner_bound_and_terminal_on_admission_exit() {
+        let store = test_store();
+        let launch_id = "L-0123456789abcdef0123456789abcdef";
+        assert!(is_canonical_launch_id(launch_id));
+        assert!(!is_canonical_launch_id("L-not-a-canonical-coordinate"));
+        store
+            .reserve_launch_planning_with_id(launch_id, "T-reserved", "fp:owner")
+            .expect("reserve caller coordinate");
+
+        assert_eq!(
+            store
+                .launch_planning_status(launch_id, "fp:owner")
+                .expect("read owner status"),
+            Some(LaunchPlanningStatus {
+                launch_id: launch_id.to_string(),
+                thread_id: None,
+                status: "planning".to_string(),
+                outcome_code: None,
+            })
+        );
+        assert_eq!(
+            store
+                .launch_planning_status(launch_id, "fp:other")
+                .expect("foreign read is indistinguishable from absence"),
+            None
+        );
+
+        store
+            .settle_launch_planning_admission_exit("T-reserved")
+            .expect("settle pre-handoff refusal");
+        assert_eq!(
+            store
+                .launch_planning_status(launch_id, "fp:owner")
+                .expect("read terminal owner status"),
+            Some(LaunchPlanningStatus {
+                launch_id: launch_id.to_string(),
+                thread_id: None,
+                status: "failed".to_string(),
+                outcome_code: Some("launch_admission_failed".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn owner_status_repairs_committed_root_and_refuses_owner_disagreement() {
+        let store = test_store();
+        let thread = thread_record("T-status-repair", "T-status-repair");
+        store
+            .create_root_thread_with_events(&thread, Vec::new())
+            .expect("publish authoritative root before auxiliary planning row");
+        let launch_id = "L-11111111111111111111111111111111";
+        store
+            .reserve_launch_planning_with_id(launch_id, &thread.thread_id, "fp:test")
+            .expect("reserve interrupted auxiliary planning row");
+        assert_eq!(
+            store
+                .launch_planning_status(launch_id, "fp:test")
+                .expect("status repairs exact committed root"),
+            Some(LaunchPlanningStatus {
+                launch_id: launch_id.to_string(),
+                thread_id: Some(thread.thread_id.clone()),
+                status: "bound".to_string(),
+                outcome_code: Some("thread_bound".to_string()),
+            })
+        );
+
+        let mismatched_thread = thread_record("T-status-mismatch", "T-status-mismatch");
+        store
+            .create_root_thread_with_events(&mismatched_thread, Vec::new())
+            .expect("publish second authoritative root");
+        let mismatched_id = "L-22222222222222222222222222222222";
+        store
+            .reserve_launch_planning_with_id(
+                mismatched_id,
+                &mismatched_thread.thread_id,
+                "fp:other",
+            )
+            .expect("reserve deliberately mismatched planning owner");
+        let error = store
+            .launch_planning_status(mismatched_id, "fp:other")
+            .expect_err("authoritative owner disagreement must fail closed");
+        assert!(error.to_string().contains("owner disagrees"), "{error:#}");
     }
 
     #[tokio::test]

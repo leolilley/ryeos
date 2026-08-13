@@ -44,7 +44,10 @@ Options:
                         (default: .dev-keys/PUBLISHER_DEV.pem)
   --owner LABEL         Owner label for populate-bundles.sh
                         (default: ryeos-dev)
-  --bundle-set SET      Bundle set to populate/install: full, standard
+  --bundle-set SET      Bundle set to populate/install: full,
+                        full-local-inference (full plus the optional local
+                        inference worker/provider content and its explicitly
+                        built isolation backend), standard
                         (core+standard), hosted-node, or hosted-workflow
                         (core+standard+hosted-node)
                         (default: full)
@@ -577,16 +580,16 @@ while IFS= read -r _bundle_name; do
     bundle_names+=("$_bundle_name")
 done < <(ryeos_bundle_set_names "$bundle_set") || true
 if [[ ${#bundle_names[@]} -eq 0 ]]; then
-    die "--bundle-set must be 'full', 'central-host', 'standard', 'hosted-node', or 'hosted-workflow', got: $bundle_set"
+    die "--bundle-set must be 'full', 'full-local-inference', 'central-host', 'standard', 'hosted-node', or 'hosted-workflow', got: $bundle_set"
 fi
 bundle_names_csv=$(IFS=,; printf '%s\n' "${bundle_names[*]}")
 
-closed_payload_bundle_names=()
-while IFS= read -r _bundle_name; do
-    closed_payload_bundle_names+=("$_bundle_name")
-done < <(ryeos_bundle_set_bin_managed_names "$bundle_set") || true
+# Every selected source bundle must already carry its exact closed manifest and
+# object graph. Source-only optional bundles are not exempt from install
+# integrity merely because they stage no Rust binary.
+closed_payload_bundle_names=("${bundle_names[@]}")
 
-if [[ "$bundle_set" != "full" && $run_init -eq 0 ]]; then
+if [[ "$bundle_set" != "full" && "$bundle_set" != "full-local-inference" && $run_init -eq 0 ]]; then
     ryeos_term_warn "--no-init installs lean sources only; existing local initialized state is not rewritten"
 fi
 
@@ -907,7 +910,7 @@ if [[ $run_init -eq 1 ]]; then
                 die "initialized central-host state unexpectedly contains $name registration"
         done
     fi
-    if [[ "$bundle_set" == "full" ]]; then
+    if [[ "$bundle_set" == "full" || "$bundle_set" == "full-local-inference" ]]; then
         grep -q '^  execute: client:ryeos/tui$' \
             "$state_root/.ai/bundles/ryeos-ui/.ai/node/commands/tui.yaml" || \
             die "initialized tui command is stale or not client-backed"

@@ -51,6 +51,11 @@ pub struct ExecuteRequest {
     #[serde(default)]
     pub parameters: Value,
     pub execution_policy: ExecutionPolicy,
+    /// Caller-retained coordinate for accepted execution. It lets an exact
+    /// owner query the planning/bound state when an HTTP acknowledgement is
+    /// lost, without discovering threads globally or risking a relaunch.
+    #[serde(default)]
+    pub launch_id: Option<String>,
     #[serde(skip)]
     pub launch_mode: String,
     #[serde(skip)]
@@ -734,6 +739,39 @@ pub struct ExecuteMode;
 
 pub struct CompiledExecuteMode;
 
+/// Own a durably reserved accepted-launch coordinate until the background
+/// task captures its own settlement guard. Any admission return, unwind, or
+/// rejection before that handoff leaves a terminal, queryable refusal instead
+/// of an ambiguous planning row.
+struct AcceptedLaunchAdmissionGuard {
+    state: ryeos_app::state::AppState,
+    reserved_thread_id: String,
+    armed: bool,
+}
+
+impl AcceptedLaunchAdmissionGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AcceptedLaunchAdmissionGuard {
+    fn drop(&mut self) {
+        if self.armed
+            && let Err(error) = self
+                .state
+                .state_store
+                .settle_launch_planning_admission_exit(&self.reserved_thread_id)
+        {
+            tracing::error!(
+                thread_id = %self.reserved_thread_id,
+                error = %error,
+                "failed to settle accepted launch admission exit"
+            );
+        }
+    }
+}
+
 impl ResponseMode for ExecuteMode {
     fn key(&self) -> &'static str {
         "execute"
@@ -863,6 +901,34 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 "/execute/launch requires execution_policy.response=accepted".to_string(),
             ));
         }
+        if ctx.request_parts.uri.path() == "/execute/launch" && request.launch_id.is_none() {
+            return Err(RouteDispatchError::BadRequest(
+                "/execute/launch requires a caller-retained launch_id".to_string(),
+            ));
+        }
+        if ctx.request_parts.uri.path() == "/execute/launch"
+            && !request
+                .launch_id
+                .as_deref()
+                .is_some_and(ryeos_app::state_store::is_canonical_launch_id)
+        {
+            return Err(RouteDispatchError::BadRequest(
+                "launch_id must be L- followed by exactly 32 hexadecimal characters".to_string(),
+            ));
+        }
+        if ctx.request_parts.uri.path() != "/execute/launch"
+            && request.execution_policy.response == ExecutionResponse::Accepted
+        {
+            return Err(RouteDispatchError::BadRequest(
+                "execution_policy.response=accepted is supported only by /execute/launch"
+                    .to_string(),
+            ));
+        }
+        if ctx.request_parts.uri.path() != "/execute/launch" && request.launch_id.is_some() {
+            return Err(RouteDispatchError::BadRequest(
+                "launch_id is accepted only by /execute/launch".to_string(),
+            ));
+        }
 
         let item_ref = &request.item_ref;
         if let Err(error) = ryeos_executor::execution::launch_preparation::validate_ref_bindings(
@@ -975,6 +1041,61 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     ))
                 })?;
             Some(caller_principal_id.clone())
+        } else {
+            None
+        };
+
+        // Reject unauthorized policy shapes before reserving a durable launch
+        // coordinate. Everything above is bounded parsing/authorization; no
+        // filesystem capture or execution-capable work has begun.
+        if let Err(error) =
+            preauthorize_execution_policy(&request.execution_policy, &caller_scopes, &state)
+        {
+            return Err(RouteDispatchError::BadRequest(error.to_string()));
+        }
+
+        // The caller retained `launch_id` before sending the request. Reserve
+        // it after authorization but before canonicalization, workspace
+        // creation, capture, checkout, or runtime preflight can block. Once
+        // this succeeds every uncertain HTTP outcome has an exact owner-bound
+        // status and a retry can never race still-running admission work.
+        let mut accepted_admission_guard = if request.launch_mode == "accepted" {
+            let reserved_thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+            let launch_id = request
+                .launch_id
+                .as_deref()
+                .expect("accepted route validated caller-retained launch id");
+            state
+                .state_store
+                .reserve_launch_planning_with_id(
+                    launch_id,
+                    &reserved_thread_id,
+                    &caller_principal_id,
+                )
+                .map_err(|error| match error {
+                    ryeos_app::state_store::LaunchPlanningReservationError::AlreadyReserved(_) => {
+                        RouteDispatchError::Conflict(
+                            "launch_id is unavailable; query its exact owner-bound status and do not relaunch while its state is planning, bound, or unknown"
+                                .to_string(),
+                        )
+                    }
+                    ryeos_app::state_store::LaunchPlanningReservationError::CapacityExceeded(_) => {
+                        RouteDispatchError::ServiceUnavailable {
+                            code: "launch_planning_capacity_exceeded".to_string(),
+                            message: "pending launch admission reached node capacity".to_string(),
+                        }
+                    }
+                    ryeos_app::state_store::LaunchPlanningReservationError::Internal(error) => {
+                        RouteDispatchError::Internal(format!(
+                            "reserve accepted launch identity: {error:#}"
+                        ))
+                    }
+                })?;
+            Some(AcceptedLaunchAdmissionGuard {
+                state: state.clone(),
+                reserved_thread_id,
+                armed: true,
+            })
         } else {
             None
         };
@@ -1167,14 +1288,6 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 Some(canonical_state)
             }
         };
-
-        // Reject unauthorized policy shapes before capture, checkout, or COW
-        // workspace reservation performs expensive or durable work.
-        if let Err(error) =
-            preauthorize_execution_policy(&request.execution_policy, &caller_scopes, &state)
-        {
-            return Err(RouteDispatchError::BadRequest(error.to_string()));
-        }
 
         // Resolve project execution context.
         let pinned_realization =
@@ -1433,8 +1546,16 @@ impl CompiledResponseMode for CompiledExecuteMode {
             launch_options.call = request.call().cloned();
             launch_options =
                 launch_options.retain_captured_generation(project_ctx.take_captured_generation());
-            let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+            let thread_id = accepted_admission_guard
+                .as_ref()
+                .expect("accepted route reserved admission guard")
+                .reserved_thread_id
+                .clone();
             let response_thread_id = thread_id.clone();
+            let launch_id = request
+                .launch_id
+                .clone()
+                .expect("accepted route validated caller-retained launch id");
 
             let (mut handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
                 &state,
@@ -1446,6 +1567,10 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 provenance.clone(),
                 launch_options,
             );
+            accepted_admission_guard
+                .as_mut()
+                .expect("accepted route retained admission guard")
+                .disarm();
             // No-project execution uses a request-owned scratch workspace.
             // Keep its guard alive until the accepted background launch has
             // actually finished, not merely until this HTTP response returns.
@@ -1506,6 +1631,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 StatusCode::ACCEPTED,
                 axum::Json(json!({
                     "status": "accepted",
+                    "launch_id": launch_id,
                     "thread_id": response_thread_id,
                 })),
             )
@@ -2351,6 +2477,7 @@ mod tests {
                 }),
                 ..ExecutionPolicy::local_live(ExecutionResponse::Wait)
             },
+            launch_id: None,
             launch_mode: "wait".into(),
             target_site_id: target_site_id.map(String::from),
             validate_only: false,

@@ -1,0 +1,9 @@
+# ryeos:signed:2026-08-13T05:00:11Z:4c337bb2db69e9e0411de4fc2ee00650a43e2df8071b3de977fa3b9b758e338c:/SN1QiT2Hq7JJypVF0ORVxS0IQhEZRhFLgpfEpEdxwdnbXm7D8XnKObUVh2SYFXZt3RSY1v2l6MW+3kHwqzDCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: launch.status
+ui_read_only: true
+record_thread: false
+required_caps: []
+schema:
+  launch_id: string
+description: "Read one exact owner-bound accepted launch coordinate"

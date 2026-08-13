@@ -379,7 +379,16 @@ pub(super) fn emit_metric(
 ) {
     let outcome = outcome.as_str();
     let reason = reason.as_str();
-    tracing::info!(
+    ryeos_tracing::record_cache_metric(ryeos_tracing::CacheMetricSample {
+        metric: "compose_context_positions_cache",
+        namespace: None,
+        outcome,
+        reason: Some(reason),
+        source_bytes: 0,
+        entry_bytes,
+        wait_microseconds: wait_milliseconds.saturating_mul(1_000),
+    });
+    tracing::debug!(
         target: "ryeos.metrics",
         metric = "compose_context_positions_cache",
         outcome,

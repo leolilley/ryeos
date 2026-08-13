@@ -441,11 +441,11 @@ pub(crate) async fn dispatch_runtime_method(
             // A self-finalizing follow child (the normal path) flips its waiter to
             // `ready` here — kick the parent resume live, keyed on the child's chain.
             if let Some(chain_root_id) = result.get("chain_root_id").and_then(|v| v.as_str()) {
-                ryeos_executor::execution::launch::kick_follow_resume_if_ready(
+                ryeos_executor::execution::launch::kick_launch_window_for_terminal(
                     state,
                     chain_root_id,
                 );
-                ryeos_executor::execution::launch::kick_launch_window_for_terminal(
+                ryeos_executor::execution::launch::kick_follow_resume_if_ready(
                     state,
                     chain_root_id,
                 );
@@ -1468,6 +1468,9 @@ async fn handle_submit_command(
         .await;
         match stop_result {
             Ok(Ok((report, cancelled_roots))) => {
+                if !cancelled_roots.is_empty() {
+                    ryeos_executor::execution::launch::kick_launch_window_after_discard(state);
+                }
                 for root in cancelled_roots {
                     ryeos_executor::execution::launch::kick_follow_resume_if_ready(state, &root);
                 }

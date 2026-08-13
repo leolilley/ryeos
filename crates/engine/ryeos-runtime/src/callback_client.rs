@@ -571,7 +571,7 @@ impl CallbackClient {
                 parameters: child_parameters,
                 facets: None,
             }],
-            launch_window_width: None,
+            launch_window_width: Some(1),
             frontier_id,
             completion,
         };
