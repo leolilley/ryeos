@@ -10,13 +10,13 @@
 # Idempotent. Safe to re-run.
 #
 # Usage:
-#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|full-local-inference|central-host|standard|hosted-node|hosted-workflow] [--build-profile release|latency-profiling]
+#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|full-sandbox|central-host|standard|hosted-node|hosted-workflow] [--build-profile release|latency-profiling]
 #
 # Bundle sets:
-#   full            core + standard + web + browser + ryeos-ui + hosted-node (default)
-#   full-local-inference
-#                   full + local-inference + the separately authored Linux
-#                   isolation backend; build its payload explicitly first
+#   full            core + standard + web + browser + ryeos-ui + hosted-node +
+#                   local-inference (default)
+#   full-sandbox    full + the separately authored Linux isolation backend;
+#                   build its payload explicitly first
 #   central-host    core + standard + web — standard node plus the rye/web/search
 #                   tool; the app-hosting image (e.g. tv-tracker) that also serves
 #                   its own central-auth realm
@@ -87,7 +87,7 @@ if ! command -v openssl >/dev/null 2>&1; then ryeos_term_fail "openssl is requir
 if ! command -v sha256sum >/dev/null 2>&1; then ryeos_term_fail "sha256sum is required"; exit 2; fi
 if ! command -v base64 >/dev/null 2>&1; then ryeos_term_fail "base64 is required"; exit 2; fi
 case "$BUNDLE_SET" in
-  full|full-local-inference|central-host|standard|hosted-node|hosted-workflow) ;;
+  full|full-sandbox|central-host|standard|hosted-node|hosted-workflow) ;;
   *) ryeos_term_fail "invalid --bundle-set: $BUNDLE_SET"; exit 2 ;;
 esac
 
@@ -224,11 +224,13 @@ for BUNDLE_DIR in "${BUNDLE_DIRS[@]}"; do
   rm -rf "$BUNDLE_DIR/.ai/refs"
   rm -f  "$BUNDLE_DIR/PUBLISHER_TRUST.toml"
 done
-if [[ "$BUNDLE_SET" == "full-local-inference" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" ]]; then
   rm -rf "$LOCAL_INFERENCE/.ai/bin"
   rm -rf "$LOCAL_INFERENCE/.ai/objects"
   rm -rf "$LOCAL_INFERENCE/.ai/refs"
   rm -f  "$LOCAL_INFERENCE/PUBLISHER_TRUST.toml"
+fi
+if [[ "$BUNDLE_SET" == "full-sandbox" ]]; then
   # The isolation payload has its own pinned authoring toolchain and must never
   # be silently rebuilt by a base RyeOS populate. Preserve bin/, but rebuild
   # its closed bundle graph against the current manifest contract.
@@ -236,12 +238,12 @@ if [[ "$BUNDLE_SET" == "full-local-inference" ]]; then
   rm -rf "$SANDBOX_LINUX_BUBBLEWRAP/.ai/refs"
   rm -f  "$SANDBOX_LINUX_BUBBLEWRAP/PUBLISHER_TRUST.toml"
   test -x "$SANDBOX_LINUX_BUBBLEWRAP/.ai/bin/$TRIPLE/bwrap" || {
-    ryeos_term_fail "full-local-inference requires an explicitly built sandbox-linux-bubblewrap payload"
+    ryeos_term_fail "full-sandbox requires an explicitly built sandbox-linux-bubblewrap payload"
     ryeos_term_info "run ./bundles/sandbox-linux-bubblewrap/build-payload.sh before populate"
     exit 2
   }
   test -x "$SANDBOX_LINUX_BUBBLEWRAP/.ai/bin/$TRIPLE/ryeos-bubblewrap-adapter" || {
-    ryeos_term_fail "full-local-inference requires an explicitly built sandbox-linux-bubblewrap adapter"
+    ryeos_term_fail "full-sandbox requires an explicitly built sandbox-linux-bubblewrap adapter"
     ryeos_term_info "run ./bundles/sandbox-linux-bubblewrap/build-payload.sh before populate"
     exit 2
   }
@@ -262,7 +264,7 @@ done
 
 # Crate list per bundle set (the default when --crates is not given).
 case "$BUNDLE_SET" in
-  full|full-local-inference)
+  full|full-sandbox)
     pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
           ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-browser-tools \
           ryeos-client-terminal ryeos-client-web)
@@ -339,14 +341,14 @@ staged_release_bins_for_set() {
     rye-parser-yaml-document rye-parser-yaml-header-document rye-parser-regex-kv \
     rye-composer-identity ryeos-core-tools
   case "$BUNDLE_SET" in
-    full|full-local-inference|central-host|standard|hosted-workflow)
+    full|full-sandbox|central-host|standard|hosted-workflow)
       printf '%s\n' ryeos-directive-runtime ryeos-graph-runtime \
         ryeos-knowledge-runtime ryeos-directive-launch-preparer \
         rye-composer-extends-chain ryeos-graph-effective-validator
       ;;
   esac
   case "$BUNDLE_SET" in
-    full|full-local-inference) printf '%s\n' ryeos-tui web ryeos-web-tools ryeos-browser-tools ;;
+    full|full-sandbox) printf '%s\n' ryeos-tui web ryeos-web-tools ryeos-browser-tools ;;
     central-host) printf '%s\n' ryeos-web-tools ;;
   esac
 }
@@ -404,7 +406,7 @@ install -m 0755 \
   "$TARGET/release/ryeos-session-exec" \
   "$CORE_BIN/"
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-local-inference" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
   ryeos_term_update "installing standard bundle binaries" "$STD_BIN"
   install -m 0755 \
     "$TARGET/release/ryeos-directive-runtime" \
@@ -416,14 +418,14 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-local-inference" || "$BU
     "$STD_BIN/"
 fi
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-local-inference" || "$BUNDLE_SET" == "central-host" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "central-host" ]]; then
   ryeos_term_update "installing web bundle binaries" "$WEB_BIN"
   install -m 0755 \
     "$TARGET/release/ryeos-web-tools" \
     "$WEB_BIN/"
 fi
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-local-inference" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" ]]; then
   ryeos_term_update "installing ryeos-ui bundle binaries" "$RYEOS_UI_BIN"
   install -m 0755 \
     "$TARGET/release/ryeos-tui" \
@@ -474,7 +476,7 @@ RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$ROOT/
   --registry-root "$CORE" \
   --owner "$OWNER" >/dev/null
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-local-inference" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
   ryeos_term_update "publishing standard bundle" "signed manifests"
   # Standard contains its own kind schemas (directive, graph, knowledge) now.
   # Core kinds are needed for verifying handlers/tools, so we pass core as registry-root.
@@ -483,7 +485,7 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-local-inference" || "$BU
     --owner "$OWNER" >/dev/null
 fi
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-local-inference" || "$BUNDLE_SET" == "central-host" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "central-host" ]]; then
   ryeos_term_update "publishing web bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$WEB" \
     --registry-root "$CORE" \
@@ -500,7 +502,7 @@ if [[ "$BUNDLE_SET" == "central-host" ]]; then
     --owner "$OWNER" >/dev/null
 fi
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-local-inference" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" ]]; then
   ryeos_term_update "publishing browser bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$BROWSER" \
     --registry-root "$CORE" \
@@ -513,19 +515,21 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-local-inference" ]]; the
     --owner "$OWNER" >/dev/null
 fi
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-local-inference" || "$BUNDLE_SET" == "hosted-node" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-node" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
   ryeos_term_update "publishing hosted-node bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$HOSTED_NODE" \
     --registry-root "$CORE" \
     --owner "$OWNER" >/dev/null
 fi
 
-if [[ "$BUNDLE_SET" == "full-local-inference" ]]; then
+if [[ "$BUNDLE_SET" == "full-sandbox" ]]; then
   ryeos_term_update "publishing sandbox-linux-bubblewrap bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$SANDBOX_LINUX_BUBBLEWRAP" \
     --registry-root "$CORE" \
     --owner "$OWNER" >/dev/null
+fi
 
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" ]]; then
   ryeos_term_update "publishing local-inference bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$LOCAL_INFERENCE" \
     --registry-root "$CORE" \

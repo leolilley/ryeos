@@ -1,6 +1,6 @@
 # Local inference bundle
 
-Optional local-model execution content for RyeOS. The bundle owns concrete
+Local-model execution content for RyeOS. The bundle owns concrete
 worker definitions, their adjacent source, provider routes, activation data,
 and acceptance probes. The generic `worker` kind remains part of the platform.
 
@@ -10,15 +10,13 @@ capability; live execution may use the generic disabled-isolation path.
 
 See `knowledge:local-inference/activation` after installing the bundle.
 
-For a source checkout, build the isolation payload explicitly, then select the
-optional install set that publishes and preserves both bundles:
+The ordinary full source-checkout install publishes this bundle without an
+isolation backend:
 
 ```text
-./bundles/sandbox-linux-bubblewrap/build-payload.sh
-sudo scripts/pkg/install-local-direct.sh --populate --all \
-  --bundle-set full-local-inference --trust-source-publishers
+sudo scripts/pkg/install-local-direct.sh --populate --all --trust-source-publishers
 ```
 
-Continue selecting `full-local-inference` for later base installs on that node.
-It never rebuilds the isolation payload implicitly. The ordinary `full` set
-deliberately removes optional bundle registrations.
+If recorded local execution is activated later, build and install a compatible
+isolation backend separately. Installing this bundle does not select or require
+Bubblewrap.

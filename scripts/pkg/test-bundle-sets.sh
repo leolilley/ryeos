@@ -6,8 +6,9 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 source "$ROOT/scripts/pkg/bundle-sets.sh"
 
 mapfile -t full < <(ryeos_bundle_set_names full)
-mapfile -t local < <(ryeos_bundle_set_names full-local-inference)
-mapfile -t local_bin_managed < <(ryeos_bundle_set_bin_managed_names full-local-inference)
+mapfile -t sandbox < <(ryeos_bundle_set_names full-sandbox)
+mapfile -t full_bin_managed < <(ryeos_bundle_set_bin_managed_names full)
+mapfile -t sandbox_bin_managed < <(ryeos_bundle_set_bin_managed_names full-sandbox)
 
 contains() {
   local needle="$1"
@@ -19,11 +20,12 @@ contains() {
   return 1
 }
 
-! contains local-inference "${full[@]}"
+contains local-inference "${full[@]}"
 ! contains sandbox-linux-bubblewrap "${full[@]}"
-contains local-inference "${local[@]}"
-contains sandbox-linux-bubblewrap "${local[@]}"
-! contains local-inference "${local_bin_managed[@]}"
-! contains sandbox-linux-bubblewrap "${local_bin_managed[@]}"
+contains local-inference "${sandbox[@]}"
+contains sandbox-linux-bubblewrap "${sandbox[@]}"
+! contains local-inference "${full_bin_managed[@]}"
+! contains local-inference "${sandbox_bin_managed[@]}"
+! contains sandbox-linux-bubblewrap "${sandbox_bin_managed[@]}"
 
 printf '%s\n' "bundle set contract ok"

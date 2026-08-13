@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-13T05:08:38Z:5d2ee895a60d87debdb82f8814c08d5fe1f911e4b25b89bc5721c1bb513fd0ab:me/CR49tOJSI6wBWBX8nKe+dnXBhc7eWOrAtkR4DZz5KNJn9ODMe2Nl4olfCmSuevgxNcgd5mjrpVqh6XGvvCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-13T05:20:35Z:d855bc4ea47c973bae0832d57faa9488d435dbee31ac3f61460d5d098ad7da6e:aj3o+FDeqF/bC7fd7tceytTDwbmOCgZD6BFrGkTiEJzR5jZyu03P6Rc1xCyc2+ZwgkK4nkI1ZOMgLO8igHcQAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: local-inference
 tags: [execution, external-content, persistent-session, local-model, replay]
@@ -9,19 +9,16 @@ description: >
 
 # Admitted local model workers
 
-The concrete worker/provider content is an optional bundle. A source-checkout
-node builds the separately authored isolation payload, installs both optional
-bundles with `full-local-inference`, and keeps using that set for updates:
+The concrete worker/provider content ships in the ordinary full source-checkout
+installation:
 
 ```text
-./bundles/sandbox-linux-bubblewrap/build-payload.sh
-sudo scripts/pkg/install-local-direct.sh --populate --all \
-  --bundle-set full-local-inference --trust-source-publishers
+sudo scripts/pkg/install-local-direct.sh --populate --all --trust-source-publishers
 ```
 
-The ordinary `full` set intentionally retires optional bundle sources and
-registrations; it is not an update path for a node that has activated this
-bundle.
+That installs no isolation backend and does not activate local inference.
+Building, installing, and selecting an isolation implementation remains a
+separate operator decision required only before recorded local execution.
 
 RyeOS runs a local model as admitted RyeOS content, not as an ambient HTTP
 sidecar. The signed worker item identifies the program and declares its exact
@@ -122,13 +119,13 @@ admitted tools. Persistent-session and external-content policy alone do not
 activate the route. RyeOS installs no backend by default.
 
 Build the current `sandbox-linux-bubblewrap` payload explicitly before running
-the `full-local-inference` populate/install command. The set publishes and
-retains that exact payload; it never downloads or builds it implicitly:
+the `full-sandbox` populate/install command. The set adds that exact payload to
+the ordinary full installation; it never downloads or builds it implicitly:
 
 ```text
 ./bundles/sandbox-linux-bubblewrap/build-payload.sh
 sudo scripts/pkg/install-local-direct.sh --populate --all \
-  --bundle-set full-local-inference --trust-source-publishers
+  --bundle-set full-sandbox --trust-source-publishers
 ```
 
 The node policy is a ceiling shared by ordinary parser, handler, tool, and
@@ -329,12 +326,12 @@ coherent contract generation:
    ./bundles/sandbox-linux-bubblewrap/build-payload.sh
    ```
 
-3. Stop the daemon. Publish and install the current RyeOS build and both
-   optional bundles as one coherent set:
+3. Stop the daemon. Publish and install the current RyeOS build and the
+   separately built sandbox as one coherent set:
 
    ```text
    sudo scripts/pkg/install-local-direct.sh --populate --all \
-     --bundle-set full-local-inference --trust-source-publishers
+     --bundle-set full-sandbox --trust-source-publishers
    ```
 
    The set publishes `core` and `standard` first, then closes the already-built
