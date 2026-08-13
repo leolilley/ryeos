@@ -197,7 +197,7 @@ pub fn build_route_table_with_extensions(
             errors.push(RouteConfigError::InvalidLimits {
                 id: raw.id.clone(),
                 reason: format!(
-                    "timeout_ms = 0 is only valid for long-lived response modes; mode `{}` does not allow it",
+                    "timeout_ms = 0 is only valid when the response mode explicitly permits disabling the dispatcher timeout; mode `{}` does not allow it",
                     raw.response.mode
                 ),
             });

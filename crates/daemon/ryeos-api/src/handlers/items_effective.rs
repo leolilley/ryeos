@@ -323,7 +323,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use ryeos_engine::contracts::{
-        InstanceValidationReport, InstanceViolation, InstanceViolationCode,
+        InstanceValidationReport, InstanceViolation, InstanceViolationCode, ItemSourceRoot,
     };
     use ryeos_engine::error::EngineError;
 
@@ -337,6 +337,9 @@ mod tests {
             requested_id: resolved_ref.to_string(),
             resolved_ref: resolved_ref.to_string(),
             source_space: ryeos_engine::contracts::ItemSpace::Bundle,
+            source_root: ItemSourceRoot::Bundle {
+                name: "fixture".to_string(),
+            },
             trust_class: TrustClass::TrustedBundle,
             signer_fingerprint: Some("fixture-signer".to_string()),
             raw_content_digest: digest.to_string(),

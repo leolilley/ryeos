@@ -739,6 +739,10 @@ impl ResponseMode for ExecuteMode {
         "execute"
     }
 
+    fn allows_zero_timeout(&self) -> bool {
+        true
+    }
+
     fn compile(
         &self,
         raw: &RawRouteSpec,
@@ -2248,6 +2252,11 @@ mod tests {
         let raw = make_raw("ryeos_signed", RawRequestBody::Json);
         let result = mode.compile(&raw);
         assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
+    }
+
+    #[test]
+    fn accepted_execute_route_may_disable_the_dispatcher_timeout() {
+        assert!(ExecuteMode.allows_zero_timeout());
     }
 
     #[test]
