@@ -5670,7 +5670,12 @@ async fn run_claimed_thread_row_inner(
         });
     }
     let ttl = launch_token_ttl(Some(hard_limits.duration_seconds));
-    let child_provenance = provenance.clone_for_borrowed_child();
+    // The capability authenticates callbacks made by this exact managed
+    // runtime, including owner-only terminal generation sealing. Keep the
+    // runtime's provenance here. Callback paths that launch descendants derive
+    // a borrowed-child projection at that launch boundary; pre-projecting the
+    // token itself makes owner callbacks look borrowed and skips foldback.
+    let callback_provenance = provenance.clone();
     // The token's project identity is the run's state/callback anchor: the
     // deliberate state-root override when one is in play, else the project.
     // The runtime advertises exactly `envelope.roots.state_root()` on every
@@ -5711,7 +5716,7 @@ async fn run_claimed_thread_row_inner(
         token_project,
         ttl,
         effective_caps.clone(),
-        child_provenance,
+        callback_provenance,
         // Same bundle identity the runtime-cap minter used (resolved canonical
         // ref), so token-claimed caps and minted caps cannot diverge.
         effective_bundle_id_for_request(resolved),
