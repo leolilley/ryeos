@@ -300,6 +300,7 @@ pub fn materialize_manifest(
     ai_dir: &Path,
     expected_name: &str,
 ) -> Result<BundleManifest> {
+    ryeos_engine::protocol_vocabulary::validate_bundle_name(&source.name)?;
     if source.name != expected_name {
         bail!(
             "manifest identity mismatch: source.name is '{}' but expected '{}' — \

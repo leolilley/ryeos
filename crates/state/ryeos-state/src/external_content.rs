@@ -28,6 +28,69 @@ pub const MAX_CAPTURE_BYTES: u64 = crate::objects::MAX_EXTERNAL_CONTENT_TOTAL_BY
 pub const MAX_CAPTURE_FILE_BYTES: u64 = crate::objects::MAX_EXTERNAL_CONTENT_FILE_BYTES;
 pub const MAX_CAPTURE_DEPTH: usize = 64;
 
+/// Meaning-blind filesystem shape selected by an authored external-content
+/// declaration. Kind and named-root authority stay with the caller; state
+/// owns the one descriptor-relative observation path used by preview,
+/// authoring, and admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalContentCaptureKind {
+    Tree,
+    File,
+}
+
+/// Capture one locator beneath an already-pinned named root.
+pub fn capture_external_content_at<S: ExternalContentBlobSink>(
+    named_root: &lillux::PinnedDirectory,
+    locator_path: &str,
+    kind: ExternalContentCaptureKind,
+    excludes: &[String],
+    policy: &ExternalCapturePolicy<'_>,
+    budget: &mut LaunchCaptureBudget,
+    sink: &mut S,
+) -> anyhow::Result<ExternalContentManifestObject> {
+    crate::objects::validate_canonical_project_relative_path(locator_path)?;
+    if policy.locator_prefix() != locator_path {
+        anyhow::bail!("external content capture policy does not belong to the selected locator");
+    }
+    let manifest = match kind {
+        ExternalContentCaptureKind::Tree => {
+            let root = open_directory_relative(named_root, locator_path)?;
+            let manifest = capture_tree(&root, excludes, policy, budget, sink)?;
+            root.ensure_path_binding()?;
+            manifest
+        }
+        ExternalContentCaptureKind::File => {
+            let (parent_path, name) = locator_path.rsplit_once('/').unwrap_or(("", locator_path));
+            let parent = if parent_path.is_empty() {
+                named_root.try_clone()?
+            } else {
+                open_directory_relative(named_root, parent_path)?
+            };
+            let manifest = capture_file_at(&parent, OsStr::new(name), locator_path, budget, sink)?;
+            parent.ensure_path_binding()?;
+            manifest
+        }
+    };
+    named_root.ensure_path_binding()?;
+    Ok(manifest)
+}
+
+fn open_directory_relative(
+    base: &lillux::PinnedDirectory,
+    relative: &str,
+) -> anyhow::Result<lillux::PinnedDirectory> {
+    let mut current = base.try_clone()?;
+    for segment in relative.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            anyhow::bail!("external content directory path is not canonical");
+        }
+        current = current
+            .open_child_directory(OsStr::new(segment))?
+            .ok_or_else(|| anyhow::anyhow!("external content directory is unavailable"))?;
+    }
+    Ok(current)
+}
+
 /// Node-admitted capture policy. The caller supplies a canonical path prefix
 /// for the selected named root; this module owns only meaning-blind matching.
 pub struct ExternalCapturePolicy<'a> {
@@ -76,6 +139,7 @@ pub struct LaunchCaptureBudget {
     max_entries: usize,
     max_total_bytes: u64,
     remaining_entries: usize,
+    remaining_observed_entries: usize,
     remaining_bytes: u64,
 }
 
@@ -87,6 +151,7 @@ impl Default for LaunchCaptureBudget {
             max_entries: MAX_CAPTURE_ENTRIES,
             max_total_bytes: MAX_CAPTURE_BYTES,
             remaining_entries: MAX_CAPTURE_ENTRIES,
+            remaining_observed_entries: MAX_CAPTURE_ENTRIES,
             remaining_bytes: MAX_CAPTURE_BYTES,
         }
     }
@@ -119,6 +184,7 @@ impl LaunchCaptureBudget {
             max_entries,
             max_total_bytes,
             remaining_entries: max_entries,
+            remaining_observed_entries: max_entries,
             remaining_bytes: max_total_bytes,
         })
     }
@@ -153,6 +219,19 @@ impl LaunchCaptureBudget {
         Ok(())
     }
 
+    fn charge_observed_entries(&mut self, entries: usize) -> anyhow::Result<()> {
+        self.remaining_observed_entries = self
+            .remaining_observed_entries
+            .checked_sub(entries)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "external content exceeds {} aggregate observed entries",
+                    self.max_entries
+                )
+            })?;
+        Ok(())
+    }
+
     pub fn charge_bytes(&mut self, bytes: u64) -> anyhow::Result<()> {
         self.remaining_bytes = self.remaining_bytes.checked_sub(bytes).ok_or_else(|| {
             anyhow::anyhow!(
@@ -171,6 +250,34 @@ pub trait ExternalContentBlobSink {
         path: &str,
         expected_size: u64,
     ) -> anyhow::Result<(String, u64)>;
+}
+
+/// Digest-only payload observer for validation and authoring. It deliberately
+/// owns no CAS handle and cannot publish blobs or manifest objects.
+#[derive(Debug, Default)]
+pub struct DigestOnlyExternalContentSink;
+
+impl ExternalContentBlobSink for DigestOnlyExternalContentSink {
+    fn store_file(
+        &mut self,
+        mut file: std::fs::File,
+        path: &str,
+        expected_size: u64,
+    ) -> anyhow::Result<(String, u64)> {
+        if expected_size > MAX_CAPTURE_FILE_BYTES {
+            anyhow::bail!("external content file {path} exceeds {MAX_CAPTURE_FILE_BYTES} bytes");
+        }
+        let (digest, _) = lillux::digest_open_regular_file_stable_exact(&mut file, expected_size)
+            .with_context(|| format!("digest exact external content file {path}"))?;
+        Ok((digest, expected_size))
+    }
+}
+
+pub fn external_content_manifest_digest(
+    manifest: &ExternalContentManifestObject,
+) -> anyhow::Result<String> {
+    let canonical = lillux::canonical_json(&serde_json::to_value(manifest)?)?;
+    Ok(lillux::sha256_hex(canonical.as_bytes()))
 }
 
 /// Node-admitted bounds for one large-content import. These are supplied by
@@ -275,6 +382,7 @@ pub fn capture_large_tree(
     let (root_device, _) = root.device_inode()?;
     let mut state = LargeCaptureState {
         observed_entries: 0,
+        remaining_namespace_entries: policy.bounds.max_entries,
         total_bytes: 0,
         entries: Vec::new(),
     };
@@ -367,6 +475,7 @@ pub fn capture_large_file(
 #[cfg(unix)]
 struct LargeCaptureState {
     observed_entries: usize,
+    remaining_namespace_entries: usize,
     total_bytes: u64,
     entries: Vec<crate::objects::ExternalLargeContentManifestEntry>,
 }
@@ -385,7 +494,17 @@ fn capture_large_directory(
     if depth >= policy.bounds.max_depth {
         anyhow::bail!("large-content capture exceeds its depth bound at {prefix:?}");
     }
-    for entry in directory.entries_no_follow()? {
+    let (initial_entries, initial_namespace_entries) = admitted_large_directory_entries(
+        directory,
+        prefix,
+        policy,
+        state.remaining_namespace_entries,
+    )?;
+    state.remaining_namespace_entries = state
+        .remaining_namespace_entries
+        .checked_sub(initial_namespace_entries)
+        .ok_or_else(|| anyhow::anyhow!("large-content capture exceeds its entry bound"))?;
+    for entry in &initial_entries {
         let name = entry
             .name
             .to_str()
@@ -397,9 +516,6 @@ fn capture_large_directory(
             format!("{prefix}/{name}")
         };
         crate::objects::validate_canonical_project_relative_path(&path)?;
-        if policy.excludes(&path) {
-            continue;
-        }
         state.observed_entries = state
             .observed_entries
             .checked_add(1)
@@ -442,15 +558,12 @@ fn capture_large_directory(
                 let file = directory
                     .open_regular(OsStr::new(&name), false)?
                     .ok_or_else(|| anyhow::anyhow!("large-content file {path} vanished"))?;
-                let metadata = file.metadata()?;
-                use std::os::unix::fs::MetadataExt as _;
-                if !metadata.file_type().is_file()
-                    || metadata.dev() != entry.containing_device
-                    || metadata.ino() != entry.inode
-                {
+                let before = lillux::observe_open_regular_file(&file)
+                    .with_context(|| format!("inspect large-content file {path}"))?;
+                if !before.matches_directory_entry(&entry) {
                     anyhow::bail!("large-content file {path} changed identity during traversal");
                 }
-                let size = metadata.len();
+                let size = before.size();
                 if size > policy.bounds.max_file_bytes {
                     anyhow::bail!("large-content file {path} is outside the admitted file bound");
                 }
@@ -461,14 +574,15 @@ fn capture_large_directory(
                 if state.total_bytes > policy.bounds.max_total_bytes {
                     anyhow::bail!("large-content capture exceeds its aggregate byte bound");
                 }
-                let mode = lillux::normalized_portable_regular_mode(&metadata)?;
+                let mode = before.portable_mode()?;
                 let manifest_entry = if size <= MAX_EXTERNAL_CONTENT_FILE_BYTES {
-                    let (blob_hash, stored_size) = sink.store_content_file(file, &path, size)?;
+                    let (blob_hash, stored_size) =
+                        sink.store_content_file(file.try_clone()?, &path, size)?;
                     if stored_size != size {
                         anyhow::bail!("large-content file {path} changed size during ingest");
                     }
                     crate::objects::ExternalLargeContentManifestEntry {
-                        path,
+                        path: path.clone(),
                         kind: ExternalContentManifestEntryKind::File,
                         mode: Some(mode),
                         blob_hash: Some(blob_hash),
@@ -480,7 +594,7 @@ fn capture_large_directory(
                     }
                 } else {
                     let ingested = sink.store_large_file(
-                        file,
+                        file.try_clone()?,
                         crate::large_object_store::PinnedLargeObjectSourceIdentity {
                             containing_device: entry.containing_device,
                             inode: entry.inode,
@@ -493,7 +607,7 @@ fn capture_large_directory(
                         anyhow::bail!("large-content file {path} changed size during ingest");
                     }
                     crate::objects::ExternalLargeContentManifestEntry {
-                        path,
+                        path: path.clone(),
                         kind: ExternalContentManifestEntryKind::File,
                         mode: Some(mode),
                         blob_hash: None,
@@ -504,6 +618,15 @@ fn capture_large_directory(
                         target: None,
                     }
                 };
+                lillux::ensure_open_regular_file_unchanged(&file, &before)
+                    .with_context(|| format!("large-content file {path} changed during capture"))?;
+                directory
+                    .ensure_entry_observation(&entry)
+                    .with_context(|| {
+                        format!(
+                            "large-content file {path} changed namespace binding during capture"
+                        )
+                    })?;
                 state.entries.push(manifest_entry);
             }
             lillux::PinnedEntryType::Symlink => {
@@ -539,7 +662,44 @@ fn capture_large_directory(
             ),
         }
     }
+    let final_limit = state
+        .remaining_namespace_entries
+        .checked_add(initial_namespace_entries)
+        .ok_or_else(|| anyhow::anyhow!("large-content entry bound overflow"))?;
+    if admitted_large_directory_entries(directory, prefix, policy, final_limit)?.0
+        != initial_entries
+    {
+        anyhow::bail!("large-content directory {prefix:?} changed during capture");
+    }
     Ok(())
+}
+
+#[cfg(unix)]
+fn admitted_large_directory_entries(
+    directory: &lillux::PinnedDirectory,
+    prefix: &str,
+    policy: &LargeContentCapturePolicy<'_>,
+    max_observed_entries: usize,
+) -> anyhow::Result<(Vec<lillux::PinnedDirectoryEntryMetadata>, usize)> {
+    let mut admitted = Vec::new();
+    let observed = directory.entries_no_follow_bounded(max_observed_entries)?;
+    let observed_count = observed.len();
+    for entry in observed {
+        let name = entry
+            .name
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("large-content path under {prefix:?} is not UTF-8"))?;
+        let path = if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        crate::objects::validate_canonical_project_relative_path(&path)?;
+        if !policy.excludes(&path) {
+            admitted.push(entry);
+        }
+    }
+    Ok((admitted, observed_count))
 }
 
 #[cfg(unix)]
@@ -582,22 +742,38 @@ pub fn capture_tree(
 }
 
 #[cfg(unix)]
-pub fn capture_file(
-    file: std::fs::File,
+pub fn capture_file_at(
+    parent: &lillux::PinnedDirectory,
+    name: &OsStr,
     display_path: &str,
     budget: &mut LaunchCaptureBudget,
     sink: &mut dyn ExternalContentBlobSink,
 ) -> anyhow::Result<ExternalContentManifestObject> {
-    let metadata = file.metadata()?;
-    if !metadata.file_type().is_file() {
-        anyhow::bail!("external content locator is not a regular file: {display_path}");
+    let entry = parent
+        .entry_no_follow(name)?
+        .ok_or_else(|| anyhow::anyhow!("external content file {display_path} is unavailable"))?;
+    if entry.entry_type != lillux::PinnedEntryType::Regular {
+        anyhow::bail!("external content file {display_path} is not regular");
     }
-    let size = metadata.len();
+    let file = parent
+        .open_regular(name, false)?
+        .ok_or_else(|| anyhow::anyhow!("external content file {display_path} is unavailable"))?;
+    let before = lillux::observe_open_regular_file(&file)
+        .with_context(|| format!("inspect external content file {display_path}"))?;
+    if !before.matches_directory_entry(&entry) {
+        anyhow::bail!("external content file {display_path} changed before capture");
+    }
+    let size = before.size();
     budget.ensure_file_bytes(size, display_path)?;
     budget.charge_entry()?;
     budget.charge_bytes(size)?;
-    let mode = lillux::normalized_portable_regular_mode(&metadata)?;
-    let (blob_hash, stored_size) = sink.store_file(file, display_path, size)?;
+    let mode = before.portable_mode()?;
+    let (blob_hash, stored_size) = sink.store_file(file.try_clone()?, display_path, size)?;
+    lillux::ensure_open_regular_file_unchanged(&file, &before)
+        .with_context(|| format!("external content file {display_path} changed during capture"))?;
+    parent.ensure_entry_observation(&entry).with_context(|| {
+        format!("external content file {display_path} changed namespace binding during capture")
+    })?;
     if stored_size != size {
         anyhow::bail!("external content file {display_path} changed size during capture");
     }
@@ -636,7 +812,15 @@ fn capture_directory(
     total_bytes: &mut u64,
 ) -> anyhow::Result<()> {
     budget.ensure_depth(depth, prefix)?;
-    for entry in directory.entries_no_follow()? {
+    let (initial_entries, initial_observed_entries) = admitted_directory_entries(
+        directory,
+        prefix,
+        authored_excludes,
+        policy,
+        budget.remaining_observed_entries,
+    )?;
+    budget.charge_observed_entries(initial_observed_entries)?;
+    for entry in &initial_entries {
         let name = entry
             .name
             .to_str()
@@ -644,18 +828,12 @@ fn capture_directory(
                 anyhow::anyhow!("external content entry under {prefix:?} is not valid UTF-8")
             })?
             .to_owned();
-        if author_excluded(&name, authored_excludes) {
-            continue;
-        }
         let path = if prefix.is_empty() {
             name.clone()
         } else {
             format!("{prefix}/{name}")
         };
         crate::objects::validate_canonical_project_relative_path(&path)?;
-        if policy.excludes(&path) {
-            continue;
-        }
         if entry.containing_device != root_device {
             anyhow::bail!(
                 "external content entry {path} is on a different filesystem from its declared root"
@@ -681,6 +859,10 @@ fn capture_directory(
                 let child = directory
                     .open_child_directory(OsStr::new(&name))?
                     .ok_or_else(|| anyhow::anyhow!("external content directory {path} vanished"))?;
+                let (child_device, child_inode) = child.device_inode()?;
+                if child_device != entry.containing_device || child_inode != entry.inode {
+                    anyhow::bail!("external content directory {path} changed during capture");
+                }
                 capture_directory(
                     &child,
                     &path,
@@ -700,8 +882,12 @@ fn capture_directory(
                 let file = directory
                     .open_regular(OsStr::new(&name), false)?
                     .ok_or_else(|| anyhow::anyhow!("external content file {path} vanished"))?;
-                let metadata = file.metadata()?;
-                let size = metadata.len();
+                let before = lillux::observe_open_regular_file(&file)
+                    .with_context(|| format!("inspect external content file {path}"))?;
+                if !before.matches_directory_entry(&entry) {
+                    anyhow::bail!("external content file {path} changed inode during capture");
+                }
+                let size = before.size();
                 budget.ensure_file_bytes(size, &path)?;
                 *declaration_bytes = declaration_bytes
                     .checked_add(size)
@@ -713,8 +899,11 @@ fn capture_directory(
                 *total_bytes = total_bytes
                     .checked_add(size)
                     .ok_or_else(|| anyhow::anyhow!("external content total byte count overflow"))?;
-                let mode = lillux::normalized_portable_regular_mode(&metadata)?;
-                let (blob_hash, stored_size) = sink.store_file(file, &path, size)?;
+                let mode = before.portable_mode()?;
+                let (blob_hash, stored_size) = sink.store_file(file.try_clone()?, &path, size)?;
+                lillux::ensure_open_regular_file_unchanged(&file, &before).with_context(|| {
+                    format!("external content file {path} changed during capture")
+                })?;
                 if stored_size != size {
                     anyhow::bail!("external content file {path} changed size during capture");
                 }
@@ -755,7 +944,50 @@ fn capture_directory(
             ),
         }
     }
+    let final_limit = budget
+        .remaining_observed_entries
+        .checked_add(initial_observed_entries)
+        .ok_or_else(|| anyhow::anyhow!("external content observed-entry bound overflow"))?;
+    if admitted_directory_entries(directory, prefix, authored_excludes, policy, final_limit)?.0
+        != initial_entries
+    {
+        anyhow::bail!("external content directory {prefix:?} changed during capture");
+    }
     Ok(())
+}
+
+fn admitted_directory_entries(
+    directory: &lillux::PinnedDirectory,
+    prefix: &str,
+    authored_excludes: &[String],
+    policy: &ExternalCapturePolicy<'_>,
+    max_observed_entries: usize,
+) -> anyhow::Result<(Vec<lillux::PinnedDirectoryEntryMetadata>, usize)> {
+    let observed = directory.entries_no_follow_bounded(max_observed_entries)?;
+    let observed_count = observed.len();
+    let admitted = observed
+        .into_iter()
+        .filter_map(|entry| {
+            let name = match entry.name.to_str() {
+                Some(name) => name,
+                None => {
+                    return Some(Err(anyhow::anyhow!(
+                        "external content entry under {prefix:?} is not valid UTF-8"
+                    )));
+                }
+            };
+            if author_excluded(name, authored_excludes) {
+                return None;
+            }
+            let path = if prefix.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            (!policy.excludes(&path)).then_some(Ok(entry))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok((admitted, observed_count))
 }
 
 fn author_excluded(name: &str, excludes: &[String]) -> bool {
@@ -930,6 +1162,79 @@ mod tests {
         budget.charge_bytes(5).unwrap();
         let byte_error = budget.charge_bytes(1).unwrap_err().to_string();
         assert!(byte_error.contains("5 aggregate bytes"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn digest_only_observation_matches_the_canonical_cas_object_hash() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("alpha.txt"), b"alpha").unwrap();
+        let pinned = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let ignore = crate::ignore::IgnoreMatcher::from_config(&crate::ignore::IgnoreConfig {
+            patterns: Vec::new(),
+        })
+        .unwrap();
+        let policy = ExternalCapturePolicy::new("fixture".to_owned(), &ignore).unwrap();
+        let mut budget = LaunchCaptureBudget::default();
+        let mut sink = DigestOnlyExternalContentSink;
+        let observed = capture_tree(&pinned, &[], &policy, &mut budget, &mut sink).unwrap();
+        let observed_hash = external_content_manifest_digest(&observed).unwrap();
+
+        let (_cas_root, cas) = temp_cas();
+        let cas_hash = cas
+            .store_object(&serde_json::to_value(&observed).unwrap())
+            .unwrap();
+        assert_eq!(observed_hash, cas_hash);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ignored_python_cache_does_not_move_the_observed_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("module.py"), b"VALUE = 1\n").unwrap();
+        let ignore = crate::ignore::IgnoreMatcher::from_config(&crate::ignore::IgnoreConfig {
+            patterns: vec!["__pycache__/".to_owned(), "*.pyc".to_owned()],
+        })
+        .unwrap();
+        let policy = ExternalCapturePolicy::new("fixture".to_owned(), &ignore).unwrap();
+        let observe = || {
+            let pinned = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+            let mut budget = LaunchCaptureBudget::default();
+            let mut sink = DigestOnlyExternalContentSink;
+            let manifest = capture_tree(&pinned, &[], &policy, &mut budget, &mut sink).unwrap();
+            external_content_manifest_digest(&manifest).unwrap()
+        };
+        let before = observe();
+        std::fs::create_dir(root.path().join("__pycache__")).unwrap();
+        std::fs::write(root.path().join("__pycache__/module.pyc"), b"ambient").unwrap();
+        assert_eq!(observe(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ignored_entries_still_consume_the_raw_namespace_budget() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["one.tmp", "two.tmp", "three.tmp"] {
+            std::fs::write(root.path().join(name), b"ignored").unwrap();
+        }
+        let pinned = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let ignore = crate::ignore::IgnoreMatcher::from_config(&crate::ignore::IgnoreConfig {
+            patterns: Vec::new(),
+        })
+        .unwrap();
+        let policy = ExternalCapturePolicy::new("fixture".to_owned(), &ignore).unwrap();
+        let mut budget = LaunchCaptureBudget::bounded(8, 2, 1024, 2048).unwrap();
+        let mut sink = DigestOnlyExternalContentSink;
+        let error = capture_tree(
+            &pinned,
+            &["*.tmp".to_owned()],
+            &policy,
+            &mut budget,
+            &mut sink,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("maximum entry count 2"), "{error}");
     }
 
     #[test]

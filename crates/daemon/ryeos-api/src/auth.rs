@@ -7,7 +7,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Result, bail};
 use base64::Engine;
 use lillux::crypto::{Signature, Verifier, VerifyingKey};
-use serde::Deserialize;
 
 use ryeos_app::identity::NodeIdentity;
 use ryeos_app::state::AppState;
@@ -93,157 +92,19 @@ struct AuthorizedKey {
     authenticated_site_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AuthorizedKeyGrantBody {
-    schema_version: u32,
-    principal_class: String,
-    #[serde(default)]
-    origin_site_id: Option<String>,
-    fingerprint: String,
-    public_key: String,
-    scopes: Vec<String>,
-    label: String,
-    granted_by: String,
-    created_at: String,
-}
-
 fn load_authorized_key(
     fingerprint: &str,
     auth_dir: &Path,
     node_identity: &NodeIdentity,
 ) -> Result<AuthorizedKey> {
-    let key_file = auth_dir.join(format!("{fingerprint}.toml"));
-    if !key_file.exists() {
-        bail!("unknown principal");
-    }
-
-    let raw = fs::read_to_string(&key_file)?;
-    let (sig_line, body) = raw.split_once('\n').unwrap_or(("", &raw));
-
-    // Verify node signature header
-    let sig_line = sig_line.trim();
-    if !sig_line.starts_with("# ryeos:signed:") {
-        bail!("unsigned key file");
-    }
-
-    // Format: # ryeos:signed:<timestamp>:<content_hash>:<sig_b64>:<signer_fp>
-    // Timestamp may contain colons (ISO 8601), so rsplit from the right.
-    let remainder = &sig_line["# ryeos:signed:".len()..];
-    let parts: Vec<&str> = remainder.rsplitn(4, ':').collect();
-    if parts.len() != 4 {
-        bail!("malformed signature header");
-    }
-    let signer_fp = parts[0];
-    let sig_b64 = parts[1];
-    let content_hash = parts[2];
-
-    // Verify signer is this node
-    if signer_fp != node_identity.fingerprint() {
-        bail!("wrong signer");
-    }
-
-    // Verify content hash
-    let actual_hash = lillux::cas::sha256_hex(body.as_bytes());
-    if actual_hash != content_hash {
-        bail!("tampered key file");
-    }
-
-    // Verify signature over the content hash
-    let sig_bytes = base64::engine::general_purpose::STANDARD.decode(sig_b64)?;
-    let signature = Signature::from_slice(&sig_bytes)?;
-    node_identity.verify_hash(content_hash, &signature)?;
-
-    let grant: AuthorizedKeyGrantBody = toml::from_str(body)
-        .map_err(|error| anyhow::anyhow!("invalid authorized-key grant body: {error}"))?;
-    if grant.schema_version != 2 {
-        bail!(
-            "authorized-key grant schema_version must be exactly 2 (got {})",
-            grant.schema_version
-        );
-    }
-    let authenticated_site_id = match grant.principal_class.as_str() {
-        "local_client" => {
-            if grant.origin_site_id.is_some() {
-                bail!("local_client authorized-key grant cannot carry origin_site_id");
-            }
-            None
-        }
-        "remote_node" => {
-            let site_id = grant.origin_site_id.as_deref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "remote_node authorized-key grant has no authenticated origin_site_id"
-                )
-            })?;
-            ryeos_app::identity::validate_canonical_site_id(site_id).map_err(|error| {
-                anyhow::anyhow!(
-                    "remote_node authorized-key grant origin_site_id is not canonical: {error}"
-                )
-            })?;
-            Some(site_id.to_string())
-        }
-        other => bail!("unknown authorized-key principal_class '{}'", other),
-    };
-
-    // Verify fingerprint matches
-    if grant.fingerprint != fingerprint {
-        bail!("fingerprint mismatch");
-    }
-
-    // Extract public key
-    let public_key_str = grant.public_key.as_str();
-    if !public_key_str.starts_with("ed25519:") {
-        bail!("invalid public key format");
-    }
-    let key_bytes = base64::engine::general_purpose::STANDARD.decode(&public_key_str[8..])?;
-    let key_array: [u8; 32] = key_bytes
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("public key must be 32 bytes"))?;
-    let public_key = VerifyingKey::from_bytes(&key_array)?;
-
-    let computed_fp = lillux::signature::compute_fingerprint(&public_key);
-    if computed_fp != fingerprint {
-        bail!(
-            "authorized-key file {} declares fingerprint {} but \
-             its public_key fingerprint computes to {} — refusing to load",
-            key_file.display(),
-            fingerprint,
-            computed_fp
-        );
-    }
-
-    let scopes = grant.scopes;
-
-    // Loud rejection of short-form / malformed scopes. A TOML on
-    // disk with `scopes = ["bundle.install"]` would otherwise
-    // authenticate fine but silently authorize nothing (the
-    // matcher does not auto-prefix) — that "inert auth" is the
-    // worst kind of failure: the request looks signed and
-    // accepted but every operation 403s with a misleading
-    // capability message. Reject the file outright so the
-    // operator sees the problem at first call.
-    for scope in &scopes {
-        if let Err(msg) = ryeos_runtime::authorizer::validate_scope_pattern(scope) {
-            bail!(
-                "authorized-key file {} contains an invalid scope: {}. \
-                 Refusing to load — re-issue the key with canonical scopes \
-                 (`ryeos.<verb>.<kind>.<subject>`).",
-                key_file.display(),
-                msg
-            );
-        }
-    }
-
-    if grant.granted_by.trim().is_empty() || grant.created_at.trim().is_empty() {
-        bail!("authorized-key grant audit fields must not be empty");
-    }
-    let owner = grant.label;
-
+    let grant =
+        ryeos_app::identity::load_verified_authorized_key(fingerprint, auth_dir, node_identity)?
+            .ok_or_else(|| anyhow::anyhow!("unknown principal"))?;
     Ok(AuthorizedKey {
-        public_key,
-        scopes,
-        owner,
-        authenticated_site_id,
+        public_key: grant.public_key,
+        scopes: grant.scopes,
+        owner: grant.owner,
+        authenticated_site_id: grant.authenticated_site_id,
     })
 }
 

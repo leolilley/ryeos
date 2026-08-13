@@ -11,11 +11,11 @@ pub mod vault;
 
 pub use exec::retain_fork_sensitive_descriptors;
 pub use exec::{
-    AbortedProcess, AttachmentAbortError, AttachmentReleaseError, ForkSensitiveDescriptorLease,
-    OutputLimitExceeded, ProcessAwaitingAttachment, RunningProcess, SpawnResult, SubprocessLimits,
-    SubprocessRequest, SubprocessResult, SupervisedLauncherAttachmentStatusPipe,
-    SupervisedLauncherStatusPipe, SupervisedProcessStatus, configure_inherited_fds,
-    configure_subprocess_limits, sealed_executable_memfd, sealed_memfd,
+    AbortedProcess, AttachmentAbortError, AttachmentReleaseError, DEFAULT_MAX_CAPTURE_BYTES,
+    ForkSensitiveDescriptorLease, OutputLimitExceeded, ProcessAwaitingAttachment, RunningProcess,
+    SpawnResult, SubprocessLimits, SubprocessRequest, SubprocessResult,
+    SupervisedLauncherAttachmentStatusPipe, SupervisedLauncherStatusPipe, SupervisedProcessStatus,
+    configure_inherited_fds, configure_subprocess_limits, sealed_executable_memfd, sealed_memfd,
     supervised_launcher_attachment_status_pipe, supervised_launcher_status_pipe,
     validate_subprocess_limits,
 };
@@ -31,12 +31,14 @@ pub use cas::{
 };
 pub use locks::{ExclusiveFileLock, SharedFileLock, with_exclusive_file_lock};
 pub use secure_fs::{
-    DirectoryTraversalBudget, FilesystemCapacity, NoFollowDirectoryTree, PinnedDirectory,
-    PinnedDirectoryEntry, PinnedDirectoryLock, PinnedEntryType, PinnedRegularFile,
-    collect_directory_tree_no_follow, collect_regular_files_no_follow,
-    digest_open_regular_file_stable_exact, inspect_optional_entry_no_follow,
-    matches_regular_file_identity, normalized_portable_regular_mode,
-    read_open_regular_file_bounded, read_open_regular_file_exact_bounded,
+    DirectoryTraversalBudget, FilesystemCapacity, NoFollowDirectoryTree,
+    OpenRegularFileObservation, PinnedDirectory, PinnedDirectoryEntry,
+    PinnedDirectoryEntryMetadata, PinnedDirectoryIdentity, PinnedDirectoryLock, PinnedEntryType,
+    PinnedRegularFile, collect_directory_tree_no_follow, collect_regular_files_no_follow,
+    digest_open_regular_file_stable_exact, ensure_open_regular_file_unchanged,
+    inspect_optional_entry_no_follow, matches_regular_file_identity,
+    normalized_portable_regular_mode, observe_open_regular_file, read_open_regular_file_bounded,
+    read_open_regular_file_exact_bounded, read_open_regular_file_stable_bounded,
     read_optional_regular_file_bounded_no_follow, read_optional_regular_file_no_follow,
     read_regular_file_bounded_no_follow, read_regular_file_no_follow,
     read_regular_file_to_string_no_follow, set_open_regular_file_mode,

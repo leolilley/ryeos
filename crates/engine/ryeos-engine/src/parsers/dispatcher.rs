@@ -9,7 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ryeos_handler_protocol::{
-    HandlerRequest, HandlerResponse, ParseRequest, ValidateParserConfigRequest,
+    EditSourceRequest, HandlerRequest, HandlerResponse, ParseRequest, SourceScalarEdit,
+    ValidateParserConfigRequest,
 };
 use serde_json::Value;
 
@@ -140,6 +141,49 @@ impl ParserDispatcher {
             }),
             other => Err(EngineError::Internal(format!(
                 "parser handler returned unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    /// Ask the registered parser handler to edit semantic scalar positions
+    /// while preserving the source representation it owns.
+    pub fn edit_source(
+        &self,
+        parser_ref: &str,
+        content: &str,
+        source_path: Option<&Path>,
+        edits: Vec<SourceScalarEdit>,
+    ) -> Result<(String, Value), EngineError> {
+        let descriptor =
+            self.parser_tools
+                .get(parser_ref)
+                .ok_or_else(|| EngineError::ParserNotRegistered {
+                    parser_id: parser_ref.to_string(),
+                })?;
+        let handler = self
+            .handlers
+            .ensure_serves(&descriptor.handler, HandlerServes::Parser)
+            .map_err(|error| EngineError::Handler(Box::new(error)))?;
+        let request = HandlerRequest::EditSource(EditSourceRequest {
+            parser_config: descriptor.parser_config.clone(),
+            content: content.to_owned(),
+            edits,
+            source_path: source_path.map(|path| path.display().to_string()),
+        });
+        match run_handler_subprocess(
+            handler,
+            &request,
+            PARSE_TIMEOUT,
+            self.handlers.launch_runtime(),
+        )? {
+            HandlerResponse::EditSourceOk { content, value } => Ok((content, value)),
+            HandlerResponse::EditSourceErr { kind, message } => Err(EngineError::ParserFailed {
+                parser_id: parser_ref.to_owned(),
+                kind: crate::error::ParseErrKind::from_wire(kind),
+                message,
+            }),
+            other => Err(EngineError::Internal(format!(
+                "parser handler returned unexpected source-edit response: {other:?}"
             ))),
         }
     }

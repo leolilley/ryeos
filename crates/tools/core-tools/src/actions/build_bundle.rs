@@ -67,13 +67,17 @@ pub(super) fn rebuild_bundle_manifest_in_place(
     validate_publish_control_tree(&ai_root, true)?;
 
     let bin_root = ai_root.join("bin");
-    if matches!(
-        fs::symlink_metadata(&bin_root),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound
-    ) {
-        bail!("no .ai/bin directory at {}", bin_root.display());
-    }
-    require_real_directory(&bin_root, "bundle binary root")?;
+    let has_binary_root = match fs::symlink_metadata(&bin_root) {
+        Ok(_) => {
+            require_real_directory(&bin_root, "bundle binary root")?;
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect bundle binary root {}", bin_root.display()));
+        }
+    };
 
     // Validate every existing output component before creating or writing any
     // publisher output. This prevents CAS/ref publication through a linked
@@ -95,7 +99,12 @@ pub(super) fn rebuild_bundle_manifest_in_place(
     let mut all_entries: HashMap<String, String> = HashMap::new();
     let mut report_entries: Vec<RebuiltEntry> = Vec::new();
 
-    for triple_entry in sorted_dir_entries(&bin_root)? {
+    let triple_entries = if has_binary_root {
+        sorted_dir_entries(&bin_root)?
+    } else {
+        Vec::new()
+    };
+    for triple_entry in triple_entries {
         let triple_type = triple_entry
             .file_type()
             .with_context(|| format!("inspect {}", triple_entry.path().display()))?;
@@ -335,16 +344,21 @@ fn is_safe_executor_path_segment(value: &str) -> bool {
 
 #[cfg(unix)]
 fn unix_mode(path: &Path) -> Result<u32> {
-    use std::os::unix::fs::PermissionsExt;
-    let meta =
-        fs::symlink_metadata(path).with_context(|| format!("metadata {}", path.display()))?;
-    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
-        bail!(
+    let parent_path = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("bundle executable has no parent"))?;
+    let parent = lillux::PinnedDirectory::open(parent_path)?
+        .ok_or_else(|| anyhow::anyhow!("bundle executable parent is unavailable"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("bundle executable has no file name"))?;
+    let file = parent.open_regular(name, false)?.ok_or_else(|| {
+        anyhow::anyhow!(
             "bundle executable {} must be a regular file, not a symlink or special file",
             path.display()
-        );
-    }
-    let mode = meta.permissions().mode() & 0o7777;
+        )
+    })?;
+    let mode = lillux::observe_open_regular_file(&file)?.full_permission_mode()?;
     if mode & !0o777 != 0 {
         bail!(
             "bundle executable {} has forbidden special permission bits ({mode:#o})",
@@ -470,5 +484,28 @@ mod tests {
             .expect_err("non-directory publisher output roots must be refused");
         assert!(error.to_string().contains("must be a real directory"));
         assert!(!ai.join("refs").exists());
+    }
+
+    #[test]
+    fn declarative_bundle_publishes_a_signed_empty_executor_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        fs::create_dir_all(bundle.join(".ai")).unwrap();
+        let key = test_signing_key();
+
+        let report = rebuild_bundle_manifest(&bundle, &key).unwrap();
+        assert!(report.entries.is_empty());
+        assert!(bundle.join(".ai/objects").is_dir());
+        let signed_ref = fs::read_to_string(bundle.join(".ai/refs/bundles/manifest")).unwrap();
+        let verified = ryeos_engine::executor_resolution::verify_signed_executor_manifest_ref(
+            &signed_ref,
+            |candidate| {
+                (candidate == compute_fingerprint(&key.verifying_key()))
+                    .then_some(key.verifying_key())
+            },
+            ryeos_engine::resolution::TrustClass::TrustedBundle,
+        )
+        .unwrap();
+        assert_eq!(verified.manifest_hash, report.manifest_hash);
     }
 }

@@ -55,7 +55,8 @@ pub struct CapturedExecutable {
 }
 
 /// Signed identity of one bundle's complete native-executor authorization
-/// manifest. A bundle without native executables has no such identity.
+/// manifest. A published declarative bundle has an identity for its signed
+/// empty executor set even though it has no `.ai/bin` directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BundleExecutorManifestIdentity {
     pub manifest_hash: String,
@@ -449,11 +450,7 @@ pub fn resolve_bundle_binary_ref(
 
     require_executor_manifest_ref(&manifest_ref_path, bundle_root, &bin_name)?;
 
-    let signed_manifest_ref = std::fs::read_to_string(&manifest_ref_path).map_err(|_| {
-        EngineError::BinManifestMissing {
-            bundle_root: bundle_root.display().to_string(),
-        }
-    })?;
+    let signed_manifest_ref = read_executor_manifest_ref(&manifest_ref_path, bundle_root)?;
     let verified_manifest_ref = crate::executor_resolution::verify_signed_executor_manifest_ref(
         &signed_manifest_ref,
         &trusted_verifying_key,
@@ -669,18 +666,12 @@ pub fn verify_bundle_executor_manifest_ref_identity(
     if !bin_exists && !manifest_ref_exists {
         return Ok(None);
     }
-    if !bin_exists || !manifest_ref_exists {
+    if bin_exists && !manifest_ref_exists {
         return Err(EngineError::BinManifestMissing {
             bundle_root: bundle_root.display().to_string(),
         });
     }
-    let signed_manifest_ref = lillux::read_regular_file_to_string_no_follow(&manifest_ref_path)
-        .map_err(|error| {
-            bundle_executor_error(
-                bundle_root,
-                format!("read {}: {error}", manifest_ref_path.display()),
-            )
-        })?;
+    let signed_manifest_ref = read_executor_manifest_ref(&manifest_ref_path, bundle_root)?;
     let verified = crate::executor_resolution::verify_signed_executor_manifest_ref(
         &signed_manifest_ref,
         |fingerprint| {
@@ -800,12 +791,7 @@ fn verify_bundle_executor_manifest_items(
         });
     }
 
-    let signed_manifest_ref = std::fs::read_to_string(&manifest_ref_path).map_err(|error| {
-        bundle_executor_error(
-            bundle_root,
-            format!("read {}: {error}", manifest_ref_path.display()),
-        )
-    })?;
+    let signed_manifest_ref = read_executor_manifest_ref(&manifest_ref_path, bundle_root)?;
     let verified_manifest_ref = crate::executor_resolution::verify_signed_executor_manifest_ref(
         &signed_manifest_ref,
         |fingerprint| {
@@ -1046,6 +1032,31 @@ fn bundle_executor_error(bundle_root: &Path, reason: impl Into<String>) -> Engin
         bin: bundle_root.display().to_string(),
         reason: reason.into(),
     }
+}
+
+fn read_executor_manifest_ref(path: &Path, bundle_root: &Path) -> Result<String, EngineError> {
+    let bytes = lillux::read_regular_file_bounded_no_follow(
+        path,
+        crate::executor_resolution::MAX_EXECUTOR_MANIFEST_REF_BYTES,
+    )
+    .map_err(|error| {
+        bundle_executor_error(
+            bundle_root,
+            format!(
+                "read bounded executor manifest ref {}: {error}",
+                path.display()
+            ),
+        )
+    })?;
+    String::from_utf8(bytes).map_err(|error| {
+        bundle_executor_error(
+            bundle_root,
+            format!(
+                "executor manifest ref {} is not UTF-8: {error}",
+                path.display()
+            ),
+        )
+    })
 }
 
 /// Require the entire bundle `.ai` control tree to remain inside the admitted
@@ -1310,25 +1321,12 @@ fn ensure_qualified_binary_dependency(
 }
 
 fn validate_bundle_name(name: &str, raw_ref: &str) -> Result<(), EngineError> {
-    if name.is_empty() {
-        return Err(EngineError::InvalidBinPrefix {
+    crate::protocol_vocabulary::validate_bundle_name(name).map_err(|error| {
+        EngineError::InvalidBinPrefix {
             raw: raw_ref.to_string(),
-            detail: "no bundle name in qualified binary ref".into(),
-        });
-    }
-    if name.contains('/') || name.contains("..") || name.starts_with('.') || name.contains(' ') {
-        return Err(EngineError::InvalidBinPrefix {
-            raw: raw_ref.to_string(),
-            detail: "bundle name must be a single non-hidden identifier without spaces, slashes, or `..`".into(),
-        });
-    }
-    if name.chars().any(|c| c.is_control() || c == '\0') {
-        return Err(EngineError::InvalidBinPrefix {
-            raw: raw_ref.to_string(),
-            detail: "bundle name must not contain control characters".into(),
-        });
-    }
-    Ok(())
+            detail: error.to_string(),
+        }
+    })
 }
 
 fn verify_item_source_sidecar(
@@ -1613,6 +1611,32 @@ mod tests {
         (fingerprint, signing_key)
     }
 
+    fn write_empty_resolver_fixture(bundle_root: &Path) -> (String, SigningKey) {
+        let ai = bundle_root.join(crate::AI_DIR);
+        std::fs::create_dir_all(&ai).unwrap();
+        let cas = lillux::cas::CasStore::new(ai.join("objects"));
+        let signing_key = SigningKey::from_bytes(&[31u8; 32]);
+        let fingerprint = lillux::signature::compute_fingerprint(&signing_key.verifying_key());
+        let manifest = serde_json::json!({
+            "kind": "source_manifest",
+            "item_source_hashes": {}
+        });
+        let manifest_hash = cas.store_object(&manifest).unwrap();
+        let ref_path = ai.join("refs").join("bundles").join("manifest");
+        std::fs::create_dir_all(ref_path.parent().unwrap()).unwrap();
+        let signed_ref = lillux::signature::sign_content(
+            &format!(
+                "{}\n{manifest_hash}\n",
+                crate::executor_resolution::EXECUTOR_MANIFEST_REF_DOMAIN
+            ),
+            &signing_key,
+            "#",
+            None,
+        );
+        std::fs::write(ref_path, signed_ref).unwrap();
+        (fingerprint, signing_key)
+    }
+
     fn trusted_key_for<'a>(
         expected_fp: &'a str,
         key: &'a SigningKey,
@@ -1692,6 +1716,83 @@ mod tests {
         let error = verify_bundle_executor_manifest(&bundle, &trust_store_for(&fingerprint, &key))
             .expect_err("an extra on-disk executable must be refused");
         assert!(error.to_string().contains("not authorized"));
+    }
+
+    #[test]
+    fn signed_empty_executor_manifest_has_a_stable_generation_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let (fingerprint, key) = write_empty_resolver_fixture(&bundle);
+        let trust_store = trust_store_for(&fingerprint, &key);
+
+        let admitted = verify_bundle_executor_manifest_identity(&bundle, &trust_store)
+            .expect("signed empty executor set should verify")
+            .expect("published empty executor set has an identity");
+        let reverified = verify_bundle_executor_manifest_ref_identity(&bundle, &trust_store)
+            .expect("generation guard should re-verify an empty executor set")
+            .expect("signed empty executor set retains its identity");
+
+        assert_eq!(reverified, admitted);
+        assert!(!bundle.join(crate::AI_DIR).join("bin").exists());
+    }
+
+    #[test]
+    fn executor_manifest_ref_reads_are_bounded_and_no_follow() {
+        let tmp = tempfile::tempdir().unwrap();
+        let oversized = tmp.path().join("oversized");
+        let (fingerprint, key) = write_empty_resolver_fixture(&oversized);
+        let manifest_ref = oversized
+            .join(crate::AI_DIR)
+            .join("refs")
+            .join("bundles")
+            .join("manifest");
+        std::fs::write(
+            &manifest_ref,
+            vec![b'x'; crate::executor_resolution::MAX_EXECUTOR_MANIFEST_REF_BYTES as usize + 1],
+        )
+        .unwrap();
+        let error = verify_bundle_executor_manifest_ref_identity(
+            &oversized,
+            &trust_store_for(&fingerprint, &key),
+        )
+        .expect_err("oversized manifest refs must be refused before allocation");
+        assert!(error.to_string().contains("bounded executor manifest ref"));
+
+        let full = tmp.path().join("full-oversized");
+        let (fingerprint, key) = write_resolver_fixture(&full, "demo");
+        let manifest_ref = full
+            .join(crate::AI_DIR)
+            .join("refs")
+            .join("bundles")
+            .join("manifest");
+        std::fs::write(
+            &manifest_ref,
+            vec![b'x'; crate::executor_resolution::MAX_EXECUTOR_MANIFEST_REF_BYTES as usize + 1],
+        )
+        .unwrap();
+        let error = verify_bundle_executor_manifest(&full, &trust_store_for(&fingerprint, &key))
+            .expect_err("full admission must enforce the same manifest-ref ceiling");
+        assert!(error.to_string().contains("bounded executor manifest ref"));
+
+        #[cfg(unix)]
+        {
+            let symlinked = tmp.path().join("symlinked");
+            let (fingerprint, key) = write_empty_resolver_fixture(&symlinked);
+            let manifest_ref = symlinked
+                .join(crate::AI_DIR)
+                .join("refs")
+                .join("bundles")
+                .join("manifest");
+            let outside = tmp.path().join("outside-ref");
+            std::fs::rename(&manifest_ref, &outside).unwrap();
+            std::os::unix::fs::symlink(&outside, &manifest_ref).unwrap();
+            let error = verify_bundle_executor_manifest_ref_identity(
+                &symlinked,
+                &trust_store_for(&fingerprint, &key),
+            )
+            .expect_err("manifest-ref symlinks must be refused");
+            assert!(error.to_string().contains("must be a regular file"));
+        }
     }
 
     #[test]

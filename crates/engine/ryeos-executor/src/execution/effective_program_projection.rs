@@ -483,7 +483,7 @@ pub(crate) fn validate_admitted_effective_program(
         .and_then(|execution| execution.external_content.as_ref());
     let declarer = ryeos_engine::external_content::declaring_authority(&resolution)
         .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
-    ryeos_engine::external_content::declarations_from_composed_for_static_preview(
+    ryeos_engine::external_content::declarations_from_composed(
         &resolution.composed.composed,
         external_contract,
         declarer,

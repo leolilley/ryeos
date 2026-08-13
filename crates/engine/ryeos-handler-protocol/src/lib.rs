@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 pub const HANDLER_PROTOCOL_JSON_MAX_DEPTH: usize = 32;
-pub const HANDLER_PROTOCOL_SCHEMA_VERSION: u32 = 2;
+pub const HANDLER_PROTOCOL_SCHEMA_VERSION: u32 = 3;
 
 // ── Request / Response envelope ──────────────────────────────────
 
@@ -30,6 +30,7 @@ pub const HANDLER_PROTOCOL_SCHEMA_VERSION: u32 = 2;
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HandlerRequest {
     Parse(ParseRequest),
+    EditSource(EditSourceRequest),
     ValidateParserConfig(ValidateParserConfigRequest),
     Compose(ComposeRequest),
     ValidateComposerConfig(ValidateComposerConfigRequest),
@@ -45,6 +46,14 @@ pub enum HandlerResponse {
         value: Value,
     },
     ParseErr {
+        kind: ParseErrKind,
+        message: String,
+    },
+    EditSourceOk {
+        content: String,
+        value: Value,
+    },
+    EditSourceErr {
         kind: ParseErrKind,
         message: String,
     },
@@ -142,6 +151,28 @@ pub struct ParseRequest {
     /// must not assume the file exists at this path on their fs.
     #[serde(default)]
     pub source_path: Option<String>,
+}
+
+/// Parser-owned byte-preserving authoring edit. JSON pointers name values in
+/// the parser's semantic output; `expected` makes the edit conditional and
+/// prevents a source span from being applied to a different document shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditSourceRequest {
+    pub parser_config: Value,
+    pub content: String,
+    pub edits: Vec<SourceScalarEdit>,
+    #[serde(default)]
+    pub source_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceScalarEdit {
+    pub pointer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<Value>,
+    pub value: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -768,7 +799,7 @@ mod tests {
     }
 
     #[test]
-    fn handler_v2_envelopes_accept_only_the_current_schema() {
+    fn handler_v3_envelopes_accept_only_the_current_schema() {
         let request = HandlerRequest::Parse(ParseRequest {
             parser_config: serde_json::json!({}),
             content: String::new(),

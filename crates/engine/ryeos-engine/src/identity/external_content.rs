@@ -124,20 +124,23 @@ pub struct ExternalContentDeclaration {
 
 impl ExternalContentDeclaration {
     pub fn validate(&self, declarer: DeclaringAuthority<'_>) -> anyhow::Result<()> {
-        self.validate_with_pending_pin(declarer, false)
+        self.validate_with_draft_state(declarer, false)
     }
 
-    pub fn validate_for_static_preview(
+    /// Validate unsigned authoring input for the dedicated pin-completion
+    /// transaction. This is not an admission/preview dialect: the only relaxed
+    /// state is a locator-backed `pinned` declaration whose digest is absent.
+    pub fn validate_for_pin_authoring_draft(
         &self,
         declarer: DeclaringAuthority<'_>,
     ) -> anyhow::Result<()> {
-        self.validate_with_pending_pin(declarer, true)
+        self.validate_with_draft_state(declarer, true)
     }
 
-    fn validate_with_pending_pin(
+    fn validate_with_draft_state(
         &self,
         declarer: DeclaringAuthority<'_>,
-        allow_pending_pin: bool,
+        allow_missing_pinned_digest: bool,
     ) -> anyhow::Result<()> {
         validate_declaration_id(&self.id)?;
         validate_relative_path("external content mount target", &self.mount)?;
@@ -166,11 +169,11 @@ impl ExternalContentDeclaration {
         }
         match (self.mode, self.digest.as_deref()) {
             (ExternalContentMode::Pinned, Some(digest)) if lillux::cas::valid_hash(digest) => {}
-            (ExternalContentMode::Pinned, Some(digest))
-                if allow_pending_pin && self.locator.is_some() && is_pending_pin_token(digest) => {}
             (ExternalContentMode::Pinned, Some(_)) => {
                 anyhow::bail!("pinned external content digest is not canonical")
             }
+            (ExternalContentMode::Pinned, None)
+                if allow_missing_pinned_digest && self.locator.is_some() => {}
             (ExternalContentMode::Pinned, None) => {
                 anyhow::bail!("pinned external content must carry its expected digest")
             }
@@ -194,6 +197,32 @@ impl ExternalContentDeclaration {
     }
 }
 
+pub fn declarations_from_authored_pin_draft(
+    authored: &serde_json::Value,
+    contract: Option<&crate::kind_registry::ExecutionExternalContentDecl>,
+    declarer: DeclaringAuthority<'_>,
+) -> anyhow::Result<Vec<ExternalContentDeclaration>> {
+    let Some(contract) = contract else {
+        if authored.get("external_content").is_some() {
+            anyhow::bail!(
+                "item declares `external_content` but its signed kind has no execution.external_content contract"
+            );
+        }
+        anyhow::bail!("item has no kind-owned external-content contract");
+    };
+    let value = authored
+        .get("external_content")
+        .ok_or_else(|| anyhow::anyhow!("item has no root-authored external_content declaration"))?;
+    if value.is_null() {
+        anyhow::bail!("external_content must be an array");
+    }
+    let declarations: Vec<ExternalContentDeclaration> = serde_json::from_value(value.clone())
+        .map_err(|error| anyhow::anyhow!("invalid external_content declaration: {error}"))?;
+    validate_declaration_collection(&declarations, declarer, true)?;
+    validate_kind_contract(&declarations, contract)?;
+    Ok(declarations)
+}
+
 pub fn validate_declarations(
     declarations: &[ExternalContentDeclaration],
     declarer: DeclaringAuthority<'_>,
@@ -201,17 +230,10 @@ pub fn validate_declarations(
     validate_declaration_collection(declarations, declarer, false)
 }
 
-pub fn validate_declarations_for_static_preview(
-    declarations: &[ExternalContentDeclaration],
-    declarer: DeclaringAuthority<'_>,
-) -> anyhow::Result<()> {
-    validate_declaration_collection(declarations, declarer, true)
-}
-
 fn validate_declaration_collection(
     declarations: &[ExternalContentDeclaration],
     declarer: DeclaringAuthority<'_>,
-    allow_pending_pin: bool,
+    allow_missing_pinned_digest: bool,
 ) -> anyhow::Result<()> {
     if declarations.len() > MAX_DECLARATIONS_PER_ITEM {
         anyhow::bail!("item declares too many external content entries");
@@ -219,8 +241,8 @@ fn validate_declaration_collection(
     let mut ids = BTreeSet::new();
     let mut mounts = BTreeSet::new();
     for declaration in declarations {
-        if allow_pending_pin {
-            declaration.validate_for_static_preview(declarer)?;
+        if allow_missing_pinned_digest {
+            declaration.validate_for_pin_authoring_draft(declarer)?;
         } else {
             declaration.validate(declarer)?;
         }
@@ -250,23 +272,6 @@ pub fn declarations_from_composed(
     contract: Option<&crate::kind_registry::ExecutionExternalContentDecl>,
     declarer: DeclaringAuthority<'_>,
 ) -> anyhow::Result<Option<Vec<ExternalContentDeclaration>>> {
-    declarations_from_composed_with_pending(composed, contract, declarer, false)
-}
-
-pub fn declarations_from_composed_for_static_preview(
-    composed: &serde_json::Value,
-    contract: Option<&crate::kind_registry::ExecutionExternalContentDecl>,
-    declarer: DeclaringAuthority<'_>,
-) -> anyhow::Result<Option<Vec<ExternalContentDeclaration>>> {
-    declarations_from_composed_with_pending(composed, contract, declarer, true)
-}
-
-fn declarations_from_composed_with_pending(
-    composed: &serde_json::Value,
-    contract: Option<&crate::kind_registry::ExecutionExternalContentDecl>,
-    declarer: DeclaringAuthority<'_>,
-    allow_pending_pin: bool,
-) -> anyhow::Result<Option<Vec<ExternalContentDeclaration>>> {
     let authored = composed.get("external_content");
     let Some(contract) = contract else {
         if authored.is_some() {
@@ -291,12 +296,23 @@ fn declarations_from_composed_with_pending(
             contract.max_declarations
         );
     }
-    if allow_pending_pin {
-        validate_declarations_for_static_preview(&declarations, declarer)?;
-    } else {
-        validate_declarations(&declarations, declarer)?;
+    validate_declarations(&declarations, declarer)?;
+    validate_kind_contract(&declarations, contract)?;
+    Ok(Some(declarations))
+}
+
+fn validate_kind_contract(
+    declarations: &[ExternalContentDeclaration],
+    contract: &crate::kind_registry::ExecutionExternalContentDecl,
+) -> anyhow::Result<()> {
+    if declarations.len() > contract.max_declarations {
+        anyhow::bail!(
+            "item declares {} external content entries; its signed kind permits {}",
+            declarations.len(),
+            contract.max_declarations
+        );
     }
-    for declaration in &declarations {
+    for declaration in declarations {
         if let Some(locator) = &declaration.locator
             && !contract
                 .allowed_roots
@@ -310,7 +326,7 @@ fn declarations_from_composed_with_pending(
             );
         }
     }
-    Ok(Some(declarations))
+    Ok(())
 }
 
 /// Derive declaration authority from verified resolution provenance. This is
@@ -351,15 +367,6 @@ fn validate_declaration_id(id: &str) -> anyhow::Result<()> {
         anyhow::bail!("external content id has a non-canonical value: {id:?}");
     }
     Ok(())
-}
-
-fn is_pending_pin_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && !lillux::cas::valid_hash(value)
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
 }
 
 fn validate_exclude_pattern(pattern: &str) -> anyhow::Result<()> {
@@ -454,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_pin_tokens_exist_only_in_static_preview() {
+    fn pending_pin_tokens_are_not_a_declaration_state() {
         let value = serde_json::json!({"external_content": [{
             "id": "fixture",
             "kind": "tree",
@@ -464,15 +471,6 @@ mod tests {
             "mount": "vendor/fixture"
         }]});
         assert!(
-            declarations_from_composed_for_static_preview(
-                &value,
-                Some(&contract(&["project_files"], 1)),
-                DeclaringAuthority::Project
-            )
-            .unwrap()
-            .is_some()
-        );
-        assert!(
             declarations_from_composed(
                 &value,
                 Some(&contract(&["project_files"], 1)),
@@ -480,5 +478,32 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn missing_pinned_digest_exists_only_in_the_unsigned_authoring_contract() {
+        let value = serde_json::json!({"external_content": [{
+            "id": "fixture",
+            "kind": "tree",
+            "locator": {"root": "project_files", "path": "vendor/fixture"},
+            "mode": "pinned",
+            "mount": "vendor/fixture"
+        }]});
+        assert!(
+            declarations_from_composed(
+                &value,
+                Some(&contract(&["project_files"], 1)),
+                DeclaringAuthority::Project,
+            )
+            .is_err()
+        );
+        let draft = declarations_from_authored_pin_draft(
+            &value,
+            Some(&contract(&["project_files"], 1)),
+            DeclaringAuthority::Project,
+        )
+        .unwrap();
+        assert_eq!(draft.len(), 1);
+        assert_eq!(draft[0].digest, None);
     }
 }

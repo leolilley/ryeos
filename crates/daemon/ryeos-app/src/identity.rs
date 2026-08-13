@@ -233,6 +233,141 @@ struct AuthorizedKeyGrantBody<'a> {
     created_at: &'a str,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetainedAuthorizedKeyGrantBody {
+    schema_version: u32,
+    principal_class: String,
+    #[serde(default)]
+    origin_site_id: Option<String>,
+    fingerprint: String,
+    public_key: String,
+    scopes: Vec<String>,
+    label: String,
+    granted_by: String,
+    created_at: String,
+}
+
+/// One node-signed authorized-key grant after exact descriptor-relative read,
+/// signature verification, subject binding, and canonical scope validation.
+#[derive(Debug, Clone)]
+pub struct VerifiedAuthorizedKeyGrant {
+    pub public_key: VerifyingKey,
+    pub scopes: Vec<String>,
+    pub owner: String,
+    pub authenticated_site_id: Option<String>,
+    /// Whole-file digest of the exact signed grant bytes used for this view.
+    pub source_file_hash: String,
+}
+
+/// Load one exact node-signed authorized-key grant. Absence is distinct from
+/// malformed or unverifiable content: callers may treat absence as no prior
+/// grant, but must never fold corrupt authority into an empty grant.
+pub fn load_verified_authorized_key(
+    fingerprint: &str,
+    auth_dir: &Path,
+    node_identity: &NodeIdentity,
+) -> Result<Option<VerifiedAuthorizedKeyGrant>> {
+    let Some(directory) = lillux::PinnedDirectory::open(auth_dir)? else {
+        return Ok(None);
+    };
+    load_verified_authorized_key_from_directory(fingerprint, &directory, node_identity)
+}
+
+fn load_verified_authorized_key_from_directory(
+    fingerprint: &str,
+    directory: &lillux::PinnedDirectory,
+    node_identity: &NodeIdentity,
+) -> Result<Option<VerifiedAuthorizedKeyGrant>> {
+    let name = format!("{fingerprint}.toml");
+    let Some(mut file) = directory.open_regular(std::ffi::OsStr::new(&name), false)? else {
+        directory.ensure_path_binding()?;
+        return Ok(None);
+    };
+    let observation = lillux::observe_open_regular_file(&file)?;
+    let bytes =
+        lillux::read_open_regular_file_stable_bounded(&mut file, &observation, 1024 * 1024)?;
+    directory.ensure_regular_entry_matches(std::ffi::OsStr::new(&name), Some(&file))?;
+    directory.ensure_path_binding()?;
+    let raw = std::str::from_utf8(&bytes).context("authorized-key grant is not UTF-8")?;
+    let (body, header) =
+        lillux::signature::strip_canonical_signature_with_envelope(raw, "#", None, false)?;
+    let header = header.ok_or_else(|| anyhow::anyhow!("unsigned key file"))?;
+    if header.signer_fingerprint != node_identity.fingerprint() {
+        bail!("wrong signer");
+    }
+    let actual_hash = lillux::sha256_hex(body.as_bytes());
+    if actual_hash != header.content_hash {
+        bail!("tampered key file");
+    }
+    let sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&header.signature_b64)
+        .context("authorized-key signature is not valid base64")?;
+    let signature = Signature::from_slice(&sig_bytes)?;
+    node_identity.verify_hash(&header.content_hash, &signature)?;
+
+    let grant: RetainedAuthorizedKeyGrantBody = toml::from_str(&body)
+        .map_err(|error| anyhow::anyhow!("invalid authorized-key grant body: {error}"))?;
+    if grant.schema_version != AUTHORIZED_KEY_SCHEMA_VERSION {
+        bail!(
+            "authorized-key grant schema_version must be exactly {} (got {})",
+            AUTHORIZED_KEY_SCHEMA_VERSION,
+            grant.schema_version
+        );
+    }
+    let authenticated_site_id = match grant.principal_class.as_str() {
+        "local_client" => {
+            if grant.origin_site_id.is_some() {
+                bail!("local_client authorized-key grant cannot carry origin_site_id");
+            }
+            None
+        }
+        "remote_node" => {
+            let site_id = grant.origin_site_id.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "remote_node authorized-key grant has no authenticated origin_site_id"
+                )
+            })?;
+            validate_canonical_site_id(site_id)?;
+            Some(site_id.to_owned())
+        }
+        other => bail!("unknown authorized-key principal_class '{other}'"),
+    };
+    if grant.fingerprint != fingerprint {
+        bail!("fingerprint mismatch");
+    }
+    let encoded = grant
+        .public_key
+        .strip_prefix("ed25519:")
+        .ok_or_else(|| anyhow::anyhow!("invalid public key format"))?;
+    let key_bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
+    let key_array: [u8; 32] = key_bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("public key must be 32 bytes"))?;
+    let public_key = VerifyingKey::from_bytes(&key_array)?;
+    let computed = lillux::signature::compute_fingerprint(&public_key);
+    if computed != fingerprint {
+        bail!(
+            "authorized-key grant public key computes to fingerprint {computed}, not {fingerprint}"
+        );
+    }
+    for scope in &grant.scopes {
+        if let Err(reason) = ryeos_runtime::authorizer::validate_scope_pattern(scope) {
+            bail!("authorized-key grant contains an invalid scope: {reason}");
+        }
+    }
+    if grant.granted_by.trim().is_empty() || grant.created_at.trim().is_empty() {
+        bail!("authorized-key grant audit fields must not be empty");
+    }
+    Ok(Some(VerifiedAuthorizedKeyGrant {
+        public_key,
+        scopes: grant.scopes,
+        owner: grant.label,
+        authenticated_site_id,
+        source_file_hash: lillux::sha256_hex(&bytes),
+    }))
+}
+
 /// Write a node-signed authorized-key TOML entry.
 ///
 /// Used by bootstrap (local operator) and the authorize-key handler
@@ -319,8 +454,35 @@ fn write_authorized_key_toml_for_subject(
     wildcard: WildcardPolicy,
     subject: AuthorizedKeySubject<'_>,
 ) -> Result<std::path::PathBuf> {
-    use std::fs;
+    let signed = render_authorized_key_toml_for_subject(
+        fingerprint,
+        public_key_b64,
+        scopes,
+        label,
+        granted_by,
+        created_at,
+        node_signing_key,
+        wildcard,
+        subject,
+    )?;
+    let directory = lillux::PinnedDirectory::open_or_create(auth_dir)?;
+    let _lock = directory.lock_exclusive()?;
+    publish_authorized_key_bytes(&directory, fingerprint, signed.as_bytes(), None)?;
+    Ok(auth_dir.join(format!("{fingerprint}.toml")))
+}
 
+#[allow(clippy::too_many_arguments)]
+fn render_authorized_key_toml_for_subject(
+    fingerprint: &str,
+    public_key_b64: &str,
+    scopes: &[String],
+    label: &str,
+    granted_by: &str,
+    created_at: &str,
+    node_signing_key: &lillux::crypto::SigningKey,
+    wildcard: WildcardPolicy,
+    subject: AuthorizedKeySubject<'_>,
+) -> Result<String> {
     // Reject wildcard delegation unless the policy permits it.
     if wildcard == WildcardPolicy::Reject && scopes.iter().any(|s| s.contains('*')) {
         bail!(
@@ -377,25 +539,156 @@ fn write_authorized_key_toml_for_subject(
     })
     .context("serialize authorized-key grant")?;
 
-    // Sign with the NODE key
-    let signed = lillux::signature::sign_content(&body, node_signing_key, "#", None);
+    Ok(lillux::signature::sign_content(
+        &body,
+        node_signing_key,
+        "#",
+        None,
+    ))
+}
 
-    // Ensure directory exists
-    fs::create_dir_all(auth_dir)?;
+fn publish_authorized_key_bytes(
+    directory: &lillux::PinnedDirectory,
+    fingerprint: &str,
+    signed: &[u8],
+    expected_file_hash: Option<Option<&str>>,
+) -> Result<()> {
+    let name = format!("{fingerprint}.toml");
+    let mut expected = directory.open_regular(std::ffi::OsStr::new(&name), false)?;
+    let expected_state = expected
+        .as_mut()
+        .map(|file| {
+            let observation = lillux::observe_open_regular_file(file)?;
+            let bytes =
+                lillux::read_open_regular_file_stable_bounded(file, &observation, 1024 * 1024)?;
+            Ok::<_, anyhow::Error>((observation, bytes))
+        })
+        .transpose()?;
+    match (expected_file_hash, expected_state.as_ref()) {
+        (Some(None), Some(_)) => bail!("authorized-key grant appeared during reconciliation"),
+        (Some(Some(_)), None) => bail!("authorized-key grant disappeared during reconciliation"),
+        (Some(Some(expected_hash)), Some((_, bytes)))
+            if lillux::sha256_hex(bytes) != expected_hash =>
+        {
+            bail!("authorized-key grant changed during reconciliation")
+        }
+        _ => {}
+    }
+    let validation = expected_state.as_ref().map(|(observation, bytes)| {
+        let observation = observation.clone();
+        let bytes = bytes.clone();
+        move |current: &std::fs::File| {
+            let current_observation = lillux::observe_open_regular_file(current)?;
+            if !current_observation.matches_quarantined_incumbent(&observation) {
+                bail!("authorized-key grant metadata changed before publication");
+            }
+            let mut current = current.try_clone()?;
+            let current = lillux::read_open_regular_file_stable_bounded(
+                &mut current,
+                &current_observation,
+                1024 * 1024,
+            )?;
+            if current != bytes {
+                bail!("authorized-key grant bytes changed before publication");
+            }
+            Ok(())
+        }
+    });
+    directory.ensure_path_binding()?;
+    let result = match validation {
+        Some(validate) => directory.replace_bytes_if_matches_atomic(
+            std::ffi::OsStr::new(&name),
+            expected.as_ref(),
+            validate,
+            signed,
+            0o600,
+        ),
+        None => directory.replace_bytes_if_matches_atomic(
+            std::ffi::OsStr::new(&name),
+            None,
+            |_| Ok(()),
+            signed,
+            0o600,
+        ),
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if error.namespace_committed() => {
+            tracing::warn!(%error, "authorized-key grant committed; retrying its durability barrier");
+            directory.sync().map_err(|sync_error| {
+                anyhow::anyhow!(
+                    "authorized-key grant was committed, but durability remains uncertain after retrying the directory barrier; do not repeat the mutation blindly: {error}; {sync_error:#}"
+                )
+            })
+        }
+        Err(error) => Err(anyhow::anyhow!(error)),
+    }
+}
 
-    // Atomic write: .tmp → rename
-    let entry_path = auth_dir.join(format!("{fingerprint}.toml"));
-    let tmp = entry_path.with_extension("tmp");
-    fs::write(&tmp, signed.as_bytes()).with_context(|| {
-        format!(
-            "failed to write authorized-key entry {}",
-            entry_path.display()
-        )
-    })?;
-    fs::rename(&tmp, &entry_path)
-        .with_context(|| format!("failed to rename to {}", entry_path.display()))?;
-
-    Ok(entry_path)
+/// Reconcile and publish one local-client grant under a single pinned
+/// directory lock. The verified incumbent is the exact compare-and-swap
+/// input, so concurrent merge operations cannot silently lose scopes.
+#[allow(clippy::too_many_arguments)]
+pub fn reconcile_authorized_key_toml_scopes(
+    auth_dir: &Path,
+    fingerprint: &str,
+    public_key_b64: &str,
+    requested_scopes: &[String],
+    label: &str,
+    granted_by: &str,
+    created_at: &str,
+    node_identity: &NodeIdentity,
+    wildcard: WildcardPolicy,
+    merge: bool,
+) -> Result<(std::path::PathBuf, Vec<String>)> {
+    let directory = lillux::PinnedDirectory::open_or_create(auth_dir)?;
+    let _lock = directory.lock_exclusive()?;
+    directory.ensure_path_binding()?;
+    let existing =
+        load_verified_authorized_key_from_directory(fingerprint, &directory, node_identity)?;
+    let existing_scopes = existing
+        .as_ref()
+        .map(|grant| grant.scopes.as_slice())
+        .unwrap_or(&[]);
+    let mut final_scopes = if merge {
+        existing_scopes.to_vec()
+    } else {
+        requested_scopes.to_vec()
+    };
+    if merge {
+        for scope in requested_scopes {
+            if !final_scopes.contains(scope) {
+                final_scopes.push(scope.clone());
+            }
+        }
+    }
+    let dropped = existing_scopes
+        .iter()
+        .filter(|scope| !final_scopes.contains(scope))
+        .cloned()
+        .collect();
+    let signed = render_authorized_key_toml_for_subject(
+        fingerprint,
+        public_key_b64,
+        &final_scopes,
+        label,
+        granted_by,
+        created_at,
+        node_identity.signing_key(),
+        wildcard,
+        AuthorizedKeySubject::LocalClient,
+    )?;
+    let expected_hash = existing
+        .as_ref()
+        .map(|grant| grant.source_file_hash.as_str());
+    directory.ensure_path_binding()?;
+    publish_authorized_key_bytes(
+        &directory,
+        fingerprint,
+        signed.as_bytes(),
+        Some(expected_hash),
+    )?;
+    Ok((auth_dir.join(format!("{fingerprint}.toml")), dropped))
 }
 
 #[cfg(test)]
@@ -586,5 +879,53 @@ mod tests {
         let parsed: toml::Value = toml::from_str(body).unwrap();
         assert_eq!(parsed["label"].as_str(), Some("operator \"one\""));
         assert_eq!(parsed["granted_by"].as_str(), Some("bootstrap\\owner"));
+    }
+
+    #[test]
+    fn concurrent_authorized_key_merges_preserve_both_scope_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = std::sync::Arc::new(NodeIdentity::from_signing_key(test_signing_key()).unwrap());
+        let client = test_signing_key().verifying_key();
+        let fingerprint = lillux::signature::compute_fingerprint(&client);
+        let public_key = base64::engine::general_purpose::STANDARD.encode(client.as_bytes());
+        let mut joins = Vec::new();
+        for scope in ["ryeos.execute.service.alpha", "ryeos.execute.service.beta"] {
+            let directory = dir.path().to_path_buf();
+            let node = std::sync::Arc::clone(&node);
+            let fingerprint = fingerprint.clone();
+            let public_key = public_key.clone();
+            let scope = scope.to_owned();
+            joins.push(std::thread::spawn(move || {
+                reconcile_authorized_key_toml_scopes(
+                    &directory,
+                    &fingerprint,
+                    &public_key,
+                    &[scope],
+                    "client",
+                    "test",
+                    "2026-01-01T00:00:00Z",
+                    &node,
+                    WildcardPolicy::Reject,
+                    true,
+                )
+                .unwrap();
+            }));
+        }
+        for join in joins {
+            join.join().unwrap();
+        }
+        let grant = load_verified_authorized_key(&fingerprint, dir.path(), &node)
+            .unwrap()
+            .unwrap();
+        assert!(
+            grant
+                .scopes
+                .contains(&"ryeos.execute.service.alpha".to_owned())
+        );
+        assert!(
+            grant
+                .scopes
+                .contains(&"ryeos.execute.service.beta".to_owned())
+        );
     }
 }

@@ -50,6 +50,15 @@ pub const MAX_TRUST_DIRECTORY_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_TRUST_TRAVERSAL_ENTRIES: usize = MAX_TRUST_DOCUMENTS * 2;
 pub const MAX_TRUST_TRAVERSAL_DEPTH: usize = 8;
 
+/// Whether one catalog-relative file name is part of the project trust
+/// document vocabulary. Content-authority adapters call this before reading
+/// bytes so unsupported files cannot force work outside the trust bounds.
+pub fn is_project_trust_document(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension, "toml" | "pub" | "key"))
+}
+
 use crate::contracts::{
     ResolvedItem, SignatureEnvelope, SignatureHeader, SignerFingerprint, TrustClass, VerifiedItem,
 };
@@ -276,11 +285,7 @@ impl TrustStore {
                     anyhow::bail!("trust directory exceeds {MAX_TRUST_DOCUMENTS} regular files");
                 }
                 let path = keys_dir.join(relative);
-                let ext = path
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("");
-                if !matches!(ext, "toml" | "pub" | "key") {
+                if !is_project_trust_document(&path) {
                     return Ok(());
                 }
                 let bytes = lillux::read_open_regular_file_bounded(file, MAX_TRUST_DOCUMENT_BYTES)?;
@@ -503,13 +508,10 @@ impl TrustStore {
         let entries = content.list_files(&prefix, false, MAX_TRUST_DOCUMENTS)?;
         let mut total_bytes = 0_u64;
         let mut files = Vec::new();
-        for entry in entries.into_iter().filter(|entry| {
-            entry
-                .relative_path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| matches!(extension, "toml" | "pub" | "key"))
-        }) {
+        for entry in entries
+            .into_iter()
+            .filter(|entry| is_project_trust_document(&entry.relative_path))
+        {
             total_bytes = total_bytes.checked_add(entry.size).ok_or_else(|| {
                 EngineError::Internal("project trust-key byte count overflow".to_string())
             })?;

@@ -56,6 +56,7 @@ pub fn sign_content_at_with_options(
     after_shebang: bool,
 ) -> String {
     let (shebang, signed_body) = split_shebang_body(body, after_shebang);
+    let newline = preferred_newline(body);
     let hash = content_hash(signed_body);
     let signature: ed25519_dalek::Signature = signing_key.sign(hash.as_bytes());
     let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
@@ -67,8 +68,8 @@ pub fn sign_content_at_with_options(
     };
 
     match shebang {
-        Some(shebang) => format!("{shebang}\n{sig_line}\n{signed_body}"),
-        None => format!("{sig_line}\n{signed_body}"),
+        Some(shebang) => format!("{shebang}{newline}{sig_line}{newline}{signed_body}"),
+        None => format!("{sig_line}{newline}{signed_body}"),
     }
 }
 
@@ -107,8 +108,22 @@ fn split_shebang_body(body: &str, after_shebang: bool) -> (Option<&str>, &str) {
         return (None, body);
     }
     match body.find('\n') {
-        Some(idx) => (Some(&body[..idx]), &body[idx + 1..]),
+        Some(idx) => {
+            let shebang_end = if idx > 0 && body.as_bytes()[idx - 1] == b'\r' {
+                idx - 1
+            } else {
+                idx
+            };
+            (Some(&body[..shebang_end]), &body[idx + 1..])
+        }
         None => (Some(body), ""),
+    }
+}
+
+fn preferred_newline(content: &str) -> &'static str {
+    match content.find('\n') {
+        Some(index) if index > 0 && content.as_bytes()[index - 1] == b'\r' => "\r\n",
+        _ => "\n",
     }
 }
 
@@ -142,17 +157,18 @@ pub fn parse_signature_line(
 }
 
 pub fn strip_signature_lines(content: &str) -> String {
-    let has_trailing_newline = content.ends_with('\n');
-    let result: String = content
-        .lines()
-        .filter(|line| !line.contains(SIGNATURE_PREFIX))
-        .collect::<Vec<_>>()
-        .join("\n");
-    if has_trailing_newline && !result.is_empty() {
-        format!("{result}\n")
-    } else {
-        result
+    let mut result = String::with_capacity(content.len());
+    for segment in content.split_inclusive('\n') {
+        let line = segment
+            .strip_suffix('\n')
+            .unwrap_or(segment)
+            .strip_suffix('\r')
+            .unwrap_or_else(|| segment.strip_suffix('\n').unwrap_or(segment));
+        if !line.contains(SIGNATURE_PREFIX) {
+            result.push_str(segment);
+        }
     }
+    result
 }
 
 /// Envelope-aware variant of [`strip_signature_lines`].
@@ -171,17 +187,53 @@ pub fn strip_signature_lines_with_envelope(
     prefix: &str,
     suffix: Option<&str>,
 ) -> String {
-    let has_trailing_newline = content.ends_with('\n');
-    let result: String = content
-        .lines()
-        .filter(|line| !is_signature_line(line, prefix, suffix))
-        .collect::<Vec<_>>()
-        .join("\n");
-    if has_trailing_newline && !result.is_empty() {
-        format!("{result}\n")
-    } else {
-        result
+    let mut result = String::with_capacity(content.len());
+    for segment in content.split_inclusive('\n') {
+        let line = segment
+            .strip_suffix('\n')
+            .unwrap_or(segment)
+            .strip_suffix('\r')
+            .unwrap_or_else(|| segment.strip_suffix('\n').unwrap_or(segment));
+        if !is_signature_line(line, prefix, suffix) {
+            result.push_str(segment);
+        }
     }
+    result
+}
+
+/// Remove the one signature envelope position accepted by item resolution and
+/// return the exact remaining source bytes, including line terminators. A
+/// signature-shaped line anywhere else is refused rather than silently
+/// deleting authored body content.
+pub fn strip_canonical_signature_with_envelope(
+    content: &str,
+    prefix: &str,
+    suffix: Option<&str>,
+    after_shebang: bool,
+) -> anyhow::Result<(String, Option<SignatureHeader>)> {
+    let lines = content.lines().collect::<Vec<_>>();
+    let canonical = if after_shebang && lines.first().is_some_and(|line| line.starts_with("#!")) {
+        vec![0, 1]
+    } else {
+        vec![0]
+    };
+    let mut header = None;
+    for (index, line) in lines.iter().enumerate() {
+        if is_signature_line(line, prefix, suffix) {
+            let parsed = parse_signature_line(line, prefix, suffix)
+                .ok_or_else(|| anyhow::anyhow!("item contains a malformed signature envelope"))?;
+            if !canonical.contains(&index) {
+                anyhow::bail!("item contains a signature envelope outside its canonical position");
+            }
+            if header.replace(parsed).is_some() {
+                anyhow::bail!("item contains more than one signature envelope");
+            }
+        }
+    }
+    Ok((
+        strip_signature_lines_with_envelope(content, prefix, suffix),
+        header,
+    ))
 }
 
 pub fn verify_signature(
@@ -393,6 +445,40 @@ mod tests {
             strip_signature_lines_with_envelope(content, "<!--", Some("-->")),
             "```yaml\nname: hello\n```\nBody\n"
         );
+    }
+
+    #[test]
+    fn canonical_strip_preserves_the_exact_body_used_by_resolution() {
+        let sk = SigningKey::from_bytes(&[7_u8; 32]);
+        let crlf = "name: fixture\r\nvalue: one\r\n";
+        let signed = sign_content_at(crlf, &sk, "#", None, "2026-01-01T00:00:00Z");
+        let (body, header) =
+            strip_canonical_signature_with_envelope(&signed, "#", None, false).unwrap();
+        assert_eq!(body, crlf);
+        assert_eq!(header.unwrap().content_hash, content_hash(crlf));
+        assert!(signed.starts_with("# ryeos:signed:"));
+        assert!(signed.contains("\r\nname: fixture\r\n"));
+    }
+
+    #[test]
+    fn canonical_strip_refuses_signature_shaped_body_content() {
+        let later = "name: fixture\n# ryeos:signed:2026-01-01T00:00:00Z:abc:sig:fp\n";
+        assert!(strip_canonical_signature_with_envelope(later, "#", None, false).is_err());
+
+        let malformed = "# ryeos:signed placeholder\nname: fixture\n";
+        assert!(strip_canonical_signature_with_envelope(malformed, "#", None, false).is_err());
+    }
+
+    #[test]
+    fn canonical_strip_accepts_only_the_post_shebang_position() {
+        let sk = SigningKey::from_bytes(&[9_u8; 32]);
+        let body = "#!/usr/bin/env python3\nprint('ok')\n";
+        let signed =
+            sign_content_at_with_options(body, &sk, "#", None, "2026-01-01T00:00:00Z", true);
+        let (stripped, header) =
+            strip_canonical_signature_with_envelope(&signed, "#", None, true).unwrap();
+        assert_eq!(stripped, body);
+        assert!(header.is_some());
     }
 
     #[test]

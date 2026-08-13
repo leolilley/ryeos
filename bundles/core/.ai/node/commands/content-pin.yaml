@@ -1,0 +1,24 @@
+# ryeos:signed:2026-08-13T07:31:58Z:34d09b2789e364ee4c0781a220b3e7face4740f83232d077051cb70dc3cca22b:YpOJvriZkG8RdE1mx5PqQnGV+b+6sqoDOPmPQgyQ6ayibnsyPy9Bl9TMHmcGyd/p6nEA6skl7vgN0K+EpSEJAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [content, pin]
+description: Observe current project bytes and atomically complete signed external-content pins
+help:
+  usage: "ryeos [--project <path>] content pin <canonical-ref> [--id <declaration>]... [--all] [--update]"
+  examples:
+    - "ryeos --project . content pin graph:training/run --id dataset"
+    - "ryeos --project . content pin graph:training/run --id dataset --id runtime --update"
+    - "ryeos --project . content pin graph:training/run --all"
+forms:
+  - slots:
+      - field: item_ref
+        matcher: canonical_ref
+project:
+  resolution: required
+  default: discover_upward_ai
+  bind_parameter: project_path
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: execute_ref
+  execute: service:content/pin
+  availability: offline

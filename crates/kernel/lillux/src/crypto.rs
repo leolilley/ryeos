@@ -9,10 +9,24 @@ pub use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 
 /// Load a signing key from a PEM file.
 pub fn load_signing_key(path: &std::path::Path) -> anyhow::Result<SigningKey> {
-    let pem = std::fs::read_to_string(path)
+    let bytes = crate::read_regular_file_bounded_no_follow(path, 64 * 1024)
         .with_context(|| format!("failed to read signing key: {}", path.display()))?;
+    let pem = std::str::from_utf8(&bytes)
+        .with_context(|| format!("signing key is not UTF-8: {}", path.display()))?;
     SigningKey::from_pkcs8_pem(&pem)
         .with_context(|| format!("failed to decode signing key: {}", path.display()))
+}
+
+/// Load a signing key from one already-opened regular-file authority.
+/// The descriptor is observed and read exactly once so callers that pin the
+/// containing directory never fall back to pathname authority.
+pub fn load_signing_key_from_open_file(mut file: std::fs::File) -> anyhow::Result<SigningKey> {
+    let observation =
+        crate::observe_open_regular_file(&file).context("observe signing-key descriptor")?;
+    let bytes = crate::read_open_regular_file_stable_bounded(&mut file, &observation, 64 * 1024)
+        .context("read stable signing-key descriptor")?;
+    let pem = std::str::from_utf8(&bytes).context("signing key is not UTF-8")?;
+    SigningKey::from_pkcs8_pem(pem).context("failed to decode signing key")
 }
 
 /// Compute the fingerprint (SHA256 hex) of a verifying key.

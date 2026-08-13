@@ -1,0 +1,13 @@
+# ryeos:signed:2026-08-13T07:32:02Z:83ad325341658a10d783e70432bea134a70a07e1d3bb4817ec053964eba7b24b:HdTiGGIXrRWECZeARiB2WIhHd3lOCQ2ZaciHKRvgTKs7xrmBJy7r1WcEB9qhOeT2OSHwipqrRfQCBaWQt1P0AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: content/pin
+availability: offline
+offline_execute: tool:ryeos/core/content-pin
+required_caps: []
+schema:
+  item_ref: string
+  project_path: string
+  id: string[]?
+  all: boolean?
+  update: boolean?
+description: "Complete and sign external-content pins from exact current project bytes without launching the item or publishing runtime state."

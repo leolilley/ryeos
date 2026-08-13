@@ -5,6 +5,7 @@ fn main() {
     std::process::exit(run_handler(|request| match request {
         HandlerRequest::EffectiveValidate(request) => graph_effective_validator::validate(request),
         HandlerRequest::Parse(_)
+        | HandlerRequest::EditSource(_)
         | HandlerRequest::ValidateParserConfig(_)
         | HandlerRequest::Compose(_)
         | HandlerRequest::ValidateComposerConfig(_)

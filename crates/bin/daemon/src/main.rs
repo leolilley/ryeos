@@ -1309,7 +1309,7 @@ fn load_node_max_live_fanout(engine: &ryeos_engine::engine::Engine) -> Result<Op
     let roots = engine.launch_config_roots(&ordinary_roots);
     let parsers = match engine.effective_parser_dispatcher(
         None,
-        &ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
+        &ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
     ) {
         Ok(p) => p,
         Err(err) => {

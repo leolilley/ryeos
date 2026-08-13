@@ -775,9 +775,22 @@ fn capture_content_import(
             manifest
         }
         ImportShape::File => {
-            let (parent, file, _, _) =
-                open_pinned_source_file(source_root, &request.path, root_device)?;
-            let manifest = ryeos_state::capture_file(file, &request.path, &mut budget, &mut sink)?;
+            let (parent, name) = open_file_parent(source_root, &request.path)?;
+            let entry = parent
+                .entry_no_follow(OsStr::new(name))?
+                .ok_or_else(|| anyhow::anyhow!("external-content source file is unavailable"))?;
+            if entry.entry_type != lillux::PinnedEntryType::Regular
+                || entry.containing_device != root_device
+            {
+                bail!("external-content source file is not an admitted regular inode");
+            }
+            let manifest = ryeos_state::capture_file_at(
+                &parent,
+                OsStr::new(name),
+                &request.path,
+                &mut budget,
+                &mut sink,
+            )?;
             if let Some(expected) = request.expected_file_sha256.as_deref()
                 && manifest.entries[0].blob_hash.as_deref() != Some(expected)
             {
@@ -851,16 +864,11 @@ fn capture_large_import(
             manifest
         }
         ImportShape::File => {
-            let (parent, file, containing_device, inode) =
+            let (parent, file, source_identity) =
                 open_pinned_source_file(source_root, &request.path, root_device)?;
-            let metadata = file.metadata()?;
             let manifest = ryeos_state::capture_large_file(
                 file,
-                ryeos_state::PinnedLargeObjectSourceIdentity {
-                    containing_device,
-                    inode,
-                    size: metadata.len(),
-                },
+                source_identity,
                 &request.path,
                 request.expected_file_sha256.as_deref(),
                 &capture_policy,
@@ -896,12 +904,14 @@ fn open_pinned_source_file(
     source_root: &lillux::PinnedDirectory,
     relative: &str,
     root_device: u64,
-) -> anyhow::Result<(lillux::PinnedDirectory, std::fs::File, u64, u64)> {
+) -> anyhow::Result<(
+    lillux::PinnedDirectory,
+    std::fs::File,
+    ryeos_state::PinnedLargeObjectSourceIdentity,
+)> {
     let (parent, name) = open_file_parent(source_root, relative)?;
     let entry = parent
-        .entries_no_follow()?
-        .into_iter()
-        .find(|entry| entry.name == OsStr::new(name))
+        .entry_no_follow(OsStr::new(name))?
         .ok_or_else(|| anyhow::anyhow!("external-content source file is unavailable"))?;
     if entry.entry_type != lillux::PinnedEntryType::Regular
         || entry.containing_device != root_device
@@ -911,12 +921,19 @@ fn open_pinned_source_file(
     let file = parent
         .open_regular(OsStr::new(name), false)?
         .ok_or_else(|| anyhow::anyhow!("external-content source file vanished"))?;
-    use std::os::unix::fs::MetadataExt as _;
-    let metadata = file.metadata()?;
-    if metadata.dev() != entry.containing_device || metadata.ino() != entry.inode {
+    let observed = lillux::observe_open_regular_file(&file)?;
+    if !observed.matches_directory_entry(&entry) {
         bail!("external-content source file changed inode during admission");
     }
-    Ok((parent, file, entry.containing_device, entry.inode))
+    Ok((
+        parent,
+        file,
+        ryeos_state::PinnedLargeObjectSourceIdentity {
+            containing_device: entry.containing_device,
+            inode: entry.inode,
+            size: observed.size(),
+        },
+    ))
 }
 
 fn open_admitted_source_tree(

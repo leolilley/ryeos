@@ -18,6 +18,8 @@ pub enum VocabularyError {
     ReservedEnvName { name: String },
     #[error("env injection name `{name}` is not a valid POSIX env identifier")]
     InvalidEnvName { name: String },
+    #[error("invalid bundle name: {detail}")]
+    InvalidBundleName { detail: String },
     #[error(
         "incompatible (stdout_shape={shape:?}, stdout_mode={mode:?}); see compatibility matrix"
     )]

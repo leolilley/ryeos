@@ -10,6 +10,10 @@ fn main() {
                 message: e.message,
             },
         },
+        HandlerRequest::EditSource(_) => HandlerResponse::EditSourceErr {
+            kind: ryeos_handler_protocol::ParseErrKind::Schema,
+            message: "regex parser does not expose source editing".into(),
+        },
         HandlerRequest::ValidateParserConfig(v) => {
             match regex_kv::validate_config(&v.parser_config) {
                 Ok(()) => HandlerResponse::ValidateOk,

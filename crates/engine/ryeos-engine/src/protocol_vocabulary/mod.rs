@@ -27,3 +27,22 @@ pub use callback_channel::CallbackChannel;
 
 mod capabilities;
 pub use capabilities::ProtocolCapabilities;
+
+/// Validate the canonical bundle identifier shared by signed manifest
+/// authoring and qualified binary resolution.
+pub fn validate_bundle_name(name: &str) -> Result<(), VocabularyError> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains("..")
+        || name.starts_with('.')
+        || name.contains(' ')
+        || name
+            .chars()
+            .any(|character| character.is_control() || character == '\0')
+    {
+        return Err(VocabularyError::InvalidBundleName {
+            detail: "must be a single non-hidden identifier without spaces, slashes, `..`, or control characters".to_owned(),
+        });
+    }
+    Ok(())
+}

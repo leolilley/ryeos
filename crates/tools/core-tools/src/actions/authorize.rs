@@ -9,7 +9,7 @@
 //! Delegates to the canonical `ryeos_app::identity::write_authorized_key_toml`
 //! so there is exactly one TOML emitter.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -62,6 +62,7 @@ pub struct AuthorizeClientResult {
 /// `existing ∪ requested` (order-preserving) and nothing is dropped. Without
 /// `merge`, the result is exactly `requested` and `dropped` lists the existing
 /// scopes that are not being re-granted.
+#[cfg(test)]
 fn reconcile_scopes(
     existing: &[String],
     requested: &[String],
@@ -83,22 +84,6 @@ fn reconcile_scopes(
             .collect();
         (requested.to_vec(), dropped)
     }
-}
-
-/// Read the `scopes` array from an existing signed authorized-key TOML.
-/// The signature line is a `#`-prefixed comment, so TOML parsing skips it.
-/// Returns an empty vec if the file is absent or unparseable.
-fn read_existing_scopes(entry_path: &Path) -> Vec<String> {
-    #[derive(serde::Deserialize)]
-    struct Existing {
-        #[serde(default)]
-        scopes: Vec<String>,
-    }
-    std::fs::read_to_string(entry_path)
-        .ok()
-        .and_then(|c| toml::from_str::<Existing>(&c).ok())
-        .map(|e| e.scopes)
-        .unwrap_or_default()
 }
 
 pub struct MintAdmissionTokenParams {
@@ -166,7 +151,7 @@ pub fn run_authorize_client(params: AuthorizeClientParams) -> Result<AuthorizeCl
         );
     }
 
-    let node_key = load_node_key(&node_key_path)?;
+    let node_identity = ryeos_app::identity::NodeIdentity::load(&node_key_path)?;
 
     let fp = lillux::crypto::fingerprint(&params.public_key);
     let key_b64 = base64::engine::general_purpose::STANDARD.encode(params.public_key.as_bytes());
@@ -186,25 +171,20 @@ pub fn run_authorize_client(params: AuthorizeClientParams) -> Result<AuthorizeCl
         ryeos_app::identity::WildcardPolicy::Reject
     };
 
-    // `authorize-client` writes one file per fingerprint and replaces it
-    // wholesale. To avoid silently narrowing an existing grant (the
-    // operator-bootstrap footgun), reconcile against the scopes already on
-    // disk: union them when `merge`, otherwise report what is being dropped.
-    let entry_path = auth_dir.join(format!("{fp}.toml"));
-    let existing_scopes = read_existing_scopes(&entry_path);
-    let (final_scopes, dropped_scopes) =
-        reconcile_scopes(&existing_scopes, &params.scopes, params.merge);
-
-    let path = ryeos_app::identity::write_authorized_key_toml(
+    // Verified load, scope reconciliation, signing, and conditional
+    // publication share one descriptor-pinned directory lock. A concurrent
+    // merge can therefore never silently lose scopes.
+    let (path, dropped_scopes) = ryeos_app::identity::reconcile_authorized_key_toml_scopes(
         &auth_dir,
         &fp,
         &key_b64,
-        &final_scopes,
+        &params.scopes,
         &params.label,
         "cli-authorize-key",
         &now,
-        &node_key,
+        &node_identity,
         wildcard,
+        params.merge,
     )
     .context("failed to write authorized-key TOML")?;
 
@@ -278,7 +258,6 @@ pub fn run_mint_admission_token(
         )
     })?;
     let path = token_dir.join(format!("{token_hash}.toml"));
-    let tmp = path.with_extension("tmp");
 
     let doc = toml::to_string(&AdmissionTokenFile {
         version: 1,
@@ -289,14 +268,17 @@ pub fn run_mint_admission_token(
         ttl_secs: params.ttl_secs,
         expires_at_unix,
     })?;
-    std::fs::write(&tmp, doc).with_context(|| {
-        format!(
-            "failed to write admission token temp file {}",
-            tmp.display()
+    let token_dir = lillux::PinnedDirectory::open(&token_dir)?
+        .ok_or_else(|| anyhow::anyhow!("admission token directory is unavailable"))?;
+    token_dir
+        .atomic_write_if_same(
+            path.file_name().expect("token path has a file name"),
+            None,
+            doc.as_bytes(),
+            0o600,
         )
-    })?;
-    std::fs::rename(&tmp, &path)
         .with_context(|| format!("failed to install admission token file {}", path.display()))?;
+    token_dir.ensure_path_binding()?;
 
     Ok(MintAdmissionTokenResult {
         token,
@@ -308,11 +290,6 @@ pub fn run_mint_admission_token(
         scopes,
         label,
     })
-}
-
-/// Load the node signing key from a PKCS#8 PEM file.
-fn load_node_key(path: &std::path::Path) -> Result<lillux::crypto::SigningKey> {
-    lillux::crypto::load_signing_key(path)
 }
 
 #[cfg(test)]

@@ -26,6 +26,7 @@ toml = { workspace = true }
 
 # Engine + state
 ryeos-engine = { workspace = true }
+ryeos-handler-protocol = { workspace = true }
 ryeos-state = { workspace = true }
 ryeos-runtime = { workspace = true }
 

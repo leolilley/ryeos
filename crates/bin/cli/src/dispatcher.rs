@@ -1600,12 +1600,24 @@ mod tests {
         // Project selection is deliberately absent from this decision: both
         // project-backed and projectless direct execution use the same live
         // route when the execution controls permit it.
-        assert!(should_stream_direct_execute(true, false, false, false, true));
-        assert!(!should_stream_direct_execute(false, false, false, false, true));
-        assert!(!should_stream_direct_execute(true, true, false, false, true));
-        assert!(!should_stream_direct_execute(true, false, true, false, true));
-        assert!(!should_stream_direct_execute(true, false, false, true, true));
-        assert!(!should_stream_direct_execute(true, false, false, false, false));
+        assert!(should_stream_direct_execute(
+            true, false, false, false, true
+        ));
+        assert!(!should_stream_direct_execute(
+            false, false, false, false, true
+        ));
+        assert!(!should_stream_direct_execute(
+            true, true, false, false, true
+        ));
+        assert!(!should_stream_direct_execute(
+            true, false, true, false, true
+        ));
+        assert!(!should_stream_direct_execute(
+            true, false, false, true, true
+        ));
+        assert!(!should_stream_direct_execute(
+            true, false, false, false, false
+        ));
     }
 
     #[test]
@@ -2090,9 +2102,8 @@ mod tests {
     #[test]
     fn direct_execute_preserves_typed_validation_intent() {
         let mut command = direct_execute_command();
-        let ryeos_runtime::CommandDispatch::DirectExecuteItemRef {
-            validate_only, ..
-        } = &mut command.dispatch
+        let ryeos_runtime::CommandDispatch::DirectExecuteItemRef { validate_only, .. } =
+            &mut command.dispatch
         else {
             panic!("fixture must use direct_execute_item_ref");
         };
@@ -2163,7 +2174,11 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(error.to_string().contains("--pin-project requires a project root"));
+        assert!(
+            error
+                .to_string()
+                .contains("--pin-project requires a project root")
+        );
     }
 
     #[test]
@@ -2186,9 +2201,11 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(error
-            .to_string()
-            .contains("--pin-project cannot be combined with --state-root"));
+        assert!(
+            error
+                .to_string()
+                .contains("--pin-project cannot be combined with --state-root")
+        );
     }
 
     #[test]

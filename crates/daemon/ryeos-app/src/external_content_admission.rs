@@ -4,7 +4,6 @@
 //! traversal and manifest construction remain meaning-blind state mechanics;
 //! executors receive only the retained realization and never a live locator.
 
-use std::io::Read as _;
 use std::path::Path;
 
 use ryeos_engine::contracts::ItemSpace;
@@ -15,11 +14,10 @@ use ryeos_engine::external_realization::{
     ExternalRealizationProof, RealizationStore, RealizedExternalContent, RealizedExternalContentSet,
 };
 use ryeos_state::{
-    ExternalCapturePolicy, ExternalContentBlobSink, LaunchCaptureBudget, MAX_CAPTURE_FILE_BYTES,
-    PendingCasPublication,
+    DigestOnlyExternalContentSink, ExternalCapturePolicy, ExternalContentBlobSink,
+    ExternalContentCaptureKind, LaunchCaptureBudget, MAX_CAPTURE_FILE_BYTES, PendingCasPublication,
 };
 use serde::Serialize;
-use sha2::{Digest as _, Sha256};
 
 use crate::state::AppState;
 
@@ -61,18 +59,17 @@ pub fn preview_external_content_pins(
         .and_then(|schema| schema.execution.as_ref())
         .and_then(|execution| execution.external_content.as_ref());
     let declarer = ryeos_engine::external_content::declaring_authority(resolution)?;
-    let Some(declarations) =
-        ryeos_engine::external_content::declarations_from_composed_for_static_preview(
-            &resolution.composed.composed,
-            contract,
-            declarer,
-        )?
+    let Some(declarations) = ryeos_engine::external_content::declarations_from_composed(
+        &resolution.composed.composed,
+        contract,
+        declarer,
+    )?
     else {
         return Ok(None);
     };
 
     let mut budget = LaunchCaptureBudget::default();
-    let mut sink = DigestOnlyBlobSink;
+    let mut sink = DigestOnlyExternalContentSink;
     let mut previews = Vec::with_capacity(declarations.len());
     let mut ready_for_admission = true;
     for declaration in declarations {
@@ -89,38 +86,16 @@ pub fn preview_external_content_pins(
                     locator.path.clone(),
                     state.ignore_matcher.as_ref(),
                 )?;
-                let manifest = match declaration.kind {
-                    ExternalContentKind::Tree => {
-                        let declared_root = open_directory_relative(&base, &locator.path)?;
-                        let manifest = ryeos_state::capture_tree(
-                            &declared_root,
-                            &declaration.exclude,
-                            &policy,
-                            &mut budget,
-                            &mut sink,
-                        )?;
-                        declared_root.ensure_path_binding()?;
-                        manifest
-                    }
-                    ExternalContentKind::File => {
-                        let (parent, name) = open_file_parent(&base, &locator.path)?;
-                        let file = parent
-                            .open_regular(std::ffi::OsStr::new(name), false)?
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "external content file `{}` is unavailable",
-                                    locator.path
-                                )
-                            })?;
-                        let manifest =
-                            ryeos_state::capture_file(file, &locator.path, &mut budget, &mut sink)?;
-                        parent.ensure_path_binding()?;
-                        manifest
-                    }
-                };
-                base.ensure_path_binding()?;
-                let canonical = lillux::canonical_json(&serde_json::to_value(&manifest)?)?;
-                lillux::sha256_hex(canonical.as_bytes())
+                let manifest = ryeos_state::capture_external_content_at(
+                    &base,
+                    &locator.path,
+                    capture_kind(declaration.kind),
+                    &declaration.exclude,
+                    &policy,
+                    &mut budget,
+                    &mut sink,
+                )?;
+                ryeos_state::external_content_manifest_digest(&manifest)?
             }
             None => declaration.digest.clone().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -135,15 +110,6 @@ pub fn preview_external_content_pins(
                 if declaration.digest.as_deref() == Some(observed_digest.as_str()) =>
             {
                 "matched"
-            }
-            ryeos_engine::external_content::ExternalContentMode::Pinned
-                if declaration
-                    .digest
-                    .as_deref()
-                    .is_some_and(|digest| !lillux::cas::valid_hash(digest)) =>
-            {
-                ready_for_admission = false;
-                "pending"
             }
             ryeos_engine::external_content::ExternalContentMode::Pinned => {
                 ready_for_admission = false;
@@ -161,46 +127,6 @@ pub fn preview_external_content_pins(
         declarations: previews,
         ready_for_admission,
     }))
-}
-
-struct DigestOnlyBlobSink;
-
-impl ExternalContentBlobSink for DigestOnlyBlobSink {
-    fn store_file(
-        &mut self,
-        mut file: std::fs::File,
-        path: &str,
-        expected_size: u64,
-    ) -> anyhow::Result<(String, u64)> {
-        if expected_size > MAX_CAPTURE_FILE_BYTES {
-            anyhow::bail!("external content file {path} exceeds {MAX_CAPTURE_FILE_BYTES} bytes");
-        }
-        let mut digest = Sha256::new();
-        let mut observed = 0_u64;
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            observed = observed
-                .checked_add(read as u64)
-                .ok_or_else(|| anyhow::anyhow!("external content file size overflow"))?;
-            if observed > MAX_CAPTURE_FILE_BYTES {
-                anyhow::bail!(
-                    "external content file {path} exceeds {MAX_CAPTURE_FILE_BYTES} bytes"
-                );
-            }
-            digest.update(&buffer[..read]);
-        }
-        if observed != expected_size {
-            anyhow::bail!(
-                "external content file {path} changed while validating (expected {expected_size} bytes, observed {observed})"
-            );
-        }
-        let digest = digest.finalize();
-        Ok((format!("{digest:x}"), observed))
-    }
 }
 
 impl AdmittedExternalRealizations {
@@ -385,33 +311,15 @@ pub fn admit_external_realizations_in_publication(
         })?;
         let policy =
             ExternalCapturePolicy::new(locator.path.clone(), state.ignore_matcher.as_ref())?;
-        let manifest = match declaration.kind {
-            ExternalContentKind::Tree => {
-                let declared_root = open_directory_relative(&base, &locator.path)?;
-                let manifest = ryeos_state::capture_tree(
-                    &declared_root,
-                    &declaration.exclude,
-                    &policy,
-                    &mut budget,
-                    &mut sink,
-                )?;
-                declared_root.ensure_path_binding()?;
-                manifest
-            }
-            ExternalContentKind::File => {
-                let (parent, name) = open_file_parent(&base, &locator.path)?;
-                let file = parent
-                    .open_regular(std::ffi::OsStr::new(name), false)?
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("external content file `{}` is unavailable", locator.path)
-                    })?;
-                let manifest =
-                    ryeos_state::capture_file(file, &locator.path, &mut budget, &mut sink)?;
-                parent.ensure_path_binding()?;
-                manifest
-            }
-        };
-        base.ensure_path_binding()?;
+        let manifest = ryeos_state::capture_external_content_at(
+            &base,
+            &locator.path,
+            capture_kind(declaration.kind),
+            &declaration.exclude,
+            &policy,
+            &mut budget,
+            &mut sink,
+        )?;
         let manifest_hash = sink.staged_roots.store_object_admitted(
             &guard,
             &cas,
@@ -738,30 +646,11 @@ fn resolve_named_root(
     }
 }
 
-fn open_directory_relative(
-    base: &lillux::PinnedDirectory,
-    relative: &str,
-) -> anyhow::Result<lillux::PinnedDirectory> {
-    let mut current = base.try_clone()?;
-    for segment in relative.split('/') {
-        current = current
-            .open_child_directory(std::ffi::OsStr::new(segment))?
-            .ok_or_else(|| anyhow::anyhow!("external directory `{relative}` is unavailable"))?;
+fn capture_kind(kind: ExternalContentKind) -> ExternalContentCaptureKind {
+    match kind {
+        ExternalContentKind::Tree => ExternalContentCaptureKind::Tree,
+        ExternalContentKind::File => ExternalContentCaptureKind::File,
     }
-    Ok(current)
-}
-
-fn open_file_parent<'a>(
-    base: &lillux::PinnedDirectory,
-    relative: &'a str,
-) -> anyhow::Result<(lillux::PinnedDirectory, &'a str)> {
-    let (parent, name) = relative.rsplit_once('/').unwrap_or(("", relative));
-    let parent = if parent.is_empty() {
-        base.try_clone()?
-    } else {
-        open_directory_relative(base, parent)?
-    };
-    Ok((parent, name))
 }
 
 fn pinned_state_authority(state: &AppState) -> anyhow::Result<ryeos_state::PinnedStateAuthority> {

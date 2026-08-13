@@ -21,6 +21,7 @@ fn main() {
             }
         }
         HandlerRequest::Parse(_)
+        | HandlerRequest::EditSource(_)
         | HandlerRequest::ValidateParserConfig(_)
         | HandlerRequest::LaunchPrepare(_)
         | HandlerRequest::ValidateLaunchPreparerConfig(_)

@@ -55,10 +55,12 @@ pub use bundle_projection::{
 };
 pub use chain::{AppendResult, CreateResult, ReadSnapshotResult, SnapshotUpdate};
 pub use external_content::{
-    ExternalCapturePolicy, ExternalContentBlobSink, ExternalLargeContentSink,
-    LargeContentCaptureBounds, LargeContentCapturePolicy, LaunchCaptureBudget, MAX_CAPTURE_BYTES,
-    MAX_CAPTURE_DEPTH, MAX_CAPTURE_ENTRIES, MAX_CAPTURE_FILE_BYTES, VerifiedExternalContentClosure,
-    capture_file, capture_large_file, capture_large_tree, capture_tree,
+    DigestOnlyExternalContentSink, ExternalCapturePolicy, ExternalContentBlobSink,
+    ExternalContentCaptureKind, ExternalLargeContentSink, LargeContentCaptureBounds,
+    LargeContentCapturePolicy, LaunchCaptureBudget, MAX_CAPTURE_BYTES, MAX_CAPTURE_DEPTH,
+    MAX_CAPTURE_ENTRIES, MAX_CAPTURE_FILE_BYTES, VerifiedExternalContentClosure,
+    capture_external_content_at, capture_file_at, capture_large_file, capture_large_tree,
+    capture_tree, external_content_manifest_digest,
 };
 pub use head_cache::{CachedHead, HeadCache};
 pub use large_object_store::{

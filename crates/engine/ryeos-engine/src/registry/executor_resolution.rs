@@ -18,6 +18,10 @@ use crate::resolution::TrustClass;
 
 /// Domain separator for the only accepted executor-manifest ref format.
 pub const EXECUTOR_MANIFEST_REF_DOMAIN: &str = "ryeos:bundle-executor-manifest";
+/// Maximum encoded size of the signed manifest-reference envelope. The body
+/// contains only the fixed domain and one SHA-256 digest; the remaining room
+/// is deliberately generous for the canonical signature metadata.
+pub const MAX_EXECUTOR_MANIFEST_REF_BYTES: u64 = 16 * 1024;
 
 /// Result of resolving and validating a native executor's ItemSource record.
 pub struct ResolvedExecutor {

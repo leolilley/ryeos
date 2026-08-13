@@ -1,0 +1,34 @@
+# ryeos:signed:2026-08-13T07:32:07Z:f8d484fd922e946685c8cccfd1f819d71814b0d7fe231a66a4c372f7b118d126:Cby+3BVL0zKc/FDoiQSAgC6AHzyz5aZcmeFAyiCDoeUtZRbMlg3TCWkyrM5MjRC0xg+SyJGhlObVsdYBP3KdAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+executor_id: "@subprocess"
+category: "ryeos/core"
+description: "Complete and sign external-content pins from exact current project bytes without launching the item or publishing CAS content."
+
+config:
+  command: "bin:ryeos-core-tools"
+  args:
+    - "content-pin"
+    - "--stdin-json"
+  input_data: "${params_json}"
+  timeout_secs: 300
+
+config_schema:
+  type: object
+  required: [item_ref, project_path]
+  properties:
+    item_ref:
+      type: string
+      description: "Exact canonical ref of the project item to author."
+    project_path:
+      type: string
+      description: "Project root containing the authored item and project_files root."
+    id:
+      description: "One external-content declaration id, or a repeated/list selector."
+    ids:
+      description: "External-content declaration ids to select."
+    all:
+      type: boolean
+      default: false
+    update:
+      type: boolean
+      default: false

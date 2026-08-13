@@ -10,6 +10,15 @@ fn main() {
                 message: e.message,
             },
         },
+        HandlerRequest::EditSource(p) => {
+            match yaml_document::edit_source(&p.parser_config, &p.content, &p.edits) {
+                Ok((content, value)) => HandlerResponse::EditSourceOk { content, value },
+                Err(error) => HandlerResponse::EditSourceErr {
+                    kind: error.kind,
+                    message: error.message,
+                },
+            }
+        }
         HandlerRequest::ValidateParserConfig(v) => {
             match yaml_document::validate_config(&v.parser_config) {
                 Ok(()) => HandlerResponse::ValidateOk,

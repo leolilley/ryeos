@@ -8,6 +8,7 @@ fn main() {
             directive_launch::validate(request)
         }
         HandlerRequest::Parse(_)
+        | HandlerRequest::EditSource(_)
         | HandlerRequest::ValidateParserConfig(_)
         | HandlerRequest::Compose(_)
         | HandlerRequest::ValidateComposerConfig(_)

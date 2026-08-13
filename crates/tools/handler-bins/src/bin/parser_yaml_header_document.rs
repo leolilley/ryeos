@@ -12,6 +12,10 @@ fn main() {
                 },
             }
         }
+        HandlerRequest::EditSource(_) => HandlerResponse::EditSourceErr {
+            kind: ryeos_handler_protocol::ParseErrKind::Schema,
+            message: "yaml header parser does not expose source editing".into(),
+        },
         HandlerRequest::ValidateParserConfig(v) => {
             match yaml_header_document::validate_config(&v.parser_config) {
                 Ok(()) => HandlerResponse::ValidateOk,
