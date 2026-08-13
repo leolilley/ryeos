@@ -6430,10 +6430,41 @@ async fn run_claimed_thread_row_inner(
             .map_err(BuildAndLaunchError::Internal)?;
     }
 
+    // The audit record follows the execution to its settled state: the real
+    // status (terminal, or `continued` on a handoff), completion time, and
+    // cost land beside the launch-time posture — instead of `created`/
+    // `running` sitting on disk forever. Best-effort like every audit write.
+    let settled_meta = ThreadMeta {
+        status: thread_detail.status.clone(),
+        completed_at: (thread_detail.status
+            != ryeos_state::objects::ThreadStatus::Continued.as_str())
+        .then(lillux::time::iso8601_now),
+        cost: runtime_result
+            .cost
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        outputs: (!runtime_result.outputs.is_null()).then(|| runtime_result.outputs.clone()),
+        ..meta
+    };
+    if let Err(e) = super::thread_meta::write_thread_meta(
+        runtime_state_root,
+        &thread_id,
+        &settled_meta,
+        identity,
+    ) {
+        tracing::warn!(
+            thread_id = %thread_id,
+            error = %e,
+            "failed to update thread.json audit record to its settled status"
+        );
+    }
+
     // Managed native runtimes own the same COW lifecycle as ordinary direct
     // executions. Terminal callbacks seal retained generations before commit;
-    // once the exact runtime process has exited, destroy the backend workspace
-    // synchronously instead of delegating normal success to orphan recovery.
+    // once the exact runtime process has exited and its final workspace-local
+    // audit record is written, destroy the backend workspace synchronously.
+    // Nothing may write beneath `runtime_state_root` after this point, or it
+    // would recreate a closed workspace outside the lifecycle journal.
     if owns_workspace {
         let terminal_publication = provenance
             .project_authority()
@@ -6462,35 +6493,6 @@ async fn run_claimed_thread_row_inner(
                 error.context("close managed runtime workspace"),
             ));
         }
-    }
-
-    // The audit record follows the execution to its settled state: the real
-    // status (terminal, or `continued` on a handoff), completion time, and
-    // cost land beside the launch-time posture — instead of `created`/
-    // `running` sitting on disk forever. Best-effort like every audit write.
-    let settled_meta = ThreadMeta {
-        status: thread_detail.status.clone(),
-        completed_at: (thread_detail.status
-            != ryeos_state::objects::ThreadStatus::Continued.as_str())
-        .then(lillux::time::iso8601_now),
-        cost: runtime_result
-            .cost
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok()),
-        outputs: (!runtime_result.outputs.is_null()).then(|| runtime_result.outputs.clone()),
-        ..meta
-    };
-    if let Err(e) = super::thread_meta::write_thread_meta(
-        runtime_state_root,
-        &thread_id,
-        &settled_meta,
-        identity,
-    ) {
-        tracing::warn!(
-            thread_id = %thread_id,
-            error = %e,
-            "failed to update thread.json audit record to its settled status"
-        );
     }
 
     // The runtime returns terminal text in `result` (Option<String>) and any
