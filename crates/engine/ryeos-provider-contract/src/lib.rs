@@ -919,7 +919,7 @@ mod tests {
                 admitted_effect_class: Some(EffectClass::Recorded),
             },
             TransportCoordinate::AdmittedLocalWorker {
-                worker_ref: "worker:standard/local-tinygrad".to_owned(),
+                worker_ref: "worker:local-inference/local-tinygrad".to_owned(),
                 effective_definition_digest: "5".repeat(64),
                 capsule_hash: "6".repeat(64),
                 execution_realization_hash: "7".repeat(64),

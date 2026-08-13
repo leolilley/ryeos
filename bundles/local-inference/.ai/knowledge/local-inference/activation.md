@@ -1,6 +1,6 @@
-<!-- ryeos:signed:2026-08-12T07:28:15Z:751521f9eacf3ffc00b9ff9432dcbbf1bcf5f0d9852644c738cbc0f004ec90b4:UBZSDyp50Yw801+V041w89d/O1ptPXcY61KNO4IzBbpBu7ZX7xJjRYjkFrmfXZlGjcS0QrgDLQpn6uOtsNmgAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-13T03:35:01Z:2a151e356731dc52b04bbfabc6bc135e5540491325583874d8ca2db85c437185:jCwcwsLzdtVexeum6ZHklQ2oacIxms32Ur+s/LqWubrHkxmQpQuv+qhPFFWHxuRuZnRvyAA+uXFQQr1iiPusCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
-category: ryeos/core/execution
+category: local-inference
 tags: [execution, external-content, persistent-session, local-model, replay]
 version: "1.0.0"
 description: >
@@ -22,12 +22,12 @@ replay never need to reopen their original paths.
 
 The worker's own publisher-authored source is not one of those external
 inputs. It lives beside the descriptor under
-`.ai/workers/standard/lib/local-tinygrad/`; the descriptor atomically signs its
-root, entry, and aggregate source-manifest digest. RyeOS admits that source
+`.ai/workers/local-inference/lib/local-tinygrad/`; the descriptor atomically
+signs its root, entry, and aggregate source-manifest digest. RyeOS admits that source
 closure directly from the exact installed bundle generation. Only the runtime,
 Tinygrad, toolchain, and model are operator-imported external realizations.
 
-The shipped `worker:standard/local-tinygrad` route is deliberately
+The shipped `worker:local-inference/local-tinygrad` route is deliberately
 `recorded`. It is not `sealed`: no node qualification currently proves a
 pre-admitted deterministic compiled-artifact set.
 
@@ -228,7 +228,7 @@ new assembly directory. The helper is authoring tooling, not worker content;
 it verifies every download and refuses an existing output path:
 
 ```text
-python3 scripts/assemble-local-tinygrad.py \
+python3 bundles/local-inference/assemble.py \
   --cache /absolute/operator-owned/download-cache \
   --output /absolute/operator-owned/assembly
 ```
@@ -260,10 +260,10 @@ Bind that exact tuple before the staging authority expires:
 
 ```text
 ryeos execute service:external-content/bind --no-stream \
-  '{"staging_id":"<from-import>","request_digest":"<from-import>","manifest_hash":"<from-import>","consumer_ref":"worker:standard/local-tinygrad"}'
+  '{"staging_id":"<from-import>","request_digest":"<from-import>","manifest_hash":"<from-import>","consumer_ref":"worker:local-inference/local-tinygrad"}'
 ```
 
-The bind must report the installed standard-bundle publisher and the exact
+The bind must report the installed local-inference-bundle publisher and the exact
 consumer ref. Knowing a manifest hash is not mount authority. Project content,
 another publisher, or another consumer cannot reuse this binding.
 
@@ -306,10 +306,17 @@ Perform activation in this order so doctor and the first launch observe one
 coherent contract generation:
 
 1. Assemble the external inputs and verify that the assembly helper completed.
-2. Stop the daemon. Install the current RyeOS build and the freshly published
-   current `core` and `standard` bundles. The installed engine must understand
-   `persistent_session.target_path` and `ipc.target_unix_stream` before doctor
-   inspects the new declarations.
+2. Stop the daemon. Install the current RyeOS build and freshly published
+   `core` and `standard` bundles. Publish and install `local-inference` against
+   those dependencies:
+
+   ```text
+   ryeos bundle publish bundles/local-inference
+   ryeos bundle install local-inference bundles/local-inference
+   ```
+
+   The installed engine must understand `persistent_session.target_path` and
+   `ipc.target_unix_stream` before doctor inspects the new declarations.
 3. Build, publish, and install the current `sandbox-linux-bubblewrap` bundle.
 4. Apply the external-content and persistent-session sources through `ryeos
    node policy-apply`, then apply isolation through `ryeos node
@@ -328,7 +335,7 @@ coherent contract generation:
 After completing the ordered activation above, execute:
 
 ```text
-ryeos execute directive:ryeos/examples/local_tinygrad_smoke --no-stream '{}'
+ryeos execute directive:local-inference/examples/tinygrad_smoke --no-stream '{}'
 ```
 
 The first run must complete through `provider:local-tinygrad`, settle its

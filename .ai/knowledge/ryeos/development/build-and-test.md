@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-29T01:42:39Z:d293c9cbf286fbd2eb94751f1b5b1c6324dc3dd134e4b50c153b5d28b8aed569:FH3uOqr7U1vpZ1mxeFud4eAkIERy2wcyd/xhNBMCChSmmR2PTtq9RNCenFaIXHnfm5rU8jJozjvoFue8GlSDDw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-13T03:35:01Z:e438789288c48cb2aa88a2ce4832d7a5db5d9b234011f08b6182fe26a1e64742:l+q2sNkTtY4joC7MQA7ifWD9WHxAK4Q6N81y2qbajEDaJEmsMbkgfrGjibts67RUWa13O4vFkX/l+CKXx5lfBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
@@ -24,6 +24,7 @@ test, refresh bundles, or install this checkout locally.
 | Fresh repo-local daemon | initialize/start with `--app-root .local/ryeos` (commands below) |
 | Fast packaged-layout install from already-built artifacts | `./scripts/pkg/install-local-direct.sh --trust-source-publishers` |
 | Verify core/standard source bundles | `target/release/ryeos-core-tools bundle-verify bundles/core --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/standard --registry-root bundles/core` |
+| Verify optional local-inference bundle | `target/release/ryeos-core-tools bundle-verify bundles/local-inference --registry-root bundles/core --registry-root bundles/standard` |
 
 Prereqs: Rust stable, `cargo-nextest`, Linux, and usually `HOSTNAME` set.
 

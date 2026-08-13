@@ -2621,7 +2621,7 @@ mod shipped_provider_config_tests {
     #[test]
     fn admitted_local_worker_is_recorded_only_until_qualification_exists() {
         let value: serde_json::Value = serde_yaml::from_str(include_str!(
-            "../../../../bundles/standard/.ai/config/ryeos-runtime/model-providers/local-tinygrad.yaml"
+            "../../../../bundles/local-inference/.ai/config/ryeos-runtime/model-providers/local-tinygrad.yaml"
         ))
         .expect("shipped local worker provider YAML");
         let provider: ProviderConfig =

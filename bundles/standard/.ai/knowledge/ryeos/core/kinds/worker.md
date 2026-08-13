@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:31Z:6ac4cddf68564f333d1a316f6c358f67afc6a264b4142efe7e926d5527c5732e:m+rtJdR/vcXMsRraugu3FfX/WpsdgQrklq7WI1DInRst5Gvims8iIwnt1Z7S9ndhWXC/5iCxhhokN8xSE74gAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-13T03:35:01Z:7a76c8d1ddf933aa97044ec444e036b3393b20ff88d1cc807723100ded9182e5:ELo9Qmc5CZ1Uk1diYYO6gUMZz7KrjJdcYr4vAzipxwAQGnCWXm3fuZuPSveyxjfskBCc5ADdu2duJF95li9cAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/kinds
 tags: [kind, worker, persistent-session, source]
@@ -18,11 +18,10 @@ adjacent-source ceiling; workloads remain ordinary authored data.
 - Source testimony: descriptor owner signs the aggregate source-manifest digest
 - Protocol: kind-declared persistent session
 
-Worker source is co-located under the worker owner's namespace. For
-`worker:standard/local-tinygrad`, the declaration
-`root: lib/local-tinygrad` addresses
-`.ai/workers/standard/lib/local-tinygrad/`, and `entry: bootstrap.py` is
-relative to that root. `${source.entry}` is a typed complete argument; it
+Worker source is co-located under the worker owner's namespace. For an item
+`worker:<owner>/<name>`, a declaration such as `root: lib/<name>` addresses
+`.ai/workers/<owner>/lib/<name>/`, and `entry` is relative to that root.
+`${source.entry}` is a typed complete argument; it
 cannot be interpolated into command, environment, working-directory, or a
 larger argument string.
 

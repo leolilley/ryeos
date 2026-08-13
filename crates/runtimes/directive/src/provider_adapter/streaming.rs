@@ -5592,7 +5592,7 @@ owner = "ryeos-dev"
     #[test]
     fn retained_local_observation_reconstructs_the_complete_terminal_without_delta_replay() {
         let provider_value: Value = serde_yaml::from_str(include_str!(
-            "../../../../../bundles/standard/.ai/config/ryeos-runtime/model-providers/local-tinygrad.yaml"
+            "../../../../../bundles/local-inference/.ai/config/ryeos-runtime/model-providers/local-tinygrad.yaml"
         ))
         .expect("shipped local worker provider YAML");
         let provider: ProviderConfig =

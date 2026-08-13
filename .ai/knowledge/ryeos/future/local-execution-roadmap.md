@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-12T07:28:15Z:5b7d562ee601bb9076d7f6e3181121c1c754d63982b94b8ec0f3f731df9b928c:Eh4yop9CfMsB+vxw76DC+vOHTm/HWpa/s8DZ7r7FRN38C5xvi6hXz1cZBMsoO8xGra9Kl+CvJ8bJDbkomHnYDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-13T03:35:01Z:fc1aed0d2a10de23dbdc2b996918e4b7ccecb1ac0b9a38e5d7828b87a046ce98:rE7ahh88/sqU1GBOIhX5Wy+tvqjMmWXRUppdFjsvGnWlYTwH0rj2pwahSPzO27dnGF9Z9XCBN+rP9h2BsheXBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: local-execution-roadmap
@@ -12,7 +12,7 @@ version: "0.2.0"
 
 This note is the boundary map for the local-execution work. It is not another
 implementation plan and it does not replace the current operating contract in
-`knowledge:ryeos/core/execution/local-model-workers`.
+`knowledge:local-inference/activation`.
 
 Its place in the larger RyeOS sequence is defined by
 `knowledge:ryeos/future/substrate-growth-roadmap`. The local worker track is
@@ -35,7 +35,8 @@ making model meaning part of the engine:
   execution contract;
 - an identity-keyed, bounded daemon persistent-session pool with cancellation,
   restart, target-channel isolation, and resource admission;
-- the standard Tinygrad/Qwen worker and `admitted_local_worker` provider route;
+- the optional local-inference bundle's Tinygrad/Qwen worker and
+  `admitted_local_worker` provider route;
   and
 - a recorded-class local inference path. It is optional node policy, not a
   required default-node service.

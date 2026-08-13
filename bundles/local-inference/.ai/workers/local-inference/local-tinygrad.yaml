@@ -1,5 +1,5 @@
-# ryeos:signed:2026-08-11T02:28:47Z:ed4a34a19e569564dfd35cfb1d56a9bea9b3cfb6011330c56149d3c78c2a5f12:9rBwZ4D0O3Yx6CPqm3Il9z7jRnlu0F2k9fRQougMG5F0biwKQTo/wPdojh9GhZbNE3VbobjveTYWsABEq0RNCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "standard"
+# ryeos:signed:2026-08-13T03:35:01Z:6730ba008755a8a84467a8630ebdcebdbe3eb43f13ea35639eb66ec0849bee25:XmziLktWIBDr9tWNj8jWV+sBQmGDT26M67F9cz/UT25k/WPb8e9Vz/BNqElW61WrxVvrI+1Y7QZGaCIC81QiDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "local-inference"
 version: "1.0.0"
 executor_id: "@subprocess"
 description: "Hermetic persistent CPU worker for the admitted Qwen3 0.6B realization."

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-12T07:28:15Z:ac60b0b91ed1abec088f1700d27064337baab81f0f3adced00df7c70bfe62e4e:GeUTPj248UUjQVYCyzKpRrezzunODT/rpPGWE6rkNIMDy3d2Y9rTsUH8gSt9r4XRtHcUp8JQL65MWRJ34MHWBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-13T03:35:01Z:e49a5508295598745eb438bca961633b1d2c6742b895972781e4fcf27887c3d5:lx7l/dmz2AvWSnJexbfhsqF3VPVrsnuaprZJh2Eh4499TL0ZB6ba8UC41DxNEDuVXEyzQCZJtHiCfMhB6EsWDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [future, determinism, inference, tinygrad, sealed, replay]
 version: "0.2.1"
@@ -19,7 +19,7 @@ through an isolated persistent session, retain a daemon observation, publish a
 provider-call record, repair crash boundaries, and replay after restart without
 model contact. Node execution identity, admitted execution realization, large
 content, and provider-effect evidence are current contracts; see
-`knowledge:ryeos/core/execution/local-model-workers`.
+`knowledge:local-inference/activation`.
 
 The route is intentionally **recorded**, not sealed. No observed realization or
 sealed qualification currently proves that the compiled artifact set,

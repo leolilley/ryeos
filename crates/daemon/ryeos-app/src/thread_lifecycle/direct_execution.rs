@@ -1473,7 +1473,7 @@ mod tests {
         spec.args = vec![PlanArgument::AdmittedSourceEntry];
         let mut prepared = prepared_plan(plan);
         let entry = Path::new(
-            "/ryeos/persistent-session-workspace/.ai/workers/standard/lib/local-tinygrad/bootstrap.py",
+            "/ryeos/persistent-session-workspace/.ai/workers/local-inference/lib/local-tinygrad/bootstrap.py",
         );
 
         prepared

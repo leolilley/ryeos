@@ -11,7 +11,8 @@ fn shipped_local_worker_pins_the_production_capture_digest() {
         .ancestors()
         .nth(3)
         .expect("ryeos-state lives below the repository root");
-    let worker_root = repository.join("bundles/standard/.ai/workers/standard/lib/local-tinygrad");
+    let worker_root = repository
+        .join("bundles/local-inference/.ai/workers/local-inference/lib/local-tinygrad");
     let mut pending = vec![worker_root.clone()];
     let mut entries = Vec::new();
     while let Some(directory) = pending.pop() {
@@ -68,7 +69,9 @@ fn shipped_local_worker_pins_the_production_capture_digest() {
     .unwrap();
 
     let worker_item = std::fs::read_to_string(
-        repository.join("bundles/standard/.ai/workers/standard/local-tinygrad.yaml"),
+        repository.join(
+            "bundles/local-inference/.ai/workers/local-inference/local-tinygrad.yaml",
+        ),
     )
     .unwrap();
     let body = lillux::signature::strip_signature_lines(&worker_item);
@@ -86,7 +89,9 @@ fn activation_fixture_matches_every_sourceless_worker_realization() {
         .nth(3)
         .expect("ryeos-state lives below the repository root");
     let worker_item = std::fs::read_to_string(
-        repository.join("bundles/standard/.ai/workers/standard/local-tinygrad.yaml"),
+        repository.join(
+            "bundles/local-inference/.ai/workers/local-inference/local-tinygrad.yaml",
+        ),
     )
     .unwrap();
     let body = lillux::signature::strip_signature_lines(&worker_item);
@@ -117,7 +122,7 @@ fn activation_fixture_matches_every_sourceless_worker_realization() {
         serde_yaml::from_str(&lillux::signature::strip_signature_lines(
             &std::fs::read_to_string(
                 repository.join(
-                    "bundles/standard/.ai/config/ryeos-runtime/local-tinygrad-activation.yaml",
+                    "bundles/local-inference/.ai/config/ryeos-runtime/local-tinygrad-activation.yaml",
                 ),
             )
             .unwrap(),
@@ -125,7 +130,7 @@ fn activation_fixture_matches_every_sourceless_worker_realization() {
         .unwrap();
     assert_eq!(
         fixture["consumer_ref"].as_str(),
-        Some("worker:standard/local-tinygrad")
+        Some("worker:local-inference/local-tinygrad")
     );
     let pool = &fixture["persistent_session_policy"];
     let lifecycle = &worker_lifecycle["execution"]["persistent_session"];

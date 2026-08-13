@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:28Z:baa6b413182606c869bc739272005e100c533e6a27d2fc1072d74a8de053d39f:HGJWhS3mz5nNVBZwpkGshRiwZ8gPbv13iXZWXlgI35bgHnTp/W94L4hxoou553b9ocK44wSKouMUhWK0EbXLAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-13T03:35:01Z:0a2b9252ea9f6f9b1f470592feda21080453d8a6694303e1640f34535d97ce60:IHF/sRI64HHBHscImguH/58hrLAR3uop+hO9yGVKb8wfjlsj7zWJGI/DolqeKvqLUOkEwXIVSXDHWk2ZsWHeCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, directory, layout, filesystem]
@@ -93,9 +93,6 @@ kinds, composers, runtime binaries, model routing, and workflow services:
 │   ├── directive-runtime.yaml
 │   ├── graph-runtime.yaml
 │   └── knowledge-runtime.yaml
-├── workers/standard/
-│   ├── local-tinygrad.yaml
-│   └── lib/local-tinygrad/              # descriptor-admitted adjacent source
 └── services/                            # threads, scheduler, events, commands
 ```
 

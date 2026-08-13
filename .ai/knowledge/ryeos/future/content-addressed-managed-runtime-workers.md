@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-10T03:16:08Z:50835abfef5d066fb79574bf8a30db4fd659c54634a69d8f21977c21f4caacf5:n1SYxz7aeG08WSVEEnsGCaDrV37D3m9RJSW8aj2bzx4johwyFV8/mumcU+er/WNrRtD0kAcfhzxzjQiVY8JvAQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-13T03:35:01Z:649703427300f8423bad6052d8d3507302920039ddf0eacdb1b8ae06e5105431:Gu7ef+kNtSAqr7f4pfyhH7CkFfqAotMPbye5hrEyKjxGIC0S1qO6doYL4Vh5NX2OoauAPhPOeQfFPioJu4m3DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: content-addressed-managed-runtime-workers
@@ -17,7 +17,7 @@ second RyeOS kind. The generic signed `worker` kind, exact external-content
 realizations, admitted persistent-session capsules, daemon persistent-session
 pool, target-channel isolation, cancellation, and the fixed local-provider
 worker have landed. Their current operating contract is documented at
-`knowledge:ryeos/core/execution/local-model-workers`.
+`knowledge:local-inference/activation`.
 
 The current worker is deliberately narrower than this design: its executable
 closure, realizations, provider role, isolation ceiling, and session protocol

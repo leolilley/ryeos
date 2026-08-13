@@ -1,7 +1,7 @@
-# ryeos:signed:2026-08-11T02:28:26Z:3b08bb0cbdc0ef83aa3488cae27a18351f2d534216b35f3e2bd44616f10becff:A92oNkKini12W5SftNJi5S4aRh2d03Qse7a1JHqPgtUGc5zSn+iZtLqWf2449/AHQDaGKWJFbnJiaITH39zYBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-13T03:35:01Z:191d495dc24307758d846dc571377ceff15da59e3ced3bbd0efd477c98d11dfd:l6npCUoSyo87HbCwfhHNpgiAi9F48G3Elq88RzLPDlk9DOIn1M4FaN9ydxmNftDzddnaIP74Pp811gEHj5/LAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime"
 schema: 1
-consumer_ref: worker:standard/local-tinygrad
+consumer_ref: worker:local-inference/local-tinygrad
 persistent_session_policy:
   max_pool_groups: 4
   max_total_processes: 1

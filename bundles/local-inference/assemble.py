@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the exact operator-import tree for worker:standard/local-tinygrad.
+"""Build the exact operator-import tree for worker:local-inference/local-tinygrad.
 
 This is an authoring/activation utility, never part of worker execution. Every
 download has an exact upstream identity and SHA-256; output is published only

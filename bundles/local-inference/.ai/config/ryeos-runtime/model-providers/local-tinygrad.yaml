@@ -1,9 +1,9 @@
-# ryeos:signed:2026-08-11T02:28:27Z:cdbf66a92109278ed8fc92f32f67cc301612b69cfb66c9f8d5f27f2907f7ea93:FNHCXdSG5v080FbLBPLlwq3j5VEwmawXcNETSYEJCAWSSk7oiBL7n2Uhi5Mos3ZInC/PuOrdmzTJiBGsqnJpBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-13T03:35:01Z:12f460c2f97b6c8a66205b01902afd332deeed0a9809ec3ac382a3357ae3b279:+SLiDh1iyqT/X57VBqYmeOMTQOsGyWRrrTGPWgTb9kehnDAVCn2yDorK677UcPO5/q/mP9KCBD2AfxxNdQeFDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
 transport:
   kind: admitted_local_worker
-  execute: worker:standard/local-tinygrad
+  execute: worker:local-inference/local-tinygrad
   effect_class_ceiling: recorded
 auth: {}
 schemas:

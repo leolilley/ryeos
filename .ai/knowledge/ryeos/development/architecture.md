@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-21T00:24:55Z:7cb4de829b5b2e50e9b0d9f030f8b580f9126b3dc775a938b65685b94f1a3d80:z1QqGj+z5Iw20Wq5fqGLdb9O32VFqRc9godugHlL85a3ISXNDdfcYcBUBuFd83XcMu4uWU8lu9G49ouO1fxxDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-13T03:35:01Z:6678aa461c9ab5747c1340ded3b0efbed351880d6e2a6fc8f69f2725052f09a6:mvud/dGc67m1ssJ1ko3Cn7CGlxKuWL9ucj9xbaZAB017NIM1Uubq0S/SEogvZPT8oSEg/nGzoJ7MTtSw2p+pAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "architecture"
@@ -42,6 +42,7 @@ Bundles are signed content trees. Derived bundle state (`.ai/bin`, `.ai/objects`
 |---|---|---|
 | Core | `bundles/core/` | kind schemas, parsers, handlers, protocols, services, core tools, routes, CLI aliases/verbs |
 | Standard | `bundles/standard/` | directive/graph/knowledge runtimes, model provider config, user-facing clients/tools/directives |
+| Local inference | `bundles/local-inference/` | optional local-model workers, provider routes, activation fixtures, and acceptance probes |
 
 Important bundle subdirs:
 
