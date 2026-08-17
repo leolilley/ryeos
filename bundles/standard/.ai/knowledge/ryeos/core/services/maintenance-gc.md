@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-08-11T02:28:34Z:16118306c1d6a2a198ad1d5c076abe69f5717342d5a25fd02672d3bbf40f4399:nBvt9+ZWKPg8l4BB5ZfWZ38uViEPqa38H7iGvLoFnstgRfMpEMux4A6sVKRV0x8PVbCi+MNAcDS5ev3aIBA6BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-13T23:39:40Z:25c93ba0759d67c9c90545a331a03894f8870d32a1e9a9bda1e881354f71ddbc:3YULVLAyMLz0TFUkk6rCjh3eS/0FiX+FZjHVIrF9plKUUkOmecrqLSYm1lL1xxEo3/lj2Ero7FWO3BNPwyGUDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/services
 tags: [service, maintenance, gc, cas, compact, sweep]
-version: "2.3.0"
+version: "2.4.0"
 description: >
   The two-phase garbage collector — compact (retention-based DAG
   pruning with topological rewrite) and sweep (mark-and-sweep of
@@ -17,6 +17,23 @@ Invariant: maintenance GC reclaims unreachable CAS state according to
 signed invocation data, with dry-run and compact modes for safe operation.
 
 Run GC as a maintenance task, not during request-critical paths.
+
+## Operation Families
+
+RyeOS keeps three mutation boundaries distinct:
+
+- **Online maintenance** is daemon-owned reclamation or compaction under the
+  exact storage mutation guards. `ryeos maintenance gc` is the GC surface.
+- **Online authoring** is a narrow daemon-owned source transaction under the
+  configured local operator. For example, `ryeos content pin` observes and
+  signs one project item without launching it or publishing runtime state.
+- **Offline reset/recovery** retires a named schema or authority epoch while
+  the daemon is stopped. These commands live under `ryeos node reset <scope>`.
+
+A reset may make CAS objects unreachable, but it never sweeps them itself.
+After restart, ordinary maintenance GC is the only reclamation path. This keeps
+reset confirmation, authoring authority, and storage-retention policy from
+silently broadening into one another.
 
 ## Pipeline
 
@@ -71,7 +88,7 @@ no compiled-in upload timeout: omission preserves them indefinitely. A recurring
 schedule authors an age rather than a fixed timestamp so each invocation derives
 a fresh canonical cutoff while holding the exclusive CAS mutation guard.
 
-## Offline Full Thread-History Retirement
+## Offline Execution-History Reset
 
 Normal maintenance GC never deletes the chain-head namespace as a bulk
 operation. When an operator explicitly chooses to discard the entire local
@@ -79,11 +96,11 @@ thread-history epoch, use the bootstrap-local command while the daemon is
 stopped:
 
 ```bash
-# Inspect every participating store without deleting history.
-ryeos node gc --discard-thread-history --dry-run
+# Inspect every participating store without retiring history.
+ryeos node reset execution-history --dry-run
 
-# Retire all thread history and publish empty current projections.
-ryeos node gc --discard-thread-history --confirm-discard-thread-history
+# Retire all execution history and publish empty current projections.
+ryeos node reset execution-history --confirm
 ```
 
 This clears authoritative thread-chain heads and pending transitions, daemon
@@ -92,14 +109,14 @@ superseded thread-projection databases. It preserves node identity and trust,
 node configuration, installed bundles, vault data, signed schedule definitions,
 project and bundle-event heads, and stable operational admission/sync state.
 Independently retained trace/log/cache data remains governed by the normal
-maintenance GC parameters; this recovery command does not silently broaden its
-deletion scope to those stores.
+maintenance GC parameters. The reset does not reclaim CAS storage; restart the
+daemon and run ordinary maintenance GC later. This recovery command does not
+silently broaden its deletion scope to those stores.
 
 The command publishes a durable discard marker before its first destructive
 step. Ordinary startup refuses while that marker exists; rerunning the same
 confirmed command resumes the idempotent cleanup. Physical CAS reclamation is
-separate: add `--sweep-cas` to the confirmed run, or allow normal maintenance GC
-to reclaim the now-unreachable objects later.
+always a separate online maintenance operation.
 
 On an interactive terminal the command renders its typed maintenance phases in
 one redrawn line. Head retirement reports the exact verified-head count and is

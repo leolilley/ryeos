@@ -754,7 +754,7 @@ impl std::fmt::Display for ReplayIndexActivationRequired {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "operational replay indexes use predecessor epoch {}, current epoch is {}; stop the daemon and run `ryeos node replay-reset --confirm-discard-replay-indexes`",
+            "operational replay indexes use predecessor epoch {}, current epoch is {}; stop the daemon and run `ryeos node reset replay-indexes --confirm`",
             self.stored, self.current
         )
     }

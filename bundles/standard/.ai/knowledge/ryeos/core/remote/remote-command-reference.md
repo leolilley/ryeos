@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:33Z:72ae878acff67de6b9d2b5e14f6e6f15470d7ad5e487c82dfe345454a0b0fb0e:WHBMmJ2ytO2QRyLOXhdgMxPfXVED8MzNB+6WpG/dKPwOvCjdUbIQpDiYgnZ/eSz3fFRkYzhy9V+/L6Z0JkoCBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-17T23:05:59Z:10df81e7209fd0cffe3a7ba62571d4e957700affcbf81287931b879970b2de70:ZCrGmWuKUtr0qa1WvPEl/Cup3BQh4oNwuUE279kl6xEvHqRD/RNuV0WHoOeAbWBg9qXLy5OQQhIi0P9XBqGPDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -335,7 +335,8 @@ Failure modes:
 - any required blob is missing
 - preflight verification fails; partial materialization is cleaned up
 
-This differs from local `bundle install/remove`, which are offline-only.
+This differs from local `bundle install/remove`, which require stopped-node
+authority.
 Remote bundle install is daemon-only and updates live local node state.
 
 ## `ryeos remote vault-set`

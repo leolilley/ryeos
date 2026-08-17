@@ -198,8 +198,9 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     let dispatch_rest = rest_with_global_no_project(&cli.rest, cli.no_project);
 
     // 5. Descriptor-driven offline dispatch.
-    //    For commands whose service descriptor declares availability: offline,
-    //    run the in-process handler. Returns None to fall through to daemon.
+    //    Local/stopped-node services run through the local descriptor path;
+    //    dual-mode services prefer the live daemon and fall back only when the
+    //    node is provably stopped. Returns None to fall through to daemon.
     let mut presenter = Presenter::for_console(console);
 
     if let Some(outcome) = crate::offline_dispatch::try_offline_dispatch(

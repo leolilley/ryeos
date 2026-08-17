@@ -1955,7 +1955,7 @@ fn incompatible_runtime_execution_schema(reason: String, predecessor: bool) -> a
     let guidance = predecessor.then(|| {
         format!(
             "{reason}; stop the daemon and run `{}` before restarting",
-            crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND
+            crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND
         )
     });
     let error = anyhow::Error::new(IncompatibleRuntimeExecutionSchema {
@@ -4202,6 +4202,12 @@ impl RuntimeDb {
             });
         }
         validate_current_runtime_store(&conn, path)?;
+        let integrity_started = std::time::Instant::now();
+        let database_bytes = database_file.metadata()?.len();
+        tracing::info!(
+            database_bytes,
+            "verifying retained runtime database integrity"
+        );
         let integrity: String = conn
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
             .context("verify runtime database integrity")?;
@@ -4211,6 +4217,11 @@ impl RuntimeDb {
                 path.display()
             );
         }
+        tracing::info!(
+            database_bytes,
+            duration_ms = integrity_started.elapsed().as_millis(),
+            "retained runtime database integrity verified"
+        );
         let journal_mode: String = conn
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .context("read runtime database journal mode")?;
@@ -7941,7 +7952,8 @@ mod tests {
             .err()
             .expect("missing current reservation contract must fail closed");
         assert!(
-            !format!("{error:#}").contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+            !format!("{error:#}")
+                .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
         );
         let read_only =
             Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
@@ -8017,7 +8029,7 @@ mod tests {
         assert!(message.contains(&format!(
             "current schema_epoch={PROJECT_AUTHORITY_SCHEMA_EPOCH}"
         )));
-        assert!(message.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND));
         assert!(!message.contains("missing field `base_snapshot_hash`"));
     }
 
@@ -8037,7 +8049,9 @@ mod tests {
             "stored schema_epoch={}",
             PROJECT_AUTHORITY_SCHEMA_EPOCH + 1
         )));
-        assert!(!message.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(
+            !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+        );
         assert!(!requires_execution_schema_cutover(&error));
         assert!(is_newer_execution_schema(&error));
     }
@@ -8062,7 +8076,9 @@ mod tests {
             "stored schema_epoch={}",
             RUNTIME_OPERATOR_SCHEMA_EPOCH + 1
         )));
-        assert!(!message.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(
+            !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+        );
 
         let reset_error = RuntimeDb::open_for_explicit_history_reset(&path)
             .err()
@@ -8117,7 +8133,9 @@ mod tests {
             .expect("an unowned database must fail closed");
         let message = format!("{error:#}");
         assert!(message.contains("refusing to classify or reset unowned store"));
-        assert!(!message.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(
+            !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+        );
 
         let reset_error = RuntimeDb::open_for_explicit_history_reset(&path)
             .err()
@@ -8215,7 +8233,9 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("z-newer"));
         assert!(message.contains("newer"));
-        assert!(!message.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(
+            !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+        );
 
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let retained: i64 = conn
@@ -8275,7 +8295,9 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("T-newer-capsule"));
         assert!(message.contains("newer admitted launch capsule"));
-        assert!(!message.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(
+            !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+        );
     }
 
     #[test]
@@ -8319,7 +8341,9 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("z-unrecognized"));
         assert!(message.contains("unrecognized outer kind"));
-        assert!(!message.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(
+            !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+        );
 
         let retained: i64 = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap()
@@ -8360,7 +8384,9 @@ mod tests {
             .expect("an older daemon must not erase newer runtime authority");
         let message = format!("{error:#}");
         assert!(message.contains("newer than this RyeOS binary"));
-        assert!(!message.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(
+            !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+        );
 
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let retained: String = conn
@@ -8459,7 +8485,7 @@ mod tests {
         assert!(message.contains(&format!(
             "current schema_version={LAUNCH_METADATA_SCHEMA_VERSION}"
         )));
-        assert!(message.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND));
         assert!(!message.contains("missing field `confinement`"));
         assert!(!message.contains("unknown field"));
     }
@@ -8479,7 +8505,9 @@ mod tests {
             "stored schema_version={}",
             LAUNCH_METADATA_SCHEMA_VERSION + 1
         )));
-        assert!(!message.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(
+            !message.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+        );
         assert!(!requires_execution_schema_cutover(&error));
         assert!(is_newer_execution_schema(&error));
     }
@@ -9678,7 +9706,8 @@ mod tests {
             .err()
             .expect("owned stale runtime database must be rejected");
         assert!(
-            !format!("{error:#}").contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+            !format!("{error:#}")
+                .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
         );
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let added: i64 = conn
@@ -9703,7 +9732,8 @@ mod tests {
             .err()
             .expect("non-current runtime structure must fail closed");
         assert!(
-            !format!("{error:#}").contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+            !format!("{error:#}")
+                .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
         );
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let child_links: i64 = conn
@@ -9912,7 +9942,8 @@ mod tests {
             .err()
             .expect("committed predecessor follow must fail closed");
         assert!(
-            !format!("{error:#}").contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+            !format!("{error:#}")
+                .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
         );
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let follows: i64 = conn

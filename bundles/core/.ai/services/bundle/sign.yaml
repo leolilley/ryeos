@@ -1,8 +1,8 @@
-# ryeos:signed:2026-08-11T02:28:14Z:f0bd1f1c65f8adc3cdcc9a835c2ea429d87cfd62d5d8c1d987a240cddde868b4:seNDUym1CVJTNx35vutjrRGQFT8fmonQUGExmQdlvj3aiYQDPQJio28Z4FQmnISmBE5hfw+F2v8f/cBRtFQDDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-17T23:05:46Z:264152056ff8dba607f4f188ea49d6b6408a0d87fc6fd12c9ffda7ddfa41f9bc:C16Rdu+fR+GT2izvWkgWmuji+ajCRBq1qEr45Z+QVMhOCLYMXK517tbs36eZg3bY0Cnm5RON3VbJg3Y4PlduDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.sign
-availability: offline
-offline_execute: tool:ryeos/core/bundle/sign
+availability: local
+local_execute: tool:ryeos/core/bundle/sign
 required_caps: []
 schema:
   source: string

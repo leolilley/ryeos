@@ -1129,7 +1129,8 @@ enum PreflightCommandAvailability {
     #[default]
     Auto,
     Daemon,
-    Offline,
+    Local,
+    StoppedNode,
     Both,
 }
 
@@ -2254,6 +2255,7 @@ description: Demo command
 dispatch:
   kind: execute_ref
   execute: tool:demo/run
+  availability: local
 aliases:
   - tokens: ["demo", "run"]
     description: Demo command alias
@@ -2268,6 +2270,24 @@ aliases:
             &trust_store,
         )
         .expect("signed valid command should pass node-config preflight");
+    }
+
+    #[test]
+    fn command_preflight_accepts_every_current_availability() {
+        for availability in ["auto", "daemon", "local", "stopped_node", "both"] {
+            let value = serde_json::json!({
+                "tokens": ["demo"],
+                "description": "Demo command",
+                "dispatch": {
+                    "kind": "execute_ref",
+                    "execute": "tool:demo/run",
+                    "availability": availability,
+                }
+            });
+            serde_json::from_value::<PreflightCommandRecord>(value).unwrap_or_else(|error| {
+                panic!("current availability `{availability}` must pass preflight: {error}")
+            });
+        }
     }
 
     #[test]

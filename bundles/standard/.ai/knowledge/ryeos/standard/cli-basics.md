@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:37Z:2bcec77de805cfd00df8600ed263127040b6a842fa126feafa5f15469b72b3e6:xN5gMqUwXRT6o75LAcDblF3h7dQKCldliqNcbjSlaSgABKt/2hnX+g1XRDEPwHFa13A3sLbzREkPaqR9u+b8Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-17T23:06:01Z:ca2a7656d7f137154d50571c40bb1f627ca51a721a28f6850518b93164921199:7jiMtGbOjKwKvMXtV7uAEWn4Lftwe9CalKfYieWwfXbPlvrAwa+3KlzQlpv54PTqEyYA4/aqD+KCjTmlp0DbCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [cli, quickstart, reference, llm, execute, remote, threads, offline]
@@ -83,27 +83,31 @@ Useful rules for agents:
 - If aliases seem stale after installing bundles, restart the daemon.
 - `ryeos identity` and `ryeos init` are useful before the
   daemon is running.
-- `ryeos sign`, `ryeos verify`, and `ryeos fetch` work offline without a
-  daemon (see Section 6).
+- `ryeos sign` uses the daemon when it is live and the same authoring service
+  standalone when the node is stopped. `ryeos verify` and `ryeos fetch` are
+  local inspections that may run alongside the daemon.
 
-## 3. Offline vs daemon commands
+## 3. Command ownership modes
 
 Commands come from signed bundle descriptors. Each service descriptor
 declares an `availability` field:
 
-- **`availability: offline`** — runs in the CLI process, no daemon required.
-  Source-tree authoring operations: `sign`, `verify`, `fetch`,
-  `bundle verify`, `bundle publish`.
-- **No `availability` field** (or `availability: daemon`) — requires a
+- **`availability: local`** — runs as a local operation; the daemon may remain
+  live. Examples include `verify`, `fetch`, `bundle verify`, and `bundle publish`.
+- **`availability: stopped_node`** — requires exclusive stopped-node state,
+  such as bundle replacement or projection rebuild.
+- **`availability: both`** — prefers the live daemon and uses the same service
+  standalone only when the node is stopped. Project `sign`, content pinning,
+  and maintenance GC use this shape.
+- **No `availability` field** (or daemon-only availability) — requires a
   running daemon. Most runtime commands fall here: `execute`, `thread`,
   `remote`, `events`, `scheduler`.
 
-The CLI reads descriptors from installed bundles on disk and dispatches
-offline-capable commands in-process. If a command is not offline-capable
-and the daemon is not running, you get a clear error.
+The CLI reads signed descriptors from the installed generation and applies the
+declared ownership mode before dispatch. It never guesses that an unavailable
+daemon means stopped-node authority.
 
-Do not run `ryeos start` or restart the daemon to use `sign`, `verify`,
-or `fetch`. They work without it.
+Do not stop or restart the daemon to use `sign`, `verify`, or `fetch`.
 
 ## 4. Ask for help and discover commands
 
@@ -148,11 +152,13 @@ ryeos remote run prod tool:apps/demo/echo --project /absolute/path/to/project
 Prefer absolute paths. If the command has `--project` and `--no-project`,
 choose exactly one.
 
-## 6. Read, verify, sign, and fetch items (offline)
+## 6. Read, verify, sign, and fetch items locally
 
-`sign`, `verify`, and `fetch` are offline descriptor-driven commands.
-They do not require a running daemon. They work by reading descriptors
-from installed bundles and running in-process.
+`verify` and `fetch` are local descriptor-driven commands and do not require a
+daemon. `sign` is dual-mode: it uses the authenticated non-threaded daemon
+service while the node is healthy and the same service under exclusive
+stopped-node authority otherwise. You do not stop a healthy node merely to
+sign a project item.
 
 Inspect an item without running it:
 
@@ -185,9 +191,10 @@ ryeos sign "tool:ryeos/core/*" --project /abs/project
 These commands are safe to use during bundle authoring. A full bundle
 publish is not needed for doc-only edits.
 
-## 7. Bundle verify and publish (offline)
+## 7. Bundle verify and publish locally
 
-Bundle release commands are also offline and do not require a running daemon.
+Bundle release commands are local and do not require a running daemon. They do
+not take exclusive node-state ownership.
 
 ### Verify a bundle before publishing
 
@@ -443,7 +450,7 @@ Local directive chat-style execution:
 ryeos -p /abs/project execute directive:apps/my-app/chat --message "Hello"
 ```
 
-Offline authoring (no daemon required):
+Local authoring and inspection:
 
 ```bash
 ryeos fetch --item-ref directive:apps/my-app/chat --project-path /abs/project --with-content

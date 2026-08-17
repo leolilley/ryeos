@@ -144,9 +144,9 @@ mod tests {
     #[test]
     fn mode_mismatch_live_offline_only_errors() {
         let avail = availability_for_endpoint(handlers::ALL, "bundle.install").unwrap();
-        assert_eq!(avail, ServiceAvailability::OfflineOnly);
+        assert_eq!(avail, ServiceAvailability::StoppedNodeOnly);
         match (ExecutionMode::Live, avail) {
-            (ExecutionMode::Live, ServiceAvailability::OfflineOnly) => {}
+            (ExecutionMode::Live, ServiceAvailability::StoppedNodeOnly) => {}
             other => panic!("unexpected: {:?}", other),
         }
     }

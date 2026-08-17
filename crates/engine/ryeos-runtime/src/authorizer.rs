@@ -859,7 +859,7 @@ mod tests {
     fn slash_subject_matches_across_systems() {
         assert!(cap_matches(
             "ryeos.execute.*",
-            &canonical_cap("service", "node-sign", "execute")
+            &canonical_cap("service", "maintenance/gc", "execute")
         ));
         assert!(cap_matches(
             "ryeos.execute.*",

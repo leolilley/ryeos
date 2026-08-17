@@ -3,7 +3,7 @@
 //! Deletes the signed `kind: node` item at `<app_root>/.ai/node/bundles/<name>.yaml`
 //! and the bundle directory at `<app_root>/.ai/bundles/<name>/`.
 //!
-//! OfflineOnly: the daemon must be stopped (engine reload not implemented).
+//! Stopped-node only: the daemon must be stopped (engine reload not implemented).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -229,7 +229,7 @@ fn admit_prospective_remove(
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle/remove",
     endpoint: "bundle.remove",
-    availability: ServiceAvailability::OfflineOnly,
+    availability: ServiceAvailability::StoppedNodeOnly,
     required_caps: &["ryeos.execute.service.bundle/remove"],
     handler: |params, _ctx, state| {
         Box::pin(async move {

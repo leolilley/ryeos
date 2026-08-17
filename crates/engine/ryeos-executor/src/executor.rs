@@ -6,7 +6,7 @@
 //! 2. Verify trust chain (signature + content hash).
 //! 3. Extract endpoint + required_caps from verified metadata.
 //! 4. Check availability for this mode (DaemonOnly + Standalone → error,
-//!    OfflineOnly + Live → error).
+//!    StoppedNodeOnly + Live → error).
 //! 5. **Live mode only:** enforce caps (AND semantics — all required caps
 //!    must be in caller scopes).
 //! 6. Dispatch to handler in the registry.
@@ -586,9 +586,9 @@ pub async fn execute_service_verified(
         (ExecutionMode::Standalone, ServiceAvailability::DaemonOnly) => {
             bail!("{service_ref} is DaemonOnly; start the daemon and call /execute");
         }
-        (ExecutionMode::Live, ServiceAvailability::OfflineOnly) => {
+        (ExecutionMode::Live, ServiceAvailability::StoppedNodeOnly) => {
             bail!(
-                "{service_ref} is OfflineOnly; engine reload not implemented; \
+                "{service_ref} requires stopped-node authority; engine reload is unavailable; \
                  run `ryeosd run-service {service_ref}` while daemon is stopped"
             );
         }

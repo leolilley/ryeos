@@ -328,9 +328,12 @@ fn build_top_level_help(
             "node doctor",
             "Offline checklist answering \"why won't it start\"",
         ),
-        crate::tty::Row::key_value("node gc", "Run explicit offline node garbage collection"),
         crate::tty::Row::key_value(
-            "node auth-reset",
+            "node reset execution-history",
+            "Retire the local execution-history epoch",
+        ),
+        crate::tty::Row::key_value(
+            "node reset authorization",
             "Reset authorized keys for a schema cutover",
         ),
     ];
@@ -375,7 +378,7 @@ fn build_top_level_help(
 
         if !offline_cmds.is_empty() {
             offline_cmds.sort_by_key(|c| c.0);
-            let mut section = crate::tty::Section::named("offline (no daemon required)");
+            let mut section = crate::tty::Section::named("local / stopped-node");
             for (tokens_str, description) in &offline_cmds {
                 section
                     .rows
@@ -524,7 +527,7 @@ struct ItemHelpMetadata {
     #[serde(default)]
     has_tool_command: bool,
     #[serde(default)]
-    has_offline_execute: bool,
+    has_local_execute: bool,
 }
 
 impl ItemHelpMetadata {
@@ -576,18 +579,17 @@ impl ItemHelpMetadata {
                 .and_then(|config| config.get("command"))
                 .and_then(Value::as_str)
                 .is_some(),
-            has_offline_execute: value
-                .get("offline_execute")
-                .and_then(Value::as_str)
-                .is_some(),
+            has_local_execute: value.get("local_execute").and_then(Value::as_str).is_some(),
         }
     }
 
     fn is_offline_dispatch(&self) -> bool {
-        matches!(self.availability.as_deref(), Some("offline" | "both"))
-            || self.has_launch_binary_ref
+        matches!(
+            self.availability.as_deref(),
+            Some("local" | "stopped_node" | "both")
+        ) || self.has_launch_binary_ref
             || self.has_tool_command
-            || self.has_offline_execute
+            || self.has_local_execute
     }
 }
 
@@ -606,7 +608,11 @@ fn command_is_offline_capable(
 ) -> bool {
     match availability {
         Some(CommandAvailability::Daemon) => false,
-        Some(CommandAvailability::Offline | CommandAvailability::Both) => true,
+        Some(
+            CommandAvailability::Local
+            | CommandAvailability::StoppedNode
+            | CommandAvailability::Both,
+        ) => true,
         Some(CommandAvailability::Auto) | None => target_is_offline_capable,
     }
 }
@@ -617,11 +623,12 @@ fn command_dispatch_mode(
 ) -> Option<&'static str> {
     match availability {
         Some(CommandAvailability::Daemon) => Some("daemon (requires running daemon)"),
-        Some(CommandAvailability::Offline) => Some("offline (no daemon required)"),
-        Some(CommandAvailability::Both) => Some("offline or daemon"),
+        Some(CommandAvailability::Local) => Some("local (daemon may remain running)"),
+        Some(CommandAvailability::StoppedNode) => Some("stopped node required"),
+        Some(CommandAvailability::Both) => Some("daemon or stopped-node standalone"),
         Some(CommandAvailability::Auto) => target_is_offline_capable.map(|is_offline| {
             if is_offline {
-                "offline (no daemon required)"
+                "local descriptor (daemon not required)"
             } else {
                 "daemon (requires running daemon)"
             }
@@ -889,10 +896,25 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "Diagnose the local node environment",
             "ryeos node doctor [--json] [--no-bundles] [--app-root <DIR>]",
         ),
-        "node gc" => (
-            "ryeos node gc",
-            "Run explicit offline node garbage collection",
-            "ryeos node gc [--json] [--dry-run] [--app-root <DIR>]",
+        "node reset execution-history" => (
+            "ryeos node reset execution-history",
+            "Retire the local execution-history epoch",
+            "ryeos node reset execution-history [--dry-run | --confirm] [--include-project-heads --confirm-project-heads] [--json] [--app-root <DIR>]",
+        ),
+        "node reset authorization" => (
+            "ryeos node reset authorization",
+            "Retire all grants and restore only the local operator",
+            "ryeos node reset authorization --confirm [--json] [--app-root <DIR>]",
+        ),
+        "node reset replay-indexes" => (
+            "ryeos node reset replay-indexes",
+            "Retire predecessor replay indexes",
+            "ryeos node reset replay-indexes --confirm [--json] [--app-root <DIR>]",
+        ),
+        "node reset external-content-bindings" => (
+            "ryeos node reset external-content-bindings",
+            "Retire predecessor external-content bindings",
+            "ryeos node reset external-content-bindings [--dry-run | --confirm] [--json] [--app-root <DIR>]",
         ),
         "start" => (
             "ryeos start",
@@ -1058,7 +1080,7 @@ mod tests {
                 "project": "string?"
             },
             "description": "Diagnose remote node authorization and project setup",
-            "availability": "offline"
+            "availability": "local"
         }));
         assert!(item.is_offline_dispatch());
         assert_eq!(item.schema.get("project").unwrap(), "string?");
@@ -1105,13 +1127,13 @@ mod tests {
     }
 
     #[test]
-    fn command_availability_is_authoritative_over_target_offline_shape() {
+    fn command_availability_is_authoritative_over_target_local_shape() {
         assert!(!command_is_offline_capable(
             Some(CommandAvailability::Daemon),
             true
         ));
         assert!(command_is_offline_capable(
-            Some(CommandAvailability::Offline),
+            Some(CommandAvailability::Local),
             false
         ));
         assert!(command_is_offline_capable(
@@ -1128,12 +1150,12 @@ mod tests {
             Some("daemon (requires running daemon)")
         );
         assert_eq!(
-            command_dispatch_mode(Some(CommandAvailability::Offline), Some(false)),
-            Some("offline (no daemon required)")
+            command_dispatch_mode(Some(CommandAvailability::Local), Some(false)),
+            Some("local (daemon may remain running)")
         );
         assert_eq!(
             command_dispatch_mode(Some(CommandAvailability::Both), Some(false)),
-            Some("offline or daemon")
+            Some("daemon or stopped-node standalone")
         );
     }
 

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:35Z:d3fc9199b4a45c64f0566b9891c1487020e0ba02e1c344f50bd6b9a88d674c69:hy/nFk7uh80Zxzqb2fAbpSO2rEAOGEq1im7+Lv5ZxzRu9OvSy5Z5k8/lpxezIv29+TpK5+ZePNI5cduCpUgjAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-17T23:06:00Z:66b96992131f0b12328a08cc3e24ea5b71a3658737ff84ecaf3c601706f1521e:D7YdSZOhCJJObXPGr9qqfkfTuFB4GgTAQA1RtOW4GXYsOW7Zfa5it71WCOpbItTWRrJ4nwI1nPeITCcrK2KsBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -29,9 +29,9 @@ records consumed by the daemon registry.
 | `bundle/list` | `bundle.list` | none |
 | `bundle/remove` | `bundle.remove` | `ryeos.execute.service.bundle/remove` |
 
-Local bundle install/remove are offline-only. `bundle/export` is
-daemon-only and is used by remote bundle installation to export bundle
-file hashes through CAS.
+Local bundle install/remove require stopped-node authority. `bundle/export` is
+daemon-only and is used by remote bundle installation to export bundle file
+hashes through CAS.
 
 ## Core System Services
 
@@ -39,7 +39,8 @@ file hashes through CAS.
 |---|---|---|
 | `fetch` | `fetch` | `ryeos.execute.service.fetch` |
 | `verify` | `verify` | `ryeos.execute.service.verify` |
-| `node-sign` | `node-sign` | `ryeos.execute.service.node-sign` |
+| `sign` | `sign` | `ryeos.execute.service.sign` |
+| `content/pin` | `content.pin` | `ryeos.execute.service.content/pin` |
 | `projection/verify` | `projection.verify` | `ryeos.execute.service.projection/verify` |
 | `projection/rebuild` | `projection.rebuild` | `ryeos.execute.service.projection/rebuild` |
 | `maintenance/gc` | `maintenance.gc` | `ryeos.execute.service.maintenance/gc` |
@@ -55,10 +56,12 @@ unauthenticated discovery routes. Mutating routes such as
 `identity/authorize-key` and `system/push-head` require signed auth plus
 the listed capability.
 
-`projection/verify` and `projection/rebuild` are offline-only standalone
-operator services. Verification inspects the selected projection without
-mutation. Rebuild performs a history-sized replacement while the daemon is
-stopped; it is disaster recovery, never a scheduled maintenance job.
+`sign` and `content/pin` are dual-mode, non-threaded local-operator services:
+they use the daemon while it is healthy and the same standalone handler while
+it is stopped. `projection/verify` and `projection/rebuild` require stopped-node
+authority. Verification inspects the selected projection without mutation.
+Rebuild performs a history-sized replacement while the daemon is stopped; it
+is disaster recovery, never a scheduled maintenance job.
 
 ## Admission Services
 

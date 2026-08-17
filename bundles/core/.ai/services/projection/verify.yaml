@@ -1,9 +1,9 @@
-# ryeos:signed:2026-08-11T02:28:16Z:0f6f70f8621f3d2e142968aa3bad29b0edeffe613cb18d32477641c697f82ac1:LY5RTxjKxnw2IQZwsC6cYizMDCX7A6BmtupTwR6AqleYSNpboSlrGUI5ceNSjDqAstE6OHyCnoNXWNkL/AwsCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-17T23:05:48Z:b5b8470131dc0c52eddb6ce9c18d481eedf4c098ee111f90dde2174e45093768:70wp8Ai4wksm+YCkuGSuylb5SPt+AHTKcYhhEaDS3ChTvT/xNIbIJCG7OrZL5+oy4ehhp46dWtt01lfDJ5xZAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: projection.verify
-availability: offline
+availability: stopped_node
 record_thread: false
 state_access: read_only_existing
 required_caps: ["ryeos.execute.service.projection/verify"]
 schema: {}
-description: "Fail-only verification of the existing generation-selected thread projection against trusted signed heads and CAS. Never rebuilds or repairs. Offline-only."
+description: "Fail-only verification of the existing generation-selected thread projection against trusted signed heads and CAS. Never rebuilds or repairs. Requires stopped-node authority."

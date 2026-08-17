@@ -23,9 +23,9 @@ pub enum ServiceAvailability {
     Both,
     /// Available only via `/execute` (needs running daemon to receive).
     DaemonOnly,
-    /// Available only via `run-service` (daemon must be down; e.g. bundle.install
-    /// needs engine reload, rebuild needs exclusive state access).
-    OfflineOnly,
+    /// Available only via `run-service` while the daemon is provably stopped;
+    /// bundle replacement and destructive rebuilds need exclusive node state.
+    StoppedNodeOnly,
 }
 
 use crate::handler_context::HandlerContext;

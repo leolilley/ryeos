@@ -376,7 +376,7 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                 &identity,
             )
             .context(
-                "authorized-key cutover failed; stop the daemon and run `ryeos node auth-reset --confirm-discard-authorized-keys` to discard every client/remote grant and recreate only the local operator grant",
+                "authorized-key cutover failed; stop the daemon and run `ryeos node reset authorization --confirm` to discard every client/remote grant and recreate only the local operator grant",
             )?;
             let repaired_bundles =
                 ryeos_app::bundle_transaction::reconcile_all_bundle_transactions(
@@ -562,7 +562,7 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
 
             startup.phase(
                 ryeos_node::StartupPhase::OpeningProjection,
-                "opening thread projection",
+                "verifying runtime state and opening thread projection",
             )?;
             let state_open_observer: Arc<dyn ryeos_state::ProjectionRecoveryObserver> =
                 Arc::new(startup.clone());
@@ -2549,7 +2549,13 @@ async fn run_service_standalone(
         }
         None => serde_json::json!({}),
     };
-    let standalone_principal = identity.principal_id();
+    // Standalone services are invoked by the configured local operator. The
+    // node identity still signs node-owned state below, but it is the server's
+    // attesting identity, not the caller principal. Keeping those authorities
+    // distinct lets the same local-operator handler run live or standalone.
+    let standalone_operator = NodeIdentity::load(&config.operator_signing_key_path)
+        .context("load configured local operator identity for standalone service")?;
+    let standalone_principal = standalone_operator.principal_id();
     let standalone_plan_ctx = ryeos_engine::contracts::PlanContext {
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
@@ -2722,7 +2728,10 @@ async fn run_service_standalone(
         scheduler_db: standalone_scheduler_db,
         scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
         scheduler_reload_tx: None,
-        ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
+        ignore_matcher: Arc::new(
+            ryeos_app::ignore::load_from_app_root(&config.app_root)
+                .context("load ingest ignore config for standalone service")?,
+        ),
         vault_fingerprint: None,
         // Standalone service invocations perform no paid launches; hard
         // admission is uniformly unavailable here.

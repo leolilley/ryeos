@@ -1,8 +1,8 @@
-# ryeos:signed:2026-08-11T02:28:14Z:897ddfa044456d08878c85cc52adba917366bed2b41da34457613385de62448d:GHaWVqAsl652KERm8s0qk31yhx69TqU1yxKiMxtG6D/pASP+7Uhj+/Md8IxBjnWH4gXYI8lCupKiu//kcrmRBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-17T23:05:46Z:a1902edab7a1120f87c2ea5e16bc23b316153803b71e8600d55a0b7955130486:AqO58vDO2mGF9ZQECBII4TYhafxwZQh7mE8XsrCS+3IUEE8RxsFj8HLpW0X2px9hWGrDm7T+SGlRIg1CCakbCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.remove
-availability: offline
+availability: stopped_node
 required_caps: ["ryeos.execute.service.bundle/remove"]
 schema:
   name: string
-description: "Remove an installed bundle: delete <system_space_dir>/.ai/node/bundles/<name>.yaml and <system_space_dir>/.ai/bundles/<name>/. Offline-only: daemon must be stopped."
+description: "Remove an installed bundle: delete <system_space_dir>/.ai/node/bundles/<name>.yaml and <system_space_dir>/.ai/bundles/<name>/. Stopped-node authority is required."

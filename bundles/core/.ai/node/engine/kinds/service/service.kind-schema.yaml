@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:03Z:3a95580dbb89a544a1db599327f38f18df8fc4cee51042c8418c860fc63b279d:EAeXmEpnxFbHbLEb65J7I8a/PuWKuPpMljUfIDiEyppfz8Sv9APHJ1xjqxhBEv4Agt9lPRG1KLY6cZCINKJoCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-17T23:05:41Z:74d67d008b02a5b05f6bdd171bf6ee4eb539c122091d59c674d8e545c0c8e4a8:3MLkLriC68vI9gaE4fGWr0gnkqo4q5mfHov64K4qaynU2b586LcEyF0033wICABgUgTo8GggA+Nq4twTCBnDAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/service"
 version: "1.0.0"
 location:
@@ -36,8 +36,8 @@ composed_value_contract:
     availability:
       type: single
       prim: string
-      enum: [both, daemon_only, offline]
-    offline_execute: { type: single, prim: string }
+      enum: [both, daemon_only, local, stopped_node]
+    local_execute: { type: single, prim: string }
     required_caps:
       type: single
       prim: sequence

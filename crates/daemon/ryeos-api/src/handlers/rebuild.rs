@@ -1,6 +1,6 @@
 //! Offline projection verification and rebuild from signed heads plus CAS.
 //!
-//! OfflineOnly: caller (run-service standalone path) holds the state lock;
+//! Stopped-node only: caller (run-service standalone path) holds the state lock;
 //! this handler just ports the rebuild logic from `actions::rebuild`.
 
 use std::sync::Arc;
@@ -96,7 +96,7 @@ async fn handle(operation: Operation, state: Arc<AppState>) -> Result<Value> {
 pub const VERIFY_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:projection/verify",
     endpoint: "projection.verify",
-    availability: ServiceAvailability::OfflineOnly,
+    availability: ServiceAvailability::StoppedNodeOnly,
     required_caps: &["ryeos.execute.service.projection/verify"],
     handler: |params, _ctx, state| {
         Box::pin(async move {
@@ -109,7 +109,7 @@ pub const VERIFY_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 pub const REBUILD_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:projection/rebuild",
     endpoint: "projection.rebuild",
-    availability: ServiceAvailability::OfflineOnly,
+    availability: ServiceAvailability::StoppedNodeOnly,
     required_caps: &["ryeos.execute.service.projection/rebuild"],
     handler: |params, _ctx, state| {
         Box::pin(async move {

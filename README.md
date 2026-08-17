@@ -241,8 +241,8 @@ restarting the new daemon on every existing node, stop the daemon and discard
 the incompatible thread history and project heads:
 
 ```bash
-ryeos node gc --discard-thread-history --discard-project-heads \
-  --confirm-discard-thread-history --confirm-discard-project-heads
+ryeos node reset execution-history --include-project-heads \
+  --confirm --confirm-project-heads
 ```
 
 The reset is destructive, so retain the pre-upgrade backup. Startup fails

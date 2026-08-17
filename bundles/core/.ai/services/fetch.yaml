@@ -1,8 +1,8 @@
-# ryeos:signed:2026-08-11T02:28:15Z:eebd8425e7cc104a846bbef4573bf3ac998804e7d96c5f1d6993f1c5073924e1:6cZeKv/CJOsWk31pJFlvaxC/VbSjI+aQhL0OpFbYRKfj5pjIHNbBF9EBFWWDZgTvughsBuZ6psmdZyDrNiVMDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-17T23:05:47Z:a4db9778906b81e92189067505793c697b06459b3ba820cb8d1c9e1fc88642c4:IbMG9ZOHgxIZW8glA0DR6+x9GZQBSDfgnVJwJzdwsnvlvJQJbKGHHS6/Wy/xXB1ffKOsKG4NE1i98vJRHLpyAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: fetch
-availability: offline
-offline_execute: tool:ryeos/core/fetch
+availability: local
+local_execute: tool:ryeos/core/fetch
 required_caps: ["ryeos.execute.service.fetch"]
 schema:
   item_ref: string

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-13T05:20:35Z:d855bc4ea47c973bae0832d57faa9488d435dbee31ac3f61460d5d098ad7da6e:aj3o+FDeqF/bC7fd7tceytTDwbmOCgZD6BFrGkTiEJzR5jZyu03P6Rc1xCyc2+ZwgkK4nkI1ZOMgLO8igHcQAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-13T23:39:10Z:0382fdad66a4fab812856278468e5d0004fb48cf7f73a39fc488e03c42bf362a:W2CFjGHHphWIfhcavuki1NU+tUf/c8nfojbBk8FWARjZGXeQrBNWye7yFr50ggTSaGOAFTMcCoSYma8yEq8XBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: local-inference
 tags: [execution, external-content, persistent-session, local-model, replay]
@@ -289,11 +289,11 @@ translating it. With the daemon stopped, inspect first and then perform only
 the reset the refusal names:
 
 ```text
-ryeos node gc --discard-thread-history --dry-run
-ryeos node gc --discard-thread-history --confirm-discard-thread-history
-ryeos node replay-reset --confirm-discard-replay-indexes
-ryeos node external-content-reset --dry-run
-ryeos node external-content-reset --confirm-discard-external-content-bindings
+ryeos node reset execution-history --dry-run
+ryeos node reset execution-history --confirm
+ryeos node reset replay-indexes --confirm
+ryeos node reset external-content-bindings --dry-run
+ryeos node reset external-content-bindings --confirm
 ```
 
 The thread-history command is destructive: it retires all predecessor

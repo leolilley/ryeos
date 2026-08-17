@@ -33,7 +33,8 @@ pub use capabilities::TerminalCapabilities;
 pub use diagnostic::{Diagnostic, DiagnosticLevel};
 pub use document::{Document, Hint, Row, Section, StatusBanner};
 pub use progress::{
-    LifecycleProgress, LifecycleProgressAction, OfflineGcProgress, OperationKind, OperationProgress,
+    ExecutionHistoryResetProgress, LifecycleProgress, LifecycleProgressAction, OperationKind,
+    OperationProgress,
 };
 pub use result::{write_json, write_machine_diagnostics, write_raw};
 pub use theme::Tone;

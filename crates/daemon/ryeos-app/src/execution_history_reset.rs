@@ -1,4 +1,4 @@
-//! Explicit offline garbage collection that retires all thread history.
+//! Explicit offline retirement of the local execution-history epoch.
 //!
 //! Normal maintenance GC deliberately preserves authoritative chain heads.
 //! This module owns the separate operator-authorized path used when an entire
@@ -16,13 +16,13 @@ use crate::config::{Config, ConfigSources};
 use crate::runtime_db::{RuntimeDb, RuntimeThreadHistoryDiscardReport};
 use crate::state_lock::{StateLock, default_lock_path};
 
-pub const EXECUTION_SCHEMA_CUTOVER_COMMAND: &str = "ryeos node gc --discard-thread-history --discard-project-heads --confirm-discard-thread-history --confirm-discard-project-heads";
+pub const EXECUTION_SCHEMA_CUTOVER_COMMAND: &str =
+    "ryeos node reset execution-history --include-project-heads --confirm --confirm-project-heads";
 
 #[derive(Debug, Clone, Default)]
-pub struct OfflineThreadHistoryGcOptions {
+pub struct ExecutionHistoryResetOptions {
     pub app_root: Option<PathBuf>,
     pub dry_run: bool,
-    pub sweep_cas: bool,
     /// Explicit immutable project-schema cutover for principal and deployed
     /// project HEADs. This is accepted only with the all-thread-history discard
     /// because live history may reference either namespace.
@@ -31,7 +31,7 @@ pub struct OfflineThreadHistoryGcOptions {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum OfflineThreadHistoryGcPhase {
+pub enum ExecutionHistoryResetPhase {
     CapturingAuthority,
     InspectingHistory,
     PublishingIntent,
@@ -41,11 +41,10 @@ pub enum OfflineThreadHistoryGcPhase {
     ClearingRuntime,
     ClearingScheduler,
     Finalizing,
-    SweepingCas,
     Complete,
 }
 
-impl OfflineThreadHistoryGcPhase {
+impl ExecutionHistoryResetPhase {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::CapturingAuthority => "capturing_authority",
@@ -57,15 +56,14 @@ impl OfflineThreadHistoryGcPhase {
             Self::ClearingRuntime => "clearing_runtime",
             Self::ClearingScheduler => "clearing_scheduler",
             Self::Finalizing => "finalizing",
-            Self::SweepingCas => "sweeping_cas",
             Self::Complete => "complete",
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct OfflineThreadHistoryGcProgress {
-    pub phase: OfflineThreadHistoryGcPhase,
+pub struct ExecutionHistoryResetProgress {
+    pub phase: ExecutionHistoryResetPhase,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -110,7 +108,7 @@ fn completed_runtime_accounting(
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct OfflineThreadHistoryGcReport {
+pub struct ExecutionHistoryResetReport {
     pub app_root: PathBuf,
     pub dry_run: bool,
     pub chain_heads: usize,
@@ -122,11 +120,9 @@ pub struct OfflineThreadHistoryGcReport {
     pub scheduler_journal_artifacts: usize,
     pub scheduler_rows: ryeos_scheduler::db::SchedulerFireHistoryDiscardReport,
     pub projection: ProjectionDiscardReport,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cas_sweep: Option<ryeos_state::gc::GcResult>,
 }
 
-impl OfflineThreadHistoryGcReport {
+impl ExecutionHistoryResetReport {
     pub fn total_discarded_rows(&self) -> Option<usize> {
         self.runtime_rows
             .total_rows()
@@ -134,41 +130,36 @@ impl OfflineThreadHistoryGcReport {
     }
 }
 
-/// Inspect or execute the explicit all-thread-history GC transaction.
-pub fn run_offline_thread_history_gc(
-    options: &OfflineThreadHistoryGcOptions,
-) -> Result<OfflineThreadHistoryGcReport> {
-    run_offline_thread_history_gc_inner(options, None)
+/// Inspect or execute the explicit all-execution-history reset transaction.
+pub fn run_execution_history_reset(
+    options: &ExecutionHistoryResetOptions,
+) -> Result<ExecutionHistoryResetReport> {
+    run_execution_history_reset_inner(options, None)
 }
 
-pub fn run_offline_thread_history_gc_with_progress(
-    options: &OfflineThreadHistoryGcOptions,
-    observer: &mut dyn FnMut(&OfflineThreadHistoryGcProgress),
-) -> Result<OfflineThreadHistoryGcReport> {
-    run_offline_thread_history_gc_inner(options, Some(observer))
+pub fn run_execution_history_reset_with_progress(
+    options: &ExecutionHistoryResetOptions,
+    observer: &mut dyn FnMut(&ExecutionHistoryResetProgress),
+) -> Result<ExecutionHistoryResetReport> {
+    run_execution_history_reset_inner(options, Some(observer))
 }
 
-fn run_offline_thread_history_gc_inner(
-    options: &OfflineThreadHistoryGcOptions,
-    mut observer: Option<&mut dyn FnMut(&OfflineThreadHistoryGcProgress)>,
-) -> Result<OfflineThreadHistoryGcReport> {
+fn run_execution_history_reset_inner(
+    options: &ExecutionHistoryResetOptions,
+    mut observer: Option<&mut dyn FnMut(&ExecutionHistoryResetProgress)>,
+) -> Result<ExecutionHistoryResetReport> {
     crate::provider_object_contracts::install()
-        .context("install application object contracts for offline GC")?;
+        .context("install application object contracts for execution-history reset")?;
     publish_progress(
         &mut observer,
-        OfflineThreadHistoryGcPhase::CapturingAuthority,
+        ExecutionHistoryResetPhase::CapturingAuthority,
         None,
     );
-    if options.dry_run && options.sweep_cas {
-        anyhow::bail!(
-            "--sweep-cas cannot be forecast before thread roots are retired; run the history dry-run first, then use --sweep-cas only with the confirmed discard"
-        );
-    }
     let config = Config::load(&ConfigSources {
         app_root: options.app_root.clone(),
         ..ConfigSources::default()
     })
-    .context("load local node configuration for offline GC")?;
+    .context("load local node configuration for execution-history reset")?;
     let runtime_state_dir = config.runtime_state_dir();
 
     // This is the outer ownership proof. A running daemon and every
@@ -179,7 +170,7 @@ fn run_offline_thread_history_gc_inner(
     } else {
         StateLock::acquire(&state_lock_path)
     }
-    .context("offline thread-history GC requires the daemon to be stopped")?;
+    .context("execution-history reset requires the daemon to be stopped")?;
     let runtime_directory =
         lillux::PinnedDirectory::open(&runtime_state_dir)?.ok_or_else(|| {
             anyhow::anyhow!("runtime state is absent: {}", runtime_state_dir.display())
@@ -203,26 +194,19 @@ fn run_offline_thread_history_gc_inner(
         &runtime_state_dir,
         Arc::clone(&head_trust),
     )
-    .context("open pinned state authority for offline thread-history GC")?;
+    .context("open pinned state authority for offline execution-history reset")?;
     let state_authority = state_db.pinned_authority()?;
     if !state_authority
         .runtime_directory()
         .is_same_directory(&runtime_directory)?
     {
-        anyhow::bail!("runtime-state path changed while offline GC captured authority");
+        anyhow::bail!(
+            "runtime-state path changed while execution-history reset captured authority"
+        );
     }
-
-    let _gc_lock = if options.sweep_cas {
-        Some(
-            ryeos_state::gc::GcLock::acquire(&runtime_state_dir, "offline-thread-history")
-                .context("acquire offline CAS GC lock")?,
-        )
-    } else {
-        None
-    };
     let cas_guard = state_authority
         .acquire_exclusive_guard(!options.dry_run)
-        .context("acquire exclusive CAS/head mutation guard for offline GC")?;
+        .context("acquire exclusive head mutation guard for execution-history reset")?;
 
     let mut runtime_db = open_runtime_db(
         &config,
@@ -238,7 +222,7 @@ fn run_offline_thread_history_gc_inner(
     // mutating; no pathname-only deletion is used.
     publish_progress(
         &mut observer,
-        OfflineThreadHistoryGcPhase::InspectingHistory,
+        ExecutionHistoryResetPhase::InspectingHistory,
         None,
     );
     let authoritative_preview = state_db
@@ -279,46 +263,9 @@ fn run_offline_thread_history_gc_inner(
         None => Default::default(),
     };
 
-    let operational_roots = if options.sweep_cas {
-        let mut roots = inspect_operational_gc_roots(
-            &runtime_directory,
-            &runtime_directory_lock,
-            options.dry_run,
-        )?;
-        roots.object_hashes.extend(
-            runtime_db
-                .handoff_cas_object_roots()
-                .context("collect durable handoff CAS roots before offline CAS sweep")?,
-        );
-        if runtime_directory
-            .open_regular(
-                std::ffi::OsStr::new(crate::accounting_db::ACCOUNTING_INITIALIZED_FILENAME),
-                true,
-            )?
-            .is_some()
-        {
-            let accounting =
-                crate::accounting_db::AccountingDb::open_at_pinned_runtime_state_dir_with_lock(
-                    &runtime_directory,
-                    runtime_directory_lock.clone(),
-                )
-                .context("open established accounting evidence for offline CAS sweep")?;
-            roots.object_hashes.extend(
-                accounting
-                    .provider_evidence_object_roots()
-                    .context("collect durable provider evidence roots before offline CAS sweep")?,
-            );
-        }
-        roots.object_hashes.sort();
-        roots.object_hashes.dedup();
-        Some(roots)
-    } else {
-        None
-    };
-
     if options.dry_run {
-        publish_progress(&mut observer, OfflineThreadHistoryGcPhase::Complete, None);
-        return Ok(OfflineThreadHistoryGcReport {
+        publish_progress(&mut observer, ExecutionHistoryResetPhase::Complete, None);
+        return Ok(ExecutionHistoryResetReport {
             app_root: config.app_root,
             dry_run: true,
             chain_heads: authoritative_preview.chain_heads,
@@ -333,13 +280,12 @@ fn run_offline_thread_history_gc_inner(
                 superseded_instances_deleted: authoritative_preview.superseded_projection_instances,
                 ..ProjectionDiscardReport::default()
             },
-            cas_sweep: None,
         });
     }
 
     publish_progress(
         &mut observer,
-        OfflineThreadHistoryGcPhase::PublishingIntent,
+        ExecutionHistoryResetPhase::PublishingIntent,
         None,
     );
     state_db
@@ -356,13 +302,13 @@ fn run_offline_thread_history_gc_inner(
                 total,
             } => publish_progress(
                 &mut observer,
-                OfflineThreadHistoryGcPhase::RetiringChainHeads,
+                ExecutionHistoryResetPhase::RetiringChainHeads,
                 Some((completed, total)),
             ),
             ryeos_state::AuthoritativeThreadHistoryDiscardProgress::RebuildingProjection => {
                 publish_progress(
                     &mut observer,
-                    OfflineThreadHistoryGcPhase::RebuildingProjection,
+                    ExecutionHistoryResetPhase::RebuildingProjection,
                     None,
                 )
             }
@@ -379,7 +325,7 @@ fn run_offline_thread_history_gc_inner(
     let project_heads = if options.discard_project_heads {
         publish_progress(
             &mut observer,
-            OfflineThreadHistoryGcPhase::RetiringProjectHeads,
+            ExecutionHistoryResetPhase::RetiringProjectHeads,
             None,
         );
         state_db
@@ -391,7 +337,7 @@ fn run_offline_thread_history_gc_inner(
 
     publish_progress(
         &mut observer,
-        OfflineThreadHistoryGcPhase::ClearingRuntime,
+        ExecutionHistoryResetPhase::ClearingRuntime,
         None,
     );
     let runtime_rows = runtime_db
@@ -406,7 +352,7 @@ fn run_offline_thread_history_gc_inner(
 
     publish_progress(
         &mut observer,
-        OfflineThreadHistoryGcPhase::ClearingScheduler,
+        ExecutionHistoryResetPhase::ClearingScheduler,
         None,
     );
     let scheduler_journal_artifacts = discard_scheduler_fire_journals(&runtime_directory, false)
@@ -419,40 +365,14 @@ fn run_offline_thread_history_gc_inner(
         None => Default::default(),
     };
 
-    publish_progress(&mut observer, OfflineThreadHistoryGcPhase::Finalizing, None);
+    publish_progress(&mut observer, ExecutionHistoryResetPhase::Finalizing, None);
     state_db
         .finish_thread_history_discard_admitted(&cas_guard)
         .context("acknowledge completed offline thread-history discard")?;
 
-    // Physical CAS reclamation is separable from retiring the roots. A sweep
-    // failure therefore cannot strand an otherwise complete reset marker and
-    // block startup; ordinary maintenance can retry reclamation later.
-    let cas_sweep = match operational_roots {
-        Some(roots) => {
-            publish_progress(
-                &mut observer,
-                OfflineThreadHistoryGcPhase::SweepingCas,
-                None,
-            );
-            Some(
-                ryeos_state::gc::run_gc_with_pinned_authority(
-                &state_authority,
-                &cas_guard,
-                None,
-                &ryeos_state::gc::GcParams::default(),
-                &roots,
-            )
-            .context(
-                "thread history was retired successfully, but the optional CAS sweep failed; startup is unblocked and maintenance GC can retry the sweep",
-                )?,
-            )
-        }
-        None => None,
-    };
-
     let rebuilt = authoritative.rebuilt_projection.unwrap_or_default();
-    publish_progress(&mut observer, OfflineThreadHistoryGcPhase::Complete, None);
-    Ok(OfflineThreadHistoryGcReport {
+    publish_progress(&mut observer, ExecutionHistoryResetPhase::Complete, None);
+    Ok(ExecutionHistoryResetReport {
         app_root: config.app_root,
         dry_run: false,
         chain_heads: authoritative.chain_heads,
@@ -469,20 +389,19 @@ fn run_offline_thread_history_gc_inner(
             events_projected: rebuilt.events_projected,
             superseded_instances_deleted: authoritative.superseded_projection_instances,
         },
-        cas_sweep,
     })
 }
 
 fn publish_progress(
-    observer: &mut Option<&mut dyn FnMut(&OfflineThreadHistoryGcProgress)>,
-    phase: OfflineThreadHistoryGcPhase,
+    observer: &mut Option<&mut dyn FnMut(&ExecutionHistoryResetProgress)>,
+    phase: ExecutionHistoryResetPhase,
     counts: Option<(usize, usize)>,
 ) {
     if let Some(observer) = observer.as_deref_mut() {
         let (completed, total) = counts
             .map(|(completed, total)| (Some(completed), Some(total)))
             .unwrap_or((None, None));
-        observer(&OfflineThreadHistoryGcProgress {
+        observer(&ExecutionHistoryResetProgress {
             phase,
             completed,
             total,
@@ -600,45 +519,6 @@ fn open_scheduler_db(
             }))
         }
     }
-}
-
-fn inspect_operational_gc_roots(
-    runtime_directory: &lillux::PinnedDirectory,
-    runtime_directory_lock: &lillux::PinnedDirectoryLock,
-    read_only: bool,
-) -> Result<ryeos_state::gc::AdditionalCasRoots> {
-    let operational = ryeos_state::OperationalDb::open_existing_current_with_namespace_authority(
-        runtime_directory,
-        runtime_directory_lock.clone(),
-        read_only,
-    )
-    .context("open operational state before CAS sweep")?;
-    let active_sync_jobs = operational
-        .count_active_sync_jobs()
-        .context("inspect active sync jobs before offline CAS sweep")?;
-    if active_sync_jobs != 0 {
-        anyhow::bail!(
-            "offline CAS sweep refused: {active_sync_jobs} active sync job(s) may pin staged roots; rerun without --sweep-cas"
-        );
-    }
-    let mirrored = operational
-        .list_cas_entries_by_state(ryeos_state::CasEntryState::Mirrored)
-        .context("collect durable mirrored CAS roots")?;
-    let mut roots = ryeos_state::gc::AdditionalCasRoots::default();
-    for entry in mirrored {
-        match entry.entry_kind {
-            ryeos_state::CasEntryKind::Object => roots.object_hashes.push(entry.hash),
-            ryeos_state::CasEntryKind::Blob => roots.blob_hashes.push(entry.hash),
-        }
-    }
-    // Indexed effect records stay reachable exactly as long as their index
-    // rows exist; retention is row deletion, never a direct object delete.
-    roots.object_hashes.extend(
-        operational
-            .list_replay_record_hashes()
-            .context("collect durable replay record roots")?,
-    );
-    Ok(roots)
 }
 
 fn discard_scheduler_fire_journals(
@@ -798,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn offline_gc_closure_knows_provider_records_and_local_observations() {
+    fn execution_history_reset_closure_knows_provider_records_and_local_observations() {
         crate::provider_object_contracts::install().unwrap();
         let coordinate = local_coordinate();
         let terminal = local_terminal();

@@ -1,7 +1,7 @@
 //! Complete signed external-content pins from current project bytes.
 //!
-//! This is an offline authoring transaction. It observes production manifests
-//! but owns no CAS, thread, scheduler, or runtime handle.
+//! The daemon-owned path is the only public authoring transaction. It observes
+//! production manifests but owns no CAS, thread, scheduler, or runtime handle.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
@@ -50,18 +50,46 @@ pub struct ContentPinDeclarationReport {
 }
 
 struct AuthoringContext {
-    _isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
     kinds: KindRegistry,
     parsers: ParserDispatcher,
     trust_store: TrustStore,
     project_trust: Arc<PinnedProjectTrustContent>,
-    app_root: PathBuf,
+    ignore_matcher: ryeos_state::ignore::IgnoreMatcher,
+    signing_key: lillux::crypto::SigningKey,
 }
 
-pub fn run_content_pin(
+/// Run the content-pin transaction under daemon-owned authority.
+///
+/// Authentication and command/service admission stay in the daemon handler.
+/// This function consumes only the exact already-admitted engine, ignore
+/// policy, and operator signing key; it never opens node state or takes the
+/// process-wide offline state lock.
+pub fn run_content_pin_online(
     item_ref: &str,
     project_path: &Path,
     options: &ContentPinOptions,
+    engine: &ryeos_engine::engine::Engine,
+    ignore_matcher: &ryeos_state::ignore::IgnoreMatcher,
+    signing_key: &lillux::crypto::SigningKey,
+) -> Result<ContentPinReport> {
+    let project_root = lillux::PinnedDirectory::open(project_path)?
+        .ok_or_else(|| anyhow!("project root is unavailable"))?;
+    let _project_lock = project_root.lock_exclusive()?;
+    let context = AuthoringContext::from_daemon(
+        &project_root,
+        engine,
+        ignore_matcher.clone(),
+        signing_key.clone(),
+    )?;
+    run_content_pin_prepared(item_ref, project_path, options, project_root, context)
+}
+
+fn run_content_pin_prepared(
+    item_ref: &str,
+    project_path: &Path,
+    options: &ContentPinOptions,
+    project_root: lillux::PinnedDirectory,
+    context: AuthoringContext,
 ) -> Result<ContentPinReport> {
     if options.all && !options.ids.is_empty() {
         bail!("--all and --id are mutually exclusive");
@@ -76,16 +104,6 @@ pub fn run_content_pin(
         bail!("content pin requires one exact canonical item ref");
     }
 
-    let app_root = ryeos_engine::roots::app_root()
-        .context("resolve app root for offline content authoring")?;
-    let _state_lock = ryeos_app::state_lock::StateLock::acquire(
-        &ryeos_app::state_lock::default_lock_path(&app_root),
-    )
-    .context("content pin is offline-only; stop the daemon before authoring")?;
-    let project_root = lillux::PinnedDirectory::open(project_path)?
-        .ok_or_else(|| anyhow!("project root is unavailable"))?;
-    let _project_lock = project_root.lock_exclusive()?;
-    let context = AuthoringContext::load(&project_root, app_root)?;
     let schema = context
         .kinds
         .get(&target.kind)
@@ -128,7 +146,7 @@ pub fn run_content_pin(
         envelope.after_shebang,
     )?;
 
-    let signing_key = sign::load_user_signing_key()?;
+    let signing_key = context.signing_key.clone();
     let signer_fingerprint = lillux::signature::compute_fingerprint(&signing_key.verifying_key());
     if !context.trust_store.is_trusted(&signer_fingerprint) {
         bail!("operator signing key is not trusted for this project");
@@ -161,30 +179,7 @@ pub fn run_content_pin(
     )?;
     let selected = select_declarations(&declarations, options)?;
 
-    let (ignore_parent, ignore_name) = open_ignore_policy(&context.app_root)?;
-    let ignore_entry = ignore_parent
-        .entry_no_follow(OsStr::new(&ignore_name))?
-        .ok_or_else(|| anyhow!("node ingest-ignore policy is unavailable"))?;
-    if ignore_entry.entry_type != lillux::PinnedEntryType::Regular {
-        bail!("node ingest-ignore policy is not a regular file");
-    }
-    let mut ignore_file = ignore_parent
-        .open_regular(OsStr::new(&ignore_name), false)?
-        .ok_or_else(|| anyhow!("node ingest-ignore policy is unavailable"))?;
-    let ignore_observation = lillux::observe_open_regular_file(&ignore_file)?;
-    if !ignore_observation.matches_directory_entry(&ignore_entry) {
-        bail!("node ingest-ignore policy changed before authoring");
-    }
-    let ignore_bytes = lillux::read_open_regular_file_stable_bounded(
-        &mut ignore_file,
-        &ignore_observation,
-        1024 * 1024,
-    )
-    .context("read stable node ingest-ignore policy")?;
-    let ignore_config: ryeos_state::ignore::IgnoreConfig =
-        serde_yaml::from_slice(&ignore_bytes).context("parse node ingest-ignore policy")?;
-    let ignore = ryeos_state::ignore::IgnoreMatcher::from_config(&ignore_config)
-        .context("compile node ingest-ignore policy")?;
+    let ignore = context.ignore_matcher.clone();
 
     let first = observe_all(
         &project_root,
@@ -256,17 +251,6 @@ pub fn run_content_pin(
     if first != second {
         bail!("external content changed during pin authoring; item was not modified");
     }
-    let current_ignore = lillux::read_open_regular_file_stable_bounded(
-        &mut ignore_file,
-        &ignore_observation,
-        1024 * 1024,
-    )?;
-    if current_ignore != ignore_bytes {
-        bail!("node ingest-ignore policy changed during pin authoring; item was not modified");
-    }
-    ignore_parent.ensure_entry_observation(&ignore_entry)?;
-    ignore_parent.ensure_path_binding()?;
-
     let current_original = lillux::read_open_regular_file_stable_bounded(
         &mut original_file,
         &original_observation,
@@ -389,35 +373,29 @@ pub fn run_content_pin(
 }
 
 impl AuthoringContext {
-    fn load(project_root: &lillux::PinnedDirectory, app_root: PathBuf) -> Result<Self> {
-        let isolation = ryeos_app::engine_init::load_locked_registered_isolation(&app_root)
-            .context("load retained node isolation generation")?;
-        let roots = isolation
-            .registered_generation_bundle_roots()
-            .context("retained isolation generation omitted bundle roots")?
-            .to_vec();
-        let node_trust = isolation
-            .registered_generation_node_trust()
-            .context("retained isolation generation omitted node trust")?;
+    fn from_daemon(
+        project_root: &lillux::PinnedDirectory,
+        engine: &ryeos_engine::engine::Engine,
+        ignore_matcher: ryeos_state::ignore::IgnoreMatcher,
+        signing_key: lillux::crypto::SigningKey,
+    ) -> Result<Self> {
         let project_trust = Arc::new(PinnedProjectTrustContent::new(project_root.try_clone()?));
-        let trust_store = node_trust
+        let trust_store = engine
+            .node_trust_store
             .with_project_keys_from_content(project_trust.as_ref())
             .context("load project trust")?;
-        let kinds = sign::build_kind_registry(&roots, &trust_store)?;
-        let parsers =
-            sign::build_parser_dispatcher(&roots, &kinds, &trust_store, Arc::clone(&isolation))?;
         Ok(Self {
-            _isolation: isolation,
-            kinds,
-            parsers,
+            kinds: engine.kinds.clone(),
+            parsers: engine.parser_dispatcher.clone(),
             trust_store,
             project_trust,
-            app_root,
+            ignore_matcher,
+            signing_key,
         })
     }
 }
 
-/// Exact project-trust view used during one offline authoring transaction.
+/// Exact project-trust view used during one content-pin authoring transaction.
 /// Path traversal and descriptor identity remain owned by Lillux; this layer
 /// only adapts those facts to the engine's generic project-content contract.
 struct PinnedProjectTrustContent {
@@ -716,14 +694,6 @@ fn ensure_exact_source_selection(
         }
     }
     bail!("selected project item extension is no longer registered")
-}
-
-fn open_ignore_policy(app_root: &Path) -> Result<(lillux::PinnedDirectory, String)> {
-    let root = lillux::PinnedDirectory::open(app_root)?
-        .ok_or_else(|| anyhow!("node app root is unavailable"))?;
-    let relative = ryeos_app::ignore::IGNORE_CONFIG_RELATIVE;
-    let (parent, name) = relative.rsplit_once('/').expect("ignore path has a parent");
-    Ok((open_directory_relative(&root, parent)?, name.to_owned()))
 }
 
 fn select_declarations(

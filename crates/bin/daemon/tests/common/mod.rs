@@ -1072,7 +1072,7 @@ impl StandaloneHarness {
     /// - Core bundle registered in `.ai/node/bundles/core.yaml`
     /// - Standard bundle registered (path points to workspace)
     ///
-    /// After this, `run_service()` can invoke any OfflineOnly service
+    /// After this, `run_service()` can invoke any stopped-node service
     /// and preflight will find installed bundles for dependency discovery.
     pub fn new_initialized() -> anyhow::Result<Self> {
         let user_space = tempfile::tempdir()?;

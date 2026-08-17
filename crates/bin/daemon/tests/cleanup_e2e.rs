@@ -9,7 +9,7 @@
 //! - `/execute` is HTTP/TCP only (UDS is system.health + runtime.* only).
 //! - CLI dispatches `service:*` to the daemon; on "daemon not running"
 //!   it falls back to spawning `ryeosd run-service` (NOT `current_exe`).
-//! - ServiceAvailability::OfflineOnly errors when the daemon is up.
+//! - stopped-node services refuse while the daemon is up.
 //! - ServiceAvailability::DaemonOnly errors when the daemon is down.
 //! - Standalone `bundle.install` persists across daemon restart and is
 //!   visible to the live `bundle.list` (regression: standalone must
@@ -116,10 +116,10 @@ async fn cli_initialized_but_stopped_suggests_start() {
     drop(user_space);
 }
 
-// ── Test 5: OfflineOnly service errors when daemon is up ───────────────
+// ── Test 5: stopped-node service errors when daemon is up ───────────────
 
 #[tokio::test(flavor = "multi_thread")]
-async fn offline_only_service_errors_when_daemon_up() {
+async fn stopped_node_service_errors_when_daemon_up() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = h
         .post_execute("service:projection/rebuild", ".", serde_json::json!({}))
@@ -127,12 +127,12 @@ async fn offline_only_service_errors_when_daemon_up() {
         .expect("post /execute");
     assert!(
         !status.is_success(),
-        "expected failure for OfflineOnly in live mode, got {status}: {body}"
+        "expected stopped-node service failure in live mode, got {status}: {body}"
     );
     let body_str = body.to_string().to_lowercase();
     assert!(
-        body_str.contains("offline") || body_str.contains("standalone"),
-        "expected error to mention OfflineOnly/standalone, got: {body}"
+        body_str.contains("stopped-node") || body_str.contains("standalone"),
+        "expected error to mention stopped-node/standalone, got: {body}"
     );
 }
 

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-13T07:31:58Z:34d09b2789e364ee4c0781a220b3e7face4740f83232d077051cb70dc3cca22b:YpOJvriZkG8RdE1mx5PqQnGV+b+6sqoDOPmPQgyQ6ayibnsyPy9Bl9TMHmcGyd/p6nEA6skl7vgN0K+EpSEJAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-17T23:05:42Z:371adc3b07a765f66c2ef9cd20001fc6698e953e95dddf39a6c75f82a5cbf825:5OSdTqLM3e6VlcMuwXB9g7D83S3r6QgwBaLP2MBpLocyljojRyGAvTSJDmLMPzf8+9O4Hp8KwyzNEy9R5JxqBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [content, pin]
 description: Observe current project bytes and atomically complete signed external-content pins
 help:
@@ -21,4 +21,4 @@ parameter_binding:
 dispatch:
   kind: execute_ref
   execute: service:content/pin
-  availability: offline
+  availability: both

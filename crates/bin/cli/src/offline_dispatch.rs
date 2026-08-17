@@ -1,7 +1,7 @@
-//! Engine-backed offline command dispatch.
+//! Engine-backed local and stopped-node command dispatch.
 //!
-//! Commands whose service descriptor declares `availability: offline` (or `both`)
-//! run locally without a daemon. Client and tool descriptors are also dispatchable
+//! Commands whose service descriptor declares `availability: local`,
+//! `stopped_node`, or `both` can run without a daemon. Client and tool descriptors are also dispatchable
 //! offline when the command's `execute` field targets them directly.
 //!
 //! The engine resolves items (tools, services, clients) through the same pipeline
@@ -21,9 +21,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::engine::EffectiveItem;
-use ryeos_runtime::{
-    CommandAvailability, CommandDef, CommandDispatch, CommandOrigin, CommandRegistry,
-};
+use ryeos_runtime::{CommandAvailability, CommandDef, CommandDispatch, CommandRegistry};
 use serde_json::Value;
 
 use crate::error::CliError;
@@ -38,35 +36,6 @@ pub enum OfflineDispatchOutcome {
 enum ServiceDispatchOutcome {
     Handled(Option<OfflineDispatchOutcome>),
     Standalone { service_ref: String, params: Value },
-}
-
-/// CLI-owned proof that the operator selected an exact core authoring command.
-///
-/// Command descriptors grant no execution authority. This fact is minted only
-/// after the verified node snapshot proves that the matched command record is
-/// the exact record installed by the registered core bundle. It is then
-/// narrowed across the expected service edge (when present) and consumed by
-/// the matching root-only core tool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OperatorAuthoringAdmission {
-    Sign,
-    ContentPin,
-}
-
-impl OperatorAuthoringAdmission {
-    fn expected_tool_ref(self) -> &'static str {
-        match self {
-            Self::Sign => "tool:ryeos/core/sign",
-            Self::ContentPin => "tool:ryeos/core/content-pin",
-        }
-    }
-
-    fn expected_service_ref(self) -> Option<&'static str> {
-        match self {
-            Self::Sign => None,
-            Self::ContentPin => Some("service:content/pin"),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -146,9 +115,11 @@ pub async fn try_offline_dispatch(
     if *availability == CommandAvailability::Daemon {
         return Ok(None);
     }
-    let operator_authoring =
-        operator_authoring_command_admission(&matched.command, &snapshot.bundles)?;
-
+    if *availability == CommandAvailability::Both
+        && prefer_live_daemon_for_dual_mode(app_root).await?
+    {
+        return Ok(None);
+    }
     // 3. Parse the command's execute ref for the engine. Kind semantics stay in
     //    the engine; dispatch below is based on composed fields.
     let execute_ref = execute;
@@ -185,7 +156,7 @@ pub async fn try_offline_dispatch(
         .map(Some);
     }
 
-    if has_service_offline_dispatch(&item.composed_value) {
+    if has_service_local_dispatch(&item.composed_value) {
         let service = dispatch_service(
             &engine,
             item,
@@ -194,7 +165,6 @@ pub async fn try_offline_dispatch(
             app_root,
             project_path,
             &isolation,
-            operator_authoring,
         )?;
         return match service {
             ServiceDispatchOutcome::Handled(outcome) => Ok(outcome),
@@ -226,7 +196,6 @@ pub async fn try_offline_dispatch(
             app_root,
             project_path,
             &isolation,
-            operator_authoring,
         )
         .map(|result| result.map(OfflineDispatchOutcome::Json));
     }
@@ -306,14 +275,14 @@ fn has_launch_binary_ref(value: &Value) -> bool {
         .is_some()
 }
 
-fn has_service_offline_dispatch(value: &Value) -> bool {
+fn has_service_local_dispatch(value: &Value) -> bool {
     value
-        .get("offline_execute")
+        .get("local_execute")
         .and_then(|v| v.as_str())
         .is_some()
         || matches!(
             value.get("availability").and_then(|v| v.as_str()),
-            Some("offline" | "both")
+            Some("local" | "stopped_node" | "both")
         )
 }
 
@@ -546,7 +515,6 @@ fn exec_tool(
     app_root: &Path,
     project_path: &str,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
-    operator_authoring_admission: Option<OperatorAuthoringAdmission>,
 ) -> Result<Option<Value>, CliError> {
     // Check executor_id
     let executor_id = item
@@ -709,101 +677,55 @@ fn exec_tool(
         },
         verified_command.clone(),
     ];
-    let operator_authoring =
-        operator_authoring_authority(operator_authoring_admission, item, tool_ref_str)?;
-    #[cfg(target_os = "linux")]
-    let operator_command = {
-        use std::os::fd::AsRawFd as _;
-        format!("/proc/self/fd/{}", captured.handle.as_raw_fd())
-    };
-    #[cfg(not(target_os = "linux"))]
-    let operator_command = captured
-        .identity
-        .absolute_path
-        .to_string_lossy()
-        .into_owned();
     let base_request = lillux::SubprocessRequest {
-        cmd: if operator_authoring {
-            operator_command
-        } else {
-            captured
-                .identity
-                .absolute_path
-                .to_string_lossy()
-                .into_owned()
-        },
+        cmd: captured
+            .identity
+            .absolute_path
+            .to_string_lossy()
+            .into_owned(),
         argv0: None,
         args,
         cwd,
         envs,
         stdin_data,
         timeout: timeout as f64,
-        limits: operator_authoring.then_some(lillux::SubprocessLimits {
-            max_open_files: Some(256),
-            max_address_space_bytes: Some(2 * 1024 * 1024 * 1024),
-            max_cpu_seconds: Some(timeout.saturating_add(5)),
-            // RLIMIT_NPROC is charged against every process owned by the
-            // invoking uid, not against this subprocess tree. Installing a
-            // small value here prevents the trusted core tool from spawning
-            // its verified parser handlers on an otherwise busy workstation.
-            // The exact command/service/tool admission and sealed executable
-            // boundary make this trusted standalone path finite; timeout and
-            // process-group teardown contain its descendants.
-            max_processes: None,
-            max_stdout_bytes: Some(lillux::DEFAULT_MAX_CAPTURE_BYTES),
-            max_stderr_bytes: Some(lillux::DEFAULT_MAX_CAPTURE_BYTES),
-        }),
-        inherited_fds: if operator_authoring {
-            vec![captured.handle.clone()]
-        } else {
-            Vec::new()
-        },
+        limits: None,
+        inherited_fds: Vec::new(),
         supervised_status: None,
     };
-    // Operator authoring is a deliberately narrow trusted standalone
-    // boundary. It is available only to an exact trusted-bundle tool whose
-    // root is the node-registered core bundle. Item-authored configuration
-    // cannot grant it. The executable itself is retained as a sealed verified
-    // descriptor and bounded by Lillux. Ordinary offline subprocesses
-    // remain subject to the selected isolation backend and never receive an
-    // app-root secret mount.
-    let mut request = if operator_authoring {
-        base_request
-    } else {
-        isolation
-            .apply(
-                base_request,
-                ryeos_engine::isolation::IsolationLaunchContext {
-                    project_path: Path::new(project_path),
-                    project_authority: project_authority.project,
-                    filesystem_authority_ceiling:
-                        ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
-                    network_authority_ceiling:
-                        ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
-                    live_access: project_authority.live_access.as_ref(),
-                    state_root: None,
-                    checkpoint_dir: None,
-                    daemon_socket_path: None,
-                    bundle_roots: std::slice::from_ref(bundle_root),
-                    node_trusted_keys_dir: Some(
-                        &app_root
-                            .join(ryeos_engine::AI_DIR)
-                            .join("config/keys/trusted"),
-                    ),
-                    verified_code: &isolation_verified_code,
-                    verified_command: Some(&verified_command),
-                    // Offline dispatch admits no launch capsule, so there is no
-                    // realization to bind; declaring kinds refuse at finalization.
-                    external_read_only_mounts: &[],
-                    target_channel: None,
-                    item_ref: tool_ref_str,
-                    thread_id: "offline-cli",
-                },
-            )
-            .map_err(|error| CliError::Local {
-                detail: format!("offline tool isolation refused execution: {error}"),
-            })?
-    };
+    let mut request = isolation
+        .apply(
+            base_request,
+            ryeos_engine::isolation::IsolationLaunchContext {
+                project_path: Path::new(project_path),
+                project_authority: project_authority.project,
+                filesystem_authority_ceiling:
+                    ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                network_authority_ceiling:
+                    ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
+                live_access: project_authority.live_access.as_ref(),
+                state_root: None,
+                checkpoint_dir: None,
+                daemon_socket_path: None,
+                bundle_roots: std::slice::from_ref(bundle_root),
+                node_trusted_keys_dir: Some(
+                    &app_root
+                        .join(ryeos_engine::AI_DIR)
+                        .join("config/keys/trusted"),
+                ),
+                verified_code: &isolation_verified_code,
+                verified_command: Some(&verified_command),
+                // Offline dispatch admits no launch capsule, so there is no
+                // realization to bind; declaring kinds refuse at finalization.
+                external_read_only_mounts: &[],
+                target_channel: None,
+                item_ref: tool_ref_str,
+                thread_id: "offline-cli",
+            },
+        )
+        .map_err(|error| CliError::Local {
+            detail: format!("offline tool isolation refused execution: {error}"),
+        })?;
 
     if inherit_stdio {
         // Terminal streams are not retained by RyeOS, so captured-output byte
@@ -843,121 +765,6 @@ fn exec_tool(
     ))
 }
 
-fn operator_authoring_command_admission(
-    command: &CommandDef,
-    bundles: &[ryeos_app::node_config::BundleRecord],
-) -> Result<Option<OperatorAuthoringAdmission>, CliError> {
-    let (admission, expected_command_path, expected_execute) = match command.name.as_str() {
-        "sign" => (
-            OperatorAuthoringAdmission::Sign,
-            ".ai/node/commands/sign.yaml",
-            "tool:ryeos/core/sign",
-        ),
-        "content-pin" => (
-            OperatorAuthoringAdmission::ContentPin,
-            ".ai/node/commands/content-pin.yaml",
-            "service:content/pin",
-        ),
-        _ => return Ok(None),
-    };
-    let CommandDispatch::ExecuteRef { execute, .. } = &command.dispatch else {
-        return Ok(None);
-    };
-    if execute != expected_execute {
-        return Ok(None);
-    }
-    let core_roots = bundles
-        .iter()
-        .filter(|bundle| bundle.name == "core")
-        .collect::<Vec<_>>();
-    let [core] = core_roots.as_slice() else {
-        return Err(CliError::Local {
-            detail: "operator authoring refused: registered core bundle authority is not unique"
-                .to_string(),
-        });
-    };
-    let expected_source = core.path.join(expected_command_path);
-    if command.provenance.origin != CommandOrigin::InstalledBundle
-        || command.source_file != expected_source
-    {
-        return Ok(None);
-    }
-    Ok(Some(admission))
-}
-
-fn exact_root_only_core_item(item: &EffectiveItem, expected_ref: &str) -> bool {
-    item.requested_ref == expected_ref
-        && item.canonical_ref == expected_ref
-        && item.trust_class == ryeos_engine::resolution::TrustClass::TrustedBundle
-        && item.root_trust_class == ryeos_engine::resolution::TrustClass::TrustedBundle
-        && item.provenance.ancestors.is_empty()
-        && item.provenance.root.requested_id == expected_ref
-        && item.provenance.root.resolved_ref == expected_ref
-        && item.provenance.root.alias_resolution.is_none()
-        && item.provenance.root.source_space == ryeos_engine::contracts::ItemSpace::Bundle
-        && matches!(
-            &item.provenance.root.source_root,
-            ryeos_engine::contracts::ItemSourceRoot::Bundle { name } if name == "core"
-        )
-}
-
-fn operator_authoring_authority(
-    admission: Option<OperatorAuthoringAdmission>,
-    item: &EffectiveItem,
-    tool_ref: &str,
-) -> Result<bool, CliError> {
-    let exact_authoring_ref = matches!(
-        tool_ref,
-        "tool:ryeos/core/sign" | "tool:ryeos/core/content-pin"
-    );
-    let Some(admission) = admission else {
-        if exact_authoring_ref {
-            return Err(CliError::Local {
-                detail: format!(
-                    "offline tool `{tool_ref}` refused operator authoring: the exact core command chain was not admitted"
-                ),
-            });
-        }
-        return Ok(false);
-    };
-    let expected_ref = admission.expected_tool_ref();
-    if tool_ref != expected_ref || !exact_root_only_core_item(item, expected_ref) {
-        return Err(CliError::Local {
-            detail: format!(
-                "offline tool `{tool_ref}` does not match the admitted exact core authoring chain ending at `{expected_ref}`"
-            ),
-        });
-    }
-    Ok(true)
-}
-
-fn narrow_operator_authoring_service(
-    admission: Option<OperatorAuthoringAdmission>,
-    item: &EffectiveItem,
-    tool_ref: &str,
-) -> Result<Option<OperatorAuthoringAdmission>, CliError> {
-    let Some(admission) = admission else {
-        return Ok(None);
-    };
-    let expected_service = admission
-        .expected_service_ref()
-        .ok_or_else(|| CliError::Local {
-            detail: "direct core authoring command was unexpectedly routed through a service"
-                .to_string(),
-        })?;
-    if !exact_root_only_core_item(item, expected_service)
-        || tool_ref != admission.expected_tool_ref()
-    {
-        return Err(CliError::Local {
-            detail: format!(
-                "offline service '{}' does not match the admitted exact core authoring chain",
-                item.canonical_ref
-            ),
-        });
-    }
-    Ok(Some(admission))
-}
-
 // ---------------------------------------------------------------------------
 // Service dispatch
 // ---------------------------------------------------------------------------
@@ -970,7 +777,6 @@ fn dispatch_service(
     app_root: &Path,
     project_path: &str,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
-    operator_authoring: Option<OperatorAuthoringAdmission>,
 ) -> Result<ServiceDispatchOutcome, CliError> {
     // Check availability
     let availability = item
@@ -979,7 +785,7 @@ fn dispatch_service(
         .and_then(|v| v.as_str())
         .unwrap_or("daemon_only");
 
-    let is_offline = availability == "offline" || availability == "both";
+    let is_offline = matches!(availability, "local" | "stopped_node" | "both");
     if !is_offline {
         // A descriptor that names an offline tool while staying daemon-only
         // is contradicting itself; routing to the daemon here would silently
@@ -987,15 +793,15 @@ fn dispatch_service(
         // (An explicit null is "absent", matching the resolution below.)
         if item
             .composed_value
-            .get("offline_execute")
+            .get("local_execute")
             .and_then(Value::as_str)
             .is_some()
         {
             return Err(CliError::Local {
                 detail: format!(
-                    "service '{}' declares offline_execute but availability is \
-                     '{availability}'; set availability to offline|both or drop \
-                     offline_execute",
+                    "service '{}' declares local_execute but availability is \
+                     '{availability}'; set availability to local or drop \
+                     local_execute",
                     item.canonical_ref
                 ),
             });
@@ -1004,9 +810,9 @@ fn dispatch_service(
     }
 
     // Resolve offline tool ref
-    let offline_execute = item
+    let local_execute = item
         .composed_value
-        .get("offline_execute")
+        .get("local_execute")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .or_else(|| match &command.dispatch {
@@ -1036,23 +842,12 @@ fn dispatch_service(
         obj.retain(|key, _| !key.starts_with('_'));
     }
 
-    let Some(tool_ref) = offline_execute else {
-        if operator_authoring.is_some() {
-            return Err(CliError::Local {
-                detail: format!(
-                    "offline service '{}' omitted the tool required by the admitted core authoring chain",
-                    item.canonical_ref
-                ),
-            });
-        }
+    let Some(tool_ref) = local_execute else {
         return Ok(ServiceDispatchOutcome::Standalone {
             service_ref: item.canonical_ref,
             params,
         });
     };
-
-    let operator_authoring =
-        narrow_operator_authoring_service(operator_authoring, &item, &tool_ref)?;
 
     // Dispatch tool
     let canonical = CanonicalRef::parse(&tool_ref).map_err(|e| CliError::Local {
@@ -1067,7 +862,6 @@ fn dispatch_service(
         app_root,
         project_path,
         isolation,
-        operator_authoring,
     )
     .map(|result| ServiceDispatchOutcome::Handled(result.map(OfflineDispatchOutcome::Json)))
 }
@@ -1133,7 +927,50 @@ fn ensure_daemon_stopped_for_standalone(app_root: &Path) -> Result<(), CliError>
         }
         Err(error) => Err(CliError::Local {
             detail: format!(
-                "this command is offline-only and the daemon appears to be running. Run `ryeos stop`, then retry. ({error:#})"
+                "this command requires stopped-node authority and the daemon appears to be running. Run `ryeos stop`, then retry. ({error:#})"
+            ),
+        }),
+    }
+}
+
+/// Dual-mode commands use the live daemon whenever it owns this node, and
+/// fall back to the exact standalone service only when lifecycle state proves
+/// the node is stopped. Starting/unresponsive state is deliberately routed to
+/// normal daemon preflight so it produces the authoritative wait/refusal
+/// instead of racing a second state owner.
+async fn prefer_live_daemon_for_dual_mode(app_root: &Path) -> Result<bool, CliError> {
+    if std::env::var_os("RYEOSD_URL").is_some() {
+        return Ok(true);
+    }
+    let env =
+        ryeos_node::LocalLifecycleEnv::load(Some(app_root.to_path_buf())).map_err(|error| {
+            CliError::Local {
+                detail: format!("resolve local node lifecycle state: {error:#}"),
+            }
+        })?;
+    let controller = ryeos_node::LifecycleController::from_env(env);
+    match controller.status().await.map_err(|error| CliError::Local {
+        detail: format!("read local node lifecycle state: {error:#}"),
+    })? {
+        ryeos_node::LifecycleStatus::Running { .. }
+        | ryeos_node::LifecycleStatus::Starting { .. }
+        | ryeos_node::LifecycleStatus::Unresponsive { .. } => Ok(true),
+        ryeos_node::LifecycleStatus::Stopped { .. }
+        | ryeos_node::LifecycleStatus::NotInitialized { .. } => Ok(false),
+        ryeos_node::LifecycleStatus::Stale { diagnostics, .. } => Err(CliError::Local {
+            detail: format!(
+                "dual-mode command refused because node lifecycle ownership is stale: {}",
+                diagnostics.message
+            ),
+        }),
+        ryeos_node::LifecycleStatus::Failed { startup, .. } => Err(CliError::Local {
+            detail: format!(
+                "dual-mode command refused because node startup failed during {}: {}",
+                startup.phase.as_str(),
+                startup
+                    .error
+                    .as_deref()
+                    .unwrap_or("unknown startup failure")
             ),
         }),
     }
@@ -1204,158 +1041,6 @@ mod tests {
     use super::*;
     use lillux::crypto::{DecodePrivateKey, EncodePrivateKey, SigningKey};
     use rand::rngs::OsRng;
-
-    fn bundle_record(name: &str, path: &Path) -> ryeos_app::node_config::BundleRecord {
-        ryeos_app::node_config::BundleRecord {
-            name: name.to_string(),
-            path: path.to_path_buf(),
-            command_registration_caps: Vec::new(),
-            source_file: path.join("registration.yaml"),
-        }
-    }
-
-    fn command_record(
-        name: &str,
-        source_file: PathBuf,
-        execute: &str,
-        origin: CommandOrigin,
-    ) -> CommandDef {
-        CommandDef {
-            name: name.to_string(),
-            tokens: vec![name.to_string()],
-            description: "test".to_string(),
-            aliases: Vec::new(),
-            help: None,
-            arguments: Vec::new(),
-            forms: Vec::new(),
-            sensitive_fields: Vec::new(),
-            defaults: Default::default(),
-            parameter_binding: None,
-            control_flags: Vec::new(),
-            project: None,
-            dispatch: CommandDispatch::ExecuteRef {
-                execute: execute.to_string(),
-                availability: CommandAvailability::Offline,
-            },
-            source_file,
-            provenance: ryeos_runtime::CommandProvenance {
-                origin,
-                command_registration_caps: Vec::new(),
-            },
-        }
-    }
-
-    fn exact_core_item(item_ref: &str) -> EffectiveItem {
-        use ryeos_engine::contracts::{ItemSourceRoot, ItemSpace};
-        use ryeos_engine::resolution::{
-            ResolutionProvenance, ResolutionProvenanceNode, ResolutionStepName, TrustClass,
-        };
-
-        EffectiveItem {
-            requested_ref: item_ref.to_string(),
-            canonical_ref: item_ref.to_string(),
-            kind: item_ref.split(':').next().unwrap().to_string(),
-            trusted: true,
-            trust_class: TrustClass::TrustedBundle,
-            root_trust_class: TrustClass::TrustedBundle,
-            source: ryeos_engine::engine::EffectiveItemSource {
-                path: PathBuf::from("/bundle/core/item.yaml"),
-                content_hash: "a".repeat(64),
-                bundle_root: Some(PathBuf::from("/bundle/core")),
-            },
-            provenance: ResolutionProvenance {
-                root: ResolutionProvenanceNode {
-                    requested_id: item_ref.to_string(),
-                    resolved_ref: item_ref.to_string(),
-                    source_path: PathBuf::from("/bundle/core/item.yaml"),
-                    source_space: ItemSpace::Bundle,
-                    source_root: ItemSourceRoot::Bundle {
-                        name: "core".to_string(),
-                    },
-                    trust_class: TrustClass::TrustedBundle,
-                    signer_fingerprint: Some("publisher".to_string()),
-                    alias_resolution: None,
-                    added_by: ResolutionStepName::PipelineInit,
-                    source_content_digest: "b".repeat(64),
-                    raw_content_digest: "c".repeat(64),
-                },
-                ancestors: Vec::new(),
-                references: Vec::new(),
-                referenced_items: Vec::new(),
-            },
-            composed_value: Value::Null,
-            derived: HashMap::new(),
-            policy_facts: HashMap::new(),
-            diagnostics: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn operator_authoring_requires_the_exact_core_command_chain() {
-        let core = PathBuf::from("/bundle/core");
-        let bundles = vec![bundle_record("core", &core)];
-        let sign = command_record(
-            "sign",
-            core.join(".ai/node/commands/sign.yaml"),
-            "tool:ryeos/core/sign",
-            CommandOrigin::InstalledBundle,
-        );
-        let third_party = command_record(
-            "sign",
-            PathBuf::from("/bundle/third-party/.ai/node/commands/sign.yaml"),
-            "tool:ryeos/core/sign",
-            CommandOrigin::InstalledBundle,
-        );
-
-        let admission = operator_authoring_command_admission(&sign, &bundles).unwrap();
-        assert_eq!(admission, Some(OperatorAuthoringAdmission::Sign));
-        assert!(
-            operator_authoring_authority(
-                admission,
-                &exact_core_item("tool:ryeos/core/sign"),
-                "tool:ryeos/core/sign",
-            )
-            .unwrap()
-        );
-
-        let forged = operator_authoring_command_admission(&third_party, &bundles).unwrap();
-        assert_eq!(forged, None);
-        assert!(
-            operator_authoring_authority(
-                forged,
-                &exact_core_item("tool:ryeos/core/sign"),
-                "tool:ryeos/core/sign",
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn operator_authoring_refuses_service_indirection_outside_exact_core_chain() {
-        let mut third_party_service = exact_core_item("service:content/pin");
-        third_party_service.provenance.root.source_root =
-            ryeos_engine::contracts::ItemSourceRoot::Bundle {
-                name: "third-party".to_string(),
-            };
-
-        assert!(
-            narrow_operator_authoring_service(
-                Some(OperatorAuthoringAdmission::ContentPin),
-                &third_party_service,
-                "tool:ryeos/core/content-pin",
-            )
-            .is_err()
-        );
-        assert_eq!(
-            narrow_operator_authoring_service(
-                Some(OperatorAuthoringAdmission::ContentPin),
-                &exact_core_item("service:content/pin"),
-                "tool:ryeos/core/content-pin",
-            )
-            .unwrap(),
-            Some(OperatorAuthoringAdmission::ContentPin)
-        );
-    }
 
     #[test]
     fn inherited_exec_rejects_invalid_limits_before_spawn() {
@@ -1559,7 +1244,7 @@ mod tests {
                 );
             }
             this.write_echo_bin();
-            this.write_standard_descriptors(Some("offline_execute: tool:custom/echo\n"));
+            this.write_standard_descriptors(Some("local_execute: tool:custom/echo\n"));
             this
         }
 
@@ -1587,7 +1272,7 @@ mod tests {
             }
         }
 
-        fn write_standard_descriptors(&self, offline_execute_line: Option<&str>) {
+        fn write_standard_descriptors(&self, local_execute_line: Option<&str>) {
             self.write_signed(
                 &self
                     .bundle
@@ -1597,7 +1282,7 @@ mod tests {
                     .join("custom.yaml"),
                 "tokens: [\"custom\"]\ndescription: Custom offline command\nforms:\n  - slots:\n      - field: name\ndispatch:\n  kind: execute_ref\n  execute: service:custom\n",
             );
-            let offline_execute_line = offline_execute_line.unwrap_or("");
+            let local_execute_line = local_execute_line.unwrap_or("");
             self.write_signed(
                 &self
                     .bundle
@@ -1605,7 +1290,7 @@ mod tests {
                     .join("services")
                     .join("custom.yaml"),
                 &format!(
-                    "kind: service\nendpoint: custom\navailability: offline\n{offline_execute_line}schema:\n  name: string?\n  project_path: string?\n"
+                    "kind: service\nendpoint: custom\navailability: local\n{local_execute_line}schema:\n  name: string?\n  project_path: string?\n"
                 ),
             );
             self.write_signed(

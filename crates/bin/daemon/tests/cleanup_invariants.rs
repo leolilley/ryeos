@@ -229,13 +229,13 @@ fn gate_04_availability_consistency() {
     );
 }
 
-// ── Gate 5: OfflineOnly services list ────────────────────────────────
+// ── Gate 5: stopped-node services list ────────────────────────────────
 
 #[test]
-fn gate_05_offline_only_services_correct() {
-    let offline_only: Vec<&str> = descriptors()
+fn gate_05_stopped_node_services_correct() {
+    let stopped_node: Vec<&str> = descriptors()
         .iter()
-        .filter(|d| d.availability == ServiceAvailability::OfflineOnly)
+        .filter(|d| d.availability == ServiceAvailability::StoppedNodeOnly)
         .map(|d| d.service_ref)
         .collect();
 
@@ -246,9 +246,9 @@ fn gate_05_offline_only_services_correct() {
         "service:projection/rebuild",
     ];
     assert_eq!(
-        offline_only.as_slice(),
+        stopped_node.as_slice(),
         &expected,
-        "OfflineOnly services mismatch"
+        "stopped-node services mismatch"
     );
 }
 

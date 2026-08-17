@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:10Z:fc1c7d90fa8ac809a6352469ee80c5e4e2a4755f4f7f2044c237840c71e86f17:9kEgustDzNM2irLfuiAbQ0CzOb1AoCeTZC5qT5Ahzem4h0c/t+/pFzYRaKb9BiLLIZXP08O5PttsYLFM1rivAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-17T23:05:44Z:e3571e20332919f8ff0bc9a58c948f9db7eec5b4302012ee0e007ebaf1650402:gzAzXQP70m6wDrA1AH1+Tm+q3nQX59Pkg78FfRMoHaME7mbpQLjgIcGn6N1UpPMTfV0tYZyWyd97zLga3LWNBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - status
 description: Show local project snapshot status
@@ -14,4 +14,4 @@ project:
 dispatch:
   kind: execute_ref
   execute: tool:core/snapshot-status
-  availability: offline
+  availability: local

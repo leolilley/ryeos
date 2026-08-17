@@ -335,8 +335,8 @@ fn gate_service_count_matches_expected() {
     let services = service_refs();
     assert_eq!(
         services.len(),
-        92,
-        "service descriptor table count drifted from expected 92"
+        98,
+        "service descriptor table count drifted from expected 98"
     );
 }
 

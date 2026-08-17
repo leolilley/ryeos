@@ -1,4 +1,4 @@
-//! E2E for OfflineOnly services: bundle/install, bundle/remove, and projection
+//! E2E for stopped-node services: bundle/install, bundle/remove, and projection
 //! maintenance.
 //! These services only work via `ryeosd run-service ...` (daemon must be
 //! down). We assert each one actually performs its data work on disk.

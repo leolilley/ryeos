@@ -2490,9 +2490,9 @@ mod kind_contract_regressions {
                 ("version", ft_string()),
                 (
                     "availability",
-                    ft_string_enum(&["both", "daemon_only", "offline"]),
+                    ft_string_enum(&["both", "daemon_only", "local", "stopped_node"]),
                 ),
-                ("offline_execute", ft_string()),
+                ("local_execute", ft_string()),
                 ("required_caps", ft_sequence_of(ft_string())),
                 ("description", ft_string()),
                 (
@@ -2510,7 +2510,7 @@ mod kind_contract_regressions {
             "endpoint": "verify",
             "description": "Verify signed items",
             "required_caps": ["ryeos.execute.service.verify"],
-            "availability": "offline"
+            "availability": "local"
         });
         let report = validate(&service_shape(), &value);
         assert!(report.is_ok(), "valid service should pass: {report}");

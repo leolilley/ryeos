@@ -396,7 +396,8 @@ pub enum CommandAvailability {
     #[default]
     Auto,
     Daemon,
-    Offline,
+    Local,
+    StoppedNode,
     Both,
 }
 

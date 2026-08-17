@@ -40,7 +40,7 @@ fn with_execution_schema_cutover_hint(error: anyhow::Error) -> anyhow::Error {
     {
         error.context(format!(
             "authoritative execution history predates the exact current contract; RyeOS will not reinterpret or rewrite it in place. Stop the daemon and run `{}` to retire that history epoch, then restart",
-            crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND
+            crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND
         ))
     } else {
         error
@@ -3199,7 +3199,7 @@ fn ensure_current_external_content_bindings(state: &StateDb) -> Result<()> {
     let current_epoch = ryeos_state::objects::EXTERNAL_CONTENT_BINDING_SCHEMA_EPOCH;
     if epoch != Some(current_epoch) {
         bail!(
-            "external-content binding epoch is {}, expected {current_epoch}; stop the daemon and run `ryeos node external-content-reset --dry-run`, then `ryeos node external-content-reset --confirm-discard-external-content-bindings`",
+            "external-content binding epoch is {}, expected {current_epoch}; stop the daemon and run `ryeos node reset external-content-bindings --dry-run`, then `ryeos node reset external-content-bindings --confirm`",
             epoch.map_or_else(|| "absent".to_owned(), |value| value.to_string())
         );
     }
@@ -3229,7 +3229,7 @@ fn ensure_current_external_content_bindings(state: &StateDb) -> Result<()> {
         };
         if manifest.get("schema").and_then(serde_json::Value::as_str) != Some(expected_schema) {
             bail!(
-                "external-content binding state predates the current manifest schema; stop the daemon and run `ryeos node external-content-reset --dry-run`, then `ryeos node external-content-reset --confirm-discard-external-content-bindings`"
+                "external-content binding state predates the current manifest schema; stop the daemon and run `ryeos node reset external-content-bindings --dry-run`, then `ryeos node reset external-content-bindings --confirm`"
             );
         }
     }
@@ -11280,7 +11280,9 @@ mod tests {
         .context("decode current snapshot");
         let error = with_execution_schema_cutover_hint(mismatch);
         let rendered = format!("{error:#}");
-        assert!(rendered.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(
+            rendered.contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+        );
         assert!(
             error
                 .chain()
@@ -11289,14 +11291,16 @@ mod tests {
 
         let unrelated = with_execution_schema_cutover_hint(anyhow!("untrusted signed head"));
         assert!(
-            !format!("{unrelated:#}").contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+            !format!("{unrelated:#}")
+                .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
         );
 
         let newer = with_execution_schema_cutover_hint(anyhow::Error::new(
             ryeos_state::IncompatibleCurrentObjectSchema::new("thread snapshot", 9, 8),
         ));
         assert!(
-            !format!("{newer:#}").contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+            !format!("{newer:#}")
+                .contains(crate::execution_history_reset::EXECUTION_SCHEMA_CUTOVER_COMMAND)
         );
     }
 
@@ -11380,7 +11384,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("ryeos node external-content-reset")
+                .contains("ryeos node reset external-content-bindings")
         );
     }
 

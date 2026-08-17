@@ -208,6 +208,7 @@ impl<'a> EffectiveProgramProjectionSession<'a> {
                 "effective-program projection refuses kind `{kind}` because it declares launch-only augmentation"
             )));
         }
+        validate_external_content_contract(self.engine, &kind, &resolution)?;
         if resolution
             .composed
             .composed
@@ -418,6 +419,7 @@ fn capture_and_finalize_fresh_effective_program_once(
     ),
     DispatchError,
 > {
+    validate_external_content_contract(engine, kind, &resolution)?;
     let config_roots = engine.launch_config_roots(roots);
     let snapshots = super::launch_preparation::load_launch_config_set_under_current_authority(
         &ryeos_engine::hooks::hook_source_declarations(),
@@ -476,19 +478,7 @@ pub(crate) fn validate_admitted_effective_program(
     Option<ryeos_app::external_content_admission::ExternalContentValidationPreview>,
     DispatchError,
 > {
-    let external_contract = engine
-        .kinds
-        .get(kind)
-        .and_then(|schema| schema.execution.as_ref())
-        .and_then(|execution| execution.external_content.as_ref());
-    let declarer = ryeos_engine::external_content::declaring_authority(&resolution)
-        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
-    ryeos_engine::external_content::declarations_from_composed(
-        &resolution.composed.composed,
-        external_contract,
-        declarer,
-    )
-    .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+    validate_external_content_contract(engine, kind, &resolution)?;
 
     let config_roots = engine.launch_config_roots(roots);
     let project = materialization
@@ -562,6 +552,41 @@ pub(crate) fn validate_admitted_effective_program(
                 )));
             }
         }
+    }
+}
+
+/// Validate the kind-owned external-content declaration before either static
+/// preview or launch capture. The declaration is authored input, so a strict
+/// contract rejection is a caller error; failure to derive its declaring
+/// authority remains an internal resolution invariant.
+fn validate_external_content_contract(
+    engine: &ryeos_engine::engine::Engine,
+    kind: &str,
+    resolution: &ResolutionOutput,
+) -> Result<(), DispatchError> {
+    let external_contract = engine
+        .kinds
+        .get(kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .and_then(|execution| execution.external_content.as_ref());
+    let declarer = ryeos_engine::external_content::declaring_authority(&resolution)
+        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+    ryeos_engine::external_content::declarations_from_composed(
+        &resolution.composed.composed,
+        external_contract,
+        declarer,
+    )
+    .map_err(invalid_external_content)?;
+    Ok(())
+}
+
+fn invalid_external_content(error: anyhow::Error) -> DispatchError {
+    DispatchError::LaunchPreparationFailed {
+        code: "invalid_external_content".to_string(),
+        message: error.to_string(),
+        classification: "caller".to_string(),
+        binding: None,
+        details: Box::default(),
     }
 }
 
@@ -843,6 +868,17 @@ mod tests {
     };
     use ryeos_engine::resolution::TrustClass;
     use std::collections::{BTreeMap, BTreeSet};
+
+    #[test]
+    fn authored_external_content_rejection_is_a_non_retryable_caller_error() {
+        let error = invalid_external_content(anyhow::anyhow!(
+            "pinned external content digest is not canonical"
+        ));
+        assert_eq!(error.code(), "invalid_external_content");
+        assert_eq!(error.http_status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(!error.retryable());
+        assert!(error.to_string().contains("digest is not canonical"));
+    }
 
     fn plan(action: serde_json::Value, caps: Vec<&str>) -> EffectiveHookPlan {
         let hook = HookDefinition {

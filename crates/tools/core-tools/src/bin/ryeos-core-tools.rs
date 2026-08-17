@@ -46,24 +46,6 @@ enum Cmd {
         source: String,
     },
 
-    /// Complete and sign external-content pins from current project bytes.
-    ContentPin {
-        /// Exact canonical ref of the project item to author.
-        item_ref: Option<String>,
-        /// Project root (parent of `.ai/`).
-        #[arg(long)]
-        project: Option<PathBuf>,
-        /// Select one declaration; repeat to select a subset.
-        #[arg(long = "id")]
-        ids: Vec<String>,
-        /// Select every locator-backed declaration.
-        #[arg(long)]
-        all: bool,
-        /// Permit moving an existing complete pin.
-        #[arg(long)]
-        update: bool,
-    },
-
     /// Build (re-publish) a bundle from source using the user signing key.
     ///
     /// Runs the full publish pipeline: clean derived artifacts, bootstrap-sign
@@ -492,13 +474,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             project,
             source,
         } => run_sign(item_refs, project, source, cli.stdin_json),
-        Cmd::ContentPin {
-            item_ref,
-            project,
-            ids,
-            all,
-            update,
-        } => run_content_pin(item_ref, project, ids, all, update, cli.stdin_json),
         Cmd::Build {
             bundle_source,
             registry_roots,
@@ -1548,72 +1523,6 @@ fn run_sign(
         );
     }
     Ok(())
-}
-
-fn run_content_pin(
-    item_ref: Option<String>,
-    project: Option<PathBuf>,
-    ids: Vec<String>,
-    all: bool,
-    update: bool,
-    stdin_json: bool,
-) -> anyhow::Result<()> {
-    use ryeos_core_tools::actions::content_pin::{ContentPinOptions, run_content_pin};
-
-    let params = if stdin_json {
-        if item_ref.is_some() || project.is_some() || !ids.is_empty() || all || update {
-            anyhow::bail!("--stdin-json is mutually exclusive with content-pin arguments");
-        }
-        serde_json::from_value::<StdinContentPinParams>(read_stdin_json()?)?
-    } else {
-        StdinContentPinParams {
-            item_ref: item_ref.ok_or_else(|| anyhow::anyhow!("ITEM_REF required"))?,
-            project_path: project,
-            ids,
-            id: Vec::new(),
-            all,
-            update,
-        }
-    };
-    let project = params
-        .project_path
-        .or_else(|| std::env::current_dir().ok())
-        .ok_or_else(|| anyhow::anyhow!("project path required"))?;
-    let mut selected_ids = params.ids;
-    selected_ids.extend(params.id);
-    let report = run_content_pin(
-        &params.item_ref,
-        &project,
-        &ContentPinOptions {
-            ids: selected_ids,
-            all: params.all,
-            update: params.update,
-        },
-    )?;
-    println!("{}", serde_json::to_string_pretty(&report)?);
-    Ok(())
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StdinContentPinParams {
-    item_ref: String,
-    #[serde(default)]
-    project_path: Option<PathBuf>,
-    #[serde(
-        default,
-        deserialize_with = "ryeos_runtime::scalar_or_vec::deserialize"
-    )]
-    ids: Vec<String>,
-    #[serde(
-        default,
-        deserialize_with = "ryeos_runtime::scalar_or_vec::deserialize"
-    )]
-    id: Vec<String>,
-    #[serde(default)]
-    all: bool,
-    #[serde(default)]
-    update: bool,
 }
 
 #[derive(serde::Deserialize)]

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:10Z:a87b424b3c87887ed7b213c2761de6da81a9fb87c13880595328fdf88ba2b8c9:NKIyfeN+tan16O9bKZb9esr7fpjjY7NsZ3PDfBFFhIILRt04YNTiAAizDjVblH60Mh6ZKM8ZuSPIprg/uIPRCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-17T23:05:44Z:8898150f52b37f2c6a07579d49549a5e8dd2bc8bdb0b090d1fe08ffe5eef7687:+fzPaqhm7NhH9IgxjPqP/RTDj7OcLI7pC4yjFD+GZoXkiDGGBJPNcUefDV6KjKipTIZa5PaHRhgsaw4r5TeyCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - s
 description: Cryptographically sign one or more items or item globs by canonical ref or .ai path
@@ -15,6 +15,11 @@ forms:
 - slots:
   - field: item_refs
     matcher: string
+project:
+  resolution: required
+  default: discover_upward_ai
+  bind_parameter: project_path
 dispatch:
   kind: execute_ref
-  execute: tool:ryeos/core/sign
+  execute: service:sign
+  availability: both

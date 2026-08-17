@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:35Z:4fc0c03a5bdd33cdc58625e3e574089bf8050c0ab3a66e2db60351f662fd188b:2CkACPwz3UNnNIeFAVUL4Qe48FcFBXrOsyualU7vPiy4DmaHLEz4fHKgHn3UG2CF0BsosFEEgmabCxtC6GRhAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-17T23:06:00Z:8b2370a12803437f2deca1e64480e186a2e6cc82b0dc7e7a57fa14b77dd1804e:auEYD9rrjYZO67c+IaD5erVekk3YytlE/NtX8SmixLstGBjT/GAtl2OOQcTIXEEa+byTRUNCyHWUaDT+fy39AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, remote, pushed-head, transfer, capabilities]
@@ -60,7 +60,7 @@ The authoritative matrix is in
   rules, not local ignore rules, when building a pushed manifest.
 - `remote execute` is synchronous in v1: push, execute, pull, apply.
 - `remote bundle-install` is live daemon-side installation; local
-  `bundle install/remove` remain offline-only.
+  `bundle install/remove` require stopped-node authority.
 - `remote vault-*` proxies to the target node vault. In v1 the vault is
   a node-level capability-gated store, not per-principal isolated.
 

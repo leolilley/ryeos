@@ -1,11 +1,10 @@
-# ryeos:signed:2026-08-11T02:28:18Z:7f1d3bbd68a7a24d9f08290565af03d7f228298508fe6834b3b9ea5d1ac5e1e5:NQtcROtoScafOWzvxcFXzH/2tSnvKkFvHUQE66cHaqVtxX9Zf7m8PnvTPl0MPepOf+kEKmuC3Rke1E27ZnG3Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-17T23:05:49Z:a6b47012dfecf1fe26fa245a39dae2be88bc984022019b244464c11f591149ff:i9kLNTVfGEtagaGJclQ9gNMFRGDTdqHn+mBiaYqkx8I9TgJ1noFkHP3Ki27KNH8i5nbKoDtntuyCXWOvr7NMCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: sign
-availability: offline
-offline_execute: tool:ryeos/core/sign
+availability: both
+record_thread: false
 required_caps: ["ryeos.execute.service.sign"]
 schema:
-  item_ref: string
-  project_path: string?
-  source: string?
-description: "Cryptographically sign an item by canonical ref (offline)"
+  item_refs: string[]
+  project_path: string
+description: "Cryptographically sign project items through the exact local-operator authoring transaction, using the daemon when live and the same service standalone when stopped."

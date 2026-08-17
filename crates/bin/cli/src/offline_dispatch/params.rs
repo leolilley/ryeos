@@ -277,7 +277,7 @@ mod tests {
             }),
             dispatch: CommandDispatch::ExecuteRef {
                 execute: "example:namespace/status".into(),
-                availability: CommandAvailability::Offline,
+                availability: CommandAvailability::Local,
             },
             source_file: PathBuf::new(),
             provenance: CommandProvenance::default(),

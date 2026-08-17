@@ -5,7 +5,7 @@
 //!
 //! Any bundle name is accepted — no special treatment for any name.
 //!
-//! OfflineOnly: the daemon must be stopped (engine reload not implemented).
+//! Stopped-node only: the daemon must be stopped (engine reload not implemented).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -713,7 +713,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle/install",
     endpoint: "bundle.install",
-    availability: ServiceAvailability::OfflineOnly,
+    availability: ServiceAvailability::StoppedNodeOnly,
     required_caps: &["ryeos.execute.service.bundle/install"],
     handler: |params, _ctx, state| {
         Box::pin(async move {

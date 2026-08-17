@@ -3,7 +3,9 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use ryeos_app::offline_gc::{OfflineThreadHistoryGcPhase, OfflineThreadHistoryGcProgress};
+use ryeos_app::execution_history_reset::{
+    ExecutionHistoryResetPhase, ExecutionHistoryResetProgress as ExecutionHistoryResetEvent,
+};
 use ryeos_node::{
     LifecycleProgressObserver, LifecycleStatus, StartReport, StartupPhase, StopReport,
 };
@@ -181,13 +183,13 @@ impl LifecycleProgressObserver for LifecycleProgress {
     }
 }
 
-pub struct OfflineGcProgress {
+pub struct ExecutionHistoryResetProgress {
     line: ProgressLine,
-    last_phase: Option<OfflineThreadHistoryGcPhase>,
+    last_phase: Option<ExecutionHistoryResetPhase>,
     last_rendered: Instant,
 }
 
-impl OfflineGcProgress {
+impl ExecutionHistoryResetProgress {
     pub fn new(enabled: bool, capabilities: TerminalCapabilities) -> Option<Self> {
         (enabled && capabilities.tty()).then(|| Self {
             line: ProgressLine::new(capabilities),
@@ -198,7 +200,7 @@ impl OfflineGcProgress {
         })
     }
 
-    pub fn observe(&mut self, progress: &OfflineThreadHistoryGcProgress) {
+    pub fn observe(&mut self, progress: &ExecutionHistoryResetEvent) {
         let phase_changed = self.last_phase != Some(progress.phase);
         let phase_finished = matches!(
             (progress.completed, progress.total),
@@ -210,7 +212,7 @@ impl OfflineGcProgress {
         {
             return;
         }
-        let (label, ratio) = gc_progress(progress);
+        let (label, ratio) = reset_progress(progress);
         let detail = match (progress.completed, progress.total) {
             (Some(completed), Some(total)) => Some(format!(
                 "{}/{} chain heads",
@@ -526,7 +528,7 @@ fn shutdown_progress(status: &LifecycleStatus) -> (String, Option<f64>, Option<S
 fn startup_phase(phase: StartupPhase) -> (usize, &'static str) {
     match phase {
         StartupPhase::Bootstrapping => (0, "loading verified node configuration"),
-        StartupPhase::OpeningProjection => (1, "opening thread projection"),
+        StartupPhase::OpeningProjection => (1, "verifying runtime and thread state"),
         StartupPhase::RebuildingProjection => (2, "rebuilding thread projection"),
         StartupPhase::ReplayingHeadChanges => (3, "replaying durable head changes"),
         StartupPhase::RecoveringSchedulerProjection => (4, "recovering scheduler projection"),
@@ -538,27 +540,26 @@ fn startup_phase(phase: StartupPhase) -> (usize, &'static str) {
     }
 }
 
-fn gc_progress(progress: &OfflineThreadHistoryGcProgress) -> (&'static str, Option<f64>) {
+fn reset_progress(progress: &ExecutionHistoryResetEvent) -> (&'static str, Option<f64>) {
     let within = match (progress.completed, progress.total) {
         (Some(completed), Some(total)) if total > 0 => completed as f64 / total as f64,
         (Some(_), Some(0)) => 1.0,
         _ => 0.0,
     };
     let (label, ratio) = match progress.phase {
-        OfflineThreadHistoryGcPhase::CapturingAuthority => ("capturing storage authority", 0.03),
-        OfflineThreadHistoryGcPhase::InspectingHistory => ("verifying discard set", 0.08),
-        OfflineThreadHistoryGcPhase::PublishingIntent => ("publishing recovery marker", 0.12),
-        OfflineThreadHistoryGcPhase::RetiringChainHeads => (
+        ExecutionHistoryResetPhase::CapturingAuthority => ("capturing storage authority", 0.03),
+        ExecutionHistoryResetPhase::InspectingHistory => ("verifying discard set", 0.08),
+        ExecutionHistoryResetPhase::PublishingIntent => ("publishing recovery marker", 0.12),
+        ExecutionHistoryResetPhase::RetiringChainHeads => (
             "retiring thread history",
             0.15 + within.clamp(0.0, 1.0) * 0.60,
         ),
-        OfflineThreadHistoryGcPhase::RetiringProjectHeads => ("retiring project generations", 0.77),
-        OfflineThreadHistoryGcPhase::RebuildingProjection => ("publishing empty projection", 0.78),
-        OfflineThreadHistoryGcPhase::ClearingRuntime => ("clearing execution recovery", 0.84),
-        OfflineThreadHistoryGcPhase::ClearingScheduler => ("clearing scheduler history", 0.90),
-        OfflineThreadHistoryGcPhase::Finalizing => ("committing maintenance state", 0.95),
-        OfflineThreadHistoryGcPhase::SweepingCas => ("sweeping unreachable CAS data", 0.97),
-        OfflineThreadHistoryGcPhase::Complete => ("maintenance complete", 1.0),
+        ExecutionHistoryResetPhase::RetiringProjectHeads => ("retiring project generations", 0.77),
+        ExecutionHistoryResetPhase::RebuildingProjection => ("publishing empty projection", 0.78),
+        ExecutionHistoryResetPhase::ClearingRuntime => ("clearing execution recovery", 0.84),
+        ExecutionHistoryResetPhase::ClearingScheduler => ("clearing scheduler history", 0.90),
+        ExecutionHistoryResetPhase::Finalizing => ("committing reset state", 0.95),
+        ExecutionHistoryResetPhase::Complete => ("reset complete", 1.0),
     };
     (label, Some(ratio))
 }

@@ -2377,6 +2377,7 @@ dependencies = [
  "ryeos-accounting",
  "ryeos-app",
  "ryeos-bundle",
+ "ryeos-core-tools",
  "ryeos-directive-definition",
  "ryeos-effect-contract",
  "ryeos-engine",

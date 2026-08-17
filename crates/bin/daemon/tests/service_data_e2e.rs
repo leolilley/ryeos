@@ -3,7 +3,7 @@
 //! per test (via `common::DaemonHarness`), POSTs `/execute` with real
 //! params, and asserts on the data shape returned.
 //!
-//! Companion file: `service_data_standalone_e2e.rs` covers OfflineOnly
+//! Companion file: `service_data_standalone_e2e.rs` covers stopped-node
 //! services that require `run-service` mode.
 
 mod common;
@@ -457,28 +457,7 @@ async fn tool_verify_returns_trusted_for_core_service() {
     );
 }
 
-// ── 3.16 node-sign — rejects non-system space ─────────────────────
-
-#[tokio::test(flavor = "multi_thread")]
-async fn service_node_sign_rejects_non_app_root() {
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
-
-    // node-sign only accepts system space — project space must be rejected.
-    let (status, _body) = exec(
-        &h,
-        "service:node-sign",
-        json!({"item_ref": "node:foo", "space": "project"}),
-    )
-    .await;
-    // The daemon returns 500 for internal handler errors. Assert the
-    // error message contains the expected rejection text.
-    assert!(
-        !status.is_success(),
-        "node-sign should reject project space; status={status}"
-    );
-}
-
-// ── 3.17 maintenance/gc — dry run on fresh state ───────────────────────
+// ── 3.16 maintenance/gc — dry run on fresh state ───────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
 async fn service_maintenance_gc_dry_run_returns_stats() {
@@ -584,10 +563,10 @@ async fn service_commands_submit_against_recorded_service_thread() {
     }
 }
 
-// ── 3.20 OfflineOnly services in live mode must reject ──────────────────
+// ── 3.20 stopped-node services in live mode must reject ──────────────────
 
 #[tokio::test(flavor = "multi_thread")]
-async fn service_offline_only_services_reject_in_live_mode() {
+async fn stopped_node_services_reject_in_live_mode() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     for svc in &[
         "service:projection/verify",
@@ -605,12 +584,12 @@ async fn service_offline_only_services_reject_in_live_mode() {
         let (status, body) = exec(&h, svc, params).await;
         assert!(
             !status.is_success(),
-            "{svc}: expected failure in live mode for OfflineOnly, got {status}: {body}"
+            "{svc}: expected stopped-node failure in live mode, got {status}: {body}"
         );
         let s = body.to_string().to_lowercase();
         assert!(
-            s.contains("offline") || s.contains("standalone") || s.contains("daemon"),
-            "{svc}: error must mention offline/standalone, got: {body}"
+            s.contains("stopped-node") || s.contains("standalone") || s.contains("daemon"),
+            "{svc}: error must mention stopped-node/standalone, got: {body}"
         );
     }
 }

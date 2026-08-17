@@ -80,7 +80,7 @@ pub async fn handle(
         }
         CommandDispatch::LocalHandler { .. } => {
             return Err(HandlerError::BadRequest(
-                "command is offline-only (local handler); run it via the CLI".to_string(),
+                "command is implemented by a local CLI handler; run it via the CLI".to_string(),
             ));
         }
     };

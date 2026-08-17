@@ -9,9 +9,10 @@
 //!   - `ryeos stop`   — gracefully stop the local node runtime
 //!   - `ryeos node status` — show local node lifecycle status
 //!   - `ryeos node doctor` — offline "why won't it start" checklist
-//!   - `ryeos node gc` — explicit offline recovery/GC that must work when boot fails
-//!   - `ryeos node replay-reset` — explicit clean-cut replay-index activation
-//!   - `ryeos node external-content-reset` — retire predecessor realization bindings
+//!   - `ryeos node reset execution-history` — explicit offline epoch retirement
+//!   - `ryeos node reset replay-indexes` — explicit clean-cut replay activation
+//!   - `ryeos node reset external-content-bindings` — retire realization bindings
+//!   - `ryeos node reset authorization` — retire grants and restore the operator
 //!   - `ryeos node policy-apply` — validate and node-sign an operator-authored policy
 //!   - `ryeos node isolation-apply` — validate and install the fixed isolation policy
 //!
@@ -81,22 +82,22 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "lifecycle",
     },
     LocalCommandDescriptor {
-        tokens: &["node", "gc"],
-        summary: "Run explicit offline node garbage collection",
+        tokens: &["node", "reset", "execution-history"],
+        summary: "Retire the local execution-history epoch",
         category: "maintenance",
     },
     LocalCommandDescriptor {
-        tokens: &["node", "auth-reset"],
+        tokens: &["node", "reset", "authorization"],
         summary: "Discard grants and recreate the local operator authorization",
         category: "maintenance",
     },
     LocalCommandDescriptor {
-        tokens: &["node", "replay-reset"],
+        tokens: &["node", "reset", "replay-indexes"],
         summary: "Discard predecessor graph/provider replay indexes",
         category: "maintenance",
     },
     LocalCommandDescriptor {
-        tokens: &["node", "external-content-reset"],
+        tokens: &["node", "reset", "external-content-bindings"],
         summary: "Discard predecessor external-content bindings",
         category: "maintenance",
     },
@@ -171,20 +172,22 @@ pub async fn try_dispatch(
                 .map_err(map_local_err)?;
             Ok(true)
         }
-        ("node", Some("gc")) => {
-            run_node_gc_command(&argv[2..], console).map_err(map_local_err)?;
+        ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("execution-history") => {
+            run_execution_history_reset_command(&argv[3..], console).map_err(map_local_err)?;
             Ok(true)
         }
-        ("node", Some("auth-reset")) => {
-            run_node_auth_reset_command(&argv[2..], console).map_err(map_local_err)?;
+        ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("authorization") => {
+            run_node_auth_reset_command(&argv[3..], console).map_err(map_local_err)?;
             Ok(true)
         }
-        ("node", Some("replay-reset")) => {
-            run_node_replay_reset_command(&argv[2..], console).map_err(map_local_err)?;
+        ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("replay-indexes") => {
+            run_node_replay_reset_command(&argv[3..], console).map_err(map_local_err)?;
             Ok(true)
         }
-        ("node", Some("external-content-reset")) => {
-            run_node_external_content_reset_command(&argv[2..], console).map_err(map_local_err)?;
+        ("node", Some("reset"))
+            if argv.get(2).map(String::as_str) == Some("external-content-bindings") =>
+        {
+            run_node_external_content_reset_command(&argv[3..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("policy-apply")) => {
@@ -388,7 +391,7 @@ fn run_node_isolation_apply_command(argv: &[String], console: &crate::tty::Conso
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "ryeos node replay-reset",
+    name = "ryeos node reset replay-indexes",
     about = "Activate the current replay-index contract",
     long_about = "Perform the explicit clean-cut replay-index activation. The daemon must be stopped. Predecessor dispatch-effect rows are discarded; provider-call evidence, thread history, CAS content, sync state, admission attestations, and accounting state are preserved.",
     no_binary_name = true
@@ -400,7 +403,7 @@ struct NodeReplayResetArgs {
 
     /// Required acknowledgement that predecessor replay indexes are discarded.
     #[arg(long)]
-    confirm_discard_replay_indexes: bool,
+    confirm: bool,
 
     /// Emit structured JSON.
     #[arg(long)]
@@ -411,10 +414,8 @@ fn run_node_replay_reset_command(argv: &[String], console: &crate::tty::Console)
     let Some(args) = parse_or_render_help::<NodeReplayResetArgs>(argv, console)? else {
         return Ok(());
     };
-    if !args.confirm_discard_replay_indexes {
-        anyhow::bail!(
-            "discarding predecessor replay indexes requires --confirm-discard-replay-indexes"
-        );
+    if !args.confirm {
+        anyhow::bail!("resetting predecessor replay indexes requires --confirm");
     }
     let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
         app_root: args.app_root,
@@ -449,7 +450,7 @@ fn run_node_replay_reset_command(argv: &[String], console: &crate::tty::Console)
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "ryeos node external-content-reset",
+    name = "ryeos node reset external-content-bindings",
     about = "Discard predecessor external-content bindings",
     long_about = "Perform the explicit clean-cut external-content manifest activation. The daemon must be stopped. Every predecessor external-content binding head is retired; CAS objects remain reclaimable and all required content must be imported and rebound under the current schema.",
     no_binary_name = true
@@ -465,7 +466,7 @@ struct NodeExternalContentResetArgs {
 
     /// Required acknowledgement that every external-content binding is discarded.
     #[arg(long)]
-    confirm_discard_external_content_bindings: bool,
+    confirm: bool,
 
     /// Emit structured JSON.
     #[arg(long)]
@@ -479,10 +480,8 @@ fn run_node_external_content_reset_command(
     let Some(args) = parse_or_render_help::<NodeExternalContentResetArgs>(argv, console)? else {
         return Ok(());
     };
-    if !args.dry_run && !args.confirm_discard_external_content_bindings {
-        anyhow::bail!(
-            "discarding predecessor external-content bindings requires --confirm-discard-external-content-bindings"
-        );
+    if !args.dry_run && !args.confirm {
+        anyhow::bail!("resetting predecessor external-content bindings requires --confirm");
     }
     let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
         app_root: args.app_root,
@@ -511,7 +510,7 @@ fn run_node_external_content_reset_command(
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "ryeos node auth-reset",
+    name = "ryeos node reset authorization",
     about = "Discard every authorized-key grant and recreate only the local operator grant",
     long_about = "Perform the explicit no-backcompat authorized-key cutover. The daemon must be stopped. Every local-client and remote-node grant is discarded atomically; only the configured local operator key is re-authorized. Remote nodes must be admitted again.",
     no_binary_name = true
@@ -523,7 +522,7 @@ struct NodeAuthResetArgs {
 
     /// Required acknowledgement that every existing authorization is discarded.
     #[arg(long)]
-    confirm_discard_authorized_keys: bool,
+    confirm: bool,
 
     /// Emit structured JSON.
     #[arg(long)]
@@ -534,8 +533,8 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
     let Some(args) = parse_or_render_help::<NodeAuthResetArgs>(argv, console)? else {
         return Ok(());
     };
-    if !args.confirm_discard_authorized_keys {
-        anyhow::bail!("discarding every authorized key requires --confirm-discard-authorized-keys");
+    if !args.confirm {
+        anyhow::bail!("resetting every authorized key requires --confirm");
     }
     let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
         app_root: args.app_root,
@@ -629,105 +628,85 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
     Ok(())
 }
 
-// ── ryeos node gc ──────────────────────────────────────────────────
+// ── ryeos node reset execution-history ───────────────────────────────────
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "ryeos node gc",
-    about = "Run bootstrap-safe offline node garbage collection",
-    long_about = "Run bootstrap-safe offline node garbage collection. The thread-history mode retires every authoritative thread-chain head, clears execution recovery rows/files and scheduler fire history, and publishes an empty current thread projection. Principal and deployed project HEADs are preserved unless the explicit schema-cutover flags are also supplied. Node identity, trust, config, installed bundles, vault data, signed schedule definitions, operational sync/admission state, and independently retained logs/caches are preserved.",
+    name = "ryeos node reset execution-history",
+    about = "Retire the local execution-history epoch while the daemon is stopped",
+    long_about = "Retire every authoritative thread-chain head, clear execution recovery rows/files and scheduler fire history, and publish an empty current thread projection. This is an offline schema/authority reset, not storage garbage collection. Principal and deployed project HEADs are preserved unless --include-project-heads is selected. Node identity, trust, config, installed bundles, vault data, signed schedule definitions, operational sync/admission state, and independently retained logs/caches are preserved. Restart the daemon and run ordinary `ryeos maintenance gc` later to reclaim newly unreachable CAS storage.",
     no_binary_name = true
 )]
-struct NodeGcArgs {
+struct ExecutionHistoryResetArgs {
     /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
     #[arg(long)]
     app_root: Option<PathBuf>,
 
-    /// Retire every local thread chain and its execution recovery history.
-    #[arg(long)]
-    discard_thread_history: bool,
-
-    /// Required acknowledgement for destructive thread-history retirement.
-    #[arg(long)]
-    confirm_discard_thread_history: bool,
-
     /// Also retire every principal and deployed project HEAD for an immutable object-schema cutover.
+    #[arg(long = "include-project-heads")]
+    include_project_heads: bool,
+
+    /// Required acknowledgement for destructive execution-history retirement.
     #[arg(long)]
-    discard_project_heads: bool,
+    confirm: bool,
 
     /// Required acknowledgement for destructive project-HEAD retirement.
-    #[arg(long)]
-    confirm_discard_project_heads: bool,
+    #[arg(long = "confirm-project-heads")]
+    confirm_project_heads: bool,
 
     /// Inspect and report without mutating any store.
     #[arg(long)]
     dry_run: bool,
-
-    /// Physically sweep newly unreachable CAS objects after retiring roots.
-    /// Omit for the fast startup-recovery path; normal maintenance can sweep later.
-    #[arg(long)]
-    sweep_cas: bool,
 
     /// Emit structured JSON instead of human-readable text.
     #[arg(long)]
     json: bool,
 }
 
-impl NodeGcArgs {
+impl ExecutionHistoryResetArgs {
     fn validate(&self) -> Result<()> {
-        if !self.discard_thread_history {
-            anyhow::bail!(
-                "no offline GC operation selected; pass --discard-thread-history (use --dry-run to inspect first)"
-            );
+        if !self.dry_run && !self.confirm {
+            anyhow::bail!("resetting all execution history requires --confirm");
         }
-        if !self.dry_run && !self.confirm_discard_thread_history {
+        if self.include_project_heads && !self.dry_run && !self.confirm_project_heads {
             anyhow::bail!(
-                "discarding all thread history requires --confirm-discard-thread-history"
-            );
-        }
-        if self.discard_project_heads && !self.discard_thread_history {
-            anyhow::bail!("--discard-project-heads requires --discard-thread-history");
-        }
-        if self.discard_project_heads && !self.dry_run && !self.confirm_discard_project_heads {
-            anyhow::bail!(
-                "discarding all principal and deployed project HEADs requires --confirm-discard-project-heads"
-            );
-        }
-        if self.dry_run && self.sweep_cas {
-            anyhow::bail!(
-                "--sweep-cas cannot be combined with --dry-run; inspect history first, then sweep only with the confirmed discard"
+                "resetting principal and deployed project HEADs requires --confirm-project-heads"
             );
         }
         Ok(())
     }
 }
 
-fn run_node_gc_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
-    let Some(args) = parse_or_render_help::<NodeGcArgs>(argv, console)? else {
+fn run_execution_history_reset_command(
+    argv: &[String],
+    console: &crate::tty::Console,
+) -> Result<()> {
+    let Some(args) = parse_or_render_help::<ExecutionHistoryResetArgs>(argv, console)? else {
         return Ok(());
     };
     args.validate()?;
 
-    let options = ryeos_app::offline_gc::OfflineThreadHistoryGcOptions {
+    let options = ryeos_app::execution_history_reset::ExecutionHistoryResetOptions {
         app_root: args.app_root,
         dry_run: args.dry_run,
-        sweep_cas: args.sweep_cas,
-        discard_project_heads: args.discard_project_heads,
+        discard_project_heads: args.include_project_heads,
     };
-    let mut progress = crate::tty::OfflineGcProgress::new(!args.json, console.capabilities());
+    let mut progress =
+        crate::tty::ExecutionHistoryResetProgress::new(!args.json, console.capabilities());
     let report = match progress.as_mut() {
         Some(progress) => {
-            let mut observer = |event: &ryeos_app::offline_gc::OfflineThreadHistoryGcProgress| {
-                progress.observe(event);
-            };
-            ryeos_app::offline_gc::run_offline_thread_history_gc_with_progress(
+            let mut observer =
+                |event: &ryeos_app::execution_history_reset::ExecutionHistoryResetProgress| {
+                    progress.observe(event);
+                };
+            ryeos_app::execution_history_reset::run_execution_history_reset_with_progress(
                 &options,
                 &mut observer,
             )
         }
-        None => ryeos_app::offline_gc::run_offline_thread_history_gc(&options),
+        None => ryeos_app::execution_history_reset::run_execution_history_reset(&options),
     }
-    .context("offline node GC failed")?;
+    .context("offline execution-history reset failed")?;
     if args.json {
         crate::tty::write_json(&report)?;
         return Ok(());
@@ -739,9 +718,9 @@ fn run_node_gc_command(argv: &[String], console: &crate::tty::Console) -> Result
     let mut status = crate::tty::StatusBanner::new(
         crate::tty::Tone::Success,
         if report.dry_run {
-            "HISTORY SCAN COMPLETE"
+            "EXECUTION HISTORY SCAN COMPLETE"
         } else {
-            "HISTORY CLEAR COMPLETE"
+            "EXECUTION HISTORY RESET COMPLETE"
         },
     );
     status.detail = Some(report.app_root.display().to_string());
@@ -776,18 +755,10 @@ fn run_node_gc_command(argv: &[String], console: &crate::tty::Console) -> Result
             report.projection.superseded_instances_deleted.to_string(),
         ),
     ];
-    if let Some(sweep) = report.cas_sweep.as_ref() {
+    if !report.dry_run {
         status.rows.push(crate::tty::Row::key_value(
-            "CAS swept",
-            format!(
-                "{} objects, {} blobs ({} bytes)",
-                sweep.deleted_objects, sweep.deleted_blobs, sweep.freed_bytes
-            ),
-        ));
-    } else if !report.dry_run {
-        status.rows.push(crate::tty::Row::key_value(
-            "CAS sweep",
-            "deferred (run normal maintenance GC later)",
+            "storage reclamation",
+            "run `ryeos maintenance gc` after restart",
         ));
     }
     console.success(&status)?;
@@ -1982,45 +1953,39 @@ mod tests {
     use super::*;
     use ryeos_core_tools::actions::doctor::NA;
 
-    fn node_gc_args(dry_run: bool, confirm: bool, sweep_cas: bool) -> NodeGcArgs {
-        NodeGcArgs {
+    fn execution_history_reset_args(dry_run: bool, confirm: bool) -> ExecutionHistoryResetArgs {
+        ExecutionHistoryResetArgs {
             app_root: None,
-            discard_thread_history: true,
-            confirm_discard_thread_history: confirm,
-            discard_project_heads: false,
-            confirm_discard_project_heads: false,
+            include_project_heads: false,
+            confirm,
+            confirm_project_heads: false,
             dry_run,
-            sweep_cas,
             json: false,
         }
     }
 
     #[test]
-    fn node_gc_requires_an_explicit_operation_and_destructive_confirmation() {
-        let mut args = node_gc_args(true, false, false);
-        args.discard_thread_history = false;
-        assert!(args.validate().is_err());
-
-        assert!(node_gc_args(true, false, false).validate().is_ok());
-        assert!(node_gc_args(false, false, false).validate().is_err());
-        assert!(node_gc_args(false, true, false).validate().is_ok());
-        assert!(node_gc_args(true, false, true).validate().is_err());
+    fn execution_history_reset_requires_destructive_confirmation() {
+        assert!(execution_history_reset_args(true, false).validate().is_ok());
+        assert!(
+            execution_history_reset_args(false, false)
+                .validate()
+                .is_err()
+        );
+        assert!(execution_history_reset_args(false, true).validate().is_ok());
     }
 
     #[test]
-    fn project_head_cutover_requires_the_combined_explicit_confirmation() {
-        let mut args = node_gc_args(false, true, false);
-        args.discard_project_heads = true;
+    fn project_head_cutover_requires_its_own_explicit_confirmation() {
+        let mut args = execution_history_reset_args(false, true);
+        args.include_project_heads = true;
         assert!(args.validate().is_err());
 
-        args.confirm_discard_project_heads = true;
+        args.confirm_project_heads = true;
         assert!(args.validate().is_ok());
 
-        args.discard_thread_history = false;
-        assert!(args.validate().is_err());
-
-        let mut preview = node_gc_args(true, false, false);
-        preview.discard_project_heads = true;
+        let mut preview = execution_history_reset_args(true, false);
+        preview.include_project_heads = true;
         assert!(preview.validate().is_ok());
     }
 

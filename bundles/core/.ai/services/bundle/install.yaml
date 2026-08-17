@@ -1,11 +1,11 @@
-# ryeos:signed:2026-08-11T02:28:13Z:f59cce611ae37792786e1cecbd7a5f3e0e858dffd8994618f50c087d2ca8dd49:/15E6eqovkKpEHAuBmEzd9xczevQVZW8GV2idszl4+R+5xSvMdHUdnkB50RF9a563fRewXH8Rd8AaiDeCd5JBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-17T23:05:46Z:2e42806f84a6b0a706442f23c09eeffa77eb4d0b509bc1ccb3be4a55a640e721:w0LR8GOxUYxDm6u2zXXAIUKo2Dz5vYN8BukYryGT/DFyPvjbJYtF9fSDISRRcnoXqsTngwkejJtlbl7mGFQADg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.install
-availability: offline
+availability: stopped_node
 required_caps: ["ryeos.execute.service.bundle/install"]
 schema:
   name: string
   source_path: string
   replace: boolean?
   preserve_runtime_artifacts: boolean?
-description: "Install or replace a downstream bundle (NOT core; core is the packaged base laid down at system_data_dir). Copies source_path into <system_space_dir>/.ai/bundles/<name>/ and registers it. Preflight verifies signatures and metadata anchoring before mutation. Offline-only: daemon must be stopped; use --replace to update an existing installed bundle. Use --preserve-runtime-artifacts when replacing from a sparse source that omits installed runtime artifacts such as .ai/bin, .ai/objects, or .ai/refs."
+description: "Install or replace a downstream bundle (NOT core; core is the packaged base laid down at system_data_dir). Copies source_path into <system_space_dir>/.ai/bundles/<name>/ and registers it. Preflight verifies signatures and metadata anchoring before mutation. Stopped-node authority is required; use --replace to update an existing installed bundle. Use --preserve-runtime-artifacts when replacing from a sparse source that omits installed runtime artifacts such as .ai/bin, .ai/objects, or .ai/refs."

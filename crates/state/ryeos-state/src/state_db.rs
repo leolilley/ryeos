@@ -2308,7 +2308,7 @@ impl StateDb {
         )?;
         if recovery.thread_history_discard_in_progress()? {
             anyhow::bail!(
-                "offline thread-history discard is incomplete; rerun `ryeos node gc --discard-thread-history --confirm-discard-thread-history` while the daemon is stopped"
+                "offline execution-history reset is incomplete; rerun `ryeos node reset execution-history --confirm` while the daemon is stopped"
             );
         }
 

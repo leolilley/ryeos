@@ -28,6 +28,7 @@ pub mod commands_get;
 pub mod commands_list;
 pub mod commands_submit;
 pub mod commands_wait;
+pub mod content_pin;
 pub mod events_chain_replay;
 pub mod events_replay;
 pub mod external_content_bind;
@@ -44,7 +45,6 @@ pub mod launch_cancel;
 pub mod launch_status;
 pub mod maintenance_gc;
 pub mod model_providers_validate;
-pub mod node_sign;
 pub mod node_status;
 pub mod objects_closure_describe;
 pub mod objects_closure_get;
@@ -85,6 +85,7 @@ pub mod scheduler_register;
 pub mod scheduler_resume;
 pub mod scheduler_show_fires;
 pub mod seat;
+pub mod sign;
 pub mod sync_jobs_inspect;
 pub mod sync_jobs_list;
 pub mod system_routes;
@@ -145,6 +146,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     commands_dispatch::DESCRIPTOR,
     commands_list::DESCRIPTOR,
     threads_chain::DESCRIPTOR,
+    sign::DESCRIPTOR,
     seat::OPEN_DESCRIPTOR,
     seat::LIST_DESCRIPTOR,
     seat::APPEND_DESCRIPTOR,
@@ -164,6 +166,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     commands_submit::DESCRIPTOR,
     commands_get::DESCRIPTOR,
     commands_wait::DESCRIPTOR,
+    content_pin::DESCRIPTOR,
     bundle_install::DESCRIPTOR,
     bundle_export::DESCRIPTOR,
     bundle_list::DESCRIPTOR,
@@ -172,7 +175,6 @@ pub const ALL: &[ServiceDescriptor] = &[
     maintenance_gc::DESCRIPTOR,
     rebuild::VERIFY_DESCRIPTOR,
     rebuild::REBUILD_DESCRIPTOR,
-    node_sign::DESCRIPTOR,
     authorize_key::DESCRIPTOR,
     scheduler_register::DESCRIPTOR,
     scheduler_deregister::DESCRIPTOR,
