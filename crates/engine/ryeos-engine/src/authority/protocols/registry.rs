@@ -356,7 +356,6 @@ fn validate_protocol_descriptor(
             EnvInjectionSource::CallbackSocketPath
                 | EnvInjectionSource::CallbackToken
                 | EnvInjectionSource::ThreadAuthToken
-                | EnvInjectionSource::CallbackProjectPath
         ) {
             callback_injection_name.get_or_insert_with(|| inj.name.clone());
         }

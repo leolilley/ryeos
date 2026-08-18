@@ -3506,7 +3506,6 @@ struct PreparedManagedLaunchAuthority {
     pending_executor_blob: Option<super::PendingCasPublication>,
     pending_external_realization: Option<super::PendingCasPublication>,
     pending_session_publications: Option<super::persistent_session::AdmittedSessionPublications>,
-    bound_external_realizations: Option<super::external_content::BoundExternalRealizations>,
     augmentation_audits: Vec<crate::augmentations::LaunchAugmentationAudit>,
     /// True when this preparation minted the accounting scope (fresh
     /// admission) rather than copying a frozen one forward. Only a freshly
@@ -4567,14 +4566,6 @@ async fn prepare_managed_launch_authority(
         )
         .map_err(BuildAndLaunchError::from)?
     };
-    let bound_external_realizations =
-        super::external_content::bind_external_realizations_for_execution(
-            params.state,
-            effective_program.resolution(),
-            params.project_path,
-            params.provenance.project_authority(),
-        )
-        .map_err(BuildAndLaunchError::Internal)?;
     let admitted_artifact_identity =
         ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
             runtime_ref: selected_runtime.canonical_ref.to_string(),
@@ -4834,7 +4825,6 @@ async fn prepare_managed_launch_authority(
         pending_executor_blob,
         pending_external_realization,
         pending_session_publications: Some(pending_session_publications),
-        bound_external_realizations,
         augmentation_audits,
         freshly_minted_accounting_scope,
     })
@@ -5350,11 +5340,17 @@ async fn run_claimed_thread_row_inner(
         pending_executor_blob,
         pending_external_realization,
         pending_session_publications,
-        bound_external_realizations,
         augmentation_audits,
         freshly_minted_accounting_scope,
     } = authority;
     let thread_id = thread.thread_id.clone();
+    if launch_audit == LaunchAuditDisposition::AppendForAttempt {
+        if thread.runtime.process_identity.is_some() {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "managed recovery requires reconciliation to retire the prior process attachment"
+            )));
+        }
+    }
     let owns_workspace = !provenance.is_borrowed_child()
         && provenance.project_authority().requires_project_foldback();
     super::runner::bind_owned_workspace_after_thread_birth(
@@ -5365,6 +5361,21 @@ async fn run_claimed_thread_row_inner(
     )
     .map_err(BuildAndLaunchError::Internal)?;
     let resolution = effective_program.resolution();
+    let super::runner::PreparedProcessInputs {
+        path: process_project_path,
+        lifeline: admitted_input_lifeline,
+        isolation_project_authority,
+        isolation_live_access_authority: isolation_live_access,
+        external: bound_external_realizations,
+        source: bound_source_closure,
+    } = super::runner::prepare_process_inputs(
+        state,
+        provenance,
+        &thread_id,
+        resolution,
+        project_path,
+    )
+    .map_err(BuildAndLaunchError::Internal)?;
     let post_publication_timer = launch_timings
         .as_ref()
         .map(|timings| timings.top_level("post_publication_launch_setup"));
@@ -5372,17 +5383,17 @@ async fn run_claimed_thread_row_inner(
         .as_ref()
         .and_then(|metadata| metadata.accounting_scope.clone());
     let engine = provenance.request_engine();
-    // Runtime-state root: the deliberate `state_root` override when one was
-    // requested, otherwise the project path. Resolution stays anchored at
-    // `project_path`; only state writes (thread.json here, and the runtime's
-    // own writes via `envelope.roots.state_root`) move.
+    // Resolution and callback/state authority remain anchored at the
+    // authoritative project path. Only the subprocess cwd/project input path
+    // moves to the transient admitted-input root.
     let runtime_state_root = provenance.state_root_override().unwrap_or(project_path);
     tracing::info!(
         acting_principal,
         item_ref = %resolved.item_ref,
         kind = %resolved.resolved_item.kind,
         required_secret_count = metadata_required_secrets.len(),
-        source_root = %project_path.display(),
+        source_root = %process_project_path.display(),
+        resolution_root = %project_path.display(),
         state_root = %runtime_state_root.display(),
         "launching native runtime"
     );
@@ -5685,11 +5696,9 @@ async fn run_claimed_thread_row_inner(
     // a borrowed-child projection at that launch boundary; pre-projecting the
     // token itself makes owner callbacks look borrowed and skips foldback.
     let callback_provenance = provenance.clone();
-    // The token's project identity is the run's state/callback anchor: the
-    // deliberate state-root override when one is in play, else the project.
-    // The runtime advertises exactly `envelope.roots.state_root()` on every
-    // callback and validation is equality — minting the source root here
-    // would reject every dispatch of an overridden run.
+    // The token alone retains the run's state/project anchor. The subprocess
+    // neither receives nor submits this host path; callback handlers recover
+    // it only after exact token+thread validation.
     let token_project = provenance
         .state_root_override()
         .unwrap_or(project_path)
@@ -6048,13 +6057,12 @@ async fn run_claimed_thread_row_inner(
         cap.invocation_id.clone(),
         thread_id.clone(),
         EnvelopeRoots {
-            project_root: project_path.to_path_buf(),
+            project_root: process_project_path.clone(),
             bundle_roots,
             node_trusted_keys_dir,
             // Deliberate runtime state-root override, carried so the runtime
             // can target its state writes (thread state, transcripts, thread
             // knowledge) away from the source project.
-            state_root: provenance.state_root_override().map(Path::to_path_buf),
         },
         EnvelopeRequest {
             // Strip runtime-control fields from prompt inputs. Parent
@@ -6135,7 +6143,7 @@ async fn run_claimed_thread_row_inner(
     // The ambient cache pathname is argv/provenance only. The exact no-follow
     // descriptor and its verified stat identity cross the isolation boundary
     // in `isolation_verified_command`.
-    let project_owned = project_path.to_path_buf();
+    let project_owned = process_project_path.clone();
     let acting_principal_owned = acting_principal.to_string();
     let callback_owned = envelope.callback.clone();
     let thread_id_owned = thread_id.to_string();
@@ -6189,18 +6197,15 @@ async fn run_claimed_thread_row_inner(
         &state.config.app_root,
     )?;
     let isolation = state.isolation.clone();
-    let isolation_project_authority = provenance.isolation_project_authority();
     let project_state_scope = provenance
         .project_authority()
         .project_state_scope_id()
         .map_err(BuildAndLaunchError::Internal)?;
-    let isolation_live_access = provenance
-        .isolation_live_access_authority()
-        .map_err(BuildAndLaunchError::Internal)?;
     let isolation_state_root = provenance
         .state_root_override()
         .map(std::path::Path::to_path_buf);
-    let isolation_workspace_lifeline = provenance.workspace_lifeline();
+    let isolation_workspace_lifeline =
+        admitted_input_lifeline.or_else(|| provenance.workspace_lifeline());
     let cas_root_owned = state
         .state_store
         .cas_root()
@@ -6281,6 +6286,7 @@ async fn run_claimed_thread_row_inner(
             isolation: isolation.as_ref(),
             verified_command: &isolation_verified_command,
             external_realizations: bound_external_realizations,
+            source_closure: bound_source_closure,
             cas_root: &cas_root_owned,
             checkpoint_dir: checkpoint_dir_owned.as_deref(),
             // A machine continuation of a replay-aware kind resumes from the

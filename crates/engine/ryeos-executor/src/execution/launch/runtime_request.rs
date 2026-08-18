@@ -39,6 +39,7 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub isolation: &'a ryeos_engine::isolation::IsolationRuntime,
     pub verified_command: &'a ryeos_engine::isolation::IsolationDescriptorBoundCommand,
     pub external_realizations: Option<super::super::external_content::BoundExternalRealizations>,
+    pub source_closure: Option<super::super::source_closure::BoundSourceClosure>,
     pub cas_root: &'a Path,
     /// Daemon-allocated checkpoint dir for a replay-aware runtime.
     pub checkpoint_dir: Option<&'a Path>,
@@ -55,6 +56,7 @@ pub(super) struct SpawnedRuntime {
     attached_process: Option<AttachedProcessGuard>,
     workspace_lifeline: Option<std::sync::Arc<ryeos_app::temp_dir_guard::TempDirGuard>>,
     external_realizations: Option<super::super::external_content::BoundExternalRealizations>,
+    source_closure: Option<super::super::source_closure::BoundSourceClosure>,
     immediate_result: Option<RuntimeResult>,
 }
 
@@ -78,6 +80,7 @@ impl SpawnedRuntime {
         drop(self.attached_process.take());
         drop(self.workspace_lifeline.take());
         drop(self.external_realizations.take());
+        drop(self.source_closure.take());
         if !result.success {
             return Ok(runtime_failure_result(
                 &result.stderr,
@@ -151,6 +154,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         isolation,
         verified_command,
         external_realizations,
+        source_closure,
         cas_root,
         checkpoint_dir,
         is_resume,
@@ -185,7 +189,6 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         args: &["--project-path".to_string(), project_path_string],
         cwd: project_path,
         project_path,
-        callback_project_path: state_root.unwrap_or(project_path),
         project_state_scope,
         thread_id,
         callback: Some(&callback_bindings),
@@ -239,6 +242,13 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
             ryeos_app::env_contract::EnvSourceDetail::PerSpawnDaemon,
         ));
     }
+    if let Some(bound) = &source_closure {
+        protocol_bindings.push(ryeos_app::env_contract::EnvBinding::new(
+            "RYEOS_ADMITTED_SOURCE",
+            bound.sealed_identity_env(),
+            ryeos_app::env_contract::EnvSourceDetail::PerSpawnDaemon,
+        ));
+    }
 
     let declared_secret_bindings = secret_map
         .iter()
@@ -260,6 +270,13 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
 
     let request = super::super::lillux_bridge::to_lillux_request(&spec)?;
     let isolation_item_ref = item_ref.to_string();
+    let mut admitted_mounts = external_realizations
+        .as_ref()
+        .map(|bound| bound.mounts().to_vec())
+        .unwrap_or_default();
+    if let Some(source) = &source_closure {
+        admitted_mounts.extend_from_slice(source.mounts());
+    }
     let applied = isolation
         .apply_awaiting_attachment_with_provenance(
             request,
@@ -278,10 +295,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
                 node_trusted_keys_dir: Some(&envelope.roots.node_trusted_keys_dir),
                 verified_code: &[],
                 verified_command: Some(verified_command),
-                external_read_only_mounts: external_realizations
-                    .as_ref()
-                    .map(|bound| bound.mounts())
-                    .unwrap_or(&[]),
+                external_read_only_mounts: &admitted_mounts,
                 target_channel: None,
                 item_ref: &isolation_item_ref,
                 thread_id,
@@ -311,6 +325,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
                 attached_process: None,
                 workspace_lifeline,
                 external_realizations,
+                source_closure,
                 immediate_result: Some(runtime_failure_result(
                     &result.stderr,
                     result.timed_out,
@@ -338,6 +353,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         Err(error) => {
             let cleanup = spawned.abort_and_reap().err();
             drop(workspace_lifeline);
+            drop(source_closure);
             return Err(match cleanup {
                 Some(cleanup) => {
                     error.context(format!("pending-process cleanup failed: {cleanup}"))
@@ -363,6 +379,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
     ) {
         let cleanup = spawned.abort_and_reap().err();
         drop(workspace_lifeline);
+        drop(source_closure);
         let error = error.context("attach held managed runtime process identity");
         return match cleanup {
             Some(cleanup) => {
@@ -385,6 +402,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
             .clear_thread_process_if_matches_owned(thread_id, &process_identity, launch_owner)
             .err();
         drop(workspace_lifeline);
+        drop(source_closure);
         let mut error = error.context("activate managed-runtime workspace after attachment");
         if let Some(clear) = clear {
             error = error.context(format!("attached-process cleanup failed: {clear:#}"));
@@ -436,6 +454,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         attached_process: Some(attached_process),
         workspace_lifeline,
         external_realizations,
+        source_closure,
         immediate_result: None,
     })
 }

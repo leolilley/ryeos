@@ -74,6 +74,10 @@ pub struct VerifiedContentFile {
 }
 
 impl VerifiedContentFile {
+    pub(crate) fn descriptor(&self) -> &fs::File {
+        &self.file
+    }
+
     pub fn link_to(
         &self,
         destination_parent: &lillux::secure_fs::PinnedDirectory,

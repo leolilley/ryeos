@@ -238,16 +238,6 @@ pub struct Runner {
     /// Shared HTTP client — created once and reused across all turns.
     /// Connection pooling keeps TCP/TLS handshakes to a minimum.
     http_client: reqwest::Client,
-    /// Persistence that must succeed before any callback can make the thread
-    /// terminal. Keeping this inside the runner closes the authority gap where
-    /// stdout could report a transcript failure after the callback had already
-    /// committed `completed`.
-    terminal_persistence: TerminalPersistence,
-}
-
-struct TerminalPersistence {
-    state_root: std::path::PathBuf,
-    source_path: String,
 }
 
 struct RunGuard {
@@ -642,8 +632,6 @@ pub struct RunnerConfig {
     pub continuation: ContinuationConfig,
     pub sampling: Option<SamplingConfig>,
     pub reasoning: Option<ReasoningConfig>,
-    pub terminal_state_root: std::path::PathBuf,
-    pub terminal_source_path: String,
 }
 
 impl Runner {
@@ -676,8 +664,6 @@ impl Runner {
             config_hash,
             financial_authority,
             accounting_scope,
-            terminal_state_root,
-            terminal_source_path,
         } = config;
         let initial_messages = initial_messages(messages, system_prompt.as_deref());
 
@@ -738,28 +724,7 @@ impl Runner {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("reqwest client builder"),
-            terminal_persistence: TerminalPersistence {
-                state_root: terminal_state_root,
-                source_path: terminal_source_path,
-            },
         }
-    }
-
-    fn persist_terminal_outputs(&self) -> anyhow::Result<()> {
-        let persistence = &self.terminal_persistence;
-        crate::knowledge::write_thread_transcript(
-            &persistence.state_root,
-            &self.thread_id,
-            &persistence.source_path,
-            &self.messages,
-        )?;
-        crate::knowledge::write_capabilities(
-            &persistence.state_root,
-            &self.thread_id,
-            &self.tools,
-            None,
-        )?;
-        Ok(())
     }
 
     pub fn from_resume(resume: ResumeState, mut config: RunnerConfig) -> anyhow::Result<Self> {
@@ -2740,15 +2705,6 @@ impl Runner {
                                     continue;
                                 }
 
-                                if let Err(e) = self.persist_terminal_outputs() {
-                                    state = State::Errored {
-                                        error: format!(
-                                            "directive terminal persistence failed: {e:#}"
-                                        ),
-                                    };
-                                    continue;
-                                }
-
                                 // Finalize thread. The persisted result mirrors
                                 // the live RuntimeResult.result here (the
                                 // `directive_return` sentinel); the structured
@@ -2837,10 +2793,9 @@ impl Runner {
                     let event = occurrence.event().to_string();
                     let callback = self.callback.clone();
                     let thread_id = self.thread_id.clone();
-                    let project_path = self.callback.project_path().to_string();
 
                     let dispatcher: ryeos_runtime::hooks_eval::HookDispatcher =
-                        Box::new(move |action, proj, hook_dispatch| {
+                        Box::new(move |action, _project_path, hook_dispatch| {
                             let cb = callback.clone();
                             let tid = thread_id.clone();
                             Box::pin(async move {
@@ -2856,7 +2811,6 @@ impl Runner {
                                     .dispatch_action(
                                         ryeos_runtime::callback::DispatchActionRequest {
                                             thread_id: tid,
-                                            project_path: proj,
                                             action: payload,
                                             hook_dispatch: Some(hook_dispatch),
                                             effect_dispatch: None,
@@ -2881,7 +2835,7 @@ impl Runner {
                         occurrence,
                         &context,
                         &self.hooks,
-                        &project_path,
+                        "",
                         &dispatcher,
                     )
                     .await;
@@ -3057,12 +3011,6 @@ impl Runner {
                             declared_outputs.join(", ")
                         ));
                     }
-                    if let Err(e) = self.persist_terminal_outputs() {
-                        state = State::Errored {
-                            error: format!("directive terminal persistence failed: {e:#}"),
-                        };
-                        continue;
-                    }
                     let completion = TerminalCompletion {
                         status: ThreadTerminalStatus::Completed,
                         outcome_code: Some("success".to_string()),
@@ -3102,12 +3050,6 @@ impl Runner {
                     // Do NOT swallow: a failed handoff must not settle the thread
                     // `continued` with no recorded successor. Surface as terminal
                     // `failed`.
-                    if let Err(e) = self.persist_terminal_outputs() {
-                        state = State::Errored {
-                            error: format!("directive terminal persistence failed: {e:#}"),
-                        };
-                        continue;
-                    }
                     let runtime_result = RuntimeResult {
                         success: false,
                         status: RuntimeResultStatus::Continued,
@@ -3153,12 +3095,6 @@ impl Runner {
                 }
 
                 State::Errored { error } => {
-                    let error = match self.persist_terminal_outputs() {
-                        Ok(()) => error,
-                        Err(persistence_error) => format!(
-                            "{error}; directive terminal persistence also failed: {persistence_error:#}"
-                        ),
-                    };
                     record_callback_warning(
                         &mut warnings,
                         "thread_failed(emit_error)",
@@ -3201,12 +3137,6 @@ impl Runner {
                 }
 
                 State::Cancelled => {
-                    if let Err(e) = self.persist_terminal_outputs() {
-                        state = State::Errored {
-                            error: format!("directive terminal persistence failed: {e:#}"),
-                        };
-                        continue;
-                    }
                     let runtime_result = RuntimeResult {
                         success: false,
                         status: RuntimeResultStatus::Cancelled,
@@ -3289,7 +3219,6 @@ impl Runner {
                 } else {
                     Ok(Box::new(ryeos_runtime::callback::DispatchActionRequest {
                         thread_id: self.thread_id.clone(),
-                        project_path: self.callback.project_path().to_string(),
                         action: ryeos_runtime::callback::ActionPayload {
                             operation_id: None,
                             item_id: dispatch_result.canonical_ref.clone(),
@@ -4321,7 +4250,7 @@ mod tests {
     }
 
     fn make_callback() -> CallbackClient {
-        CallbackClient::new(&make_callback_env(), "T-test", "/project", "tat-test")
+        CallbackClient::new(&make_callback_env(), "T-test", "tat-test")
     }
 
     fn usd(canonical: &str) -> ryeos_accounting::UsdNanos {
@@ -4580,8 +4509,6 @@ mod tests {
             return_nudge: ReturnNudge::default(),
             sampling: None,
             reasoning: None,
-            terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
-            terminal_source_path: "directive:test/fixture".to_string(),
         });
 
         // Model not in the (empty) per-model table → provider-default rates.
@@ -4661,8 +4588,6 @@ mod tests {
             return_nudge: ReturnNudge::default(),
             sampling: None,
             reasoning: None,
-            terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
-            terminal_source_path: "directive:test/fixture".to_string(),
         });
 
         let result = runner.finalize(json!("Hello world"));
@@ -4724,8 +4649,6 @@ mod tests {
             return_nudge: ReturnNudge::default(),
             sampling: None,
             reasoning: None,
-            terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
-            terminal_source_path: "directive:test/fixture".to_string(),
         });
 
         assert_eq!(runner.messages.len(), 2);
@@ -4785,8 +4708,6 @@ mod tests {
             return_nudge: ReturnNudge::default(),
             sampling: None,
             reasoning: None,
-            terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
-            terminal_source_path: "directive:test/fixture".to_string(),
         });
 
         assert!(runner.directive_outputs.is_some());
@@ -4858,8 +4779,6 @@ mod tests {
             return_nudge: ReturnNudge::default(),
             sampling: None,
             reasoning: None,
-            terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
-            terminal_source_path: "directive:test/fixture".to_string(),
         });
 
         let context = runner.continuation_hook_context(123, 456);
@@ -5036,8 +4955,6 @@ mod tests {
                 seed: Some(42),
             }),
             reasoning: None,
-            terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
-            terminal_source_path: "directive:test/fixture".to_string(),
         });
 
         let s = runner.sampling.unwrap();
@@ -5109,8 +5026,6 @@ mod tests {
             return_nudge: ReturnNudge::default(),
             sampling: None,
             reasoning: None,
-            terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
-            terminal_source_path: "directive:test/fixture".to_string(),
         });
 
         // 1M input + 1M output → 0.80 + 4.00 = 4.80, exact in nanos
@@ -5182,8 +5097,6 @@ mod tests {
             return_nudge: ReturnNudge::default(),
             sampling: None,
             reasoning: None,
-            terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
-            terminal_source_path: "directive:test/fixture".to_string(),
         });
 
         // Falls back to provider defaults: 1M input + 1M output → 1.0 + 5.0 = 6.0
@@ -5239,8 +5152,6 @@ mod tests {
             return_nudge: ReturnNudge::default(),
             sampling: None,
             reasoning: None,
-            terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
-            terminal_source_path: "directive:test/fixture".to_string(),
         });
 
         // No pricing configured: nonzero tokens but $0 cost, flagged Unpriced so
@@ -5979,8 +5890,6 @@ mod tests {
             return_nudge: ReturnNudge::default(),
             sampling: None,
             reasoning: None,
-            terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
-            terminal_source_path: "directive:test/fixture".to_string(),
         })
     }
 

@@ -49,7 +49,6 @@ pub const MAX_RUNTIME_REPLAY_PAGE_LIMIT: usize = 32;
 pub struct CallbackClient {
     inner: Option<Arc<dyn RuntimeCallbackAPI>>,
     thread_id: String,
-    project_path: String,
     thread_auth_token: String,
 }
 
@@ -58,13 +57,12 @@ impl CallbackClient {
     pub fn from_inner(
         inner: Arc<dyn RuntimeCallbackAPI>,
         thread_id: &str,
-        project_path: &str,
+        _test_display_path: &str,
         thread_auth_token: &str,
     ) -> Self {
         Self {
             inner: Some(inner),
             thread_id: thread_id.to_string(),
-            project_path: project_path.to_string(),
             thread_auth_token: thread_auth_token.to_string(),
         }
     }
@@ -75,19 +73,13 @@ impl Clone for CallbackClient {
         Self {
             inner: self.inner.clone(),
             thread_id: self.thread_id.clone(),
-            project_path: self.project_path.clone(),
             thread_auth_token: self.thread_auth_token.clone(),
         }
     }
 }
 
 impl CallbackClient {
-    pub fn new(
-        callback: &EnvelopeCallback,
-        thread_id: &str,
-        project_path: &str,
-        thread_auth_token: &str,
-    ) -> Self {
+    pub fn new(callback: &EnvelopeCallback, thread_id: &str, thread_auth_token: &str) -> Self {
         let inner: Option<Arc<dyn RuntimeCallbackAPI>> = if callback.socket_path.exists() {
             Some(Arc::new(crate::callback_uds::UdsRuntimeClient::new(
                 callback.socket_path.clone(),
@@ -106,17 +98,12 @@ impl CallbackClient {
         Self {
             inner,
             thread_id: thread_id.to_string(),
-            project_path: project_path.to_string(),
             thread_auth_token: thread_auth_token.to_string(),
         }
     }
 
     pub fn thread_id(&self) -> &str {
         &self.thread_id
-    }
-
-    pub fn project_path(&self) -> &str {
-        &self.project_path
     }
 
     /// Dispatch a sub-action through the daemon's `runtime.dispatch_action`
@@ -561,10 +548,10 @@ impl CallbackClient {
         })?;
         let request = crate::callback::SpawnFollowChildRequest {
             thread_id: self.thread_id.clone(),
-            project_path: self.project_path.clone(),
             graph_run_id: graph_run_id.to_string(),
             follow_node: follow_node.to_string(),
             step_count,
+            result_shape: crate::callback::FollowResultShape::Single,
             children: vec![crate::callback::FollowChildSpec {
                 item_ref: child_item_ref.to_string(),
                 ref_bindings,
@@ -600,10 +587,10 @@ impl CallbackClient {
         client
             .spawn_follow_child(crate::callback::SpawnFollowChildRequest {
                 thread_id: self.thread_id.clone(),
-                project_path: self.project_path.clone(),
                 graph_run_id: graph_run_id.to_string(),
                 follow_node: follow_node.to_string(),
                 step_count,
+                result_shape: crate::callback::FollowResultShape::Cohort,
                 children,
                 launch_window_width,
                 frontier_id,
@@ -1594,7 +1581,7 @@ mod tests {
     }
 
     fn make_client() -> CallbackClient {
-        CallbackClient::new(&make_callback(), "T-test", "/project", "tat-test")
+        CallbackClient::new(&make_callback(), "T-test", "tat-test")
     }
 
     #[tokio::test]
@@ -1606,7 +1593,6 @@ mod tests {
         let client = make_client();
         let req = DispatchActionRequest {
             thread_id: "T-test".to_string(),
-            project_path: "/project".to_string(),
             action: ActionPayload {
                 operation_id: None,
                 item_id: "my/tool".to_string(),
@@ -1743,10 +1729,9 @@ mod tests {
     }
 
     #[test]
-    fn thread_id_and_project_path_accessors() {
+    fn thread_id_accessor() {
         let client = make_client();
         assert_eq!(client.thread_id(), "T-test");
-        assert_eq!(client.project_path(), "/project");
     }
 
     #[test]
@@ -1754,7 +1739,6 @@ mod tests {
         let client = make_client();
         let cloned = client.clone();
         assert_eq!(cloned.thread_id(), "T-test");
-        assert_eq!(cloned.project_path(), "/project");
     }
 
     #[tokio::test]

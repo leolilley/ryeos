@@ -472,13 +472,19 @@ fn start_capsule_process(
     )?;
     let resolution = exact.resolution_output.restore();
     super::source_closure::validate_external_mount_separation(state, &resolution)?;
+    let private_budget = (!state.isolation.is_enforced())
+        .then(super::external_content::private_materialization_budget)
+        .transpose()?;
     let bound = if state.isolation.is_enforced() {
         super::external_content::bind_external_realizations(state, &resolution, &workspace)?
     } else {
-        super::external_content::bind_external_realizations_in_private_workspace(
+        super::external_content::bind_external_realizations_in_private_workspace_with_budget(
             state,
             &resolution,
             &workspace,
+            private_budget
+                .as_ref()
+                .expect("disabled isolation has a private copy budget"),
         )?
     };
     let (mounts, external_env, leases) = match bound {
@@ -491,7 +497,14 @@ fn start_capsule_process(
     let source = if state.isolation.is_enforced() {
         super::source_closure::bind_source(state, &resolution, &workspace)?
     } else {
-        super::source_closure::bind_source_in_private_workspace(state, &resolution, &workspace)?
+        super::source_closure::bind_source_in_private_workspace_with_budget(
+            state,
+            &resolution,
+            &workspace,
+            private_budget
+                .as_ref()
+                .expect("disabled isolation has a private copy budget"),
+        )?
     };
     let mut mounts = mounts;
     let (source_env, source_entry) = match source.as_ref() {

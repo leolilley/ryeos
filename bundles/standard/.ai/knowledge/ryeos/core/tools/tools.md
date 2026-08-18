@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-12T07:28:15Z:5a22d7401f60509c8b41841b3be54d55263f98aeb3d557f1784c4675d1939e75:tIKKUd/mow1HfrRl+D3RsGDpeI+ImMn/LsACgAf9VFlGrOrRvfCsv+UmaJJQM2Opv75W5hCBuvAN0429rXx9Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-18T22:04:52Z:8d2c6d4ceb099d4fb0bcfe623db19dbbf8acec0803027ce0fd14f80e2b3de227:zCGrmSATDIjK0vEbZRmdW8ad5Uxr0nQXBRwJpiVQY8l8n4+PqoOXKXVaxa5XNTLXH3RiM57gEpuLmmPmw/N8Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, tools, execution, subprocess]
-version: "1.0.0"
+version: "1.2.0"
 description: >
   How tools work — executable scripts, the subprocess model,
   executor chains, and runtime environments.
@@ -108,7 +108,8 @@ there is no separate Bash runtime descriptor.
 
 ### Python Function (`ryeos/core/runtimes/python/function`)
 Loads a Python module, calls its `execute(params, project_path)`
-function. Resolves interpreter from `.venv/bin/python3` or `RYE_PYTHON`.
+function. Resolves the interpreter from `RYE_PYTHON` or the engine-resolved
+system `python3`; project virtualenvs are not implicit dependencies.
 Prepends runtime-derived bundle-local roots to `sys.path` without setting
 `PYTHONPATH`.
 
@@ -130,7 +131,7 @@ declare the basic tool variables:
 | Variable              | Description                        |
 |-----------------------|------------------------------------|
 | `RYE_THREAD_ID`       | Current thread ID                  |
-| `RYE_PROJECT_PATH`    | Absolute path to project root      |
+| `RYE_PROJECT_PATH`    | Absolute path to the selected process workspace |
 
 `tool_callback` additionally declares these callback bindings (the managed
 `runtime` protocol uses the same callback names):
@@ -140,7 +141,6 @@ declare the basic tool variables:
 | `RYEOSD_SOCKET_PATH`        | Daemon Unix socket path            |
 | `RYEOSD_CALLBACK_TOKEN`     | Auth token for callback channel    |
 | `RYEOSD_THREAD_ID`          | Thread ID (redundant with RYE_)    |
-| `RYEOSD_PROJECT_PATH`       | Callback authorization/state anchor; may differ from `RYE_PROJECT_PATH` under a state-root override |
 | `RYEOSD_PROJECT_STATE_SCOPE` | Opaque logical-project state namespace; stable across pinned COW successors and not an authority token |
 | `RYEOSD_THREAD_AUTH_TOKEN`  | Thread-specific auth token         |
 

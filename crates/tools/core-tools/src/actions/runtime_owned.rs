@@ -21,10 +21,9 @@ use ryeos_state::project_sync::{ProjectAiPathClass, classify_project_ai_path};
 /// - `NodeOwned` — `.ai/state`, `.ai/node/{schedules,routes,bundles}`;
 /// - `NeverDeploySecret` — `.ai/config/keys/signing`, node identity/auth/vault.
 ///
-/// The floor is exhaustive: every runtime writer emits under `.ai/state/`
-/// (per-thread transcripts in `.ai/state/threads/<id>/`, graph-run transcripts
-/// in `.ai/state/graphs/<id>/`), so nothing writes under `.ai/knowledge/` at
-/// runtime and the whole `.ai/knowledge` surface stays authorable.
+/// The floor is exhaustive: runtime state and retired runtime-output locations
+/// are reserved under `.ai/state/`, so nothing writes under `.ai/knowledge/`
+/// at runtime and the whole `.ai/knowledge` surface stays authorable.
 ///
 /// The `ignore` matcher is deliberately unused: runtime ownership is a floor,
 /// independent of any project ignore file.
@@ -124,9 +123,9 @@ mod tests {
     }
 
     #[test]
-    fn runtime_transcript_output_is_node_owned_state() {
-        // Runtime-emitted thread/graph transcripts live under `.ai/state/`,
-        // which the `NodeOwned` floor covers — excluded from signing.
+    fn retired_runtime_transcript_locations_remain_node_owned_state() {
+        // Retired transcript mirrors stay reserved under `.ai/state/`; old
+        // output cannot silently become signable authored content.
         assert!(is_runtime_owned_ai_path(
             ".ai/state/threads/T-abc/transcript.md"
         ));

@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-12T07:28:15Z:7cc47ba3fa746728f3fda2670327ae9822b65e5505d679dbb022bd5f7ea2e375:G5bgfvCFOoiLzt9BxDvqHLVysa5DcEPutjvj3RU73io+9XBJ8Eus5hfgfUKlyrMe+AiTWzXQDPJGIFmfBtOHBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-18T22:04:48Z:728ea73d17fde437211d3ce9e94023847a3ffbcb0d7180d7848af77aa52ccf97:nLYWstL1k6JDEO5NkPiAy/NbpzWd3LZA0d00quTugVfglm67L3jKAB5fhKS5SILr+roL/5deiA/mnoyfyW1eAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, env, daemon, cli, runtimes, lifecycle]
-version: "2.1.1"
+version: "2.2.0"
 description: >
   Environment variables for local lifecycle, daemon dispatch, CLI
   signing, runtimes, tools, and provider auth.
@@ -40,13 +40,12 @@ The daemon sets `RYEOSD_URL` and `RYEOSD_SOCKET_PATH` for its own listener
 process. A child receives only the environment selected by its verified
 protocol plus daemon-root, engine-plan, secret, and resume bindings. In
 particular, callback variables (`RYEOSD_SOCKET_PATH`,
-`RYEOSD_CALLBACK_TOKEN`, `RYEOSD_THREAD_AUTH_TOKEN`, `RYEOSD_THREAD_ID`, and
-`RYEOSD_PROJECT_PATH`) plus the identity-only `RYEOSD_PROJECT_STATE_SCOPE` are declared by callback-capable protocols such as
+`RYEOSD_CALLBACK_TOKEN`, `RYEOSD_THREAD_AUTH_TOKEN`, `RYEOSD_THREAD_ID`) and
+the identity-only `RYEOSD_PROJECT_STATE_SCOPE` are declared by callback-capable protocols such as
 `runtime` and the default tool protocol `tool_callback`; callback-free
-protocols receive none of that authority. `RYEOSD_PROJECT_PATH` is the callback
-authorization/state anchor: a deliberate state-root override when present,
-otherwise the effective project root. It may intentionally differ from the
-source-oriented `RYE_PROJECT_PATH`.
+protocols receive none of that authority. The daemon derives durable project
+and state authority from the sealed callback token; subprocesses neither
+receive nor submit the canonical host project path as callback authority.
 
 `RYEOSD_PROJECT_STATE_SCOPE` is an opaque lowercase digest naming the admitted
 logical project's durable state namespace. It stays stable when a pinned COW

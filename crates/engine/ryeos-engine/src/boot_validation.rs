@@ -820,7 +820,6 @@ pub fn validate_protocol_builder(
             args: &[],
             cwd: dummy_path,
             project_path: dummy_path,
-            callback_project_path: dummy_path,
             project_state_scope: Some(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
@@ -2010,7 +2009,6 @@ composed_value_contract:
             args: &[],
             cwd: dummy,
             project_path: dummy,
-            callback_project_path: dummy,
             project_state_scope: Some(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
@@ -2073,7 +2071,6 @@ composed_value_contract:
             args: &[],
             cwd: dummy,
             project_path: dummy,
-            callback_project_path: dummy,
             project_state_scope: Some(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),

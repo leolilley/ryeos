@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-11T02:28:31Z:fe3cb6d9d05258abdb2ab30f2b43cab475fefa80ec382ad12c45513673151e50:qIUJCnZH95Y3UIDcizzEXP1H9TskrS6LtVU4rWo23i6h9DO8VNdAjJ53TapmAZYHaGmLuTbdLB9ZfmMOYHQfCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-18T22:04:49Z:3de8593f896fe0a3ac0777a3ac149239261e441965602689cd187ac4f7e5aec7:SiSaPufwEwrv9p0vtpFEH1/6BVuauJPTbPRchBy+u30s/Q8gabSejvIHp5Btmva5QvFrJvZMkJNennkyQQROBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/kinds
 tags: [kind, tool, subprocess]
-version: "1.0.0"
+version: "1.1.0"
 description: Tool kind reference.
 ---
 
@@ -30,7 +30,10 @@ ceiling that names the loader roots but cannot add files or widen ownership.
 
 RyeOS captures and verifies this source before minting runtime authority,
 retains its content manifest and authority binding, and shadows the matching
-logical `.ai/tools/` path during execution. The protected
+logical `.ai/tools/` path during execution. Enforced nodes receive the shadow
+as a descriptor-pinned read-only mount. Disabled nodes receive the same exact
+retained bytes in a daemon-private per-process input root, without changing the
+tool's execution identity or requiring a full project pin. The protected
 `RYEOS_ADMITTED_SOURCE` value carries only canonical source identity. Tool code
 does not declare its own files through `external_content` and must not hash or
 reopen live source to establish execution identity.

@@ -29,6 +29,12 @@ pub mod spawn_follow_child;
 pub mod thread_meta;
 pub mod workspace;
 
+/// Arm node-owned mechanics for fallback copies into private admitted-input
+/// roots. The signed policy is loaded by the daemon composition root.
+pub fn arm_private_materialization_copy_limit(limit: u64) -> anyhow::Result<()> {
+    external_content::arm_private_materialization_copy_limit(limit)
+}
+
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
@@ -425,7 +431,10 @@ fn store_project_snapshot(
 pub(crate) enum ProjectLowerMaterialization<'a> {
     SharedReadOnly,
     EnforcedOverlayLower(&'a Path),
-    PrivateWritableWorkspace(&'a Path),
+    PrivateWritableWorkspace {
+        target_dir: &'a Path,
+        budget: Option<&'a external_content::PrivateMaterializationBudget>,
+    },
 }
 
 /// Materialize one immutable snapshot for the selected execution boundary.
@@ -504,19 +513,26 @@ pub(crate) fn checkout_project_lower(
             }
             target_dir.to_path_buf()
         }
-        ProjectLowerMaterialization::PrivateWritableWorkspace(target_dir) => {
+        ProjectLowerMaterialization::PrivateWritableWorkspace { target_dir, budget } => {
             let target_root = lillux::secure_fs::PinnedDirectory::open_or_create(target_dir)?;
+            let owned_budget;
+            let budget = match budget {
+                Some(budget) => budget,
+                None => {
+                    owned_budget = external_content::private_materialization_budget()?;
+                    &owned_budget
+                }
+            };
             for (relative, project_file) in project_files {
                 let content = cache.ensure_content_file(&cas, project_file)?;
                 let (parent, name) = pinned_output_parent(&target_root, relative)?;
-                let materialized =
-                    content.copy_to_private(&parent, &name, project_file.normalized_mode)?;
-                if materialized != project_file.size {
-                    anyhow::bail!(
-                        "private workspace file {relative} materialized {materialized} bytes, expected {}",
-                        project_file.size
-                    );
-                }
+                budget.materialize_regular(
+                    &parent,
+                    &name,
+                    content.descriptor(),
+                    project_file.size,
+                    project_file.normalized_mode,
+                )?;
             }
             target_dir.to_path_buf()
         }
@@ -1384,11 +1400,16 @@ mod pinned_child_authority_tests {
         .unwrap();
         let first_root = tempfile::tempdir().unwrap();
         let second_root = tempfile::tempdir().unwrap();
+        let first_budget = external_content::PrivateMaterializationBudget::new(1024);
+        let second_budget = external_content::PrivateMaterializationBudget::new(1024);
         let (first_path, _first_lease, _first) = checkout_project_lower(
             &authority,
             &guard,
             &snapshot_hash,
-            ProjectLowerMaterialization::PrivateWritableWorkspace(first_root.path()),
+            ProjectLowerMaterialization::PrivateWritableWorkspace {
+                target_dir: first_root.path(),
+                budget: Some(&first_budget),
+            },
             &cache,
         )
         .unwrap();
@@ -1396,7 +1417,10 @@ mod pinned_child_authority_tests {
             &authority,
             &guard,
             &snapshot_hash,
-            ProjectLowerMaterialization::PrivateWritableWorkspace(second_root.path()),
+            ProjectLowerMaterialization::PrivateWritableWorkspace {
+                target_dir: second_root.path(),
+                budget: Some(&second_budget),
+            },
             &cache,
         )
         .unwrap();

@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-12T07:28:15Z:6f1d2b39d567fa496e6523dc9c5c74c56e5fd767145a0cb1e6586db77cb455c1:QAxWS2xX8Ia1IZZbif09KHnDwZgI4DpMSFrP6wbFM5JC/0ULCm3ajfocmB5hCMtVbx8BUNW73EFFHrkMEJC4AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-18T22:04:51Z:8f2011f6bd5eb556fe18a43af6794cb31bb2e225492696882b036217b531633a:Fn43j8YQ0hD973zgmk+nUQRqo3Pbo6AFypRTu/MuSmBFMnkXvODvNTYNjgF9FyunInKO05JFaiKc3JKFn3peBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, protocols, wire, subprocess]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   Signed subprocess wire protocols and schema-driven protocol selection.
 ---
@@ -22,7 +22,7 @@ output while making callback authority explicit in signed protocol data.
 |-------------|-------------------------------|
 | **stdin**   | `opaque` — executor-plan-owned bytes |
 | **stdout**  | `opaque_bytes` — raw bytes, terminal mode |
-| **env**     | `RYE_THREAD_ID`, `RYE_PROJECT_PATH`, plus declared `RYEOSD_*` socket/token/thread/project/auth bindings |
+| **env**     | `RYE_THREAD_ID`, `RYE_PROJECT_PATH`, plus declared `RYEOSD_*` socket/token/thread/state-scope/auth bindings |
 | **lifecycle** | `detached_ok` — process can outlive parent |
 | **callback**  | `http` — authenticated daemon callback channel |
 
@@ -52,7 +52,7 @@ graph-runtime). Used by the `runtime` kind.
 |-------------|-------------------------------|
 | **stdin**   | `launch_envelope` — structured launch payload |
 | **stdout**  | `runtime_result` — structured result |
-| **env**     | `RYEOSD_SOCKET_PATH`, `RYEOSD_CALLBACK_TOKEN`, `RYEOSD_THREAD_ID`, `RYEOSD_PROJECT_PATH`, `RYEOSD_PROJECT_STATE_SCOPE`, `RYEOSD_THREAD_AUTH_TOKEN` |
+| **env**     | `RYEOSD_SOCKET_PATH`, `RYEOSD_CALLBACK_TOKEN`, `RYEOSD_THREAD_ID`, `RYEOSD_PROJECT_STATE_SCOPE`, `RYEOSD_THREAD_AUTH_TOKEN` |
 | **lifecycle** | `managed` — daemon tracks process lifetime |
 | **callback**  | `http` — HTTP callback channel for async |
 

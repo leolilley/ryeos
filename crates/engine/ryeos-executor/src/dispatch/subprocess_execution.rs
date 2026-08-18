@@ -696,7 +696,6 @@ async fn dispatch_streaming_subprocess(
             .map_err(DispatchError::Internal)?,
         callback_token: None,
         callback_socket_path: None,
-        callback_project_path: None,
         project_state_scope: request
             .provenance
             .project_authority()

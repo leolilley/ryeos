@@ -72,6 +72,32 @@ impl PreparedItemPlan {
         &self.plan
     }
 
+    /// A private admitted-input root intentionally omits ambient project
+    /// dependencies such as `.venv`. Refuse a plan whose interpreter was
+    /// selected from the live project instead of relocating that path into a
+    /// sparse workspace where it is absent (or letting captured launcher bytes
+    /// hide undeclared site-packages).
+    pub fn ensure_no_project_local_interpreter(&self, project_root: &Path) -> Result<()> {
+        let spec = match self.plan.nodes.first() {
+            Some(ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. }) => spec,
+            _ => return Ok(()),
+        };
+        let command_is_project_local = Path::new(&spec.cmd).starts_with(project_root);
+        let interpreter_env_is_project_local = spec.env_sources.iter().any(|(name, source)| {
+            *source == ryeos_engine::contracts::RuntimeEnvSource::RuntimeInterpreter
+                && spec
+                    .env
+                    .get(name)
+                    .is_some_and(|value| Path::new(value).starts_with(project_root))
+        });
+        if command_is_project_local || interpreter_env_is_project_local {
+            bail!(
+                "private admitted-input execution refused: the selected interpreter comes from the live project; declare the interpreter/dependency environment as admitted runtime content or use a non-project interpreter"
+            );
+        }
+        Ok(())
+    }
+
     /// Replace the concrete project workspace with its stable logical target
     /// before artifact identity and closure admission. The returned root is
     /// retained in the capsule; a mutable spawn copy is relocated to the
@@ -1588,6 +1614,35 @@ mod tests {
             panic!("fixture must carry runtime parameters");
         };
         assert_eq!(project_path.as_deref(), Some(effective));
+    }
+
+    #[test]
+    fn private_inputs_refuse_a_project_local_interpreter() {
+        let project_root = Path::new("/tmp/live-project");
+        let mut plan = portable_direct_plan(project_root);
+        let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = &mut plan.nodes[0]
+        else {
+            panic!("fixture must dispatch");
+        };
+        spec.cmd = project_root
+            .join(".venv/bin/python")
+            .to_string_lossy()
+            .into_owned();
+        spec.verified_command = None;
+        spec.env.insert("RYE_PYTHON".into(), spec.cmd.clone());
+        spec.env_sources.insert(
+            "RYE_PYTHON".into(),
+            ryeos_engine::contracts::RuntimeEnvSource::RuntimeInterpreter,
+        );
+
+        let error = prepared_plan(plan)
+            .ensure_no_project_local_interpreter(project_root)
+            .expect_err("ambient project interpreter must not enter a private input root");
+        assert!(
+            error
+                .to_string()
+                .contains("selected interpreter comes from the live project")
+        );
     }
 
     #[test]

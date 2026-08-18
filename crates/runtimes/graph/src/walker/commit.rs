@@ -2,7 +2,6 @@ use anyhow::Context as _;
 use serde_json::{Value, json};
 
 use crate::edges;
-use crate::knowledge;
 use crate::model::*;
 use ryeos_runtime::events::RuntimeEventType;
 use ryeos_runtime::{TerminalCompletion, ThreadTerminalStatus};
@@ -369,25 +368,6 @@ impl Walker {
                 .await;
             self.record_callback_warning(RuntimeEventType::GraphCompleted.as_str(), r);
         }
-
-        // Write transcript.
-        let r = knowledge::write_knowledge_transcript(
-            &self.project_path,
-            &self.graph.graph_id,
-            graph_run_id,
-            &serde_json::to_string(&graph_result).unwrap_or_default(),
-        );
-        self.record_callback_warning("write_knowledge_transcript", r);
-
-        // Publish artifact.
-        let r = self
-            .client
-            .publish_artifact(json!({
-                "artifact_type": "graph_transcript",
-                "uri": format!("graph://{}/runs/{}", self.graph.graph_id, graph_run_id),
-            }))
-            .await;
-        self.record_callback_warning("publish_artifact", r.map(|_| ()));
 
         // Finalize thread. A cooperative cancel/kill settles the THREAD as
         // cancelled/killed (a distinct terminal an operator can tell apart from a

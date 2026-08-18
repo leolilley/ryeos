@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-11T02:28:31Z:1ca3fce6dbb862d6a33c702f767598a9e3b2d8c133e64cccf68c2ffccfbcc590:XRwZW/EasOXP+eXcuhhIMw4k7vNEIpuqXlZ2OSDQESamQoE42P8feGXPzorOPct0imt1qCuQkdAHac75UurXCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-18T22:04:50Z:74bbf2f2633e5ded04c5c5de3f7981e645f4ff6a6153d30e768a7cda61959baf:7iPPfYe4+xsW4fILHJ8THPaoX0q5AmBAUAufBc+W1Kb5V0AJEZaTJKYsBXCej2QjX8aPr9THgpX0reYG9XliBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
-version: "1.6.0"
+version: "1.7.0"
 description: >
   Node contract for the node-owned subprocess isolation: strict policy
   schema, startup pickup, enforcement behavior, diagnostics, and limits.
@@ -35,7 +35,13 @@ The policy has two modes:
   caps, signature, trust, authorization, and capability checks still apply,
   but there is no OS confinement or verification-to-exec path pinning.
   Daemon-owned processes still use attachment-before-execution; Lillux supplies
-  the direct target hold without an isolation backend.
+  the direct target hold without an isolation backend. When a finalized program
+  retains an admitted source closure or external realization, RyeOS gives that
+  process a daemon-private sparse input root and materializes the exact retained
+  bytes there by descriptor-safe reflink or bounded copy. A live launch with no
+  retained filesystem bindings keeps the ordinary live project path. This input
+  delivery is not a substitute for OS isolation: disabled mode still provides no
+  confinement from other host paths visible to the process.
 - `mode: enforce` applies the complete policy and refuses the launch if any
   requested control cannot be enforced.
 
@@ -73,6 +79,21 @@ The default is deliberately inert. To opt in, install a signed backend bundle,
 select its bundle and implementation in the policy, change the node-owned mode
 to `enforce`, run
 `ryeos node doctor`, and restart the node.
+
+`--pin-project` remains the explicit complete-project snapshot/COW workflow. It
+does not control ordinary admitted source or external-content delivery, and is
+not required merely to run a definition that already retains those exact bytes.
+Sparse admitted-input roots are process inputs and scratch, not project
+publication. Their writes are discarded at process cleanup and never fold back
+to the live project. Durable outputs use structured results or explicit
+daemon-owned authoring, vault, and bundle-event callbacks; generic opaque file
+ingest is not currently a runtime callback contract.
+The signed node execution config also sets
+`node.max_private_materialization_copy_bytes`. It is one aggregate allowance
+per private materialization transaction when filesystem reflinks are
+unavailable; zero, missing, malformed, or untrusted values refuse node startup.
+The `ryeos.metrics` summary reports reflink/copy counts, copied bytes, allowance
+remaining, and materialization time without exposing host paths.
 The daemon loads one immutable policy generation at startup; editing the file
 does not change a running daemon. The daemon-backed `ryeos daemon status`
 surface (`service:node/status`) reports the loaded mode, version, source, and

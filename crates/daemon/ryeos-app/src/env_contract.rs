@@ -46,7 +46,6 @@ const DAEMON_CALLBACK_NAMES: &[&str] = &[
     "RYEOSD_SOCKET_PATH",
     "RYEOSD_CALLBACK_TOKEN",
     "RYEOSD_THREAD_ID",
-    "RYEOSD_PROJECT_PATH",
     "RYEOSD_PROJECT_STATE_SCOPE",
     "RYEOSD_THREAD_AUTH_TOKEN",
 ];
@@ -402,10 +401,6 @@ fn validate_protocol_injection_name(
             | (EnvInjectionSource::ThreadId, "RYE_THREAD_ID")
             | (EnvInjectionSource::ThreadId, "RYEOSD_THREAD_ID")
             | (
-                EnvInjectionSource::CallbackProjectPath,
-                "RYEOSD_PROJECT_PATH"
-            )
-            | (
                 EnvInjectionSource::ProjectStateScope,
                 "RYEOSD_PROJECT_STATE_SCOPE"
             )
@@ -707,7 +702,7 @@ mod tests {
                 "RYEOSD_PROJECT_STATE_SCOPE",
                 "a".repeat(64),
                 EnvSourceDetail::ProtocolInjection {
-                    source: EnvInjectionSource::CallbackProjectPath,
+                    source: EnvInjectionSource::ThreadId,
                 },
             )])
             .unwrap_err();

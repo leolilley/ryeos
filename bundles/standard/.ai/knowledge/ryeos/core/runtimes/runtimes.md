@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-11T02:28:34Z:f672df56075471eae40efa4b4c553263266dd4b1c12c50ac52d3cd1ed21cfb32:BzwrEKEVQe7tqxeAgl2BfIpWN0y4czkb4GYwGkemFG2okVjvKp25c/atcsduL0W/6BEWtYBUUseeLLNmqpSdAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-18T22:04:51Z:10b72249a5ccc04e0552ab08ecd4a55999a74bbfca962afe53e4b7ef7420a8fe:Cid0U3WNlzQy5yX7w64qLO2zD+r9XPapj98DagvKHBOYsT641ObQgumOzz1cL8xES1iabVrjkuiAoZ4FrsPCDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, runtimes, execution, subprocess]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   Active tool runtime descriptors and subprocess execution helpers.
 ---
@@ -18,7 +18,8 @@ and knowledge runtime binaries.
 ### Python Function (`tool:ryeos/core/runtimes/python/function`)
 Loads a Python module and calls its `execute(params, project_path)`.
 
-- **Interpreter:** `.venv/bin/python3` → `RYE_PYTHON` → `python3`
+- **Interpreter:** `RYE_PYTHON` override → engine-resolved `python3`. Project
+  virtualenvs are not an implicit execution dependency.
 - **Imports:** prepends runtime-derived bundle-local roots to `sys.path`
 - **Async support:** Yes (auto-detects and wraps with `asyncio.run`)
 - **Timeout:** 300s

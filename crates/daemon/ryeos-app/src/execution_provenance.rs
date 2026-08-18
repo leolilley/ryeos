@@ -83,9 +83,9 @@ pub enum ExecutionProvenance {
         workspace_lifeline: Option<Arc<TempDirGuard>>,
         /// Deliberate runtime state-root override (`/execute` `state_root`):
         /// item resolution stays anchored at `project_path` while the
-        /// runtime-state project path advertised to the child (callback
-        /// token + `RYEOSD_PROJECT_PATH`) points here. `None` = state
-        /// lives under the project as usual.
+        /// daemon-side runtime-state authority points here. Callback tokens
+        /// retain it, but subprocesses never receive the host path as callback
+        /// authority. `None` = state lives under the project as usual.
         state_root: Option<PathBuf>,
         project_authority: ryeos_state::objects::ExecutionProjectAuthority,
         __seal: ProvenanceSeal,

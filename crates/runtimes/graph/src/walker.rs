@@ -157,6 +157,8 @@ struct ControlDirective {
 
 pub struct Walker {
     graph: GraphDefinition,
+    /// Process-visible workspace used for local scratch/checkpoint output.
+    /// Durable callback/project authority is sealed server-side.
     project_path: String,
     thread_id: String,
     client: CallbackClient,
@@ -416,7 +418,7 @@ impl Walker {
     ///
     /// Also used for non-event callbacks (finalize_thread,
     /// mark_running, publish_artifact, write_node_receipt,
-    /// write_knowledge_transcript) — any callback whose failure
+    /// callback) — any callback whose failure
     /// should be surfaced rather than dropped.
     ///
     /// The lock is taken only for the single `push` and is never held

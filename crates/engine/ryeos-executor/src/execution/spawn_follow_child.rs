@@ -70,10 +70,10 @@ struct SpawnFollowChildParams {
     thread_auth_token: String,
     /// The caller's own thread — the graph (parent) issuing the follow.
     thread_id: String,
-    project_path: String,
     graph_run_id: String,
     follow_node: String,
     step_count: i64,
+    result_shape: ryeos_runtime::callback::FollowResultShape,
     children: Vec<ryeos_runtime::callback::FollowChildSpec>,
     #[serde(default)]
     launch_window_width: Option<u32>,
@@ -86,21 +86,21 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     let params: SpawnFollowChildParams = serde_json::from_value(params.clone())
         .context("invalid runtime.spawn_follow_child params")?;
 
-    let (fanout, launch_window_width) =
-        validate_follow_launch(params.children.len(), params.launch_window_width)?;
+    let (fanout, launch_window_width) = validate_follow_launch(
+        params.result_shape,
+        params.children.len(),
+        params.launch_window_width,
+    )?;
     let children = params.children;
 
     let parent_thread_id = params.thread_id.clone();
-    let project_path = std::path::PathBuf::from(&params.project_path);
-
     // ── Trust derivation (all server-side) ──────────────────────────────────
     // Parent callback token → the PARENT's effective caps (bound the child under
-    // `FollowChildHybrid`) + provenance. Validated against the parent thread +
-    // project path exactly like `runtime.dispatch_action`.
-    let cap =
-        state
-            .callback_tokens
-            .validate(&params.callback_token, &parent_thread_id, &project_path)?;
+    // `FollowChildHybrid`) + provenance. The sealed token owns project
+    // authority; the runtime cannot submit a live path as a second authority.
+    let cap = state
+        .callback_tokens
+        .validate_token_and_thread(&params.callback_token, &parent_thread_id)?;
     let launch_owner = cap
         .launch_owner
         .as_deref()
@@ -1676,6 +1676,7 @@ fn commit_follow_child_roots(
 }
 
 fn validate_follow_launch(
+    result_shape: ryeos_runtime::callback::FollowResultShape,
     children_len: usize,
     launch_window_width: Option<u32>,
 ) -> Result<(bool, u32)> {
@@ -1685,27 +1686,44 @@ fn validate_follow_launch(
     if launch_window_width == Some(0) {
         bail!("follow: launch_window_width must be greater than zero");
     }
+    if result_shape == ryeos_runtime::callback::FollowResultShape::Single && children_len != 1 {
+        bail!("follow: single result shape requires exactly one child");
+    }
     let cohort_width = u32::try_from(children_len).context("follow: too many children")?;
     let width = launch_window_width
         .unwrap_or_else(|| cohort_width.min(ryeos_runtime::DEFAULT_LIVE_FANOUT_WINDOW_WIDTH));
-    Ok((children_len > 1, width))
+    Ok((
+        result_shape == ryeos_runtime::callback::FollowResultShape::Cohort,
+        width,
+    ))
 }
 
 #[cfg(test)]
 mod launch_shape_tests {
     use super::validate_follow_launch;
+    use ryeos_runtime::callback::FollowResultShape;
 
     #[test]
     fn single_child_can_use_a_launch_window() {
-        assert_eq!(validate_follow_launch(1, None).unwrap(), (false, 1));
-        assert_eq!(validate_follow_launch(1, Some(8)).unwrap(), (false, 8));
-        assert_eq!(validate_follow_launch(24, None).unwrap(), (true, 8));
+        assert_eq!(
+            validate_follow_launch(FollowResultShape::Single, 1, None).unwrap(),
+            (false, 1)
+        );
+        assert_eq!(
+            validate_follow_launch(FollowResultShape::Cohort, 1, Some(8)).unwrap(),
+            (true, 8)
+        );
+        assert_eq!(
+            validate_follow_launch(FollowResultShape::Cohort, 24, None).unwrap(),
+            (true, 8)
+        );
     }
 
     #[test]
     fn invalid_follow_launch_shapes_remain_rejected() {
-        assert!(validate_follow_launch(0, Some(1)).is_err());
-        assert!(validate_follow_launch(1, Some(0)).is_err());
+        assert!(validate_follow_launch(FollowResultShape::Cohort, 0, Some(1)).is_err());
+        assert!(validate_follow_launch(FollowResultShape::Single, 1, Some(0)).is_err());
+        assert!(validate_follow_launch(FollowResultShape::Single, 2, Some(2)).is_err());
     }
 }
 

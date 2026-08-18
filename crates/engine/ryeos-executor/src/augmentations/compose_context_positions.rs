@@ -648,7 +648,6 @@ pub async fn run(
                 socket_path: state.config.uds_path.clone(),
                 token: cap.token.clone(),
             },
-            callback_project_path: callback_project_path.clone(),
             project_root: project_path.to_path_buf(),
             runtime_config: runtime_config_snapshot.values.clone(),
             payload,
@@ -730,7 +729,6 @@ pub async fn run(
             } else {
                 None
             },
-            callback_project_path: Some(callback_project_path.clone()),
             project_state_scope: cap
                 .provenance
                 .project_authority()

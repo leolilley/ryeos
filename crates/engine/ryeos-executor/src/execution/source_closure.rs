@@ -5,7 +5,7 @@
 //! result at the canonical source coordinate proved by the binding.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -73,42 +73,33 @@ fn mount_destinations_overlap(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }
 
-pub(crate) fn bind_source_for_execution(
-    state: &ryeos_app::state::AppState,
-    resolution: &ryeos_engine::resolution::ResolutionOutput,
-    workspace: &Path,
-    project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
-) -> anyhow::Result<Option<BoundSourceClosure>> {
-    let daemon_owned_workspace = matches!(
-        project_authority,
-        ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. }
-            | ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
-                realization: ryeos_state::objects::PinnedProjectRealization::Cow { .. },
-                ..
-            }
-    );
-    let mode = if !state.isolation.is_enforced() && daemon_owned_workspace {
-        BindingMode::PrivateWorkspace
-    } else {
-        BindingMode::IsolationMount
-    };
-    bind_source_with(state, resolution, workspace, mode)
-}
-
 pub(crate) fn bind_source(
     state: &ryeos_app::state::AppState,
     resolution: &ryeos_engine::resolution::ResolutionOutput,
     workspace: &Path,
 ) -> anyhow::Result<Option<BoundSourceClosure>> {
-    bind_source_with(state, resolution, workspace, BindingMode::IsolationMount)
+    bind_source_with(
+        state,
+        resolution,
+        workspace,
+        BindingMode::IsolationMount,
+        None,
+    )
 }
 
-pub(crate) fn bind_source_in_private_workspace(
+pub(crate) fn bind_source_in_private_workspace_with_budget(
     state: &ryeos_app::state::AppState,
     resolution: &ryeos_engine::resolution::ResolutionOutput,
     workspace: &Path,
+    budget: &super::external_content::PrivateMaterializationBudget,
 ) -> anyhow::Result<Option<BoundSourceClosure>> {
-    bind_source_with(state, resolution, workspace, BindingMode::PrivateWorkspace)
+    bind_source_with(
+        state,
+        resolution,
+        workspace,
+        BindingMode::PrivateWorkspace,
+        Some(budget),
+    )
 }
 
 fn bind_source_with(
@@ -116,6 +107,7 @@ fn bind_source_with(
     resolution: &ryeos_engine::resolution::ResolutionOutput,
     workspace: &Path,
     mode: BindingMode,
+    budget: Option<&super::external_content::PrivateMaterializationBudget>,
 ) -> anyhow::Result<Option<BoundSourceClosure>> {
     let authority = super::pinned_state_authority(state)?;
     let guard = authority.acquire_shared_guard()?;
@@ -207,7 +199,14 @@ fn bind_source_with(
             ),
         ],
         BindingMode::PrivateWorkspace => {
-            publish_private_source(&cas, workspace, &mount, &manifest)?;
+            publish_private_source(
+                &source,
+                workspace,
+                &mount,
+                &manifest,
+                budget
+                    .ok_or_else(|| anyhow::anyhow!("private source binding has no copy budget"))?,
+            )?;
             Vec::new()
         }
     };
@@ -300,10 +299,11 @@ fn logical_entry(binding: &ryeos_state::objects::EffectiveSourceBinding) -> anyh
 }
 
 fn publish_private_source(
-    cas: &lillux::CasStore,
+    source: &lillux::PinnedDirectory,
     workspace: &Path,
     mount: &str,
     manifest: &ryeos_state::objects::SourceClosureManifest,
+    budget: &super::external_content::PrivateMaterializationBudget,
 ) -> anyhow::Result<()> {
     let workspace = lillux::PinnedDirectory::open(workspace)?
         .ok_or_else(|| anyhow::anyhow!("private source workspace is absent"))?;
@@ -343,15 +343,114 @@ fn publish_private_source(
             ryeos_state::objects::SourceFileMode::ReadOnly => 0o644,
             ryeos_state::objects::SourceFileMode::Executable => 0o755,
         };
-        let observed = cas
-            .materialize_blob_to_new_regular(&entry.blob_hash, &output, &filename, mode)
+        let (source_parent, source_name) = open_source_parent(source, &entry.path)?;
+        let source_file = source_parent
+            .open_regular(&source_name, false)?
+            .ok_or_else(|| anyhow::anyhow!("admitted source cache file disappeared"))?;
+        budget
+            .materialize_regular(&output, &filename, &source_file, entry.size, mode)
             .with_context(|| format!("materialize admitted source file {}", entry.path))?;
-        if observed != entry.size {
-            anyhow::bail!("materialized source file size contradicts its manifest");
-        }
     }
     target.sync_tree()?;
+    verify_private_source(&target, manifest)?;
     Ok(())
+}
+
+fn verify_private_source(
+    root: &lillux::PinnedDirectory,
+    manifest: &ryeos_state::objects::SourceClosureManifest,
+) -> anyhow::Result<()> {
+    let expected = manifest
+        .entries
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut observed = Vec::with_capacity(expected.len());
+    verify_private_source_directory(root, "", &expected, &mut observed)?;
+    observed.sort();
+    if observed.iter().map(String::as_str).collect::<Vec<_>>()
+        != expected.keys().copied().collect::<Vec<_>>()
+    {
+        anyhow::bail!("private admitted source has missing or extra files");
+    }
+    Ok(())
+}
+
+fn verify_private_source_directory(
+    directory: &lillux::PinnedDirectory,
+    prefix: &str,
+    expected: &BTreeMap<&str, &ryeos_state::objects::SourceClosureFile>,
+    observed: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    for actual in directory.entries_no_follow_bounded(expected.len().saturating_add(1))? {
+        let name = actual
+            .name
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("private admitted source has a non-UTF-8 entry"))?;
+        let path = if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        match actual.entry_type {
+            lillux::PinnedEntryType::Directory => {
+                let descendant_prefix = format!("{path}/");
+                if !expected
+                    .keys()
+                    .any(|candidate| candidate.starts_with(&descendant_prefix))
+                {
+                    anyhow::bail!("private admitted source has unexpected directory {path}");
+                }
+                let child = directory
+                    .open_child_directory(&actual.name)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("private admitted source directory {path} disappeared")
+                    })?;
+                verify_private_source_directory(&child, &path, expected, observed)?;
+            }
+            lillux::PinnedEntryType::Regular => {
+                let entry = expected.get(path.as_str()).ok_or_else(|| {
+                    anyhow::anyhow!("private admitted source has unexpected file {path}")
+                })?;
+                let mut file = directory
+                    .open_regular(&actual.name, false)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("private admitted source file {path} disappeared")
+                    })?;
+                let (digest, metadata) =
+                    lillux::digest_open_regular_file_stable_exact(&mut file, entry.size)?;
+                let expected_mode = match entry.mode {
+                    ryeos_state::objects::SourceFileMode::ReadOnly => 0o644,
+                    ryeos_state::objects::SourceFileMode::Executable => 0o755,
+                };
+                if digest != entry.blob_hash
+                    || lillux::normalized_portable_regular_mode(&metadata)? != expected_mode
+                {
+                    anyhow::bail!("private admitted source file {path} failed verification");
+                }
+                observed.push(path);
+            }
+            _ => anyhow::bail!("private admitted source contains unsupported entry {path}"),
+        }
+    }
+    Ok(())
+}
+
+fn open_source_parent(
+    root: &lillux::PinnedDirectory,
+    relative: &str,
+) -> anyhow::Result<(lillux::PinnedDirectory, OsString)> {
+    let mut components = relative.split('/').peekable();
+    let mut parent = root.try_clone()?;
+    while let Some(component) = components.next() {
+        if components.peek().is_none() {
+            return Ok((parent, OsString::from(component)));
+        }
+        parent = parent
+            .open_child_directory(OsStr::new(component))?
+            .ok_or_else(|| anyhow::anyhow!("admitted source cache directory disappeared"))?;
+    }
+    anyhow::bail!("admitted source path is empty")
 }
 
 #[cfg(test)]
@@ -380,8 +479,12 @@ mod tests {
     fn private_source_shadow_contains_only_retained_cas_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let cas_root = dir.path().join("cas");
+        let source_cache = dir.path().join("source-cache");
         let workspace = dir.path().join("workspace");
         std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::create_dir_all(source_cache.join("lib")).unwrap();
+        std::fs::write(source_cache.join("solve.py"), b"sealed solve").unwrap();
+        std::fs::write(source_cache.join("lib/helper.py"), b"sealed helper").unwrap();
         std::fs::create_dir_all(workspace.join(".ai/tools/arc")).unwrap();
         std::fs::write(workspace.join(".ai/tools/arc/solve.py"), b"live").unwrap();
         std::fs::write(workspace.join(".ai/tools/arc/ambient.py"), b"ambient").unwrap();
@@ -411,7 +514,18 @@ mod tests {
         )
         .unwrap();
 
-        publish_private_source(&cas, &workspace, ".ai/tools/arc", &manifest).unwrap();
+        let source_cache = lillux::PinnedDirectory::open(&source_cache)
+            .unwrap()
+            .unwrap();
+        let budget = super::super::external_content::PrivateMaterializationBudget::new(u64::MAX);
+        publish_private_source(
+            &source_cache,
+            &workspace,
+            ".ai/tools/arc",
+            &manifest,
+            &budget,
+        )
+        .unwrap();
 
         assert_eq!(
             std::fs::read(workspace.join(".ai/tools/arc/solve.py")).unwrap(),

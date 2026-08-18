@@ -1,6 +1,6 @@
-# ryeos:signed:2026-08-11T03:06:22Z:8780ef6af85ea7e659d2550e924877380923754bb2c2b3dc1beeb3044e62e20b:x+bx1/gnfK2cFr2ZuRYkFim32Ejw5hZ36FvoJRGGSlVv+PFlDcNS2Yw0Y5No+KjYcpS1S0wul+gz3y0Us45ADA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-18T22:04:42Z:27f4cb783aacbc5ef4a6d164aa8831030f93760c5aa4d72e0d2916803aa3c29f:qqxqIML5Pkhwyr0q/yGMFDNpdQ5ntdmWoQji1sn1/eVR+UPue5M8wKgv4GToSYU00RGH6SD/WjJTEpBgz9QQDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/runtimes/python"
-version: "1.0.0"
+version: "1.1.0"
 executor_id: "@subprocess"
 description: "Python script runtime - runs Python scripts that manage their own __main__ entry point"
 
@@ -9,13 +9,12 @@ env_config:
     type: local_binary
     binary: python
     candidates: [python3]
-    search_paths: [".venv/bin", ".venv/Scripts"]
+    search_paths: []
     var: RYE_PYTHON
     path_candidates: [python3]
   env:
     PYTHONDONTWRITEBYTECODE: "1"
     PYTHONUNBUFFERED: "1"
-    PROJECT_VENV_PYTHON: "${interpreter}"
 
 source_scope:
   location: item_namespace

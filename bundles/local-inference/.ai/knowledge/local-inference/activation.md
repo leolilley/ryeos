@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-13T23:39:10Z:0382fdad66a4fab812856278468e5d0004fb48cf7f73a39fc488e03c42bf362a:W2CFjGHHphWIfhcavuki1NU+tUf/c8nfojbBk8FWARjZGXeQrBNWye7yFr50ggTSaGOAFTMcCoSYma8yEq8XBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-18T22:05:09Z:e9eff69814a2c620fac0ad57239430ca456a91a59a78bfa9a3217ba5ee652bca:KttCsyvKN4L9g2feZOpc2lDXWJXu+fNvqZTQmcxKexfOvKjqk+p5tUFjp0XVnbQYHcLGCLgI92bzOcOGL7W5Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: local-inference
 tags: [execution, external-content, persistent-session, local-model, replay]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   Operator activation and recovery contract for admitted local model workers.
 ---
@@ -177,7 +177,6 @@ environment:
     - RUST_BACKTRACE
     - RUST_LOG
     - RYEOSD_CALLBACK_TOKEN
-    - RYEOSD_PROJECT_PATH
     - RYEOSD_PROJECT_STATE_SCOPE
     - RYEOSD_SOCKET_PATH
     - RYEOSD_THREAD_AUTH_TOKEN

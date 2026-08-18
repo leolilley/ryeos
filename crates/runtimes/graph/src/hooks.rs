@@ -52,7 +52,7 @@ pub async fn run_graph_hooks(
 /// failed hook child surfaces as a `hook_child_failed` error instead of a silent
 /// success.
 fn build_dispatcher(callback: CallbackClient, thread_id: String) -> HookDispatcher {
-    Box::new(move |action, project_path, hook_dispatch| {
+    Box::new(move |action, _project_path, hook_dispatch| {
         let cb = callback.clone();
         let tid = thread_id.clone();
         Box::pin(async move {
@@ -68,7 +68,6 @@ fn build_dispatcher(callback: CallbackClient, thread_id: String) -> HookDispatch
             let response = cb
                 .dispatch_action(DispatchActionRequest {
                     thread_id: tid,
-                    project_path,
                     action: payload,
                     hook_dispatch: Some(hook_dispatch),
                     effect_dispatch: None,

@@ -265,7 +265,7 @@ pub(crate) async fn dispatch_runtime_method(
     //
     //  - thread-auth methods (dispatch_action, spawn_follow_child) prove a
     //    per-request `thread_auth_token` against the caller's own thread here,
-    //    then do their own stronger validation (callback token + project_path +
+    //    then do their own stronger validation (callback token + exact thread +
     //    server-side trust derivation) in the handler.
     //  - chain *reads* (get_thread / replay) may target any thread in the
     //    capability's own chain — a successor rehydrates by folding its
@@ -643,7 +643,7 @@ fn is_sensitive_runtime_read_method(method: &str) -> bool {
 
 /// Runtime methods that carry a per-request `thread_auth_token`. The prelude
 /// proves the token against the caller's own `thread_id`; the handler performs
-/// the stronger validation (callback token + project_path) and derives every
+/// the stronger validation (callback token + exact thread) and derives every
 /// trust-bearing field (principal, provenance, caps) from server-side state.
 fn is_thread_auth_method(method: &str) -> bool {
     matches!(
@@ -2762,10 +2762,10 @@ mod tests {
             "callback_token": callback_token,
             "thread_auth_token": thread_auth_token,
             "thread_id": "P",
-            "project_path": "/proj",
             "graph_run_id": "gr-1",
             "follow_node": "node-a",
             "step_count": 0,
+            "result_shape": "single",
             "children": [{
                 "item_ref": child,
                 "ref_bindings": {},
@@ -5177,7 +5177,6 @@ mod tests {
                 json!({
                     "callback_token": cbt.token,
                     "thread_id": "T-tat-missing",
-                    "project_path": "/p",
                     "action": {
                         "item_id": "directive:ryeos/agent/core/base",
                         "ref_bindings": {},
@@ -5218,7 +5217,6 @@ mod tests {
         let resp = dispatch(rpc("runtime.dispatch_action", json!({
                 "callback_token": cbt.token,
                 "thread_id": "T-tat-wrong",
-                "project_path": "/p",
                 "thread_auth_token": "tat-deadbeef0000000000000000000000000000000000000000000000000000",
                 "action": {
                     "item_id": "directive:ryeos/agent/core/base",
@@ -5271,7 +5269,6 @@ mod tests {
                 json!({
                     "callback_token": cbt.token,
                     "thread_id": "T-tat-ok",
-                    "project_path": "/p",
                     "thread_auth_token": tat.token.clone(),
                     "acting_principal": "fp:attacker-spoofed-principal",
                     "action": {
@@ -5305,7 +5302,6 @@ mod tests {
                 json!({
                     "callback_token": cbt.token,
                     "thread_id": "T-tat-ok",
-                    "project_path": "/p",
                     "thread_auth_token": tat.token,
                     "action": {
                         "item_id": "directive:ryeos/agent/core/base",
@@ -5352,7 +5348,6 @@ mod tests {
                 json!({
                     "callback_token": cbt.token,
                     "thread_id": "T-caps-empty",
-                    "project_path": "/p",
                     "thread_auth_token": tat.token,
                     "action": {
                         "item_id": "directive:ryeos/agent/core/base",
@@ -5400,7 +5395,6 @@ mod tests {
                 json!({
                     "callback_token": cbt.token,
                     "thread_id": "T-caps-wild",
-                    "project_path": "/p",
                     "thread_auth_token": tat.token,
                     "action": {
                         "item_id": "directive:ryeos/agent/core/base",

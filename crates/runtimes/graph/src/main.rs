@@ -8,7 +8,6 @@ mod evaluation;
 mod expression_inventory_tests;
 mod foreach;
 mod hooks;
-mod knowledge;
 mod model;
 mod persistence;
 mod resume;
@@ -48,14 +47,10 @@ struct Cli {
 
 /// Normalized launch data from the envelope.
 struct ResolvedLaunch {
-    /// Callback identity + state-write anchor: `envelope.roots.state_root()`
-    /// — the deliberate override when the launch carried one, otherwise the
-    /// project root. The daemon minted this run's callback token against
-    /// exactly this path, so every callback (dispatch, hooks, author) must
-    /// advertise it; the transcript write anchors here too. Graph resolution
-    /// needs no source root of its own: the composed definition arrives in
-    /// the envelope and children resolve daemon-side from token provenance.
-    state_root: std::path::PathBuf,
+    /// Process-visible workspace for runtime scratch/output. Durable project
+    /// and callback authority stay sealed server-side and are never supplied
+    /// as a host path to the runtime.
+    workspace_root: std::path::PathBuf,
     /// Diagnostic source label only. Executable bytes come exclusively from
     /// the finalized composed resolution carried by the launch envelope.
     graph_source_label: String,
@@ -113,12 +108,7 @@ fn main() -> anyhow::Result<()> {
     let thread_auth_token = std::env::var("RYEOSD_THREAD_AUTH_TOKEN")
         .expect("RYEOSD_THREAD_AUTH_TOKEN must be set by daemon");
     let callback = match resolved.callback.as_ref() {
-        Some(cb) => CallbackClient::new(
-            cb,
-            &resolved.thread_id,
-            resolved.state_root.to_str().unwrap_or(""),
-            &thread_auth_token,
-        ),
+        Some(cb) => CallbackClient::new(cb, &resolved.thread_id, &thread_auth_token),
         None => {
             let cb_env = EnvelopeCallback {
                 socket_path: ryeos_runtime::resolve_daemon_socket_path(
@@ -127,12 +117,7 @@ fn main() -> anyhow::Result<()> {
                 token: std::env::var("RYEOSD_CALLBACK_TOKEN")
                     .expect("RYEOSD_CALLBACK_TOKEN must be set by daemon"),
             };
-            CallbackClient::new(
-                &cb_env,
-                &resolved.thread_id,
-                resolved.state_root.to_str().unwrap_or(""),
-                &thread_auth_token,
-            )
+            CallbackClient::new(&cb_env, &resolved.thread_id, &thread_auth_token)
         }
     };
 
@@ -226,7 +211,7 @@ fn main() -> anyhow::Result<()> {
 
     let w = walker::Walker::new(
         graph,
-        resolved.state_root.to_string_lossy().to_string(),
+        resolved.workspace_root.to_string_lossy().to_string(),
         resolved.thread_id.clone(),
         callback,
         checkpoint,
@@ -282,7 +267,7 @@ fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<Resolve
     let effective_definition_digest = envelope.effective_definition_digest().clone();
 
     Ok(ResolvedLaunch {
-        state_root: envelope.roots.state_root().to_path_buf(),
+        workspace_root: envelope.roots.project_root.clone(),
         graph_source_label: envelope
             .resolution()
             .root

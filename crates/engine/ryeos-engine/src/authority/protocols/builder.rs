@@ -73,10 +73,6 @@ pub struct BuildRequest<'a> {
     /// Project root for env/secret expansion contexts.
     pub project_path: &'a Path,
 
-    /// Callback authorization/state anchor. May differ from `project_path`
-    /// when execution provenance deliberately overrides the state root.
-    pub callback_project_path: &'a Path,
-
     /// Opaque namespace for durable state owned by the admitted logical
     /// project. Absent for projectless execution.
     pub project_state_scope: Option<&'a str>,
@@ -196,13 +192,6 @@ pub fn build_subprocess_spec(
                 .to_str()
                 .ok_or(BuildError::NonUtf8Path {
                     path_kind: "project",
-                })?
-                .to_owned(),
-            EnvInjectionSource::CallbackProjectPath => request
-                .callback_project_path
-                .to_str()
-                .ok_or(BuildError::NonUtf8Path {
-                    path_kind: "callback project",
                 })?
                 .to_owned(),
             EnvInjectionSource::ProjectStateScope => {
@@ -344,10 +333,6 @@ mod tests {
                     name: "RYEOSD_THREAD_ID".to_string(),
                     source: EnvInjectionSource::ThreadId,
                 },
-                EnvInjection {
-                    name: "RYEOSD_PROJECT_PATH".to_string(),
-                    source: EnvInjectionSource::CallbackProjectPath,
-                },
             ],
             capabilities: ProtocolCapabilities {
                 allows_pushed_head: false,
@@ -424,7 +409,6 @@ mod tests {
             args,
             cwd: Path::new("/project"),
             project_path: Path::new("/project"),
-            callback_project_path: Path::new("/project-state"),
             project_state_scope: Some(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
@@ -453,7 +437,6 @@ mod tests {
                 project_root: PathBuf::from("/project"),
                 bundle_roots: vec![],
                 node_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
-                state_root: None,
             },
             request: EnvelopeRequest {
                 inputs: serde_json::json!({}),
@@ -558,21 +541,19 @@ mod tests {
 
         let spec = build_subprocess_spec(&desc, &req).unwrap();
 
-        // Assert env contains exactly the 4 declared keys.
+        // Callback authority is token-bound; no host project path is exposed.
         let env_keys: std::collections::HashSet<&String> =
             spec.env.iter().map(|(k, _)| k).collect();
-        assert_eq!(env_keys.len(), 4);
+        assert_eq!(env_keys.len(), 3);
         assert!(env_keys.contains(&"RYEOSD_SOCKET_PATH".to_string()));
         assert!(env_keys.contains(&"RYEOSD_CALLBACK_TOKEN".to_string()));
         assert!(env_keys.contains(&"RYEOSD_THREAD_ID".to_string()));
-        assert!(env_keys.contains(&"RYEOSD_PROJECT_PATH".to_string()));
 
         // Assert env values.
         let env_map: BTreeMap<String, String> = spec.env.into_iter().collect();
         assert_eq!(env_map["RYEOSD_SOCKET_PATH"], "/tmp/ryeos-callback.sock");
         assert_eq!(env_map["RYEOSD_CALLBACK_TOKEN"], "tok-test-123");
         assert_eq!(env_map["RYEOSD_THREAD_ID"], "T-test-thread");
-        assert_eq!(env_map["RYEOSD_PROJECT_PATH"], "/project-state");
 
         // Assert callback_channel and stdout_shape propagated.
         assert_eq!(spec.callback_channel, CallbackChannel::Http);

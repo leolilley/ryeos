@@ -7,7 +7,7 @@
 //! runtime consumers.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::effective_program::FinalizedEffectiveProgram;
 use crate::resolution::EffectiveDefinitionDigest;
@@ -35,7 +35,7 @@ pub use ryeos_accounting::UsdNanos;
 /// and the runtime would have no way to tell which to trust. Now there
 /// is exactly one root snapshot — `resolution.root` — and every consumer
 /// reads `path` / `digest` / `kind` / `item_id` from there.
-pub const MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION: u32 = 1;
+pub const MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -255,26 +255,15 @@ impl EnvelopeCallback {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnvelopeRoots {
+    /// Process workspace selected by the daemon. Depending on the admitted
+    /// execution policy this may be the live project, a pinned generation, or
+    /// a private exact-input view; it is never fresh resolution authority.
     pub project_root: PathBuf,
     pub bundle_roots: Vec<PathBuf>,
     /// Node trusted-keys dir (`<app_root>/.ai/config/keys/trusted`).
-    /// The runtime's `VerifiedLoader` takes its trust context from here
-    /// and the project root — never from bundle roots, never from env.
+    /// Runtimes that load an admitted config surface take node trust from this
+    /// directory, never from bundle roots or ambient environment variables.
     pub node_trusted_keys_dir: PathBuf,
-    /// Deliberate runtime state-root override (`/execute` `state_root`).
-    /// Item resolution stays anchored at `project_root`; runtime-state
-    /// writes (thread state, transcripts, thread knowledge) should target
-    /// [`Self::state_root`] instead of the project root when this is set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state_root: Option<PathBuf>,
-}
-
-impl EnvelopeRoots {
-    /// The root runtime-state writes should target: the deliberate override
-    /// when present, otherwise the project root.
-    pub fn state_root(&self) -> &Path {
-        self.state_root.as_deref().unwrap_or(&self.project_root)
-    }
 }
 
 /// Intentionally open payload — shape is kind-defined.
@@ -598,7 +587,6 @@ mod tests {
                 project_root: PathBuf::from("/project"),
                 bundle_roots: vec![],
                 node_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
-                state_root: None,
             },
             request: EnvelopeRequest {
                 inputs: serde_json::json!({}),
@@ -867,33 +855,6 @@ cost:
     }
 
     #[test]
-    fn state_root_falls_back_to_project_root() {
-        let mut roots = EnvelopeRoots {
-            project_root: PathBuf::from("/project"),
-            bundle_roots: vec![],
-            node_trusted_keys_dir: PathBuf::from("/keys"),
-            state_root: None,
-        };
-        assert_eq!(roots.state_root(), Path::new("/project"));
-        roots.state_root = Some(PathBuf::from("/tmp/smoke-state"));
-        assert_eq!(roots.state_root(), Path::new("/tmp/smoke-state"));
-    }
-
-    #[test]
-    fn envelope_roots_without_state_root_deserializes() {
-        // `state_root` is an optional key: absence must decode as None
-        // (fall back to the project root), never error.
-        let roots: EnvelopeRoots = serde_json::from_value(serde_json::json!({
-            "project_root": "/project",
-            "bundle_roots": [],
-            "node_trusted_keys_dir": "/keys",
-        }))
-        .unwrap();
-        assert!(roots.state_root.is_none());
-        assert_eq!(roots.state_root(), Path::new("/project"));
-    }
-
-    #[test]
     fn builder_produces_same_envelope() {
         let resolution = ResolutionOutput {
             root: crate::resolution::ResolvedAncestor {
@@ -927,7 +888,6 @@ cost:
                 project_root: PathBuf::from("/project"),
                 bundle_roots: vec![],
                 node_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
-                state_root: None,
             },
             EnvelopeRequest::simple(serde_json::json!({"key": "value"})),
             EnvelopePolicy::new(vec!["ryeos.execute.*".to_string()], HardLimits::default()),

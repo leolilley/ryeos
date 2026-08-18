@@ -672,7 +672,6 @@ mod tests {
         };
         let request = DispatchActionRequest {
             thread_id: "T-1".to_string(),
-            project_path: "/project".to_string(),
             action: ActionPayload {
                 operation_id: None,
                 item_id: "tool:test/audit".to_string(),
@@ -700,7 +699,6 @@ mod tests {
     fn dispatch_action_omits_hook_identity_for_regular_actions() {
         let request = DispatchActionRequest {
             thread_id: "T-1".to_string(),
-            project_path: "/project".to_string(),
             action: ActionPayload {
                 operation_id: None,
                 item_id: "tool:test/noop".to_string(),

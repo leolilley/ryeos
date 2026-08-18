@@ -12,7 +12,6 @@ mod dispatcher;
 #[cfg(test)]
 mod expression_inventory_tests;
 mod harness;
-mod knowledge;
 mod provider_adapter;
 mod provider_transport_timing;
 mod result_guard;
@@ -218,11 +217,6 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         );
     }
     let project_root = envelope.roots.project_root.clone();
-    // Callback identity + state-write anchor: the deliberate `state_root`
-    // override when the launch carried one, otherwise the project root. The
-    // daemon minted this run's callback token against exactly this path, so
-    // every callback must advertise it; resolution stays on `project_root`.
-    let state_root = envelope.roots.state_root().to_path_buf();
     let bundle_roots = envelope.roots.bundle_roots.clone();
 
     // The runtime no longer parses the directive body or walks extends.
@@ -241,7 +235,6 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     let callback = ryeos_runtime::callback_client::CallbackClient::new(
         &envelope.callback,
         &envelope.thread_id,
-        state_root.to_str().unwrap_or(""),
         &thread_auth_token,
     );
 
@@ -551,13 +544,6 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
                     .context_threshold_ratio,
                 sampling,
                 reasoning,
-                terminal_state_root: state_root.clone(),
-                terminal_source_path: envelope
-                    .resolution()
-                    .root
-                    .source_path
-                    .to_string_lossy()
-                    .into_owned(),
             },
         )?
     } else {
@@ -646,13 +632,6 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
                 .context_threshold_ratio,
             sampling,
             reasoning,
-            terminal_state_root: state_root.clone(),
-            terminal_source_path: envelope
-                .resolution()
-                .root
-                .source_path
-                .to_string_lossy()
-                .into_owned(),
         })
     };
     let result = runner_inst.run().await;

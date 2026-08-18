@@ -56,7 +56,6 @@ impl CallbackError {
 #[serde(deny_unknown_fields)]
 pub struct DispatchActionRequest {
     pub thread_id: String,
-    pub project_path: String,
     pub action: ActionPayload,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_dispatch: Option<HookDispatchIdentity>,
@@ -207,11 +206,13 @@ pub struct SpawnFollowChildRequest {
     /// `thread_id` to match the callback wire convention (the caller's thread),
     /// where "parent" is just its follow-semantics role.
     pub thread_id: String,
-    /// Project path the parent runs in, for callback-token validation.
-    pub project_path: String,
     pub graph_run_id: String,
     pub follow_node: String,
     pub step_count: i64,
+    /// Closed result shape selected by the graph operation. A cohort remains a
+    /// cohort when filtering leaves exactly one child; cardinality never
+    /// rewrites the checkpoint wire contract.
+    pub result_shape: FollowResultShape,
     /// Required non-empty cohort. Single-child callers emit one element.
     pub children: Vec<FollowChildSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -222,6 +223,13 @@ pub struct SpawnFollowChildRequest {
     /// Exact `continued` terminal payload the graph will emit on stdout after
     /// the daemon atomically records the follow handoff.
     pub completion: TerminalCompletion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FollowResultShape {
+    Single,
+    Cohort,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1023,7 +1031,6 @@ mod tests {
     fn dispatch_action_hook_identity_round_trips_exactly() {
         let request = DispatchActionRequest {
             thread_id: "T-hook".to_string(),
-            project_path: "/project".to_string(),
             action: ActionPayload {
                 operation_id: None,
                 item_id: "tool:test/hook".to_string(),
@@ -1058,6 +1065,43 @@ mod tests {
         let wire = serde_json::to_value(&request).unwrap();
         let round_trip: DispatchActionRequest = serde_json::from_value(wire).unwrap();
         assert_eq!(round_trip.hook_dispatch, request.hook_dispatch);
+    }
+
+    #[test]
+    fn callback_requests_reject_caller_supplied_project_path_authority() {
+        let request = json!({
+            "thread_id": "T-test",
+            "project_path": "/host/project",
+            "action": {
+                "item_id": "tool:test/echo",
+                "ref_bindings": {},
+                "params": {},
+                "thread": "inline"
+            }
+        });
+        assert!(serde_json::from_value::<DispatchActionRequest>(request).is_err());
+
+        let follow = json!({
+            "thread_id": "T-test",
+            "project_path": "/host/project",
+            "graph_run_id": "gr-test",
+            "follow_node": "child",
+            "step_count": 0,
+            "result_shape": "single",
+            "children": [{
+                "item_ref": "graph:test/child",
+                "ref_bindings": {},
+                "parameters": {}
+            }],
+            "completion": {
+                "status": "continued",
+                "outcome_code": "continued",
+                "result": null,
+                "error": null,
+                "cost": null
+            }
+        });
+        assert!(serde_json::from_value::<SpawnFollowChildRequest>(follow).is_err());
     }
 
     #[test]

@@ -766,6 +766,14 @@ fn resolve_command_for_daemon_with_commands(
         CommandDispatch::DirectExecuteItemRef { .. } => &tail[1..],
         _ => &tail,
     };
+    crate::project_resolve::reject_bound_project_parameter_flag(
+        parameter_tail,
+        matched
+            .command
+            .project
+            .as_ref()
+            .and_then(|project| project.bind_parameter.as_deref()),
+    )?;
     let mut parameters = bind_command_parameters_for_daemon(parameter_tail, &matched.command)?;
     let project_path = apply_project_policy(&matched.command, &mut parameters, default_project)?;
     if control.pin_project_at_admission && project_path.is_none() {

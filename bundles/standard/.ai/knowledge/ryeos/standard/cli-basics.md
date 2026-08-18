@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-17T23:06:01Z:ca2a7656d7f137154d50571c40bb1f627ca51a721a28f6850518b93164921199:7jiMtGbOjKwKvMXtV7uAEWn4Lftwe9CalKfYieWwfXbPlvrAwa+3KlzQlpv54PTqEyYA4/aqD+KCjTmlp0DbCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-18T22:04:53Z:7d4c3c398d84d6a5cf94c0339549c68826a018045b30c0e499a8a57811084b15:1FplciaF2T+1l5CqiNGebIjSq0cuH4FcrKBxjeDnGUHnBL7UV8dZdi9VR3TQTwv3zylJaY9XdJYzMhFCk+4rAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [cli, quickstart, reference, llm, execute, remote, threads, offline]
-version: "1.2.0"
+version: "1.3.0"
 description: >
   LLM-facing quickstart for using the ryeos CLI from initialization through
   local execution, project execution, thread inspection, and remote execution.
@@ -163,16 +163,16 @@ sign a project item.
 Inspect an item without running it:
 
 ```bash
-ryeos fetch --item-ref knowledge:ryeos/standard/cli-basics --project-path /abs/project
-ryeos fetch --item-ref tool:apps/demo/echo --project-path /abs/project --with-content
-ryeos fetch --item-ref directive:apps/demo/chat --project-path /abs/project --verify
+ryeos --project /abs/project fetch --item-ref knowledge:ryeos/standard/cli-basics
+ryeos --project /abs/project fetch --item-ref tool:apps/demo/echo --with-content
+ryeos --project /abs/project fetch --item-ref directive:apps/demo/chat --verify
 ```
 
 Verify signature and trust status:
 
 ```bash
-ryeos verify --item-ref knowledge:ryeos/standard/cli-basics --project-path /abs/project
-ryeos verify --item-ref tool:apps/demo/echo --project-path /abs/project
+ryeos --project /abs/project verify --item-ref knowledge:ryeos/standard/cli-basics
+ryeos --project /abs/project verify --item-ref tool:apps/demo/echo
 ```
 
 After editing a signed Rye item, sign it:
@@ -453,8 +453,8 @@ ryeos -p /abs/project execute directive:apps/my-app/chat --message "Hello"
 Local authoring and inspection:
 
 ```bash
-ryeos fetch --item-ref directive:apps/my-app/chat --project-path /abs/project --with-content
-ryeos verify --item-ref directive:apps/my-app/chat --project-path /abs/project
+ryeos --project /abs/project fetch --item-ref directive:apps/my-app/chat --with-content
+ryeos --project /abs/project verify --item-ref directive:apps/my-app/chat
 ryeos sign directive:apps/my-app/chat --project /abs/project
 ```
 

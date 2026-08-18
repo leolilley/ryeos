@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-08-11T02:28:36Z:28382b6a82fbcc1258ba6e3e58e9b2a24db3e982fd3d120b660e6f58dd73cf37:hts6fyrFm5diWYOiYH2x/t3H2kQ1Xze+iB1BW0uHiZtOWceYvB8c8rvIjLQSFGhkiiHhyoewH16VwdYrwfx9Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-18T22:04:52Z:0d3faf1dbc8b1108a2ca6a0900ed7afdf2989571e46e836ed0d0cded4f7db0cf:dw9+QG3fuV27Ns6faR5bOIPmUcPtccpHCAe548o9HirSI/EGDjAUW/pHFd0GMQZkwFvpSutxpUeOsYr71ApjCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
 tags: [reference, templating, interpolation, substitution]
-version: "1.0.0"
+version: "1.2.0"
 description: >
   The interpolation/template surfaces in Rye OS — where each runs, which
   use rye-expr/1, and what context each surface exposes.
@@ -52,7 +52,7 @@ evaluator as graph/directive runtime bodies.
 | `${tool_path}`       | Absolute path to the tool source file        |
 | `${tool_dir}`        | Parent directory of the tool source file     |
 | `${tool_parent}`     | Grandparent of the tool source file          |
-| `${project_path}`    | Absolute path to the project root            |
+| `${project_path}`    | Absolute path to the selected execution workspace; it may be a sparse ephemeral admitted-input view |
 | `${params_json}`     | Full parameters as JSON string               |
 | `${interpreter}`     | Resolved Python binary (from env config)     |
 | `${runtime_dir}`     | Current chain element's directory            |
@@ -107,7 +107,7 @@ env_config:
   env:
     PATH: "${PATH}"                         # allowlisted host value
     PYTHONUNBUFFERED: "1"                   # literal
-    PROJECT_VENV_PYTHON: "${interpreter}"   # runtime context
+    TOOL_PYTHON: "${interpreter}"           # runtime context
   env_paths:
     PATH:
       prepend: ["${runtime_dir}/bin"]

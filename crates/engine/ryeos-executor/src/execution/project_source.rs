@@ -466,7 +466,10 @@ fn resolve_pinned_snapshot_context_admitted(
         Some(path) if state.isolation.is_enforced() => {
             crate::execution::ProjectLowerMaterialization::EnforcedOverlayLower(path)
         }
-        Some(path) => crate::execution::ProjectLowerMaterialization::PrivateWritableWorkspace(path),
+        Some(path) => crate::execution::ProjectLowerMaterialization::PrivateWritableWorkspace {
+            target_dir: path,
+            budget: None,
+        },
     };
     let (effective_path, generation_lease, pinned_materialization) =
         crate::execution::checkout_project_lower(

@@ -2226,7 +2226,6 @@ pub(crate) async fn dispatch_method(
             method: method_name.to_string(),
             thread_id: thread_id.clone(),
             callback,
-            callback_project_path: callback_project_path.clone(),
             project_root: request.project_path.to_path_buf(),
             runtime_config,
             payload,
@@ -2359,7 +2358,6 @@ pub(crate) async fn dispatch_method(
             } else {
                 None
             },
-            callback_project_path: Some(callback_project_path.clone()),
             project_state_scope: request
                 .provenance
                 .project_authority()

@@ -13,6 +13,13 @@ pub(super) fn bind_params_minimal(
     command: &CommandDef,
     project_path: &str,
 ) -> Result<Value, CliError> {
+    crate::project_resolve::reject_bound_project_parameter_flag(
+        tail,
+        command
+            .project
+            .as_ref()
+            .and_then(|project| project.bind_parameter.as_deref()),
+    )?;
     // Shared with daemon dispatch so the two paths cannot drift:
     // `--input` is only honored when the descriptor declares an input
     // flag (clean cut from the old always-on offline behavior), and

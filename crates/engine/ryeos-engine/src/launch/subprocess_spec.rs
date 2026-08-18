@@ -68,7 +68,6 @@ pub struct SubprocessBuildRequest {
     pub cas_root: PathBuf,
     pub callback_token: Option<String>,
     pub callback_socket_path: Option<String>,
-    pub callback_project_path: Option<PathBuf>,
     /// Opaque namespace for durable state owned by the admitted logical
     /// project. `None` means the execution is projectless. This value conveys
     /// identity only and does not authorize callbacks or state access.

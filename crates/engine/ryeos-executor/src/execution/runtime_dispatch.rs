@@ -12,7 +12,6 @@ use ryeos_app::state::AppState;
 struct DispatchActionParams {
     callback_token: String,
     thread_id: String,
-    project_path: String,
     thread_auth_token: String,
     // Use the shared callback wire type directly — no local duplicate — so the
     // action payload (incl. its `call` block) can't drift from the runtime
@@ -166,15 +165,9 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     let params: DispatchActionParams =
         serde_json::from_value(params.clone()).context("invalid runtime.dispatch_action params")?;
 
-    // Use the raw project_path as-is. The token was minted with the raw
-    // PathBuf at runner.rs's launch site (no normalization); we must
-    // compare against the same form here or PathBuf equality will fail.
-    let project_path = std::path::PathBuf::from(&params.project_path);
-
-    let cap =
-        state
-            .callback_tokens
-            .validate(&params.callback_token, &params.thread_id, &project_path)?;
+    let cap = state
+        .callback_tokens
+        .validate_token_and_thread(&params.callback_token, &params.thread_id)?;
     let launch_owner = cap
         .launch_owner
         .as_deref()
@@ -233,7 +226,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     tracing::info!(
         thread_id = %params.thread_id,
         server_principal = %thread_auth.acting_principal,
-        project_path = %params.project_path,
+        project_path = %cap.project_path.display(),
         borrowed_dir = %child_provenance.effective_path().display(),
         project_source = ?child_provenance.project_source(),
         "thread auth token validated: using server-side principal",

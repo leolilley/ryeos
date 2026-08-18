@@ -1131,15 +1131,53 @@ async fn reconcile_active_threads_inner(
         })
         .map(|thread| thread.thread_id.clone())
         .collect::<BTreeSet<_>>();
-    for thread_id in state.state_store.list_attached_thread_ids()? {
+    let attached_thread_ids = state
+        .state_store
+        .list_attached_thread_ids()?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    for thread_id in &attached_thread_ids {
+        if running_threads
+            .iter()
+            .any(|thread| thread.thread_id == *thread_id)
+        {
+            continue;
+        }
+        if let Some(thread) = state.state_store.get_thread(thread_id)? {
+            running_threads.push(thread);
+        }
+    }
+    // A crash can occur after terminal publication and process compare-clear
+    // but before the request-owned TempDirGuard drops. Such a thread is absent
+    // from both nonterminal and attachment queries, so inventory the reserved
+    // mechanical namespace and bring its authoritative thread row into this
+    // same reconciliation pass. Missing rows are removable only when neither
+    // an attachment nor an exact launch claim still owns the coordinate.
+    for thread_id in ryeos_app::temp_dir_guard::admitted_input_workspace_thread_ids(
+        &state.config.runtime_root().cache(),
+    )? {
         if running_threads
             .iter()
             .any(|thread| thread.thread_id == thread_id)
         {
             continue;
         }
-        if let Some(thread) = state.state_store.get_thread(&thread_id)? {
-            running_threads.push(thread);
+        match state.state_store.get_thread(&thread_id)? {
+            Some(thread) => running_threads.push(thread),
+            None if !attached_thread_ids.contains(&thread_id)
+                && state.state_store.get_launch_claim(&thread_id)?.is_none() =>
+            {
+                ryeos_app::temp_dir_guard::remove_abandoned_admitted_input_workspace(
+                    &state.config.runtime_root().cache(),
+                    &thread_id,
+                )?;
+            }
+            None => {
+                tracing::warn!(
+                    thread_id,
+                    "admitted-input residue has unresolved runtime ownership; preserving it"
+                );
+            }
         }
     }
 
@@ -1348,6 +1386,10 @@ async fn reconcile_active_threads_inner(
                     }
                 }
             }
+            ryeos_app::temp_dir_guard::remove_abandoned_admitted_input_workspace(
+                &state.config.runtime_root().cache(),
+                &thread.thread_id,
+            )?;
             if let Some(claim) = launch_claim.as_ref() {
                 state
                     .state_store
@@ -1398,8 +1440,13 @@ async fn reconcile_active_threads_inner(
                         thread_id = %thread.thread_id,
                         "terminal identity changed before reconcile compare-and-clear"
                     );
+                    continue;
                 }
             }
+            ryeos_app::temp_dir_guard::remove_abandoned_admitted_input_workspace(
+                &state.config.runtime_root().cache(),
+                &thread.thread_id,
+            )?;
             if let Some(claim) = launch_claim.as_ref() {
                 state
                     .state_store
@@ -1485,6 +1532,10 @@ async fn reconcile_active_threads_inner(
                 "revoked abandoned exact launch claim during reconciliation"
             );
         }
+        ryeos_app::temp_dir_guard::remove_abandoned_admitted_input_workspace(
+            &state.config.runtime_root().cache(),
+            &thread.thread_id,
+        )?;
 
         // Unsupported launch authority is history, not current recovery
         // authority. The runtime DB inspected only its outer wire fields and

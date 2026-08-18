@@ -80,7 +80,7 @@ async fn unsigned_node_execution_limit_contributor_refuses_startup() {
                     std::fs::create_dir_all(&directory)?;
                     std::fs::write(
                         directory.join("execution.yaml"),
-                        "node:\n  max_live_fanout: 2\n",
+                        "node:\n  max_live_fanout: 2\n  max_private_materialization_copy_bytes: 1024\n",
                     )?;
                     Ok(())
                 },

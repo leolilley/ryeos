@@ -223,6 +223,80 @@ pub fn create_projectless_workspace(
     Ok((path, guard))
 }
 
+const ADMITTED_INPUT_WORKSPACE_PREFIX: &str = "admitted-input-";
+const MAX_ADMITTED_INPUT_WORKSPACE_ROOTS: usize = 65_536;
+
+/// Create the per-process root used to deliver an already-admitted sparse
+/// source/external view. The root is mechanical execution state: its name and
+/// materialization strategy never enter program or effect identity.
+pub fn create_admitted_input_workspace(
+    runtime_cache_root: &std::path::Path,
+    thread_id: &str,
+) -> anyhow::Result<(PathBuf, Arc<TempDirGuard>)> {
+    ryeos_runtime::validate_runtime_thread_id(thread_id)
+        .map_err(|error| anyhow::anyhow!("invalid admitted-input thread id: {error}"))?;
+    create_projectless_workspace(
+        runtime_cache_root,
+        &format!("{ADMITTED_INPUT_WORKSPACE_PREFIX}{thread_id}"),
+    )
+}
+
+/// Remove an abandoned admitted-input root for one exclusively claimed
+/// thread. Callers must first prove that no prior process owner remains alive.
+/// Persistent-session and pinned-COW roots use different namespaces and are
+/// structurally outside this cleanup.
+pub fn remove_abandoned_admitted_input_workspace(
+    runtime_cache_root: &std::path::Path,
+    thread_id: &str,
+) -> anyhow::Result<bool> {
+    ryeos_runtime::validate_runtime_thread_id(thread_id)
+        .map_err(|error| anyhow::anyhow!("invalid admitted-input thread id: {error}"))?;
+    let Some(execution_root) =
+        lillux::PinnedDirectory::open(&runtime_cache_root.join("executions"))?
+    else {
+        return Ok(false);
+    };
+    let name = std::ffi::OsString::from(format!("{ADMITTED_INPUT_WORKSPACE_PREFIX}{thread_id}"));
+    let Some(workspace) = execution_root.open_child_directory(&name)? else {
+        return Ok(false);
+    };
+    workspace.remove_contents_recursive()?;
+    if !execution_root.remove_empty_child_if_same(&name, &workspace)? {
+        anyhow::bail!("abandoned admitted-input workspace remained non-empty");
+    }
+    Ok(true)
+}
+
+/// Inventory the exact transient-input namespace for reconciliation. Only the
+/// reserved directory form is accepted; malformed entries fail startup rather
+/// than being ignored or treated as deletion authority.
+pub fn admitted_input_workspace_thread_ids(
+    runtime_cache_root: &std::path::Path,
+) -> anyhow::Result<Vec<String>> {
+    let Some(execution_root) =
+        lillux::PinnedDirectory::open(&runtime_cache_root.join("executions"))?
+    else {
+        return Ok(Vec::new());
+    };
+    let mut thread_ids = Vec::new();
+    for entry in execution_root.entries_no_follow_bounded(MAX_ADMITTED_INPUT_WORKSPACE_ROOTS)? {
+        let Some(name) = entry.name.to_str() else {
+            continue;
+        };
+        let Some(thread_id) = name.strip_prefix(ADMITTED_INPUT_WORKSPACE_PREFIX) else {
+            continue;
+        };
+        if entry.entry_type != lillux::PinnedEntryType::Directory {
+            anyhow::bail!("admitted-input namespace entry {name} is not a directory");
+        }
+        ryeos_runtime::validate_runtime_thread_id(thread_id)
+            .map_err(|error| anyhow::anyhow!("invalid admitted-input workspace name: {error}"))?;
+        thread_ids.push(thread_id.to_owned());
+    }
+    thread_ids.sort();
+    Ok(thread_ids)
+}
+
 impl std::fmt::Debug for TempDirGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TempDirGuard")
@@ -308,5 +382,53 @@ mod tests {
         // Prevent TempDirGuard from trying to remove the disarmed dir
         // (it was disarmed, so drop is a no-op, but let's be explicit).
         drop(g);
+    }
+
+    #[test]
+    fn admitted_input_workspace_is_per_thread_and_removed_by_its_guard() {
+        let cache = tempfile::tempdir().unwrap();
+        let thread_id = "T-00000000-0000-0000-0000-000000000001";
+        let (path, guard) = create_admitted_input_workspace(cache.path(), thread_id).unwrap();
+        assert!(path.ends_with(format!("admitted-input-{thread_id}")));
+        assert!(path.join(ryeos_engine::AI_DIR).is_dir());
+        std::fs::write(path.join("scratch"), b"private").unwrap();
+        drop(guard);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn abandoned_input_cleanup_cannot_cross_its_reserved_namespace() {
+        let cache = tempfile::tempdir().unwrap();
+        let thread_id = "T-00000000-0000-0000-0000-000000000002";
+        let (path, guard) = create_admitted_input_workspace(cache.path(), thread_id).unwrap();
+        std::fs::write(path.join("scratch"), b"abandoned").unwrap();
+        guard.disarm();
+        drop(guard);
+
+        assert!(remove_abandoned_admitted_input_workspace(cache.path(), thread_id).unwrap());
+        assert!(!path.exists());
+        assert!(!remove_abandoned_admitted_input_workspace(cache.path(), thread_id).unwrap());
+        assert!(remove_abandoned_admitted_input_workspace(cache.path(), "not-a-thread").is_err());
+    }
+
+    #[test]
+    fn admitted_input_inventory_finds_unattached_terminal_residue() {
+        let cache = tempfile::tempdir().unwrap();
+        let thread_id = "T-00000000-0000-0000-0000-000000000003";
+        let (path, guard) = create_admitted_input_workspace(cache.path(), thread_id).unwrap();
+        std::fs::write(path.join("terminal-output"), b"settled").unwrap();
+        guard.disarm();
+        drop(guard);
+
+        assert_eq!(
+            admitted_input_workspace_thread_ids(cache.path()).unwrap(),
+            vec![thread_id.to_owned()]
+        );
+        assert!(remove_abandoned_admitted_input_workspace(cache.path(), thread_id).unwrap());
+        assert!(
+            admitted_input_workspace_thread_ids(cache.path())
+                .unwrap()
+                .is_empty()
+        );
     }
 }

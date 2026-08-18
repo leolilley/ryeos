@@ -3596,6 +3596,10 @@ async fn follow_suspend_emits_events_and_no_receipt() {
     assert_eq!(reqs[0].graph_run_id, "gr-follow");
     assert_eq!(reqs[0].follow_node, "fetch");
     assert_eq!(reqs[0].step_count, 0);
+    assert_eq!(
+        reqs[0].result_shape,
+        ryeos_runtime::callback::FollowResultShape::Single
+    );
     assert_eq!(reqs[0].children.len(), 1);
     assert_eq!(reqs[0].children[0].item_ref, "directive:child");
 }
@@ -4269,6 +4273,11 @@ async fn follow_fanout_binds_item_before_rendering_action() {
         "directive:bound"
     );
     assert_eq!(rec.recorded_follow_requests()[0].children.len(), 1);
+    assert_eq!(
+        rec.recorded_follow_requests()[0].result_shape,
+        ryeos_runtime::callback::FollowResultShape::Cohort,
+        "foreach remains a cohort when filtering leaves one child"
+    );
     assert_eq!(
         rec.recorded_follow_requests()[0].launch_window_width,
         Some(2),

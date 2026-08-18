@@ -422,12 +422,8 @@ mod tests {
             socket_path: std::path::PathBuf::from("/nonexistent/ryeos-callback.sock"),
             token: "unused".to_string(),
         };
-        let callback = CallbackClient::new(
-            &callback_config,
-            "T-reasoning-request-fixture",
-            "/project",
-            "unused",
-        );
+        let callback =
+            CallbackClient::new(&callback_config, "T-reasoning-request-fixture", "unused");
         prepare_provider_request(&StreamingCallInput {
             client: &client,
             provider: &provider,
@@ -499,12 +495,8 @@ mod tests {
             socket_path: std::path::PathBuf::from("/nonexistent/ryeos-callback.sock"),
             token: "unused".to_string(),
         };
-        let callback = CallbackClient::new(
-            &callback_config,
-            "T-request-body-limit-fixture",
-            "/project",
-            "unused",
-        );
+        let callback =
+            CallbackClient::new(&callback_config, "T-request-body-limit-fixture", "unused");
         let error = match prepare_provider_request(&StreamingCallInput {
             client: &client,
             provider: &provider,

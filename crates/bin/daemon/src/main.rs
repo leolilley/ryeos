@@ -554,11 +554,21 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
 
             // Execution admission limits must be armed before projection recovery
             // or any later runtime recovery action is classified or enqueued.
-            let node_fanout = load_node_max_live_fanout(&engine)?;
-            ryeos_executor::execution::launch::arm_global_live_fanout_limit(node_fanout);
-            if let Some(n) = node_fanout {
+            let execution_limits = load_node_execution_limits(&engine)?;
+            ryeos_executor::execution::launch::arm_global_live_fanout_limit(
+                execution_limits.max_live_fanout,
+            );
+            let private_copy_limit = execution_limits
+                .max_private_materialization_copy_bytes
+                .expect("verified node execution limits include private copy bytes");
+            ryeos_executor::execution::arm_private_materialization_copy_limit(private_copy_limit)?;
+            if let Some(n) = execution_limits.max_live_fanout {
                 tracing::info!(max_live_fanout = n, "node execution limits armed");
             }
+            tracing::info!(
+                max_private_materialization_copy_bytes = private_copy_limit,
+                "node private materialization limit armed"
+            );
 
             startup.phase(
                 ryeos_node::StartupPhase::OpeningProjection,
@@ -1300,11 +1310,19 @@ async fn settle_uds_listener(task: &mut tokio::task::JoinHandle<Result<()>>) -> 
     }
 }
 
-/// Read `node.max_live_fanout` from the layered signed execution config,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct NodeExecutionLimits {
+    max_live_fanout: Option<u32>,
+    max_private_materialization_copy_bytes: Option<u64>,
+}
+
+/// Read node execution limits from the layered signed execution config,
 /// bundle defaults first and the node's own `.ai` tree last (last layer
 /// wins, matching execution-policy layering). A present malformed or
 /// unverifiable layer refuses startup; load shedding must not fail open.
-fn load_node_max_live_fanout(engine: &ryeos_engine::engine::Engine) -> Result<Option<u32>> {
+fn load_node_execution_limits(
+    engine: &ryeos_engine::engine::Engine,
+) -> Result<NodeExecutionLimits> {
     let ordinary_roots = engine.resolution_roots(None);
     let roots = engine.launch_config_roots(&ordinary_roots);
     let parsers = match engine.effective_parser_dispatcher(
@@ -1323,7 +1341,7 @@ fn load_node_max_live_fanout(engine: &ryeos_engine::engine::Engine) -> Result<Op
         trust_store: &engine.node_trust_store,
         project_authority: None,
     };
-    let mut limit: Option<u32> = None;
+    let mut limits = NodeExecutionLimits::default();
     // Resolution roots are ordered highest precedence first. Apply them in
     // reverse so trusted bundle defaults land first and the exact node config
     // layer, inserted ahead of bundle roots, wins last.
@@ -1344,30 +1362,44 @@ fn load_node_max_live_fanout(engine: &ryeos_engine::engine::Engine) -> Result<Op
                         candidate.display()
                     )
                 })?;
-        limit = apply_node_max_live_fanout_layer(limit, &value, &candidate)?;
+        limits = apply_node_execution_limits_layer(limits, &value, &candidate)?;
     }
-    if limit.is_none() {
+    if limits.max_live_fanout.is_none() {
         anyhow::bail!(
             "node execution limits: signed execution configuration must declare node.max_live_fanout"
         );
     }
-    Ok(limit)
+    if limits.max_private_materialization_copy_bytes.is_none() {
+        anyhow::bail!(
+            "node execution limits: signed execution configuration must declare node.max_private_materialization_copy_bytes"
+        );
+    }
+    Ok(NodeExecutionLimits {
+        max_live_fanout: limits.max_live_fanout,
+        max_private_materialization_copy_bytes: limits.max_private_materialization_copy_bytes,
+    })
 }
 
-fn apply_node_max_live_fanout_layer(
-    current: Option<u32>,
+fn apply_node_execution_limits_layer(
+    current: NodeExecutionLimits,
     value: &serde_json::Value,
     source: &std::path::Path,
-) -> Result<Option<u32>> {
-    Ok(decode_node_max_live_fanout(value, source)?.or(current))
+) -> Result<NodeExecutionLimits> {
+    let layer = decode_node_execution_limits(value, source)?;
+    Ok(NodeExecutionLimits {
+        max_live_fanout: layer.max_live_fanout.or(current.max_live_fanout),
+        max_private_materialization_copy_bytes: layer
+            .max_private_materialization_copy_bytes
+            .or(current.max_private_materialization_copy_bytes),
+    })
 }
 
-fn decode_node_max_live_fanout(
+fn decode_node_execution_limits(
     value: &serde_json::Value,
     source: &std::path::Path,
-) -> Result<Option<u32>> {
+) -> Result<NodeExecutionLimits> {
     let Some(node) = value.get("node") else {
-        return Ok(None);
+        return Ok(NodeExecutionLimits::default());
     };
     let node = node.as_object().ok_or_else(|| {
         anyhow::anyhow!(
@@ -1375,28 +1407,52 @@ fn decode_node_max_live_fanout(
             source.display()
         )
     })?;
-    let Some(raw) = node.get("max_live_fanout") else {
-        return Ok(None);
-    };
-    let parsed = raw.as_u64().ok_or_else(|| {
-        anyhow::anyhow!(
-            "node execution limits: node.max_live_fanout at {} must be a positive integer",
-            source.display()
-        )
-    })?;
-    let parsed = u32::try_from(parsed).with_context(|| {
-        format!(
-            "node execution limits: node.max_live_fanout at {} exceeds u32",
-            source.display()
-        )
-    })?;
-    if parsed == 0 {
-        anyhow::bail!(
-            "node execution limits: node.max_live_fanout at {} must be greater than zero",
-            source.display()
-        );
-    }
-    Ok(Some(parsed))
+    let max_live_fanout = node
+        .get("max_live_fanout")
+        .map(|raw| {
+            let parsed = raw.as_u64().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "node execution limits: node.max_live_fanout at {} must be a positive integer",
+                    source.display()
+                )
+            })?;
+            let parsed = u32::try_from(parsed).with_context(|| {
+                format!(
+                    "node execution limits: node.max_live_fanout at {} exceeds u32",
+                    source.display()
+                )
+            })?;
+            if parsed == 0 {
+                anyhow::bail!(
+                    "node execution limits: node.max_live_fanout at {} must be greater than zero",
+                    source.display()
+                );
+            }
+            Ok(parsed)
+        })
+        .transpose()?;
+    let max_private_materialization_copy_bytes = node
+        .get("max_private_materialization_copy_bytes")
+        .map(|raw| {
+            let parsed = raw.as_u64().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "node execution limits: node.max_private_materialization_copy_bytes at {} must be a positive integer",
+                    source.display()
+                )
+            })?;
+            if parsed == 0 {
+                anyhow::bail!(
+                    "node execution limits: node.max_private_materialization_copy_bytes at {} must be greater than zero",
+                    source.display()
+                );
+            }
+            Ok(parsed)
+        })
+        .transpose()?;
+    Ok(NodeExecutionLimits {
+        max_live_fanout,
+        max_private_materialization_copy_bytes,
+    })
 }
 
 /// Cross the durable ownership boundary for every active-thread resume intent.
@@ -2827,7 +2883,9 @@ mod shutdown_mapping_tests {
 
 #[cfg(test)]
 mod execution_limit_tests {
-    use super::{apply_node_max_live_fanout_layer, decode_node_max_live_fanout};
+    use super::{
+        NodeExecutionLimits, apply_node_execution_limits_layer, decode_node_execution_limits,
+    };
     use serde_json::json;
     use std::path::Path;
 
@@ -2835,7 +2893,9 @@ mod execution_limit_tests {
     fn fanout_limit_accepts_positive_u32_and_rejects_invalid_values() {
         let source = Path::new("execution.yaml");
         assert_eq!(
-            decode_node_max_live_fanout(&json!({"node":{"max_live_fanout":8}}), source).unwrap(),
+            decode_node_execution_limits(&json!({"node":{"max_live_fanout":8}}), source)
+                .unwrap()
+                .max_live_fanout,
             Some(8)
         );
         for invalid in [
@@ -2845,7 +2905,27 @@ mod execution_limit_tests {
             json!({"node":8}),
             json!({"node":[]}),
         ] {
-            assert!(decode_node_max_live_fanout(&invalid, source).is_err());
+            assert!(decode_node_execution_limits(&invalid, source).is_err());
+        }
+    }
+
+    #[test]
+    fn private_copy_limit_accepts_positive_u64_and_rejects_invalid_values() {
+        let source = Path::new("execution.yaml");
+        assert_eq!(
+            decode_node_execution_limits(
+                &json!({"node":{"max_private_materialization_copy_bytes":17179869184_u64}}),
+                source,
+            )
+            .unwrap()
+            .max_private_materialization_copy_bytes,
+            Some(17_179_869_184)
+        );
+        for invalid in [
+            json!({"node":{"max_private_materialization_copy_bytes":0}}),
+            json!({"node":{"max_private_materialization_copy_bytes":"1"}}),
+        ] {
+            assert!(decode_node_execution_limits(&invalid, source).is_err());
         }
     }
 
@@ -2853,12 +2933,19 @@ mod execution_limit_tests {
     fn later_node_layer_replaces_the_bundle_default() {
         let bundle = Path::new("bundle/execution.yaml");
         let node = Path::new("node/execution.yaml");
-        let limit =
-            apply_node_max_live_fanout_layer(None, &json!({"node":{"max_live_fanout":8}}), bundle)
-                .unwrap();
-        let limit =
-            apply_node_max_live_fanout_layer(limit, &json!({"node":{"max_live_fanout":3}}), node)
-                .unwrap();
-        assert_eq!(limit, Some(3));
+        let limits = apply_node_execution_limits_layer(
+            NodeExecutionLimits::default(),
+            &json!({"node":{"max_live_fanout":8,"max_private_materialization_copy_bytes":1024}}),
+            bundle,
+        )
+        .unwrap();
+        let limits = apply_node_execution_limits_layer(
+            limits,
+            &json!({"node":{"max_live_fanout":3,"max_private_materialization_copy_bytes":2048}}),
+            node,
+        )
+        .unwrap();
+        assert_eq!(limits.max_live_fanout, Some(3));
+        assert_eq!(limits.max_private_materialization_copy_bytes, Some(2048));
     }
 }

@@ -7,6 +7,8 @@ use std::io::{Read as _, Seek as _};
 #[cfg(unix)]
 use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ryeos_engine::external_content::ExternalContentKind;
 use ryeos_engine::external_realization::RealizedExternalContentSet;
@@ -76,23 +78,109 @@ enum ExternalRealizationBinding {
     PrivateWorkspace,
 }
 
-fn binding_for_execution(
-    isolation_enforced: bool,
-    project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
-) -> ExternalRealizationBinding {
-    let daemon_owned_workspace = matches!(
-        project_authority,
-        ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. }
-            | ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
-                realization: ryeos_state::objects::PinnedProjectRealization::Cow { .. },
-                ..
-            }
-    );
-    if !isolation_enforced && daemon_owned_workspace {
-        ExternalRealizationBinding::PrivateWorkspace
-    } else {
-        ExternalRealizationBinding::IsolationMounts
+static PRIVATE_MATERIALIZATION_COPY_LIMIT: AtomicU64 = AtomicU64::new(0);
+
+/// Arm the node-owned aggregate allowance used only when descriptor reflinks
+/// are unavailable while constructing one private admitted-input root.
+pub fn arm_private_materialization_copy_limit(limit: u64) -> anyhow::Result<()> {
+    if limit == 0 {
+        anyhow::bail!("private materialization copy limit must be greater than zero");
     }
+    PRIVATE_MATERIALIZATION_COPY_LIMIT.store(limit, Ordering::Release);
+    Ok(())
+}
+
+#[derive(Debug)]
+pub(crate) struct PrivateMaterializationBudget {
+    state: Mutex<PrivateMaterializationState>,
+}
+
+#[derive(Debug)]
+struct PrivateMaterializationState {
+    copy_limit_bytes: u64,
+    remaining_copy_bytes: u64,
+    copied_files: u64,
+    copied_bytes: u64,
+    reflinked_files: u64,
+    materialization_micros: u64,
+}
+
+impl PrivateMaterializationBudget {
+    pub(crate) fn new(limit: u64) -> Self {
+        Self {
+            state: Mutex::new(PrivateMaterializationState {
+                copy_limit_bytes: limit,
+                remaining_copy_bytes: limit,
+                copied_files: 0,
+                copied_bytes: 0,
+                reflinked_files: 0,
+                materialization_micros: 0,
+            }),
+        }
+    }
+
+    pub(crate) fn materialize_regular(
+        &self,
+        target_parent: &lillux::PinnedDirectory,
+        target_name: &OsStr,
+        source: &fs::File,
+        expected_size: u64,
+        mode: u32,
+    ) -> anyhow::Result<()> {
+        let started = std::time::Instant::now();
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("private materialization copy budget lock is poisoned"))?;
+        let outcome = target_parent.materialize_private_regular_child(
+            target_name,
+            source,
+            expected_size,
+            mode,
+            &mut state.remaining_copy_bytes,
+        )?;
+        match outcome {
+            lillux::secure_fs::PrivateFileMaterialization::Reflink => {
+                state.reflinked_files = state.reflinked_files.saturating_add(1);
+            }
+            lillux::secure_fs::PrivateFileMaterialization::Copied => {
+                state.copied_files = state.copied_files.saturating_add(1);
+                state.copied_bytes = state.copied_bytes.saturating_add(expected_size);
+            }
+        }
+        state.materialization_micros = state
+            .materialization_micros
+            .saturating_add(started.elapsed().as_micros().try_into().unwrap_or(u64::MAX));
+        Ok(())
+    }
+
+    pub(crate) fn emit_metrics(&self, thread_id: &str) -> anyhow::Result<()> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("private materialization copy budget lock is poisoned"))?;
+        tracing::info!(
+            target: "ryeos.metrics",
+            operation = "private_input_materialization",
+            thread_id,
+            reflinked_files = state.reflinked_files,
+            copied_files = state.copied_files,
+            copied_bytes = state.copied_bytes,
+            copy_limit_bytes = state.copy_limit_bytes,
+            copy_remaining_bytes = state.remaining_copy_bytes,
+            materialization_micros = state.materialization_micros,
+            "private input materialization summary"
+        );
+        Ok(())
+    }
+}
+
+pub(crate) fn private_materialization_budget() -> anyhow::Result<PrivateMaterializationBudget> {
+    let limit = PRIVATE_MATERIALIZATION_COPY_LIMIT.load(Ordering::Acquire);
+    if limit == 0 {
+        anyhow::bail!("node private materialization copy limit is not armed");
+    }
+    Ok(PrivateMaterializationBudget::new(limit))
 }
 
 impl ExternalMaterializationCache {
@@ -590,20 +678,9 @@ fn copy_open_regular_to_new(
     target_name: &OsStr,
     expected_size: u64,
     mode: u32,
+    budget: &PrivateMaterializationBudget,
 ) -> anyhow::Result<()> {
-    let mut source = source.try_clone()?;
-    source.rewind()?;
-    let mut target = target_parent.open_regular_create(target_name, true, true, 0o600)?;
-    let copied = std::io::copy(
-        &mut source.take(expected_size.saturating_add(1)),
-        &mut target,
-    )?;
-    if copied != expected_size {
-        anyhow::bail!(
-            "private external realization changed size while copying: expected {expected_size}, copied {copied}"
-        );
-    }
-    lillux::secure_fs::set_open_regular_file_mode(&target, mode)?;
+    budget.materialize_regular(target_parent, target_name, source, expected_size, mode)?;
     Ok(())
 }
 
@@ -611,6 +688,7 @@ fn copy_materialized_tree(
     source: &lillux::PinnedDirectory,
     target: &lillux::PinnedDirectory,
     manifest: &ryeos_state::objects::ExternalContentManifestObject,
+    budget: &PrivateMaterializationBudget,
 ) -> anyhow::Result<()> {
     for entry in &manifest.entries {
         let (target_parent, target_name) = ensure_materialization_parent(target, &entry.path)?;
@@ -635,6 +713,7 @@ fn copy_materialized_tree(
                     &target_name,
                     entry.size.expect("validated file entry has a size"),
                     entry.mode.expect("validated file entry has a mode"),
+                    budget,
                 )?;
             }
             ryeos_state::objects::ExternalContentManifestEntryKind::Symlink => {
@@ -662,6 +741,7 @@ fn copy_large_materialized_tree(
     source: &lillux::PinnedDirectory,
     target: &lillux::PinnedDirectory,
     manifest: &ryeos_state::objects::ExternalLargeContentManifestObject,
+    budget: &PrivateMaterializationBudget,
 ) -> anyhow::Result<()> {
     for entry in &manifest.entries {
         let (target_parent, target_name) = ensure_materialization_parent(target, &entry.path)?;
@@ -686,6 +766,7 @@ fn copy_large_materialized_tree(
                     &target_name,
                     entry.size.expect("validated file entry has a size"),
                     entry.mode.expect("validated file entry has a mode"),
+                    budget,
                 )?;
             }
             ryeos_state::objects::ExternalContentManifestEntryKind::Symlink => {
@@ -836,6 +917,7 @@ pub(crate) fn bind_external_realizations(
         resolution,
         project_path,
         ExternalRealizationBinding::IsolationMounts,
+        None,
     )
 }
 
@@ -862,41 +944,18 @@ pub(crate) fn admitted_realization_mounts(
     Ok(mounts)
 }
 
-/// Bind admitted realizations for a normal execution workspace.
-///
-/// Enforced isolation receives descriptor-pinned read-only mounts. With
-/// isolation disabled, only workspaces whose durable authority proves daemon
-/// ownership may receive private copies. Live and shared read-only project
-/// roots keep the mount form and are refused later by the isolation boundary.
-pub(crate) fn bind_external_realizations_for_execution(
-    state: &ryeos_app::state::AppState,
-    resolution: &ryeos_engine::resolution::ResolutionOutput,
-    project_path: &Path,
-    project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
-) -> anyhow::Result<Option<BoundExternalRealizations>> {
-    bind_external_realizations_with(
-        state,
-        resolution,
-        project_path,
-        binding_for_execution(state.isolation.is_enforced(), project_authority),
-    )
-}
-
-/// Install admitted realizations into a daemon-owned projectless workspace
-/// when the node has explicitly disabled OS isolation. The child receives no
-/// shared cache/store inode and no live locator fallback. Callers must never
-/// use this for an operator's live project workspace: doing so would replace
-/// project content rather than construct an execution view.
-pub(crate) fn bind_external_realizations_in_private_workspace(
+pub(crate) fn bind_external_realizations_in_private_workspace_with_budget(
     state: &ryeos_app::state::AppState,
     resolution: &ryeos_engine::resolution::ResolutionOutput,
     workspace: &Path,
+    budget: &PrivateMaterializationBudget,
 ) -> anyhow::Result<Option<BoundExternalRealizations>> {
     bind_external_realizations_with(
         state,
         resolution,
         workspace,
         ExternalRealizationBinding::PrivateWorkspace,
+        Some(budget),
     )
 }
 
@@ -905,6 +964,7 @@ fn bind_external_realizations_with(
     resolution: &ryeos_engine::resolution::ResolutionOutput,
     project_path: &Path,
     binding: ExternalRealizationBinding,
+    budget: Option<&PrivateMaterializationBudget>,
 ) -> anyhow::Result<Option<BoundExternalRealizations>> {
     let Some(value) = resolution
         .composed
@@ -934,6 +994,13 @@ fn bind_external_realizations_with(
                 )
             })?)
         }
+    };
+    let private_budget = if private_workspace.is_some() {
+        Some(budget.ok_or_else(|| {
+            anyhow::anyhow!("private external realization binding has no copy budget")
+        })?)
+    } else {
+        None
     };
     let mut mounts = Vec::with_capacity(realized.iter().len());
     let mut leases = Vec::with_capacity(realized.iter().len());
@@ -978,7 +1045,14 @@ fn bind_external_realizations_with(
                     workspace,
                     &entry.mount,
                     entry.kind,
-                    |staging| copy_large_materialized_tree(&generation.root, staging, &manifest),
+                    |staging| {
+                        copy_large_materialized_tree(
+                            &generation.root,
+                            staging,
+                            &manifest,
+                            private_budget.expect("private binding has a budget"),
+                        )
+                    },
                     |staging| {
                         verify_large_materialized_tree(
                             &cas,
@@ -1059,7 +1133,14 @@ fn bind_external_realizations_with(
                 workspace,
                 &entry.mount,
                 entry.kind,
-                |staging| copy_materialized_tree(&generation.root, staging, closure.manifest()),
+                |staging| {
+                    copy_materialized_tree(
+                        &generation.root,
+                        staging,
+                        closure.manifest(),
+                        private_budget.expect("private binding has a budget"),
+                    )
+                },
                 |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
                 |existing| match (entry.kind, existing) {
                     (
@@ -1706,71 +1787,6 @@ fn verify_materialized_directory(
 mod tests {
     use super::*;
 
-    #[test]
-    fn disabled_isolation_uses_private_copies_only_for_daemon_owned_workspaces() {
-        use ryeos_state::objects::{
-            EnvironmentAuthority, ExecutionProjectAuthority, LiveFilesystemConfinement,
-            LiveProjectAccess, PinnedProjectRealization, PinnedTerminalPublication,
-        };
-
-        let projectless = ExecutionProjectAuthority::PROJECTLESS;
-        let pinned_read_only = ExecutionProjectAuthority::pinned(
-            "project:test".to_owned(),
-            None,
-            "a".repeat(64),
-            PinnedProjectRealization::ReadOnly,
-            EnvironmentAuthority::None,
-            Vec::new(),
-        )
-        .unwrap();
-        let pinned_cow = ExecutionProjectAuthority::pinned(
-            "project:test".to_owned(),
-            None,
-            "b".repeat(64),
-            PinnedProjectRealization::Cow {
-                terminal_publication: PinnedTerminalPublication::Discard,
-            },
-            EnvironmentAuthority::None,
-            Vec::new(),
-        )
-        .unwrap();
-        let live_root = tempfile::tempdir().unwrap();
-        let live = ExecutionProjectAuthority::live(
-            live_root.path().to_path_buf(),
-            "project:test".to_owned(),
-            LiveProjectAccess::ReadOnly,
-            LiveFilesystemConfinement::standard_descriptor_rooted(),
-            EnvironmentAuthority::None,
-            Vec::new(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            binding_for_execution(false, &projectless),
-            ExternalRealizationBinding::PrivateWorkspace
-        );
-        assert_eq!(
-            binding_for_execution(false, &pinned_cow),
-            ExternalRealizationBinding::PrivateWorkspace
-        );
-        assert_eq!(
-            binding_for_execution(false, &pinned_read_only),
-            ExternalRealizationBinding::IsolationMounts
-        );
-        assert_eq!(
-            binding_for_execution(false, &live),
-            ExternalRealizationBinding::IsolationMounts
-        );
-        assert_eq!(
-            binding_for_execution(true, &projectless),
-            ExternalRealizationBinding::IsolationMounts
-        );
-        assert_eq!(
-            binding_for_execution(true, &pinned_cow),
-            ExternalRealizationBinding::IsolationMounts
-        );
-    }
-
     fn tree_mount(destination: &str, files: &[(&str, u64)]) -> SealedRealizationMount {
         SealedRealizationMount {
             destination: PathBuf::from(destination),
@@ -1968,12 +1984,15 @@ mod tests {
         let workspace = lillux::PinnedDirectory::open(&workspace_path)
             .unwrap()
             .unwrap();
+        let budget = PrivateMaterializationBudget::new(u64::MAX);
 
         publish_private_generation(
             &workspace,
             "runtime/content",
             ExternalContentKind::Tree,
-            |staging| copy_materialized_tree(&generation.root, staging, closure.manifest()),
+            |staging| {
+                copy_materialized_tree(&generation.root, staging, closure.manifest(), &budget)
+            },
             |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
             |existing| match existing {
                 lillux::PinnedDirectoryEntry::Directory(directory) => {
@@ -1993,7 +2012,9 @@ mod tests {
             &workspace,
             "runtime/content",
             ExternalContentKind::Tree,
-            |staging| copy_materialized_tree(&generation.root, staging, closure.manifest()),
+            |staging| {
+                copy_materialized_tree(&generation.root, staging, closure.manifest(), &budget)
+            },
             |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
             |existing| match existing {
                 lillux::PinnedDirectoryEntry::Directory(directory) => {
@@ -2025,7 +2046,9 @@ mod tests {
             &workspace,
             "runtime/content",
             ExternalContentKind::Tree,
-            |staging| copy_materialized_tree(&generation.root, staging, closure.manifest()),
+            |staging| {
+                copy_materialized_tree(&generation.root, staging, closure.manifest(), &budget)
+            },
             |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
             |existing| match existing {
                 lillux::PinnedDirectoryEntry::Directory(directory) => {
@@ -2183,11 +2206,12 @@ mod tests {
         let private = lillux::PinnedDirectory::open(&private_path)
             .unwrap()
             .unwrap();
+        let budget = PrivateMaterializationBudget::new(u64::MAX);
         publish_private_generation(
             &private,
             "model",
             ExternalContentKind::Tree,
-            |staging| copy_large_materialized_tree(&generation.root, staging, &manifest),
+            |staging| copy_large_materialized_tree(&generation.root, staging, &manifest, &budget),
             |staging| {
                 verify_large_materialized_tree(
                     &cas,
@@ -2272,12 +2296,15 @@ mod tests {
         let workspace = lillux::PinnedDirectory::open(&workspace_path)
             .unwrap()
             .unwrap();
+        let budget = PrivateMaterializationBudget::new(u64::MAX);
 
         publish_private_generation(
             &workspace,
             "config/model.bin",
             ExternalContentKind::File,
-            |staging| copy_materialized_tree(&generation.root, staging, closure.manifest()),
+            |staging| {
+                copy_materialized_tree(&generation.root, staging, closure.manifest(), &budget)
+            },
             |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
             |existing| match existing {
                 lillux::PinnedDirectoryEntry::Regular(file) => {
@@ -2313,7 +2340,9 @@ mod tests {
             &workspace,
             "config/model.bin",
             ExternalContentKind::File,
-            |staging| copy_materialized_tree(&generation.root, staging, closure.manifest()),
+            |staging| {
+                copy_materialized_tree(&generation.root, staging, closure.manifest(), &budget)
+            },
             |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
             |existing| match existing {
                 lillux::PinnedDirectoryEntry::Regular(file) => {
@@ -2345,7 +2374,9 @@ mod tests {
             &workspace,
             "config/model.bin",
             ExternalContentKind::File,
-            |staging| copy_materialized_tree(&generation.root, staging, closure.manifest()),
+            |staging| {
+                copy_materialized_tree(&generation.root, staging, closure.manifest(), &budget)
+            },
             |staging| verify_materialized_tree(&cas, staging, closure.manifest()),
             |existing| match existing {
                 lillux::PinnedDirectoryEntry::Regular(file) => {

@@ -11,6 +11,42 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+/// Mechanical result of materializing one immutable file into a private
+/// execution root. Policy remains with the caller; Lillux owns only the
+/// descriptor-safe filesystem operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivateFileMaterialization {
+    Reflink,
+    Copied,
+}
+
+fn try_reflink_regular_file(source: &File, target: &File) -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd as _;
+
+        // `_IOW(0x94, 9, int)` from linux/fs.h. Keep the syscall and its
+        // platform vocabulary inside Lillux.
+        const FICLONE: libc::c_ulong = 0x4004_9409;
+        if unsafe { libc::ioctl(target.as_raw_fd(), FICLONE, source.as_raw_fd()) } == 0 {
+            return Ok(true);
+        }
+        let error = std::io::Error::last_os_error();
+        if matches!(
+            error.raw_os_error(),
+            Some(libc::EOPNOTSUPP) | Some(libc::ENOTTY) | Some(libc::EXDEV) | Some(libc::EINVAL)
+        ) {
+            return Ok(false);
+        }
+        Err(error).context("reflink immutable file into private directory")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (source, target);
+        Ok(false)
+    }
+}
+
 /// Digest exactly the admitted number of bytes from an already-open regular
 /// inode and prove its descriptor identity remained stable.
 ///
@@ -1972,6 +2008,68 @@ impl PinnedDirectory {
             )?
             .ok_or_else(|| anyhow::anyhow!("created regular file disappeared"))
         }
+    }
+
+    /// Materialize one already-open immutable regular file as a new child.
+    ///
+    /// A descriptor-to-descriptor reflink is attempted first. When that
+    /// filesystem operation is unavailable, the caller-owned aggregate copy
+    /// allowance is charged before any bytes are copied. The source and target
+    /// identities are revalidated before return.
+    pub fn materialize_private_regular_child(
+        &self,
+        name: &OsStr,
+        source: &File,
+        expected_size: u64,
+        mode: u32,
+        remaining_copy_bytes: &mut u64,
+    ) -> Result<PrivateFileMaterialization> {
+        let source_observation = observe_open_regular_file(source)?;
+        if source_observation.size() != expected_size {
+            anyhow::bail!(
+                "private materialization source size {} differs from admitted size {expected_size}",
+                source_observation.size()
+            );
+        }
+        let mut target = self.open_regular_create(name, true, true, 0o600)?;
+        let result = (|| {
+            let outcome = if try_reflink_regular_file(source, &target)? {
+                PrivateFileMaterialization::Reflink
+            } else {
+                if expected_size > *remaining_copy_bytes {
+                    anyhow::bail!(
+                        "private materialization fallback copy requires {expected_size} bytes but only {} bytes remain",
+                        *remaining_copy_bytes
+                    );
+                }
+                target.set_len(0)?;
+                target.rewind()?;
+                let mut source = source.try_clone()?;
+                source.rewind()?;
+                let copied = std::io::copy(
+                    &mut source.take(expected_size.saturating_add(1)),
+                    &mut target,
+                )?;
+                if copied != expected_size {
+                    anyhow::bail!(
+                        "private materialization source changed size while copying: expected {expected_size}, copied {copied}"
+                    );
+                }
+                *remaining_copy_bytes -= expected_size;
+                PrivateFileMaterialization::Copied
+            };
+            ensure_open_regular_file_unchanged(source, &source_observation)?;
+            if target.metadata()?.len() != expected_size {
+                anyhow::bail!("private materialization target has the wrong size");
+            }
+            set_open_regular_file_mode(&target, mode)?;
+            self.ensure_regular_entry_matches(name, Some(&target))?;
+            Ok(outcome)
+        })();
+        if result.is_err() {
+            let _ = self.remove_if_same(name, &target);
+        }
+        result
     }
 
     /// Publish an already-open regular file from another pinned directory as a
@@ -5159,5 +5257,38 @@ mod tests {
             error.contains("rejected a symlink or non-regular entry"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn private_file_materialization_is_exact_and_independent() {
+        let root = tempfile::tempdir().unwrap();
+        let source_path = root.path().join("source");
+        let target_path = root.path().join("target");
+        std::fs::write(&source_path, b"admitted bytes").unwrap();
+        std::fs::create_dir(&target_path).unwrap();
+        let source = std::fs::File::open(&source_path).unwrap();
+        let target = PinnedDirectory::open(&target_path).unwrap().unwrap();
+        let mut copy_budget = 64;
+
+        let outcome = target
+            .materialize_private_regular_child(
+                OsStr::new("value"),
+                &source,
+                14,
+                0o644,
+                &mut copy_budget,
+            )
+            .unwrap();
+        assert_eq!(
+            std::fs::read(target_path.join("value")).unwrap(),
+            b"admitted bytes"
+        );
+        match outcome {
+            PrivateFileMaterialization::Reflink => assert_eq!(copy_budget, 64),
+            PrivateFileMaterialization::Copied => assert_eq!(copy_budget, 50),
+        }
+
+        std::fs::write(target_path.join("value"), b"child mutation").unwrap();
+        assert_eq!(std::fs::read(source_path).unwrap(), b"admitted bytes");
     }
 }

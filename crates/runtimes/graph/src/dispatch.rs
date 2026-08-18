@@ -197,7 +197,7 @@ pub async fn dispatch_action(
     client: &CallbackClient,
     action: &Value,
     thread_id: &str,
-    project_path: &str,
+    _project_path: &str,
     effect_dispatch: Option<ryeos_runtime::callback::EffectDispatchRequest>,
     _exec_ctx: Option<&ExecutionContext>,
 ) -> Result<ActionOutcome, ActionDispatchError> {
@@ -209,7 +209,6 @@ pub async fn dispatch_action(
 
     let request = ryeos_runtime::callback::DispatchActionRequest {
         thread_id: thread_id.to_string(),
-        project_path: project_path.to_string(),
         action: payload,
         hook_dispatch: None,
         effect_dispatch,

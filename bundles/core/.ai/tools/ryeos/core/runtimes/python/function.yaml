@@ -1,6 +1,6 @@
-# ryeos:signed:2026-08-11T03:06:22Z:7a0c9f5decfa9c93a1a21d79fa7079c006d3b775792cdc4c915f3ffab000dd29:C5kZd0myCZOX+VT1x/DByF6JD18ZrqGWVI9a2L/ixVFoUr97o9GSx0IHGTitZF7GpGGFOgOF8pjNrTbAEvbrDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-18T22:04:42Z:ee2e5b6a114bfe70cc4cfcac554ca40a063389fb4b3b36e944a623544bc2b82f:+TjZi6QWLrcrb5MIYLHQqZ9L+T8wNNSfeF4h22m5/gO+1VYlOwlD30oWlZl9dwQ5ausx9HIcDfqg+duZnWBsCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/runtimes/python"
-version: "1.0.0"
+version: "1.1.0"
 executor_id: "@subprocess"
 description: "Python function runtime - calls execute(params, project_path) and serializes result to stdout"
 
@@ -9,13 +9,12 @@ env_config:
     type: local_binary
     binary: python
     candidates: [python3]
-    search_paths: [".venv/bin", ".venv/Scripts"]
+    search_paths: []
     var: RYE_PYTHON
     path_candidates: [python3]
   env:
     PYTHONDONTWRITEBYTECODE: "1"
     PYTHONUNBUFFERED: "1"
-    PROJECT_VENV_PYTHON: "${interpreter}"
 
 source_scope:
   location: item_namespace
