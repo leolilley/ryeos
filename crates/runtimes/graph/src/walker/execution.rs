@@ -83,6 +83,7 @@ impl Walker {
                         item_id: String::new(),
                         result: json!({}),
                         assign: None,
+                        project_observations: Vec::new(),
                         next: Some(n),
                         child_thread_id: None,
                         cache_hit: false,
@@ -565,6 +566,53 @@ impl Walker {
                     },
                     None => None,
                 };
+                let project_observations = match &compiled.project_observations {
+                    Some(template) => match ExpressionScope::new(
+                        state,
+                        inputs,
+                        Some(&execution),
+                        GraphRunExpressionContext::new(
+                            graph_run_id,
+                            step,
+                            &self.graph.definition_ref,
+                            &self.graph.effective_definition_digest,
+                        ),
+                    )
+                    .with_result(&val)
+                    .with_dispatch_option(dispatch.as_ref())
+                    .render_json(template)
+                    {
+                        Ok(Value::Array(observations)) => observations,
+                        Ok(_) => {
+                            return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
+                                item_id: Some(dispatched_item_id),
+                                error: format!(
+                                    "project_observations for node `{current}` did not render as an array"
+                                ),
+                                elapsed_ms: elapsed,
+                                cost,
+                                effects: ExpressionFailureEffects::action(
+                                    dispatch_observation.clone(),
+                                ),
+                            });
+                        }
+                        Err(error) => {
+                            return StepOutcome::ExpressionFailed(ExpressionFailedOutcome {
+                                item_id: Some(dispatched_item_id),
+                                error: format!(
+                                    "expression evaluation failed in `project_observations` for node `{current}`: {error}"
+                                ),
+                                next_on_error: resolve_next_on_error(node, cfg),
+                                elapsed_ms: elapsed,
+                                cost,
+                                effects: ExpressionFailureEffects::action(
+                                    dispatch_observation.clone(),
+                                ),
+                            });
+                        }
+                    },
+                    None => Vec::new(),
+                };
                 let mut candidate_state = state.clone();
                 if let Some(assign) = assign.as_ref() {
                     merge_into(&mut candidate_state, assign);
@@ -614,6 +662,7 @@ impl Walker {
                     item_id: dispatched_item_id,
                     result: val,
                     assign,
+                    project_observations,
                     next,
                     child_thread_id,
                     cache_hit,

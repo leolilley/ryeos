@@ -21,6 +21,7 @@ impl Walker {
             item_id,
             result,
             assign,
+            project_observations,
             next,
             child_thread_id,
             cache_hit,
@@ -50,12 +51,27 @@ impl Walker {
         // happened, but are deliberately deferred until assignment and
         // branch evaluation have both succeeded. They therefore cannot
         // make an expression-failed transition look committed.
-        if let Some(observation) = DispatchObservation::from_success(
+        let mut observation = DispatchObservation::from_success(
             item_id.to_string(),
             child_thread_id.clone(),
             result,
             dispatch.clone(),
-        ) {
+        );
+        if !project_observations.is_empty() {
+            let observation = observation.get_or_insert_with(|| DispatchObservation {
+                item_id: item_id.to_string(),
+                child_thread_id: child_thread_id.clone(),
+                dispatch: dispatch.clone(),
+                milestones: Vec::new(),
+                state_anchors: Vec::new(),
+                project_observations: Vec::new(),
+                project_observations_well_formed: true,
+            });
+            observation
+                .project_observations
+                .extend(project_observations.iter().cloned());
+        }
+        if let Some(observation) = observation {
             if let Err(error) = self
                 .emit_dispatch_observation(graph_run_id, current, step, &observation)
                 .await

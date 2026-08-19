@@ -1,7 +1,7 @@
-<!-- ryeos:signed:2026-08-11T06:25:48Z:eee3b909f22072e0add705c34c5edf3abf99a8368e3ca039e52ebd6f6561d704:CrevOlUaCA9lwsN0AUxU4YlyPETLKY73nrH0AN+mJ7jFTlfBuppH/qjWJaJuE0pzxHpCR6ywfE2A1aYLkPLrCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-19T09:42:33Z:07be3ebf7a07eb65e96494e5bcb8343f9c225cfbc7004288763e56b5e0b3b3aa:zwcvwZAb0cbxRui58w2g9ntxnE8jvqubk3ugZJlMHOiy0D9l4xqDWptlECTbFNA2Vspaasezj/5F3iuojsysDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, graphs, dag, state-machine]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   How state graphs work — YAML DAG definitions, node types,
   conditional edges, foreach, hooks, and state persistence.
@@ -106,8 +106,31 @@ An action result may propose authoritative, meaning-blind project observations:
 }
 ```
 
-The graph runtime normalizes these requests only after assignment and branch
-evaluation succeed; one action may propose at most 256. The daemon supplies the chain and admitted graph
+When the graph already has every claimed value, author the same bounded
+request directly on the action node instead of dispatching an observation-only
+tool or hook:
+
+```yaml
+classify:
+  action: {item_id: "tool:my/classify", params: {subject: "${inputs.subject}"}}
+  project_observations:
+    - namespace: example.classification
+      stable_id: "classification:${inputs.subject}"
+      payload:
+        status: "${result.status}"
+        graph_run_id: "${run.graph_run_id}"
+```
+
+The field is valid only on an ordinary action node. It renders from the same
+pre-assignment `state`, `inputs`, successful `result`, `dispatch`, and `run`
+context as `assign`, and it does not launch a second child. Use a hook when an
+independent observer must execute or derive new evidence; do not use one merely
+to repackage values already accepted at the node fence.
+
+Graph-authored requests remain behind successful assignment and branch
+evaluation. Action-returned requests retain the existing dispatch-observation
+fence. On a successful action their combined list may contain at most 256
+entries. The daemon supplies the chain and admitted graph
 definition/effective digest, derives the durable observation identity, and
 refuses ordinary runtime append of the reserved event kind. A byte-identical
 retry returns the original event; reusing the same source-scoped stable ID with
@@ -266,7 +289,9 @@ redirect the walk — routing stays the walker's job. Ordinary condition/action
 evaluation or child-dispatch failures are warnings; accounting or integrity
 failures invalidate terminal authority and fail closed. Node-level resilience
 is the node `retry:` block, not a hook action. See `retry-and-hooks.md` for the
-full contract.
+full contract. If an ordinary action already returned the values to record,
+prefer node-level `project_observations`; it shares the action commit fence and
+does not create an observer child.
 
 Before launch, authored hooks and signed builtin, infrastructure, context,
 operator, and project policy are normalized into one captured effective hook

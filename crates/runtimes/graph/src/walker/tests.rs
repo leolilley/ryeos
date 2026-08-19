@@ -2465,6 +2465,7 @@ fn step_outcome_action_ok_captures_fields() {
         item_id: "tool:test/echo".to_string(),
         result: json!({"msg": "hello"}),
         assign: None,
+        project_observations: Vec::new(),
         next: Some("done".to_string()),
         child_thread_id: None,
         cache_hit: false,
@@ -4905,6 +4906,129 @@ config:
     assert_eq!(
         observations[0].observation.stable_id,
         "classification:game-1"
+    );
+}
+
+#[tokio::test]
+async fn graph_authored_project_observation_uses_the_existing_action_commit() {
+    let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: classify
+  nodes:
+    classify:
+      action: {item_id: "tool:test/classify", ref_bindings: {}, params: {}}
+      project_observations:
+        - namespace: example.classification
+          stable_id: "classification:${inputs.subject}"
+          payload:
+            status: "${result.classification}"
+            graph_run_id: "${run.graph_run_id}"
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#;
+    let graph = make_graph(yaml);
+    let (walker, recorder) =
+        make_recording_walker(graph, vec![json!({"classification": "accepted"})], None);
+
+    let result = walker
+        .execute(
+            json!({"inputs": {"subject": "game-1"}}),
+            Some("G-authored-project-observation".to_string()),
+        )
+        .await;
+    assert!(result.success, "{result:?}");
+    assert_eq!(
+        recorder.dispatch_count(),
+        1,
+        "authoring an observation must not dispatch a second tool"
+    );
+    let observations = recorder.recorded_project_observations();
+    assert_eq!(observations.len(), 1);
+    assert_eq!(
+        observations[0].observation.stable_id,
+        "classification:game-1"
+    );
+    assert_eq!(observations[0].observation.payload["status"], "accepted");
+    assert_eq!(
+        observations[0].observation.payload["graph_run_id"],
+        "G-authored-project-observation"
+    );
+}
+
+#[tokio::test]
+async fn graph_authored_project_observation_stays_behind_the_expression_fence() {
+    let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: classify
+  nodes:
+    classify:
+      action: {item_id: "tool:test/classify", ref_bindings: {}, params: {}}
+      project_observations:
+        - namespace: example.classification
+          stable_id: classification:broken
+          payload: {status: "${result.missing.deep}"}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#;
+    let (walker, recorder) =
+        make_recording_walker(make_graph(yaml), vec![json!({"ok": true})], None);
+
+    let result = walker
+        .execute(json!({}), Some("G-authored-observation-failure".to_string()))
+        .await;
+    assert!(!result.success, "missing authored evidence must fail closed");
+    assert_eq!(recorder.dispatch_count(), 1);
+    assert!(
+        recorder.recorded_project_observations().is_empty(),
+        "an uncommitted graph-authored claim must not publish"
+    );
+}
+
+#[tokio::test]
+async fn graph_and_action_project_observations_share_one_bound() {
+    let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: classify
+  nodes:
+    classify:
+      action: {item_id: "tool:test/classify", ref_bindings: {}, params: {}}
+      project_observations:
+        - {namespace: example.classification, stable_id: authored:1, payload: {ok: true}}
+        - {namespace: example.classification, stable_id: authored:2, payload: {ok: true}}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#;
+    let returned = (0..(ryeos_runtime::MAX_PROJECT_OBSERVATIONS_PER_ACTION - 1))
+        .map(|index| {
+            json!({
+                "namespace": "example.classification",
+                "stable_id": format!("returned:{index}"),
+                "payload": {"ok": true}
+            })
+        })
+        .collect::<Vec<_>>();
+    let (walker, recorder) = make_recording_walker(
+        make_graph(yaml),
+        vec![json!({"project_observations": returned})],
+        None,
+    );
+
+    let result = walker
+        .execute(json!({}), Some("G-combined-observation-bound".to_string()))
+        .await;
+    assert!(!result.success, "the combined list must retain one hard bound");
+    assert!(
+        recorder.recorded_project_observations().is_empty(),
+        "the complete combined list must validate before its first append"
     );
 }
 

@@ -280,6 +280,9 @@ pub(super) struct ActionOkOutcome {
     pub(super) item_id: String,
     pub(super) result: Value,
     pub(super) assign: Option<Value>,
+    /// Graph-authored project observations rendered from the successful
+    /// action result and held behind the same expression commit fence.
+    pub(super) project_observations: Vec<Value>,
     pub(super) next: Option<String>,
     /// Deferred until every assignment and branch expression has
     /// succeeded, then emitted by the commit fence.

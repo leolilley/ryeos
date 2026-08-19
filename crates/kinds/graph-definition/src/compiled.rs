@@ -87,6 +87,7 @@ impl CompiledGraph {
 pub struct CompiledNode {
     pub action: Option<CompiledActionTemplate>,
     pub assign: Option<CompiledJsonTemplate>,
+    pub project_observations: Option<CompiledJsonTemplate>,
     pub output: Option<CompiledJsonTemplate>,
     pub over: Option<CompiledTemplate>,
     pub facets: Option<CompiledJsonTemplate>,
@@ -138,6 +139,21 @@ impl CompiledNode {
             .as_ref()
             .map(|source| {
                 let field = format!("node {name}.assign");
+                let compiled = CompiledJsonTemplate::compile(source, field.clone(), limits)?;
+                validate_references(
+                    &field,
+                    compiled.references(),
+                    &assign_roots,
+                    input_properties,
+                )?;
+                Ok::<_, anyhow::Error>(compiled)
+            })
+            .transpose()?;
+        let project_observations = node
+            .project_observations
+            .as_ref()
+            .map(|source| {
+                let field = format!("node {name}.project_observations");
                 let compiled = CompiledJsonTemplate::compile(source, field.clone(), limits)?;
                 validate_references(
                     &field,
@@ -211,6 +227,9 @@ impl CompiledNode {
         for set in [
             action.as_ref().map(CompiledActionTemplate::references),
             assign.as_ref().map(CompiledJsonTemplate::references),
+            project_observations
+                .as_ref()
+                .map(CompiledJsonTemplate::references),
             output.as_ref().map(CompiledJsonTemplate::references),
             over.as_ref().map(CompiledTemplate::references),
             facets.as_ref().map(CompiledJsonTemplate::references),
@@ -225,6 +244,7 @@ impl CompiledNode {
         Ok(Self {
             action,
             assign,
+            project_observations,
             output,
             over,
             facets,

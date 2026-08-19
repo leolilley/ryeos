@@ -258,6 +258,12 @@ pub struct GraphNode {
         deserialize_with = "deserialize_assign"
     )]
     pub assign: Option<Value>,
+    /// Source-owned, meaning-blind observations rendered from the successful
+    /// action result at the graph commit fence. This is the authored form of
+    /// the existing `project_observations` action-result contract: it avoids a
+    /// second tool dispatch when the graph already has every claimed value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_observations: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<EdgeSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -635,6 +641,22 @@ fn validate_node(name: &str, node: &GraphNode, config: &GraphConfig) -> Result<(
         .is_some_and(|assign| !assign.is_object())
     {
         bail!("node `{name}` assign must be a mapping");
+    }
+    if let Some(observations) = &node.project_observations {
+        let observations = observations
+            .as_array()
+            .ok_or_else(|| anyhow!("node `{name}` project_observations must be an array"))?;
+        if observations.len() > ryeos_runtime::MAX_PROJECT_OBSERVATIONS_PER_ACTION {
+            bail!(
+                "node `{name}` project_observations contains {} entries; maximum is {}",
+                observations.len(),
+                ryeos_runtime::MAX_PROJECT_OBSERVATIONS_PER_ACTION,
+            );
+        }
+        if node.node_type != NodeType::Action || node.action.is_none() || node.follow || node.detach
+        {
+            bail!("node `{name}` project_observations requires an ordinary action node");
+        }
     }
     for requirement in &node.env_requires {
         if requirement.trim().is_empty() {
@@ -1051,6 +1073,45 @@ mod tests {
         let error = validate_view(&view(composed, Vec::new())).unwrap_err();
         assert!(
             format!("{error:#}").contains("expression root `result` is unavailable"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn admits_action_authored_project_observations_with_result_context() {
+        let mut graph = composed_graph();
+        graph["config"]["nodes"]["inherited"] = serde_json::json!({
+            "action": {
+                "item_id": "tool:test/audit",
+                "ref_bindings": {},
+                "params": {}
+            },
+            "project_observations": [{
+                "namespace": "example.classification",
+                "stable_id": "classification:${inputs.subject}",
+                "payload": {
+                    "status": "${result.status}",
+                    "graph_run_id": "${run.graph_run_id}"
+                }
+            }],
+            "next": {"type": "unconditional", "to": "finish"}
+        });
+
+        validate_view(&view(graph, Vec::new())).unwrap();
+    }
+
+    #[test]
+    fn rejects_project_observations_outside_an_ordinary_action() {
+        let mut graph = composed_graph();
+        graph["config"]["nodes"]["inherited"] = serde_json::json!({
+            "node_type": "gate",
+            "project_observations": [],
+            "next": {"type": "unconditional", "to": "finish"}
+        });
+
+        let error = validate_view(&view(graph, Vec::new())).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("project_observations requires an ordinary action node"),
             "unexpected error: {error:#}"
         );
     }

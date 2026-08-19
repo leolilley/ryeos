@@ -55,6 +55,7 @@ mod tests {
             node_type: NodeType::Action,
             action: None,
             assign: None,
+            project_observations: None,
             next: None,
             on_error: None,
             cache_result: false,
