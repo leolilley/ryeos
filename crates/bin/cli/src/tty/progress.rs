@@ -106,6 +106,7 @@ impl LifecycleProgress {
 
     pub fn finish_start(mut self, report: &StartReport) -> io::Result<()> {
         self.line.clear()?;
+        let width = self.line.live_width();
         let elapsed = human_duration(self.line.started.elapsed());
         let qualifier = if report.already_running {
             "already online"
@@ -122,7 +123,7 @@ impl LifecycleProgress {
         writeln!(
             out,
             "{}",
-            super::clamp_visible(&summary, self.line.width.saturating_sub(1).max(1))
+            super::clamp_visible(&summary, width.saturating_sub(1).max(1))
         )?;
         if let LifecycleStatus::Running { metadata, .. } = &report.status {
             let mut details = Vec::new();
@@ -140,7 +141,7 @@ impl LifecycleProgress {
                 writeln!(
                     out,
                     "{}",
-                    super::clamp_visible(&details, self.line.width.saturating_sub(1).max(1))
+                    super::clamp_visible(&details, width.saturating_sub(1).max(1))
                 )?;
             }
         }
@@ -149,6 +150,7 @@ impl LifecycleProgress {
 
     pub fn finish_stop(mut self, report: &StopReport) -> io::Result<()> {
         self.line.clear()?;
+        let width = self.line.live_width();
         let elapsed = human_duration(self.line.started.elapsed());
         let qualifier = if report.already_stopped {
             "already offline"
@@ -165,7 +167,7 @@ impl LifecycleProgress {
         writeln!(
             out,
             "{}",
-            super::clamp_visible(&summary, self.line.width.saturating_sub(1).max(1))
+            super::clamp_visible(&summary, width.saturating_sub(1).max(1))
         )?;
         out.flush()
     }
@@ -310,11 +312,15 @@ impl ProgressLine {
             self.started,
             self.color,
             self.unicode,
-            self.width,
+            self.live_width(),
         );
         drop(state);
         self.shared.wake.notify_one();
         result
+    }
+
+    fn live_width(&self) -> usize {
+        super::capabilities::live_terminal_width(self.width)
     }
 
     fn clear(&mut self) -> io::Result<()> {
@@ -386,7 +392,14 @@ fn progress_ticker(
         }
         if timeout.timed_out()
             && state.current.is_some()
-            && render_progress_state(&mut state, started, color, unicode, width).is_err()
+            && render_progress_state(
+                &mut state,
+                started,
+                color,
+                unicode,
+                super::capabilities::live_terminal_width(width),
+            )
+            .is_err()
         {
             state.stopped = true;
             return;

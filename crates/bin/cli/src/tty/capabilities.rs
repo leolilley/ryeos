@@ -90,9 +90,13 @@ fn terminal_width() -> usize {
             std::env::var("COLUMNS")
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
-                .filter(|width| *width >= 20)
+                .filter(|width| *width >= 2)
         })
         .unwrap_or(DEFAULT_TERMINAL_WIDTH)
+}
+
+pub(super) fn live_terminal_width(fallback: usize) -> usize {
+    tty_width().unwrap_or(fallback.max(2))
 }
 
 #[cfg(unix)]
@@ -104,7 +108,7 @@ fn tty_width() -> Option<usize> {
         ws_ypixel: 0,
     };
     let status = unsafe { libc::ioctl(io::stderr().as_raw_fd(), libc::TIOCGWINSZ, &mut size) };
-    (status == 0 && size.ws_col >= 20).then_some(size.ws_col as usize)
+    (status == 0 && size.ws_col >= 2).then_some(size.ws_col as usize)
 }
 
 #[cfg(not(unix))]
