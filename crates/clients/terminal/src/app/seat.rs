@@ -228,7 +228,7 @@ fn seat_execution_policy() -> serde_json::Value {
             "name_policy": { "kind": "declared_required" },
         },
         "project": {
-            "kind": "live_direct",
+            "kind": "live_authority",
             "access": "read_write",
             "child_policy": { "kind": "inherit" },
         },

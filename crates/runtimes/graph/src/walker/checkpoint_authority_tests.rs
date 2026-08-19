@@ -153,7 +153,37 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for AuthorityClient {
         Ok(json!({}))
     }
 
-    async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
+    async fn append_events(&self, _: &str, events: Vec<Value>) -> Result<Value, CallbackError> {
+        let event_types = events
+            .iter()
+            .map(|event| {
+                event
+                    .get("event_type")
+                    .and_then(Value::as_str)
+                    .expect("batched event type")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        self.event_types
+            .lock()
+            .unwrap()
+            .extend(event_types.iter().cloned());
+        let target = {
+            let boundary = self.crash_boundary.lock().unwrap();
+            boundary.as_ref().and_then(|boundary| match boundary {
+                CallbackCrashBoundary::Event(target)
+                    if event_types
+                        .iter()
+                        .any(|event_type| event_type == target.as_str()) =>
+                {
+                    Some(*target)
+                }
+                _ => None,
+            })
+        };
+        if let Some(target) = target {
+            self.crash_if_armed(CallbackCrashBoundary::Event(target));
+        }
         Ok(json!({}))
     }
 

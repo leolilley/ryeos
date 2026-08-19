@@ -14,6 +14,65 @@ fn graph_call_id(graph_run_id: &str, step: u32, node: &str) -> String {
 }
 
 impl Walker {
+    /// Publish the already-completed action's opening/result testimony as one
+    /// ordered state transaction. Dispatch happens before commit, so no
+    /// execution boundary can occur between these three durable events.
+    pub(super) async fn emit_completed_action_call(
+        &self,
+        graph_run_id: &str,
+        step: u32,
+        current: &str,
+        item_id: &str,
+        status: GraphToolCallStatus,
+    ) {
+        let call_id = graph_call_id(graph_run_id, step, current);
+        let node_ref = node_ref(&self.graph.definition_ref, current);
+        let events = vec![
+            (
+                RuntimeEventType::GraphStepStarted,
+                json!({
+                    "graph_run_id": graph_run_id,
+                    "definition_ref": &self.graph.definition_ref,
+                    "effective_definition_digest": &self.graph.effective_definition_digest,
+                    "node": current,
+                    "node_ref": &node_ref,
+                    "step": step,
+                }),
+            ),
+            (
+                RuntimeEventType::ToolCallStart,
+                json!({
+                    "tool": item_id,
+                    "call_id": &call_id,
+                    "graph_run_id": graph_run_id,
+                    "definition_ref": &self.graph.definition_ref,
+                    "effective_definition_digest": &self.graph.effective_definition_digest,
+                    "node": current,
+                    "node_ref": &node_ref,
+                    "step": step,
+                    "item_id": item_id,
+                }),
+            ),
+            (
+                RuntimeEventType::ToolCallResult,
+                json!({
+                    "tool": item_id,
+                    "call_id": &call_id,
+                    "graph_run_id": graph_run_id,
+                    "definition_ref": &self.graph.definition_ref,
+                    "effective_definition_digest": &self.graph.effective_definition_digest,
+                    "node": current,
+                    "node_ref": &node_ref,
+                    "step": step,
+                    "item_id": item_id,
+                    "status": status.as_str(),
+                }),
+            ),
+        ];
+        let result = self.client.append_runtime_events(events).await;
+        self.record_callback_warning("completed_action_call", result);
+    }
+
     pub(super) async fn write_node_receipt_or_warn(
         &self,
         graph_run_id: &str,

@@ -395,7 +395,7 @@ fn effective_base_from_public_key_url(public_key_url: &str) -> Result<String> {
 }
 
 fn project_from_cli_env() -> Option<PathBuf> {
-    let value = std::env::var_os("RYEOS_PROJECT_PATH")?;
+    let value = std::env::var_os("RYEOS_CLIENT_PROJECT_PATH")?;
     if value.is_empty() || value == "." {
         None
     } else {

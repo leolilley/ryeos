@@ -215,7 +215,7 @@ fn execute_policy(project_path: Option<&str>) -> serde_json::Value {
         },
         "project": if project_backed {
             serde_json::json!({
-                "kind": "live_direct",
+                "kind": "live_authority",
                 "access": "read_write",
                 "child_policy": { "kind": "inherit" },
             })

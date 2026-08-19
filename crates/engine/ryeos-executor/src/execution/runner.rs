@@ -1714,9 +1714,7 @@ fn publish_dispatch_effect_record(
                 "durable dispatch producer {produced_by_thread} has no admitted launch capsule"
             )
         })?;
-    let state_authority = state
-        .state_store
-        .with_state_db(|db| db.pinned_authority())?;
+    let state_authority = state.state_store.pinned_state_authority()?;
     let realization = capsule.verify_retained_execution_realization(
         &state_authority.cas_store()?,
         &state_authority.large_object_store()?,
@@ -2437,10 +2435,7 @@ fn admitted_root_launch_metadata(
         &params.resolved.item_ref,
         direct_executable_identity,
     )?;
-    let cas_root = state.state_store.cas_root()?;
-    let cas_directory = lillux::PinnedDirectory::open(&cas_root)?
-        .ok_or_else(|| anyhow::anyhow!("state CAS root is unavailable"))?;
-    let cas = lillux::CasStore::from_pinned_root(cas_directory);
+    let cas = state.state_store.pinned_state_authority()?.cas_store()?;
     let execution_closure = prepared_plan.admit_execution_closure(
         &cas,
         state.isolation.as_ref(),
@@ -2900,9 +2895,11 @@ pub async fn run_and_wait(
         prepared_plan.ensure_no_project_local_interpreter(params.provenance.effective_path())?;
     }
     let protocol = resolved_terminator_protocol(&engine, &params.resolved)?;
-    let wait_cas_guard =
-        ryeos_state::CasMutationGuard::shared_from_cas_root(&state.state_store.cas_root()?)
-            .context("acquire direct admission CAS mutation authority")?;
+    let wait_cas_guard = state
+        .state_store
+        .pinned_state_authority()?
+        .acquire_shared_guard()
+        .context("acquire direct admission CAS mutation authority")?;
     let (wait_launch_metadata, mut wait_external) = admitted_root_launch_metadata(
         &state,
         &params,
@@ -2944,11 +2941,12 @@ pub async fn run_and_wait(
         let authority = super::pinned_state_authority(&state)?;
         let replay_namespace =
             ryeos_state::ReplayIndexNamespace::new(ryeos_effect_contract::EFFECT_REPLAY_NAMESPACE)?;
-        let lookup = state.state_store.with_state_db(|db| {
-            db.lookup_replay_record(&replay_namespace, &cache_key, |indexed| {
-                verify_dispatch_effect_record(&authority, indexed)
-            })
-        })?;
+        let lookup =
+            state
+                .state_store
+                .lookup_replay_record(&replay_namespace, &cache_key, |indexed| {
+                    verify_dispatch_effect_record(&authority, indexed)
+                })?;
         match lookup {
             ryeos_state::ReplayLookupOutcome::Absent => Some(identity),
             ryeos_state::ReplayLookupOutcome::Present(indexed) => {
@@ -3741,9 +3739,11 @@ pub async fn run_detached(
         prepared_plan.ensure_no_project_local_interpreter(params.provenance.effective_path())?;
     }
     let protocol = resolved_terminator_protocol(&engine, &params.resolved)?;
-    let bg_cas_guard =
-        ryeos_state::CasMutationGuard::shared_from_cas_root(&state.state_store.cas_root()?)
-            .context("acquire detached direct admission CAS mutation authority")?;
+    let bg_cas_guard = state
+        .state_store
+        .pinned_state_authority()?
+        .acquire_shared_guard()
+        .context("acquire detached direct admission CAS mutation authority")?;
     let (bg_launch_metadata, mut bg_fresh_external) = admitted_root_launch_metadata(
         &state,
         &params,

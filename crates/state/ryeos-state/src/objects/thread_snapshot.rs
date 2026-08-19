@@ -4,6 +4,7 @@
 //! remain in CAS (immutable). The chain_state points to the latest.
 
 use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -20,7 +21,108 @@ use super::validate_object_kind;
 /// canonical decimal string; JSON-number money does not decode.
 /// v8: pinned COW authority persists both its immutable base snapshot and its
 /// current operational generation.
-pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 8;
+/// v9: terminal result/error content has a dedicated bounded contract, and
+/// managed runtime terminal state stores only its non-derivable supplement.
+pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 9;
+
+/// Maximum compact-JSON bytes retained across a terminal snapshot's result and
+/// error values. Terminal content has its own bounded contract: it is not an
+/// event payload, and lifecycle events must not duplicate it merely to make the
+/// result durable.
+pub const MAX_THREAD_RESULT_CONTENT_BYTES: usize = 4 * 1024 * 1024;
+
+struct BoundedJsonSize {
+    bytes: usize,
+    maximum: usize,
+    exceeded: bool,
+}
+
+impl std::io::Write for BoundedJsonSize {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let next = self
+            .bytes
+            .checked_add(buffer.len())
+            .ok_or_else(|| std::io::Error::other("serialized JSON size overflow"))?;
+        if next > self.maximum {
+            self.exceeded = true;
+            return Err(std::io::Error::other(
+                "serialized JSON exceeds the thread result content limit",
+            ));
+        }
+        self.bytes = next;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_json_size_bounded<T: Serialize + ?Sized>(
+    value: &T,
+    maximum: usize,
+    label: &str,
+) -> anyhow::Result<usize> {
+    let mut counter = BoundedJsonSize {
+        bytes: 0,
+        maximum,
+        exceeded: false,
+    };
+    if let Err(error) = serde_json::to_writer(&mut counter, value) {
+        if counter.exceeded {
+            anyhow::bail!("{label} exceeds the {maximum}-byte serialized maximum");
+        }
+        return Err(error).with_context(|| format!("serialize {label} for bounded validation"));
+    }
+    counter
+        .flush()
+        .context("finish bounded thread result content measurement")?;
+    Ok(counter.bytes)
+}
+
+/// Validate the exact terminal result/error content retained by a thread
+/// snapshot and return each compact serialized size. Keeping this in the state
+/// layer makes authoritative loads, projection rebuilds, and daemon writers
+/// share one ceiling.
+pub fn validate_thread_result_content(
+    result: Option<&serde_json::Value>,
+    error: Option<&serde_json::Value>,
+) -> anyhow::Result<(usize, usize)> {
+    let result_bytes = result
+        .map(|value| {
+            serialized_json_size_bounded(value, MAX_THREAD_RESULT_CONTENT_BYTES, "thread result")
+        })
+        .transpose()
+        .context("measure thread result")?
+        .unwrap_or(0);
+    let remaining = MAX_THREAD_RESULT_CONTENT_BYTES
+        .checked_sub(result_bytes)
+        .context("thread result content byte count overflow")?;
+    let error_bytes = error
+        .map(|value| serialized_json_size_bounded(value, remaining, "thread result and error"))
+        .transpose()
+        .context("measure thread error")?
+        .unwrap_or(0);
+    let total_bytes = result_bytes
+        .checked_add(error_bytes)
+        .context("thread result content byte count overflow")?;
+    if total_bytes > MAX_THREAD_RESULT_CONTENT_BYTES {
+        anyhow::bail!(
+            "thread result and error total {total_bytes} serialized bytes (max {MAX_THREAD_RESULT_CONTENT_BYTES})"
+        );
+    }
+    Ok((result_bytes, error_bytes))
+}
+
+/// Non-derivable fields from a managed runtime's terminal envelope. The
+/// terminal result/error and cost remain in their existing typed snapshot
+/// fields; storing only this supplement avoids a second copy of the result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedRuntimeTerminalSupplement {
+    pub outputs: serde_json::Value,
+    pub warnings: Vec<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -570,7 +672,7 @@ impl std::fmt::Display for ThreadStatus {
 /// Matches the JSON schema from ARCHITECTURE.md §3:
 /// ```json
 /// {
-///   "schema": 4,
+///   "schema": 9,
 ///   "kind": "thread_snapshot",
 ///   "thread_id": "T-root",
 ///   "chain_root_id": "T-root",
@@ -601,6 +703,7 @@ impl std::fmt::Display for ThreadStatus {
 ///   "error": null,
 ///   "budget": { ... },
 ///   "artifacts": [ ... ],
+///   "managed_runtime_terminal": null,
 ///   "facets": { ... },
 ///   "last_event_hash": "<hash>",
 ///   "last_chain_seq": 7,
@@ -682,6 +785,10 @@ pub struct ThreadSnapshot {
     pub budget: Option<ThreadUsage>,
     /// Published artifacts.
     pub artifacts: Vec<serde_json::Value>,
+    /// Non-derivable managed-runtime terminal fields. Required as an explicit
+    /// nullable field in schema 9; generic terminals do not carry it.
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub managed_runtime_terminal: Option<ManagedRuntimeTerminalSupplement>,
     /// Key-value facets (e.g. cost annotations). Uses BTreeMap for deterministic serialization.
     #[serde(
         serialize_with = "serialize_btreemap",
@@ -860,6 +967,22 @@ impl ThreadSnapshot {
         if let Some(usage) = &self.budget {
             usage.validate()?;
         }
+        let (result_bytes, error_bytes) =
+            validate_thread_result_content(self.result.as_ref(), self.error.as_ref())?;
+        if let Some(supplement) = self.managed_runtime_terminal.as_ref() {
+            if !self.status.is_terminal() {
+                anyhow::bail!("managed runtime terminal supplement requires a terminal snapshot");
+            }
+            let remaining = MAX_THREAD_RESULT_CONTENT_BYTES
+                .checked_sub(result_bytes)
+                .and_then(|bytes| bytes.checked_sub(error_bytes))
+                .context("managed runtime terminal content byte count overflow")?;
+            serialized_json_size_bounded(
+                supplement,
+                remaining,
+                "managed runtime terminal content",
+            )?;
+        }
         for (label, hash) in [
             (
                 "base_project_snapshot_hash",
@@ -923,6 +1046,7 @@ pub struct ThreadSnapshotBuilder {
     error: Option<serde_json::Value>,
     budget: Option<ThreadUsage>,
     artifacts: Vec<serde_json::Value>,
+    managed_runtime_terminal: Option<ManagedRuntimeTerminalSupplement>,
     facets: BTreeMap<String, String>,
     last_event_hash: Option<String>,
     last_chain_seq: u64,
@@ -969,6 +1093,7 @@ impl ThreadSnapshotBuilder {
             error: None,
             budget: None,
             artifacts: Vec::new(),
+            managed_runtime_terminal: None,
             facets: BTreeMap::new(),
             last_event_hash: None,
             last_chain_seq: 0,
@@ -1071,6 +1196,14 @@ impl ThreadSnapshotBuilder {
         self
     }
 
+    pub fn managed_runtime_terminal(
+        mut self,
+        supplement: Option<ManagedRuntimeTerminalSupplement>,
+    ) -> Self {
+        self.managed_runtime_terminal = supplement;
+        self
+    }
+
     pub fn facets(mut self, facets: BTreeMap<String, String>) -> Self {
         self.facets = facets;
         self
@@ -1132,6 +1265,7 @@ impl ThreadSnapshotBuilder {
             error: self.error,
             budget: self.budget,
             artifacts: self.artifacts,
+            managed_runtime_terminal: self.managed_runtime_terminal,
             facets: self.facets,
             last_event_hash: self.last_event_hash,
             last_chain_seq: self.last_chain_seq,
@@ -1389,6 +1523,7 @@ mod tests {
         assert!(snap.error.is_none());
         assert!(snap.budget.is_none());
         assert!(snap.artifacts.is_empty());
+        assert!(snap.managed_runtime_terminal.is_none());
         assert!(snap.facets.is_empty());
         assert!(snap.last_event_hash.is_none());
         assert_eq!(snap.last_chain_seq, 0);
@@ -1396,7 +1531,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_8_inventory_contains_capsule_identity_but_no_definition_identity() {
+    fn schema_9_inventory_contains_capsule_identity_but_no_definition_identity() {
         let value = child_snapshot().to_value();
         let fields = value.as_object().expect("thread snapshot is an object");
         assert_eq!(
@@ -1467,7 +1602,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_6_requires_current_wire_fields() {
+    fn schema_9_requires_current_wire_fields() {
         for field in [
             "upstream_thread_id",
             "requested_by",
@@ -1483,6 +1618,7 @@ mod tests {
             "outcome_code",
             "error",
             "budget",
+            "managed_runtime_terminal",
             "last_event_hash",
         ] {
             let mut value = serde_json::to_value(child_snapshot()).unwrap();
@@ -1825,5 +1961,92 @@ mod tests {
         let json = serde_json::to_string(&snap).unwrap();
         let deserialized: ThreadSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.result.unwrap()["answer"], 42);
+    }
+
+    #[test]
+    fn snapshot_result_has_a_dedicated_larger_than_event_ceiling() {
+        let accepted = ThreadSnapshotBuilder::new(
+            "T-result",
+            "T-root",
+            "graph",
+            "graph:test/large-result",
+            "native:ryeos-graph-runtime",
+        )
+        .status(ThreadStatus::Completed)
+        .result(Some(serde_json::json!({
+            "state": "x".repeat(super::super::MAX_THREAD_EVENT_SERIALIZED_BYTES)
+        })))
+        .created_at("2026-04-21T12:00:00Z".to_string())
+        .updated_at("2026-04-21T12:05:00Z".to_string())
+        .finished_at(Some("2026-04-21T12:05:00Z".to_string()))
+        .build();
+        assert!(accepted.validate().is_ok());
+
+        let rejected = ThreadSnapshotBuilder::new(
+            "T-oversized",
+            "T-root",
+            "graph",
+            "graph:test/large-result",
+            "native:ryeos-graph-runtime",
+        )
+        .status(ThreadStatus::Completed)
+        .result(Some(serde_json::json!(
+            "x".repeat(MAX_THREAD_RESULT_CONTENT_BYTES)
+        )))
+        .created_at("2026-04-21T12:00:00Z".to_string())
+        .updated_at("2026-04-21T12:05:00Z".to_string())
+        .finished_at(Some("2026-04-21T12:05:00Z".to_string()))
+        .build();
+        assert!(
+            rejected
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("thread result")
+        );
+    }
+
+    #[test]
+    fn managed_terminal_supplement_is_terminal_and_shares_the_content_ceiling() {
+        let supplement = ManagedRuntimeTerminalSupplement {
+            outputs: serde_json::json!({"summary": "x".repeat(256)}),
+            warnings: Vec::new(),
+        };
+        let nonterminal = ThreadSnapshotBuilder::new(
+            "T-running",
+            "T-root",
+            "tool",
+            "tool:test/managed",
+            "native:test",
+        )
+        .managed_runtime_terminal(Some(supplement.clone()))
+        .created_at("2026-04-21T12:00:00Z".to_string())
+        .updated_at("2026-04-21T12:00:00Z".to_string())
+        .build();
+        assert!(
+            nonterminal
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("requires a terminal snapshot")
+        );
+
+        let oversized_combination = ThreadSnapshotBuilder::new(
+            "T-terminal",
+            "T-root",
+            "tool",
+            "tool:test/managed",
+            "native:test",
+        )
+        .status(ThreadStatus::Completed)
+        .result(Some(serde_json::json!(
+            "x".repeat(MAX_THREAD_RESULT_CONTENT_BYTES - 128)
+        )))
+        .managed_runtime_terminal(Some(supplement))
+        .created_at("2026-04-21T12:00:00Z".to_string())
+        .updated_at("2026-04-21T12:05:00Z".to_string())
+        .finished_at(Some("2026-04-21T12:05:00Z".to_string()))
+        .build();
+        assert!(oversized_combination.validate().is_err());
     }
 }

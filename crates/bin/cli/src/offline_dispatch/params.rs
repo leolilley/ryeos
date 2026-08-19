@@ -31,6 +31,8 @@ pub(super) fn bind_params_minimal(
     let mut params = ryeos_runtime::arg_binder::bind_argv_with_command(tail, Some(command))
         .map_err(|e| CliError::Local { detail: e })?;
 
+    reject_injected_project_binding(&params, command)?;
+
     // Project resolution
     let resolution = command_project_resolution(command);
     if resolution != CommandProjectResolution::None {
@@ -161,6 +163,28 @@ fn command_project_resolution(command: &CommandDef) -> CommandProjectResolution 
         .as_ref()
         .map(|p| p.resolution)
         .unwrap_or_default()
+}
+
+fn reject_injected_project_binding(params: &Value, command: &CommandDef) -> Result<(), CliError> {
+    let Some(bind_parameter) = command
+        .project
+        .as_ref()
+        .and_then(|project| project.bind_parameter.as_ref())
+    else {
+        return Ok(());
+    };
+    if params
+        .as_object()
+        .is_some_and(|object| object.contains_key(bind_parameter))
+    {
+        return Err(CliError::Local {
+            detail: format!(
+                "--{} is runtime-bound from the command's project selector; use --project <path> instead",
+                bind_parameter.replace('_', "-")
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn apply_project_parameter_binding(params: &mut Value, command: &CommandDef) {
@@ -309,5 +333,28 @@ mod tests {
             json!({"project_path": project_path.to_string_lossy()})
         );
         assert!(params.get("project").is_none());
+    }
+
+    #[test]
+    fn offline_binding_refuses_injected_runtime_project_parameter() {
+        let project_path = std::env::current_dir()
+            .expect("current directory")
+            .canonicalize()
+            .expect("canonical current directory");
+        let error = bind_params_minimal(
+            &[
+                "--project-path".to_string(),
+                "/tmp/other-project".to_string(),
+            ],
+            &project_command("project_path"),
+            project_path.to_str().expect("UTF-8 project path"),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("--project-path is runtime-bound from the command's project selector")
+        );
     }
 }

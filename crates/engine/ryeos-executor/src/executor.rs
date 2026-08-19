@@ -344,10 +344,7 @@ fn confirm_recorded_service_terminal(
     if snapshot.budget.is_some() {
         bail!("authoritative terminal final_cost is unexpectedly present");
     }
-    if snapshot
-        .facets
-        .contains_key("runtime.terminal_envelope_json")
-    {
+    if snapshot.managed_runtime_terminal.is_some() {
         bail!("authoritative managed terminal envelope is unexpectedly present");
     }
     if !snapshot.artifacts.is_empty() {

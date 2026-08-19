@@ -65,11 +65,12 @@ const MAX_THREAD_LIST_EVENT_PAYLOAD_BYTES: usize = 256 * 1024;
 const MAX_THREAD_LIST_EVENT_PAYLOAD_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 const MAX_THREAD_LIST_ERROR_PREVIEW_BYTES: usize = 2 * 1024;
 const MAX_ACTIVE_LAUNCH_SIGNALS: usize = 4_096;
-/// Exact JSON budget for the response-facing thread result record. The
-/// projection content itself is capped by the 512 KiB ThreadEvent ceiling;
-/// four MiB also covers worst-case JSON escaping of a malformed stored error
-/// converted to a JSON string.
-const MAX_THREAD_RESULT_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+/// Exact JSON budget for the response-facing thread result record. Terminal
+/// content remains within the state-owned aggregate ceiling; the remainder
+/// covers the fixed record keys and bounded outcome code.
+const MAX_THREAD_RESULT_RESPONSE_BYTES: usize =
+    ryeos_state::objects::MAX_THREAD_RESULT_CONTENT_BYTES + 64 * 1024;
+const MAX_TERMINAL_EVENT_INLINE_ERROR_BYTES: usize = 64 * 1024;
 const MAX_STATE_RESTORE_BYTES: usize = 256 * 1024;
 const MAX_STATE_MANIFEST_INPUT_BYTES: usize = 1024 * 1024;
 const MAX_STATE_MANIFEST_TOTAL_INPUT_BYTES: usize = 4 * 1024 * 1024;
@@ -458,7 +459,6 @@ pub(crate) fn validate_final_cost_for_settlement(
 
 fn terminal_facets(
     final_cost: Option<&ryeos_engine::contracts::FinalCost>,
-    managed_envelope: Option<&Value>,
 ) -> Result<BTreeMap<String, String>> {
     let mut facets = BTreeMap::new();
     if let Some(cost) = final_cost {
@@ -485,13 +485,67 @@ fn terminal_facets(
             );
         }
     }
-    if let Some(envelope) = managed_envelope {
-        facets.insert(
-            "runtime.terminal_envelope_json".to_string(),
-            serde_json::to_string(envelope).context("encode managed runtime terminal envelope")?,
-        );
-    }
     Ok(facets)
+}
+
+fn managed_runtime_terminal_supplement(
+    envelope: Option<&Value>,
+) -> Result<Option<ryeos_state::objects::ManagedRuntimeTerminalSupplement>> {
+    envelope
+        .map(|envelope| {
+            let envelope =
+                ryeos_runtime::envelope::decode_managed_runtime_terminal_envelope(envelope)
+                    .map_err(anyhow::Error::msg)
+                    .context("decode validated managed runtime terminal envelope")?;
+            Ok::<_, anyhow::Error>(ryeos_state::objects::ManagedRuntimeTerminalSupplement {
+                outputs: envelope.outputs,
+                warnings: envelope.warnings,
+            })
+        })
+        .transpose()
+}
+
+fn terminal_value_digest(value: Option<&Value>, field: &str) -> Result<Option<String>> {
+    value
+        .map(|value| {
+            let canonical = lillux::canonical_json(value)
+                .with_context(|| format!("canonicalize terminal {field}"))?;
+            Ok::<_, anyhow::Error>(lillux::sha256_hex(canonical.as_bytes()))
+        })
+        .transpose()
+}
+
+fn managed_terminal_envelope_from_supplement(
+    thread_id: &str,
+    status: ThreadStatus,
+    result: Option<&Value>,
+    error: Option<&Value>,
+    final_cost: Option<&ryeos_engine::contracts::FinalCost>,
+    supplement: ryeos_state::objects::ManagedRuntimeTerminalSupplement,
+) -> Result<Value> {
+    let runtime_status = runtime_status_for_thread_status(status)?;
+    let raw_cost = final_cost
+        .map(|cost| {
+            serde_json::to_value(ryeos_runtime::envelope::RuntimeCost {
+                input_tokens: cost.input_tokens,
+                output_tokens: cost.output_tokens,
+                total_usd: cost.spend,
+                basis: cost.basis.clone(),
+            })
+        })
+        .transpose()
+        .context("encode authoritative managed runtime terminal cost")?;
+    let envelope = json!({
+        "success": runtime_status.is_success(),
+        "child_thread_id": thread_id,
+        "status": runtime_status,
+        "result": result.or(error).cloned().unwrap_or(Value::Null),
+        "outputs": supplement.outputs,
+        "warnings": supplement.warnings,
+        "cost": raw_cost,
+    });
+    validate_managed_terminal_envelope(&envelope, thread_id, status, result, error, final_cost)?;
+    Ok(envelope)
 }
 
 const FOLLOW_ENVELOPE_LIMIT_CODE: &str = "follow_terminal_envelope_limit_exceeded";
@@ -1775,6 +1829,7 @@ fn build_snapshot(thread: &NewThreadRecord) -> ThreadSnapshot {
         error: None,
         budget: None,
         artifacts: vec![],
+        managed_runtime_terminal: None,
         captured_history_policy: thread.captured_history_policy.clone(),
         facets: Default::default(),
         last_event_hash: None,
@@ -2287,6 +2342,7 @@ fn continued_snapshot_from_authoritative(
     snapshot.error = None;
     snapshot.budget = None;
     snapshot.artifacts.clear();
+    snapshot.managed_runtime_terminal = None;
     snapshot.facets.clear();
     snapshot
 }
@@ -3721,14 +3777,65 @@ impl StateStore {
 
     /// Get the CAS root path for raw CAS access.
     pub fn cas_root(&self) -> Result<std::path::PathBuf> {
-        let g = self.lock()?;
-        Ok(g.state_db.cas_root().to_path_buf())
+        Ok(self.state_authority.cas_directory().path().to_path_buf())
     }
 
     /// Get the refs root path for ref system access.
     pub fn refs_root(&self) -> Result<std::path::PathBuf> {
-        let g = self.lock()?;
-        Ok(g.state_db.refs_root().to_path_buf())
+        Ok(self.state_authority.refs_directory().path().to_path_buf())
+    }
+
+    /// Duplicate the descriptor-pinned state authority without entering the
+    /// serialized database boundary. The authority is immutable for the life
+    /// of this store and is safe to use for CAS verification outside the
+    /// StateStore mutex.
+    pub fn pinned_state_authority(&self) -> Result<ryeos_state::PinnedStateAuthority> {
+        self.state_authority.try_clone()
+    }
+
+    /// Verify immutable replay evidence without holding the node-wide state
+    /// mutex. The index is read under the mutex, CAS verification happens on
+    /// descriptor-pinned authority, and an exact-row retention touch closes
+    /// the operation. Movement during verification is unavailable, never a
+    /// miss that could re-execute an already-recorded effect.
+    pub fn lookup_replay_record(
+        &self,
+        namespace: &ryeos_state::ReplayIndexNamespace,
+        cache_key: &str,
+        mut verify: impl FnMut(&ryeos_state::ReplayIndexRecord) -> ryeos_state::ReplayRecordVerification,
+    ) -> Result<ryeos_state::ReplayLookupOutcome> {
+        let indexed = {
+            let g = self.lock()?;
+            match g.state_db.lookup_replay_index(namespace, cache_key)? {
+                ryeos_state::ReplayLookupOutcome::Absent => {
+                    return Ok(ryeos_state::ReplayLookupOutcome::Absent);
+                }
+                ryeos_state::ReplayLookupOutcome::Present(indexed) => indexed,
+                failure => return Ok(failure),
+            }
+        };
+        match verify(&indexed) {
+            ryeos_state::ReplayRecordVerification::Verified => {
+                let retained = {
+                    let g = self.lock()?;
+                    g.state_db
+                        .touch_replay_record_if_same(namespace, &indexed)?
+                };
+                if !retained {
+                    return Ok(ryeos_state::ReplayLookupOutcome::Unavailable {
+                        reason: "replay index moved while its record was being verified"
+                            .to_string(),
+                    });
+                }
+                Ok(ryeos_state::ReplayLookupOutcome::Present(indexed))
+            }
+            ryeos_state::ReplayRecordVerification::Unavailable { reason } => {
+                Ok(ryeos_state::ReplayLookupOutcome::Unavailable { reason })
+            }
+            ryeos_state::ReplayRecordVerification::IntegrityFailure { reason } => {
+                Ok(ryeos_state::ReplayLookupOutcome::IntegrityFailure { reason })
+            }
+        }
     }
 
     pub fn pending_head_transition_status(&self) -> Result<PendingHeadTransitionStatus> {
@@ -5172,6 +5279,11 @@ impl StateStore {
         if let Some(cost) = update.final_cost.as_ref() {
             validate_final_cost_for_settlement(cost)?;
         }
+        let (result_size_bytes, error_size_bytes) =
+            ryeos_state::objects::validate_thread_result_content(
+                update.result_json.as_ref(),
+                update.error_json.as_ref(),
+            )?;
         if let Some(envelope) = update.managed_envelope.as_ref() {
             validate_managed_terminal_envelope(
                 envelope,
@@ -5215,7 +5327,9 @@ impl StateStore {
         }
 
         let now = lillux::time::iso8601_now();
-        let facets = terminal_facets(update.final_cost.as_ref(), update.managed_envelope.as_ref())?;
+        let facets = terminal_facets(update.final_cost.as_ref())?;
+        let managed_runtime_terminal =
+            managed_runtime_terminal_supplement(update.managed_envelope.as_ref())?;
 
         let artifacts_json: Vec<Value> = update
             .artifacts
@@ -5257,6 +5371,7 @@ impl StateStore {
             }
         });
         updated_snapshot.artifacts = artifacts_json;
+        updated_snapshot.managed_runtime_terminal = managed_runtime_terminal;
         updated_snapshot.facets = facets;
         updated_snapshot
             .result_project_snapshot_hash
@@ -5282,16 +5397,35 @@ impl StateStore {
             });
         }
 
+        // A terminal event is a bounded lifecycle fact, not a second result
+        // store. The complete result/error remain authoritative in the thread
+        // snapshot committed by this same head transition. Hashes let an event
+        // consumer correlate those values without embedding them again.
         let mut terminal_payload = json!({
             "outcome_code": update.outcome_code,
-            "result": update.result_json,
+            "result_present": update.result_json.is_some(),
+            "result_size_bytes": result_size_bytes,
+            "result_digest": terminal_value_digest(update.result_json.as_ref(), "result")?,
             "has_error": update.error_json.is_some(),
+            "error_size_bytes": error_size_bytes,
+            "error_digest": terminal_value_digest(update.error_json.as_ref(), "error")?,
             "artifact_count": update.artifacts.len(),
         });
         if let Some(err) = &update.error_json
             && let Some(map) = terminal_payload.as_object_mut()
         {
-            map.insert("error".to_string(), err.clone());
+            if error_size_bytes <= MAX_TERMINAL_EVENT_INLINE_ERROR_BYTES {
+                map.insert("error".to_string(), err.clone());
+            } else {
+                map.insert("error_omitted".to_string(), Value::Bool(true));
+                map.insert(
+                    "error_preview".to_string(),
+                    Value::String(
+                        "terminal error exceeds the event inline limit; inspect the thread for the full error"
+                            .to_string(),
+                    ),
+                );
+            }
         }
         events_to_append.push(NewEventRecord {
             event_type: terminal_event_type(&update.status)?.to_string(),
@@ -7300,7 +7434,15 @@ impl StateStore {
             result,
             error: row
                 .error
-                .map(|error| serde_json::from_str::<Value>(&error).unwrap_or(Value::String(error))),
+                .map(|error| {
+                    serde_json::from_str::<Value>(&error).with_context(|| {
+                        format!(
+                            "malformed JSON in thread_results.error for thread_id {}",
+                            thread_id
+                        )
+                    })
+                })
+                .transpose()?,
             metadata: None,
         };
         let response_bytes = serde_json::to_vec(&record)?.len();
@@ -7336,6 +7478,7 @@ impl StateStore {
             result,
             error,
             budget,
+            managed_runtime_terminal,
             facets,
             ..
         } = snapshot;
@@ -7364,11 +7507,18 @@ impl StateStore {
                 })
             })
             .transpose()?;
-        let managed_envelope = facets
-            .get("runtime.terminal_envelope_json")
-            .map(|raw| serde_json::from_str(raw))
-            .transpose()
-            .context("decode authoritative managed runtime terminal envelope")?;
+        let managed_envelope = managed_runtime_terminal
+            .map(|supplement| {
+                managed_terminal_envelope_from_supplement(
+                    thread_id,
+                    status,
+                    result.as_ref(),
+                    error.as_ref(),
+                    final_cost.as_ref(),
+                    supplement,
+                )
+            })
+            .transpose()?;
 
         Ok(Some(ThreadTerminalAuthority {
             status,
@@ -11327,6 +11477,35 @@ mod tests {
     }
 
     #[test]
+    fn replay_object_verification_runs_outside_the_state_mutex() {
+        let store = test_store();
+        let namespace = ryeos_state::ReplayIndexNamespace::new("dispatch.effect").unwrap();
+        let indexed = ryeos_state::ReplayIndexRecord {
+            cache_key: "a".repeat(64),
+            answer_digest: "b".repeat(64),
+            record_hash: "c".repeat(64),
+        };
+        store
+            .with_state_db(|db| {
+                db.publish_replay_record(&namespace, &indexed, |_| {
+                    ryeos_state::ReplayRecordVerification::Verified
+                })
+            })
+            .expect("publish replay row");
+
+        let outcome = store
+            .lookup_replay_record(&namespace, &indexed.cache_key, |_| {
+                assert!(
+                    store.inner.try_lock().is_ok(),
+                    "CAS verification must not hold the node-wide state mutex"
+                );
+                ryeos_state::ReplayRecordVerification::Verified
+            })
+            .expect("lookup replay row");
+        assert_eq!(outcome, ryeos_state::ReplayLookupOutcome::Present(indexed));
+    }
+
+    #[test]
     fn predecessor_released_binding_head_requires_explicit_epoch_reset() {
         let tmp = tempdir().unwrap();
         let runtime_state_dir = tmp.path().join(".ai/state");
@@ -12612,6 +12791,170 @@ mod tests {
             .into_iter()
             .map(|event| event.event_type)
             .collect()
+    }
+
+    #[test]
+    fn terminal_result_larger_than_event_is_retained_once_and_event_is_bounded() {
+        let store = test_store();
+        let thread_id = "T-large-terminal-result";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .expect("create thread");
+        let result = json!({
+            "state": "x".repeat(ryeos_state::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES)
+        });
+        let managed_envelope = crate::thread_lifecycle::managed_runtime_envelope(
+            thread_id,
+            ThreadStatus::Completed.as_str(),
+            Some(&result),
+            None,
+            None,
+            &json!({"answer": 42}),
+            &["retained warning".to_string()],
+        );
+
+        store
+            .finalize_thread(
+                thread_id,
+                &FinalizeThreadRecord {
+                    status: ThreadStatus::Completed.as_str().to_string(),
+                    outcome_code: Some("success".to_string()),
+                    result_json: Some(result.clone()),
+                    error_json: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    managed_envelope: Some(managed_envelope),
+                    result_project_snapshot_hash: None,
+                },
+            )
+            .expect("large terminal result must not inflate the lifecycle event");
+
+        let projected = store
+            .get_thread_result(thread_id)
+            .expect("read projected result")
+            .expect("projected result exists");
+        assert_eq!(projected.result.as_ref(), Some(&result));
+
+        let events = store
+            .replay_events(thread_id, Some(thread_id), None, 8, 1024 * 1024)
+            .expect("replay terminal events")
+            .events;
+        let terminal = events
+            .iter()
+            .find(|event| event.event_type == ryeos_state::event_types::THREAD_COMPLETED)
+            .expect("thread_completed event");
+        assert!(terminal.payload.get("result").is_none());
+        assert_eq!(terminal.payload["result_present"], true);
+        assert!(terminal.payload["result_size_bytes"].as_u64().unwrap() > 512 * 1024);
+        assert!(
+            serde_json::to_vec(&terminal.payload).unwrap().len() < 1024,
+            "terminal lifecycle payload must remain a summary"
+        );
+
+        let authority = store
+            .get_thread_terminal_authority(thread_id)
+            .expect("read terminal authority")
+            .expect("terminal authority exists");
+        let envelope = authority
+            .managed_envelope
+            .expect("managed envelope is reconstructed from its supplement");
+        assert_eq!(envelope["result"], result);
+        assert_eq!(envelope["outputs"], json!({"answer": 42}));
+        assert_eq!(envelope["warnings"], json!(["retained warning"]));
+
+        let inner = store.lock().expect("lock state store");
+        let snapshot = authoritative_snapshot_for_transition(&inner, thread_id, thread_id)
+            .expect("authoritative terminal snapshot");
+        let supplement = snapshot
+            .managed_runtime_terminal
+            .expect("authoritative managed runtime supplement");
+        assert_eq!(supplement.outputs, json!({"answer": 42}));
+        assert_eq!(supplement.warnings, vec!["retained warning".to_string()]);
+    }
+
+    #[test]
+    fn large_terminal_error_is_retained_but_not_duplicated_into_the_event() {
+        let store = test_store();
+        let thread_id = "T-large-terminal-error";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .expect("create thread");
+        let error = json!({"error": "x".repeat(MAX_TERMINAL_EVENT_INLINE_ERROR_BYTES)});
+
+        store
+            .finalize_thread(
+                thread_id,
+                &FinalizeThreadRecord {
+                    status: ThreadStatus::Failed.as_str().to_string(),
+                    outcome_code: Some("large_failure".to_string()),
+                    result_json: None,
+                    error_json: Some(error.clone()),
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    managed_envelope: None,
+                    result_project_snapshot_hash: None,
+                },
+            )
+            .expect("large terminal error remains durable outside the event");
+
+        let projected = store
+            .get_thread_result(thread_id)
+            .expect("read projected error")
+            .expect("projected error exists");
+        assert_eq!(projected.error.as_ref(), Some(&error));
+
+        let events = store
+            .replay_events(thread_id, Some(thread_id), None, 8, 1024 * 1024)
+            .expect("replay terminal events")
+            .events;
+        let terminal = events
+            .iter()
+            .find(|event| event.event_type == ryeos_state::event_types::THREAD_FAILED)
+            .expect("thread_failed event");
+        assert!(terminal.payload.get("error").is_none());
+        assert_eq!(terminal.payload["error_omitted"], true);
+        assert!(terminal.payload["error_digest"].as_str().is_some());
+        assert!(serde_json::to_vec(&terminal.payload).unwrap().len() < 1024);
+    }
+
+    #[test]
+    fn oversized_terminal_content_refuses_before_mutating_the_chain() {
+        let store = test_store();
+        let thread_id = "T-oversized-terminal-result";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .expect("create thread");
+        let result = json!("x".repeat(ryeos_state::objects::MAX_THREAD_RESULT_CONTENT_BYTES));
+
+        let error = store
+            .finalize_thread(
+                thread_id,
+                &FinalizeThreadRecord {
+                    status: ThreadStatus::Completed.as_str().to_string(),
+                    outcome_code: Some("success".to_string()),
+                    result_json: Some(result),
+                    error_json: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    managed_envelope: None,
+                    result_project_snapshot_hash: None,
+                },
+            )
+            .expect_err("oversized terminal content must fail closed");
+        assert!(error.to_string().contains("thread result"));
+
+        let thread = store
+            .get_thread(thread_id)
+            .expect("read unchanged thread")
+            .expect("thread remains present");
+        assert_eq!(thread.status, ThreadStatus::Created.as_str());
+        assert_eq!(replayed_event_types(&store, thread_id), ["thread_created"]);
+        assert!(
+            store
+                .get_thread_result(thread_id)
+                .expect("read absent result")
+                .is_none()
+        );
     }
 
     fn running_in_process_test_root(store: &StateStore, thread_id: &str) {

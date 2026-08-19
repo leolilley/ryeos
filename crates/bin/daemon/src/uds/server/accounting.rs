@@ -68,16 +68,15 @@ fn lookup_provider_call(
     state: &AppState,
     cache_key: &str,
 ) -> Result<Option<(String, ProviderCallRecord)>> {
-    let authority = state
-        .state_store
-        .with_state_db(|db| db.pinned_authority())?;
+    let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&guard)?;
     let cas = authority.cas_store()?;
     let namespace = ryeos_state::ReplayIndexNamespace::new(PROVIDER_CALL_REPLAY_NAMESPACE)?;
     let mut loaded: Option<ProviderCallRecord> = None;
-    let outcome = state.state_store.with_state_db(|db| {
-        db.lookup_replay_record(&namespace, cache_key, |indexed| {
+    let outcome = state
+        .state_store
+        .lookup_replay_record(&namespace, cache_key, |indexed| {
             if let Err(error) = authority.ensure_guard(&guard) {
                 return ryeos_state::ReplayRecordVerification::Unavailable {
                     reason: error.to_string(),
@@ -116,8 +115,7 @@ fn lookup_provider_call(
             }
             loaded = Some(record);
             ryeos_state::ReplayRecordVerification::Verified
-        })
-    })?;
+        })?;
     authority.ensure_guard(&guard)?;
     match outcome {
         ryeos_state::ReplayLookupOutcome::Absent => Ok(None),
@@ -707,9 +705,7 @@ fn publish_provider_call(
         },
     };
     let value = record.to_value()?;
-    let authority = state
-        .state_store
-        .with_state_db(|db| db.pinned_authority())?;
+    let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&guard)?;
     let _permit = state
@@ -900,39 +896,41 @@ fn verify_provider_call_publication_proof(
     authority.ensure_guard(&guard)?;
     let cas = authority.cas_store()?;
     let namespace = ryeos_state::ReplayIndexNamespace::new(PROVIDER_CALL_REPLAY_NAMESPACE)?;
-    let outcome = state.state_store.with_state_db(|db| {
-        db.lookup_replay_record(&namespace, &proof.cache_key, |indexed| {
-            if indexed.answer_digest != proof.answer_digest
-                || indexed.record_hash != proof.record_hash
-            {
-                return ryeos_state::ReplayRecordVerification::IntegrityFailure {
-                    reason: "provider publication proof contradicts its replay row".to_owned(),
-                };
-            }
-            match cas.get_object(&indexed.record_hash) {
-                Ok(Some(value)) => match ProviderCallRecord::from_current_value(&value) {
-                    Ok(record)
-                        if record.cache_key == proof.cache_key
-                            && record.answer_digest == proof.answer_digest =>
-                    {
-                        ryeos_state::ReplayRecordVerification::Verified
-                    }
-                    Ok(_) => ryeos_state::ReplayRecordVerification::IntegrityFailure {
-                        reason: "provider publication proof contradicts its CAS object".to_owned(),
+    let outcome =
+        state
+            .state_store
+            .lookup_replay_record(&namespace, &proof.cache_key, |indexed| {
+                if indexed.answer_digest != proof.answer_digest
+                    || indexed.record_hash != proof.record_hash
+                {
+                    return ryeos_state::ReplayRecordVerification::IntegrityFailure {
+                        reason: "provider publication proof contradicts its replay row".to_owned(),
+                    };
+                }
+                match cas.get_object(&indexed.record_hash) {
+                    Ok(Some(value)) => match ProviderCallRecord::from_current_value(&value) {
+                        Ok(record)
+                            if record.cache_key == proof.cache_key
+                                && record.answer_digest == proof.answer_digest =>
+                        {
+                            ryeos_state::ReplayRecordVerification::Verified
+                        }
+                        Ok(_) => ryeos_state::ReplayRecordVerification::IntegrityFailure {
+                            reason: "provider publication proof contradicts its CAS object"
+                                .to_owned(),
+                        },
+                        Err(error) => ryeos_state::ReplayRecordVerification::IntegrityFailure {
+                            reason: error.to_string(),
+                        },
                     },
-                    Err(error) => ryeos_state::ReplayRecordVerification::IntegrityFailure {
+                    Ok(None) => ryeos_state::ReplayRecordVerification::Unavailable {
+                        reason: "provider publication proof object is missing".to_owned(),
+                    },
+                    Err(error) => ryeos_state::ReplayRecordVerification::Unavailable {
                         reason: error.to_string(),
                     },
-                },
-                Ok(None) => ryeos_state::ReplayRecordVerification::Unavailable {
-                    reason: "provider publication proof object is missing".to_owned(),
-                },
-                Err(error) => ryeos_state::ReplayRecordVerification::Unavailable {
-                    reason: error.to_string(),
-                },
-            }
-        })
-    })?;
+                }
+            })?;
     authority.ensure_guard(&guard)?;
     match outcome {
         ryeos_state::ReplayLookupOutcome::Present(indexed)

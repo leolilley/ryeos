@@ -249,9 +249,7 @@ fn store_realization_candidate(
             (stored, None)
         }
         None => {
-            let authority = state
-                .state_store
-                .with_state_db(|db| db.pinned_authority())?;
+            let authority = state.state_store.pinned_state_authority()?;
             let guard = authority.acquire_shared_guard()?;
             authority.ensure_guard(&guard)?;
             let _permit = state
@@ -359,17 +357,13 @@ fn verify_realization_components(
     state: &AppState,
     realization: &AdmittedExecutionRealization,
 ) -> Result<()> {
-    let authority = state
-        .state_store
-        .with_state_db(|db| db.pinned_authority())?;
+    let authority = state.state_store.pinned_state_authority()?;
     realization
         .verify_retained_components(&authority.cas_store()?, &authority.large_object_store()?)
 }
 
 fn load_realization(state: &AppState, hash: &str) -> Result<AdmittedExecutionRealization> {
-    let authority = state
-        .state_store
-        .with_state_db(|db| db.pinned_authority())?;
+    let authority = state.state_store.pinned_state_authority()?;
     let value = authority
         .cas_store()?
         .get_object(hash)?
@@ -385,9 +379,7 @@ fn verify_node_evidence(
     state: &AppState,
     node: &ryeos_app::execution_identity_probe::NodeExecutionIdentity,
 ) -> Result<()> {
-    let authority = state
-        .state_store
-        .with_state_db(|db| db.pinned_authority())?;
+    let authority = state.state_store.pinned_state_authority()?;
     let cas = authority.cas_store()?;
     let identity_value = cas
         .get_object(&node.identity_hash)?
@@ -428,9 +420,7 @@ fn verify_realization_node_evidence(
             "admitted execution realization belongs to a different node execution substrate"
         );
     }
-    let authority = state
-        .state_store
-        .with_state_db(|db| db.pinned_authority())?;
+    let authority = state.state_store.pinned_state_authority()?;
     let value = authority
         .cas_store()?
         .get_object(&realization.substrate_identity_hash)?
@@ -482,9 +472,7 @@ fn execution_components(
         .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY)
         .map(ryeos_state::objects::EffectiveSourceClosureProjection::from_value)
         .transpose()?;
-    let authority = state
-        .state_store
-        .with_state_db(|db| db.pinned_authority())?;
+    let authority = state.state_store.pinned_state_authority()?;
     let cas = authority.cas_store()?;
     let mut components = Vec::new();
     if let Some(set) = external.as_ref() {

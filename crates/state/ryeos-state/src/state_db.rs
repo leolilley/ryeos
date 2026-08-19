@@ -5565,6 +5565,24 @@ impl StateDb {
             .lookup_replay_record(namespace, cache_key, verify)
     }
 
+    pub fn lookup_replay_index(
+        &self,
+        namespace: &crate::ReplayIndexNamespace,
+        cache_key: &str,
+    ) -> anyhow::Result<crate::ReplayLookupOutcome> {
+        self.operational()?
+            .lookup_replay_index(namespace, cache_key)
+    }
+
+    pub fn touch_replay_record_if_same(
+        &self,
+        namespace: &crate::ReplayIndexNamespace,
+        indexed: &crate::ReplayIndexRecord,
+    ) -> anyhow::Result<bool> {
+        self.operational()?
+            .touch_replay_record_if_same(namespace, indexed)
+    }
+
     pub fn publish_replay_record(
         &self,
         namespace: &crate::ReplayIndexNamespace,

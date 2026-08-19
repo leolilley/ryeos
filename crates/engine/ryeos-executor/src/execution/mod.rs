@@ -225,7 +225,7 @@ impl CapturedProjectGeneration {
 pub(crate) fn pinned_state_authority(
     state: &ryeos_app::state::AppState,
 ) -> Result<ryeos_state::PinnedStateAuthority> {
-    state.state_store.with_state_db(|db| db.pinned_authority())
+    state.state_store.pinned_state_authority()
 }
 
 /// Capture a live project tree as an immutable CAS snapshot for durable

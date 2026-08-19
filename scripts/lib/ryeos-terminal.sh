@@ -282,7 +282,7 @@ _ryeos_term_glyph() {
         success:1) printf '◆' ;;
         warning:1) printf '▲' ;;
         failure:1) printf '✕' ;;
-        active:1) printf '%s' "${2:-⠹}" ;;
+        active:1) printf '%s' "${2:-⠋}" ;;
         info:1) printf '•' ;;
         success:0) printf 'OK' ;;
         warning:0) printf 'WARN' ;;
@@ -293,7 +293,7 @@ _ryeos_term_glyph() {
 }
 
 _ryeos_term_render_active() {
-    local frame="${1:-⠹}" suffix="" message elapsed message_limit
+    local frame="${1:-⠋}" suffix="" message elapsed message_limit
     [[ -n "$_RYEOS_TERM_DETAIL" ]] && suffix="  ·  $_RYEOS_TERM_DETAIL"
     elapsed="$(_ryeos_term_elapsed)"
     message_limit=$(( _RYEOS_TERM_WIDTH - 25 - ${#elapsed} ))
@@ -316,7 +316,7 @@ _ryeos_term_start_spinner() {
     (
         local frame_index=0 resize_pending=0
         local interval="${RYEOS_TERM_SPINNER_INTERVAL:-0.1}"
-        local -a frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+        local -a frames=(⠋ ⠙ ⠸ ⢰ ⣠ ⣄ ⡆ ⠇)
         trap - EXIT INT TERM
         trap 'resize_pending=1' WINCH
         while :; do

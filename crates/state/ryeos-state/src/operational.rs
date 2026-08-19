@@ -2084,11 +2084,10 @@ impl OperationalDb {
     /// Read and verify one current replay row. Only a database-proven absence is an
     /// executable miss. Once a row exists, unavailable or divergent CAS
     /// evidence is surfaced distinctly and never collapses into `Absent`.
-    pub fn lookup_replay_record(
+    pub fn lookup_replay_index(
         &self,
         namespace: &ReplayIndexNamespace,
         cache_key: &str,
-        mut verify: impl FnMut(&ReplayIndexRecord) -> ReplayRecordVerification,
     ) -> Result<ReplayLookupOutcome> {
         validate_canonical_hash("replay cache key", cache_key)?;
         let indexed = self
@@ -2115,16 +2114,55 @@ impl OperationalDb {
                 reason: error.to_string(),
             });
         }
+        Ok(ReplayLookupOutcome::Present(indexed))
+    }
+
+    /// Refresh retention for the exact immutable replay row that was verified
+    /// by the caller. A false result means the index moved or was retired while
+    /// verification ran and must not be treated as a cache miss.
+    pub fn touch_replay_record_if_same(
+        &self,
+        namespace: &ReplayIndexNamespace,
+        indexed: &ReplayIndexRecord,
+    ) -> Result<bool> {
+        let now = lillux::time::iso8601_now();
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE replay_records SET last_replayed_at = ?1
+                 WHERE namespace = ?2 AND cache_key = ?3
+                   AND answer_digest = ?4 AND record_hash = ?5",
+                rusqlite::params![
+                    &now,
+                    namespace.as_str(),
+                    &indexed.cache_key,
+                    &indexed.answer_digest,
+                    &indexed.record_hash,
+                ],
+            )
+            .context("failed to touch verified replay record")?;
+        Ok(changed == 1)
+    }
+
+    pub fn lookup_replay_record(
+        &self,
+        namespace: &ReplayIndexNamespace,
+        cache_key: &str,
+        mut verify: impl FnMut(&ReplayIndexRecord) -> ReplayRecordVerification,
+    ) -> Result<ReplayLookupOutcome> {
+        let indexed = match self.lookup_replay_index(namespace, cache_key)? {
+            ReplayLookupOutcome::Absent => return Ok(ReplayLookupOutcome::Absent),
+            ReplayLookupOutcome::Present(indexed) => indexed,
+            failure => return Ok(failure),
+        };
         match verify(&indexed) {
             ReplayRecordVerification::Verified => {
-                let now = lillux::time::iso8601_now();
-                self.conn
-                    .execute(
-                        "UPDATE replay_records SET last_replayed_at = ?1
-                         WHERE namespace = ?2 AND cache_key = ?3",
-                        rusqlite::params![&now, namespace.as_str(), cache_key],
-                    )
-                    .context("failed to touch verified replay record")?;
+                if !self.touch_replay_record_if_same(namespace, &indexed)? {
+                    return Ok(ReplayLookupOutcome::Unavailable {
+                        reason: "replay index moved while its record was being verified"
+                            .to_string(),
+                    });
+                }
                 Ok(ReplayLookupOutcome::Present(indexed))
             }
             ReplayRecordVerification::Unavailable { reason } => {

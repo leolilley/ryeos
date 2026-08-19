@@ -165,9 +165,7 @@ impl RuntimeProjectSnapshotService {
         let canonical = project_path
             .to_str()
             .ok_or_else(|| anyhow!("canonical project_path is not valid UTF-8"))?;
-        let authority = state
-            .state_store
-            .with_state_db(|db| db.pinned_authority())?;
+        let authority = state.state_store.pinned_state_authority()?;
         let cas = authority.cas_store()?;
         let ctx = SnapshotContext {
             state: SnapshotState::Live(state),

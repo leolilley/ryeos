@@ -23,6 +23,7 @@ reqwest     = { workspace = true, features = ["rustls-tls"] }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 serde_yaml  = { workspace = true }
+sha2        = { workspace = true }
 thiserror   = { workspace = true }
 tokio       = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "time", "io-util", "net"] }
 tracing     = { workspace = true }

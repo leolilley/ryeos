@@ -197,6 +197,16 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     // so every dispatch path observes one data-driven project policy.
     let dispatch_rest = rest_with_global_no_project(&cli.rest, cli.no_project);
 
+    // Node-registered client handlers own local byte-oriented UX that cannot
+    // be represented as an `/execute` JSON result. The verified command is
+    // still only routing: the handler's signed daemon requests carry the
+    // operator authority and are independently authorized server-side.
+    if let Some(result) = try_dispatch_client_handler(&dispatch_rest, &app_root, snapshot).await? {
+        let mut presenter = Presenter::for_console(console);
+        print_result(result, &mut presenter, &cli.rest, 0)?;
+        return Ok(());
+    }
+
     // 5. Descriptor-driven offline dispatch.
     //    Local/stopped-node services run through the local descriptor path;
     //    dual-mode services prefer the live daemon and fall back only when the
@@ -340,7 +350,7 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         // is interrupted after the daemon accepts but before it acknowledges,
         // the terminal/log still retains the exact owner-bound lookup key.
         console.info(&crate::tty::Diagnostic::info(format!(
-            "accepted launch coordinate: {launch_id}"
+            "launch request coordinate (pending daemon acknowledgement): {launch_id}"
         )))?;
     }
     let rendered_lines = presenter.loading(&command_label, route_path)?;
@@ -350,7 +360,7 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
             let launch_id = launch_id.expect("guarded accepted launch id");
             return Err(CliError::Local {
                 detail: format!(
-                    "{error}; accepted-launch acknowledgement was not received. The request's exact owner-bound coordinate is {launch_id}; query the authenticated owner route GET /launches/{launch_id} before deciding whether to launch again"
+                    "{error}; launch acknowledgement was not received. Retain request coordinate {launch_id}: the request may still be in flight or accepted. Query the authenticated owner route GET /launches/{launch_id}; a missing status while the original request is still in flight does not prove rejection, so do not relaunch from that observation"
                 ),
             });
         }
@@ -361,7 +371,7 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     {
         return Err(CliError::Local {
             detail: format!(
-                "accepted launch response did not echo the exact caller-retained launch_id {expected_launch_id}; query the authenticated owner route GET /launches/{expected_launch_id} before deciding whether to launch again"
+                "accepted launch response did not echo caller-retained request coordinate {expected_launch_id}; query the authenticated owner route GET /launches/{expected_launch_id}. Do not relaunch unless that exact request is known not to have been accepted"
             ),
         });
     }
@@ -390,6 +400,78 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         std::slice::from_ref(&command_label),
         rendered_lines,
     )?;
+    Ok(())
+}
+
+async fn try_dispatch_client_handler(
+    rest: &[String],
+    app_root: &Path,
+    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+) -> Result<Option<Value>, CliError> {
+    let registry = CommandRegistry::from_records(
+        &snapshot.commands,
+        &snapshot.command_registration_policy.policy,
+    )
+    .map_err(|error| CliError::Local {
+        detail: format!("load verified node commands: {error:#}"),
+    })?;
+    let Ok(matched) = registry.resolve(rest) else {
+        return Ok(None);
+    };
+    let CommandDispatch::LocalHandler { handler, .. } = &matched.command.dispatch else {
+        return Ok(None);
+    };
+    let parameters =
+        bind_command_parameters_for_daemon(&rest[matched.consumed..], &matched.command)?;
+    match handler.as_str() {
+        "artifact_export" => {
+            authorize_exact_core_client_handler(
+                &matched.command,
+                snapshot,
+                "artifact-export.yaml",
+            )?;
+            crate::client_handlers::export_artifact(app_root, &parameters)
+                .await
+                .map(Some)
+        }
+        other => Err(CliError::Local {
+            detail: format!("unknown verified local client handler `{other}`"),
+        }),
+    }
+}
+
+fn authorize_exact_core_client_handler(
+    command: &CommandDef,
+    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+    source_name: &str,
+) -> Result<(), CliError> {
+    let core = snapshot
+        .bundles
+        .iter()
+        .find(|bundle| bundle.name == "core")
+        .ok_or_else(|| CliError::Local {
+            detail: "node has no uniquely registered core bundle".to_string(),
+        })?;
+    if snapshot
+        .bundles
+        .iter()
+        .filter(|bundle| bundle.name == "core")
+        .count()
+        != 1
+    {
+        return Err(CliError::Local {
+            detail: "node has contradictory core bundle registrations".to_string(),
+        });
+    }
+    let expected = core.path.join(".ai/node/commands").join(source_name);
+    if command.provenance.origin != ryeos_runtime::CommandOrigin::InstalledBundle
+        || command.source_file != expected
+    {
+        return Err(CliError::Local {
+            detail: "local client handler authority is not the exact registered core command"
+                .to_string(),
+        });
+    }
     Ok(())
 }
 
@@ -1146,6 +1228,14 @@ fn apply_project_policy(
     let obj = parameters.as_object_mut().ok_or_else(|| {
         CliError::ProjectResolution("command parameters must be a JSON object".into())
     })?;
+    if let Some(bind_parameter) = project.bind_parameter.as_ref()
+        && obj.contains_key(bind_parameter)
+    {
+        return Err(CliError::ProjectResolution(format!(
+            "--{} is runtime-bound from the command's project selector; use --project <path> instead",
+            bind_parameter.replace('_', "-")
+        )));
+    }
     let no_project = obj
         .remove("no_project")
         .and_then(|value| value.as_bool())
@@ -1532,11 +1622,12 @@ fn thread_get_payload_to_execute_result(payload: Value) -> Value {
 }
 
 fn print_result(
-    payload: serde_json::Value,
+    mut payload: serde_json::Value,
     presenter: &mut Presenter,
     command_tokens: &[String],
     previous_lines: usize,
 ) -> Result<(), CliError> {
+    surface_continuation_identity(&mut payload);
     let command = command_tokens.join(" ");
     let machine_failure = crate::tty::structured_result_failure(&payload);
     match presenter.structured_result(&command, &payload, previous_lines)? {
@@ -1566,6 +1657,50 @@ fn print_result(
     match machine_failure {
         Some(detail) => Err(CliError::Reported { detail }),
         None => Ok(()),
+    }
+}
+
+/// `/execute` returns durable thread identity beside the authored result. The
+/// plain CLI normally unwraps that result for script-friendly output, but doing
+/// so for a continued segment would discard the only exact way to follow its
+/// successor. Copy only the continuation coordinates into the displayed result;
+/// they remain presentation evidence and never enter execution/effect records.
+fn surface_continuation_identity(payload: &mut Value) {
+    let Some((is_continued, thread_id, chain_root_id, successor_thread_id)) = payload
+        .get("thread")
+        .and_then(Value::as_object)
+        .map(|thread| {
+            (
+                thread.get("status").and_then(Value::as_str) == Some("continued"),
+                thread.get("thread_id").cloned(),
+                thread.get("chain_root_id").cloned(),
+                thread
+                    .get("successor_thread_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            )
+        })
+    else {
+        return;
+    };
+    if !is_continued {
+        return;
+    }
+
+    let Some(result) = payload.get_mut("result").and_then(Value::as_object_mut) else {
+        return;
+    };
+    if let Some(thread_id) = thread_id {
+        result.insert("thread_id".to_string(), thread_id);
+    }
+    if let Some(chain_root_id) = chain_root_id {
+        result.insert("chain_root_id".to_string(), chain_root_id);
+    }
+    if let Some(successor_thread_id) = successor_thread_id {
+        result.insert(
+            "successor_thread_id".to_string(),
+            Value::String(successor_thread_id),
+        );
     }
 }
 
@@ -1661,6 +1796,59 @@ mod tests {
         assert!(!accepted_launch_delivery_is_uncertain(&CliError::Local {
             detail: "request never submitted".to_string(),
         }));
+    }
+
+    #[test]
+    fn continued_plain_result_retains_exact_chain_coordinates() {
+        let mut payload = serde_json::json!({
+            "thread": {
+                "thread_id": "T-root",
+                "chain_root_id": "T-root",
+                "status": "continued",
+                "successor_thread_id": "T-successor"
+            },
+            "result": {
+                "success": false,
+                "status": "continued",
+                "result": null
+            }
+        });
+
+        surface_continuation_identity(&mut payload);
+
+        assert_eq!(
+            payload.pointer("/result/thread_id"),
+            Some(&serde_json::json!("T-root"))
+        );
+        assert_eq!(
+            payload.pointer("/result/chain_root_id"),
+            Some(&serde_json::json!("T-root"))
+        );
+        assert_eq!(
+            payload.pointer("/result/successor_thread_id"),
+            Some(&serde_json::json!("T-successor"))
+        );
+        assert_eq!(
+            payload.pointer("/result/status"),
+            Some(&serde_json::json!("continued"))
+        );
+    }
+
+    #[test]
+    fn ordinary_terminal_result_is_not_given_execution_identity() {
+        let mut payload = serde_json::json!({
+            "thread": {
+                "thread_id": "T-complete",
+                "chain_root_id": "T-complete",
+                "status": "completed",
+                "successor_thread_id": null
+            },
+            "result": {"answer": 42}
+        });
+
+        let original = payload.clone();
+        surface_continuation_identity(&mut payload);
+        assert_eq!(payload, original);
     }
 
     #[test]
@@ -2017,13 +2205,50 @@ mod tests {
     }
 
     #[test]
+    fn local_artifact_handler_requires_exact_registered_core_command() {
+        let root = tempfile::tempdir().unwrap();
+        let core = root.path().join("core");
+        let expected = core.join(".ai/node/commands/artifact-export.yaml");
+        let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
+            bundles: vec![ryeos_app::node_config::BundleRecord {
+                name: "core".into(),
+                path: core,
+                command_registration_caps: Vec::new(),
+                source_file: root.path().join("core-registration.yaml"),
+            }],
+            routes: Vec::new(),
+            commands: Vec::new(),
+            hosted_node_policies: Vec::new(),
+            command_registration_policy: Default::default(),
+            external_content_import_policy: None,
+            persistent_session_policy: None,
+        };
+        let mut command = direct_execute_command();
+        command.source_file = expected;
+        command.provenance.origin = ryeos_runtime::CommandOrigin::InstalledBundle;
+        authorize_exact_core_client_handler(&command, &snapshot, "artifact-export.yaml").unwrap();
+
+        command.provenance.origin = ryeos_runtime::CommandOrigin::SourceLocal;
+        assert!(
+            authorize_exact_core_client_handler(&command, &snapshot, "artifact-export.yaml")
+                .is_err()
+        );
+        command.provenance.origin = ryeos_runtime::CommandOrigin::InstalledBundle;
+        command.source_file = root.path().join("other/artifact-export.yaml");
+        assert!(
+            authorize_exact_core_client_handler(&command, &snapshot, "artifact-export.yaml")
+                .is_err()
+        );
+    }
+
+    #[test]
     fn live_project_execute_is_daemon_owned_and_restart_recoverable() {
         let wait = execution_policy_value(true, false, false);
         let accepted = execution_policy_value(true, true, false);
         for policy in [&wait, &accepted] {
             assert_eq!(policy["ownership"], "daemon_owned");
             assert_eq!(policy["recovery"], "restart_recoverable");
-            assert_eq!(policy["project"]["kind"], "live_direct");
+            assert_eq!(policy["project"]["kind"], "live_authority");
         }
         assert_eq!(wait["response"], "wait");
         assert_eq!(accepted["response"], "accepted");
@@ -2144,6 +2369,33 @@ mod tests {
 
         assert_eq!(resolved.item_ref, "tool:test/run");
         assert_eq!(resolved.project_path.as_deref(), Some(tmp.path()));
+    }
+
+    #[test]
+    fn runtime_bound_project_parameter_cannot_override_project_selector() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut command = direct_execute_command();
+        command.project.as_mut().unwrap().bind_parameter = Some("project_path".into());
+        let error = match resolve_command_for_daemon_with_commands(
+            &s(&[
+                "execute",
+                "tool:test/run",
+                "--project-path",
+                "/tmp/other-project",
+            ]),
+            &[command],
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            Some(tmp.path()),
+        ) {
+            Ok(_) => panic!("injected runtime project binding must be refused"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("--project-path is runtime-bound from the command's project selector")
+        );
     }
 
     #[test]

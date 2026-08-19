@@ -132,8 +132,10 @@ pub use thread_snapshot::{
     CapturedEffectiveTrustClass, CapturedItemSpace, CapturedItemTrustClass,
     CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,
     CapturedThreadHistoryMinimumClamp, CapturedThreadHistoryPolicy, MAX_TERMINAL_DURATION_SECONDS,
+    MAX_THREAD_RESULT_CONTENT_BYTES, ManagedRuntimeTerminalSupplement,
     THREAD_SNAPSHOT_SCHEMA_VERSION, ThreadHistoryRetention, ThreadSnapshot, ThreadSnapshotBuilder,
     ThreadStatus, ThreadUsage, UsageSubject, parse_canonical_timestamp,
+    validate_thread_result_content,
 };
 
 /// Schema version shared across all CAS object types.

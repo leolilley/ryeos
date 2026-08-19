@@ -188,7 +188,7 @@ impl AppState {
     /// retained for the lifetime of the store so a concurrent sweep cannot
     /// remove objects between traversal and payload reads.
     pub fn acquire_cas_read(&self) -> anyhow::Result<PinnedCasRead> {
-        let authority = self.state_store.with_state_db(|db| db.pinned_authority())?;
+        let authority = self.state_store.pinned_state_authority()?;
         let guard = authority.acquire_shared_guard()?;
         let cas = authority.cas_store()?;
         Ok(PinnedCasRead { _guard: guard, cas })

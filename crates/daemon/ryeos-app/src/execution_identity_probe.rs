@@ -68,7 +68,7 @@ pub fn boot_node_execution_identity(
 ) -> Result<Arc<NodeExecutionIdentity>> {
     let substrate = probe_node_execution_identity(build, identity.fingerprint())?;
     let digest = substrate.identity_digest()?;
-    let authority = state_store.with_state_db(|db| db.pinned_authority())?;
+    let authority = state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&guard)?;
     let cas = authority.cas_store()?;

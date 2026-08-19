@@ -379,7 +379,7 @@ async fn exec_client(
     let mut command = std::process::Command::new(&executable);
     command.args(&args);
     command
-        .env("RYEOS_PROJECT_PATH", project_path)
+        .env("RYEOS_CLIENT_PROJECT_PATH", project_path)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
@@ -1375,7 +1375,7 @@ mod tests {
 
         fn write_capture_bin(&self, capture_file: &Path) {
             let script = format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$RYEOS_PROJECT_PATH\" > {}\nprintf '%s\\n' \"$@\" >> {}\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$RYEOS_CLIENT_PROJECT_PATH\" > {}\nprintf '%s\\n' \"$@\" >> {}\n",
                 capture_file.display(),
                 capture_file.display()
             );

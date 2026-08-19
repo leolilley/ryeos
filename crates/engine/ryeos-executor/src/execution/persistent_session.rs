@@ -260,11 +260,7 @@ fn admit_session_capsule(
         .as_ref()
         .map(|publication| publication.authority().try_clone())
         .transpose()?
-        .unwrap_or(
-            state
-                .state_store
-                .with_state_db(|db| db.pinned_authority())?,
-        );
+        .unwrap_or(state.state_store.pinned_state_authority()?);
     let guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&guard)?;
     let cas = authority.cas_store()?;
@@ -517,9 +513,7 @@ fn start_capsule_process(
         }
         None => (None, None),
     };
-    let authority = state
-        .state_store
-        .with_state_db(|db| db.pinned_authority())?;
+    let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&guard)?;
     let cas = authority.cas_store()?;
@@ -570,9 +564,7 @@ fn load_capsule(state: &AppState, hash: &str) -> Result<AdmittedPersistentSessio
     if !lillux::valid_hash(hash) {
         bail!("persistent-session capsule hash is not canonical");
     }
-    let authority = state
-        .state_store
-        .with_state_db(|db| db.pinned_authority())?;
+    let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&guard)?;
     let cas = authority.cas_store()?;

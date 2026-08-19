@@ -717,7 +717,14 @@ pub fn get_thread_result(
     db: &ProjectionDb,
     thread_id: &str,
 ) -> anyhow::Result<Option<ThreadResultRow>> {
-    let max_content_bytes = crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES;
+    let max_content_bytes = crate::objects::MAX_THREAD_RESULT_CONTENT_BYTES;
+    // Current thread/result identity columns are much smaller than this
+    // allowance. Keeping a separate overhead budget avoids rejecting a result
+    // exactly at its content ceiling while still bounding the complete SQLite
+    // row before materialization.
+    let max_row_bytes = max_content_bytes
+        .checked_add(64 * 1024)
+        .context("thread result row byte maximum overflow")?;
     let lengths = db
         .connection()
         .query_row(
@@ -768,14 +775,16 @@ pub fn get_thread_result(
             "thread {thread_id} result and error total {total_bytes} bytes; maximum is {max_content_bytes}"
         );
     }
-    if row_bytes > max_content_bytes {
+    if row_bytes > max_row_bytes {
         anyhow::bail!(
-            "thread {thread_id} result row is {row_bytes} bytes; maximum is {max_content_bytes}"
+            "thread {thread_id} result row is {row_bytes} bytes; maximum is {max_row_bytes}"
         );
     }
 
     let max_content_bytes_sql = i64::try_from(max_content_bytes)
         .context("thread result byte maximum exceeds SQLite i64")?;
+    let max_row_bytes_sql =
+        i64::try_from(max_row_bytes).context("thread result row maximum exceeds SQLite i64")?;
     let mut stmt = db
         .connection()
         .prepare(
@@ -791,12 +800,12 @@ pub fn get_thread_result(
                    + COALESCE(length(result), 0) \
                    + COALESCE(length(CAST(outcome_code AS BLOB)), 0) \
                    + COALESCE(length(CAST(error AS BLOB)), 0) \
-                   + COALESCE(length(CAST(updated_at AS BLOB)), 0) <= ?2",
+                   + COALESCE(length(CAST(updated_at AS BLOB)), 0) <= ?3",
         )
         .context("prepare get_thread_result")?;
     let row = stmt
         .query_row(
-            rusqlite::params![thread_id, max_content_bytes_sql],
+            rusqlite::params![thread_id, max_content_bytes_sql, max_row_bytes_sql],
             ThreadResultRow::from_row,
         )
         .optional()
@@ -3215,8 +3224,7 @@ mod tests {
     #[test]
     fn get_thread_result_rejects_oversized_blob_before_reading_it() {
         let db = test_db();
-        let oversized =
-            i64::try_from(crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES + 1).unwrap();
+        let oversized = i64::try_from(crate::objects::MAX_THREAD_RESULT_CONTENT_BYTES + 1).unwrap();
         db.connection()
             .execute(
                 "INSERT INTO thread_results \
@@ -3229,6 +3237,25 @@ mod tests {
         let error = get_thread_result(&db, "T-large").unwrap_err();
         assert!(error.to_string().contains("result is"));
         assert!(error.to_string().contains("maximum"));
+    }
+
+    #[test]
+    fn get_thread_result_accepts_content_larger_than_one_event() {
+        let db = test_db();
+        let content = vec![b'x'; crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES + 1];
+        db.connection()
+            .execute(
+                "INSERT INTO thread_results \
+                 (thread_id, chain_root_id, status, result, updated_at) \
+                 VALUES ('T-result', 'chain-A', 'completed', ?1, 'now')",
+                [&content],
+            )
+            .unwrap();
+
+        let row = get_thread_result(&db, "T-result")
+            .unwrap()
+            .expect("result row");
+        assert_eq!(row.result.as_deref(), Some(content.as_slice()));
     }
 
     #[test]

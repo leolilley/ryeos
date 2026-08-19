@@ -654,5 +654,5 @@ fn capture_kind(kind: ExternalContentKind) -> ExternalContentCaptureKind {
 }
 
 fn pinned_state_authority(state: &AppState) -> anyhow::Result<ryeos_state::PinnedStateAuthority> {
-    state.state_store.with_state_db(|db| db.pinned_authority())
+    state.state_store.pinned_state_authority()
 }

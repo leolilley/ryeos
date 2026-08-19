@@ -213,9 +213,7 @@ pub async fn import(
     let publication_key =
         ryeos_state::DurableCasPublicationKey::external_content_import(&request_digest)?;
 
-    let authority = state
-        .state_store
-        .with_state_db(|db| db.pinned_authority())?;
+    let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
     let large_store = authority.large_object_store()?;
@@ -297,9 +295,7 @@ pub async fn bind(
     if !lillux::valid_hash(&request.request_digest) || !lillux::valid_hash(&request.manifest_hash) {
         bail!("external-content bind request contains a non-canonical digest");
     }
-    let authority = state
-        .state_store
-        .with_state_db(|db| db.pinned_authority())?;
+    let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
     let store = authority.large_object_store()?;
@@ -469,9 +465,7 @@ pub async fn bind(
 
 pub async fn scrub(state: Arc<AppState>, context: HandlerContext) -> anyhow::Result<ScrubResponse> {
     require_local_operator(&state, &context)?;
-    let authority = state
-        .state_store
-        .with_state_db(|db| db.pinned_authority())?;
+    let authority = state.state_store.pinned_state_authority()?;
     let _guard = authority.acquire_shared_guard()?;
     let _permit = state
         .write_barrier
@@ -564,9 +558,7 @@ pub async fn release(
     {
         bail!("external-content release binding_id is not a canonical digest");
     }
-    let authority = state
-        .state_store
-        .with_state_db(|db| db.pinned_authority())?;
+    let authority = state.state_store.pinned_state_authority()?;
     let worker_state = state.clone();
     let binding_id = request.binding_id;
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();

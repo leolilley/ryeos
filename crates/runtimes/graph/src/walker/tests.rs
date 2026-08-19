@@ -2585,6 +2585,7 @@ struct RecordingMockClient {
     dispatch_results: Mutex<Vec<Value>>,
     dispatch_requests: Mutex<Vec<DispatchActionRequest>>,
     events: Mutex<Vec<(String, String, Value, String)>>,
+    event_batch_calls: Mutex<usize>,
     /// (thread_id, status) pairs from finalize_thread calls.
     finalizations: Mutex<Vec<(String, ryeos_runtime::ThreadTerminalStatus)>>,
     /// `TerminalCompletion.cost` (raw JSON) from finalize_thread calls.
@@ -2608,6 +2609,7 @@ impl RecordingMockClient {
             dispatch_results: Mutex::new(dispatch_results),
             dispatch_requests: Mutex::new(Vec::new()),
             events: Mutex::new(Vec::new()),
+            event_batch_calls: Mutex::new(0),
             finalizations: Mutex::new(Vec::new()),
             finalize_costs: Mutex::new(Vec::new()),
             artifacts: Mutex::new(Vec::new()),
@@ -2620,6 +2622,10 @@ impl RecordingMockClient {
 
     fn recorded_events(&self) -> Vec<(String, String, Value, String)> {
         self.events.lock().unwrap().clone()
+    }
+
+    fn event_batch_calls(&self) -> usize {
+        *self.event_batch_calls.lock().unwrap()
     }
 
     fn dispatch_count(&self) -> usize {
@@ -2714,7 +2720,29 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for RecordingMockClient {
         ));
         Ok(json!({}))
     }
-    async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
+    async fn append_events(
+        &self,
+        thread_id: &str,
+        events: Vec<Value>,
+    ) -> Result<Value, CallbackError> {
+        *self.event_batch_calls.lock().unwrap() += 1;
+        let mut recorded = self.events.lock().unwrap();
+        for event in events {
+            recorded.push((
+                thread_id.to_string(),
+                event
+                    .get("event_type")
+                    .and_then(Value::as_str)
+                    .unwrap()
+                    .to_string(),
+                event.get("payload").cloned().unwrap(),
+                event
+                    .get("storage_class")
+                    .and_then(Value::as_str)
+                    .unwrap()
+                    .to_string(),
+            ));
+        }
         Ok(json!({}))
     }
     async fn replay_events(&self, _: Value) -> Result<Value, CallbackError> {
@@ -4704,6 +4732,11 @@ config:
     );
 
     let events = recorder.recorded_events();
+    assert_eq!(
+        recorder.event_batch_calls(),
+        1,
+        "the completed action lifecycle must use one atomic callback batch"
+    );
     let types: Vec<&str> = events.iter().map(|(_, et, _, _)| et.as_str()).collect();
 
     for (_, event_type, payload, _) in &events {

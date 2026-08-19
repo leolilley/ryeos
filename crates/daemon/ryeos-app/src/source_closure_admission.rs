@@ -425,9 +425,7 @@ pub fn admit_source_closure_in_publication(
     }
 
     if publication.is_none() {
-        let authority = state
-            .state_store
-            .with_state_db(|db| db.pinned_authority())?;
+        let authority = state.state_store.pinned_state_authority()?;
         let guard = authority.acquire_shared_guard()?;
         authority.ensure_guard(&guard)?;
         let staged = authority
@@ -536,9 +534,7 @@ pub fn recover_source_closure(
         return Ok(None);
     };
     let projection = ryeos_state::objects::EffectiveSourceClosureProjection::from_value(value)?;
-    let authority = state
-        .state_store
-        .with_state_db(|db| db.pinned_authority())?;
+    let authority = state.state_store.pinned_state_authority()?;
     let cas = authority.cas_store()?;
     let binding_value = cas
         .get_object(&projection.binding_hash)?
