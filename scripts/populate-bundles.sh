@@ -335,8 +335,11 @@ fi
 # (ryeos-runtime / ryeos-state / ryeos-app) changed would stage linked against
 # the old lib and silently drift. Fail loudly, naming the stale binaries.
 
-# Release binaries this set stages, one per line (mirrors the staging steps).
-staged_release_bins_for_set() {
+# Release binaries this set stages that link at least one foundational crate,
+# one per line. Web/browser tool payloads are independent executables; making
+# their mtimes answer for RyeOS library source changes creates a false skew
+# refusal without protecting any linked contract.
+staged_foundational_release_bins_for_set() {
   printf '%s\n' \
     rye-parser-yaml-document rye-parser-yaml-header-document rye-parser-regex-kv \
     rye-composer-identity ryeos-core-tools
@@ -348,8 +351,7 @@ staged_release_bins_for_set() {
       ;;
   esac
   case "$BUNDLE_SET" in
-    full|full-sandbox) printf '%s\n' ryeos-tui web ryeos-web-tools ryeos-browser-tools ;;
-    central-host) printf '%s\n' ryeos-web-tools ;;
+    full|full-sandbox) printf '%s\n' ryeos-tui web ;;
   esac
 }
 
@@ -381,7 +383,7 @@ if [[ -n "$CRATES_OVERRIDE" ]]; then
       if (( _bin_mtime < _newest_foundational )); then
         _stale+=("$_bin")
       fi
-    done < <(staged_release_bins_for_set)
+    done < <(staged_foundational_release_bins_for_set)
     if (( ${#_stale[@]} > 0 )); then
       {
         ryeos_term_fail "refusing to stage binaries older than the foundational libraries"
