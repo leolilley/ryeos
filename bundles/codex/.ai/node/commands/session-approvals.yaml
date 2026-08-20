@@ -1,0 +1,10 @@
+# ryeos:signed:2026-08-19T02:53:00Z:b4fa68075ec182af928b418fe89dc2789f82e7f648fce0a976da205175ba5b55:e0WkjPHT092lS/gkHkszJv88bvw9Kaj/wdzvaGXzPBHCTTr1iMvIGKdvl17qb3qro/wnLrHLgHOSd0OmJa0ABQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [codex, session, approvals]
+description: "List pending Codex session approvals"
+forms:
+  - slots:
+      - field: session_id
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/approvals
+  availability: daemon

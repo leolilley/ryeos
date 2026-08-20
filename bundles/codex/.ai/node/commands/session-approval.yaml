@@ -1,0 +1,13 @@
+# ryeos:signed:2026-08-19T02:53:00Z:688446eac71bb390c08ad134fa92250ad771dd28df4479be81dbb44fe06385db:14NNqt9NnNEvKx2v6dlaBUsWzl0YYeCwCz8pI/qkVTNSTZegCTwvRLgz8MSDwIPteUYwdcoeZvdszhYqA77yBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [codex, session, approval]
+description: "Resolve one digest-fenced Codex approval with an explicit boolean decision"
+forms:
+  - slots:
+      - field: session_id
+      - field: approval_id
+      - field: request_digest
+      - field: accept
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/resolve-approval
+  availability: daemon

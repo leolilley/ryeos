@@ -1,0 +1,11 @@
+# ryeos:signed:2026-08-19T02:53:00Z:9635aae6c76464f1d4518806af58f50652c675f50a72a27a55667e0ea4a5d6cf:QBa/sUcPodotWOWZZcu4tpzj6h4puwrdrWnreOTKQXgynESUltWQsX2UC4Zbp+qOPsNuWz77zpHO26PW/JPEBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [codex, session, publish]
+description: "Compare-and-swap publish a verified terminal Codex candidate"
+forms:
+  - slots:
+      - field: session_id
+      - field: expected_previous_hash
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/publish
+  availability: daemon

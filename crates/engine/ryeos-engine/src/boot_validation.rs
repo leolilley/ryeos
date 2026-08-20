@@ -872,14 +872,17 @@ pub fn validate_protocol_builder(
             Some(e) => e,
             None => continue,
         };
-        if let Some(crate::kind_registry::TerminatorDecl::Subprocess { protocol_ref }) =
+        if let Some(crate::kind_registry::TerminatorDecl::Subprocess { protocol }) =
             &exec.terminator
-            && protocols.get(protocol_ref).is_none()
         {
-            issues.push(BootIssue::DanglingProtocolRef {
-                kind: kind_name.to_string(),
-                protocol_ref: protocol_ref.clone(),
-            });
+            for protocol_ref in protocol.boot_required_refs() {
+                if protocols.get(protocol_ref).is_none() {
+                    issues.push(BootIssue::DanglingProtocolRef {
+                        kind: kind_name.to_string(),
+                        protocol_ref: protocol_ref.clone(),
+                    });
+                }
+            }
         }
         if let Some(method_dispatch) = &exec.method_dispatch {
             match protocols.get(&method_dispatch.protocol) {

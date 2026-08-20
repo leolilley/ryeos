@@ -170,7 +170,41 @@ pub(crate) async fn dispatch_subprocess(
                 detail: "dispatch_subprocess called on a schema with no terminator".into(),
             })?;
     let protocol_ref = match terminator {
-        TerminatorDecl::Subprocess { protocol_ref } => protocol_ref.as_str(),
+        TerminatorDecl::Subprocess { protocol } => {
+            let verified = hop_verified.ok_or_else(|| DispatchError::SchemaMisconfigured {
+                kind: current_ref.kind.clone(),
+                detail: "subprocess protocol selection requires a verified item".into(),
+            })?;
+            let effective = ctx
+                .engine
+                .effective_item(ryeos_engine::engine::EffectiveItemRequest {
+                    item_ref: verified.resolved.canonical_ref.clone(),
+                    expected_kind: Some(current_ref.kind.clone()),
+                    project_root: verified.resolved.materialized_project_root.clone(),
+                    subject_resolution_authority: verified
+                        .resolved
+                        .subject_resolution_authority
+                        .clone(),
+                })
+                .map_err(|error| DispatchError::SchemaMisconfigured {
+                    kind: current_ref.kind.clone(),
+                    detail: format!("resolve subprocess protocol selection: {error}"),
+                })?;
+            if effective.source.content_hash != verified.resolved.content_hash {
+                return Err(DispatchError::SchemaMisconfigured {
+                    kind: current_ref.kind.clone(),
+                    detail:
+                        "effective subprocess protocol selection changed the verified root bytes"
+                            .into(),
+                });
+            }
+            protocol
+                .resolve(&effective.composed_value)
+                .map_err(|detail| DispatchError::SchemaMisconfigured {
+                    kind: current_ref.kind.clone(),
+                    detail,
+                })?
+        }
         TerminatorDecl::InProcess { .. } => {
             return Err(DispatchError::SchemaMisconfigured {
                 kind: current_ref.kind.clone(),
@@ -184,8 +218,8 @@ pub(crate) async fn dispatch_subprocess(
     let protocol = ctx
         .engine
         .protocols
-        .require(protocol_ref)
-        .map_err(|_| DispatchError::ProtocolNotRegistered(protocol_ref.to_string()))?;
+        .require(&protocol_ref)
+        .map_err(|_| DispatchError::ProtocolNotRegistered(protocol_ref.clone()))?;
 
     check_dispatch_capabilities(&protocol.descriptor.capabilities, request)?;
 

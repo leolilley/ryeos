@@ -197,6 +197,7 @@ WEB="$ROOT/bundles/web"
 BROWSER="$ROOT/bundles/browser"
 RYEOS_UI="$ROOT/bundles/ryeos-ui"
 HOSTED_NODE="$ROOT/bundles/hosted-node"
+CODEX="$ROOT/bundles/codex"
 LOCAL_INFERENCE="$ROOT/bundles/local-inference"
 SANDBOX_LINUX_BUBBLEWRAP="$ROOT/bundles/sandbox-linux-bubblewrap"
 TVTA="$ROOT/bundles/tv-tracker-authoring"
@@ -254,6 +255,7 @@ STD_BIN="$STD/.ai/bin/$TRIPLE"
 WEB_BIN="$WEB/.ai/bin/$TRIPLE"
 BROWSER_BIN="$BROWSER/.ai/bin/$TRIPLE"
 RYEOS_UI_BIN="$RYEOS_UI/.ai/bin/$TRIPLE"
+CODEX_BIN="$CODEX/.ai/bin/$TRIPLE"
 
 # Bin dirs for exactly the bin-managed bundles this set builds.
 for BUNDLE_DIR in "${BUNDLE_DIRS[@]}"; do
@@ -267,18 +269,22 @@ case "$BUNDLE_SET" in
   full|full-sandbox)
     pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
           ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-browser-tools \
-          ryeos-client-terminal ryeos-client-web)
+          ryeos-client-terminal ryeos-client-web ryeos-structured-session)
     ;;
   central-host)
     pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
           ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools)
     ;;
-  standard|hosted-workflow)
+  standard)
     pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
           ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec)
     ;;
+  hosted-workflow)
+    pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
+          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session)
+    ;;
   hosted-node)
-    pkgs=(ryeosd ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec)
+    pkgs=(ryeosd ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session)
     ;;
 esac
 
@@ -320,13 +326,29 @@ ryeos_term_resume "release build complete"
 
 # The admitted persistent-session bridge must bring no ambient loader/library
 # closure into the worker realization. Build it fully static and reject any
-# payload carrying PT_INTERP or DT_NEEDED before bundle publication.
+# payload carrying PT_INTERP or DT_NEEDED before bundle publication. An
+# explicit Cargo target keeps target RUSTFLAGS off host-built proc macros;
+# applying `crt-static` to the implicit host graph makes GNU proc-macro dylibs
+# impossible to produce.
+STATIC_RELEASE="$TARGET/$TRIPLE/release"
 RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
-  "$CARGO" build --release "${jobs_args[@]}" -p ryeos-session-exec
-if readelf -l "$TARGET/release/ryeos-session-exec" | grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' \
-    || readelf -d "$TARGET/release/ryeos-session-exec" | grep -Eq 'NEEDED'; then
+  "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-session-exec
+if readelf -l "$STATIC_RELEASE/ryeos-session-exec" | grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' \
+    || readelf -d "$STATIC_RELEASE/ryeos-session-exec" | grep -Eq 'NEEDED'; then
   ryeos_term_fail "ryeos-session-exec is not fully static"
   exit 2
+fi
+
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-node" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
+  RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+    "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-structured-session
+  for codex_binary in ryeos-structured-session-bridge ryeos-worker-execution-launch-preparer ryeos-worker-execution-runtime; do
+    if readelf -l "$STATIC_RELEASE/$codex_binary" | grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' \
+        || readelf -d "$STATIC_RELEASE/$codex_binary" | grep -Eq 'NEEDED'; then
+      ryeos_term_fail "$codex_binary is not fully static"
+      exit 2
+    fi
+  done
 fi
 
 # ── Guard: no stale sibling binaries under --crates ──────────────────
@@ -352,6 +374,11 @@ staged_foundational_release_bins_for_set() {
   esac
   case "$BUNDLE_SET" in
     full|full-sandbox) printf '%s\n' ryeos-tui web ;;
+  esac
+  case "$BUNDLE_SET" in
+    full|full-sandbox|hosted-node|hosted-workflow)
+      printf '%s\n' ryeos-structured-session-bridge ryeos-worker-execution-launch-preparer ryeos-worker-execution-runtime
+      ;;
   esac
 }
 
@@ -405,8 +432,20 @@ install -m 0755 \
   "$TARGET/release/rye-parser-regex-kv" \
   "$TARGET/release/rye-composer-identity" \
   "$TARGET/release/ryeos-core-tools" \
-  "$TARGET/release/ryeos-session-exec" \
+  "$STATIC_RELEASE/ryeos-session-exec" \
   "$CORE_BIN/"
+
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-node" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
+  ryeos_term_update "installing hosted-execution core binaries" "$CORE_BIN"
+  install -m 0755 \
+    "$STATIC_RELEASE/ryeos-worker-execution-launch-preparer" \
+    "$STATIC_RELEASE/ryeos-worker-execution-runtime" \
+    "$CORE_BIN/"
+  ryeos_term_update "installing codex workload bridge" "$CODEX_BIN"
+  install -m 0755 \
+    "$STATIC_RELEASE/ryeos-structured-session-bridge" \
+    "$CODEX_BIN/"
+fi
 
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
   ryeos_term_update "installing standard bundle binaries" "$STD_BIN"
@@ -520,6 +559,13 @@ fi
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-node" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
   ryeos_term_update "publishing hosted-node bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$HOSTED_NODE" \
+    --registry-root "$CORE" \
+    --owner "$OWNER" >/dev/null
+fi
+
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-node" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
+  ryeos_term_update "publishing codex bundle" "signed manifests"
+  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$CODEX" \
     --registry-root "$CORE" \
     --owner "$OWNER" >/dev/null
 fi

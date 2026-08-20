@@ -1,0 +1,6 @@
+# ryeos:signed:2026-08-19T08:24:49Z:9e374851ee052244f9caa93fe0621e0e5376f7a269371a2cb0631720b6734437:587Y+HFJj5bdvOrNhf20faabywpP1YpvT+mXdQKUEeuauKPLMSSCL+s0IaWq2Yk5+FcHpc4jKwH6Y6uc4umbCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: worker-executions.command
+required_caps: ["ryeos.execute.service.worker-executions/command"]
+schema: {session_id: string, idempotency_key: string, route_id: string, payload: object}
+description: Send one idempotent opaque command through a session worker ledger.

@@ -1,0 +1,12 @@
+# ryeos:signed:2026-08-19T08:24:55Z:17752542ef71c72cc20f5549c03bf916d8548b35561a5ce0aa1405b913accce5:jElSTDXPJQuWIG0QhoNPz+csQsSH0UO2nkAVIJiS7R+ZGY7nXxqo2Jj5UiIOPnu9eLw19VoERNNpnj4kYcMiCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [codex, session, validate, candidate]
+description: "Validate closure and base ancestry for one exact frozen Codex workspace candidate"
+forms:
+  - slots:
+      - field: session_id
+      - field: candidate_snapshot_hash
+      - field: candidate_validation_hash
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/validate-candidate-closure-and-base
+  availability: daemon

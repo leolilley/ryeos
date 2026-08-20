@@ -1,0 +1,8 @@
+# ryeos:signed:2026-08-19T08:24:49Z:d293d203432a9d13b874c05085ab16d4047b45c50aa8bf5f6b76f5fa7f3d9ed0:TRXwZ9tROsm57n/5to5oZq6pVkRPxV+SpUboWZy6vJGtRRqLuW3MbsoBL83cQzexR/vxk74gCM71fL2Rjb+WAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: worker-executions
+name: terminate
+kind: service
+endpoint: worker-executions.terminate
+description: Stop, reap, and settle one owner-authorized session worker execution.
+required_caps: ["ryeos.execute.service.worker-executions/terminate"]
+schema: {session_id: string, reason: string}

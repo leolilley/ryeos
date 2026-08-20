@@ -141,6 +141,63 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
+    async fn start_dedicated_session(
+        &self,
+        request: DedicatedSessionStartRequest,
+    ) -> Result<Value, CallbackError> {
+        let mut params = serde_json::to_value(request).map_err(|error| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "serialize dedicated-session start request: {error}"
+            ))
+        })?;
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.start_dedicated_session", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn dedicated_session_status(&self, thread_id: &str) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id});
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.dedicated_session_status", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn dedicated_session_command(
+        &self,
+        request: DedicatedSessionCommandRequest,
+    ) -> Result<Value, CallbackError> {
+        let mut params = serde_json::to_value(request).map_err(|error| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "serialize dedicated-session command request: {error}"
+            ))
+        })?;
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.dedicated_session_command", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn terminate_dedicated_session(
+        &self,
+        request: DedicatedSessionTerminateRequest,
+    ) -> Result<Value, CallbackError> {
+        let mut params = serde_json::to_value(request).map_err(|error| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "serialize dedicated-session terminate request: {error}"
+            ))
+        })?;
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.terminate_dedicated_session", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
     async fn mark_running(&self, thread_id: &str) -> Result<Value, CallbackError> {
         let mut params = json!({"thread_id": thread_id});
         self.inject_callback_token(&mut params);

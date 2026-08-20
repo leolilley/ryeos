@@ -6,13 +6,14 @@
 //! the outer runtime capsule is minted, then reopens only retained content.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use ryeos_app::persistent_session::StartedPersistentSession;
+use ryeos_app::runtime_db::{WorkerProcessRecord, WorkerProcessState, daemon_generation_id};
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::{ResolvedExecutionRequest, prepare_captured_item_plan};
 use ryeos_engine::contracts::{
@@ -20,6 +21,7 @@ use ryeos_engine::contracts::{
     SubjectResolutionAuthority,
 };
 use ryeos_engine::kind_registry::{PersistentSessionDecl, TerminatorDecl};
+use ryeos_engine::protocols::descriptor::PersistentSessionProcessMode;
 use ryeos_engine::protocols::{VerifiedProtocol, validate_persistent_session_protocol};
 use ryeos_state::objects::{
     AdmittedPersistentSessionCapsule, PERSISTENT_SESSION_CAPSULE_KIND,
@@ -42,6 +44,22 @@ pub struct AdmittedPersistentSessionIdentity {
     pub effective_definition_digest: String,
     pub capsule_hash: String,
     pub execution_realization_hash: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExclusivePersistentSessionIdentity {
+    pub session_id: String,
+    pub worker_instance_id: String,
+    pub boot_identity_hash: String,
+    pub boot_epoch: u64,
+    pub lifecycle_generation: u64,
+    pub control_channel_identity: String,
+}
+
+struct HeldPersistentSession {
+    process: ryeos_app::thread_lifecycle::SpawnedPersistentSessionAwaitingAttachment,
+    socket: std::os::unix::net::UnixStream,
+    lifelines: Vec<Box<dyn Send + Sync>>,
 }
 
 pub(crate) struct AdmittedSessionPublications {
@@ -92,6 +110,13 @@ pub(crate) fn admit_or_verify_prepared_sessions(
             }
             let (hash, admitted_publications) =
                 admit_session_capsule(state, engine, dependency, &declaration, &protocol)
+                    .inspect_err(|error| {
+                        tracing::warn!(
+                            dependency = %name,
+                            error = %error,
+                            "persistent-session dependency admission failed"
+                        );
+                    })
                     .with_context(|| format!("admit persistent-session dependency `{name}`"))?;
             admitted_sessions.insert(name.clone(), hash);
             publications.extend(admitted_publications);
@@ -119,17 +144,23 @@ fn session_contract(
     let Some(declaration) = execution.persistent_session.clone() else {
         return Ok(None);
     };
-    let TerminatorDecl::Subprocess { protocol_ref } = execution
+    let TerminatorDecl::Subprocess {
+        protocol: protocol_selection,
+    } = execution
         .terminator
         .as_ref()
         .ok_or_else(|| anyhow!("persistent-session kind `{kind}` has no terminator"))?
     else {
         bail!("persistent-session kind `{kind}` is not subprocess-terminated");
     };
-    let protocol =
-        engine.protocols.get(protocol_ref).cloned().ok_or_else(|| {
-            anyhow!("persistent-session protocol `{protocol_ref}` is not installed")
-        })?;
+    let protocol_ref = protocol_selection
+        .resolve(&dependency.resolution.composed.composed)
+        .map_err(|reason| anyhow!("persistent-session kind `{kind}`: {reason}"))?;
+    let protocol = engine
+        .protocols
+        .get(&protocol_ref)
+        .cloned()
+        .ok_or_else(|| anyhow!("persistent-session protocol `{protocol_ref}` is not installed"))?;
     validate_persistent_session_protocol(&protocol.descriptor)
         .map_err(|error| anyhow!("persistent-session protocol `{protocol_ref}`: {error}"))?;
     validate_session_target(
@@ -264,6 +295,31 @@ fn admit_session_capsule(
     let guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&guard)?;
     let cas = authority.cas_store()?;
+    let structured_session_profile = if wire.wire_protocol == "ryeos.structured-session" {
+        let captured = captured_source
+            .as_ref()
+            .ok_or_else(|| anyhow!("structured-session worker has no admitted source closure"))?;
+        let entry = match &captured.binding().logical_binding {
+            ryeos_state::objects::SourceLogicalBinding::Worker { entry, .. } => entry,
+            _ => bail!("structured-session worker has a non-worker source binding"),
+        };
+        let mut source_files = BTreeMap::new();
+        for file in &captured.manifest().entries {
+            let bytes = cas
+                .get_blob(&file.blob_hash)?
+                .ok_or_else(|| anyhow!("captured structured-session source blob is absent"))?;
+            source_files.insert(file.path.clone(), bytes);
+        }
+        let profile_bytes = source_files.get(entry).ok_or_else(|| {
+            anyhow!("structured-session entry is absent from its captured source closure")
+        })?;
+        Some(ryeos_engine::structured_session_profile::compile(
+            profile_bytes,
+            &source_files,
+        )?)
+    } else {
+        None
+    };
     let execution_closure = {
         let _permit = state
             .write_barrier
@@ -316,6 +372,7 @@ fn admit_session_capsule(
             .as_ref()
             .map(|captured| captured.binding().digest())
             .transpose()?,
+        structured_session_profile,
         runtime_ref: session_authority.runtime_ref,
         executor_ref,
     };
@@ -418,6 +475,14 @@ where
 {
     let capsule = load_capsule(state, capsule_hash)?;
     validate_capsule_current_trust(&state.engine, &capsule)?;
+    let protocol_ref = capsule_protocol_identity(&capsule)?.0;
+    if installed_session_protocol(state, protocol_ref)?.process_mode
+        != PersistentSessionProcessMode::PooledRequests
+    {
+        bail!(
+            "exclusive persistent-session protocol `{protocol_ref}` cannot enter the request pool"
+        );
+    }
     let exact: PersistentSessionExactProgram =
         serde_json::from_value(capsule.exact_program.clone())?;
     let current_digest = exact.resolution_output.effective_definition_digest()?;
@@ -451,12 +516,29 @@ where
     )
 }
 
+fn installed_session_protocol<'a>(
+    state: &'a AppState,
+    protocol_ref: &str,
+) -> Result<&'a ryeos_engine::protocols::descriptor::PersistentSessionProtocol> {
+    let protocol =
+        state.engine.protocols.get(protocol_ref).ok_or_else(|| {
+            anyhow!("persistent-session protocol `{protocol_ref}` is not installed")
+        })?;
+    validate_persistent_session_protocol(&protocol.descriptor)
+        .map_err(|error| anyhow!("persistent-session protocol `{protocol_ref}`: {error}"))
+}
+
 fn start_capsule_process(
     state: &AppState,
     capsule_hash: &str,
     capsule: &AdmittedPersistentSessionCapsule,
     exact: &PersistentSessionExactProgram,
 ) -> Result<StartedPersistentSession> {
+    let protocol_ref = capsule_protocol_identity(capsule)?.0;
+    let session_protocol = installed_session_protocol(state, protocol_ref)?;
+    if session_protocol.process_mode != PersistentSessionProcessMode::PooledRequests {
+        bail!("exclusive persistent-session protocol cannot use the pooled launcher");
+    }
     let workspace_name = format!(
         "persistent-session-{}-{:08x}",
         &capsule_hash[..16],
@@ -466,18 +548,159 @@ fn start_capsule_process(
         &state.config.runtime_root().cache(),
         &workspace_name,
     )?;
+    let mut held = spawn_capsule_process_held(
+        state,
+        capsule_hash,
+        capsule,
+        exact,
+        &workspace,
+        session_protocol,
+        None,
+        &BTreeMap::new(),
+    )?;
+    held.lifelines.push(Box::new(workspace_lifeline));
+    // The fixed pool becomes the process owner as soon as this constructor
+    // succeeds. It has no durable cross-restart attachment: restart recovery
+    // deliberately reconstructs an equivalent pooled process from the
+    // immutable capsule.
+    let running = held.process.release_after_attachment()?;
+    Ok(StartedPersistentSession {
+        running,
+        socket: held.socket,
+        lifelines: held.lifelines,
+        expected_boot_identity: None,
+    })
+}
+
+/// Create a daemon-owned execution view under RyeOS's code-enforced
+/// `.ai/cache` snapshot exclusion. Disabled-isolation launches can materialize
+/// immutable runtime inputs here without adding them to the project candidate.
+fn create_node_owned_runtime_view(workspace: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut current = workspace.to_path_buf();
+    for component in [".ai", "cache", "ryeos-runtime"] {
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    bail!("node-owned runtime view collides with a non-directory");
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&current).with_context(|| {
+                    format!("create node-owned runtime view {}", current.display())
+                })?;
+            }
+            Err(error) => return Err(error).context("inspect node-owned runtime view"),
+        }
+    }
+    std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o700))?;
+    let canonical_workspace = workspace.canonicalize()?;
+    let canonical_view = current.canonicalize()?;
+    if !canonical_view.starts_with(&canonical_workspace) {
+        bail!("node-owned runtime view escaped its workspace");
+    }
+    Ok(canonical_view)
+}
+
+fn prepare_structured_session_baseline(
+    profile: &ryeos_state::objects::AdmittedStructuredSessionProfile,
+    source_entry: &Path,
+    state_root: &Path,
+    enforced: bool,
+) -> Result<Option<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let source = source_entry
+        .parent()
+        .ok_or_else(|| anyhow!("structured-session entry has no source parent"))?
+        .join(&profile.baseline_source);
+    let source_metadata = std::fs::symlink_metadata(&source)
+        .context("inspect admitted structured-session baseline")?;
+    if source_metadata.file_type().is_symlink()
+        || !source_metadata.is_file()
+        || source_metadata.len() == 0
+        || source_metadata.len() > 64 * 1024
+    {
+        bail!("admitted structured-session baseline is not one bounded regular file");
+    }
+    let bytes = std::fs::read(&source).context("read admitted structured-session baseline")?;
+    let destination = state_root.join(&profile.baseline_destination);
+    match std::fs::symlink_metadata(&destination) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.permissions().mode() & 0o777 != 0o400
+                || std::fs::read(&destination)? != bytes
+            {
+                bail!("workload baseline differs from the admission-compiled generation");
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let temporary = state_root.join(".ryeos-baseline.pending");
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o400)
+                .open(&temporary)
+                .context("create structured-session baseline staging file")?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            std::fs::rename(&temporary, &destination)?;
+            std::fs::File::open(state_root)?.sync_all()?;
+        }
+        Err(error) => return Err(error).context("inspect workload baseline destination"),
+    }
+    if !enforced {
+        return Ok(None);
+    }
+    let source_file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&source)
+        .context("pin admitted structured-session baseline")?;
+    Ok(Some(
+        ryeos_engine::isolation::IsolationReadOnlyMountAuthority::new_state_overlay(
+            source,
+            destination,
+            source_file,
+        ),
+    ))
+}
+
+fn spawn_capsule_process_held(
+    state: &AppState,
+    capsule_hash: &str,
+    capsule: &AdmittedPersistentSessionCapsule,
+    exact: &PersistentSessionExactProgram,
+    workspace: &Path,
+    session_protocol: &ryeos_engine::protocols::descriptor::PersistentSessionProtocol,
+    state_root: Option<&Path>,
+    runtime_environment: &BTreeMap<String, String>,
+) -> Result<HeldPersistentSession> {
     let resolution = exact.resolution_output.restore();
     super::source_closure::validate_external_mount_separation(state, &resolution)?;
     let private_budget = (!state.isolation.is_enforced())
         .then(super::external_content::private_materialization_budget)
         .transpose()?;
+    let private_runtime_view;
+    let realization_workspace = if state.isolation.is_enforced()
+        || session_protocol.process_mode == PersistentSessionProcessMode::PooledRequests
+    {
+        workspace
+    } else {
+        private_runtime_view = create_node_owned_runtime_view(workspace)?;
+        private_runtime_view.as_path()
+    };
     let bound = if state.isolation.is_enforced() {
         super::external_content::bind_external_realizations(state, &resolution, &workspace)?
     } else {
         super::external_content::bind_external_realizations_in_private_workspace_with_budget(
             state,
             &resolution,
-            &workspace,
+            realization_workspace,
             private_budget
                 .as_ref()
                 .expect("disabled isolation has a private copy budget"),
@@ -496,7 +719,7 @@ fn start_capsule_process(
         super::source_closure::bind_source_in_private_workspace_with_budget(
             state,
             &resolution,
-            &workspace,
+            realization_workspace,
             private_budget
                 .as_ref()
                 .expect("disabled isolation has a private copy budget"),
@@ -513,6 +736,20 @@ fn start_capsule_process(
         }
         None => (None, None),
     };
+    if let Some(profile) = capsule.structured_session_profile.as_ref() {
+        let source_entry = source_entry
+            .ok_or_else(|| anyhow!("structured-session capsule has no bound source entry"))?;
+        let state_root = state_root
+            .ok_or_else(|| anyhow!("structured-session capsule has no exact state root"))?;
+        if let Some(overlay) = prepare_structured_session_baseline(
+            profile,
+            source_entry,
+            state_root,
+            state.isolation.is_enforced(),
+        )? {
+            mounts.push(overlay);
+        }
+    }
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&guard)?;
@@ -532,19 +769,32 @@ fn start_capsule_process(
     )?;
     plan.bind_persistent_session_spawn_environment(
         external_env.as_deref(),
+        external_env.as_ref().map(|_| realization_workspace),
         source_env,
         source_entry,
     )?;
-    let running = plan.spawn_persistent_session(
+    let mut runtime_env_allowlist = session_protocol.runtime_env_allowlist.clone();
+    if let Some(name) = session_protocol.readiness_identity_env.as_ref() {
+        runtime_env_allowlist.push(name.clone());
+    }
+    plan.bind_persistent_session_runtime_environment(runtime_environment, &runtime_env_allowlist)?;
+    // `realization_workspace` is only the daemon-owned location for sealed
+    // runtime inputs when outer isolation is disabled.  The process authority
+    // remains the canonical runtime-workspace `project` child; substituting
+    // the nested realization view here would change the admitted workspace
+    // identity and fail the runtime-workspace layout check.
+    let process = plan.spawn_persistent_session_held(
         state,
-        &workspace,
+        workspace,
         mounts,
         target_channel,
         &capsule.lifecycle,
+        session_protocol.workspace_authority,
+        session_protocol.network_authority,
+        state_root,
         &format!("session-{}", &capsule_hash[..24]),
     )?;
-    let mut lifelines: Vec<Box<dyn Send + Sync>> = Vec::with_capacity(leases.len() + 1);
-    lifelines.push(Box::new(workspace_lifeline));
+    let mut lifelines: Vec<Box<dyn Send + Sync>> = Vec::with_capacity(leases.len());
     lifelines.extend(
         leases
             .into_iter()
@@ -553,11 +803,150 @@ fn start_capsule_process(
     if let Some(source) = source {
         lifelines.push(Box::new(source));
     }
-    Ok(StartedPersistentSession {
-        running,
+    Ok(HeldPersistentSession {
+        process,
         socket: daemon_socket,
         lifelines,
     })
+}
+
+/// Start one session-owned process from an already-admitted capsule and
+/// already-ready durable workspace. The exact held identity is committed
+/// before Lillux authorizes child execution.
+pub fn start_exclusive_capsule(
+    state: &AppState,
+    capsule_hash: &str,
+    workspace: &Path,
+    state_root: Option<&Path>,
+    runtime_environment: &BTreeMap<String, String>,
+    identity: &ExclusivePersistentSessionIdentity,
+) -> Result<()> {
+    let capsule = load_capsule(state, capsule_hash)?;
+    validate_capsule_current_trust(&state.engine, &capsule)?;
+    let exact: PersistentSessionExactProgram =
+        serde_json::from_value(capsule.exact_program.clone())?;
+    let protocol_ref = capsule_protocol_identity(&capsule)?.0;
+    let session_protocol = installed_session_protocol(state, protocol_ref)?;
+    use ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority;
+    if session_protocol.process_mode != PersistentSessionProcessMode::ExclusiveSession
+        || session_protocol.workspace_authority
+            != PersistentSessionWorkspaceAuthority::RuntimeWorkspace
+    {
+        bail!("persistent-session protocol does not authorize an exclusive runtime workspace");
+    }
+    let reservation = state.persistent_sessions.reserve_exclusive(
+        &identity.session_id,
+        &capsule.lifecycle,
+        &capsule.wire,
+    )?;
+    let mut runtime_environment = runtime_environment.clone();
+    if let Some(profile) = capsule.structured_session_profile.as_ref()
+        && runtime_environment
+            .insert(
+                "RYEOS_STRUCTURED_SESSION_PROFILE_HASH".to_owned(),
+                profile.profile_hash.clone(),
+            )
+            .is_some()
+    {
+        bail!("structured-session profile identity collides with runtime authority");
+    }
+    if let Some(name) = session_protocol.readiness_identity_env.as_ref() {
+        if runtime_environment
+            .insert(name.clone(), identity.boot_identity_hash.clone())
+            .is_some()
+        {
+            bail!("readiness identity environment collides with runtime authority");
+        }
+    } else {
+        bail!("exclusive persistent-session protocol requires a readiness identity slot");
+    }
+    let held = spawn_capsule_process_held(
+        state,
+        capsule_hash,
+        &capsule,
+        &exact,
+        workspace,
+        session_protocol,
+        state_root,
+        &runtime_environment,
+    )?;
+    let now = lillux::time::timestamp_millis() as i64;
+    let record = WorkerProcessRecord {
+        worker_instance_id: identity.worker_instance_id.clone(),
+        boot_identity_hash: identity.boot_identity_hash.clone(),
+        session_capsule_hash: capsule_hash.to_owned(),
+        boot_epoch: identity.boot_epoch,
+        lifecycle_generation: identity.lifecycle_generation,
+        process_identity: held.process.process_identity.clone(),
+        control_channel_identity: identity.control_channel_identity.clone(),
+        state: WorkerProcessState::Attached,
+        daemon_generation_id: daemon_generation_id().to_owned(),
+        session_id: identity.session_id.clone(),
+        cleanup_state: "owned".to_owned(),
+        created_at_ms: now,
+        updated_at_ms: now,
+    };
+    if let Err(error) = state.state_store.attach_worker_process(&record) {
+        let cleanup = held.process.abort_and_reap().err();
+        return Err(match cleanup {
+            Some(cleanup) => error.context(format!(
+                "exclusive held-process attachment cleanup failed: {cleanup}"
+            )),
+            None => error,
+        });
+    }
+    let running = match held.process.release_after_attachment() {
+        Ok(running) => running,
+        Err(error) => {
+            let _ = state.state_store.settle_worker_process(
+                &identity.worker_instance_id,
+                &identity.session_id,
+                identity.boot_epoch,
+                "unproved",
+                "held process release failed",
+            );
+            return Err(error);
+        }
+    };
+    let started = StartedPersistentSession {
+        running,
+        socket: held.socket,
+        lifelines: held.lifelines,
+        expected_boot_identity: Some(identity.boot_identity_hash.clone()),
+    };
+    if let Err(error) = reservation.bind(started) {
+        let _ = state.state_store.settle_worker_process(
+            &identity.worker_instance_id,
+            &identity.session_id,
+            identity.boot_epoch,
+            "unproved",
+            "exclusive worker readiness failed",
+        );
+        return Err(error);
+    }
+    if let Err(error) = state.state_store.complete_worker_binding(
+        &identity.worker_instance_id,
+        &identity.session_id,
+        identity.boot_epoch,
+    ) {
+        let cleanup = state
+            .persistent_sessions
+            .retire_exclusive(&identity.session_id);
+        let cleanup_state = if cleanup.is_ok() {
+            "reaped"
+        } else {
+            "unproved"
+        };
+        let _ = state.state_store.settle_worker_process(
+            &identity.worker_instance_id,
+            &identity.session_id,
+            identity.boot_epoch,
+            cleanup_state,
+            "durable readiness publication failed",
+        );
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn load_capsule(state: &AppState, hash: &str) -> Result<AdmittedPersistentSessionCapsule> {
@@ -864,6 +1253,7 @@ mod tests {
             },
             execution_realization_hash: "8".repeat(64),
             source_binding_hash: None,
+            structured_session_profile: None,
             runtime_ref: "runtime:fixture/session".to_owned(),
             executor_ref: "native:fixture".to_owned(),
         }
@@ -945,6 +1335,28 @@ mod tests {
         );
         assert!(!logical.starts_with("/tmp"));
         assert!(!logical.to_string_lossy().contains("cache"));
+    }
+
+    #[test]
+    fn node_owned_runtime_view_is_snapshot_excluded_and_rejects_symlink_collisions() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let view = create_node_owned_runtime_view(workspace.path()).unwrap();
+        assert_eq!(
+            view.strip_prefix(workspace.path()).unwrap(),
+            std::path::Path::new(".ai/cache/ryeos-runtime")
+        );
+        assert!(
+            ryeos_state::project_sync::is_project_snapshot_floor_excluded(
+                ".ai/cache/ryeos-runtime/structured-session"
+            )
+        );
+
+        let colliding_workspace = tempfile::tempdir().unwrap();
+        symlink("/tmp", colliding_workspace.path().join(".ai")).unwrap();
+        let error = create_node_owned_runtime_view(colliding_workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("collides with a non-directory"));
     }
 
     #[test]

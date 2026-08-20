@@ -66,9 +66,44 @@ pub enum PersistentSessionFraming {
     U32BeJson,
 }
 
+/// Generic ownership/reuse mechanics for a managed session process. This is
+/// protocol vocabulary, not an executable-kind or product classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum PersistentSessionProcessMode {
+    /// A bounded daemon pool may lease the process for independent requests.
+    PooledRequests,
+    /// One durable session owns the process until drain/termination.
+    ExclusiveSession,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum PersistentSessionWorkspaceAuthority {
+    EphemeralScratch,
+    RuntimeWorkspace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum PersistentSessionNetworkAuthority {
+    Isolated,
+    NodePolicy,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PersistentSessionProtocol {
+    pub process_mode: PersistentSessionProcessMode,
+    pub workspace_authority: PersistentSessionWorkspaceAuthority,
+    pub network_authority: PersistentSessionNetworkAuthority,
+    #[serde(default)]
+    pub runtime_env_allowlist: Vec<String>,
+    /// Optional environment slot carrying a daemon-minted boot identity that
+    /// the child must echo in its readiness frame. This binds readiness to the
+    /// exact held launch without assigning product meaning to the protocol.
+    #[serde(default)]
+    pub readiness_identity_env: Option<String>,
     pub channel: PersistentSessionChannel,
     pub channel_env: String,
     pub framing: PersistentSessionFraming,
@@ -164,6 +199,33 @@ pub fn validate_persistent_session_protocol(
             .env_injections
             .iter()
             .any(|injection| injection.name == session.channel_env)
+        || session.runtime_env_allowlist.len() > 32
+        || session
+            .runtime_env_allowlist
+            .iter()
+            .enumerate()
+            .any(|(index, name)| {
+                name.is_empty()
+                    || name.len() > 128
+                    || !name.bytes().enumerate().all(|(position, byte)| {
+                        byte == b'_'
+                            || byte.is_ascii_uppercase()
+                            || (position != 0 && byte.is_ascii_digit())
+                    })
+                    || session.runtime_env_allowlist[..index].contains(name)
+                    || name == &session.channel_env
+            })
+        || session.readiness_identity_env.as_ref().is_some_and(|name| {
+            name.is_empty()
+                || name.len() > 128
+                || !name.bytes().enumerate().all(|(position, byte)| {
+                    byte == b'_'
+                        || byte.is_ascii_uppercase()
+                        || (position != 0 && byte.is_ascii_digit())
+                })
+                || name == &session.channel_env
+                || session.runtime_env_allowlist.contains(name)
+        })
     {
         return Err("persistent session descriptor is not canonical or bounded".to_owned());
     }

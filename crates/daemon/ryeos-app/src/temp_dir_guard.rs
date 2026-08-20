@@ -297,6 +297,28 @@ pub fn admitted_input_workspace_thread_ids(
     Ok(thread_ids)
 }
 
+/// Create one durable runtime-workspace root through the same pinned
+/// `.ai/state/cache/executions` authority consumed by the isolation runtime.
+/// The caller must either bind the workspace journal and disarm the returned
+/// guard, or let the guard roll the unbound directory back.
+pub fn create_runtime_workspace(
+    runtime_cache_root: &std::path::Path,
+    workspace_name: &str,
+) -> anyhow::Result<(PathBuf, Arc<TempDirGuard>)> {
+    let execution_root =
+        lillux::PinnedDirectory::open_or_create(&runtime_cache_root.join("executions"))?;
+    execution_root.set_mode(0o700)?;
+    let name = std::ffi::OsString::from(workspace_name);
+    let workspace = execution_root.create_child(&name, 0o700)?;
+    for child in ["project", "upper", "work"] {
+        workspace.create_child(std::ffi::OsStr::new(child), 0o700)?;
+    }
+    workspace.sync()?;
+    let project = workspace.path().join("project");
+    let guard = Arc::new(TempDirGuard::new_pinned(execution_root, name, workspace));
+    Ok((project, guard))
+}
+
 impl std::fmt::Debug for TempDirGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TempDirGuard")
@@ -329,6 +351,19 @@ mod tests {
         // Drop second Arc — dir removed.
         drop(g2);
         assert!(!path.exists(), "dir removed on last Arc drop");
+    }
+
+    #[test]
+    fn runtime_workspace_uses_the_canonical_execution_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (project, guard) = create_runtime_workspace(tmp.path(), "runtime-one").unwrap();
+        let root = project.parent().unwrap();
+        assert_eq!(root.parent().unwrap(), tmp.path().join("executions"));
+        for child in ["project", "upper", "work"] {
+            assert!(root.join(child).is_dir());
+        }
+        drop(guard);
+        assert!(!root.exists());
     }
 
     #[test]

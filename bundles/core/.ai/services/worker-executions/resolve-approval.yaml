@@ -1,0 +1,8 @@
+# ryeos:signed:2026-08-19T03:02:47Z:d09836af9aab3be52863ac081c1058265195bec70baeb2f2377609f9bf39db1c:18HToi8/2Brvx+7mIawtQSXExJQz+EjvVtJ5ORzgikbuqGwXtlvdfT1NbV8IfpWTQcEV1WWkCZY4W3zNPsQpAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: worker-executions
+name: resolve-approval
+kind: service
+endpoint: worker-executions.resolve-approval
+description: Resolve one digest- and worker-epoch-fenced execution approval.
+required_caps: ["ryeos.execute.service.worker-executions/resolve-approval"]
+schema: {session_id: string, approval_id: string, request_digest: string, accept: boolean}

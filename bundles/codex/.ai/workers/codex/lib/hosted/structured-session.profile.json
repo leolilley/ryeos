@@ -1,0 +1,1072 @@
+{
+  "schema_version": 1,
+  "workload_realization_id": "codex",
+  "workload_executable": "codex",
+  "workload_args": [
+    "app-server"
+  ],
+  "workload_home_env": "CODEX_HOME",
+  "baseline_config": "baseline.config.toml",
+  "baseline_destination": "config.toml",
+  "initialization": [
+    {
+      "method": "initialize",
+      "effect_class": "pure_read",
+      "params": {
+        "clientInfo": {
+          "name": "ryeos",
+          "title": "RyeOS Hosted Workload",
+          "version": "1"
+        }
+      },
+      "response_schema": "schema/InitializeResponse.json",
+      "notification": null
+    },
+    {
+      "method": "initialized",
+      "effect_class": "pure_read",
+      "params": {},
+      "response_schema": null,
+      "notification": "initialized"
+    }
+  ],
+  "route_sets": {
+    "enrollment": [
+      "credential.account.read",
+      "credential.login.cancel",
+      "credential.login.start"
+    ],
+    "session": [
+      "credential.account.read",
+      "credential.rate_limits.read",
+      "model.list",
+      "session.read",
+      "session.resume",
+      "session.start",
+      "turn.interrupt",
+      "turn.start",
+      "turn.steer"
+    ]
+  },
+  "routes": [
+    {
+      "id": "credential.login.start",
+      "method": "account/login/start",
+      "effect_class": "credential_write",
+      "request_schema": "schema/LoginAccountParams.json",
+      "response_schema": "schema/LoginAccountResponse.json",
+      "fixed_params": {
+        "type": "chatgptDeviceCode"
+      },
+      "workspace_fields": [],
+      "forbidden_non_null_fields": [
+        "apiKey",
+        "accessToken",
+        "chatgptAccountId",
+        "chatgptPlanType"
+      ],
+      "observations": [
+        {
+          "when": [
+            {
+              "pointer": "/response/result/type",
+              "equals": "chatgptDeviceCode"
+            }
+          ],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "credential_enrollment_started"
+              },
+              "login_id": {
+                "op": "pointer",
+                "pointer": "/response/result/loginId"
+              },
+              "ttl_seconds": {
+                "op": "literal",
+                "value": 900
+              }
+            }
+          }
+        }
+      ],
+      "result_retention": "ephemeral",
+      "ceremony": "start",
+      "response_predicates": []
+    },
+    {
+      "id": "credential.login.cancel",
+      "method": "account/login/cancel",
+      "effect_class": "credential_write",
+      "request_schema": "schema/CancelLoginAccountParams.json",
+      "response_schema": "schema/CancelLoginAccountResponse.json",
+      "fixed_params": {},
+      "workspace_fields": [],
+      "forbidden_non_null_fields": [],
+      "observations": [
+        {
+          "when": [],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "credential_enrollment_cancelled"
+              },
+              "login_id": {
+                "op": "pointer",
+                "pointer": "/params/loginId"
+              }
+            }
+          }
+        }
+      ],
+      "result_retention": "ephemeral",
+      "ceremony": "clear",
+      "response_predicates": []
+    },
+    {
+      "id": "credential.account.read",
+      "method": "account/read",
+      "effect_class": "credential_read",
+      "request_schema": "schema/GetAccountParams.json",
+      "response_schema": "schema/GetAccountResponse.json",
+      "fixed_params": {
+        "refreshToken": false
+      },
+      "workspace_fields": [],
+      "forbidden_non_null_fields": [],
+      "observations": [
+        {
+          "when": [
+            {
+              "pointer": "/response/result/account/type",
+              "equals": "chatgpt"
+            }
+          ],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "credential_enrollment_observed"
+              },
+              "account": {
+                "op": "object",
+                "fields": {
+                  "type": {
+                    "op": "literal",
+                    "value": "chatgpt"
+                  },
+                  "email": {
+                    "op": "pointer",
+                    "pointer": "/response/result/account/email",
+                    "optional": true,
+                    "max_string_bytes": 4096
+                  },
+                  "plan_type": {
+                    "op": "pointer",
+                    "pointer": "/response/result/account/planType",
+                    "optional": true,
+                    "max_string_bytes": 4096
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "result_retention": "ephemeral",
+      "ceremony": "clear",
+      "response_predicates": []
+    },
+    {
+      "id": "credential.rate_limits.read",
+      "method": "account/rateLimits/read",
+      "effect_class": "credential_read",
+      "request_schema": "schema/EmptyObject.json",
+      "response_schema": "schema/GetAccountRateLimitsResponse.json",
+      "fixed_params": {},
+      "workspace_fields": [],
+      "forbidden_non_null_fields": [],
+      "observations": [],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "response_predicates": []
+    },
+    {
+      "id": "model.list",
+      "method": "model/list",
+      "effect_class": "pure_read",
+      "request_schema": "schema/ModelListParams.json",
+      "response_schema": "schema/ModelListResponse.json",
+      "fixed_params": {
+        "includeHidden": false
+      },
+      "workspace_fields": [],
+      "forbidden_non_null_fields": [],
+      "observations": [],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "response_predicates": []
+    },
+    {
+      "id": "session.start",
+      "method": "thread/start",
+      "effect_class": "external_effect",
+      "request_schema": "schema/ThreadStartParams.json",
+      "response_schema": "schema/ThreadStartResponse.json",
+      "fixed_params": {
+        "approvalPolicy": {
+          "granular": {
+            "sandbox_approval": true,
+            "rules": false,
+            "mcp_elicitations": false,
+            "request_permissions": false,
+            "skill_approval": false
+          }
+        },
+        "approvalsReviewer": "user"
+      },
+      "workspace_fields": [
+        "cwd"
+      ],
+      "forbidden_non_null_fields": [
+        "config",
+        "baseInstructions",
+        "serviceName",
+        "modelProvider",
+        "sandbox"
+      ],
+      "observations": [
+        {
+          "when": [],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "remote_thread"
+              },
+              "id": {
+                "op": "pointer",
+                "pointer": "/response/result/thread/id",
+                "max_string_bytes": 256
+              }
+            }
+          }
+        }
+      ],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "session_binding": {
+        "action": "bind_new",
+        "request_field": null,
+        "response_pointer": "/result/thread/id"
+      },
+      "response_predicates": [
+        {
+          "pointer": "/response/result/activePermissionProfile/id",
+          "equals": "ryeos-workspace-only"
+        },
+        {
+          "pointer": "/response/result/approvalsReviewer",
+          "equals": "user"
+        },
+        {
+          "pointer": "/response/result/sandbox/networkAccess",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "id": "session.resume",
+      "method": "thread/resume",
+      "audience": "runtime",
+      "effect_class": "session_mutation",
+      "request_schema": "schema/ThreadResumeParams.json",
+      "response_schema": "schema/ThreadResumeResponse.json",
+      "fixed_params": {
+        "approvalPolicy": {
+          "granular": {
+            "sandbox_approval": true,
+            "rules": false,
+            "mcp_elicitations": false,
+            "request_permissions": false,
+            "skill_approval": false
+          }
+        },
+        "approvalsReviewer": "user"
+      },
+      "workspace_fields": [
+        "cwd"
+      ],
+      "forbidden_non_null_fields": [
+        "config",
+        "baseInstructions",
+        "modelProvider",
+        "sandbox"
+      ],
+      "observations": [
+        {
+          "when": [],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "remote_thread_recovered"
+              },
+              "id": {
+                "op": "pointer",
+                "pointer": "/response/result/thread/id",
+                "max_string_bytes": 256
+              }
+            }
+          }
+        }
+      ],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "session_binding": {
+        "action": "bind_expected",
+        "request_field": "threadId",
+        "response_pointer": "/result/thread/id"
+      },
+      "response_predicates": [
+        {
+          "pointer": "/response/result/activePermissionProfile/id",
+          "equals": "ryeos-workspace-only"
+        },
+        {
+          "pointer": "/response/result/approvalsReviewer",
+          "equals": "user"
+        },
+        {
+          "pointer": "/response/result/sandbox/networkAccess",
+          "equals": false
+        }
+      ]
+    },
+    {
+      "id": "session.read",
+      "method": "thread/read",
+      "audience": "runtime",
+      "effect_class": "pure_read",
+      "request_schema": "schema/ThreadReadParams.json",
+      "response_schema": "schema/ThreadReadResponse.json",
+      "fixed_params": {},
+      "workspace_fields": [],
+      "forbidden_non_null_fields": [
+        "includeTurns"
+      ],
+      "observations": [
+        {
+          "when": [],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "remote_thread_recovery_status"
+              },
+              "id": {
+                "op": "pointer",
+                "pointer": "/response/result/thread/id",
+                "max_string_bytes": 256
+              },
+              "status": {
+                "op": "pointer",
+                "pointer": "/response/result/thread/status/type",
+                "max_string_bytes": 32
+              }
+            }
+          }
+        }
+      ],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "session_binding": {
+        "action": "require",
+        "request_field": "threadId",
+        "response_pointer": null
+      },
+      "response_predicates": []
+    },
+    {
+      "id": "turn.start",
+      "method": "turn/start",
+      "effect_class": "external_effect",
+      "request_schema": "schema/TurnStartParams.json",
+      "response_schema": "schema/TurnStartResponse.json",
+      "fixed_params": {
+        "approvalPolicy": {
+          "granular": {
+            "sandbox_approval": true,
+            "rules": false,
+            "mcp_elicitations": false,
+            "request_permissions": false,
+            "skill_approval": false
+          }
+        },
+        "approvalsReviewer": "user"
+      },
+      "workspace_fields": [
+        "cwd"
+      ],
+      "forbidden_non_null_fields": [
+        "sandboxPolicy",
+        "outputSchema"
+      ],
+      "observations": [
+        {
+          "when": [],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "state"
+              },
+              "expected": {
+                "op": "literal",
+                "value": "idle"
+              },
+              "next": {
+                "op": "literal",
+                "value": "turn_running"
+              },
+              "turn_id": {
+                "op": "pointer",
+                "pointer": "/response/result/turn/id",
+                "max_string_bytes": 256
+              }
+            }
+          }
+        }
+      ],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "session_binding": {
+        "action": "require",
+        "request_field": "threadId",
+        "response_pointer": null
+      },
+      "response_predicates": []
+    },
+    {
+      "id": "turn.steer",
+      "method": "turn/steer",
+      "effect_class": "external_effect",
+      "request_schema": "schema/TurnSteerParams.json",
+      "response_schema": "schema/TurnSteerResponse.json",
+      "fixed_params": {},
+      "workspace_fields": [],
+      "forbidden_non_null_fields": [],
+      "observations": [],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "session_binding": {
+        "action": "require",
+        "request_field": "threadId",
+        "response_pointer": null
+      },
+      "response_predicates": []
+    },
+    {
+      "id": "turn.interrupt",
+      "method": "turn/interrupt",
+      "effect_class": "external_effect",
+      "request_schema": "schema/TurnInterruptParams.json",
+      "response_schema": "schema/TurnInterruptResponse.json",
+      "fixed_params": {},
+      "workspace_fields": [],
+      "forbidden_non_null_fields": [],
+      "observations": [],
+      "result_retention": "ephemeral",
+      "ceremony": null,
+      "session_binding": {
+        "action": "require",
+        "request_field": "threadId",
+        "response_pointer": null
+      },
+      "response_predicates": []
+    }
+  ],
+  "notifications": [
+    {
+      "method": "account/login/completed",
+      "schema": "schema/AccountLoginCompletedNotification.json",
+      "event_type": "credential.login_completed",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "login_id": {
+            "op": "pointer",
+            "pointer": "/message/params/loginId",
+            "optional": true,
+            "max_string_bytes": 256
+          },
+          "success": {
+            "op": "pointer",
+            "pointer": "/message/params/success"
+          }
+        }
+      },
+      "observations": [
+        {
+          "when": [
+            {
+              "pointer": "/message/params/success",
+              "equals": false
+            }
+          ],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "credential_enrollment_cancelled"
+              },
+              "login_id": {
+                "op": "pointer",
+                "pointer": "/message/params/loginId",
+                "max_string_bytes": 256
+              }
+            }
+          }
+        }
+      ],
+      "ceremony_clear": true
+    },
+    {
+      "method": "account/rateLimits/updated",
+      "schema": "schema/AccountRateLimitsUpdatedNotification.json",
+      "event_type": "credential.rate_limits_updated",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "account/updated",
+      "schema": "schema/AccountUpdatedNotification.json",
+      "event_type": "credential.account_updated",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "changed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "turn/completed",
+      "schema": "schema/TurnCompletedNotification.json",
+      "event_type": "turn.completed",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "thread_id": {
+            "op": "pointer",
+            "pointer": "/message/params/threadId",
+            "max_string_bytes": 256
+          },
+          "turn_id": {
+            "op": "pointer",
+            "pointer": "/message/params/turn/id",
+            "max_string_bytes": 256
+          },
+          "status": {
+            "op": "pointer",
+            "pointer": "/message/params/turn/status",
+            "optional": true,
+            "max_string_bytes": 256
+          }
+        }
+      },
+      "observations": [
+        {
+          "when": [],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {
+                "op": "literal",
+                "value": "state"
+              },
+              "expected": {
+                "op": "literal",
+                "value": "turn_running"
+              },
+              "next": {
+                "op": "literal",
+                "value": "idle"
+              },
+              "completed_turn_id": {
+                "op": "pointer",
+                "pointer": "/message/params/turn/id",
+                "max_string_bytes": 256
+              }
+            }
+          }
+        }
+      ],
+      "ceremony_clear": false
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "schema": "schema/AgentMessageDeltaNotification.json",
+      "event_type": "item.agent_message_delta",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "thread_id": {
+            "op": "pointer",
+            "pointer": "/message/params/threadId",
+            "max_string_bytes": 256
+          },
+          "turn_id": {
+            "op": "pointer",
+            "pointer": "/message/params/turnId",
+            "max_string_bytes": 256
+          },
+          "item_id": {
+            "op": "pointer",
+            "pointer": "/message/params/itemId",
+            "max_string_bytes": 256
+          },
+          "delta": {
+            "op": "pointer",
+            "pointer": "/message/params/delta",
+            "max_string_bytes": 65536
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "item/commandExecution/outputDelta",
+      "schema": "schema/CommandExecutionOutputDeltaNotification.json",
+      "event_type": "item.command_output_delta",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "thread_id": {
+            "op": "pointer",
+            "pointer": "/message/params/threadId",
+            "max_string_bytes": 256
+          },
+          "turn_id": {
+            "op": "pointer",
+            "pointer": "/message/params/turnId",
+            "max_string_bytes": 256
+          },
+          "item_id": {
+            "op": "pointer",
+            "pointer": "/message/params/itemId",
+            "max_string_bytes": 256
+          },
+          "delta_digest": {
+            "op": "digest",
+            "pointer": "/message/params/delta"
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "item/fileChange/outputDelta",
+      "schema": "schema/FileChangeOutputDeltaNotification.json",
+      "event_type": "item.file_change_output_delta",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "thread_id": {
+            "op": "pointer",
+            "pointer": "/message/params/threadId",
+            "max_string_bytes": 256
+          },
+          "turn_id": {
+            "op": "pointer",
+            "pointer": "/message/params/turnId",
+            "max_string_bytes": 256
+          },
+          "item_id": {
+            "op": "pointer",
+            "pointer": "/message/params/itemId",
+            "max_string_bytes": 256
+          },
+          "delta_digest": {
+            "op": "digest",
+            "pointer": "/message/params/delta"
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "item/fileChange/patchUpdated",
+      "schema": "schema/FileChangePatchUpdatedNotification.json",
+      "event_type": "item.file_change_patch_updated",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "thread_id": {
+            "op": "pointer",
+            "pointer": "/message/params/threadId",
+            "max_string_bytes": 256
+          },
+          "turn_id": {
+            "op": "pointer",
+            "pointer": "/message/params/turnId",
+            "max_string_bytes": 256
+          },
+          "item_id": {
+            "op": "pointer",
+            "pointer": "/message/params/itemId",
+            "max_string_bytes": 256
+          },
+          "changes_digest": {
+            "op": "digest",
+            "pointer": "/message/params/changes"
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "thread/started",
+      "schema": "schema/ThreadStartedNotification.json",
+      "event_type": "thread.started",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "thread_id": {
+            "op": "pointer",
+            "pointer": "/message/params/thread/id",
+            "max_string_bytes": 256
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "thread/status/changed",
+      "schema": "schema/ThreadStatusChangedNotification.json",
+      "event_type": "thread.status_changed",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "thread_id": {
+            "op": "pointer",
+            "pointer": "/message/params/threadId",
+            "max_string_bytes": 256
+          },
+          "status": {
+            "op": "pointer",
+            "pointer": "/message/params/status",
+            "max_string_bytes": 256
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "turn/started",
+      "schema": "schema/TurnStartedNotification.json",
+      "event_type": "turn.started",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "thread_id": {
+            "op": "pointer",
+            "pointer": "/message/params/threadId",
+            "max_string_bytes": 256
+          },
+          "turn_id": {
+            "op": "pointer",
+            "pointer": "/message/params/turn/id",
+            "max_string_bytes": 256
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "configWarning",
+      "schema": "schema/ConfigWarningNotification.json",
+      "event_type": "workload.config_warning",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "deprecationNotice",
+      "schema": "schema/DeprecationNoticeNotification.json",
+      "event_type": "workload.deprecation_notice",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "error",
+      "schema": "schema/ErrorNotification.json",
+      "event_type": "workload.error",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "warning",
+      "schema": "schema/WarningNotification.json",
+      "event_type": "workload.warning",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "item/reasoning/summaryPartAdded",
+      "schema": "schema/ReasoningSummaryPartAddedNotification.json",
+      "event_type": "workload.ephemeral",
+      "durable": false,
+      "payload": {
+        "op": "literal",
+        "value": null
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "item/reasoning/summaryTextDelta",
+      "schema": "schema/ReasoningSummaryTextDeltaNotification.json",
+      "event_type": "workload.ephemeral",
+      "durable": false,
+      "payload": {
+        "op": "literal",
+        "value": null
+      },
+      "observations": [],
+      "ceremony_clear": false
+    },
+    {
+      "method": "item/reasoning/textDelta",
+      "schema": "schema/ReasoningTextDeltaNotification.json",
+      "event_type": "workload.ephemeral",
+      "durable": false,
+      "payload": {
+        "op": "literal",
+        "value": null
+      },
+      "observations": [],
+      "ceremony_clear": false
+    }
+  ],
+  "ignored_notifications": {
+    "thread/closed": "schema/ThreadClosedNotification.json",
+    "thread/tokenUsage/updated": "schema/ThreadTokenUsageUpdatedNotification.json",
+    "turn/diff/updated": "schema/TurnDiffUpdatedNotification.json",
+    "turn/plan/updated": "schema/TurnPlanUpdatedNotification.json",
+    "item/started": "schema/ItemStartedNotification.json",
+    "item/completed": "schema/ItemCompletedNotification.json",
+    "item/plan/delta": "schema/PlanDeltaNotification.json",
+    "serverRequest/resolved": "schema/ServerRequestResolvedNotification.json",
+    "model/rerouted": "schema/ModelReroutedNotification.json",
+    "model/verification": "schema/ModelVerificationNotification.json",
+    "remoteControl/status/changed": "schema/RemoteControlStatusChangedNotification.json"
+  },
+  "server_requests": [
+    {
+      "method": "item/commandExecution/requestApproval",
+      "schema": "schema/CommandExecutionRequestApprovalParams.json",
+      "operation_class": "command_execution",
+      "response_style": "decision",
+      "deny_only": false,
+      "permission_delta_fields": [
+        "/message/params/networkApprovalContext",
+        "/message/params/proposedExecpolicyAmendment",
+        "/message/params/proposedNetworkPolicyAmendments"
+      ],
+      "required_review_fields": [
+        "/message/params/command"
+      ],
+      "display": {
+        "op": "object",
+        "fields": {
+          "thread_id": {
+            "op": "pointer",
+            "pointer": "/message/params/threadId",
+            "max_string_bytes": 256
+          },
+          "turn_id": {
+            "op": "pointer",
+            "pointer": "/message/params/turnId",
+            "max_string_bytes": 256
+          },
+          "item_id": {
+            "op": "pointer",
+            "pointer": "/message/params/itemId",
+            "max_string_bytes": 256
+          },
+          "command_digest": {
+            "op": "digest",
+            "pointer": "/message/params/command"
+          },
+          "command": {
+            "op": "pointer",
+            "pointer": "/message/params/command",
+            "max_string_bytes": 16384
+          },
+          "cwd": {
+            "op": "pointer",
+            "pointer": "/message/params/cwd",
+            "max_string_bytes": 4096
+          },
+          "reason": {
+            "op": "pointer",
+            "pointer": "/message/params/reason",
+            "optional": true,
+            "max_string_bytes": 4096
+          }
+        }
+      }
+    },
+    {
+      "method": "item/fileChange/requestApproval",
+      "schema": "schema/FileChangeRequestApprovalParams.json",
+      "operation_class": "file_change",
+      "response_style": "decision",
+      "deny_only": true,
+      "permission_delta_fields": [
+        "/message/params/grantRoot"
+      ],
+      "display": {
+        "op": "object",
+        "fields": {
+          "thread_id": {
+            "op": "pointer",
+            "pointer": "/message/params/threadId",
+            "max_string_bytes": 256
+          },
+          "turn_id": {
+            "op": "pointer",
+            "pointer": "/message/params/turnId",
+            "max_string_bytes": 256
+          },
+          "item_id": {
+            "op": "pointer",
+            "pointer": "/message/params/itemId",
+            "max_string_bytes": 256
+          },
+          "reason": {
+            "op": "pointer",
+            "pointer": "/message/params/reason",
+            "optional": true,
+            "max_string_bytes": 4096
+          }
+        }
+      }
+    },
+    {
+      "method": "item/permissions/requestApproval",
+      "schema": "schema/PermissionsRequestApprovalParams.json",
+      "operation_class": "additional_permissions",
+      "response_style": "permissions_denial",
+      "deny_only": true,
+      "permission_delta_fields": [
+        "/message/params/permissions"
+      ],
+      "display": {
+        "op": "object",
+        "fields": {
+          "thread_id": {
+            "op": "pointer",
+            "pointer": "/message/params/threadId",
+            "max_string_bytes": 256
+          },
+          "turn_id": {
+            "op": "pointer",
+            "pointer": "/message/params/turnId",
+            "max_string_bytes": 256
+          },
+          "item_id": {
+            "op": "pointer",
+            "pointer": "/message/params/itemId",
+            "max_string_bytes": 256
+          },
+          "permissions_digest": {
+            "op": "digest",
+            "pointer": "/message/params/permissions"
+          }
+        }
+      }
+    }
+  ]
+}

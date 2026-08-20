@@ -448,28 +448,71 @@ pub(crate) fn stop_owner_dropped_execution_tree(
     state: &AppState,
     root_thread_id: &str,
 ) -> Result<OwnerDropStopOutcome> {
-    match stop_owner_dropped_thread(state, root_thread_id)? {
-        OwnerDropThreadOutcome::AlreadyTerminal => {
+    if !state.state_store.process_attachment_admission_is_open() {
+        return Ok(OwnerDropStopOutcome::PreservedForShutdown);
+    }
+    // Publication has crossed a separately authorized external-effect
+    // reservation. Keep the authoritative root open until that short
+    // operation either settles or rolls back; terminalizing it first would
+    // make the keyed publication fact impossible to append. A wedged
+    // publication remains durable for recovery instead of being misreported
+    // as cancelled.
+    for _ in 0..400 {
+        let publishing = state
+            .state_store
+            .dedicated_session(root_thread_id)?
+            .is_some_and(|session| session.state == "publishing");
+        if !publishing {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    if state
+        .state_store
+        .dedicated_session(root_thread_id)?
+        .is_some_and(|session| session.state == "publishing")
+    {
+        anyhow::bail!(
+            "candidate publication remains at a possible-contact boundary; preserving root for recovery"
+        );
+    }
+    // These are independent ownership domains. A projection/cleanup error in
+    // the subordinate session must never prevent the root process tree from
+    // being stopped. Preserve both errors and report them only after the root
+    // stop has been attempted.
+    let mut failures = Vec::new();
+    let mut scan_descendants = true;
+    match stop_owner_dropped_thread(state, root_thread_id) {
+        Err(error) => failures.push(format!("root {root_thread_id}: {error:#}")),
+        Ok(OwnerDropThreadOutcome::AlreadyTerminal) => {
             // A terminal root no longer belongs to the request task. In
             // particular, `continued` means the follow callback has already
             // committed ownership to its child/successor chain. The terminal
             // event can reach an SSE client before that callback finishes its
             // spawn handoffs; cancelling descendants here would turn a normal
             // stream close into a durable chain kill.
-            return Ok(OwnerDropStopOutcome::Settled);
+            scan_descendants = false;
         }
-        OwnerDropThreadOutcome::PreservedForShutdown => {
+        Ok(OwnerDropThreadOutcome::PreservedForShutdown) => {
             return Ok(OwnerDropStopOutcome::PreservedForShutdown);
         }
-        OwnerDropThreadOutcome::Settled => {}
+        Ok(OwnerDropThreadOutcome::Settled) => {}
     }
 
     const MAX_DESCENDANT_FIXED_POINT_PASSES: usize = 16;
     let mut seen = BTreeSet::from([root_thread_id.to_string()]);
-    let mut failures = Vec::new();
-    let mut reached_fixed_point = false;
+    let mut reached_fixed_point = !scan_descendants;
     for _ in 0..MAX_DESCENDANT_FIXED_POINT_PASSES {
-        let descendants = state.state_store.descendant_thread_ids(root_thread_id)?;
+        if !scan_descendants {
+            break;
+        }
+        let descendants = match state.state_store.descendant_thread_ids(root_thread_id) {
+            Ok(descendants) => descendants,
+            Err(error) => {
+                failures.push(format!("enumerate descendants: {error:#}"));
+                break;
+            }
+        };
         let new_descendants = descendants
             .into_iter()
             .filter(|thread_id| seen.insert(thread_id.clone()))
@@ -498,6 +541,12 @@ pub(crate) fn stop_owner_dropped_execution_tree(
             "descendant fixed-point did not converge within \
              {MAX_DESCENDANT_FIXED_POINT_PASSES} passes"
         ));
+    }
+    if let Err(error) =
+        ryeos_app::dedicated_session_service::abort_session_for_root_stop(state, root_thread_id)
+            .context("settle session-bound worker after root-owner cancellation")
+    {
+        failures.push(format!("session-bound worker: {error:#}"));
     }
     if !failures.is_empty() {
         anyhow::bail!(
@@ -1824,14 +1873,32 @@ fn resolved_terminator_protocol<'a>(
         .and_then(|execution| execution.terminator.as_ref())
         .ok_or_else(|| anyhow::anyhow!("execution kind '{kind}' has no terminator"))?;
     let protocol_ref = match terminator {
-        ryeos_engine::kind_registry::TerminatorDecl::Subprocess { protocol_ref } => protocol_ref,
+        ryeos_engine::kind_registry::TerminatorDecl::Subprocess { protocol } => {
+            let effective = engine.effective_item(ryeos_engine::engine::EffectiveItemRequest {
+                item_ref: resolved.resolved_item.canonical_ref.clone(),
+                expected_kind: Some(kind.clone()),
+                project_root: resolved.resolved_item.materialized_project_root.clone(),
+                subject_resolution_authority: resolved
+                    .resolved_item
+                    .subject_resolution_authority
+                    .clone(),
+            })?;
+            if effective.source.content_hash != resolved.resolved_item.content_hash {
+                anyhow::bail!(
+                    "effective subprocess protocol selection changed the verified root bytes"
+                );
+            }
+            protocol
+                .resolve(&effective.composed_value)
+                .map_err(anyhow::Error::msg)?
+        }
         ryeos_engine::kind_registry::TerminatorDecl::InProcess { .. } => {
             anyhow::bail!("execution kind '{kind}' has an in-process terminator")
         }
     };
     let protocol = engine
         .protocols
-        .require(protocol_ref)
+        .require(&protocol_ref)
         .map_err(|error| anyhow::anyhow!("protocol lookup failed for '{protocol_ref}': {error}"))?;
     crate::dispatch::validate_ordinary_protocol_contract(protocol, kind)
         .map_err(|error| anyhow::anyhow!(error))?;
@@ -3575,7 +3642,58 @@ pub async fn run_and_wait(
     // `snapshot_publication` and released it after launch-metadata attachment.
     release_tree_publication(tree_publication, "waited execution completion");
 
-    // Finalize
+    // A session-bound worker finishing its process is not the terminal RyeOS
+    // execution boundary. Freeze and durably bind the retained candidate while
+    // the ordinary root thread/event chain is still running, then wait for the
+    // owner-authorized publish/discard disposition. This keeps validation and
+    // publication evidence on the one authoritative root chain and avoids the
+    // old terminal -> frozen state reversal.
+    let mut dedicated_workspace_closed = false;
+    if let (Some(snapshot_hash), Some(session)) = (
+        result_project_snapshot_hash.as_deref(),
+        state.state_store.dedicated_session(&running.thread_id)?,
+    ) && session.state == "freezing"
+    {
+        if wait_requires_foldback {
+            close_owned_workspace(&state, guard.temp_dir.as_ref(), &running.thread_id)
+                .context("close session-bound workspace before candidate disposition")?;
+            dedicated_workspace_closed = true;
+        }
+        if let Some(pending) = pending_project_result.take() {
+            pending
+                .publish()
+                .context("publish retained candidate recovery root")?;
+        }
+        if !state
+            .state_store
+            .bind_dedicated_session_candidate(&running.thread_id, snapshot_hash)
+            .context("bind retained session-bound candidate")?
+        {
+            anyhow::bail!("session-bound candidate lost its freezing identity/state CAS");
+        }
+        loop {
+            let session = state
+                .state_store
+                .dedicated_session(&running.thread_id)?
+                .ok_or_else(|| anyhow::anyhow!("session-bound projection disappeared"))?;
+            if session.state == "terminal" {
+                break;
+            }
+            if !matches!(
+                session.state.as_str(),
+                "frozen" | "verifying" | "publish_ready" | "publishing" | "discarding"
+            ) {
+                anyhow::bail!(
+                    "session-bound candidate entered invalid disposition state {}",
+                    session.state
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+
+    // Finalize only after any session-bound retained candidate has a terminal
+    // owner disposition.
     let finalize_result = if callback_sealed_result.is_some() {
         state
             .threads
@@ -3607,7 +3725,7 @@ pub async fn run_and_wait(
                 drop(pending_project_result.take());
                 Ok(())
             };
-            let close = if wait_requires_foldback {
+            let close = if wait_requires_foldback && !dedicated_workspace_closed {
                 close_owned_workspace(&state, guard.temp_dir.as_ref(), &running.thread_id)
             } else {
                 Ok(())
@@ -4735,6 +4853,74 @@ async fn dispatch_detached_bg_task(
                     }
                 }
             };
+            let mut dedicated_disposition = false;
+            if let (Some(snapshot_hash), Ok(Some(session))) = (
+                result_project_snapshot_hash.as_deref(),
+                bg_state.state_store.dedicated_session(&bg_thread_id),
+            ) && session.state == "freezing"
+            {
+                let disposition = async {
+                    if bg_requires_foldback {
+                        close_owned_workspace(&bg_state, bg_temp_dir.as_ref(), &bg_thread_id)
+                            .context("close detached session-bound workspace")?;
+                    }
+                    if let Some(pending) = pending_project_result.take() {
+                        pending
+                            .publish()
+                            .context("publish detached retained-candidate recovery root")?;
+                    }
+                    if !bg_state
+                        .state_store
+                        .bind_dedicated_session_candidate(&bg_thread_id, snapshot_hash)?
+                    {
+                        anyhow::bail!(
+                            "detached session-bound candidate lost its freezing identity/state CAS"
+                        );
+                    }
+                    loop {
+                        let session = bg_state
+                            .state_store
+                            .dedicated_session(&bg_thread_id)?
+                            .ok_or_else(|| anyhow::anyhow!("session-bound projection disappeared"))?;
+                        if session.state == "terminal" {
+                            break;
+                        }
+                        if !matches!(
+                            session.state.as_str(),
+                            "frozen"
+                                | "verifying"
+                                | "publish_ready"
+                                | "publishing"
+                                | "discarding"
+                        ) {
+                            anyhow::bail!(
+                                "detached session-bound candidate entered invalid disposition state {}",
+                                session.state
+                            );
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    }
+                    Ok::<(), anyhow::Error>(())
+                }
+                .await;
+                if let Err(error) = disposition {
+                    tracing::error!(
+                        phase = log_phase,
+                        thread_id = %bg_thread_id,
+                        %error,
+                        "detached session-bound candidate disposition failed"
+                    );
+                    let _ = fail_thread_static_owned(
+                        &bg_state,
+                        &bg_thread_id,
+                        "candidate_disposition_failed",
+                        &launch_owner,
+                    );
+                    drop(bg_temp_dir.take());
+                    return;
+                }
+                dedicated_disposition = true;
+            }
             let settlement = if callback_sealed_result.is_some() {
                 bg_state
                     .threads
@@ -4762,7 +4948,7 @@ async fn dispatch_detached_bg_task(
                     "completion finalization failed; terminal cleanup outcome is included"
                 );
             } else {
-                if bg_records_terminal_generation {
+                if bg_records_terminal_generation && !dedicated_disposition {
                     if let Some(pending) = pending_project_result.take()
                         && let Err(error) = pending.publish()
                     {
@@ -4776,7 +4962,7 @@ async fn dispatch_detached_bg_task(
                 } else {
                     drop(pending_project_result.take());
                 }
-                let close = if bg_requires_foldback {
+                let close = if bg_requires_foldback && !dedicated_disposition {
                     close_owned_workspace(&bg_state, bg_temp_dir.as_ref(), &bg_thread_id)
                 } else {
                     Ok(())

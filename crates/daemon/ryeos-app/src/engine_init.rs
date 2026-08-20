@@ -1069,20 +1069,22 @@ fn load_host_env_passthrough_allowlist(names: &[String]) -> Result<HostEnvBindin
     Ok(bindings)
 }
 
-/// Walk every kind schema's terminator and verify that `Subprocess`
-/// terminators' `protocol_ref` values resolve in the protocol registry.
+/// Walk every kind schema's terminator and verify that every statically named
+/// or selector-allowlisted subprocess protocol resolves in the registry.
 fn validate_terminator_refs(kinds: &KindRegistry, protocols: &ProtocolRegistry) -> Result<()> {
     for kind_name in kinds.kinds() {
         if let Some(schema) = kinds.get(kind_name)
             && let Some(exec) = &schema.execution
-            && let Some(TerminatorDecl::Subprocess { protocol_ref }) = &exec.terminator
+            && let Some(TerminatorDecl::Subprocess { protocol }) = &exec.terminator
         {
-            protocols.require(protocol_ref).with_context(|| {
-                format!(
-                    "kind `{kind_name}` declares protocol `{protocol_ref}` \
-                     but no such protocol is registered in the protocol registry"
-                )
-            })?;
+            for protocol_ref in protocol.boot_required_refs() {
+                protocols.require(protocol_ref).with_context(|| {
+                    format!(
+                        "kind `{kind_name}` declares protocol `{protocol_ref}` \
+                         but no such protocol is registered in the protocol registry"
+                    )
+                })?;
+            }
         }
     }
     Ok(())

@@ -559,12 +559,97 @@ pub const RESERVED_CONTROL_KEYS: &[&str] = &[
     PARAM_CONTINUATION,
 ];
 
+/// Request to bind one already-admitted exclusive subprocess dependency to
+/// the calling runtime's durable root and workspace. Integration-specific
+/// runtimes name the dependency and environment slots; the daemon derives all
+/// paths and authority from retained launch/profile state.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DedicatedSessionStartRequest {
+    pub thread_id: String,
+    pub dependency_ref: String,
+    pub credential_profile_id: String,
+    pub required_credential_state: String,
+    /// Exact signed route set selected by the root execution. The worker
+    /// profile admits the route IDs; callers cannot widen this after launch.
+    pub route_set: String,
+    /// Sorted, unique effect-class ceiling admitted by the root launch.
+    pub allowed_effect_classes: Vec<String>,
+    pub credential_home_env: String,
+    pub workspace_env: String,
+    pub require_pinned_cow: bool,
+    pub required_terminal_publication: String,
+}
+
+/// One opaque command issued by the integration runtime that owns a dedicated
+/// session root. The daemon supplies the durable at-most-once boundary; the
+/// signed runtime and worker protocol own the payload meaning.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DedicatedSessionCommandRequest {
+    pub thread_id: String,
+    pub idempotency_key: String,
+    pub command_kind: String,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DedicatedSessionTerminateRequest {
+    pub thread_id: String,
+    pub reason: String,
+}
+
 #[async_trait]
 pub trait RuntimeCallbackAPI: Send + Sync {
     async fn dispatch_action(&self, request: DispatchActionRequest)
     -> Result<Value, CallbackError>;
 
     async fn attach_process(&self, thread_id: &str, pid: u32) -> Result<Value, CallbackError>;
+
+    async fn start_dedicated_session(
+        &self,
+        request: DedicatedSessionStartRequest,
+    ) -> Result<Value, CallbackError> {
+        let _ = request;
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message: "dedicated sessions are only supported by the daemon UDS client".to_string(),
+            retryable: false,
+        })
+    }
+
+    async fn dedicated_session_status(&self, _thread_id: &str) -> Result<Value, CallbackError> {
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message: "dedicated sessions are only supported by the daemon UDS client".to_string(),
+            retryable: false,
+        })
+    }
+
+    async fn dedicated_session_command(
+        &self,
+        request: DedicatedSessionCommandRequest,
+    ) -> Result<Value, CallbackError> {
+        let _ = request;
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message: "dedicated sessions are only supported by the daemon UDS client".to_string(),
+            retryable: false,
+        })
+    }
+
+    async fn terminate_dedicated_session(
+        &self,
+        request: DedicatedSessionTerminateRequest,
+    ) -> Result<Value, CallbackError> {
+        let _ = request;
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message: "dedicated sessions are only supported by the daemon UDS client".to_string(),
+            retryable: false,
+        })
+    }
 
     async fn mark_running(&self, thread_id: &str) -> Result<Value, CallbackError>;
 

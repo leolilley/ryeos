@@ -1,0 +1,11 @@
+# ryeos:signed:2026-08-19T02:53:00Z:9eaea22f5353750cc17dc0b6c75e27218061cf14aa87d9af393e54dd1421aa36:HHqrV5T31vJ2uWu/kn986ihSjidKsS1/Srs4Tfrypqyxsi/LErusb5AYb7OX6cypwO7KAyWx86L5otT/fQkuBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [codex, session, discard]
+description: "Discard one retained Codex workspace candidate"
+forms:
+  - slots:
+      - field: session_id
+      - field: candidate_snapshot_hash
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/discard
+  availability: daemon

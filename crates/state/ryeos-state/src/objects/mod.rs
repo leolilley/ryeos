@@ -103,9 +103,10 @@ pub use external_large_content_manifest::{
 pub use item_source::ItemSource;
 pub use live_input::{LiveInput, LiveInputIntent};
 pub use persistent_session_capsule::{
-    AdmittedPersistentSessionCapsule, MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES,
-    PERSISTENT_SESSION_CAPSULE_KIND, PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
-    PersistentSessionAuthority, PersistentSessionLifecycleContract, PersistentSessionWireContract,
+    AdmittedPersistentSessionCapsule, AdmittedStructuredSessionProfile,
+    MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES, PERSISTENT_SESSION_CAPSULE_KIND,
+    PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION, PersistentSessionAuthority,
+    PersistentSessionLifecycleContract, PersistentSessionWireContract,
 };
 pub use project_file::ProjectFile;
 pub use project_snapshot::ProjectSnapshot;

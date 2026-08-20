@@ -38,6 +38,7 @@ use ryeos_app::thread_lifecycle::{
 use ryeos_runtime::callback_client::MAX_RUNTIME_REPLAY_PAGE_LIMIT;
 
 mod accounting;
+mod dedicated_sessions;
 mod routing;
 mod transport;
 
@@ -431,6 +432,30 @@ pub(crate) async fn dispatch_runtime_method(
             callback_cap.as_ref(),
             validated_thread_auth.as_ref(),
         ),
+        "runtime.start_dedicated_session" => {
+            let cap = callback_cap
+                .as_ref()
+                .ok_or_else(|| anyhow!("dedicated-session start requires callback authority"))?;
+            dedicated_sessions::start(&clean_params, state, cap).await
+        }
+        "runtime.dedicated_session_status" => {
+            let cap = callback_cap
+                .as_ref()
+                .ok_or_else(|| anyhow!("dedicated-session status requires callback authority"))?;
+            dedicated_sessions::status(&clean_params, state, cap)
+        }
+        "runtime.dedicated_session_command" => {
+            let cap = callback_cap
+                .as_ref()
+                .ok_or_else(|| anyhow!("dedicated-session command requires callback authority"))?;
+            dedicated_sessions::command(&clean_params, state, cap).await
+        }
+        "runtime.terminate_dedicated_session" => {
+            let cap = callback_cap.as_ref().ok_or_else(|| {
+                anyhow!("dedicated-session termination requires callback authority")
+            })?;
+            dedicated_sessions::terminate(&clean_params, state, cap).await
+        }
         "runtime.finalize_thread" => {
             let owner = callback_launch_owner
                 .ok_or_else(|| anyhow!("runtime.finalize_thread requires a launch owner"))?;
@@ -594,6 +619,9 @@ fn is_running_runtime_mutation(method: &str) -> bool {
             | "runtime.request_continuation"
             | "runtime.author_item"
             | "runtime.project_snapshot"
+            | "runtime.start_dedicated_session"
+            | "runtime.dedicated_session_command"
+            | "runtime.terminate_dedicated_session"
             | "runtime.vault_put"
             | "runtime.vault_delete"
             | "runtime.bundle_events_append"
@@ -638,6 +666,7 @@ fn is_sensitive_runtime_read_method(method: &str) -> bool {
             | "runtime.vault_get"
             | "runtime.vault_list"
             | "runtime.provider_attempt_local_stream_next"
+            | "runtime.dedicated_session_status"
     )
 }
 

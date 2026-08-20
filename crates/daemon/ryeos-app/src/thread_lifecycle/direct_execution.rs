@@ -46,6 +46,31 @@ pub struct RunningItem {
     running: ryeos_engine::dispatch::RunningExecution,
 }
 
+/// A kind-neutral persistent subprocess held at Lillux's attachment boundary.
+///
+/// Exclusive session owners must durably attach [`Self::process_identity`]
+/// before calling [`Self::release_after_attachment`]. Pooled sessions may
+/// attach ownership to their in-memory pool and release immediately.
+pub struct SpawnedPersistentSessionAwaitingAttachment {
+    pub process_identity: crate::process::ExecutionProcessIdentity,
+    spawned: ryeos_engine::dispatch::SpawnedExecutionAwaitingAttachment,
+}
+
+impl SpawnedPersistentSessionAwaitingAttachment {
+    pub fn release_after_attachment(self) -> Result<ryeos_engine::dispatch::RunningExecution> {
+        self.spawned
+            .release_after_attachment()
+            .map_err(|error| anyhow!("release daemon-owned persistent session: {error}"))
+    }
+
+    pub fn abort_and_reap(self) -> Result<()> {
+        self.spawned
+            .abort_and_reap()
+            .map(|_| ())
+            .map_err(|error| anyhow!("abort persistent session awaiting attachment: {error}"))
+    }
+}
+
 impl RunningItem {
     pub fn abort(self) {
         self.running.abort();
@@ -155,9 +180,13 @@ impl PreparedItemPlan {
     pub fn bind_persistent_session_spawn_environment(
         &mut self,
         external_realizations: Option<&str>,
+        external_root: Option<&Path>,
         admitted_source: Option<&str>,
         admitted_source_entry: Option<&Path>,
     ) -> Result<()> {
+        if external_realizations.is_some() != external_root.is_some() {
+            bail!("persistent-session external identity and root must be bound together");
+        }
         if admitted_source.is_some() != admitted_source_entry.is_some() {
             bail!("persistent-session source identity and entry must be bound together");
         }
@@ -169,6 +198,17 @@ impl PreparedItemPlan {
             );
             spec.env_sources.insert(
                 "RYEOS_EXTERNAL_REALIZATIONS".to_owned(),
+                RuntimeEnvSource::EnginePlan,
+            );
+        }
+        if let Some(root) = external_root {
+            let root = root
+                .to_str()
+                .ok_or_else(|| anyhow!("persistent-session external root is not valid UTF-8"))?;
+            spec.env
+                .insert("RYEOS_EXTERNAL_ROOT".to_owned(), root.to_owned());
+            spec.env_sources.insert(
+                "RYEOS_EXTERNAL_ROOT".to_owned(),
                 RuntimeEnvSource::EnginePlan,
             );
         }
@@ -208,6 +248,29 @@ impl PreparedItemPlan {
             (true, _) => {
                 bail!("persistent-session plan consumes its admitted source entry more than once")
             }
+        }
+        Ok(())
+    }
+
+    pub fn bind_persistent_session_runtime_environment(
+        &mut self,
+        environment: &std::collections::BTreeMap<String, String>,
+        allowlist: &[String],
+    ) -> Result<()> {
+        let spec = first_subprocess_spec_mut(&mut self.plan)?;
+        for (name, value) in environment {
+            if !allowlist.contains(name) {
+                bail!("persistent-session runtime environment `{name}` is not protocol-authorized");
+            }
+            if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control) {
+                bail!("persistent-session runtime environment `{name}` is not bounded");
+            }
+            if spec.env.contains_key(name) || spec.env_sources.contains_key(name) {
+                bail!("persistent-session runtime environment attempts to override `{name}`");
+            }
+            spec.env.insert(name.clone(), value.clone());
+            spec.env_sources
+                .insert(name.clone(), RuntimeEnvSource::EnginePlan);
         }
         Ok(())
     }
@@ -588,29 +651,58 @@ impl PreparedItemPlan {
     /// authority. The daemon pool, rather than thread state, owns the returned
     /// running process; a daemon restart therefore reopens the capsule and
     /// starts a fresh matching process.
-    pub fn spawn_persistent_session(
+    pub fn spawn_persistent_session_held(
         self,
         state: &crate::state::AppState,
         workspace: &Path,
         external_mounts: Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
         target_channel: ryeos_engine::isolation::IsolationTargetChannelAuthority,
         lifecycle: &ryeos_state::objects::PersistentSessionLifecycleContract,
+        workspace_authority: ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority,
+        network_authority: ryeos_engine::protocols::descriptor::PersistentSessionNetworkAuthority,
+        state_root: Option<&Path>,
         session_identity: &str,
-    ) -> Result<ryeos_engine::dispatch::RunningExecution> {
+    ) -> Result<SpawnedPersistentSessionAwaitingAttachment> {
         if session_identity.is_empty() || session_identity.len() > 128 {
             bail!("persistent-session process identity is not canonical");
         }
+        use ryeos_engine::protocols::descriptor::{
+            PersistentSessionNetworkAuthority, PersistentSessionWorkspaceAuthority,
+        };
+        let (project_authority, filesystem_authority_ceiling) = match workspace_authority {
+            PersistentSessionWorkspaceAuthority::EphemeralScratch => (
+                ryeos_engine::isolation::IsolationProjectAuthority::EphemeralScratch,
+                ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution,
+            ),
+            PersistentSessionWorkspaceAuthority::RuntimeWorkspace => (
+                ryeos_engine::isolation::IsolationProjectAuthority::RuntimeWorkspace,
+                ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            ),
+        };
+        if state_root.is_some()
+            && !matches!(
+                workspace_authority,
+                PersistentSessionWorkspaceAuthority::RuntimeWorkspace
+            )
+        {
+            bail!("persistent-session state root requires runtime-workspace authority");
+        }
+        let network_authority_ceiling = match network_authority {
+            PersistentSessionNetworkAuthority::Isolated => {
+                ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::Isolated
+            }
+            PersistentSessionNetworkAuthority::NodePolicy => {
+                ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy
+            }
+        };
         let context = EngineContext {
             app_root: state.config.app_root.clone(),
             isolation: state.isolation.clone(),
-            isolation_project_authority:
-                ryeos_engine::isolation::IsolationProjectAuthority::EphemeralScratch,
-            isolation_filesystem_authority_ceiling:
-                ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution,
-            isolation_network_authority_ceiling:
-                ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::Isolated,
+            isolation_project_authority: project_authority,
+            isolation_filesystem_authority_ceiling: filesystem_authority_ceiling,
+            isolation_network_authority_ceiling: network_authority_ceiling,
             isolation_live_access_authority: None,
-            isolation_state_root: None,
+            isolation_state_root: state_root.map(Path::to_path_buf),
             isolation_checkpoint_dir: None,
             isolation_daemon_socket_path: None,
             // A persistent session executes its captured command and exact
@@ -648,13 +740,39 @@ impl PreparedItemPlan {
             project_context: ProjectContext::None,
             launch_mode: LaunchMode::Wait,
         };
-        let pending = state
+        let spawned = state
             .engine
             .spawn_plan(&context, &self.plan)
             .map_err(|error| anyhow!("spawn persistent session: {error}"))?;
-        pending
-            .release_after_attachment()
-            .map_err(|error| anyhow!("release daemon-owned persistent session: {error}"))
+        #[cfg(target_os = "linux")]
+        let identity_result = crate::process::capture_execution_process_identity_from_pidfd(
+            spawned.pid() as i64,
+            Some(spawned.pgid()),
+            spawned.pidfd(),
+        )
+        .context("capture held persistent-session identity from Lillux pidfd");
+        #[cfg(not(target_os = "linux"))]
+        let identity_result = crate::process::capture_execution_process_identity(
+            spawned.pid() as i64,
+            Some(spawned.pgid()),
+        )
+        .context("capture held persistent-session identity");
+        let process_identity = match identity_result {
+            Ok(identity) => identity,
+            Err(error) => {
+                let cleanup = spawned.abort_and_reap().err();
+                return Err(match cleanup {
+                    Some(cleanup) => {
+                        error.context(format!("held persistent-session cleanup failed: {cleanup}"))
+                    }
+                    None => error,
+                });
+            }
+        };
+        Ok(SpawnedPersistentSessionAwaitingAttachment {
+            process_identity,
+            spawned,
+        })
     }
 }
 
@@ -1505,6 +1623,7 @@ mod tests {
         prepared
             .bind_persistent_session_spawn_environment(
                 None,
+                None,
                 Some("{\"binding_hash\":\"fixture\"}"),
                 Some(entry),
             )
@@ -1542,6 +1661,7 @@ mod tests {
             prepared
                 .bind_persistent_session_spawn_environment(
                     None,
+                    None,
                     Some("sealed"),
                     Some(&project_root.join("bootstrap.py")),
                 )
@@ -1559,7 +1679,7 @@ mod tests {
         let mut prepared = prepared_plan(plan);
         assert!(
             prepared
-                .bind_persistent_session_spawn_environment(None, Some("sealed"), None)
+                .bind_persistent_session_spawn_environment(None, None, Some("sealed"), None)
                 .unwrap_err()
                 .to_string()
                 .contains("must be bound together")

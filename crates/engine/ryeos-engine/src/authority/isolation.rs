@@ -30,6 +30,8 @@ mod inspection;
 mod policy;
 mod provenance;
 
+use authority::IsolationReadOnlyMountScope;
+
 pub use authority::{
     IsolationCommandAuthority, IsolationCommandAuthorityRef, IsolationDescriptorBoundCommand,
     IsolationDescriptorFileIdentity, IsolationFilesystemAuthorityCeiling, IsolationLaunchContext,
@@ -727,6 +729,7 @@ struct PreparedVerifiedCode {
 enum WritableMountAuthority {
     Policy,
     DaemonCheckpoint,
+    DaemonStateRoot,
 }
 
 #[derive(Debug, Clone)]
@@ -799,6 +802,7 @@ struct WritableMountValidation<'a> {
     project_authority: IsolationProjectAuthority,
     runtime_workspace_authorized: bool,
     canonical_checkpoint_dir: Option<&'a Path>,
+    canonical_state_root: Option<&'a Path>,
 }
 
 struct PreparedProjectWorkspace {
@@ -2391,6 +2395,22 @@ impl IsolationRuntime {
             .state_root
             .map(|path| canonicalize_context_mount("state root", path))
             .transpose()?;
+        let state_root_source_handle = if let Some(state_root) = canonical_state_root.as_ref() {
+            let app_root = self.app_root.as_deref().ok_or_else(|| {
+                refused("state-root authority requires a pinned app root".to_string())
+            })?;
+            let node_state = app_root.join(crate::AI_DIR).join("state");
+            if !state_root.starts_with(&node_state) || state_root == &node_state {
+                return Err(refused(format!(
+                    "state root {} is not one exact daemon-owned child beneath {}",
+                    state_root.display(),
+                    node_state.display()
+                )));
+            }
+            Some(pin_mount_source("daemon state root", state_root)?)
+        } else {
+            None
+        };
         let canonical_checkpoint_dir = context
             .checkpoint_dir
             .map(|path| canonicalize_context_mount("checkpoint directory", path))
@@ -2486,6 +2506,24 @@ impl IsolationRuntime {
                 writable_mounts.push(mount);
             }
         }
+        if let (Some(source), Some(destination), Some(source_handle)) = (
+            canonical_state_root.as_ref(),
+            context.state_root,
+            state_root_source_handle.as_ref(),
+        ) {
+            // A daemon-owned state root is an exact descriptor authority. Do
+            // not retain a broader policy mount that would expose sibling
+            // daemon state merely because it contains this path.
+            writable_mounts.retain(|mount| {
+                !paths_overlap(&mount.source, source) || mount.source == canonical_project
+            });
+            writable_mounts.push(WritableMount {
+                source: source.clone(),
+                destination: destination.to_path_buf(),
+                authority: WritableMountAuthority::DaemonStateRoot,
+                source_handle: source_handle.clone(),
+            });
+        }
         writable_mounts.sort_by(|left, right| {
             left.destination
                 .cmp(&right.destination)
@@ -2501,6 +2539,7 @@ impl IsolationRuntime {
             project_authority: context.project_authority,
             runtime_workspace_authorized,
             canonical_checkpoint_dir: canonical_checkpoint_dir.as_deref(),
+            canonical_state_root: canonical_state_root.as_deref(),
         };
         for mount in &writable_mounts {
             validate_writable_mount(&mount.source, mount.authority, &writable_validation)?;
@@ -2750,13 +2789,32 @@ impl IsolationRuntime {
         for external in context.external_read_only_mounts {
             let destination = external.destination();
             validate_namespace_destination("external realization mount", destination)?;
-            if destination == project_destination || !destination.starts_with(&project_destination)
-            {
-                return Err(refused(format!(
-                    "external realization mount {} is not a strict child of project root {}",
-                    destination.display(),
-                    project_destination.display()
-                )));
+            match external.scope() {
+                IsolationReadOnlyMountScope::ProjectRealization => {
+                    if destination == project_destination
+                        || !destination.starts_with(&project_destination)
+                    {
+                        return Err(refused(format!(
+                            "external realization mount {} is not a strict child of project root {}",
+                            destination.display(),
+                            project_destination.display()
+                        )));
+                    }
+                }
+                IsolationReadOnlyMountScope::StateOverlay => {
+                    let state_root = context.state_root.ok_or_else(|| {
+                        refused(
+                            "read-only state overlay has no exact state-root authority".to_string(),
+                        )
+                    })?;
+                    if destination == state_root || !destination.starts_with(state_root) {
+                        return Err(refused(format!(
+                            "read-only state overlay {} is not a strict child of {}",
+                            destination.display(),
+                            state_root.display()
+                        )));
+                    }
+                }
             }
             if external_destinations.iter().any(|other: &PathBuf| {
                 destination.starts_with(other) || other.starts_with(destination)
@@ -2771,7 +2829,11 @@ impl IsolationRuntime {
                 source: external.source_path().to_path_buf(),
                 destination: destination.to_path_buf(),
                 source_handle: external.source().clone(),
-                layer: 30,
+                layer: if external.scope() == IsolationReadOnlyMountScope::StateOverlay {
+                    40
+                } else {
+                    30
+                },
             });
         }
         readable_mounts.sort_by(|left, right| {
@@ -4994,9 +5056,12 @@ fn validate_writable_mount(
         let is_exact_daemon_checkpoint = mount_authority
             == WritableMountAuthority::DaemonCheckpoint
             && validation.canonical_checkpoint_dir == Some(path);
+        let is_exact_daemon_state_root = mount_authority == WritableMountAuthority::DaemonStateRoot
+            && validation.canonical_state_root == Some(path);
         if paths_overlap(path, app_root)
             && !is_exact_runtime_workspace
             && !is_exact_daemon_checkpoint
+            && !is_exact_daemon_state_root
         {
             return Err(refused(format!(
                 "isolation writable path {} overlaps protected app root {}",
@@ -6231,7 +6296,10 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(compiled.cwd.as_deref(), Some(lower.to_string_lossy().as_ref()));
+        assert_eq!(
+            compiled.cwd.as_deref(),
+            Some(lower.to_string_lossy().as_ref())
+        );
         assert!(lillux::run(compiled).success);
 
         let destroyed = runtime

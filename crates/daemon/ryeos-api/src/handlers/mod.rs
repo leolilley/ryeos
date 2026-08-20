@@ -29,6 +29,8 @@ pub mod commands_list;
 pub mod commands_submit;
 pub mod commands_wait;
 pub mod content_pin;
+pub mod credential_profiles;
+pub mod dedicated_sessions;
 pub mod events_chain_replay;
 pub mod events_replay;
 pub mod external_content_bind;
@@ -167,6 +169,19 @@ pub const ALL: &[ServiceDescriptor] = &[
     commands_get::DESCRIPTOR,
     commands_wait::DESCRIPTOR,
     content_pin::DESCRIPTOR,
+    credential_profiles::CREATE_DESCRIPTOR,
+    credential_profiles::GET_DESCRIPTOR,
+    credential_profiles::CONFIRM_DESCRIPTOR,
+    credential_profiles::REVOKE_DESCRIPTOR,
+    credential_profiles::DELETE_DESCRIPTOR,
+    dedicated_sessions::STATUS_DESCRIPTOR,
+    dedicated_sessions::COMMAND_DESCRIPTOR,
+    dedicated_sessions::APPROVALS_DESCRIPTOR,
+    dedicated_sessions::RESOLVE_APPROVAL_DESCRIPTOR,
+    dedicated_sessions::TERMINATE_DESCRIPTOR,
+    dedicated_sessions::VALIDATE_CANDIDATE_DESCRIPTOR,
+    dedicated_sessions::PUBLISH_DESCRIPTOR,
+    dedicated_sessions::DISCARD_DESCRIPTOR,
     bundle_install::DESCRIPTOR,
     bundle_export::DESCRIPTOR,
     bundle_list::DESCRIPTOR,

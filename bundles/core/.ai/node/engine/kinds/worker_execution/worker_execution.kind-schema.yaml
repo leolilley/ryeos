@@ -1,0 +1,62 @@
+# ryeos:signed:2026-08-19T04:03:52Z:02cbe548d099888d46301c9fa830baa57f7a837f8106dc8c72b5fd0339482dca:xTdG01WUhF611sTW1nu9d9mOKMqunDTtBS8K80a6KocvDaZ9MmywWQ1IEGvZUxvfiOx+HvQzXFXJ+eBh30l6Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "engine/kinds/worker_execution"
+version: "1.0.0"
+location:
+  directory: worker-executions
+resolution: []
+effective_trust:
+  include_references: false
+execution:
+  delegate:
+    via: runtime_registry
+  thread_profile:
+    name: worker_execution
+    root_executable: true
+    supports_interrupt: false
+    supports_continuation: false
+    supports_operator_followup: false
+  hooks:
+    authored_path: [hooks]
+    plan_derived: effective_hook_plan
+    events:
+      worker_execution_terminal:
+        context_contract:
+          schema: ryeos.hooks.context.v1
+          allowed_roots: [event, status]
+        allowed_results: [discard, observation]
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+composer: handler:ryeos/core/identity
+composer_config:
+  policy_facts:
+    - name: effective_caps
+      path: [requires, capabilities, declared]
+      expect: array_of_strings
+composed_value_contract:
+  root_type: mapping
+  required:
+    version: {type: single, prim: string}
+    category: {type: single, prim: string}
+    config: {type: single, prim: mapping}
+    requires: {type: single, prim: mapping}
+  optional:
+    description: {type: single, prim: string}
+    hooks: {type: single, prim: mapping}
+    limits: {type: single, prim: mapping}
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+    version:
+      from: path
+      key: version
+    category:
+      from: relative_dir
+      required: true
+    description:
+      from: path
+      key: description

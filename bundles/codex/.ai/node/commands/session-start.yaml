@@ -1,0 +1,28 @@
+# ryeos:signed:2026-08-19T02:53:00Z:61e4d2b55e2f8ca9122a2d377fc097d4756494a9cae49cb89dbd7b19075ae34b:prVKuHqYR1pEJsnOgGN0yn6i4L0Nw8jNaTo5MnX+Y4XMDoHQH57xlw0kSu8T+oj8HlCj0X7IQPkkZlnXfwBBBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [codex, session, start]
+description: "Start a pinned-project Codex session; --async and --pin-project are required"
+help:
+  usage: "ryeos --project <path> codex session start <credential-profile-id> --async --pin-project"
+  examples:
+    - "ryeos --project . codex session start personal --async --pin-project"
+forms:
+  - slots:
+      - field: credential_profile_id
+project:
+  resolution: required
+  default: discover_upward_ai
+  request_project_path: true
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+control_flags:
+  - flag: async
+    help: "Return after durable accepted launch"
+    binding: launch_mode_accepted
+  - flag: pin-project
+    help: "Capture the project into a retained copy-on-write generation"
+    binding: pin_project_at_admission
+dispatch:
+  kind: execute_ref
+  execute: worker_execution:codex/session
+  availability: daemon

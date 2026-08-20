@@ -464,10 +464,121 @@ pub struct RuntimeSpec {
     pub ignored_keys: Vec<String>,
 }
 
+/// Signed selection of the protocol for a subprocess terminator.
+///
+/// The static string form preserves the existing descriptor wire shape. The
+/// selected form is kind-neutral: any executable kind may name a composed
+/// value path and a closed allowlist of signed protocol refs. Engine code
+/// resolves the data but never assigns kind- or product-specific meaning to
+/// the selected protocol.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum SubprocessProtocolDecl {
+    Static(String),
+    Selected {
+        from_composed: Vec<String>,
+        allowed: Vec<String>,
+    },
+}
+
+impl SubprocessProtocolDecl {
+    pub fn validate(&self) -> Result<(), String> {
+        let valid_ref = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 256
+                && value.trim() == value
+                && value.starts_with("protocol:")
+                && !value.chars().any(char::is_control)
+        };
+        match self {
+            Self::Static(protocol_ref) => {
+                if !valid_ref(protocol_ref) {
+                    return Err("static subprocess protocol ref is not canonical".to_owned());
+                }
+            }
+            Self::Selected {
+                from_composed,
+                allowed,
+            } => {
+                if from_composed.is_empty()
+                    || from_composed.len() > 16
+                    || from_composed
+                        .iter()
+                        .any(|part| part.trim().is_empty() || part.contains('.'))
+                    || allowed.is_empty()
+                    || allowed.len() > 32
+                    || allowed.iter().any(|value| !valid_ref(value))
+                    || allowed
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                        != allowed.len()
+                {
+                    return Err(
+                        "selected subprocess protocol declaration is not canonical and bounded"
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Protocol refs that must be present for the kind schema to boot. Selected
+    /// allowlists may name protocols supplied by optional bundles; the exact
+    /// selected ref is required and verified when an item is admitted.
+    pub fn boot_required_refs(&self) -> &[String] {
+        match self {
+            Self::Static(protocol_ref) => std::slice::from_ref(protocol_ref),
+            Self::Selected { .. } => &[],
+        }
+    }
+
+    pub fn static_ref(&self) -> Option<&str> {
+        match self {
+            Self::Static(protocol_ref) => Some(protocol_ref),
+            Self::Selected { .. } => None,
+        }
+    }
+
+    pub fn resolve(&self, composed: &Value) -> Result<String, String> {
+        self.validate()?;
+        match self {
+            Self::Static(protocol_ref) => Ok(protocol_ref.clone()),
+            Self::Selected {
+                from_composed,
+                allowed,
+            } => {
+                let mut selected = composed;
+                for part in from_composed {
+                    selected = selected.get(part).ok_or_else(|| {
+                        format!(
+                            "subprocess protocol selector `{}` is absent",
+                            from_composed.join(".")
+                        )
+                    })?;
+                }
+                let selected = selected.as_str().ok_or_else(|| {
+                    format!(
+                        "subprocess protocol selector `{}` must be a string",
+                        from_composed.join(".")
+                    )
+                })?;
+                if !allowed.iter().any(|candidate| candidate == selected) {
+                    return Err(format!(
+                        "subprocess protocol `{selected}` is not in the signed selector allowlist"
+                    ));
+                }
+                Ok(selected.to_owned())
+            }
+        }
+    }
+}
+
 /// How a kind terminates dispatch. Two variants only — `InProcess` for
 /// daemon-owned Rust handlers, `Subprocess` for everything that spawns a
-/// child binary. The child's envelope shape is determined by the
-/// `protocol_ref` field, which points into the `ProtocolRegistry`.
+/// child binary. The child's envelope shape is determined by a signed protocol
+/// selection resolved through the `ProtocolRegistry`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TerminatorDecl {
@@ -476,10 +587,9 @@ pub enum TerminatorDecl {
     /// Daemon spawns a child binary; envelope shape comes from the
     /// referenced protocol descriptor.
     Subprocess {
-        /// Canonical ref into ProtocolRegistry, e.g.
-        /// "protocol:ryeos/core/runtime".
+        /// Static canonical ref or a composed path plus signed allowlist.
         #[serde(rename = "protocol")]
-        protocol_ref: String,
+        protocol: SubprocessProtocolDecl,
     },
 }
 
@@ -2283,11 +2393,19 @@ fn parse_execution_schema(
         .unwrap_or(8);
 
     let terminator = if let Some(t_value) = execution_value.get("terminator") {
-        Some(serde_yaml::from_value(t_value.clone()).map_err(|e| {
+        let declaration: TerminatorDecl = serde_yaml::from_value(t_value.clone()).map_err(|e| {
             EngineError::SchemaLoaderError {
                 reason: format!("{display}: invalid terminator declaration: {e}"),
             }
-        })?)
+        })?;
+        if let TerminatorDecl::Subprocess { protocol } = &declaration {
+            protocol
+                .validate()
+                .map_err(|reason| EngineError::SchemaLoaderError {
+                    reason: format!("{display}: invalid subprocess protocol selection: {reason}"),
+                })?;
+        }
+        Some(declaration)
     } else {
         None
     };
@@ -3911,7 +4029,7 @@ execution:
         assert_eq!(
             exec.terminator,
             Some(TerminatorDecl::Subprocess {
-                protocol_ref: "protocol:ryeos/core/opaque".into()
+                protocol: SubprocessProtocolDecl::Static("protocol:ryeos/core/opaque".into())
             })
         );
         assert_eq!(
@@ -3949,8 +4067,42 @@ execution:
         assert_eq!(
             exec.terminator,
             Some(TerminatorDecl::Subprocess {
-                protocol_ref: "protocol:ryeos/core/runtime".into()
+                protocol: SubprocessProtocolDecl::Static("protocol:ryeos/core/runtime".into())
             })
+        );
+    }
+
+    #[test]
+    fn execution_schema_parses_kind_neutral_composed_protocol_selection() {
+        let yaml = "\
+execution:
+  terminator:
+    kind: subprocess
+    protocol:
+      from_composed: [execution_protocol]
+      allowed:
+        - protocol:ryeos/core/persistent_session
+        - protocol:example/exclusive_session
+";
+        let exec = parse_exec(yaml).unwrap().expect("execution present");
+        let Some(TerminatorDecl::Subprocess { protocol }) = exec.terminator else {
+            panic!("expected subprocess terminator");
+        };
+        assert_eq!(
+            protocol
+                .resolve(&serde_json::json!({
+                    "execution_protocol": "protocol:example/exclusive_session"
+                }))
+                .unwrap(),
+            "protocol:example/exclusive_session"
+        );
+        assert!(protocol.resolve(&serde_json::json!({})).is_err());
+        assert!(
+            protocol
+                .resolve(&serde_json::json!({
+                    "execution_protocol": "protocol:other/not_allowed"
+                }))
+                .is_err()
         );
     }
 

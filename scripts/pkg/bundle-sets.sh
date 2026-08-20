@@ -15,12 +15,12 @@
 
 ryeos_bundle_set_names() {
   case "$1" in
-    full)            printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node local-inference ;;
-    full-sandbox)    printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node local-inference sandbox-linux-bubblewrap ;;
+    full)            printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex local-inference ;;
+    full-sandbox)    printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex local-inference sandbox-linux-bubblewrap ;;
     central-host)    printf '%s\n' core central-auth standard web tv-tracker-authoring ;;
     standard)        printf '%s\n' core central-auth standard ;;
-    hosted-node)     printf '%s\n' core central-auth hosted-node ;;
-    hosted-workflow) printf '%s\n' core central-auth standard hosted-node ;;
+    hosted-node)     printf '%s\n' core central-auth hosted-node codex ;;
+    hosted-workflow) printf '%s\n' core central-auth standard hosted-node codex ;;
     *) return 1 ;;
   esac
 }
@@ -30,8 +30,9 @@ ryeos_bundle_set_names() {
 ryeos_bundle_set_bin_managed_names() {
   local name
   ryeos_bundle_set_names "$1" | while IFS= read -r name; do
-# central-auth (Python tool support) and tv-tracker-authoring (reuses bin:core/
-    # ryeos-core-tools) own no compiled binaries — exclude from bin staging.
+    # central-auth (Python tool support) and tv-tracker-authoring (reuses
+    # bin:core/ryeos-core-tools) own no compiled
+    # binaries; local-inference and sandbox own separately built payloads.
     [[ "$name" == "central-auth" || "$name" == "tv-tracker-authoring" || "$name" == "local-inference" || "$name" == "sandbox-linux-bubblewrap" ]] && continue
     printf '%s\n' "$name"
   done

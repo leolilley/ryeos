@@ -1,0 +1,12 @@
+# ryeos:signed:2026-08-19T00:43:30Z:a89cb8b98914bba164a0bd3a6e059a5dbfa01fe4fd7c5ebc225db9b38b5ddc55:j2fXid5E7IhQHyCN56IgNINNAURtzaM/qQIY7KR0+Jry5F2rNteZ1rMFD+wOcY0Mc1Z0HS1Ejyl9o8fKyCO0CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [codex, profile, confirm]
+description: "Confirm the sanitized account observed during projectless login"
+forms:
+  - slots:
+      - field: profile_id
+      - field: login_epoch
+      - field: expected_account_digest
+dispatch:
+  kind: execute_ref
+  execute: service:credential-profiles/confirm
+  availability: daemon

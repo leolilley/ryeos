@@ -1,0 +1,8 @@
+# ryeos:signed:2026-08-18T23:03:53Z:9cdd674560588448137359562e009f663efd112dd557e240b9a5a810a071f029:D4PWS6mRbP+SXpE9dbl38MG1o/cVfAiL5ZB5RVF3Zo5DxCDfOIam7IlKOaqPCgO0xx/T7WPwRDH5zRp9DC+uCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: credential-profiles.delete
+required_caps: ["ryeos.execute.service.credential-profiles/delete"]
+schema:
+  profile_id: string
+  credential_generation: integer
+description: "Delete one revoked or unauthenticated owner-bound credential profile and its private home"

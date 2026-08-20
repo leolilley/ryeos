@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:03Z:162eb34d248629cce5130c89752df414541ad4161dd3519bd1eb87bf6bed20e0:CQUHDLZ5+jVpWPnJv39S1/rU5UQPo09tJ4wH02t+GWZz/a1P6tKYwKefjHlaEMlb6PK59UTHeVgbqnK9ppCuDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-19T03:56:48Z:b42e3f7bf04a576f27058f4361a8d657581d18fc36f714bad1574f3c4607f66a:f0RzsNhdFRFUZHDCDachu9ScxoLnWXEycL0upv2RxTWt8G6JNBmGO4+dOgteTLLIK+do2f0XXqR/coS/FsHDAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/worker"
 version: "1.0.0"
 location:
@@ -20,7 +20,11 @@ execution:
     max_depth: 32
   terminator:
     kind: subprocess
-    protocol: protocol:ryeos/core/persistent_session
+    protocol:
+      from_composed: [execution_protocol]
+      allowed:
+        - protocol:ryeos/core/persistent_session
+        - protocol:ryeos/core/structured_session
   aliases:
     "@subprocess": "tool:ryeos/core/subprocess/execute"
   persistent_session:
@@ -57,6 +61,7 @@ composed_value_contract:
     executor_id: {type: single, prim: string}
     config: {type: single, prim: mapping}
     external_content: {type: single, prim: array}
+    execution_protocol: {type: single, prim: string}
     source: {type: single, prim: mapping}
     supported_target: {type: single, prim: mapping}
   optional:
@@ -72,6 +77,7 @@ runtime:
     - version
     - description
     - executor_id
+    - execution_protocol
     - external_content
     - source
     - supported_target

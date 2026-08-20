@@ -3,6 +3,7 @@ category: "local-inference"
 version: "1.0.0"
 executor_id: "@subprocess"
 description: "Hermetic persistent CPU worker for the admitted Qwen3 0.6B realization."
+execution_protocol: protocol:ryeos/core/persistent_session
 supported_target:
   os: linux
   arch: x86_64

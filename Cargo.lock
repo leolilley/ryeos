@@ -2941,6 +2941,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-structured-session"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "jsonschema",
+ "libc",
+ "ryeos-engine",
+ "ryeos-handler-bins",
+ "ryeos-handler-protocol",
+ "ryeos-runtime",
+ "ryeos-state",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "ryeos-tracing"
 version = "0.1.0"
 dependencies = [

@@ -156,7 +156,9 @@ pub(crate) fn require_callback_runtime_protocol<'a>(
         .execution()
         .and_then(|execution| execution.terminator.as_ref())
     {
-        Some(TerminatorDecl::Subprocess { protocol_ref }) => protocol_ref,
+        Some(TerminatorDecl::Subprocess { protocol }) => {
+            concrete_subprocess_protocol_ref(protocol, &verified_runtime.canonical_ref.kind)?
+        }
         Some(other) => {
             return Err(DispatchError::SchemaMisconfigured {
                 kind: verified_runtime.canonical_ref.kind.clone(),
@@ -179,7 +181,7 @@ pub(crate) fn require_callback_runtime_protocol<'a>(
     let protocol = engine
         .protocols
         .require(runtime_protocol_ref)
-        .map_err(|_| DispatchError::ProtocolNotRegistered(runtime_protocol_ref.clone()))?;
+        .map_err(|_| DispatchError::ProtocolNotRegistered(runtime_protocol_ref.to_owned()))?;
     match subprocess_execution::classify_managed_protocol(
         protocol,
         &verified_runtime.canonical_ref.kind,
@@ -434,6 +436,19 @@ pub(crate) enum HopAction {
     },
 }
 
+fn concrete_subprocess_protocol_ref<'a>(
+    protocol: &'a ryeos_engine::kind_registry::SubprocessProtocolDecl,
+    kind: &str,
+) -> Result<&'a str, DispatchError> {
+    protocol
+        .static_ref()
+        .ok_or_else(|| DispatchError::SchemaMisconfigured {
+            kind: kind.to_owned(),
+            detail: "subprocess protocol selection reached dispatch before effective resolution"
+                .into(),
+        })
+}
+
 /// Per-hop verification output. The dispatch loop stays thin by
 /// delegating all hop logic here.
 ///
@@ -649,13 +664,60 @@ fn resolve_dispatch_hop_with_verified(
                 kind: schema_kind.clone(),
                 detail: "schema declares a terminator but no `execution.thread_profile`".into(),
             })?;
+        let terminator = match terminator {
+            TerminatorDecl::Subprocess { protocol } => {
+                let item = verified
+                    .as_ref()
+                    .ok_or_else(|| DispatchError::SchemaMisconfigured {
+                        kind: schema_kind.clone(),
+                        detail: "selected subprocess protocol requires a resolved item".into(),
+                    })?;
+                let effective = ctx
+                    .engine
+                    .effective_item(ryeos_engine::engine::EffectiveItemRequest {
+                        item_ref: current_ref.clone(),
+                        expected_kind: Some(schema_kind.clone()),
+                        project_root: item.resolved.materialized_project_root.clone(),
+                        subject_resolution_authority: item
+                            .resolved
+                            .subject_resolution_authority
+                            .clone(),
+                    })
+                    .map_err(|error| DispatchError::SchemaMisconfigured {
+                        kind: schema_kind.clone(),
+                        detail: format!(
+                            "resolve effective item for subprocess protocol selection: {error}"
+                        ),
+                    })?;
+                if effective.source.content_hash != item.resolved.content_hash {
+                    return Err(DispatchError::SchemaMisconfigured {
+                        kind: schema_kind.clone(),
+                        detail: "effective subprocess protocol selection changed the verified root bytes"
+                            .into(),
+                    });
+                }
+                let protocol_ref =
+                    protocol
+                        .resolve(&effective.composed_value)
+                        .map_err(|detail| DispatchError::SchemaMisconfigured {
+                            kind: schema_kind.clone(),
+                            detail,
+                        })?;
+                TerminatorDecl::Subprocess {
+                    protocol: ryeos_engine::kind_registry::SubprocessProtocolDecl::Static(
+                        protocol_ref,
+                    ),
+                }
+            }
+            other => other.clone(),
+        };
         return Ok(VerifiedHop {
             canonical_ref: current_ref.clone(),
             verified,
             resolution_error,
             thread_profile: Some(tp.to_string()),
             runtime,
-            next: HopAction::Terminate(terminator.clone(), tp.to_string()),
+            next: HopAction::Terminate(terminator, tp.to_string()),
         });
     }
 
@@ -4323,12 +4385,12 @@ fn launch_contract_applicability_with_evidence(
                     class: RootDispatchClass::InProcess,
                 });
             }
-            HopAction::Terminate(TerminatorDecl::Subprocess { protocol_ref }, _) => {
-                let protocol = ctx
-                    .engine
-                    .protocols
-                    .require(&protocol_ref)
-                    .map_err(|_| DispatchError::ProtocolNotRegistered(protocol_ref))?;
+            HopAction::Terminate(TerminatorDecl::Subprocess { protocol }, _) => {
+                let protocol_ref = concrete_subprocess_protocol_ref(&protocol, &current.kind)?;
+                let protocol =
+                    ctx.engine.protocols.require(protocol_ref).map_err(|_| {
+                        DispatchError::ProtocolNotRegistered(protocol_ref.to_owned())
+                    })?;
                 use ryeos_engine::protocol_vocabulary::LifecycleMode;
                 if protocol.descriptor.lifecycle.mode != LifecycleMode::Managed {
                     return Ok(LaunchContractApplicability::NonEnvelope {
@@ -5446,11 +5508,14 @@ pub fn preflight_root_dispatch(
                         launch_timings,
                     );
                 }
-                TerminatorDecl::Subprocess { protocol_ref } => {
-                    let protocol =
-                        ctx.engine.protocols.require(&protocol_ref).map_err(|_| {
-                            DispatchError::ProtocolNotRegistered(protocol_ref.clone())
-                        })?;
+                TerminatorDecl::Subprocess {
+                    protocol: protocol_selection,
+                } => {
+                    let protocol_ref =
+                        concrete_subprocess_protocol_ref(&protocol_selection, &hop_ref.kind)?;
+                    let protocol = ctx.engine.protocols.require(protocol_ref).map_err(|_| {
+                        DispatchError::ProtocolNotRegistered(protocol_ref.to_owned())
+                    })?;
                     use ryeos_engine::protocol_vocabulary::LifecycleMode;
                     match protocol.descriptor.lifecycle.mode {
                         LifecycleMode::DetachedOk => {

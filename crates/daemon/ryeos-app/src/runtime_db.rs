@@ -16,6 +16,9 @@ use crate::process::{
     validate_execution_process_identity_shape,
 };
 
+const MAX_DEDICATED_SESSION_COMMANDS: i64 = 100_000;
+const MAX_DEDICATED_SESSION_COMMAND_SPOOL_BYTES: i64 = 512 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopIntent {
     Cancel,
@@ -986,6 +989,125 @@ CREATE INDEX IF NOT EXISTS idx_launch_planning_state_updated
 
 CREATE INDEX IF NOT EXISTS idx_launch_planning_generation_state
     ON launch_planning(daemon_generation_id, state);
+
+CREATE TABLE IF NOT EXISTS worker_process (
+    worker_instance_id TEXT PRIMARY KEY,
+    boot_identity_hash TEXT NOT NULL,
+    session_capsule_hash TEXT NOT NULL,
+    boot_epoch INTEGER NOT NULL CHECK (boot_epoch > 0),
+    lifecycle_generation INTEGER NOT NULL CHECK (lifecycle_generation > 0),
+    process_identity TEXT NOT NULL,
+    control_channel_identity TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('starting', 'attached', 'live', 'draining', 'dead')),
+    daemon_generation_id TEXT NOT NULL,
+    session_id TEXT NOT NULL UNIQUE,
+    cleanup_state TEXT NOT NULL CHECK (cleanup_state IN ('owned', 'draining', 'reaped', 'unproved')),
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_worker_process_daemon_state
+    ON worker_process(daemon_generation_id, state);
+
+CREATE TABLE IF NOT EXISTS dedicated_session (
+    session_id TEXT PRIMARY KEY,
+    root_thread_id TEXT NOT NULL UNIQUE,
+    owner_principal TEXT NOT NULL,
+    admitted_capsule_hash TEXT NOT NULL,
+    worker_instance_id TEXT,
+    worker_boot_epoch INTEGER,
+    workspace_id TEXT NOT NULL,
+    credential_profile_id TEXT NOT NULL,
+    credential_generation INTEGER NOT NULL CHECK (credential_generation > 0),
+    remote_thread_id TEXT,
+    current_turn_id TEXT,
+    state TEXT NOT NULL CHECK (state IN ('admitted', 'binding', 'idle', 'turn_running', 'awaiting_approval', 'recovering', 'outcome_unknown', 'draining', 'freezing', 'frozen', 'verifying', 'publish_ready', 'publishing', 'discarding', 'terminal')),
+    send_boundary TEXT NOT NULL CHECK (send_boundary IN ('none', 'committed', 'contacted', 'settled', 'outcome_unknown')),
+    candidate_snapshot_hash TEXT,
+    candidate_validation_hash TEXT,
+    publication_result TEXT,
+    disposition_resume_state TEXT,
+    terminal_reason TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_dedicated_session_owner_state
+    ON dedicated_session(owner_principal, state);
+
+CREATE TABLE IF NOT EXISTS dedicated_session_command (
+    session_id TEXT NOT NULL,
+    command_sequence INTEGER NOT NULL CHECK (command_sequence > 0),
+    idempotency_key TEXT NOT NULL,
+    worker_boot_epoch INTEGER NOT NULL CHECK (worker_boot_epoch > 0),
+    command_kind TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('committed', 'dispatched', 'completed', 'failed', 'outcome_unknown')),
+    result_json TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (session_id, command_sequence),
+    UNIQUE (session_id, idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dedicated_session_command_state
+    ON dedicated_session_command(session_id, state);
+
+CREATE TABLE IF NOT EXISTS dedicated_session_observation_batch (
+    session_id TEXT NOT NULL,
+    worker_boot_epoch INTEGER NOT NULL CHECK (worker_boot_epoch > 0),
+    first_sequence INTEGER NOT NULL CHECK (first_sequence > 0),
+    through_sequence INTEGER NOT NULL CHECK (through_sequence >= first_sequence),
+    previous_digest TEXT,
+    batch_digest TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('append_contacting', 'settled', 'append_unknown')),
+    created_at_ms INTEGER NOT NULL,
+    settled_at_ms INTEGER,
+    PRIMARY KEY (session_id, worker_boot_epoch, first_sequence)
+);
+
+CREATE TABLE IF NOT EXISTS dedicated_session_approval (
+    session_id TEXT NOT NULL,
+    approval_id TEXT NOT NULL,
+    worker_instance_id TEXT NOT NULL,
+    worker_boot_epoch INTEGER NOT NULL CHECK (worker_boot_epoch > 0),
+    request_digest TEXT NOT NULL,
+    operation_class TEXT NOT NULL,
+    requested_authority_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending', 'decision_reserved', 'delivery_contacting', 'delivery_settled', 'delivery_unknown', 'expired', 'stale_epoch')),
+    decision_principal TEXT,
+    decision_json TEXT,
+    decision_digest TEXT,
+    reservation_token TEXT,
+    expires_at_ms INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    resolved_at_ms INTEGER,
+    delivery_contacted_at_ms INTEGER,
+    delivery_settled_at_ms INTEGER,
+    PRIMARY KEY (session_id, approval_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dedicated_session_approval_pending
+    ON dedicated_session_approval(session_id, state, expires_at_ms);
+
+CREATE TABLE IF NOT EXISTS credential_profile (
+    profile_id TEXT PRIMARY KEY,
+    owner_principal TEXT NOT NULL,
+    home_id TEXT NOT NULL UNIQUE,
+    credential_generation INTEGER NOT NULL CHECK (credential_generation > 0),
+    state TEXT NOT NULL CHECK (state IN ('unauthenticated', 'enrolling', 'confirming', 'active', 'revoking', 'revoked', 'deleting')),
+    active_login_id TEXT,
+    login_epoch INTEGER NOT NULL CHECK (login_epoch >= 0),
+    login_expires_at_ms INTEGER,
+    sanitized_account_json TEXT,
+    lock_owner TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_credential_profile_owner_state
+    ON credential_profile(owner_principal, state);
 "#;
 
 use ryeos_state::sqlite_schema;
@@ -1010,7 +1132,12 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 5 stores only the daemon-projected action result in follow waiter
 // terminal envelopes. Predecessor rows retained complete runtime results and
 // cannot be reinterpreted as the compact parent-resume contract.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 5;
+// Epoch 6 atomically introduces durable exclusive-process ownership, its
+// dedicated session command/approval ledgers, and opaque credential-profile
+// metadata. It deliberately has no open-time migration.
+// Epoch 7 adds the durable pre-contact boundary for worker-pushed observation
+// batches. It deliberately has no open-time migration.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 7;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -1842,6 +1969,528 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "worker_process",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "worker_instance_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "boot_identity_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "session_capsule_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "boot_epoch",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "lifecycle_generation",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "process_identity",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "control_channel_identity",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "daemon_generation_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "session_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "cleanup_state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "dedicated_session",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "session_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "root_thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner_principal",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "admitted_capsule_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "worker_instance_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "worker_boot_epoch",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "workspace_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "credential_profile_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "credential_generation",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "remote_thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "current_turn_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "send_boundary",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "candidate_snapshot_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "candidate_validation_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "publication_result",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "disposition_resume_state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "terminal_reason",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "dedicated_session_command",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "session_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "command_sequence",
+                        col_type: "INTEGER",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "idempotency_key",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "worker_boot_epoch",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "command_kind",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "request_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "payload_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "result_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "dedicated_session_approval",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "session_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "approval_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "worker_instance_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "worker_boot_epoch",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "request_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "operation_class",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "requested_authority_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "decision_principal",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "decision_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "decision_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "reservation_token",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "expires_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "resolved_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "delivery_contacted_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "delivery_settled_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "dedicated_session_observation_batch",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "session_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "worker_boot_epoch",
+                        col_type: "INTEGER",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "first_sequence",
+                        col_type: "INTEGER",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "through_sequence",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "previous_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "batch_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "settled_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "credential_profile",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "profile_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner_principal",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "home_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "credential_generation",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "active_login_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "login_epoch",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "login_expires_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "sanitized_account_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "lock_owner",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -1914,6 +2563,36 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "idx_launch_planning_generation_state",
                 table: "launch_planning",
                 columns: &["daemon_generation_id", "state"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_worker_process_daemon_state",
+                table: "worker_process",
+                columns: &["daemon_generation_id", "state"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_dedicated_session_owner_state",
+                table: "dedicated_session",
+                columns: &["owner_principal", "state"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_dedicated_session_command_state",
+                table: "dedicated_session_command",
+                columns: &["session_id", "state"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_dedicated_session_approval_pending",
+                table: "dedicated_session_approval",
+                columns: &["session_id", "state", "expires_at_ms"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_credential_profile_owner_state",
+                table: "credential_profile",
+                columns: &["owner_principal", "state"],
                 unique: false,
             },
         ],
@@ -2550,6 +3229,232 @@ pub struct RuntimeDb {
     _inspection_copy: Option<crate::temp_dir_guard::TempDirGuard>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerProcessState {
+    Starting,
+    Attached,
+    Live,
+    Draining,
+    Dead,
+}
+
+impl WorkerProcessState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Attached => "attached",
+            Self::Live => "live",
+            Self::Draining => "draining",
+            Self::Dead => "dead",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "starting" => Ok(Self::Starting),
+            "attached" => Ok(Self::Attached),
+            "live" => Ok(Self::Live),
+            "draining" => Ok(Self::Draining),
+            "dead" => Ok(Self::Dead),
+            other => bail!("invalid worker process state `{other}`"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerProcessRecord {
+    pub worker_instance_id: String,
+    pub boot_identity_hash: String,
+    pub session_capsule_hash: String,
+    pub boot_epoch: u64,
+    pub lifecycle_generation: u64,
+    pub process_identity: ExecutionProcessIdentity,
+    pub control_channel_identity: String,
+    pub state: WorkerProcessState,
+    pub daemon_generation_id: String,
+    pub session_id: String,
+    pub cleanup_state: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewDedicatedSession<'a> {
+    pub session_id: &'a str,
+    pub root_thread_id: &'a str,
+    pub owner_principal: &'a str,
+    pub admitted_capsule_hash: &'a str,
+    pub workspace_id: &'a str,
+    pub credential_profile_id: &'a str,
+    pub credential_generation: u64,
+    pub credential_lock_owner: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DedicatedSessionRecord {
+    pub session_id: String,
+    pub root_thread_id: String,
+    pub owner_principal: String,
+    pub admitted_capsule_hash: String,
+    pub worker_instance_id: Option<String>,
+    pub worker_boot_epoch: Option<u64>,
+    pub workspace_id: String,
+    pub credential_profile_id: String,
+    pub credential_generation: u64,
+    pub remote_thread_id: Option<String>,
+    pub current_turn_id: Option<String>,
+    pub state: String,
+    pub send_boundary: String,
+    pub candidate_snapshot_hash: Option<String>,
+    pub candidate_validation_hash: Option<String>,
+    pub publication_result: Option<String>,
+    pub terminal_reason: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewCredentialProfile<'a> {
+    pub profile_id: &'a str,
+    pub owner_principal: &'a str,
+    pub home_id: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialProfileRecord {
+    pub profile_id: String,
+    pub owner_principal: String,
+    pub home_id: String,
+    pub credential_generation: u64,
+    pub state: String,
+    pub active_login_id: Option<String>,
+    pub login_epoch: u64,
+    pub login_expires_at_ms: Option<i64>,
+    pub sanitized_account: Option<serde_json::Value>,
+    pub lock_owner: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewDedicatedSessionCommand<'a> {
+    pub session_id: &'a str,
+    pub idempotency_key: &'a str,
+    pub worker_boot_epoch: u64,
+    pub command_kind: &'a str,
+    pub request_digest: &'a str,
+    pub payload: &'a serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DedicatedSessionCommandRecord {
+    pub session_id: String,
+    pub command_sequence: u64,
+    pub idempotency_key: String,
+    pub worker_boot_epoch: u64,
+    pub command_kind: String,
+    pub request_digest: String,
+    pub payload: serde_json::Value,
+    pub state: String,
+    pub result: Option<serde_json::Value>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservationBatchReservation {
+    ContactAppend,
+    AlreadySettled,
+    RebuildProjection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewDedicatedSessionApproval<'a> {
+    pub session_id: &'a str,
+    pub approval_id: &'a str,
+    pub worker_instance_id: &'a str,
+    pub worker_boot_epoch: u64,
+    pub request_digest: &'a str,
+    pub operation_class: &'a str,
+    pub requested_authority: &'a serde_json::Value,
+    pub expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DedicatedSessionApprovalRecord {
+    pub session_id: String,
+    pub approval_id: String,
+    pub worker_instance_id: String,
+    pub worker_boot_epoch: u64,
+    pub request_digest: String,
+    pub operation_class: String,
+    pub requested_authority: serde_json::Value,
+    pub state: String,
+    pub decision_principal: Option<String>,
+    pub decision: Option<serde_json::Value>,
+    pub decision_digest: Option<String>,
+    pub reservation_token: Option<String>,
+    pub expires_at_ms: i64,
+    pub created_at_ms: i64,
+    pub resolved_at_ms: Option<i64>,
+    pub delivery_contacted_at_ms: Option<i64>,
+    pub delivery_settled_at_ms: Option<i64>,
+}
+
+fn validate_worker_process_record(record: &WorkerProcessRecord) -> Result<()> {
+    for (label, value, max) in [
+        (
+            "worker instance id",
+            record.worker_instance_id.as_str(),
+            256,
+        ),
+        (
+            "worker boot identity",
+            record.boot_identity_hash.as_str(),
+            128,
+        ),
+        (
+            "worker session capsule",
+            record.session_capsule_hash.as_str(),
+            128,
+        ),
+        (
+            "worker control channel",
+            record.control_channel_identity.as_str(),
+            1024,
+        ),
+        (
+            "worker daemon generation",
+            record.daemon_generation_id.as_str(),
+            256,
+        ),
+        ("worker session id", record.session_id.as_str(), 256),
+        ("worker cleanup state", record.cleanup_state.as_str(), 32),
+    ] {
+        validate_bounded_runtime_text(label, value, max)?;
+    }
+    validate_execution_process_identity_shape(&record.process_identity)
+        .context("invalid worker process identity")?;
+    if record.boot_epoch == 0
+        || record.lifecycle_generation == 0
+        || record.created_at_ms <= 0
+        || record.updated_at_ms < record.created_at_ms
+        || !matches!(
+            record.cleanup_state.as_str(),
+            "owned" | "draining" | "reaped" | "unproved"
+        )
+    {
+        bail!("worker process record is internally inconsistent");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IncompatibleRuntimeOperatorSchema {
     stored: u32,
@@ -3077,6 +3982,58 @@ fn prune_launch_planning(conn: &Connection, now_ms: i64) -> Result<()> {
     Ok(())
 }
 
+fn read_dedicated_command_by_key(
+    conn: &Connection,
+    session_id: &str,
+    idempotency_key: &str,
+) -> Result<Option<DedicatedSessionCommandRecord>> {
+    let row = conn
+        .query_row(
+            "SELECT session_id, command_sequence, idempotency_key, worker_boot_epoch,
+                command_kind, request_digest, payload_json, state, result_json,
+                created_at_ms, updated_at_ms
+           FROM dedicated_session_command
+          WHERE session_id=?1 AND idempotency_key=?2",
+            params![session_id, idempotency_key],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, i64>(10)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(|row| {
+        Ok(DedicatedSessionCommandRecord {
+            session_id: row.0,
+            command_sequence: u64::try_from(row.1).context("negative command sequence")?,
+            idempotency_key: row.2,
+            worker_boot_epoch: u64::try_from(row.3).context("negative command worker epoch")?,
+            command_kind: row.4,
+            request_digest: row.5,
+            payload: serde_json::from_str(&row.6).context("decode command payload")?,
+            state: row.7,
+            result: row
+                .8
+                .map(|raw| serde_json::from_str(&raw))
+                .transpose()
+                .context("decode command result")?,
+            created_at_ms: row.9,
+            updated_at_ms: row.10,
+        })
+    })
+    .transpose()
+}
+
 impl RuntimeDb {
     pub fn new_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("failed to open in-memory runtime db")?;
@@ -3094,6 +4051,2416 @@ impl RuntimeDb {
             _shm_file: None,
             _inspection_copy: None,
         })
+    }
+
+    pub fn admit_dedicated_session(&self, session: NewDedicatedSession<'_>) -> Result<()> {
+        for (label, value) in [
+            ("dedicated session id", session.session_id),
+            ("dedicated root thread id", session.root_thread_id),
+            ("dedicated owner principal", session.owner_principal),
+            ("dedicated admitted capsule", session.admitted_capsule_hash),
+            ("dedicated workspace id", session.workspace_id),
+            (
+                "dedicated credential profile id",
+                session.credential_profile_id,
+            ),
+        ] {
+            validate_bounded_runtime_text(label, value, 256)?;
+        }
+        if session.credential_generation == 0 {
+            bail!("dedicated credential generation must be positive");
+        }
+        let now = lillux::time::timestamp_millis() as i64;
+        let changed = self.conn.execute(
+            "INSERT INTO dedicated_session (
+                session_id, root_thread_id, owner_principal, admitted_capsule_hash,
+                worker_instance_id, worker_boot_epoch, workspace_id,
+                credential_profile_id, credential_generation, remote_thread_id,
+                current_turn_id, state, send_boundary, candidate_snapshot_hash,
+                candidate_validation_hash, publication_result, terminal_reason,
+                created_at_ms, updated_at_ms
+             ) SELECT ?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6, ?7, NULL, NULL,
+                       'admitted', 'none', NULL, NULL, NULL, NULL, ?9, ?9
+               WHERE EXISTS(SELECT 1 FROM credential_profile
+                 WHERE profile_id=?6 AND owner_principal=?3 AND credential_generation=?7
+                   AND lock_owner=?8 AND state IN ('unauthenticated','enrolling','confirming','active'))",
+            params![
+                session.session_id,
+                session.root_thread_id,
+                session.owner_principal,
+                session.admitted_capsule_hash,
+                session.workspace_id,
+                session.credential_profile_id,
+                i64::try_from(session.credential_generation)
+                    .context("credential generation exceeds SQLite integer range")?,
+                session.credential_lock_owner,
+                now,
+            ],
+        )?;
+        if changed != 1 {
+            bail!("dedicated admission lost its credential generation/lock fence");
+        }
+        Ok(())
+    }
+
+    pub fn dedicated_session(&self, session_id: &str) -> Result<Option<DedicatedSessionRecord>> {
+        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+        let row = self
+            .conn
+            .query_row(
+                "SELECT session_id, root_thread_id, owner_principal, admitted_capsule_hash,
+                    worker_instance_id, worker_boot_epoch, workspace_id,
+                    credential_profile_id, credential_generation, remote_thread_id,
+                    current_turn_id, state, send_boundary, candidate_snapshot_hash,
+                    candidate_validation_hash, publication_result, terminal_reason,
+                    created_at_ms, updated_at_ms
+               FROM dedicated_session WHERE session_id=?1",
+                [session_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, i64>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, Option<String>>(10)?,
+                        row.get::<_, String>(11)?,
+                        row.get::<_, String>(12)?,
+                        row.get::<_, Option<String>>(13)?,
+                        row.get::<_, Option<String>>(14)?,
+                        row.get::<_, Option<String>>(15)?,
+                        row.get::<_, Option<String>>(16)?,
+                        row.get::<_, i64>(17)?,
+                        row.get::<_, i64>(18)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(|row| {
+            Ok(DedicatedSessionRecord {
+                session_id: row.0,
+                root_thread_id: row.1,
+                owner_principal: row.2,
+                admitted_capsule_hash: row.3,
+                worker_instance_id: row.4,
+                worker_boot_epoch: row
+                    .5
+                    .map(u64::try_from)
+                    .transpose()
+                    .context("negative worker boot epoch")?,
+                workspace_id: row.6,
+                credential_profile_id: row.7,
+                credential_generation: u64::try_from(row.8)
+                    .context("negative credential generation")?,
+                remote_thread_id: row.9,
+                current_turn_id: row.10,
+                state: row.11,
+                send_boundary: row.12,
+                candidate_snapshot_hash: row.13,
+                candidate_validation_hash: row.14,
+                publication_result: row.15,
+                terminal_reason: row.16,
+                created_at_ms: row.17,
+                updated_at_ms: row.18,
+            })
+        })
+        .transpose()
+    }
+
+    pub fn nonterminal_dedicated_sessions_for_credential_profile(
+        &self,
+        profile_id: &str,
+    ) -> Result<Vec<DedicatedSessionRecord>> {
+        validate_bounded_runtime_text("credential profile id", profile_id, 256)?;
+        let mut statement = self.conn.prepare(
+            "SELECT session_id FROM dedicated_session
+              WHERE credential_profile_id=?1 AND state!='terminal'
+              ORDER BY session_id",
+        )?;
+        let ids = statement
+            .query_map([profile_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
+            .map(|session_id| {
+                self.dedicated_session(&session_id)?
+                    .ok_or_else(|| anyhow!("listed dedicated session disappeared"))
+            })
+            .collect()
+    }
+
+    pub fn terminalize_unattached_dedicated_session(
+        &self,
+        session_id: &str,
+        reason: &str,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+        validate_bounded_runtime_text("dedicated terminal reason", reason, 2048)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE dedicated_session SET state='terminal', terminal_reason=?2,
+                    current_turn_id=NULL, send_boundary='none', updated_at_ms=?3
+              WHERE session_id=?1 AND worker_instance_id IS NULL AND worker_boot_epoch IS NULL
+                AND state IN ('admitted','recovering','outcome_unknown')",
+            params![session_id, reason, now],
+        )?;
+        if changed != 1 {
+            bail!("unattached dedicated terminal settlement lost its session CAS");
+        }
+        tx.execute(
+            "UPDATE dedicated_session_approval SET state='delivery_unknown', resolved_at_ms=?2
+              WHERE session_id=?1 AND state='delivery_contacting'",
+            params![session_id, now],
+        )?;
+        tx.execute(
+            "UPDATE dedicated_session_approval SET state='stale_epoch', resolved_at_ms=?2
+              WHERE session_id=?1 AND state IN ('pending', 'decision_reserved')",
+            params![session_id, now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn fail_dedicated_session_start(
+        &self,
+        session_id: &str,
+        worker_instance_id: &str,
+        reason: &str,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+        validate_bounded_runtime_text("worker instance id", worker_instance_id, 256)?;
+        validate_bounded_runtime_text("dedicated terminal reason", reason, 4096)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE dedicated_session
+                SET state='terminal', terminal_reason=?3, updated_at_ms=?4
+              WHERE session_id=?1 AND state IN ('admitted','binding','recovering')",
+            params![session_id, worker_instance_id, reason, now],
+        )?;
+        if changed != 1 {
+            bail!("dedicated start failure lost its session-state CAS");
+        }
+        tx.execute(
+            "UPDATE credential_profile SET lock_owner=NULL, updated_at_ms=?3
+              WHERE profile_id=(SELECT credential_profile_id FROM dedicated_session
+                                  WHERE session_id=?1)
+                AND lock_owner=?2
+                AND (NOT EXISTS(SELECT 1 FROM worker_process WHERE worker_instance_id=?2)
+                     OR EXISTS(SELECT 1 FROM worker_process
+                         WHERE worker_instance_id=?2 AND cleanup_state='reaped'))",
+            params![session_id, worker_instance_id, now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn bind_dedicated_remote_thread(
+        &self,
+        session_id: &str,
+        worker_instance_id: &str,
+        worker_boot_epoch: u64,
+        remote_thread_id: &str,
+    ) -> Result<()> {
+        for (label, value) in [
+            ("dedicated session id", session_id),
+            ("worker instance id", worker_instance_id),
+            ("remote thread id", remote_thread_id),
+        ] {
+            validate_bounded_runtime_text(label, value, 256)?;
+        }
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session SET remote_thread_id=?4, updated_at_ms=?5
+              WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                AND state='idle' AND remote_thread_id IS NULL",
+            params![
+                session_id,
+                worker_instance_id,
+                i64::try_from(worker_boot_epoch)
+                    .context("worker boot epoch exceeds SQLite range")?,
+                remote_thread_id,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            let matched: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session
+                  WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                    AND remote_thread_id=?4)",
+                params![
+                    session_id,
+                    worker_instance_id,
+                    i64::try_from(worker_boot_epoch)?,
+                    remote_thread_id
+                ],
+                |row| row.get(0),
+            )?;
+            if !matched {
+                bail!("dedicated remote-thread bind lost its worker/session CAS");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn observe_dedicated_remote_reattach(
+        &self,
+        session_id: &str,
+        worker_boot_epoch: u64,
+        remote_thread_id: &str,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+        validate_bounded_runtime_text("remote thread id", remote_thread_id, 256)?;
+        let matched: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM dedicated_session
+              WHERE session_id=?1 AND worker_boot_epoch=?2 AND remote_thread_id=?3
+                AND state IN ('recovering','idle','outcome_unknown'))",
+            params![
+                session_id,
+                i64::try_from(worker_boot_epoch)?,
+                remote_thread_id
+            ],
+            |row| row.get(0),
+        )?;
+        if !matched {
+            bail!("dedicated remote reattach lost its session/thread/epoch CAS");
+        }
+        Ok(())
+    }
+
+    pub fn settle_dedicated_remote_recovery_status(
+        &self,
+        session_id: &str,
+        worker_boot_epoch: u64,
+        remote_thread_id: &str,
+        remote_status: &str,
+    ) -> Result<()> {
+        if !matches!(
+            remote_status,
+            "idle" | "active" | "notLoaded" | "systemError"
+        ) {
+            bail!("remote recovery status is outside the pinned vocabulary");
+        }
+        let next = if remote_status == "idle" {
+            "idle"
+        } else {
+            "outcome_unknown"
+        };
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session SET state=?4, updated_at_ms=?5
+              WHERE session_id=?1 AND worker_boot_epoch=?2 AND remote_thread_id=?3
+                AND state='recovering'",
+            params![
+                session_id,
+                i64::try_from(worker_boot_epoch)?,
+                remote_thread_id,
+                next,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            let matched: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session
+                  WHERE session_id=?1 AND worker_boot_epoch=?2 AND remote_thread_id=?3
+                    AND state=?4)",
+                params![
+                    session_id,
+                    i64::try_from(worker_boot_epoch)?,
+                    remote_thread_id,
+                    next
+                ],
+                |row| row.get(0),
+            )?;
+            if !matched {
+                bail!("dedicated remote recovery status lost its session/thread/epoch CAS");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn prepare_dedicated_session_recovery(
+        &self,
+        session_id: &str,
+        credential_generation: u64,
+        credential_lock_owner: &str,
+    ) -> Result<u64> {
+        let next_epoch: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(boot_epoch), 0) + 1 FROM worker_process WHERE session_id=?1",
+            [session_id],
+            |row| row.get(0),
+        )?;
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session
+                SET state='admitted', credential_generation=?2, updated_at_ms=?3
+              WHERE session_id=?1 AND state='recovering'
+                AND worker_instance_id IS NULL AND worker_boot_epoch IS NULL
+                AND send_boundary='none'
+                AND EXISTS(SELECT 1 FROM credential_profile
+                  WHERE profile_id=dedicated_session.credential_profile_id
+                    AND owner_principal=dedicated_session.owner_principal
+                    AND credential_generation=?2 AND lock_owner=?4
+                    AND state IN ('unauthenticated','enrolling','confirming','active'))",
+            params![
+                session_id,
+                i64::try_from(credential_generation)?,
+                lillux::time::timestamp_millis() as i64,
+                credential_lock_owner
+            ],
+        )?;
+        if changed != 1 {
+            bail!("dedicated recovery preparation lost its session CAS");
+        }
+        u64::try_from(next_epoch).context("negative dedicated recovery epoch")
+    }
+
+    pub fn observe_dedicated_session_state(
+        &self,
+        session_id: &str,
+        worker_boot_epoch: u64,
+        expected: &str,
+        next: &str,
+        expected_turn_id: Option<&str>,
+        next_turn_id: Option<&str>,
+    ) -> Result<()> {
+        let allowed = matches!(
+            (expected, next),
+            ("idle", "turn_running")
+                | ("turn_running", "idle")
+                | ("turn_running", "recovering")
+                | ("awaiting_approval", "recovering")
+        );
+        if !allowed {
+            bail!("dedicated worker observation requested an invalid lifecycle edge");
+        }
+        for turn_id in [expected_turn_id, next_turn_id].into_iter().flatten() {
+            validate_bounded_runtime_text("dedicated current turn id", turn_id, 256)?;
+        }
+        if next == "turn_running" && next_turn_id.is_none() {
+            bail!("turn-running observation requires a remote turn id");
+        }
+        if next == "idle" && (expected_turn_id.is_none() || next_turn_id.is_some()) {
+            bail!("idle observation must clear its remote turn id");
+        }
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session SET state=?4, current_turn_id=?6, updated_at_ms=?7
+              WHERE session_id=?1 AND worker_boot_epoch=?2 AND state=?3
+                AND ((?5 IS NULL AND current_turn_id IS NULL) OR current_turn_id=?5)",
+            params![
+                session_id,
+                i64::try_from(worker_boot_epoch)?,
+                expected,
+                next,
+                expected_turn_id,
+                next_turn_id,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            let matched: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session
+                  WHERE session_id=?1 AND worker_boot_epoch=?2 AND state=?3
+                    AND ((?4 IS NULL AND current_turn_id IS NULL) OR current_turn_id=?4))",
+                params![
+                    session_id,
+                    i64::try_from(worker_boot_epoch)?,
+                    next,
+                    next_turn_id
+                ],
+                |row| row.get(0),
+            )?;
+            if !matched {
+                bail!("dedicated worker observation lost its session-epoch/state CAS");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn create_credential_profile(&self, profile: NewCredentialProfile<'_>) -> Result<()> {
+        for (label, value) in [
+            ("credential profile id", profile.profile_id),
+            ("credential profile owner", profile.owner_principal),
+            ("credential profile home id", profile.home_id),
+        ] {
+            validate_bounded_runtime_text(label, value, 256)?;
+        }
+        let now = lillux::time::timestamp_millis() as i64;
+        let changed = self.conn.execute(
+            "INSERT INTO credential_profile (
+                profile_id, owner_principal, home_id, credential_generation, state,
+                active_login_id, login_epoch, login_expires_at_ms, sanitized_account_json,
+                lock_owner, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, 1, 'unauthenticated', NULL, 0, NULL, NULL, NULL, ?4, ?4)",
+            params![
+                profile.profile_id,
+                profile.owner_principal,
+                profile.home_id,
+                now
+            ],
+        )?;
+        if changed != 1 {
+            bail!("credential profile insertion did not create exactly one row");
+        }
+        Ok(())
+    }
+
+    pub fn credential_profile(&self, profile_id: &str) -> Result<Option<CredentialProfileRecord>> {
+        validate_bounded_runtime_text("credential profile id", profile_id, 256)?;
+        let row = self
+            .conn
+            .query_row(
+                "SELECT profile_id, owner_principal, home_id, credential_generation, state,
+                    active_login_id, login_epoch, login_expires_at_ms, sanitized_account_json,
+                    lock_owner, created_at_ms, updated_at_ms
+               FROM credential_profile WHERE profile_id=?1",
+                [profile_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, i64>(10)?,
+                        row.get::<_, i64>(11)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(|row| {
+            let sanitized_account = row
+                .8
+                .map(|raw| serde_json::from_str(&raw))
+                .transpose()
+                .context("decode sanitized credential account")?;
+            Ok(CredentialProfileRecord {
+                profile_id: row.0,
+                owner_principal: row.1,
+                home_id: row.2,
+                credential_generation: u64::try_from(row.3)
+                    .context("negative credential generation")?,
+                state: row.4,
+                active_login_id: row.5,
+                login_epoch: u64::try_from(row.6).context("negative login epoch")?,
+                login_expires_at_ms: row.7,
+                sanitized_account,
+                lock_owner: row.9,
+                created_at_ms: row.10,
+                updated_at_ms: row.11,
+            })
+        })
+        .transpose()
+    }
+
+    pub fn acquire_credential_profile(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        lock_owner: &str,
+    ) -> Result<u64> {
+        for (label, value) in [
+            ("credential profile id", profile_id),
+            ("credential profile owner", owner_principal),
+            ("credential profile lock owner", lock_owner),
+        ] {
+            validate_bounded_runtime_text(label, value, 256)?;
+        }
+        let now = lillux::time::timestamp_millis() as i64;
+        let changed = self.conn.execute(
+            "UPDATE credential_profile SET lock_owner=?3, updated_at_ms=?4
+              WHERE profile_id=?1 AND owner_principal=?2 AND lock_owner IS NULL
+                AND state IN ('unauthenticated','enrolling','active')",
+            params![profile_id, owner_principal, lock_owner, now],
+        )?;
+        if changed != 1 {
+            bail!("credential profile is absent, not owned, locked, or deleting");
+        }
+        self.conn
+            .query_row(
+                "SELECT credential_generation FROM credential_profile WHERE profile_id=?1",
+                [profile_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(Into::into)
+            .and_then(|value| u64::try_from(value).context("negative credential generation"))
+    }
+
+    pub fn release_credential_profile(&self, profile_id: &str, lock_owner: &str) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE credential_profile SET lock_owner=NULL, updated_at_ms=?3
+              WHERE profile_id=?1 AND lock_owner=?2",
+            params![
+                profile_id,
+                lock_owner,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            bail!("credential profile lock release lost its CAS");
+        }
+        Ok(())
+    }
+
+    pub fn begin_credential_enrollment(
+        &self,
+        profile_id: &str,
+        lock_owner: &str,
+        login_id: &str,
+        expires_at_ms: i64,
+    ) -> Result<u64> {
+        validate_bounded_runtime_text("credential login id", login_id, 256)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        if expires_at_ms <= now {
+            bail!("credential enrollment expiry must be in the future");
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let epoch: i64 = tx
+            .query_row(
+                "SELECT login_epoch FROM credential_profile
+              WHERE profile_id=?1 AND lock_owner=?2 AND state='unauthenticated'",
+                params![profile_id, lock_owner],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("credential profile cannot begin enrollment"))?;
+        let next = epoch
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("credential login epoch overflow"))?;
+        tx.execute(
+            "UPDATE credential_profile SET state='enrolling', active_login_id=?3,
+                    login_epoch=?4, login_expires_at_ms=?5, sanitized_account_json=NULL,
+                    updated_at_ms=?6
+              WHERE profile_id=?1 AND lock_owner=?2 AND login_epoch=?7",
+            params![
+                profile_id,
+                lock_owner,
+                login_id,
+                next,
+                expires_at_ms,
+                now,
+                epoch
+            ],
+        )?;
+        tx.commit()?;
+        u64::try_from(next).context("negative credential login epoch")
+    }
+
+    pub fn complete_credential_enrollment(
+        &self,
+        profile_id: &str,
+        lock_owner: &str,
+        login_id: &str,
+        login_epoch: u64,
+        sanitized_account: &serde_json::Value,
+    ) -> Result<u64> {
+        let account_json = serde_json::to_string(sanitized_account)?;
+        validate_bounded_runtime_text("sanitized credential account", &account_json, 16 * 1024)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let login_epoch = i64::try_from(login_epoch).context("login epoch exceeds SQLite range")?;
+        let changed = self.conn.execute(
+            "UPDATE credential_profile
+                SET state='active', active_login_id=NULL, login_expires_at_ms=NULL,
+                    sanitized_account_json=?5, credential_generation=credential_generation+1,
+                    updated_at_ms=?6
+              WHERE profile_id=?1 AND lock_owner=?2 AND active_login_id=?3
+                AND login_epoch=?4 AND state='enrolling' AND login_expires_at_ms>=?6",
+            params![
+                profile_id,
+                lock_owner,
+                login_id,
+                login_epoch,
+                account_json,
+                now
+            ],
+        )?;
+        if changed != 1 {
+            bail!("credential enrollment completion lost its ceremony CAS");
+        }
+        self.conn
+            .query_row(
+                "SELECT credential_generation FROM credential_profile WHERE profile_id=?1",
+                [profile_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(Into::into)
+            .and_then(|value| u64::try_from(value).context("negative credential generation"))
+    }
+
+    pub fn observe_session_credential_enrollment(
+        &self,
+        session_id: &str,
+        worker_instance_id: &str,
+        worker_boot_epoch: u64,
+        sanitized_account: &serde_json::Value,
+    ) -> Result<u64> {
+        let account_json = serde_json::to_string(sanitized_account)?;
+        validate_bounded_runtime_text("sanitized credential account", &account_json, 16 * 1024)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let profile: (String, String, i64) = tx.query_row(
+            "SELECT credential_profile_id, active_login_id, login_epoch
+               FROM dedicated_session JOIN credential_profile
+                 ON profile_id=credential_profile_id
+              WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                AND credential_profile.lock_owner=?2
+                AND credential_profile.state='enrolling'
+                AND credential_profile.login_expires_at_ms>=?4",
+            params![
+                session_id,
+                worker_instance_id,
+                i64::try_from(worker_boot_epoch)?,
+                now
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let profile_changed = tx.execute(
+            "UPDATE credential_profile
+                SET state='confirming', sanitized_account_json=?4, updated_at_ms=?5
+              WHERE profile_id=?1 AND lock_owner=?2 AND active_login_id=?3
+                AND state='enrolling'",
+            params![profile.0, worker_instance_id, profile.1, account_json, now],
+        )?;
+        if profile_changed != 1 {
+            bail!("session credential observation lost its profile/session CAS");
+        }
+        tx.commit()?;
+        u64::try_from(profile.2).context("negative credential login epoch")
+    }
+
+    pub fn confirm_credential_enrollment(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        login_epoch: u64,
+        expected_account_digest: &str,
+    ) -> Result<u64> {
+        if !lillux::valid_hash(expected_account_digest) {
+            bail!("credential confirmation account digest is not canonical");
+        }
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let account_json: String = tx
+            .query_row(
+                "SELECT sanitized_account_json FROM credential_profile
+                  WHERE profile_id=?1 AND owner_principal=?2 AND login_epoch=?3
+                    AND state='confirming' AND login_expires_at_ms>=?4
+                    AND lock_owner IS NULL",
+                params![
+                    profile_id,
+                    owner_principal,
+                    i64::try_from(login_epoch)?,
+                    now
+                ],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("credential confirmation ceremony is absent or expired"))?;
+        let account: serde_json::Value = serde_json::from_str(&account_json)?;
+        if ryeos_state::objects::canonical_value_digest(&account)? != expected_account_digest {
+            bail!("credential confirmation account digest changed");
+        }
+        let changed = tx.execute(
+            "UPDATE credential_profile
+                SET state='active', active_login_id=NULL, login_expires_at_ms=NULL,
+                    credential_generation=credential_generation+1, updated_at_ms=?4
+              WHERE profile_id=?1 AND owner_principal=?2 AND login_epoch=?3
+                AND state='confirming'",
+            params![
+                profile_id,
+                owner_principal,
+                i64::try_from(login_epoch)?,
+                now
+            ],
+        )?;
+        if changed != 1 {
+            bail!("credential confirmation lost its ceremony CAS");
+        }
+        let generation: i64 = tx.query_row(
+            "SELECT credential_generation FROM credential_profile WHERE profile_id=?1",
+            [profile_id],
+            |row| row.get(0),
+        )?;
+        tx.commit()?;
+        u64::try_from(generation).context("negative credential generation")
+    }
+
+    pub fn cancel_credential_enrollment(
+        &self,
+        profile_id: &str,
+        lock_owner: &str,
+        login_id: &str,
+        login_epoch: u64,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE credential_profile SET state='unauthenticated', active_login_id=NULL,
+                    login_expires_at_ms=NULL, updated_at_ms=?5
+              WHERE profile_id=?1 AND lock_owner=?2 AND active_login_id=?3
+                AND login_epoch=?4 AND state='enrolling'",
+            params![
+                profile_id,
+                lock_owner,
+                login_id,
+                i64::try_from(login_epoch).context("login epoch exceeds SQLite range")?,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            bail!("credential enrollment cancellation lost its ceremony CAS");
+        }
+        Ok(())
+    }
+
+    pub fn revoke_credential_profile(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        expected_generation: u64,
+    ) -> Result<u64> {
+        let expected = i64::try_from(expected_generation)
+            .context("credential generation exceeds SQLite range")?;
+        let changed = self.conn.execute(
+            "UPDATE credential_profile
+                SET state='revoking', credential_generation=credential_generation+1,
+                    active_login_id=NULL, login_expires_at_ms=NULL,
+                    sanitized_account_json=NULL, updated_at_ms=?4
+              WHERE profile_id=?1 AND owner_principal=?2 AND credential_generation=?3
+                AND state NOT IN ('revoking','revoked','deleting')",
+            params![
+                profile_id,
+                owner_principal,
+                expected,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            bail!("credential revocation lost its owner/generation CAS");
+        }
+        Ok(expected_generation + 1)
+    }
+
+    pub fn finish_credential_profile_revocation(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        revoking_generation: u64,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE credential_profile
+                SET state='revoked', lock_owner=NULL, updated_at_ms=?4
+              WHERE profile_id=?1 AND owner_principal=?2 AND credential_generation=?3
+                AND state='revoking'",
+            params![
+                profile_id,
+                owner_principal,
+                i64::try_from(revoking_generation)?,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            bail!("credential revocation finalization lost its generation CAS");
+        }
+        Ok(())
+    }
+
+    pub fn begin_credential_profile_deletion(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        expected_generation: u64,
+    ) -> Result<u64> {
+        let expected = i64::try_from(expected_generation)
+            .context("credential generation exceeds SQLite range")?;
+        let tx = self.conn.unchecked_transaction()?;
+        let live_sessions: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM dedicated_session
+              WHERE credential_profile_id=?1 AND state!='terminal'",
+            [profile_id],
+            |row| row.get(0),
+        )?;
+        if live_sessions != 0 {
+            bail!("credential profile still owns nonterminal sessions");
+        }
+        let changed = tx.execute(
+            "UPDATE credential_profile
+                SET state='deleting', credential_generation=credential_generation+1,
+                    active_login_id=NULL, login_expires_at_ms=NULL,
+                    sanitized_account_json=NULL, lock_owner=NULL, updated_at_ms=?4
+              WHERE profile_id=?1 AND owner_principal=?2 AND credential_generation=?3
+                AND state IN ('unauthenticated','revoked')",
+            params![
+                profile_id,
+                owner_principal,
+                expected,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            bail!("credential profile deletion lost its owner/generation CAS");
+        }
+        tx.commit()?;
+        Ok(expected_generation + 1)
+    }
+
+    pub fn finish_credential_profile_deletion(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        deleting_generation: u64,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "DELETE FROM credential_profile
+              WHERE profile_id=?1 AND owner_principal=?2 AND credential_generation=?3
+                AND state='deleting'",
+            params![
+                profile_id,
+                owner_principal,
+                i64::try_from(deleting_generation)
+                    .context("credential generation exceeds SQLite range")?
+            ],
+        )?;
+        if changed != 1 {
+            bail!("credential profile deletion finalization lost its generation CAS");
+        }
+        Ok(())
+    }
+
+    pub fn reserve_dedicated_session_command(
+        &self,
+        command: NewDedicatedSessionCommand<'_>,
+    ) -> Result<DedicatedSessionCommandRecord> {
+        for (label, value, max) in [
+            ("command session id", command.session_id, 256),
+            ("command idempotency key", command.idempotency_key, 256),
+            ("command kind", command.command_kind, 128),
+            ("command request digest", command.request_digest, 128),
+        ] {
+            validate_bounded_runtime_text(label, value, max)?;
+        }
+        let payload_json = serde_json::to_string(command.payload)?;
+        validate_bounded_runtime_text("command payload", &payload_json, 256 * 1024)?;
+        let epoch = i64::try_from(command.worker_boot_epoch)
+            .context("worker boot epoch exceeds SQLite range")?;
+        let tx = self.conn.unchecked_transaction()?;
+        if let Some(existing) =
+            read_dedicated_command_by_key(&tx, command.session_id, command.idempotency_key)?
+        {
+            if existing.worker_boot_epoch != command.worker_boot_epoch
+                || existing.command_kind != command.command_kind
+                || existing.request_digest != command.request_digest
+                || existing.payload != *command.payload
+            {
+                bail!("command idempotency key was reused for different authority");
+            }
+            tx.commit()?;
+            return Ok(existing);
+        }
+        let next: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(command_sequence), 0) + 1 FROM dedicated_session_command WHERE session_id=?1",
+            [command.session_id], |row| row.get(0),
+        )?;
+        if next > MAX_DEDICATED_SESSION_COMMANDS {
+            bail!("dedicated session command ledger reached its count ceiling");
+        }
+        let spool_bytes: i64 = tx.query_row(
+            "SELECT COALESCE(SUM(length(payload_json) + COALESCE(length(result_json), 0)), 0)
+               FROM dedicated_session_command WHERE session_id=?1",
+            [command.session_id],
+            |row| row.get(0),
+        )?;
+        let reserved_bytes = i64::try_from(payload_json.len())?
+            .checked_add(256 * 1024)
+            .context("dedicated command reservation byte overflow")?;
+        if spool_bytes
+            .checked_add(reserved_bytes)
+            .is_none_or(|total| total > MAX_DEDICATED_SESSION_COMMAND_SPOOL_BYTES)
+        {
+            bail!("dedicated session command/output spool reached its byte ceiling");
+        }
+        let now = lillux::time::timestamp_millis() as i64;
+        let active_commands: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM dedicated_session_command
+              WHERE session_id=?1 AND state IN ('committed','dispatched')",
+            [command.session_id],
+            |row| row.get(0),
+        )?;
+        if active_commands != 0 {
+            bail!("dedicated session already has an unsettled command");
+        }
+        let session_changed = tx.execute(
+            "UPDATE dedicated_session SET send_boundary='committed', updated_at_ms=?3
+              WHERE session_id=?1 AND worker_boot_epoch=?2
+                AND state IN ('idle','turn_running','awaiting_approval','recovering')
+                AND send_boundary IN ('none','settled')
+                AND EXISTS(SELECT 1 FROM credential_profile
+                    WHERE profile_id=dedicated_session.credential_profile_id
+                      AND credential_generation=dedicated_session.credential_generation
+                      AND lock_owner=dedicated_session.worker_instance_id
+                      AND state IN ('unauthenticated','enrolling','confirming','active'))",
+            params![command.session_id, epoch, now],
+        )?;
+        if session_changed != 1 {
+            bail!("command admission lost its idle worker-epoch CAS");
+        }
+        tx.execute(
+            "INSERT INTO dedicated_session_command (
+                session_id, command_sequence, idempotency_key, worker_boot_epoch,
+                command_kind, request_digest, payload_json, state, result_json,
+                created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'committed', NULL, ?8, ?8)",
+            params![
+                command.session_id,
+                next,
+                command.idempotency_key,
+                epoch,
+                command.command_kind,
+                command.request_digest,
+                payload_json,
+                now
+            ],
+        )?;
+        let record =
+            read_dedicated_command_by_key(&tx, command.session_id, command.idempotency_key)?
+                .ok_or_else(|| anyhow!("committed command disappeared"))?;
+        tx.commit()?;
+        Ok(record)
+    }
+
+    pub fn mark_dedicated_command_contacted(
+        &self,
+        session_id: &str,
+        command_sequence: u64,
+        worker_boot_epoch: u64,
+    ) -> Result<()> {
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE dedicated_session_command SET state='dispatched', updated_at_ms=?4
+              WHERE session_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3 AND state='committed'",
+            params![session_id, i64::try_from(command_sequence)?, i64::try_from(worker_boot_epoch)?, now],
+        )?;
+        let session_changed = tx.execute(
+            "UPDATE dedicated_session SET send_boundary='contacted', updated_at_ms=?3
+              WHERE session_id=?1 AND worker_boot_epoch=?2
+                AND state IN ('idle','turn_running','awaiting_approval','recovering')
+                AND send_boundary='committed'
+                AND EXISTS(SELECT 1 FROM credential_profile
+                    WHERE profile_id=dedicated_session.credential_profile_id
+                      AND credential_generation=dedicated_session.credential_generation
+                      AND lock_owner=dedicated_session.worker_instance_id
+                      AND state IN ('unauthenticated','enrolling','confirming','active'))",
+            params![session_id, i64::try_from(worker_boot_epoch)?, now],
+        )?;
+        if changed != 1 || session_changed != 1 {
+            bail!("command contact lost its command/session CAS");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn settle_dedicated_command(
+        &self,
+        session_id: &str,
+        command_sequence: u64,
+        worker_boot_epoch: u64,
+        succeeded: bool,
+        result: &serde_json::Value,
+    ) -> Result<()> {
+        let result_json = serde_json::to_string(result)?;
+        validate_bounded_runtime_text("command result", &result_json, 256 * 1024)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let state = if succeeded { "completed" } else { "failed" };
+        let changed = tx.execute(
+            "UPDATE dedicated_session_command SET state=?4, result_json=?5, updated_at_ms=?6
+              WHERE session_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3 AND state='dispatched'",
+            params![session_id, i64::try_from(command_sequence)?, i64::try_from(worker_boot_epoch)?, state, result_json, now],
+        )?;
+        let session_changed = tx.execute(
+            "UPDATE dedicated_session SET send_boundary='settled', updated_at_ms=?3
+              WHERE session_id=?1 AND worker_boot_epoch=?2
+                AND state IN ('idle','turn_running','awaiting_approval')
+                AND send_boundary='contacted'",
+            params![session_id, i64::try_from(worker_boot_epoch)?, now],
+        )?;
+        if changed != 1 || session_changed != 1 {
+            bail!("command settlement lost its command/session CAS");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn mark_dedicated_command_outcome_unknown(
+        &self,
+        session_id: &str,
+        command_sequence: u64,
+        worker_boot_epoch: u64,
+    ) -> Result<()> {
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE dedicated_session_command SET state='outcome_unknown', updated_at_ms=?4
+              WHERE session_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3 AND state='dispatched'",
+            params![session_id, i64::try_from(command_sequence)?, i64::try_from(worker_boot_epoch)?, now],
+        )?;
+        let session_changed = tx.execute(
+            "UPDATE dedicated_session SET state='outcome_unknown', send_boundary='outcome_unknown', updated_at_ms=?3
+              WHERE session_id=?1 AND worker_boot_epoch=?2 AND send_boundary='contacted'",
+            params![session_id, i64::try_from(worker_boot_epoch)?, now],
+        )?;
+        if changed != 1 || session_changed != 1 {
+            bail!("ambiguous command reconciliation lost its CAS");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Reserve the possible-contact boundary before appending a worker batch
+    /// to the authoritative root thread event chain. A contacting row is never
+    /// automatically retried: after a crash RyeOS cannot prove whether the CAS
+    /// append happened.
+    pub fn reserve_dedicated_observation_batch(
+        &self,
+        session_id: &str,
+        worker_boot_epoch: u64,
+        first_sequence: u64,
+        through_sequence: u64,
+        previous_digest: Option<&str>,
+        batch_digest: &str,
+    ) -> Result<ObservationBatchReservation> {
+        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+        validate_bounded_runtime_text("observation batch digest", batch_digest, 128)?;
+        if let Some(previous) = previous_digest {
+            validate_bounded_runtime_text("previous observation digest", previous, 128)?;
+        }
+        if worker_boot_epoch == 0
+            || first_sequence == 0
+            || through_sequence < first_sequence
+            || through_sequence - first_sequence >= 512
+        {
+            bail!("observation batch sequence range is invalid or unbounded");
+        }
+        let epoch = i64::try_from(worker_boot_epoch)?;
+        let first = i64::try_from(first_sequence)?;
+        let through = i64::try_from(through_sequence)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let attached: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM dedicated_session
+              WHERE session_id=?1 AND worker_boot_epoch=?2 AND state!='terminal')",
+            params![session_id, epoch],
+            |row| row.get(0),
+        )?;
+        if !attached {
+            bail!("observation batch lost its live worker epoch");
+        }
+        let existing = tx
+            .query_row(
+                "SELECT through_sequence, previous_digest, batch_digest, state
+                   FROM dedicated_session_observation_batch
+                  WHERE session_id=?1 AND worker_boot_epoch=?2 AND first_sequence=?3",
+                params![session_id, epoch, first],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            if existing.0 != through
+                || existing.1.as_deref() != previous_digest
+                || existing.2 != batch_digest
+            {
+                bail!("observation batch sequence identity was reused with different content");
+            }
+            return match existing.3.as_str() {
+                "settled" => Ok(ObservationBatchReservation::AlreadySettled),
+                "append_contacting" | "append_unknown" => {
+                    Ok(ObservationBatchReservation::RebuildProjection)
+                }
+                _ => bail!("observation batch has an invalid durable state"),
+            };
+        }
+        let predecessor = tx
+            .query_row(
+                "SELECT through_sequence, batch_digest, state
+                   FROM dedicated_session_observation_batch
+                  WHERE session_id=?1 AND worker_boot_epoch=?2
+                  ORDER BY through_sequence DESC LIMIT 1",
+                params![session_id, epoch],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        match predecessor {
+            None if first_sequence == 1 && previous_digest.is_none() => {}
+            Some((prior_through, prior_digest, prior_state))
+                if prior_state == "settled"
+                    && prior_through.checked_add(1) == Some(first)
+                    && previous_digest == Some(prior_digest.as_str()) => {}
+            Some((_, _, prior_state)) if prior_state != "settled" => {
+                bail!("prior observation append outcome is unknown")
+            }
+            _ => bail!("observation batch has a gap, reordering, or broken digest chain"),
+        }
+        let now = lillux::time::timestamp_millis() as i64;
+        tx.execute(
+            "INSERT INTO dedicated_session_observation_batch(
+                session_id, worker_boot_epoch, first_sequence, through_sequence,
+                previous_digest, batch_digest, state, created_at_ms, settled_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'append_contacting', ?7, NULL)",
+            params![
+                session_id,
+                epoch,
+                first,
+                through,
+                previous_digest,
+                batch_digest,
+                now
+            ],
+        )?;
+        tx.commit()?;
+        Ok(ObservationBatchReservation::ContactAppend)
+    }
+
+    pub fn settle_dedicated_observation_batch(
+        &self,
+        session_id: &str,
+        worker_boot_epoch: u64,
+        first_sequence: u64,
+        batch_digest: &str,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session_observation_batch
+                SET state='settled', settled_at_ms=?5
+              WHERE session_id=?1 AND worker_boot_epoch=?2 AND first_sequence=?3
+                AND batch_digest=?4 AND state IN ('append_contacting','append_unknown')",
+            params![
+                session_id,
+                i64::try_from(worker_boot_epoch)?,
+                i64::try_from(first_sequence)?,
+                batch_digest,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            bail!("observation batch lost its append-contacting reservation");
+        }
+        Ok(())
+    }
+
+    pub fn mark_dedicated_observation_batch_unknown(
+        &self,
+        session_id: &str,
+        worker_boot_epoch: u64,
+        first_sequence: u64,
+        batch_digest: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE dedicated_session_observation_batch SET state='append_unknown'
+              WHERE session_id=?1 AND worker_boot_epoch=?2 AND first_sequence=?3
+                AND batch_digest=?4 AND state='append_contacting'",
+            params![
+                session_id,
+                i64::try_from(worker_boot_epoch)?,
+                i64::try_from(first_sequence)?,
+                batch_digest
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn create_dedicated_session_approval(
+        &self,
+        approval: NewDedicatedSessionApproval<'_>,
+    ) -> Result<()> {
+        let authority_json = serde_json::to_string(approval.requested_authority)?;
+        validate_bounded_runtime_text("approval authority", &authority_json, 64 * 1024)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        if approval.expires_at_ms <= now {
+            bail!("approval expiry must be in the future");
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let existing: Option<(String, String, String, i64)> = tx
+            .query_row(
+                "SELECT request_digest, operation_class, requested_authority_json, worker_boot_epoch
+                   FROM dedicated_session_approval WHERE session_id=?1 AND approval_id=?2",
+                params![approval.session_id, approval.approval_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            if existing.0 == approval.request_digest
+                && existing.1 == approval.operation_class
+                && existing.2 == authority_json
+                && existing.3 == i64::try_from(approval.worker_boot_epoch)?
+            {
+                return Ok(());
+            }
+            bail!("approval identity was reused with different authority");
+        }
+        let session_live: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM dedicated_session
+              WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                AND state='turn_running')",
+            params![
+                approval.session_id,
+                approval.worker_instance_id,
+                i64::try_from(approval.worker_boot_epoch)?,
+            ],
+            |row| row.get(0),
+        )?;
+        if !session_live {
+            bail!("approval admission lost its active worker/session CAS");
+        }
+        tx.execute(
+            "INSERT INTO dedicated_session_approval (
+                session_id, approval_id, worker_instance_id, worker_boot_epoch,
+                request_digest, operation_class, requested_authority_json, state,
+                decision_principal, decision_json, decision_digest, reservation_token,
+                expires_at_ms, created_at_ms, resolved_at_ms,
+                delivery_contacted_at_ms, delivery_settled_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending',
+                       NULL, NULL, NULL, NULL, ?8, ?9, NULL, NULL, NULL)",
+            params![
+                approval.session_id,
+                approval.approval_id,
+                approval.worker_instance_id,
+                i64::try_from(approval.worker_boot_epoch)?,
+                approval.request_digest,
+                approval.operation_class,
+                authority_json,
+                approval.expires_at_ms,
+                now
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn pending_dedicated_session_approvals(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<DedicatedSessionApprovalRecord>> {
+        validate_bounded_runtime_text("approval session id", session_id, 256)?;
+        let mut statement = self.conn.prepare(
+            "SELECT session_id, approval_id, worker_instance_id, worker_boot_epoch,
+                    request_digest, operation_class, requested_authority_json, state,
+                    decision_principal, decision_json, decision_digest, reservation_token,
+                    expires_at_ms, created_at_ms, resolved_at_ms,
+                    delivery_contacted_at_ms, delivery_settled_at_ms
+               FROM dedicated_session_approval
+              WHERE session_id=?1
+                AND state IN ('pending','decision_reserved','delivery_contacting','delivery_unknown')
+              ORDER BY created_at_ms, approval_id",
+        )?;
+        let rows = statement.query_map([session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, i64>(12)?,
+                row.get::<_, i64>(13)?,
+                row.get::<_, Option<i64>>(14)?,
+                row.get::<_, Option<i64>>(15)?,
+                row.get::<_, Option<i64>>(16)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let row = row?;
+            Ok(DedicatedSessionApprovalRecord {
+                session_id: row.0,
+                approval_id: row.1,
+                worker_instance_id: row.2,
+                worker_boot_epoch: u64::try_from(row.3)?,
+                request_digest: row.4,
+                operation_class: row.5,
+                requested_authority: serde_json::from_str(&row.6)?,
+                state: row.7,
+                decision_principal: row.8,
+                decision: row
+                    .9
+                    .map(|value| serde_json::from_str(&value))
+                    .transpose()?,
+                decision_digest: row.10,
+                reservation_token: row.11,
+                expires_at_ms: row.12,
+                created_at_ms: row.13,
+                resolved_at_ms: row.14,
+                delivery_contacted_at_ms: row.15,
+                delivery_settled_at_ms: row.16,
+            })
+        })
+        .collect()
+    }
+
+    pub fn reconcile_dedicated_approval_delivery_unknown(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session_approval
+                SET state='delivery_unknown', resolved_at_ms=?4
+              WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                AND state IN ('decision_reserved','delivery_contacting')",
+            params![
+                session_id,
+                approval_id,
+                i64::try_from(worker_boot_epoch)?,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            let retry: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session_approval
+                  WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                    AND state='delivery_unknown')",
+                params![session_id, approval_id, i64::try_from(worker_boot_epoch)?],
+                |row| row.get(0),
+            )?;
+            if !retry {
+                bail!("approval outbox reconciliation lost its identity/state CAS");
+            }
+        }
+        Ok(())
+    }
+
+    /// Atomically closes command and approval admission before retirement.
+    /// A retained draining reservation is safe to retry after a crash.
+    pub fn reserve_dedicated_session_completion(
+        &self,
+        session_id: &str,
+        worker_boot_epoch: u64,
+    ) -> Result<()> {
+        let epoch = i64::try_from(worker_boot_epoch)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE dedicated_session SET state='draining', updated_at_ms=?3
+              WHERE session_id=?1 AND worker_boot_epoch=?2 AND state='idle'
+                AND current_turn_id IS NULL
+                AND NOT EXISTS(SELECT 1 FROM dedicated_session_command
+                    WHERE session_id=?1 AND worker_boot_epoch=?2
+                      AND state IN ('committed','dispatched','outcome_unknown'))
+                AND NOT EXISTS(SELECT 1 FROM dedicated_session_approval
+                    WHERE session_id=?1 AND worker_boot_epoch=?2
+                      AND state IN ('pending','decision_reserved','delivery_contacting','delivery_unknown'))
+                AND NOT EXISTS(SELECT 1 FROM dedicated_session_observation_batch
+                    WHERE session_id=?1 AND worker_boot_epoch=?2 AND state!='settled')",
+            params![session_id, epoch, now],
+        )?;
+        if changed == 0 {
+            let retry: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session
+                  WHERE session_id=?1 AND worker_boot_epoch=?2 AND state='draining')",
+                params![session_id, epoch],
+                |row| row.get(0),
+            )?;
+            if !retry {
+                bail!("dedicated completion requires an idle, quiescent worker");
+            }
+        }
+        let worker_changed = tx.execute(
+            "UPDATE worker_process SET state='draining', cleanup_state='draining', updated_at_ms=?3
+              WHERE session_id=?1 AND boot_epoch=?2 AND state='live' AND cleanup_state='owned'",
+            params![session_id, epoch, now],
+        )?;
+        if worker_changed == 0 {
+            let retry: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM worker_process
+                  WHERE session_id=?1 AND boot_epoch=?2 AND state='draining'
+                    AND cleanup_state='draining')",
+                params![session_id, epoch],
+                |row| row.get(0),
+            )?;
+            if !retry {
+                bail!("dedicated completion lost its live worker reservation");
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn reserve_dedicated_session_approval_decision(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+        request_digest: &str,
+        decision_principal: &str,
+        decision: &serde_json::Value,
+        decision_digest: &str,
+        reservation_token: &str,
+    ) -> Result<()> {
+        let decision_json = lillux::canonical_json(decision)?;
+        validate_bounded_runtime_text("approval decision", &decision_json, 64 * 1024)?;
+        validate_bounded_runtime_text("approval decision digest", decision_digest, 128)?;
+        validate_bounded_runtime_text("approval reservation token", reservation_token, 256)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session_approval
+                SET state='decision_reserved', decision_principal=?5,
+                    decision_json=?6, decision_digest=?7, reservation_token=?8,
+                    resolved_at_ms=?9
+              WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                AND request_digest=?4 AND state='pending' AND expires_at_ms>=?9",
+            params![
+                session_id,
+                approval_id,
+                i64::try_from(worker_boot_epoch)?,
+                request_digest,
+                decision_principal,
+                decision_json,
+                decision_digest,
+                reservation_token,
+                now,
+            ],
+        )?;
+        if changed != 1 {
+            bail!("approval resolution lost its digest/epoch/single-use CAS");
+        }
+        Ok(())
+    }
+
+    pub fn mark_dedicated_approval_delivery_contacting(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+        reservation_token: &str,
+        decision_digest: &str,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session_approval
+                SET state='delivery_contacting', delivery_contacted_at_ms=?6
+              WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                AND reservation_token=?4 AND decision_digest=?5
+                AND state='decision_reserved'
+                AND EXISTS(SELECT 1 FROM dedicated_session
+                  JOIN credential_profile ON profile_id=credential_profile_id
+                  WHERE dedicated_session.session_id=?1
+                    AND dedicated_session.worker_boot_epoch=?3
+                    AND dedicated_session.worker_instance_id=dedicated_session_approval.worker_instance_id
+                    AND dedicated_session.state IN ('turn_running','awaiting_approval')
+                    AND credential_profile.state='active'
+                    AND credential_profile.credential_generation=dedicated_session.credential_generation
+                    AND credential_profile.lock_owner=dedicated_session.worker_instance_id)",
+            params![
+                session_id,
+                approval_id,
+                i64::try_from(worker_boot_epoch)?,
+                reservation_token,
+                decision_digest,
+                lillux::time::timestamp_millis() as i64,
+            ],
+        )?;
+        if changed != 1 {
+            bail!("approval delivery lost its reserved pre-contact CAS");
+        }
+        Ok(())
+    }
+
+    pub fn settle_dedicated_approval_delivery(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+        reservation_token: &str,
+        decision_digest: &str,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session_approval
+                SET state='delivery_settled', delivery_settled_at_ms=?6
+              WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                AND reservation_token=?4 AND decision_digest=?5
+                AND state='delivery_contacting'",
+            params![
+                session_id,
+                approval_id,
+                i64::try_from(worker_boot_epoch)?,
+                reservation_token,
+                decision_digest,
+                lillux::time::timestamp_millis() as i64,
+            ],
+        )?;
+        if changed != 1 {
+            bail!("approval delivery lost its contacted CAS");
+        }
+        Ok(())
+    }
+
+    pub fn mark_dedicated_approval_delivery_unknown(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+        reservation_token: &str,
+        decision_digest: &str,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session_approval SET state='delivery_unknown'
+              WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                AND reservation_token=?4 AND decision_digest=?5
+                AND state='delivery_contacting'",
+            params![
+                session_id,
+                approval_id,
+                i64::try_from(worker_boot_epoch)?,
+                reservation_token,
+                decision_digest,
+            ],
+        )?;
+        if changed != 1 {
+            bail!("approval unknown settlement lost its contacted CAS");
+        }
+        Ok(())
+    }
+
+    pub fn expire_dedicated_session_approval(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("approval session id", session_id, 256)?;
+        validate_bounded_runtime_text("approval id", approval_id, 256)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let approval_changed = self.conn.execute(
+            "UPDATE dedicated_session_approval
+                SET state='expired', resolved_at_ms=?4
+              WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                AND state='pending' AND expires_at_ms<=?4",
+            params![
+                session_id,
+                approval_id,
+                i64::try_from(worker_boot_epoch)?,
+                now
+            ],
+        )?;
+        if approval_changed != 1 {
+            let expired: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session_approval
+                  WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                    AND state='expired')",
+                params![session_id, approval_id, i64::try_from(worker_boot_epoch)?],
+                |row| row.get(0),
+            )?;
+            if !expired {
+                bail!("approval expiry lost its id/epoch CAS");
+            }
+        }
+        Ok(())
+    }
+
+    /// Atomically publish the operational owner of one held exclusive process
+    /// and activate its already-constructed workspace. The caller may release
+    /// the held child only after this transaction commits.
+    pub fn attach_worker_process(&self, record: &WorkerProcessRecord) -> Result<()> {
+        validate_worker_process_record(record)?;
+        if record.state != WorkerProcessState::Attached || record.cleanup_state != "owned" {
+            bail!("new worker process must enter as attached and owned");
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let session: Option<(String, String, String, String, String, i64)> = tx
+            .query_row(
+                "SELECT admitted_capsule_hash, workspace_id, root_thread_id, state,
+                        credential_profile_id, credential_generation
+                 FROM dedicated_session WHERE session_id = ?1",
+                [&record.session_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            capsule_hash,
+            workspace_id,
+            root_thread_id,
+            session_state,
+            profile_id,
+            generation,
+        )) = session
+        else {
+            bail!("worker process references an unknown dedicated session");
+        };
+        if capsule_hash != record.session_capsule_hash || session_state != "admitted" {
+            bail!("worker process contradicts admitted session authority or state");
+        }
+        let credential_fenced: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM credential_profile
+              WHERE profile_id=?1 AND credential_generation=?2 AND lock_owner=?3
+                AND state IN ('unauthenticated','enrolling','confirming','active'))",
+            params![profile_id, generation, record.worker_instance_id],
+            |row| row.get(0),
+        )?;
+        if !credential_fenced {
+            bail!("dedicated worker attachment lost its credential generation/lock fence");
+        }
+        let workspace_state: Option<String> = tx
+            .query_row(
+                "SELECT state FROM execution_workspace
+                 WHERE workspace_id = ?1 AND thread_id = ?2",
+                params![workspace_id, root_thread_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if workspace_state.as_deref() != Some("ready") {
+            bail!("dedicated worker workspace is not ready and owned by its session");
+        }
+        let process_identity = serde_json::to_string(&record.process_identity)
+            .context("serialize worker process identity")?;
+        tx.execute(
+            "INSERT INTO worker_process (
+                worker_instance_id, boot_identity_hash, session_capsule_hash,
+                boot_epoch, lifecycle_generation, process_identity,
+                control_channel_identity, state, daemon_generation_id,
+                session_id, cleanup_state, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                record.worker_instance_id,
+                record.boot_identity_hash,
+                record.session_capsule_hash,
+                i64::try_from(record.boot_epoch)
+                    .context("worker boot epoch exceeds SQLite range")?,
+                i64::try_from(record.lifecycle_generation)
+                    .context("worker lifecycle generation exceeds SQLite range")?,
+                process_identity,
+                record.control_channel_identity,
+                record.state.as_str(),
+                record.daemon_generation_id,
+                record.session_id,
+                record.cleanup_state,
+                record.created_at_ms,
+                record.updated_at_ms,
+            ],
+        )?;
+        let workspace_changed = tx.execute(
+            "UPDATE execution_workspace
+             SET state = 'active', process_identity = ?2, updated_at_ms = ?3
+             WHERE workspace_id = ?1 AND state = 'ready'",
+            params![workspace_id, process_identity, record.updated_at_ms],
+        )?;
+        let session_changed = tx.execute(
+            "UPDATE dedicated_session
+             SET worker_instance_id = ?2, worker_boot_epoch = ?3,
+                 state = 'binding', updated_at_ms = ?4
+             WHERE session_id = ?1 AND state = 'admitted' AND worker_instance_id IS NULL",
+            params![
+                record.session_id,
+                record.worker_instance_id,
+                i64::try_from(record.boot_epoch)
+                    .context("worker boot epoch exceeds SQLite range")?,
+                record.updated_at_ms,
+            ],
+        )?;
+        if workspace_changed != 1 || session_changed != 1 {
+            bail!("dedicated worker atomic attachment lost its workspace/session CAS");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn worker_process(&self, worker_instance_id: &str) -> Result<Option<WorkerProcessRecord>> {
+        let raw = self
+            .conn
+            .query_row(
+                "SELECT worker_instance_id, boot_identity_hash, session_capsule_hash,
+                        boot_epoch, lifecycle_generation, process_identity,
+                        control_channel_identity, state, daemon_generation_id,
+                        session_id, cleanup_state, created_at_ms, updated_at_ms
+                 FROM worker_process WHERE worker_instance_id = ?1",
+                [worker_instance_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, String>(10)?,
+                        row.get::<_, i64>(11)?,
+                        row.get::<_, i64>(12)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            instance,
+            boot_hash,
+            capsule,
+            boot_epoch,
+            lifecycle_generation,
+            process_identity,
+            control_channel,
+            state,
+            daemon_generation,
+            session_id,
+            cleanup_state,
+            created_at_ms,
+            updated_at_ms,
+        )) = raw
+        else {
+            return Ok(None);
+        };
+        let record = WorkerProcessRecord {
+            worker_instance_id: instance,
+            boot_identity_hash: boot_hash,
+            session_capsule_hash: capsule,
+            boot_epoch: u64::try_from(boot_epoch).context("negative worker boot epoch")?,
+            lifecycle_generation: u64::try_from(lifecycle_generation)
+                .context("negative worker lifecycle generation")?,
+            process_identity: serde_json::from_str(&process_identity)
+                .context("decode worker process identity")?,
+            control_channel_identity: control_channel,
+            state: WorkerProcessState::parse(&state)?,
+            daemon_generation_id: daemon_generation,
+            session_id,
+            cleanup_state,
+            created_at_ms,
+            updated_at_ms,
+        };
+        validate_worker_process_record(&record)?;
+        Ok(Some(record))
+    }
+
+    pub fn live_worker_processes(&self) -> Result<Vec<WorkerProcessRecord>> {
+        let mut statement = self.conn.prepare(
+            "SELECT worker_instance_id FROM worker_process
+              WHERE state IN ('starting','attached','live','draining')
+              ORDER BY created_at_ms, worker_instance_id",
+        )?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ids.into_iter()
+            .map(|id| {
+                self.worker_process(&id)?
+                    .ok_or_else(|| anyhow!("listed worker process disappeared"))
+            })
+            .collect()
+    }
+
+    /// Fence a previous daemon generation before any replacement worker can
+    /// be admitted. Contacted commands become permanently ambiguous and
+    /// pending approvals become stale; neither may be replayed into a new
+    /// process epoch.
+    pub fn fence_abandoned_worker_process(
+        &self,
+        worker_instance_id: &str,
+        session_id: &str,
+        boot_epoch: u64,
+        cleanup_state: &str,
+    ) -> Result<()> {
+        if !matches!(cleanup_state, "reaped" | "unproved") {
+            bail!("abandoned worker cleanup state must be reaped or unproved");
+        }
+        let epoch = i64::try_from(boot_epoch).context("worker boot epoch exceeds SQLite range")?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE worker_process SET state='dead', cleanup_state=?4, updated_at_ms=?5
+              WHERE worker_instance_id=?1 AND session_id=?2 AND boot_epoch=?3
+                AND state IN ('starting','attached','live','draining')",
+            params![worker_instance_id, session_id, epoch, cleanup_state, now],
+        )?;
+        if changed != 1 {
+            bail!("abandoned worker fence lost its process-identity CAS");
+        }
+        tx.execute(
+            "UPDATE dedicated_session_approval SET state='delivery_unknown', resolved_at_ms=?3
+              WHERE session_id=?1 AND worker_boot_epoch=?2 AND state='delivery_contacting'",
+            params![session_id, epoch, now],
+        )?;
+        tx.execute(
+            "UPDATE dedicated_session_approval SET state='stale_epoch', resolved_at_ms=?3
+              WHERE session_id=?1 AND worker_boot_epoch=?2
+                AND state IN ('pending', 'decision_reserved')",
+            params![session_id, epoch, now],
+        )?;
+        let contacted = tx.execute(
+            "UPDATE dedicated_session_command SET state='outcome_unknown', updated_at_ms=?3
+              WHERE session_id=?1 AND worker_boot_epoch=?2 AND state='dispatched'",
+            params![session_id, epoch, now],
+        )?;
+        let next_state = if contacted > 0 {
+            "outcome_unknown"
+        } else {
+            "recovering"
+        };
+        let next_boundary = if contacted > 0 {
+            "outcome_unknown"
+        } else {
+            "none"
+        };
+        let session_changed = tx.execute(
+            "UPDATE dedicated_session
+                SET worker_instance_id=NULL, worker_boot_epoch=NULL, state=?4,
+                    send_boundary=?5, current_turn_id=NULL, updated_at_ms=?6
+              WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                AND state NOT IN ('terminal','frozen','publish_ready')",
+            params![
+                session_id,
+                worker_instance_id,
+                epoch,
+                next_state,
+                next_boundary,
+                now
+            ],
+        )?;
+        if session_changed != 1 {
+            bail!("abandoned worker fence lost its session-epoch CAS");
+        }
+        tx.execute(
+            "UPDATE execution_workspace SET state='ready', process_identity=NULL, updated_at_ms=?2
+              WHERE workspace_id=(SELECT workspace_id FROM dedicated_session WHERE session_id=?1)
+                AND state='active'",
+            params![session_id, now],
+        )?;
+        if cleanup_state == "reaped" {
+            tx.execute(
+                "UPDATE credential_profile SET lock_owner=NULL, updated_at_ms=?3
+                  WHERE profile_id=(SELECT credential_profile_id FROM dedicated_session
+                                      WHERE session_id=?1)
+                    AND lock_owner=?2",
+                params![session_id, worker_instance_id, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Publish readiness only after the worker completed its signed boot
+    /// handshake. Both the process and its owning session cross the boundary
+    /// in one transaction, fenced by the boot epoch.
+    pub fn complete_worker_binding(
+        &self,
+        worker_instance_id: &str,
+        session_id: &str,
+        boot_epoch: u64,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("worker instance id", worker_instance_id, 256)?;
+        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+        if boot_epoch == 0 {
+            bail!("worker boot epoch must be positive");
+        }
+        let epoch = i64::try_from(boot_epoch).context("worker boot epoch exceeds SQLite range")?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let worker_changed = tx.execute(
+            "UPDATE worker_process SET state = 'live', updated_at_ms = ?4
+             WHERE worker_instance_id = ?1 AND session_id = ?2 AND boot_epoch = ?3
+               AND state = 'attached' AND cleanup_state = 'owned'
+               AND EXISTS(SELECT 1 FROM dedicated_session
+                 JOIN credential_profile ON credential_profile.profile_id=dedicated_session.credential_profile_id
+                 WHERE dedicated_session.session_id=?2
+                   AND dedicated_session.worker_instance_id=?1
+                   AND dedicated_session.worker_boot_epoch=?3
+                   AND credential_profile.credential_generation=dedicated_session.credential_generation
+                   AND credential_profile.lock_owner=?1
+                   AND credential_profile.state IN ('unauthenticated','enrolling','confirming','active'))",
+            params![worker_instance_id, session_id, epoch, now],
+        )?;
+        let session_changed = tx.execute(
+            "UPDATE dedicated_session
+                SET state = CASE WHEN remote_thread_id IS NULL THEN 'idle' ELSE 'recovering' END,
+                    send_boundary = 'none',
+                    updated_at_ms = ?4
+             WHERE session_id = ?1 AND worker_instance_id = ?2
+               AND worker_boot_epoch = ?3 AND state = 'binding'
+               AND EXISTS(SELECT 1 FROM credential_profile
+                 WHERE profile_id=dedicated_session.credential_profile_id
+                   AND credential_generation=dedicated_session.credential_generation
+                   AND lock_owner=?2
+                   AND state IN ('unauthenticated','enrolling','confirming','active'))",
+            params![session_id, worker_instance_id, epoch, now],
+        )?;
+        if worker_changed != 1 || session_changed != 1 {
+            bail!("worker readiness lost its attached process/session epoch");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Fence and settle an owned worker after exact process-group cleanup.
+    pub fn settle_worker_process(
+        &self,
+        worker_instance_id: &str,
+        session_id: &str,
+        boot_epoch: u64,
+        cleanup_state: &str,
+        terminal_reason: &str,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("worker instance id", worker_instance_id, 256)?;
+        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+        validate_bounded_runtime_text("worker cleanup state", cleanup_state, 32)?;
+        validate_bounded_runtime_text("worker terminal reason", terminal_reason, 2048)?;
+        if !matches!(cleanup_state, "reaped" | "unproved") || boot_epoch == 0 {
+            bail!("worker settlement is not canonical");
+        }
+        let epoch = i64::try_from(boot_epoch).context("worker boot epoch exceeds SQLite range")?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let worker_changed = tx.execute(
+            "UPDATE worker_process SET state = 'dead', cleanup_state = ?4,
+                    updated_at_ms = ?5
+             WHERE worker_instance_id = ?1 AND session_id = ?2 AND boot_epoch = ?3
+               AND state IN ('attached', 'live', 'draining')",
+            params![worker_instance_id, session_id, epoch, cleanup_state, now],
+        )?;
+        let session_changed = tx.execute(
+            "UPDATE dedicated_session SET state = 'recovering', terminal_reason = ?4,
+                    updated_at_ms = ?5
+             WHERE session_id = ?1 AND worker_instance_id = ?2
+               AND worker_boot_epoch = ?3
+               AND state IN ('admitted','binding','idle','turn_running','awaiting_approval',
+                             'recovering','outcome_unknown','draining')",
+            params![session_id, worker_instance_id, epoch, terminal_reason, now],
+        )?;
+        if worker_changed != 1 {
+            let retry: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM worker_process
+                  WHERE worker_instance_id=?1 AND session_id=?2 AND boot_epoch=?3
+                    AND state='dead' AND cleanup_state=?4)",
+                params![worker_instance_id, session_id, epoch, cleanup_state],
+                |row| row.get(0),
+            )?;
+            if !retry {
+                bail!("worker settlement lost its process identity");
+            }
+        }
+        if session_changed != 1 {
+            let retry: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session
+                  WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                    AND state IN ('recovering','freezing','frozen','verifying','publish_ready',
+                                  'publishing','discarding','terminal'))",
+                params![session_id, worker_instance_id, epoch],
+                |row| row.get(0),
+            )?;
+            if !retry {
+                bail!("worker settlement lost its session epoch");
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn terminalize_dedicated_session(
+        &self,
+        session_id: &str,
+        worker_instance_id: &str,
+        boot_epoch: u64,
+        reason: &str,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+        validate_bounded_runtime_text("worker instance id", worker_instance_id, 256)?;
+        validate_bounded_runtime_text("dedicated terminal reason", reason, 2048)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let terminal_state = if reason == "completed" {
+            "freezing"
+        } else {
+            "terminal"
+        };
+        let session_changed = tx.execute(
+            "UPDATE dedicated_session SET state=?6, terminal_reason=?4,
+                    current_turn_id=NULL, updated_at_ms=?5
+              WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                AND state='recovering'
+                AND EXISTS(SELECT 1 FROM worker_process
+                    WHERE worker_instance_id=?2 AND session_id=?1 AND boot_epoch=?3
+                      AND state='dead' AND cleanup_state='reaped')",
+            params![
+                session_id,
+                worker_instance_id,
+                i64::try_from(boot_epoch)?,
+                reason,
+                now,
+                terminal_state,
+            ],
+        )?;
+        if session_changed != 1 {
+            let retry: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session
+                  WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                    AND terminal_reason=?4 AND state=?5)",
+                params![
+                    session_id,
+                    worker_instance_id,
+                    i64::try_from(boot_epoch)?,
+                    reason,
+                    terminal_state
+                ],
+                |row| row.get(0),
+            )?;
+            if !retry {
+                bail!("dedicated terminal settlement lost its worker/session CAS");
+            }
+        }
+        tx.execute(
+            "UPDATE dedicated_session_approval SET state='delivery_unknown', resolved_at_ms=?2
+              WHERE session_id=?1 AND state='delivery_contacting'",
+            params![session_id, now],
+        )?;
+        tx.execute(
+            "UPDATE dedicated_session_approval SET state='stale_epoch', resolved_at_ms=?2
+              WHERE session_id=?1 AND state IN ('pending', 'decision_reserved')",
+            params![session_id, now],
+        )?;
+        // Terminal settlement owns the credential lease release in the same
+        // durable transaction. This closes the crash window where a dead
+        // worker had terminalized its session but left the profile fenced.
+        tx.execute(
+            "UPDATE credential_profile
+                SET state=CASE WHEN state='enrolling' THEN 'unauthenticated' ELSE state END,
+                    active_login_id=CASE WHEN state='enrolling' THEN NULL ELSE active_login_id END,
+                    login_expires_at_ms=CASE WHEN state='enrolling' THEN NULL ELSE login_expires_at_ms END,
+                    lock_owner=NULL, updated_at_ms=?4
+              WHERE profile_id=(SELECT credential_profile_id FROM dedicated_session
+                                  WHERE session_id=?1)
+                AND lock_owner=?2
+                AND EXISTS(SELECT 1 FROM dedicated_session
+                  WHERE session_id=?1 AND worker_boot_epoch=?3)",
+            params![session_id, worker_instance_id, i64::try_from(boot_epoch)?, now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn bind_dedicated_session_candidate(
+        &self,
+        root_thread_id: &str,
+        snapshot_hash: &str,
+    ) -> Result<bool> {
+        validate_bounded_runtime_text("dedicated root thread id", root_thread_id, 256)?;
+        if !lillux::valid_hash(snapshot_hash) {
+            bail!("dedicated candidate snapshot hash is not canonical");
+        }
+        let candidate_validation_hash =
+            ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+                "schema":"ryeos.dedicated_candidate_verification.v1",
+                "candidate_snapshot_hash":snapshot_hash,
+                "checks":["canonical_snapshot_manifest","base_ancestry_at_publication"]
+            }))?;
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session
+                SET candidate_snapshot_hash=?2, candidate_validation_hash=?3,
+                    publication_result='retained', state='frozen', updated_at_ms=?4
+              WHERE root_thread_id=?1 AND state='freezing'
+                AND terminal_reason='completed'
+                AND candidate_snapshot_hash IS NULL
+                AND EXISTS(SELECT 1 FROM execution_workspace
+                    WHERE workspace_id=dedicated_session.workspace_id AND state='closed')",
+            params![
+                root_thread_id,
+                snapshot_hash,
+                candidate_validation_hash,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn reserve_dedicated_candidate_validation(
+        &self,
+        session_id: &str,
+        candidate_snapshot_hash: &str,
+        candidate_validation_hash: &str,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session SET state='verifying', disposition_resume_state='frozen', updated_at_ms=?4
+              WHERE session_id=?1 AND state='frozen'
+                AND candidate_snapshot_hash=?2 AND candidate_validation_hash=?3
+                AND publication_result='retained'",
+            params![
+                session_id,
+                candidate_snapshot_hash,
+                candidate_validation_hash,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed == 1 {
+            return Ok(true);
+        }
+        let retry: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM dedicated_session
+              WHERE session_id=?1 AND state='verifying'
+                AND candidate_snapshot_hash=?2 AND candidate_validation_hash=?3
+                AND publication_result='retained')",
+            params![
+                session_id,
+                candidate_snapshot_hash,
+                candidate_validation_hash
+            ],
+            |row| row.get(0),
+        )?;
+        if !retry {
+            bail!("dedicated candidate validation lost its identity/state CAS");
+        }
+        Ok(false)
+    }
+
+    pub fn settle_dedicated_candidate_validation(
+        &self,
+        session_id: &str,
+        candidate_snapshot_hash: &str,
+        candidate_validation_hash: &str,
+        evidence: &Value,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+        if !lillux::valid_hash(candidate_snapshot_hash)
+            || !lillux::valid_hash(candidate_validation_hash)
+        {
+            bail!("dedicated validation identity is not canonical");
+        }
+        let _evidence_digest = ryeos_state::objects::canonical_value_digest(evidence)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE dedicated_session SET state='publish_ready', disposition_resume_state=NULL, updated_at_ms=?4
+              WHERE session_id=?1 AND state='verifying'
+                AND candidate_snapshot_hash=?2 AND candidate_validation_hash=?3
+                AND publication_result='retained'",
+            params![
+                session_id,
+                candidate_snapshot_hash,
+                candidate_validation_hash,
+                now
+            ],
+        )?;
+        if changed != 1 {
+            bail!("dedicated candidate validation lost its identity/state CAS");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn reserve_dedicated_candidate_discard(
+        &self,
+        session_id: &str,
+        candidate_snapshot_hash: &str,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+        if !lillux::valid_hash(candidate_snapshot_hash) {
+            bail!("discarded candidate hash is not canonical");
+        }
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session
+                SET disposition_resume_state=state, state='discarding', updated_at_ms=?3
+              WHERE session_id=?1 AND candidate_snapshot_hash=?2
+                AND publication_result='retained' AND state IN ('frozen','publish_ready')",
+            params![
+                session_id,
+                candidate_snapshot_hash,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            let retry: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session
+                  WHERE session_id=?1 AND candidate_snapshot_hash=?2
+                    AND publication_result='retained' AND state='discarding')",
+                params![session_id, candidate_snapshot_hash],
+                |row| row.get(0),
+            )?;
+            if !retry {
+                bail!("dedicated candidate discard lost its identity/state CAS");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn settle_dedicated_candidate_discard(
+        &self,
+        session_id: &str,
+        candidate_snapshot_hash: &str,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session
+                SET state='terminal', publication_result='discarded',
+                    disposition_resume_state=NULL, updated_at_ms=?3
+              WHERE session_id=?1 AND candidate_snapshot_hash=?2
+                AND publication_result='retained' AND state='discarding'",
+            params![
+                session_id,
+                candidate_snapshot_hash,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            bail!("dedicated candidate discard settlement lost its reservation");
+        }
+        Ok(())
+    }
+
+    pub fn reserve_dedicated_candidate_publication(
+        &self,
+        session_id: &str,
+        candidate_snapshot_hash: &str,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session SET state='publishing', disposition_resume_state='publish_ready', updated_at_ms=?3
+              WHERE session_id=?1 AND candidate_snapshot_hash=?2
+                AND publication_result='retained' AND state='publish_ready'",
+            params![
+                session_id,
+                candidate_snapshot_hash,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            let retry: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session
+                  WHERE session_id=?1 AND candidate_snapshot_hash=?2
+                    AND publication_result='retained' AND state='publishing')",
+                params![session_id, candidate_snapshot_hash],
+                |row| row.get(0),
+            )?;
+            if !retry {
+                bail!("dedicated candidate publication lost its identity/state CAS");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn settle_dedicated_candidate_publication(
+        &self,
+        session_id: &str,
+        candidate_snapshot_hash: &str,
+        publication_result: &str,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+        if !lillux::valid_hash(candidate_snapshot_hash) {
+            bail!("published candidate snapshot hash is not canonical");
+        }
+        validate_bounded_runtime_text("dedicated publication result", publication_result, 512)?;
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session SET publication_result=?3, state='terminal',
+                    disposition_resume_state=NULL, updated_at_ms=?4
+              WHERE session_id=?1 AND state='publishing'
+                AND candidate_snapshot_hash=?2
+                AND publication_result='retained'",
+            params![
+                session_id,
+                candidate_snapshot_hash,
+                publication_result,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            bail!("dedicated publication result lost its session/candidate CAS");
+        }
+        Ok(())
+    }
+
+    pub fn fail_dedicated_candidate_disposition(
+        &self,
+        session_id: &str,
+        reserved_state: &str,
+    ) -> Result<()> {
+        if !matches!(reserved_state, "verifying" | "publishing" | "discarding") {
+            bail!("candidate disposition failure state is invalid");
+        }
+        let fallback = match reserved_state {
+            "verifying" => "frozen",
+            "publishing" => "publish_ready",
+            "discarding" => "", // retained per-row below
+            _ => unreachable!(),
+        };
+        let changed = if reserved_state == "discarding" {
+            self.conn.execute(
+                "UPDATE dedicated_session SET state=disposition_resume_state,
+                    disposition_resume_state=NULL, updated_at_ms=?3
+                  WHERE session_id=?1 AND state=?2
+                    AND disposition_resume_state IN ('frozen','publish_ready')
+                    AND publication_result='retained'",
+                params![
+                    session_id,
+                    reserved_state,
+                    lillux::time::timestamp_millis() as i64
+                ],
+            )?
+        } else {
+            self.conn.execute(
+                "UPDATE dedicated_session SET state=?3, disposition_resume_state=NULL,
+                    updated_at_ms=?4
+                  WHERE session_id=?1 AND state=?2 AND publication_result='retained'",
+                params![
+                    session_id,
+                    reserved_state,
+                    fallback,
+                    lillux::time::timestamp_millis() as i64
+                ],
+            )?
+        };
+        if changed != 1 {
+            bail!("candidate disposition failure lost its reservation");
+        }
+        Ok(())
+    }
+
+    pub fn cancel_dedicated_candidate_for_root_stop(&self, session_id: &str) -> Result<()> {
+        let now = lillux::time::timestamp_millis() as i64;
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session
+                SET state='terminal', terminal_reason='cancelled',
+                    publication_result=CASE
+                      WHEN candidate_snapshot_hash IS NULL THEN 'abandoned'
+                      ELSE 'discarded'
+                    END,
+                    disposition_resume_state=NULL, updated_at_ms=?2
+              WHERE session_id=?1
+                AND state IN ('freezing','frozen','verifying','publish_ready','discarding')
+                AND EXISTS(SELECT 1 FROM worker_process
+                  WHERE worker_instance_id=dedicated_session.worker_instance_id
+                    AND session_id=dedicated_session.session_id
+                    AND boot_epoch=dedicated_session.worker_boot_epoch
+                    AND state='dead' AND cleanup_state='reaped')",
+            params![session_id, now],
+        )?;
+        if changed != 1 {
+            bail!("candidate root-stop cancellation lost its dead-worker/session proof");
+        }
+        Ok(())
     }
 
     pub fn reserve_launch_planning(
@@ -6124,6 +9491,19 @@ impl RuntimeDb {
             .map_err(Into::into)
     }
 
+    pub fn workspace_for_thread(&self, thread_id: &str) -> Result<Option<WorkspaceRecord>> {
+        validate_bounded_runtime_text("workspace thread id", thread_id, 256)?;
+        let matches = self
+            .open_workspaces()?
+            .into_iter()
+            .filter(|workspace| workspace.thread_id.as_deref() == Some(thread_id))
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            bail!("thread owns more than one open execution workspace");
+        }
+        Ok(matches.into_iter().next())
+    }
+
     pub fn submit_command(&self, cmd: &NewCommandRecord) -> Result<CommandRecord> {
         validate_command_type(&cmd.command_type)?;
         let now = now_rfc3339();
@@ -7816,6 +11196,706 @@ mod tests {
             .with_in_process_lifecycle_authority(
                 ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE,
             )
+    }
+
+    fn create_locked_profile(db: &RuntimeDb, profile_id: &str, lock_owner: &str) {
+        db.create_credential_profile(NewCredentialProfile {
+            profile_id,
+            owner_principal: "fp:operator",
+            home_id: &format!("home-{profile_id}"),
+        })
+        .unwrap();
+        db.acquire_credential_profile(profile_id, "fp:operator", lock_owner)
+            .unwrap();
+    }
+
+    #[test]
+    fn dedicated_worker_attachment_atomically_owns_process_workspace_and_session() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-one", "worker-one");
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    lower_snapshot, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-one', 'T-root', 'dedicated_worker_session', 'trusted-daemon',
+                           'a', '/tmp/workspace-one', 'ready', 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            session_id: "S-one",
+            root_thread_id: "T-root",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-one",
+            credential_profile_id: "P-one",
+            credential_generation: 1,
+            credential_lock_owner: "worker-one",
+        })
+        .unwrap();
+        let record = WorkerProcessRecord {
+            worker_instance_id: "worker-one".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "a".repeat(64),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(123, 123),
+            control_channel_identity: "fd:9".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "daemon-one".to_owned(),
+            session_id: "S-one".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: 2,
+            updated_at_ms: 2,
+        };
+        db.attach_worker_process(&record).unwrap();
+        assert_eq!(db.worker_process("worker-one").unwrap(), Some(record));
+        let workspace_state: String = db
+            .conn
+            .query_row(
+                "SELECT state FROM execution_workspace WHERE workspace_id = 'W-one'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let session_state: String = db
+            .conn
+            .query_row(
+                "SELECT state FROM dedicated_session WHERE session_id = 'S-one'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(workspace_state, "active");
+        assert_eq!(session_state, "binding");
+        db.complete_worker_binding("worker-one", "S-one", 1)
+            .unwrap();
+        assert_eq!(
+            db.worker_process("worker-one").unwrap().unwrap().state,
+            WorkerProcessState::Live
+        );
+        let session_state: String = db
+            .conn
+            .query_row(
+                "SELECT state FROM dedicated_session WHERE session_id = 'S-one'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_state, "idle");
+        db.settle_worker_process("worker-one", "S-one", 1, "reaped", "fixture restart")
+            .unwrap();
+        let settled = db.worker_process("worker-one").unwrap().unwrap();
+        assert_eq!(settled.state, WorkerProcessState::Dead);
+        assert_eq!(settled.cleanup_state, "reaped");
+    }
+
+    #[test]
+    fn credential_revocation_fences_worker_attachment() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-fence", "worker-fence");
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    lower_snapshot, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-fence', 'T-fence', 'owner', 'backend',
+                           'a', '/tmp/workspace-fence', 'ready', 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            session_id: "S-fence",
+            root_thread_id: "T-fence",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-fence",
+            credential_profile_id: "P-fence",
+            credential_generation: 1,
+            credential_lock_owner: "worker-fence",
+        })
+        .unwrap();
+        db.revoke_credential_profile("P-fence", "fp:operator", 1)
+            .unwrap();
+        let now = lillux::time::timestamp_millis() as i64;
+        assert!(
+            db.attach_worker_process(&WorkerProcessRecord {
+                worker_instance_id: "worker-fence".to_owned(),
+                boot_identity_hash: "b".repeat(64),
+                session_capsule_hash: "a".repeat(64),
+                boot_epoch: 1,
+                lifecycle_generation: 1,
+                process_identity: fake_process_identity(126, 126),
+                control_channel_identity: "fd:12".to_owned(),
+                state: WorkerProcessState::Attached,
+                daemon_generation_id: "daemon-one".to_owned(),
+                session_id: "S-fence".to_owned(),
+                cleanup_state: "owned".to_owned(),
+                created_at_ms: now,
+                updated_at_ms: now,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn proved_abandoned_worker_fence_releases_credential_atomically() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-abandoned", "worker-abandoned");
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                workspace_id, thread_id, launch_owner, backend_id,
+                lower_snapshot, root_path, state, created_at_ms, updated_at_ms
+             ) VALUES ('W-abandoned', 'T-abandoned', 'owner', 'backend',
+                       'a', '/tmp/workspace-abandoned', 'ready', 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            session_id: "S-abandoned",
+            root_thread_id: "T-abandoned",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-abandoned",
+            credential_profile_id: "P-abandoned",
+            credential_generation: 1,
+            credential_lock_owner: "worker-abandoned",
+        })
+        .unwrap();
+        let now = lillux::time::timestamp_millis() as i64;
+        db.attach_worker_process(&WorkerProcessRecord {
+            worker_instance_id: "worker-abandoned".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "a".repeat(64),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(127, 127),
+            control_channel_identity: "fd:13".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "daemon-one".to_owned(),
+            session_id: "S-abandoned".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: now,
+            updated_at_ms: now,
+        })
+        .unwrap();
+        db.complete_worker_binding("worker-abandoned", "S-abandoned", 1)
+            .unwrap();
+        db.fence_abandoned_worker_process("worker-abandoned", "S-abandoned", 1, "reaped")
+            .unwrap();
+        assert_eq!(
+            db.credential_profile("P-abandoned")
+                .unwrap()
+                .unwrap()
+                .lock_owner,
+            None
+        );
+    }
+
+    #[test]
+    fn readiness_failure_terminalizes_a_recovering_dedicated_session() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-ready-fail", "worker-ready-fail");
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    lower_snapshot, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-ready-fail', 'T-ready-fail', 'owner', 'backend',
+                           'a', '/tmp/workspace-ready-fail', 'ready', 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            session_id: "S-ready-fail",
+            root_thread_id: "T-ready-fail",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-ready-fail",
+            credential_profile_id: "P-ready-fail",
+            credential_generation: 1,
+            credential_lock_owner: "worker-ready-fail",
+        })
+        .unwrap();
+        db.attach_worker_process(&WorkerProcessRecord {
+            worker_instance_id: "worker-ready-fail".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "a".repeat(64),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(125, 125),
+            control_channel_identity: "fd:11".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "daemon-one".to_owned(),
+            session_id: "S-ready-fail".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: 2,
+            updated_at_ms: 2,
+        })
+        .unwrap();
+        db.settle_worker_process(
+            "worker-ready-fail",
+            "S-ready-fail",
+            1,
+            "reaped",
+            "readiness failed",
+        )
+        .unwrap();
+        assert_eq!(
+            db.dedicated_session("S-ready-fail").unwrap().unwrap().state,
+            "recovering"
+        );
+        db.fail_dedicated_session_start("S-ready-fail", "worker-ready-fail", "readiness failed")
+            .unwrap();
+        let session = db.dedicated_session("S-ready-fail").unwrap().unwrap();
+        assert_eq!(session.state, "terminal");
+        assert_eq!(session.terminal_reason.as_deref(), Some("readiness failed"));
+        assert_eq!(
+            db.credential_profile("P-ready-fail")
+                .unwrap()
+                .unwrap()
+                .lock_owner,
+            None
+        );
+    }
+
+    #[test]
+    fn observation_batches_are_epoch_ordered_and_rebuild_only_from_root_facts() {
+        let (_tmp, db) = fresh_db();
+        db.conn
+            .execute(
+                "INSERT INTO dedicated_session(
+                    session_id, root_thread_id, owner_principal, admitted_capsule_hash,
+                    worker_instance_id, worker_boot_epoch, workspace_id,
+                    credential_profile_id, credential_generation, remote_thread_id,
+                    current_turn_id, state, send_boundary, candidate_snapshot_hash,
+                    candidate_validation_hash, publication_result, terminal_reason,
+                    created_at_ms, updated_at_ms
+                 ) VALUES ('S-observe', 'T-observe', 'fp:operator', ?1,
+                           'worker-observe', 3, 'W-observe', 'P-observe', 1,
+                           NULL, NULL, 'idle', 'none', NULL, NULL, NULL, NULL, 1, 1)",
+                [&"a".repeat(64)],
+            )
+            .unwrap();
+        assert_eq!(
+            db.reserve_dedicated_observation_batch("S-observe", 3, 1, 2, None, &"b".repeat(64),)
+                .unwrap(),
+            ObservationBatchReservation::ContactAppend
+        );
+        assert_eq!(
+            db.reserve_dedicated_observation_batch("S-observe", 3, 1, 2, None, &"b".repeat(64),)
+                .unwrap(),
+            ObservationBatchReservation::RebuildProjection
+        );
+        db.settle_dedicated_observation_batch("S-observe", 3, 1, &"b".repeat(64))
+            .unwrap();
+        assert_eq!(
+            db.reserve_dedicated_observation_batch("S-observe", 3, 1, 2, None, &"b".repeat(64),)
+                .unwrap(),
+            ObservationBatchReservation::AlreadySettled
+        );
+        assert!(
+            db.reserve_dedicated_observation_batch(
+                "S-observe",
+                3,
+                4,
+                4,
+                Some(&"b".repeat(64)),
+                &"c".repeat(64),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            db.reserve_dedicated_observation_batch(
+                "S-observe",
+                3,
+                3,
+                3,
+                Some(&"b".repeat(64)),
+                &"c".repeat(64),
+            )
+            .unwrap(),
+            ObservationBatchReservation::ContactAppend
+        );
+        assert!(
+            db.reserve_dedicated_observation_batch("S-observe", 2, 1, 1, None, &"d".repeat(64),)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn credential_ceremony_and_dedicated_ledgers_are_epoch_fenced() {
+        let (_tmp, db) = fresh_db();
+        db.create_credential_profile(NewCredentialProfile {
+            profile_id: "P-one",
+            owner_principal: "fp:operator",
+            home_id: "home-one",
+        })
+        .unwrap();
+        assert_eq!(
+            db.acquire_credential_profile("P-one", "fp:operator", "login-owner")
+                .unwrap(),
+            1
+        );
+        let login_epoch = db
+            .begin_credential_enrollment(
+                "P-one",
+                "login-owner",
+                "login-one",
+                lillux::time::timestamp_millis() as i64 + 60_000,
+            )
+            .unwrap();
+        let generation = db
+            .complete_credential_enrollment(
+                "P-one",
+                "login-owner",
+                "login-one",
+                login_epoch,
+                &serde_json::json!({"account_label": "fixture"}),
+            )
+            .unwrap();
+        assert_eq!(generation, 2);
+        db.release_credential_profile("P-one", "login-owner")
+            .unwrap();
+
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    lower_snapshot, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-ledger', 'T-ledger', 'dedicated_worker_session', 'trusted-daemon',
+                           'a', '/tmp/workspace-ledger', 'ready', 1, 1)",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            db.acquire_credential_profile("P-one", "fp:operator", "worker-ledger")
+                .unwrap(),
+            generation
+        );
+        db.admit_dedicated_session(NewDedicatedSession {
+            session_id: "S-ledger",
+            root_thread_id: "T-ledger",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"c".repeat(64),
+            workspace_id: "W-ledger",
+            credential_profile_id: "P-one",
+            credential_generation: generation,
+            credential_lock_owner: "worker-ledger",
+        })
+        .unwrap();
+        let now = lillux::time::timestamp_millis() as i64;
+        db.attach_worker_process(&WorkerProcessRecord {
+            worker_instance_id: "worker-ledger".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "c".repeat(64),
+            boot_epoch: 4,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(124, 124),
+            control_channel_identity: "fd:10".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "daemon-one".to_owned(),
+            session_id: "S-ledger".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: now,
+            updated_at_ms: now,
+        })
+        .unwrap();
+        db.complete_worker_binding("worker-ledger", "S-ledger", 4)
+            .unwrap();
+
+        let payload = serde_json::json!({"operation": "fixture_turn"});
+        let command = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                session_id: "S-ledger",
+                idempotency_key: "request-one",
+                worker_boot_epoch: 4,
+                command_kind: "request",
+                request_digest: &"d".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        let replay = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                session_id: "S-ledger",
+                idempotency_key: "request-one",
+                worker_boot_epoch: 4,
+                command_kind: "request",
+                request_digest: &"d".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        assert_eq!(command, replay);
+        db.mark_dedicated_command_contacted("S-ledger", command.command_sequence, 4)
+            .unwrap();
+        db.observe_dedicated_session_state(
+            "S-ledger",
+            4,
+            "idle",
+            "turn_running",
+            None,
+            Some("turn-fixture"),
+        )
+        .unwrap();
+        db.create_dedicated_session_approval(NewDedicatedSessionApproval {
+            session_id: "S-ledger",
+            approval_id: "approval-one",
+            worker_instance_id: "worker-ledger",
+            worker_boot_epoch: 4,
+            request_digest: &"e".repeat(64),
+            operation_class: "fixture",
+            requested_authority: &serde_json::json!({}),
+            expires_at_ms: lillux::time::timestamp_millis() as i64 + 60_000,
+        })
+        .unwrap();
+        let approval_decision = serde_json::json!({"decision": "deny"});
+        let approval_decision_digest =
+            ryeos_state::objects::canonical_value_digest(&approval_decision).unwrap();
+        db.reserve_dedicated_session_approval_decision(
+            "S-ledger",
+            "approval-one",
+            4,
+            &"e".repeat(64),
+            "fp:operator",
+            &approval_decision,
+            &approval_decision_digest,
+            "reservation-one",
+        )
+        .unwrap();
+        assert!(
+            db.reserve_dedicated_session_approval_decision(
+                "S-ledger",
+                "approval-one",
+                4,
+                &"e".repeat(64),
+                "fp:operator",
+                &approval_decision,
+                &approval_decision_digest,
+                "reservation-two",
+            )
+            .is_err()
+        );
+        db.mark_dedicated_approval_delivery_contacting(
+            "S-ledger",
+            "approval-one",
+            4,
+            "reservation-one",
+            &approval_decision_digest,
+        )
+        .unwrap();
+        db.settle_dedicated_approval_delivery(
+            "S-ledger",
+            "approval-one",
+            4,
+            "reservation-one",
+            &approval_decision_digest,
+        )
+        .unwrap();
+        db.settle_dedicated_command(
+            "S-ledger",
+            command.command_sequence,
+            4,
+            true,
+            &serde_json::json!({"ok": true}),
+        )
+        .unwrap();
+        db.observe_dedicated_session_state(
+            "S-ledger",
+            4,
+            "turn_running",
+            "idle",
+            Some("turn-fixture"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            db.dedicated_session("S-ledger").unwrap().unwrap().state,
+            "idle"
+        );
+        let expiry_command = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                session_id: "S-ledger",
+                idempotency_key: "request-expiry",
+                worker_boot_epoch: 4,
+                command_kind: "events",
+                request_digest: &"a".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        db.mark_dedicated_command_contacted("S-ledger", expiry_command.command_sequence, 4)
+            .unwrap();
+        db.observe_dedicated_session_state(
+            "S-ledger",
+            4,
+            "idle",
+            "turn_running",
+            None,
+            Some("turn-expiry"),
+        )
+        .unwrap();
+        db.create_dedicated_session_approval(NewDedicatedSessionApproval {
+            session_id: "S-ledger",
+            approval_id: "approval-expiry",
+            worker_instance_id: "worker-ledger",
+            worker_boot_epoch: 4,
+            request_digest: &"b".repeat(64),
+            operation_class: "fixture",
+            requested_authority: &serde_json::json!({}),
+            expires_at_ms: lillux::time::timestamp_millis() as i64 + 60_000,
+        })
+        .unwrap();
+        db.conn
+            .execute(
+                "UPDATE dedicated_session_approval SET expires_at_ms=?1
+                  WHERE session_id='S-ledger' AND approval_id='approval-expiry'",
+                [lillux::time::timestamp_millis() as i64 - 1],
+            )
+            .unwrap();
+        db.expire_dedicated_session_approval("S-ledger", "approval-expiry", 4)
+            .unwrap();
+        assert!(
+            db.pending_dedicated_session_approvals("S-ledger")
+                .unwrap()
+                .is_empty()
+        );
+        db.settle_dedicated_command(
+            "S-ledger",
+            expiry_command.command_sequence,
+            4,
+            true,
+            &serde_json::json!({"expired":true}),
+        )
+        .unwrap();
+        db.observe_dedicated_session_state(
+            "S-ledger",
+            4,
+            "turn_running",
+            "idle",
+            Some("turn-expiry"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            db.revoke_credential_profile("P-one", "fp:operator", generation)
+                .unwrap(),
+            3
+        );
+        assert!(
+            db.reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                session_id: "S-ledger",
+                idempotency_key: "request-after-revocation",
+                worker_boot_epoch: 4,
+                command_kind: "request",
+                request_digest: &"f".repeat(64),
+                payload: &payload,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn frozen_candidate_requires_exact_verification_before_publish_or_discard() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-candidate", "worker-candidate");
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    lower_snapshot, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-candidate', 'S-candidate', 'owner', 'trusted-daemon',
+                           'a', '/tmp/candidate', 'ready', 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            session_id: "S-candidate",
+            root_thread_id: "S-candidate",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-candidate",
+            credential_profile_id: "P-candidate",
+            credential_generation: 1,
+            credential_lock_owner: "worker-candidate",
+        })
+        .unwrap();
+        let now = lillux::time::timestamp_millis() as i64;
+        db.attach_worker_process(&WorkerProcessRecord {
+            worker_instance_id: "worker-candidate".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "a".repeat(64),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(125, 125),
+            control_channel_identity: "fd:11".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "daemon-one".to_owned(),
+            session_id: "S-candidate".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: now,
+            updated_at_ms: now,
+        })
+        .unwrap();
+        db.complete_worker_binding("worker-candidate", "S-candidate", 1)
+            .unwrap();
+        db.reserve_dedicated_session_completion("S-candidate", 1)
+            .unwrap();
+        db.settle_worker_process("worker-candidate", "S-candidate", 1, "reaped", "completed")
+            .unwrap();
+        db.terminalize_dedicated_session("S-candidate", "worker-candidate", 1, "completed")
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE execution_workspace SET state='closed'
+                  WHERE workspace_id='W-candidate'",
+                [],
+            )
+            .unwrap();
+        let candidate = "c".repeat(64);
+        assert!(
+            db.bind_dedicated_session_candidate("S-candidate", &candidate)
+                .unwrap()
+        );
+        let frozen = db.dedicated_session("S-candidate").unwrap().unwrap();
+        assert_eq!(frozen.state, "frozen");
+        let plan = frozen.candidate_validation_hash.unwrap();
+        assert!(
+            db.reserve_dedicated_candidate_publication("S-candidate", &candidate)
+                .is_err()
+        );
+        assert!(
+            db.reserve_dedicated_candidate_validation("S-candidate", &candidate, &"d".repeat(64))
+                .is_err()
+        );
+        db.reserve_dedicated_candidate_validation("S-candidate", &candidate, &plan)
+            .unwrap();
+        db.fail_dedicated_candidate_disposition("S-candidate", "verifying")
+            .unwrap();
+        assert_eq!(
+            db.dedicated_session("S-candidate").unwrap().unwrap().state,
+            "frozen"
+        );
+        db.reserve_dedicated_candidate_validation("S-candidate", &candidate, &plan)
+            .unwrap();
+        db.settle_dedicated_candidate_validation(
+            "S-candidate",
+            &candidate,
+            &plan,
+            &serde_json::json!({"ok":true}),
+        )
+        .unwrap();
+        assert_eq!(
+            db.dedicated_session("S-candidate").unwrap().unwrap().state,
+            "publish_ready"
+        );
+        db.reserve_dedicated_candidate_discard("S-candidate", &candidate)
+            .unwrap();
+        db.settle_dedicated_candidate_discard("S-candidate", &candidate)
+            .unwrap();
+        let discarded = db.dedicated_session("S-candidate").unwrap().unwrap();
+        assert_eq!(discarded.state, "terminal");
+        assert_eq!(discarded.publication_result.as_deref(), Some("discarded"));
     }
 
     #[test]

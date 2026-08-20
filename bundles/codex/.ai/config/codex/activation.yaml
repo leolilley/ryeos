@@ -1,0 +1,27 @@
+# ryeos:signed:2026-08-18T23:04:02Z:c6bb738152be321fd83cb311b20f7531666165faedded8cfa562870553e739cb:00Nv1GWZijeEHoJwMVbNEZlXYsGiqpJnhOLUu3XCKQmk1aKdjbl+DxI7DDmJT3PTHry0nAnCGSRP6HGtXcP3DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "codex"
+schema: 1
+consumer_ref: worker:codex/hosted
+codex:
+  version: "0.147.0"
+  target: "x86_64-unknown-linux-musl"
+  archive_sha256: "0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a9690544c36"
+  executable_sha256: "cb0a15567e9a60a5820d54b0f6ae86d504dc3805c1eab21a47f70e3eb7b73a40"
+persistent_session_policy:
+  max_pool_groups: 4
+  max_total_processes: 4
+  max_total_address_space_bytes: 68719476736
+  max_total_cpu_seconds: 14400
+  max_open_streams: 32
+  max_active_streams: 4
+  max_active_streams_per_subject: 1
+  max_stream_backlog_bytes: 16777216
+  max_total_backlog_bytes: 67108864
+components:
+  - id: codex
+    path: codex
+    shape: file
+    storage: large_content
+    manifest_schema: ryeos.external_content.large.v2
+    maximum_bytes: 268435456
+    expected_manifest_hash: "713c3d1985ca438d8c309631d665c14f8fa0afedfce8b73dc93d0646edfe11ff"

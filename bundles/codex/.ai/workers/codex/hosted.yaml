@@ -1,0 +1,31 @@
+# ryeos:signed:2026-08-19T05:30:19Z:946c93c071616053519e6863f6a2a5b648f366d626943a355397b60af853a155:YV5Rl9sWCrfNUJci58CiYcPVDO2wseS4WD8sAtoEMg3fwCqhj635dnyffVrYh/rkxNeQOE3q4CcJBzKNqNDMAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "codex"
+version: "1.0.0"
+executor_id: "@subprocess"
+description: "Codex App Server profile for one RyeOS session-bound worker execution."
+execution_protocol: protocol:ryeos/core/structured_session
+supported_target:
+  os: linux
+  arch: x86_64
+
+source:
+  root: "lib/hosted"
+  entry: "structured-session.profile.json"
+  digest: "6c7cde1f1b0ec63753d8377fe4118ff012a64c8a733d5046f488bfcd3ae5ddfb"
+
+external_content:
+  - id: codex
+    kind: file
+    mode: pinned
+    digest: "713c3d1985ca438d8c309631d665c14f8fa0afedfce8b73dc93d0646edfe11ff"
+    metadata_hint: "openai-codex-rust-v0.147.0-x86_64-unknown-linux-musl"
+    mount: codex
+
+config:
+  command: "bin:codex/ryeos-structured-session-bridge"
+  args: ["${source.entry}"]
+  env:
+    PATH: ""
+    LANG: "C"
+    LC_ALL: "C"
+  timeout_secs: 0

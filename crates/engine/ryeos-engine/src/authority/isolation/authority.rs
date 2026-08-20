@@ -160,6 +160,13 @@ pub struct IsolationReadOnlyMountAuthority {
     source_path: PathBuf,
     destination: PathBuf,
     source: Arc<std::fs::File>,
+    scope: IsolationReadOnlyMountScope,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IsolationReadOnlyMountScope {
+    ProjectRealization,
+    StateOverlay,
 }
 
 impl IsolationReadOnlyMountAuthority {
@@ -168,6 +175,20 @@ impl IsolationReadOnlyMountAuthority {
             source_path,
             destination,
             source: Arc::new(source),
+            scope: IsolationReadOnlyMountScope::ProjectRealization,
+        }
+    }
+
+    pub fn new_state_overlay(
+        source_path: PathBuf,
+        destination: PathBuf,
+        source: std::fs::File,
+    ) -> Self {
+        Self {
+            source_path,
+            destination,
+            source: Arc::new(source),
+            scope: IsolationReadOnlyMountScope::StateOverlay,
         }
     }
 
@@ -181,6 +202,10 @@ impl IsolationReadOnlyMountAuthority {
 
     pub(crate) fn source(&self) -> &Arc<std::fs::File> {
         &self.source
+    }
+
+    pub(crate) fn scope(&self) -> IsolationReadOnlyMountScope {
+        self.scope
     }
 }
 

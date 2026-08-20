@@ -1,0 +1,21 @@
+# ryeos:signed:2026-08-19T02:52:59Z:1f17be4ceb91cb76664209a1f9672d9e7e54918a1e1bc8befd8a48032490854c:wyfQ+4EMJLxO42ilpaep8iytFJ+VHZKSa48JaU1oQ8l761ys0lG0Z9B1ys2vLUr5juxN1MhHPamsvnJWziO7Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [codex, login, open]
+description: "Open a projectless Codex device-login session"
+help:
+  usage: "ryeos codex login open <credential-profile-id> --async"
+  examples:
+    - "ryeos codex login open personal --async"
+forms:
+  - slots:
+      - field: credential_profile_id
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+control_flags:
+  - flag: async
+    help: "Return after durable accepted launch"
+    binding: launch_mode_accepted
+dispatch:
+  kind: execute_ref
+  execute: worker_execution:codex/login
+  availability: daemon

@@ -1,0 +1,50 @@
+forced_login_method = "chatgpt"
+cli_auth_credentials_store = "file"
+check_for_update_on_startup = false
+approval_policy = { granular = { sandbox_approval = true, rules = false, mcp_elicitations = false, request_permissions = false, skill_approval = false } }
+approvals_reviewer = "user"
+# Pinned Codex 0.147.0 split-filesystem profile. Permission profiles do not
+# compose with legacy sandbox_mode settings, so none are present here.
+default_permissions = "ryeos-workspace-only"
+web_search = "disabled"
+allow_login_shell = false
+
+[shell_environment_policy]
+inherit = "core"
+ignore_default_excludes = false
+
+[shell_environment_policy.filters]
+"CODEX_HOME" = "exclude"
+"RYEOS_*" = "exclude"
+"DBUS_*" = "exclude"
+"SSH_*" = "exclude"
+"*PROXY" = "exclude"
+
+[permissions.ryeos-workspace-only]
+extends = ":workspace"
+
+[permissions.ryeos-workspace-only.filesystem]
+":root" = "deny"
+":minimal" = "read"
+":tmpdir" = "deny"
+":slash_tmp" = "deny"
+
+[permissions.ryeos-workspace-only.filesystem.":workspace_roots"]
+".ai/cache/ryeos-runtime" = "read"
+
+[permissions.ryeos-workspace-only.network]
+enabled = false
+
+[agents]
+enabled = false
+
+[features]
+apps = false
+remote_plugin = false
+hooks = false
+multi_agent = false
+memories = false
+network_proxy = false
+
+[features.code_mode]
+enabled = false

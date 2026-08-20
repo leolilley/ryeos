@@ -1,0 +1,7 @@
+# ryeos:signed:2026-08-19T00:43:21Z:fbaefacd7ccb3b1c809e5bd56c37525566deb5af47199a7a06c53757f24ad4c7:H1VmpUhWSvb/7PBVNRfLggyGDeIw2+1QhO3dxH3LS6AsSZbV4v3F+oocHC1er+Y8I3fL7hZSy7LTa3ifXOvTDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: credential-profiles.create
+required_caps: ["ryeos.execute.service.credential-profiles/create"]
+schema:
+  profile_id: string
+description: "Create one empty owner-bound node-private credential profile"

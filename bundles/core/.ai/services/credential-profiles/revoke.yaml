@@ -1,0 +1,8 @@
+# ryeos:signed:2026-08-18T23:03:53Z:9103656ff441c6a252c632806ee11c09215a6a3d8c8f5eb87dd81ced91ad8e6c:mUxToiBmP5ksDDXdlZVTBT7Qwqrx9U1M5XU5GUdYhjMOhUCDguxjUmLuYQDr6if7gBr2pAtbcNZPfxcVKZmiAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: credential-profiles.revoke
+required_caps: ["ryeos.execute.service.credential-profiles/revoke"]
+schema:
+  profile_id: string
+  credential_generation: integer
+description: "Generation-fence a credential profile, reap bound workers, and remove its opaque private home"

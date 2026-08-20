@@ -23,9 +23,12 @@ use crate::projection_health::ThreadProjectionHealth;
 use crate::runtime_db;
 use crate::write_barrier::{WriteBarrier, WritePermit};
 pub use runtime_db::{
-    CommandRecord, HookDispatchReservation, LaunchPlanningAlreadyReserved,
-    LaunchPlanningCapacityExceeded, LaunchPlanningRecord, NewCommandRecord, NewHookDispatch,
-    RuntimeInfo, StopIntent,
+    CommandRecord, CredentialProfileRecord, DedicatedSessionApprovalRecord,
+    DedicatedSessionCommandRecord, DedicatedSessionRecord, HookDispatchReservation,
+    LaunchPlanningAlreadyReserved, LaunchPlanningCapacityExceeded, LaunchPlanningRecord,
+    NewCommandRecord, NewCredentialProfile, NewDedicatedSession, NewDedicatedSessionApproval,
+    NewDedicatedSessionCommand, NewHookDispatch, ObservationBatchReservation, RuntimeInfo,
+    StopIntent, WorkerProcessRecord,
 };
 
 mod projection_access;
@@ -3878,6 +3881,692 @@ impl StateStore {
     {
         let g = self.lock()?;
         f(&g.state_db)
+    }
+
+    pub fn admit_dedicated_session(&self, session: NewDedicatedSession<'_>) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.admit_dedicated_session(session)
+    }
+
+    pub fn dedicated_session(&self, session_id: &str) -> Result<Option<DedicatedSessionRecord>> {
+        let g = self.lock()?;
+        g.runtime_db.dedicated_session(session_id)
+    }
+
+    pub fn nonterminal_dedicated_sessions_for_credential_profile(
+        &self,
+        profile_id: &str,
+    ) -> Result<Vec<DedicatedSessionRecord>> {
+        let g = self.lock()?;
+        g.runtime_db
+            .nonterminal_dedicated_sessions_for_credential_profile(profile_id)
+    }
+
+    pub fn terminalize_unattached_dedicated_session(
+        &self,
+        session_id: &str,
+        reason: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .terminalize_unattached_dedicated_session(session_id, reason)
+    }
+
+    pub fn fail_dedicated_session_start(
+        &self,
+        session_id: &str,
+        worker_instance_id: &str,
+        reason: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .fail_dedicated_session_start(session_id, worker_instance_id, reason)
+    }
+
+    pub fn bind_dedicated_remote_thread(
+        &self,
+        session_id: &str,
+        worker_instance_id: &str,
+        worker_boot_epoch: u64,
+        remote_thread_id: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.bind_dedicated_remote_thread(
+            session_id,
+            worker_instance_id,
+            worker_boot_epoch,
+            remote_thread_id,
+        )
+    }
+
+    pub fn observe_dedicated_remote_reattach(
+        &self,
+        session_id: &str,
+        worker_boot_epoch: u64,
+        remote_thread_id: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.observe_dedicated_remote_reattach(
+            session_id,
+            worker_boot_epoch,
+            remote_thread_id,
+        )
+    }
+
+    pub fn settle_dedicated_remote_recovery_status(
+        &self,
+        session_id: &str,
+        worker_boot_epoch: u64,
+        remote_thread_id: &str,
+        remote_status: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.settle_dedicated_remote_recovery_status(
+            session_id,
+            worker_boot_epoch,
+            remote_thread_id,
+            remote_status,
+        )
+    }
+
+    pub fn prepare_dedicated_session_recovery(
+        &self,
+        session_id: &str,
+        credential_generation: u64,
+        credential_lock_owner: &str,
+    ) -> Result<u64> {
+        let g = self.lock()?;
+        g.runtime_db.prepare_dedicated_session_recovery(
+            session_id,
+            credential_generation,
+            credential_lock_owner,
+        )
+    }
+
+    pub fn fail_dedicated_candidate_disposition(
+        &self,
+        session_id: &str,
+        reserved_state: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .fail_dedicated_candidate_disposition(session_id, reserved_state)
+    }
+
+    pub fn cancel_dedicated_candidate_for_root_stop(&self, session_id: &str) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .cancel_dedicated_candidate_for_root_stop(session_id)
+    }
+
+    pub fn observe_dedicated_session_state(
+        &self,
+        session_id: &str,
+        worker_boot_epoch: u64,
+        expected: &str,
+        next: &str,
+        expected_turn_id: Option<&str>,
+        next_turn_id: Option<&str>,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.observe_dedicated_session_state(
+            session_id,
+            worker_boot_epoch,
+            expected,
+            next,
+            expected_turn_id,
+            next_turn_id,
+        )
+    }
+
+    pub fn create_credential_profile(&self, profile: NewCredentialProfile<'_>) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.create_credential_profile(profile)
+    }
+
+    pub fn credential_profile(&self, profile_id: &str) -> Result<Option<CredentialProfileRecord>> {
+        let g = self.lock()?;
+        g.runtime_db.credential_profile(profile_id)
+    }
+
+    pub fn acquire_credential_profile(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        lock_owner: &str,
+    ) -> Result<u64> {
+        let g = self.lock()?;
+        g.runtime_db
+            .acquire_credential_profile(profile_id, owner_principal, lock_owner)
+    }
+
+    pub fn release_credential_profile(&self, profile_id: &str, lock_owner: &str) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .release_credential_profile(profile_id, lock_owner)
+    }
+
+    pub fn begin_credential_enrollment(
+        &self,
+        profile_id: &str,
+        lock_owner: &str,
+        login_id: &str,
+        expires_at_ms: i64,
+    ) -> Result<u64> {
+        let g = self.lock()?;
+        g.runtime_db
+            .begin_credential_enrollment(profile_id, lock_owner, login_id, expires_at_ms)
+    }
+
+    pub fn complete_credential_enrollment(
+        &self,
+        profile_id: &str,
+        lock_owner: &str,
+        login_id: &str,
+        login_epoch: u64,
+        sanitized_account: &Value,
+    ) -> Result<u64> {
+        let g = self.lock()?;
+        g.runtime_db.complete_credential_enrollment(
+            profile_id,
+            lock_owner,
+            login_id,
+            login_epoch,
+            sanitized_account,
+        )
+    }
+
+    pub fn observe_session_credential_enrollment(
+        &self,
+        session_id: &str,
+        worker_instance_id: &str,
+        worker_boot_epoch: u64,
+        sanitized_account: &Value,
+    ) -> Result<u64> {
+        let g = self.lock()?;
+        g.runtime_db.observe_session_credential_enrollment(
+            session_id,
+            worker_instance_id,
+            worker_boot_epoch,
+            sanitized_account,
+        )
+    }
+
+    pub fn confirm_credential_enrollment(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        login_epoch: u64,
+        expected_account_digest: &str,
+    ) -> Result<u64> {
+        let g = self.lock()?;
+        g.runtime_db.confirm_credential_enrollment(
+            profile_id,
+            owner_principal,
+            login_epoch,
+            expected_account_digest,
+        )
+    }
+
+    pub fn cancel_credential_enrollment(
+        &self,
+        profile_id: &str,
+        lock_owner: &str,
+        login_id: &str,
+        login_epoch: u64,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .cancel_credential_enrollment(profile_id, lock_owner, login_id, login_epoch)
+    }
+
+    pub fn revoke_credential_profile(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        expected_generation: u64,
+    ) -> Result<u64> {
+        let g = self.lock()?;
+        g.runtime_db
+            .revoke_credential_profile(profile_id, owner_principal, expected_generation)
+    }
+
+    pub fn finish_credential_profile_revocation(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        revoking_generation: u64,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.finish_credential_profile_revocation(
+            profile_id,
+            owner_principal,
+            revoking_generation,
+        )
+    }
+
+    pub fn begin_credential_profile_deletion(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        expected_generation: u64,
+    ) -> Result<u64> {
+        let g = self.lock()?;
+        g.runtime_db.begin_credential_profile_deletion(
+            profile_id,
+            owner_principal,
+            expected_generation,
+        )
+    }
+
+    pub fn finish_credential_profile_deletion(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        deleting_generation: u64,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.finish_credential_profile_deletion(
+            profile_id,
+            owner_principal,
+            deleting_generation,
+        )
+    }
+
+    pub fn reserve_dedicated_session_command(
+        &self,
+        command: NewDedicatedSessionCommand<'_>,
+    ) -> Result<DedicatedSessionCommandRecord> {
+        let g = self.lock()?;
+        g.runtime_db.reserve_dedicated_session_command(command)
+    }
+
+    pub fn mark_dedicated_command_contacted(
+        &self,
+        session_id: &str,
+        command_sequence: u64,
+        worker_boot_epoch: u64,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.mark_dedicated_command_contacted(
+            session_id,
+            command_sequence,
+            worker_boot_epoch,
+        )
+    }
+
+    pub fn settle_dedicated_command(
+        &self,
+        session_id: &str,
+        command_sequence: u64,
+        worker_boot_epoch: u64,
+        succeeded: bool,
+        result: &Value,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.settle_dedicated_command(
+            session_id,
+            command_sequence,
+            worker_boot_epoch,
+            succeeded,
+            result,
+        )
+    }
+
+    pub fn mark_dedicated_command_outcome_unknown(
+        &self,
+        session_id: &str,
+        command_sequence: u64,
+        worker_boot_epoch: u64,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.mark_dedicated_command_outcome_unknown(
+            session_id,
+            command_sequence,
+            worker_boot_epoch,
+        )
+    }
+
+    pub fn reserve_dedicated_observation_batch(
+        &self,
+        session_id: &str,
+        worker_boot_epoch: u64,
+        first_sequence: u64,
+        through_sequence: u64,
+        previous_digest: Option<&str>,
+        batch_digest: &str,
+    ) -> Result<ObservationBatchReservation> {
+        let g = self.lock()?;
+        g.runtime_db.reserve_dedicated_observation_batch(
+            session_id,
+            worker_boot_epoch,
+            first_sequence,
+            through_sequence,
+            previous_digest,
+            batch_digest,
+        )
+    }
+
+    pub fn settle_dedicated_observation_batch(
+        &self,
+        session_id: &str,
+        worker_boot_epoch: u64,
+        first_sequence: u64,
+        batch_digest: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.settle_dedicated_observation_batch(
+            session_id,
+            worker_boot_epoch,
+            first_sequence,
+            batch_digest,
+        )
+    }
+
+    pub fn mark_dedicated_observation_batch_unknown(
+        &self,
+        session_id: &str,
+        worker_boot_epoch: u64,
+        first_sequence: u64,
+        batch_digest: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.mark_dedicated_observation_batch_unknown(
+            session_id,
+            worker_boot_epoch,
+            first_sequence,
+            batch_digest,
+        )
+    }
+
+    pub fn create_dedicated_session_approval(
+        &self,
+        approval: NewDedicatedSessionApproval<'_>,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.create_dedicated_session_approval(approval)
+    }
+
+    pub fn pending_dedicated_session_approvals(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<runtime_db::DedicatedSessionApprovalRecord>> {
+        let g = self.lock()?;
+        g.runtime_db.pending_dedicated_session_approvals(session_id)
+    }
+
+    pub fn reconcile_dedicated_approval_delivery_unknown(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.reconcile_dedicated_approval_delivery_unknown(
+            session_id,
+            approval_id,
+            worker_boot_epoch,
+        )
+    }
+
+    pub fn reserve_dedicated_session_completion(
+        &self,
+        session_id: &str,
+        worker_boot_epoch: u64,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .reserve_dedicated_session_completion(session_id, worker_boot_epoch)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn reserve_dedicated_session_approval_decision(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+        request_digest: &str,
+        decision_principal: &str,
+        decision: &Value,
+        decision_digest: &str,
+        reservation_token: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.reserve_dedicated_session_approval_decision(
+            session_id,
+            approval_id,
+            worker_boot_epoch,
+            request_digest,
+            decision_principal,
+            decision,
+            decision_digest,
+            reservation_token,
+        )
+    }
+
+    pub fn mark_dedicated_approval_delivery_contacting(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+        reservation_token: &str,
+        decision_digest: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.mark_dedicated_approval_delivery_contacting(
+            session_id,
+            approval_id,
+            worker_boot_epoch,
+            reservation_token,
+            decision_digest,
+        )
+    }
+
+    pub fn settle_dedicated_approval_delivery(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+        reservation_token: &str,
+        decision_digest: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.settle_dedicated_approval_delivery(
+            session_id,
+            approval_id,
+            worker_boot_epoch,
+            reservation_token,
+            decision_digest,
+        )
+    }
+
+    pub fn mark_dedicated_approval_delivery_unknown(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+        reservation_token: &str,
+        decision_digest: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.mark_dedicated_approval_delivery_unknown(
+            session_id,
+            approval_id,
+            worker_boot_epoch,
+            reservation_token,
+            decision_digest,
+        )
+    }
+
+    pub fn expire_dedicated_session_approval(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .expire_dedicated_session_approval(session_id, approval_id, worker_boot_epoch)
+    }
+
+    pub fn attach_worker_process(&self, record: &WorkerProcessRecord) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.attach_worker_process(record)
+    }
+
+    pub fn worker_process(&self, worker_instance_id: &str) -> Result<Option<WorkerProcessRecord>> {
+        let g = self.lock()?;
+        g.runtime_db.worker_process(worker_instance_id)
+    }
+
+    pub fn live_worker_processes(&self) -> Result<Vec<WorkerProcessRecord>> {
+        let g = self.lock()?;
+        g.runtime_db.live_worker_processes()
+    }
+
+    pub fn fence_abandoned_worker_process(
+        &self,
+        worker_instance_id: &str,
+        session_id: &str,
+        boot_epoch: u64,
+        cleanup_state: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.fence_abandoned_worker_process(
+            worker_instance_id,
+            session_id,
+            boot_epoch,
+            cleanup_state,
+        )
+    }
+
+    pub fn complete_worker_binding(
+        &self,
+        worker_instance_id: &str,
+        session_id: &str,
+        boot_epoch: u64,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .complete_worker_binding(worker_instance_id, session_id, boot_epoch)
+    }
+
+    pub fn settle_worker_process(
+        &self,
+        worker_instance_id: &str,
+        session_id: &str,
+        boot_epoch: u64,
+        cleanup_state: &str,
+        terminal_reason: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.settle_worker_process(
+            worker_instance_id,
+            session_id,
+            boot_epoch,
+            cleanup_state,
+            terminal_reason,
+        )
+    }
+
+    pub fn terminalize_dedicated_session(
+        &self,
+        session_id: &str,
+        worker_instance_id: &str,
+        boot_epoch: u64,
+        reason: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.terminalize_dedicated_session(
+            session_id,
+            worker_instance_id,
+            boot_epoch,
+            reason,
+        )
+    }
+
+    pub fn bind_dedicated_session_candidate(
+        &self,
+        root_thread_id: &str,
+        snapshot_hash: &str,
+    ) -> Result<bool> {
+        let g = self.lock()?;
+        g.runtime_db
+            .bind_dedicated_session_candidate(root_thread_id, snapshot_hash)
+    }
+
+    pub fn reserve_dedicated_candidate_publication(
+        &self,
+        session_id: &str,
+        candidate_snapshot_hash: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .reserve_dedicated_candidate_publication(session_id, candidate_snapshot_hash)
+    }
+
+    pub fn settle_dedicated_candidate_publication(
+        &self,
+        session_id: &str,
+        candidate_snapshot_hash: &str,
+        publication_result: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.settle_dedicated_candidate_publication(
+            session_id,
+            candidate_snapshot_hash,
+            publication_result,
+        )
+    }
+
+    pub fn reserve_dedicated_candidate_validation(
+        &self,
+        session_id: &str,
+        candidate_snapshot_hash: &str,
+        candidate_validation_hash: &str,
+    ) -> Result<bool> {
+        let g = self.lock()?;
+        g.runtime_db.reserve_dedicated_candidate_validation(
+            session_id,
+            candidate_snapshot_hash,
+            candidate_validation_hash,
+        )
+    }
+
+    pub fn settle_dedicated_candidate_validation(
+        &self,
+        session_id: &str,
+        candidate_snapshot_hash: &str,
+        candidate_validation_hash: &str,
+        evidence: &serde_json::Value,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.settle_dedicated_candidate_validation(
+            session_id,
+            candidate_snapshot_hash,
+            candidate_validation_hash,
+            evidence,
+        )
+    }
+
+    pub fn reserve_dedicated_candidate_discard(
+        &self,
+        session_id: &str,
+        candidate_snapshot_hash: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .reserve_dedicated_candidate_discard(session_id, candidate_snapshot_hash)
+    }
+
+    pub fn settle_dedicated_candidate_discard(
+        &self,
+        session_id: &str,
+        candidate_snapshot_hash: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .settle_dedicated_candidate_discard(session_id, candidate_snapshot_hash)
     }
 
     /// Run a state publication while the exact execution launch owner remains
@@ -9923,6 +10612,14 @@ impl StateStore {
     ) -> Result<Option<runtime_db::WorkspaceRecord>> {
         let g = self.lock()?;
         g.runtime_db.workspace(workspace_id)
+    }
+
+    pub fn execution_workspace_for_thread(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<runtime_db::WorkspaceRecord>> {
+        let g = self.lock()?;
+        g.runtime_db.workspace_for_thread(thread_id)
     }
 
     // ── Hook dispatch ledger ─────────────────────────────────────────────

@@ -9,6 +9,7 @@ use std::io::Read;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -140,10 +141,15 @@ where
 pub enum PersistentSessionFrameKind {
     Ready,
     Request,
+    /// Daemon-owned authority control. Public opaque commands cannot select
+    /// this frame kind.
+    Control,
     Delta,
     Final,
     Error,
     Cancel,
+    ObservationBatch,
+    ObservationAck,
 }
 
 pub struct StartedPersistentSession {
@@ -152,15 +158,30 @@ pub struct StartedPersistentSession {
     /// Descriptor-backed workspace/content leases owned for exactly the
     /// process lifetime. Their concrete types remain outside pool semantics.
     pub lifelines: Vec<Box<dyn Send + Sync>>,
+    /// When present, readiness must echo this exact daemon-minted identity in
+    /// `{ "boot_identity": ... }`. Pooled request workers omit it.
+    pub expected_boot_identity: Option<String>,
 }
 
 struct SessionProcess {
-    channel: Mutex<SessionChannel>,
+    wire: PersistentSessionWireContract,
+    writer: Mutex<UnixStream>,
+    reader: Mutex<Option<SessionChannel>>,
+    pending:
+        Mutex<HashMap<String, SyncSender<std::result::Result<PersistentSessionFrame, String>>>>,
+    observation_sender: Mutex<Option<SyncSender<PersistentSessionFrame>>>,
+    buffered_observations: Mutex<VecDeque<PersistentSessionFrame>>,
+    reader_failure: Mutex<Option<String>>,
     running: Mutex<Option<ryeos_engine::dispatch::RunningExecution>>,
     leased: AtomicBool,
     last_used_ms: AtomicU64,
     _lifelines: Vec<Box<dyn Send + Sync>>,
 }
+
+type ObservationSink = Arc<dyn Fn(Value) -> Result<Value> + Send + Sync + 'static>;
+
+const MAX_BUFFERED_OBSERVATION_BATCHES: usize = 64;
+const MAX_PENDING_SESSION_REQUESTS: usize = 32;
 
 struct SessionChannel {
     socket: UnixStream,
@@ -176,6 +197,120 @@ struct FrameReader {
 }
 
 impl SessionProcess {
+    fn start_reader(self: &Arc<Self>, wire: PersistentSessionWireContract) -> Result<()> {
+        let channel = self
+            .reader
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .ok_or_else(|| anyhow!("persistent-session reader already started"))?;
+        let process = Arc::downgrade(self);
+        std::thread::Builder::new()
+            .name("ryeos-persistent-session-reader".to_owned())
+            .spawn(move || run_session_reader(process, channel, wire))
+            .context("spawn persistent-session reader")?;
+        Ok(())
+    }
+
+    fn register_request(
+        &self,
+        request_id: &str,
+    ) -> Result<Receiver<std::result::Result<PersistentSessionFrame, String>>> {
+        let (sender, receiver) = sync_channel(64);
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pending.len() >= MAX_PENDING_SESSION_REQUESTS {
+            bail!("persistent-session pending request bound is exhausted");
+        }
+        if pending.insert(request_id.to_owned(), sender).is_some() {
+            bail!("persistent-session request identity was reused");
+        }
+        Ok(receiver)
+    }
+
+    fn unregister_request(&self, request_id: &str) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(request_id);
+    }
+
+    fn write(
+        &self,
+        wire: &PersistentSessionWireContract,
+        frame: &PersistentSessionFrame,
+        deadline: Instant,
+    ) -> Result<()> {
+        if let Some(reason) = self
+            .reader_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_deref()
+        {
+            bail!("persistent-session reader failed: {reason}");
+        }
+        let mut writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        write_frame(&mut writer, wire, frame, deadline)
+    }
+
+    fn install_observation_sink(self: &Arc<Self>, sink: ObservationSink) -> Result<()> {
+        let (sender, receiver) = sync_channel(MAX_BUFFERED_OBSERVATION_BATCHES);
+        let weak = Arc::downgrade(self);
+        std::thread::Builder::new()
+            .name("ryeos-persistent-session-observation-ingest".to_owned())
+            .spawn(move || run_observation_ingest(weak, receiver, sink))
+            .context("spawn bounded persistent-session observation ingest")?;
+        {
+            let mut slot = self
+                .observation_sender
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if slot.is_some() {
+                bail!("persistent-session observation sink is already installed");
+            }
+            let mut buffered = self
+                .buffered_observations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            while let Some(frame) = buffered.pop_front() {
+                sender.try_send(frame).map_err(|error| match error {
+                    TrySendError::Full(_) => anyhow!("observation ingest queue is full"),
+                    TrySendError::Disconnected(_) => anyhow!("observation ingest worker stopped"),
+                })?;
+            }
+            *slot = Some(sender);
+        }
+        Ok(())
+    }
+
+    fn deliver_observation(
+        &self,
+        frame: PersistentSessionFrame,
+        sink: &ObservationSink,
+    ) -> Result<()> {
+        let body = frame
+            .body
+            .ok_or_else(|| anyhow!("observation batch has no body"))?;
+        let acknowledgement = sink(body)?;
+        let wire = self.wire.clone();
+        self.write(
+            &wire,
+            &PersistentSessionFrame {
+                protocol: wire.wire_protocol.clone(),
+                version: wire.wire_version,
+                kind: PersistentSessionFrameKind::ObservationAck,
+                request_id: None,
+                body: Some(acknowledgement),
+            },
+            Instant::now() + Duration::from_secs(30),
+        )
+    }
+
     fn failure_diagnostic(&self) -> Option<String> {
         let mut running = self
             .running
@@ -222,6 +357,137 @@ impl Drop for SessionProcess {
     }
 }
 
+fn run_session_reader(
+    process: Weak<SessionProcess>,
+    mut channel: SessionChannel,
+    wire: PersistentSessionWireContract,
+) {
+    let failure = loop {
+        let Some(process) = process.upgrade() else {
+            return;
+        };
+        let next = channel
+            .reader
+            .read_next(&mut channel.socket, wire.max_frame_bytes);
+        let frame = match next {
+            Ok(Some(frame)) => frame,
+            Ok(None) => {
+                std::thread::sleep(IO_POLL_INTERVAL);
+                continue;
+            }
+            Err(error) => break format!("read response frame: {error:#}"),
+        };
+        if let Err(error) =
+            require_frame_identity(&frame, &wire).and_then(|()| validate_frame_shape(&frame, None))
+        {
+            break format!("invalid response frame: {error:#}");
+        }
+        match frame.kind {
+            PersistentSessionFrameKind::Delta
+            | PersistentSessionFrameKind::Final
+            | PersistentSessionFrameKind::Error => {
+                let request_id = frame.request_id.clone().expect("validated request id");
+                let sender = process
+                    .pending
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get(&request_id)
+                    .cloned();
+                let Some(sender) = sender else {
+                    break format!("worker emitted a response for unknown request `{request_id}`");
+                };
+                if sender.send(Ok(frame)).is_err() {
+                    break format!("request `{request_id}` response receiver disappeared");
+                }
+            }
+            PersistentSessionFrameKind::ObservationBatch => {
+                let sender = process
+                    .observation_sender
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Some(sender) = sender.as_ref() {
+                    if let Err(error) = sender.try_send(frame) {
+                        break match error {
+                            TrySendError::Full(_) => {
+                                "bounded observation ingest queue is exhausted".to_owned()
+                            }
+                            TrySendError::Disconnected(_) => {
+                                "observation ingest worker stopped".to_owned()
+                            }
+                        };
+                    }
+                } else {
+                    let mut buffered = process
+                        .buffered_observations
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if buffered.len() >= MAX_BUFFERED_OBSERVATION_BATCHES {
+                        break "observation sink was not installed before backlog exhaustion"
+                            .to_owned();
+                    }
+                    buffered.push_back(frame);
+                }
+            }
+            PersistentSessionFrameKind::Ready
+            | PersistentSessionFrameKind::Request
+            | PersistentSessionFrameKind::Control
+            | PersistentSessionFrameKind::Cancel
+            | PersistentSessionFrameKind::ObservationAck => {
+                break "worker emitted a frame forbidden after readiness".to_owned();
+            }
+        }
+    };
+
+    if let Some(process) = process.upgrade() {
+        let mut slot = process
+            .reader_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot.is_none() {
+            *slot = Some(failure.clone());
+        }
+        drop(slot);
+        let pending = process
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for sender in pending.values() {
+            let _ = sender.try_send(Err(failure.clone()));
+        }
+    }
+}
+
+fn run_observation_ingest(
+    process: Weak<SessionProcess>,
+    incoming: Receiver<PersistentSessionFrame>,
+    sink: ObservationSink,
+) {
+    while let Ok(frame) = incoming.recv() {
+        let Some(process) = process.upgrade() else {
+            return;
+        };
+        if let Err(error) = process.deliver_observation(frame, &sink) {
+            let failure = format!("persist observation batch: {error:#}");
+            let mut slot = process
+                .reader_failure
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if slot.is_none() {
+                *slot = Some(failure.clone());
+            }
+            drop(slot);
+            let pending = process
+                .pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for sender in pending.values() {
+                let _ = sender.try_send(Err(failure.clone()));
+            }
+            return;
+        }
+    }
+}
+
 #[derive(Clone)]
 struct GroupContract {
     lifecycle: PersistentSessionLifecycleContract,
@@ -236,10 +502,18 @@ struct SessionGroup {
 
 struct PoolState {
     groups: HashMap<String, SessionGroup>,
+    exclusive: HashMap<String, ExclusiveSessionEntry>,
+    exclusive_reservations: HashMap<String, GroupContract>,
+    exclusive_failure_cleanup: HashMap<String, &'static str>,
     /// Once process-tree cleanup cannot be proved, the pool admits no further
     /// work in this daemon generation. Capacity must never be recycled while
     /// an old ownership unit may still exist.
     cleanup_unproved: Option<String>,
+}
+
+struct ExclusiveSessionEntry {
+    contract: GroupContract,
+    process: Arc<SessionProcess>,
 }
 
 struct PoolInner {
@@ -370,6 +644,16 @@ pub struct PersistentSessionPool {
     streams: Arc<StreamRegistry>,
 }
 
+/// A node-capacity reservation for one exclusive persistent subprocess.
+/// Dropping it before binding releases the reservation without contacting a
+/// worker. The process can never enter a pooled group.
+pub struct ExclusivePersistentSessionReservation {
+    inner: Arc<PoolInner>,
+    session_id: String,
+    contract: GroupContract,
+    active: bool,
+}
+
 impl Default for PersistentSessionPool {
     fn default() -> Self {
         Self::new()
@@ -396,6 +680,9 @@ impl PersistentSessionPool {
         let inner = Arc::new(PoolInner {
             state: Mutex::new(PoolState {
                 groups: HashMap::new(),
+                exclusive: HashMap::new(),
+                exclusive_reservations: HashMap::new(),
+                exclusive_failure_cleanup: HashMap::new(),
                 cleanup_unproved: None,
             }),
             changed: Condvar::new(),
@@ -425,6 +712,249 @@ impl PersistentSessionPool {
         Ok(Self { inner, streams })
     }
 
+    /// Reserve node-wide capacity for one session-owned process. This shares
+    /// the same aggregate admission counters as pooled persistent workers but
+    /// never grants request reuse or cross-session lookup.
+    pub fn reserve_exclusive(
+        &self,
+        session_id: &str,
+        lifecycle: &PersistentSessionLifecycleContract,
+        wire: &PersistentSessionWireContract,
+    ) -> Result<ExclusivePersistentSessionReservation> {
+        if !self.inner.enabled {
+            bail!("persistent sessions are disabled by node policy");
+        }
+        validate_exclusive_session_id(session_id)?;
+        lifecycle.validate()?;
+        wire.validate()?;
+        let contract = GroupContract {
+            lifecycle: lifecycle.clone(),
+            wire: wire.clone(),
+        };
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(reason) = state.cleanup_unproved.as_deref() {
+            bail!(
+                "persistent-session ownership is quarantined after unproved process cleanup: {reason}"
+            );
+        }
+        if state.exclusive.contains_key(session_id)
+            || state.exclusive_reservations.contains_key(session_id)
+            || state.exclusive_failure_cleanup.contains_key(session_id)
+        {
+            bail!("exclusive persistent session already exists");
+        }
+        let (processes, address_space, cpu_seconds) = aggregate_process_capacity(&state);
+        if processes >= self.inner.limits.max_total_processes
+            || address_space.saturating_add(lifecycle.max_address_space_bytes)
+                > self.inner.limits.max_total_address_space_bytes
+            || cpu_seconds.saturating_add(lifecycle.max_cpu_seconds)
+                > self.inner.limits.max_total_cpu_seconds
+        {
+            bail!("persistent-session node process capacity is exhausted");
+        }
+        state
+            .exclusive_reservations
+            .insert(session_id.to_owned(), contract.clone());
+        Ok(ExclusivePersistentSessionReservation {
+            inner: Arc::clone(&self.inner),
+            session_id: session_id.to_owned(),
+            contract,
+            active: true,
+        })
+    }
+
+    pub fn execute_exclusive<C, D>(
+        &self,
+        session_id: &str,
+        request_body: Value,
+        cancelled: C,
+        mut on_delta: D,
+    ) -> Result<Value>
+    where
+        C: Fn() -> bool,
+        D: FnMut(Value) -> Result<()>,
+    {
+        validate_exclusive_session_id(session_id)?;
+        let (process, contract) = {
+            let state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let entry = state
+                .exclusive
+                .get(session_id)
+                .ok_or_else(|| anyhow!("exclusive persistent session is not attached"))?;
+            (Arc::clone(&entry.process), entry.contract.clone())
+        };
+        let deadline =
+            Instant::now() + Duration::from_millis(contract.lifecycle.request_timeout_ms);
+        let result = execute_on_process(
+            &process,
+            &contract.wire,
+            PersistentSessionFrameKind::Request,
+            request_body,
+            &cancelled,
+            deadline,
+            &mut on_delta,
+        )
+        .map_err(|error| attach_process_diagnostic(&process, error));
+        if result.is_err() {
+            let cleanup = process.retire().err();
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.exclusive.remove(session_id);
+            let cleanup_state = if let Some(cleanup) = cleanup {
+                state
+                    .cleanup_unproved
+                    .get_or_insert_with(|| cleanup.to_string());
+                "unproved"
+            } else {
+                "reaped"
+            };
+            state
+                .exclusive_failure_cleanup
+                .insert(session_id.to_owned(), cleanup_state);
+            self.inner.changed.notify_all();
+        }
+        result
+    }
+
+    /// Deliver an authority-bearing daemon control frame. This surface is
+    /// intentionally distinct from the public opaque-command path.
+    pub fn execute_exclusive_control(
+        &self,
+        session_id: &str,
+        control_body: Value,
+    ) -> Result<Value> {
+        validate_exclusive_session_id(session_id)?;
+        let (process, contract) = {
+            let state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let entry = state
+                .exclusive
+                .get(session_id)
+                .ok_or_else(|| anyhow!("exclusive persistent session is not attached"))?;
+            (Arc::clone(&entry.process), entry.contract.clone())
+        };
+        let deadline =
+            Instant::now() + Duration::from_millis(contract.lifecycle.request_timeout_ms);
+        let result = execute_on_process(
+            &process,
+            &contract.wire,
+            PersistentSessionFrameKind::Control,
+            control_body,
+            &|| false,
+            deadline,
+            &mut |_| Ok(()),
+        )
+        .map_err(|error| attach_process_diagnostic(&process, error));
+        if result.is_err() {
+            let cleanup = process.retire().err();
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.exclusive.remove(session_id);
+            let cleanup_state = if let Some(cleanup) = cleanup {
+                state
+                    .cleanup_unproved
+                    .get_or_insert_with(|| cleanup.to_string());
+                "unproved"
+            } else {
+                "reaped"
+            };
+            state
+                .exclusive_failure_cleanup
+                .insert(session_id.to_owned(), cleanup_state);
+            self.inner.changed.notify_all();
+        }
+        result
+    }
+
+    /// Bind the observation-only sink for one exact exclusive worker. The
+    /// sink is installed once after durable process attachment and must append
+    /// authority-bearing observations before returning an acknowledgement.
+    pub fn install_exclusive_observation_sink<F>(&self, session_id: &str, sink: F) -> Result<()>
+    where
+        F: Fn(Value) -> Result<Value> + Send + Sync + 'static,
+    {
+        validate_exclusive_session_id(session_id)?;
+        let process = {
+            let state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            Arc::clone(
+                &state
+                    .exclusive
+                    .get(session_id)
+                    .ok_or_else(|| anyhow!("exclusive persistent session is not attached"))?
+                    .process,
+            )
+        };
+        process.install_observation_sink(Arc::new(sink))
+    }
+
+    /// Consume the cleanup proof recorded when an exclusive request failed.
+    /// The caller uses this to fence the matching durable worker/session epoch;
+    /// no replacement reservation is admitted while the proof is unconsumed.
+    pub fn take_exclusive_failure_cleanup_state(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<&'static str>> {
+        validate_exclusive_session_id(session_id)?;
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok(state.exclusive_failure_cleanup.remove(session_id))
+    }
+
+    pub fn retire_exclusive(&self, session_id: &str) -> Result<()> {
+        validate_exclusive_session_id(session_id)?;
+        let process = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state
+                .exclusive
+                .remove(session_id)
+                .map(|entry| entry.process)
+        };
+        let Some(process) = process else {
+            return Ok(());
+        };
+        let result = process.retire();
+        if let Err(error) = result.as_ref() {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state
+                .cleanup_unproved
+                .get_or_insert_with(|| error.to_string());
+        }
+        self.inner.changed.notify_all();
+        result
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn execute<F, C, D>(
         &self,
@@ -452,6 +982,7 @@ impl PersistentSessionPool {
         let result = execute_on_process(
             &process,
             wire,
+            PersistentSessionFrameKind::Request,
             request_body,
             &cancelled,
             deadline,
@@ -761,30 +1292,8 @@ impl PersistentSessionPool {
             {
                 bail!("persistent-session pool group quota is exhausted");
             }
-            let (total_processes, total_address_space, total_cpu_seconds) = state
-                .groups
-                .values()
-                .fold((0usize, 0u64, 0u64), |totals, group| {
-                    let count = group.processes.len().saturating_add(group.spawning);
-                    let count_u64 = u64::try_from(count).unwrap_or(u64::MAX);
-                    (
-                        totals.0.saturating_add(count),
-                        totals.1.saturating_add(
-                            group
-                                .contract
-                                .lifecycle
-                                .max_address_space_bytes
-                                .saturating_mul(count_u64),
-                        ),
-                        totals.2.saturating_add(
-                            group
-                                .contract
-                                .lifecycle
-                                .max_cpu_seconds
-                                .saturating_mul(count_u64),
-                        ),
-                    )
-                });
+            let (total_processes, total_address_space, total_cpu_seconds) =
+                aggregate_process_capacity(&state);
             let group = state
                 .groups
                 .entry(key.to_owned())
@@ -843,6 +1352,15 @@ impl PersistentSessionPool {
                     match started {
                         Ok(process) => {
                             let process = Arc::new(process);
+                            if let Err(error) = process.start_reader(wire.clone()) {
+                                let cleanup = process.retire().err();
+                                return Err(match cleanup {
+                                    Some(cleanup) => error.context(format!(
+                                        "persistent-session reader start cleanup failed: {cleanup}"
+                                    )),
+                                    None => error,
+                                });
+                            }
                             process.leased.store(true, Ordering::Release);
                             group.processes.push(Arc::clone(&process));
                             self.inner.changed.notify_all();
@@ -918,6 +1436,144 @@ impl PersistentSessionPool {
         }
         self.inner.changed.notify_all();
     }
+}
+
+impl ExclusivePersistentSessionReservation {
+    /// Complete readiness and publish the process into the exclusive registry.
+    /// The caller must already have persisted the exact held-process identity
+    /// before supplying a released process here.
+    pub fn bind(mut self, started: StartedPersistentSession) -> Result<()> {
+        let ready = match ready_process(started, &self.contract.wire, &self.contract.lifecycle) {
+            Ok(process) => {
+                let process = Arc::new(process);
+                if let Err(error) = process.start_reader(self.contract.wire.clone()) {
+                    self.release_reservation();
+                    let cleanup = process.retire().err();
+                    return Err(match cleanup {
+                        Some(cleanup) => error
+                            .context(format!("exclusive reader start cleanup failed: {cleanup}")),
+                        None => error,
+                    });
+                }
+                process
+            }
+            Err(failure) => {
+                self.release_reservation();
+                if failure.cleanup_unproved {
+                    let mut state = self
+                        .inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state
+                        .cleanup_unproved
+                        .get_or_insert_with(|| failure.error.to_string());
+                }
+                return Err(failure.error);
+            }
+        };
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let reserved = state
+            .exclusive_reservations
+            .remove(&self.session_id)
+            .ok_or_else(|| anyhow!("exclusive persistent-session reservation was lost"))?;
+        if reserved.lifecycle != self.contract.lifecycle || reserved.wire != self.contract.wire {
+            drop(state);
+            let cleanup = ready.retire().err();
+            return Err(match cleanup {
+                Some(cleanup) => anyhow!(
+                    "exclusive persistent-session reservation changed; cleanup failed: {cleanup}"
+                ),
+                None => anyhow!("exclusive persistent-session reservation changed"),
+            });
+        }
+        match state.exclusive.entry(self.session_id.clone()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(ExclusiveSessionEntry {
+                    contract: self.contract.clone(),
+                    process: ready,
+                });
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                drop(state);
+                let cleanup = ready.retire().err();
+                return Err(match cleanup {
+                    Some(cleanup) => anyhow!(
+                        "exclusive session was concurrently attached; cleanup failed: {cleanup}"
+                    ),
+                    None => anyhow!("exclusive persistent session was concurrently attached"),
+                });
+            }
+        }
+        self.active = false;
+        self.inner.changed.notify_all();
+        Ok(())
+    }
+
+    fn release_reservation(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.exclusive_reservations.remove(&self.session_id);
+        self.active = false;
+        self.inner.changed.notify_all();
+    }
+}
+
+impl Drop for ExclusivePersistentSessionReservation {
+    fn drop(&mut self) {
+        self.release_reservation();
+    }
+}
+
+fn aggregate_process_capacity(state: &PoolState) -> (usize, u64, u64) {
+    let pooled = state
+        .groups
+        .values()
+        .fold((0usize, 0u64, 0u64), |totals, group| {
+            let count = group.processes.len().saturating_add(group.spawning);
+            let count_u64 = u64::try_from(count).unwrap_or(u64::MAX);
+            (
+                totals.0.saturating_add(count),
+                totals.1.saturating_add(
+                    group
+                        .contract
+                        .lifecycle
+                        .max_address_space_bytes
+                        .saturating_mul(count_u64),
+                ),
+                totals.2.saturating_add(
+                    group
+                        .contract
+                        .lifecycle
+                        .max_cpu_seconds
+                        .saturating_mul(count_u64),
+                ),
+            )
+        });
+    state
+        .exclusive
+        .values()
+        .map(|entry| &entry.contract)
+        .chain(state.exclusive_reservations.values())
+        .fold(pooled, |totals, contract| {
+            (
+                totals.0.saturating_add(1),
+                totals
+                    .1
+                    .saturating_add(contract.lifecycle.max_address_space_bytes),
+                totals.2.saturating_add(contract.lifecycle.max_cpu_seconds),
+            )
+        })
 }
 
 impl PersistentSessionStreamReservation {
@@ -1196,6 +1852,7 @@ fn ready_process(
         running,
         mut socket,
         lifelines,
+        expected_boot_identity,
     } = started;
     let timeout = Duration::from_millis(lifecycle.ready_timeout_ms);
     socket
@@ -1244,7 +1901,7 @@ fn ready_process(
         }
     };
     let readiness = require_frame_identity(&frame, wire)
-        .and_then(|()| validate_frame_shape(&frame))
+        .and_then(|()| validate_frame_shape(&frame, expected_boot_identity.as_deref()))
         .and_then(|()| {
             if frame.kind == PersistentSessionFrameKind::Ready {
                 Ok(())
@@ -1269,8 +1926,35 @@ fn ready_process(
             }),
         };
     }
+    let writer = match socket.try_clone() {
+        Ok(writer) => writer,
+        Err(error) => {
+            let error = attach_running_diagnostic(
+                &running,
+                anyhow!(error).context("clone persistent-session writer descriptor"),
+            );
+            return match running.abort_and_reap_checked() {
+                Ok(()) => Err(ReadyProcessFailure {
+                    error,
+                    cleanup_unproved: false,
+                }),
+                Err(cleanup) => Err(ReadyProcessFailure {
+                    error: error.context(format!(
+                        "persistent-session descriptor-clone cleanup could not be proved: {cleanup}"
+                    )),
+                    cleanup_unproved: true,
+                }),
+            };
+        }
+    };
     Ok(SessionProcess {
-        channel: Mutex::new(SessionChannel { socket, reader }),
+        wire: wire.clone(),
+        writer: Mutex::new(writer),
+        reader: Mutex::new(Some(SessionChannel { socket, reader })),
+        pending: Mutex::new(HashMap::new()),
+        observation_sender: Mutex::new(None),
+        buffered_observations: Mutex::new(VecDeque::new()),
+        reader_failure: Mutex::new(None),
         running: Mutex::new(Some(running)),
         leased: AtomicBool::new(false),
         last_used_ms: AtomicU64::new(now_ms()),
@@ -1327,6 +2011,7 @@ fn process_completion_diagnostic(
 fn execute_on_process<C, D>(
     process: &SessionProcess,
     wire: &PersistentSessionWireContract,
+    request_kind: PersistentSessionFrameKind,
     request_body: Value,
     cancelled: &C,
     deadline: Instant,
@@ -1341,90 +2026,81 @@ where
         now_ms(),
         REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     );
-    let mut channel = process
-        .channel
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if cancelled() || Instant::now() >= deadline {
-        bail!("persistent-session request ended before worker contact");
-    }
-    write_frame(
-        &mut channel.socket,
-        wire,
-        &PersistentSessionFrame {
-            protocol: wire.wire_protocol.clone(),
-            version: wire.wire_version,
-            kind: PersistentSessionFrameKind::Request,
-            request_id: Some(request_id.clone()),
-            body: Some(request_body),
-        },
-        deadline,
-    )
-    .context("send persistent-session request frame")?;
-    let mut cancel_sent = false;
-    loop {
-        if Instant::now() >= deadline {
-            bail!("persistent-session request exceeded its signed timeout");
+    let receiver = process.register_request(&request_id)?;
+    let outcome = (|| {
+        if cancelled() || Instant::now() >= deadline {
+            bail!("persistent-session request ended before worker contact");
         }
-        if cancelled() && !cancel_sent {
-            write_frame(
-                &mut channel.socket,
+        process
+            .write(
                 wire,
                 &PersistentSessionFrame {
                     protocol: wire.wire_protocol.clone(),
                     version: wire.wire_version,
-                    kind: PersistentSessionFrameKind::Cancel,
+                    kind: request_kind,
                     request_id: Some(request_id.clone()),
-                    body: None,
+                    body: Some(request_body),
                 },
                 deadline,
             )
-            .context("send persistent-session cancellation frame")?;
-            cancel_sent = true;
-        }
-        let next_frame = {
-            let SessionChannel { socket, reader } = &mut *channel;
-            reader.read_next(socket, wire.max_frame_bytes)
-        };
-        let frame = match next_frame {
-            Ok(Some(frame)) => frame,
-            Ok(None) => {
-                sleep_until_io_retry(deadline);
-                continue;
+            .context("send persistent-session request frame")?;
+        let mut cancel_sent = false;
+        loop {
+            if Instant::now() >= deadline {
+                bail!("persistent-session request exceeded its signed timeout");
             }
-            Err(error) => return Err(error.context("read persistent-session response frame")),
-        };
-        require_frame_identity(&frame, wire)?;
-        validate_frame_shape(&frame)?;
-        if frame.request_id.as_deref() != Some(request_id.as_str()) {
-            bail!("persistent-session response carried the wrong request identity");
-        }
-        match frame.kind {
-            PersistentSessionFrameKind::Delta => {
-                on_delta(frame.body.expect("delta body validated"))?;
+            if cancelled() && !cancel_sent {
+                process
+                    .write(
+                        wire,
+                        &PersistentSessionFrame {
+                            protocol: wire.wire_protocol.clone(),
+                            version: wire.wire_version,
+                            kind: PersistentSessionFrameKind::Cancel,
+                            request_id: Some(request_id.clone()),
+                            body: None,
+                        },
+                        deadline,
+                    )
+                    .context("send persistent-session cancellation frame")?;
+                cancel_sent = true;
             }
-            PersistentSessionFrameKind::Final => {
-                if cancel_sent {
-                    bail!("persistent-session request was cancelled");
+            let wait = deadline
+                .saturating_duration_since(Instant::now())
+                .min(IO_POLL_INTERVAL);
+            let frame = match receiver.recv_timeout(wait) {
+                Ok(Ok(frame)) => frame,
+                Ok(Err(reason)) => bail!("persistent-session reader failed: {reason}"),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    bail!("persistent-session response channel disconnected")
                 }
-                return Ok(frame.body.expect("final body validated"));
-            }
-            PersistentSessionFrameKind::Error => {
-                let detail = frame
-                    .body
-                    .as_ref()
-                    .and_then(|body| body.get("message"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("worker returned an error");
-                bail!("persistent-session worker error: {detail}");
-            }
-            PersistentSessionFrameKind::Ready
-            | PersistentSessionFrameKind::Request
-            | PersistentSessionFrameKind::Cancel => {
-                bail!("persistent-session worker sent an invalid response frame")
+            };
+            match frame.kind {
+                PersistentSessionFrameKind::Delta => {
+                    on_delta(frame.body.expect("delta body validated"))?;
+                }
+                PersistentSessionFrameKind::Final => {
+                    if cancel_sent {
+                        bail!("persistent-session request was cancelled");
+                    }
+                    return Ok(frame.body.expect("final body validated"));
+                }
+                PersistentSessionFrameKind::Error => {
+                    let detail = frame
+                        .body
+                        .as_ref()
+                        .and_then(|body| body.get("message"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("worker returned an error");
+                    bail!("persistent-session worker error: {detail}");
+                }
+                _ => bail!("persistent-session reader routed an invalid response frame"),
             }
         }
-    }
+    })();
+    process.unregister_request(&request_id);
+    outcome
 }
 
 fn require_frame_identity(
@@ -1491,7 +2167,7 @@ fn encode_frame(
     frame: &PersistentSessionFrame,
 ) -> Result<Vec<u8>> {
     require_frame_identity(frame, wire)?;
-    validate_frame_shape(frame)?;
+    validate_frame_shape(frame, None)?;
     let body = serde_json::to_vec(frame)?;
     if body.len() > wire.max_frame_bytes as usize {
         bail!("persistent-session output frame exceeds its signed bound");
@@ -1523,7 +2199,7 @@ fn decode_frame_body(body: &[u8], max_frame_bytes: u32) -> Result<PersistentSess
     {
         bail!("persistent-session frame must contain exactly five protocol fields");
     }
-    validate_frame_shape(&frame)?;
+    validate_frame_shape(&frame, None)?;
     Ok(frame)
 }
 
@@ -1564,10 +2240,26 @@ impl FrameReader {
     }
 }
 
-fn validate_frame_shape(frame: &PersistentSessionFrame) -> Result<()> {
+fn validate_frame_shape(
+    frame: &PersistentSessionFrame,
+    expected_boot_identity: Option<&str>,
+) -> Result<()> {
     let valid = match frame.kind {
-        PersistentSessionFrameKind::Ready => frame.request_id.is_none() && frame.body.is_none(),
+        PersistentSessionFrameKind::Ready => {
+            frame.request_id.is_none()
+                && match expected_boot_identity {
+                    None => frame.body.is_none(),
+                    Some(expected) => frame.body.as_ref().is_some_and(|body| {
+                        body.as_object().is_some_and(|object| {
+                            object.len() == 1
+                                && object.get("boot_identity").and_then(Value::as_str)
+                                    == Some(expected)
+                        })
+                    }),
+                }
+        }
         PersistentSessionFrameKind::Request
+        | PersistentSessionFrameKind::Control
         | PersistentSessionFrameKind::Delta
         | PersistentSessionFrameKind::Final
         | PersistentSessionFrameKind::Error => {
@@ -1575,6 +2267,10 @@ fn validate_frame_shape(frame: &PersistentSessionFrame) -> Result<()> {
         }
         PersistentSessionFrameKind::Cancel => {
             frame.request_id.as_ref().is_some_and(|id| !id.is_empty()) && frame.body.is_none()
+        }
+        PersistentSessionFrameKind::ObservationBatch
+        | PersistentSessionFrameKind::ObservationAck => {
+            frame.request_id.is_none() && frame.body.is_some()
         }
     };
     if !valid
@@ -1602,6 +2298,17 @@ fn validate_pool_key(key: &str) -> Result<()> {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         bail!("persistent-session pool key is not a canonical digest");
+    }
+    Ok(())
+}
+
+fn validate_exclusive_session_id(session_id: &str) -> Result<()> {
+    if session_id.is_empty()
+        || session_id.len() > 256
+        || session_id.trim() != session_id
+        || session_id.chars().any(char::is_control)
+    {
+        bail!("exclusive persistent-session id is not canonical and bounded");
     }
     Ok(())
 }
@@ -1805,6 +2512,17 @@ while True:
     frame = receive()
     if frame['kind'] == 'request':
         send('delta', frame['request_id'], {'text':'fixture'})
+        if frame['body'].get('emit_observation'):
+            send('observation_batch', None, {
+                'first_sequence':1,
+                'count':1,
+                'batch_digest':'fixture-digest',
+                'events':[{'event_type':'fixture','payload':{}}],
+                'session_observations':[]
+            })
+            acknowledgement = receive()
+            if acknowledgement['kind'] != 'observation_ack':
+                raise SystemExit(2)
         send('final', frame['request_id'], {'echo':frame['body']})
     elif frame['kind'] == 'cancel':
         send('error', frame['request_id'], {'message':'fixture observed cancellation'})
@@ -1890,6 +2608,7 @@ while True:
             running,
             socket: daemon_socket,
             lifelines: vec![Box::new(app_root), Box::new(worker_file)],
+            expected_boot_identity: None,
         })
     }
 
@@ -1976,6 +2695,116 @@ while True:
     }
 
     #[test]
+    fn exclusive_session_is_bound_once_and_never_enters_a_pool() {
+        let pool = PersistentSessionPool::new();
+        let mut lifecycle = test_lifecycle();
+        lifecycle.ready_timeout_ms = 2_000;
+        lifecycle.request_timeout_ms = 2_000;
+        let wire = test_wire();
+        let session_id = "e".repeat(64);
+        let reservation = pool
+            .reserve_exclusive(&session_id, &lifecycle, &wire)
+            .unwrap();
+        assert!(
+            pool.reserve_exclusive(&session_id, &lifecycle, &wire)
+                .is_err()
+        );
+        reservation.bind(fake_framed_session().unwrap()).unwrap();
+        let result = pool
+            .execute_exclusive(
+                &session_id,
+                serde_json::json!({"message": "exclusive"}),
+                || false,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!({"echo": {"message": "exclusive"}})
+        );
+        assert!(
+            pool.reserve_exclusive(&session_id, &lifecycle, &wire)
+                .is_err()
+        );
+        pool.retire_exclusive(&session_id).unwrap();
+        pool.reserve_exclusive(&session_id, &lifecycle, &wire)
+            .unwrap();
+    }
+
+    #[test]
+    fn exclusive_session_demultiplexes_observations_and_acks_after_sink_success() {
+        let pool = PersistentSessionPool::new();
+        let mut lifecycle = test_lifecycle();
+        lifecycle.ready_timeout_ms = 2_000;
+        lifecycle.request_timeout_ms = 2_000;
+        let wire = test_wire();
+        let session_id = "o".repeat(64);
+        pool.reserve_exclusive(&session_id, &lifecycle, &wire)
+            .unwrap()
+            .bind(fake_framed_session().unwrap())
+            .unwrap();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&observed);
+        pool.install_exclusive_observation_sink(&session_id, move |body| {
+            captured
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(body);
+            Ok(serde_json::json!({
+                "through_sequence": 1,
+                "batch_digest": "fixture-digest"
+            }))
+        })
+        .unwrap();
+        let result = pool
+            .execute_exclusive(
+                &session_id,
+                serde_json::json!({"emit_observation": true}),
+                || false,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!({"echo": {"emit_observation": true}})
+        );
+        let observed = observed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0]["batch_digest"], "fixture-digest");
+    }
+
+    #[test]
+    fn exclusive_failure_retains_cleanup_proof_until_durable_owner_consumes_it() {
+        let pool = PersistentSessionPool::new();
+        let mut lifecycle = test_lifecycle();
+        lifecycle.ready_timeout_ms = 2_000;
+        lifecycle.request_timeout_ms = 2_000;
+        let wire = test_wire();
+        let session_id = "f".repeat(64);
+        pool.reserve_exclusive(&session_id, &lifecycle, &wire)
+            .unwrap()
+            .bind(fake_framed_session().unwrap())
+            .unwrap();
+        assert!(
+            pool.execute_exclusive(&session_id, serde_json::json!({}), || true, |_| Ok(()))
+                .is_err()
+        );
+        assert!(
+            pool.reserve_exclusive(&session_id, &lifecycle, &wire)
+                .is_err()
+        );
+        assert_eq!(
+            pool.take_exclusive_failure_cleanup_state(&session_id)
+                .unwrap(),
+            Some("reaped")
+        );
+        pool.reserve_exclusive(&session_id, &lifecycle, &wire)
+            .unwrap();
+    }
+
+    #[test]
     fn cancel_frame_matches_the_worker_wire_fixture() {
         let frame = PersistentSessionFrame {
             protocol: "ryeos.persistent-session".to_owned(),
@@ -2000,6 +2829,31 @@ while True:
         assert!(decode_frame_body(duplicate, 4096).is_err());
         let incoherent = br#"{"protocol":"test.session","version":1,"kind":"ready","request_id":"x","body":null}"#;
         assert!(decode_frame_body(incoherent, 4096).is_err());
+    }
+
+    #[test]
+    fn readiness_identity_is_exact_and_cannot_be_replayed_without_the_boot_value() {
+        let expected = "a".repeat(64);
+        let valid = PersistentSessionFrame {
+            protocol: "fixture".to_owned(),
+            version: 1,
+            kind: PersistentSessionFrameKind::Ready,
+            request_id: None,
+            body: Some(serde_json::json!({"boot_identity": expected})),
+        };
+        assert!(validate_frame_shape(&valid, Some(&"a".repeat(64))).is_ok());
+
+        let missing = PersistentSessionFrame {
+            body: None,
+            ..valid.clone()
+        };
+        assert!(validate_frame_shape(&missing, Some(&"a".repeat(64))).is_err());
+
+        let stale = PersistentSessionFrame {
+            body: Some(serde_json::json!({"boot_identity": "stale"})),
+            ..valid
+        };
+        assert!(validate_frame_shape(&stale, Some(&"a".repeat(64))).is_err());
     }
 
     #[test]

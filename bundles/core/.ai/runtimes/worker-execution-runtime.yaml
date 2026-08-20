@@ -1,0 +1,34 @@
+# ryeos:signed:2026-08-19T08:24:44Z:434e90d0f6ac4e350613af0f8e5a84fce71a422bda881eccdcf71d355ae81b58:a6WTZO6kxX5gp1WjK8jKlKdJHmbPc+4/F8Jnq13v57NEwyBvGlBqkiykzSdArRcd/xoxREBMZ+acktSW3KqgAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: runtime
+serves: worker_execution
+default: true
+binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-worker-execution-runtime
+abi_version: "v3"
+required_caps:
+  - ryeos.runtime.dedicated_session.start
+  - ryeos.runtime.dedicated_session.command
+  - ryeos.runtime.dedicated_session.terminate
+launch_contract:
+  primary_allowed_kinds: [worker_execution]
+  primary_allowed_spaces: [bundle]
+  primary_allowed_trust: [trusted_bundle]
+  ref_bindings: {}
+  preparation:
+    kind: handler
+    handler: handler:ryeos/core/worker-execution-launch
+    config: {}
+    execution_cache: content_addressed
+  config_inputs: {}
+  execution_dependencies:
+    max_dependencies: 1
+    allowed_kinds: [worker]
+    allowed_spaces: [bundle]
+    allowed_trust: [trusted_bundle]
+  financial_authority: {kind: none}
+  external_effect_authority: {kind: external}
+  secret_policy:
+    max_requirements: 0
+    allowed_names: []
+  required_runtime_data: [worker_execution]
+  runtime_facts: {}
+description: Owns one root execution while its admitted session-bound worker is live.

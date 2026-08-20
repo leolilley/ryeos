@@ -14,7 +14,7 @@ use super::{
 };
 
 pub const PERSISTENT_SESSION_CAPSULE_KIND: &str = "persistent_session_capsule";
-pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 3;
+pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 4;
 
 fn deserialize_required_nullable<'de, D, T>(
     deserializer: D,
@@ -186,6 +186,10 @@ pub struct AdmittedPersistentSessionCapsule {
     pub execution_realization_hash: String,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub source_binding_hash: Option<String>,
+    /// Admission-compiled identity for the closed structured-session protocol
+    /// family. Other persistent-session protocol families retain `null`.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub structured_session_profile: Option<AdmittedStructuredSessionProfile>,
     pub runtime_ref: String,
     pub executor_ref: String,
 }
@@ -243,6 +247,14 @@ impl AdmittedPersistentSessionCapsule {
                 hash,
             )?;
         }
+        if let Some(profile) = &self.structured_session_profile {
+            profile.validate()?;
+            if self.wire.wire_protocol != "ryeos.structured-session" {
+                anyhow::bail!("structured-session profile is attached to another wire protocol");
+            }
+        } else if self.wire.wire_protocol == "ryeos.structured-session" {
+            anyhow::bail!("structured-session capsule has no admitted profile identity");
+        }
         Ok(())
     }
 
@@ -277,6 +289,59 @@ impl AdmittedPersistentSessionCapsule {
         Ok(lillux::sha256_hex(
             lillux::canonical_json(&self.to_value()?)?.as_bytes(),
         ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmittedStructuredSessionProfile {
+    pub profile_hash: String,
+    pub schema_hashes: std::collections::BTreeMap<String, String>,
+    pub baseline_source: String,
+    pub baseline_destination: String,
+}
+
+impl AdmittedStructuredSessionProfile {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        super::thread_snapshot::validate_canonical_hash(
+            "structured-session profile hash",
+            &self.profile_hash,
+        )?;
+        if self.schema_hashes.is_empty() || self.schema_hashes.len() > 512 {
+            anyhow::bail!("structured-session schema identity set is empty or too large");
+        }
+        for (identity, hash) in &self.schema_hashes {
+            let path = std::path::Path::new(identity);
+            if identity.len() > 4096
+                || path.is_absolute()
+                || path.as_os_str().is_empty()
+                || path
+                    .components()
+                    .any(|part| !matches!(part, std::path::Component::Normal(_)))
+            {
+                anyhow::bail!("structured-session schema identity is not a safe local path");
+            }
+            super::thread_snapshot::validate_canonical_hash(
+                "structured-session schema hash",
+                hash,
+            )?;
+        }
+        for (label, value) in [
+            ("structured-session baseline source", &self.baseline_source),
+            (
+                "structured-session baseline destination",
+                &self.baseline_destination,
+            ),
+        ] {
+            let mut components = std::path::Path::new(value).components();
+            if value.len() > 128
+                || !matches!(components.next(), Some(std::path::Component::Normal(_)))
+                || components.next().is_some()
+            {
+                anyhow::bail!("{label} is not one bounded relative file name");
+            }
+        }
+        Ok(())
     }
 }
 

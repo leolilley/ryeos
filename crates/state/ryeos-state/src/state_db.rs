@@ -5353,11 +5353,6 @@ impl StateDb {
         explicit_reset: bool,
     ) -> anyhow::Result<()> {
         guard.ensure_protects_pinned_runtime(&self._runtime_state_directory)?;
-        if !guard.is_exclusive() {
-            anyhow::bail!(
-                "external-content binding epoch publication requires exclusive state authority"
-            );
-        }
         let current = crate::objects::EXTERNAL_CONTENT_BINDING_SCHEMA_EPOCH;
         let name = std::ffi::OsStr::new("external-content-bindings.epoch");
         let expected = self._runtime_state_directory.open_regular(name, false)?;
@@ -5375,6 +5370,11 @@ impl StateDb {
                     "external-content binding epoch {stored} is newer than this binary's epoch {current}"
                 );
             }
+        }
+        if !guard.is_exclusive() {
+            anyhow::bail!(
+                "external-content binding epoch publication requires exclusive state authority"
+            );
         }
         self._runtime_state_directory.atomic_write_if_same(
             name,
@@ -6025,6 +6025,11 @@ mod tests {
                 .unwrap(),
             0
         );
+
+        drop(guard);
+        let guard = authority.acquire_shared_guard().unwrap();
+        db.ensure_current_external_content_binding_epoch(&guard)
+            .expect("ordinary online binding may validate an already-current epoch");
     }
 
     #[test]

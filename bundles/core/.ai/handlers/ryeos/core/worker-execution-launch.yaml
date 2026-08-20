@@ -1,0 +1,9 @@
+# ryeos:signed:2026-08-19T08:24:39Z:0a6ee4ac371a73196ab13aa24c8a2888071e1b2c9a7fc0097c8061b457aa1dfc:EDoDtxutIlf5Dwh2IrpjydYLU8SdVxU1VuL7B5X8tTeRfO6eaFKa3Y6qhCwQYihjMeGAFIRMS3duGt0l0jmTAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: handler
+name: worker-execution-launch
+category: ryeos/core
+serves: launch_preparer
+abi_version: v3
+binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-worker-execution-launch-preparer
+required_caps: []
+description: Admits one signed session-bound worker dependency for a hosted execution root.

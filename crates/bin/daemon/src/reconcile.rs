@@ -1114,6 +1114,7 @@ async fn reconcile_active_threads_inner(
                 "dead-generation launch claims cleared at startup"
             );
         }
+        reconcile_dedicated_workers(state)?;
     }
     repair_detached_spawn_links(state)?;
     reconcile_accounting(state)?;
@@ -2023,6 +2024,48 @@ async fn reconcile_active_threads_inner(
         active_thread_ids,
         resume_intents: intents,
     })
+}
+
+fn reconcile_dedicated_workers(state: &AppState) -> Result<()> {
+    let current_generation = ryeos_app::runtime_db::daemon_generation_id();
+    for worker in state.state_store.live_worker_processes()? {
+        if worker.daemon_generation_id == current_generation {
+            continue;
+        }
+        let initial_liveness = execution_group_liveness(&worker.process_identity);
+        let cleanup_state = match initial_liveness {
+            IdentityLiveness::DeadOrStale => "reaped",
+            IdentityLiveness::Alive => {
+                let killed = kill_by_action(
+                    &worker.process_identity,
+                    ryeos_app::process::ShutdownAction::Hard,
+                );
+                if killed.success
+                    && execution_group_liveness(&worker.process_identity)
+                        == IdentityLiveness::DeadOrStale
+                {
+                    "reaped"
+                } else {
+                    "unproved"
+                }
+            }
+            IdentityLiveness::Unavailable => "unproved",
+        };
+        state.state_store.fence_abandoned_worker_process(
+            &worker.worker_instance_id,
+            &worker.session_id,
+            worker.boot_epoch,
+            cleanup_state,
+        )?;
+        tracing::warn!(
+            worker_instance_id = %worker.worker_instance_id,
+            session_id = %worker.session_id,
+            dead_daemon_generation = %worker.daemon_generation_id,
+            cleanup_state,
+            "fenced a dedicated worker retained from a previous daemon generation"
+        );
+    }
+    Ok(())
 }
 
 fn repair_detached_spawn_links(state: &AppState) -> Result<()> {

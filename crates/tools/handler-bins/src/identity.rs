@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ryeos_handler_protocol::{
     ComposeRequest, ComposeSuccess, ComposerFieldRequirement, ComposerFieldSemantics,
@@ -6,19 +6,52 @@ use ryeos_handler_protocol::{
 };
 use serde_json::Value;
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IdentityConfig {
+    #[serde(default)]
+    policy_facts: Vec<IdentityPolicyFact>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IdentityPolicyFact {
+    name: String,
+    path: Vec<String>,
+    expect: IdentityPolicyFactShape,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum IdentityPolicyFactShape {
+    ArrayOfStrings,
+}
+
 pub fn validate_config(config: &Value) -> Result<(), String> {
-    match config {
-        Value::Null => Ok(()),
-        Value::Object(obj) if obj.is_empty() => Ok(()),
-        Value::Object(_) => {
-            Err("identity composer takes no config: composer_config must be null or {}".to_string())
-        }
-        other => Err(format!(
-            "identity composer takes no config: composer_config must be null or {{}} \
-             (got {})",
-            value_type(other)
-        )),
+    if config.is_null() {
+        return Ok(());
     }
+    let parsed: IdentityConfig = serde_json::from_value(config.clone()).map_err(|error| {
+        format!("identity composer config must be a strict policy-fact object: {error}")
+    })?;
+    if parsed.policy_facts.len() > 16 {
+        return Err("identity composer policy-fact count exceeds 16".to_owned());
+    }
+    let mut names = HashSet::new();
+    for fact in parsed.policy_facts {
+        if fact.name.is_empty()
+            || fact.name.len() > 128
+            || !names.insert(fact.name)
+            || fact.path.is_empty()
+            || fact.path.len() > 16
+            || fact.path.iter().any(|part| {
+                part.is_empty() || part.len() > 128 || part.chars().any(char::is_control)
+            })
+        {
+            return Err("identity composer policy fact is not canonical and bounded".to_owned());
+        }
+    }
+    Ok(())
 }
 
 /// Validate exact-value composition requirements for the identity composer.
@@ -47,25 +80,58 @@ pub fn validate_field_requirements(
 }
 
 pub fn compose(
-    _config: &Value,
+    config: &Value,
     request: &ComposeRequest,
 ) -> Result<ComposeSuccess, (ResolutionStepNameWire, String)> {
+    validate_config(config).map_err(|reason| (ResolutionStepNameWire::PipelineInit, reason))?;
+    let parsed = if config.is_null() {
+        IdentityConfig {
+            policy_facts: Vec::new(),
+        }
+    } else {
+        serde_json::from_value(config.clone()).map_err(|error| {
+            (
+                ResolutionStepNameWire::PipelineInit,
+                format!("decode validated identity composer config: {error}"),
+            )
+        })?
+    };
+    let mut policy_facts = HashMap::new();
+    for fact in parsed.policy_facts {
+        let mut value = &request.root.parsed;
+        for part in &fact.path {
+            value = value.get(part).ok_or_else(|| {
+                (
+                    ResolutionStepNameWire::PipelineInit,
+                    format!("identity policy fact `{}` path is absent", fact.name),
+                )
+            })?;
+        }
+        match fact.expect {
+            IdentityPolicyFactShape::ArrayOfStrings
+                if value.as_array().is_some_and(|items| {
+                    items.iter().all(|item| {
+                        item.as_str().is_some_and(|text| {
+                            !text.is_empty()
+                                && text.len() <= 1024
+                                && !text.chars().any(char::is_control)
+                        })
+                    })
+                }) => {}
+            _ => {
+                return Err((
+                    ResolutionStepNameWire::PipelineInit,
+                    format!("identity policy fact `{}` has the wrong shape", fact.name),
+                ));
+            }
+        }
+        policy_facts.insert(fact.name, value.clone());
+    }
     Ok(ComposeSuccess {
         composed: request.root.parsed.clone(),
         derived: HashMap::new(),
-        policy_facts: HashMap::new(),
+        policy_facts,
     })
-}
-
-fn value_type(v: &Value) -> &'static str {
-    match v {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
 }
 
 #[cfg(test)]
@@ -128,22 +194,43 @@ mod tests {
     #[test]
     fn validate_config_rejects_non_empty_object() {
         let err = validate_config(&json!({ "anything": 1 })).unwrap_err();
-        assert!(
-            err.contains("identity composer takes no config"),
-            "got: {err}"
-        );
+        assert!(err.contains("strict policy-fact object"), "got: {err}");
     }
 
     #[test]
     fn validate_config_rejects_array() {
         let err = validate_config(&json!([1, 2, 3])).unwrap_err();
-        assert!(err.contains("array"), "got: {err}");
+        assert!(err.contains("strict policy-fact object"), "got: {err}");
     }
 
     #[test]
     fn validate_config_rejects_string() {
         let err = validate_config(&json!("nope")).unwrap_err();
-        assert!(err.contains("string"), "got: {err}");
+        assert!(err.contains("strict policy-fact object"), "got: {err}");
+    }
+
+    #[test]
+    fn extracts_only_declared_typed_policy_facts_without_changing_content() {
+        let config = json!({"policy_facts":[{
+            "name":"effective_caps",
+            "path":["requires","capabilities","declared"],
+            "expect":"array_of_strings"
+        }]});
+        let root = json!({
+            "requires":{"capabilities":{"declared":["cap:a"]}},
+            "config":{"opaque":true}
+        });
+        let view = compose(
+            &config,
+            &ComposeRequest {
+                composer_config: config.clone(),
+                root: root_input(root.clone()),
+                ancestors: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(view.composed, root);
+        assert_eq!(view.policy_facts["effective_caps"], json!(["cap:a"]));
     }
 
     #[test]

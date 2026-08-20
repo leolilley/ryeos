@@ -1563,11 +1563,13 @@ mod tests {
             status_fd: 6,
             lifecycle: AdapterLaunchLifecycle::Run,
         };
-        assert!(request
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("adapter descriptor overlaps stdio or another isolation protocol role"));
+        assert!(
+            request
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("adapter descriptor overlaps stdio or another isolation protocol role")
+        );
     }
 
     #[test]

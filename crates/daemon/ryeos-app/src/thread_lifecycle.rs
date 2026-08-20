@@ -50,7 +50,8 @@ mod validation;
 
 pub use direct_execution::{
     ADMITTED_DIRECT_PROJECT_ROOT, PreparedItemPlan, RunningItem, SpawnItemParams,
-    SpawnedItemAwaitingAttachment, prepare_captured_item_plan, prepare_item_plan, spawn_item,
+    SpawnedItemAwaitingAttachment, SpawnedPersistentSessionAwaitingAttachment,
+    prepare_captured_item_plan, prepare_item_plan, spawn_item,
 };
 #[cfg(test)]
 use sealed_request::SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION;
@@ -2351,9 +2352,11 @@ fn validate_principal_identifier(label: &str, principal: &str) -> Result<()> {
 /// from one item with another `item_ref`.
 #[derive(Debug, Clone)]
 pub struct NonExecutionRootAdmission {
+    request_engine: Arc<Engine>,
     verified_subject: VerifiedItem,
     plan_context: PlanContext,
     project_authority: ryeos_state::objects::ExecutionProjectAuthority,
+    project_binding: Option<AdmittedProjectBinding>,
     thread_profile: String,
     resolved_history_policy: ResolvedThreadHistoryPolicy,
     captured_history_policy: ryeos_state::objects::CapturedThreadHistoryPolicy,
@@ -2373,6 +2376,9 @@ impl NonExecutionRootAdmission {
     }
 
     pub fn project_root(&self) -> Option<&Path> {
+        if self.project_binding.is_some() {
+            return self.project_authority.project_root_projection();
+        }
         match &self.plan_context.project_context {
             ProjectContext::LocalPath { path } => Some(path.as_path()),
             ProjectContext::None
@@ -2391,7 +2397,9 @@ impl NonExecutionRootAdmission {
             plan_principal_identifier(&self.plan_context),
         )?;
         self.project_authority.validate()?;
-        if self.project_authority.project_root_projection() != self.project_root() {
+        if self.project_binding.is_none()
+            && self.project_authority.project_root_projection() != self.project_root()
+        {
             bail!("non-execution root project authority does not match its planning context");
         }
         if self.thread_profile.trim().is_empty()
@@ -2423,10 +2431,17 @@ impl NonExecutionRootAdmission {
     /// Validate the sealed admission at the final persistence boundary against
     /// the already-loaded verified kind registry. The mutable item source is
     /// deliberately not re-resolved or re-read after admission.
-    fn validate_for_persistence(&self, engine: &Engine) -> Result<()> {
+    fn validate_for_persistence(&self) -> Result<()> {
         self.validate()?;
+        if let Some(binding) = &self.project_binding {
+            binding.validate_for(&self.request_engine, &self.plan_context)?;
+            if binding.exact_authority() != &self.project_authority {
+                bail!("non-execution root binding differs from its project authority");
+            }
+        }
         let admitted = &self.verified_subject.resolved;
-        let current_schema_hash = engine
+        let current_schema_hash = self
+            .request_engine
             .kinds
             .schema_content_hash(&admitted.kind)
             .ok_or_else(|| {
@@ -3325,7 +3340,10 @@ impl ThreadLifecycleService {
         admission: &NonExecutionRootAdmission,
     ) -> Result<ThreadDetail> {
         self.validate_root_create_shape(params)?;
-        admission.validate_for_persistence(&self.engine)?;
+        if !Arc::ptr_eq(&self.engine, &admission.request_engine) {
+            bail!("non-execution root admission belongs to a different engine generation");
+        }
+        admission.validate_for_persistence()?;
         let admitted_ref = admission
             .verified_subject
             .resolved
@@ -6063,7 +6081,7 @@ fn admit_verified_root_execution_inner(
 // independent admission facts and remain explicit at this boundary.
 #[allow(clippy::too_many_arguments)]
 pub fn admit_non_execution_root(
-    engine: &Engine,
+    engine: &Arc<Engine>,
     node_history_policy: &ResolvedNodeThreadHistoryPolicy,
     item_ref: &str,
     project_path: &Path,
@@ -6116,14 +6134,57 @@ pub fn admit_non_execution_root(
     let resolved_history_policy =
         resolve_thread_history_policy(engine, &plan_context, &resolved, node_history_policy)?;
     let admission = NonExecutionRootAdmission {
+        request_engine: Arc::clone(engine),
         verified_subject,
         plan_context,
         project_authority,
+        project_binding: None,
         thread_profile,
         captured_history_policy: capture_thread_history_policy(&resolved_history_policy)?,
         resolved_history_policy,
     };
-    admission.validate_for_persistence(engine)?;
+    admission.validate_for_persistence()?;
+    Ok(admission)
+}
+
+/// Admit a daemon-owned root against an already-captured immutable project
+/// generation. This is the pinned counterpart of [`admit_non_execution_root`]
+/// and reuses the same engine/project binding that owns the CoW workspace.
+#[allow(clippy::too_many_arguments)]
+pub fn admit_pinned_non_execution_root(
+    engine: &Arc<Engine>,
+    node_history_policy: &ResolvedNodeThreadHistoryPolicy,
+    item_ref: &str,
+    plan_context: PlanContext,
+    project_binding: AdmittedProjectBinding,
+    thread_profile: String,
+) -> Result<NonExecutionRootAdmission> {
+    validate_principal_identifier(
+        "pinned non-execution root acting principal",
+        plan_principal_identifier(&plan_context),
+    )?;
+    project_binding.validate_for(engine, &plan_context)?;
+    let canonical_ref = CanonicalRef::parse(item_ref)
+        .map_err(|error| anyhow!("invalid pinned root policy item ref `{item_ref}`: {error}"))?;
+    let resolved = engine
+        .resolve(&plan_context, &canonical_ref)
+        .map_err(|error| anyhow!("pinned root policy item resolution failed: {error}"))?;
+    let verified_subject = engine
+        .verify(&plan_context, resolved.clone())
+        .map_err(|error| anyhow!("pinned root policy item verification failed: {error}"))?;
+    let resolved_history_policy =
+        resolve_thread_history_policy(engine, &plan_context, &resolved, node_history_policy)?;
+    let admission = NonExecutionRootAdmission {
+        request_engine: Arc::clone(engine),
+        verified_subject,
+        plan_context,
+        project_authority: project_binding.exact_authority().clone(),
+        project_binding: Some(project_binding),
+        thread_profile,
+        captured_history_policy: capture_thread_history_policy(&resolved_history_policy)?,
+        resolved_history_policy,
+    };
+    admission.validate_for_persistence()?;
     Ok(admission)
 }
 

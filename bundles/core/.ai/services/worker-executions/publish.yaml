@@ -1,0 +1,8 @@
+# ryeos:signed:2026-08-19T08:24:49Z:8ce838c9f7444698e5b1a9c96e842eabca95ac4637aded5ab940bfa7673f93a7:oHnaxKlGHNDnYlMkOKekShS7/zVu1Ra5jWjzf9YmhXzvObIj8Va6S4h8cM6A4TNhY09xUkmyI24AAe0bv1q6AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: worker-executions
+name: publish
+kind: service
+endpoint: worker-executions.publish
+description: Compare-and-swap publish one validated retained execution candidate.
+required_caps: ["ryeos.execute.service.worker-executions/publish", "ryeos.write.project.live"]
+schema: {session_id: string, expected_previous_hash: string}
