@@ -1017,6 +1017,7 @@ CREATE TABLE IF NOT EXISTS dedicated_session (
     worker_instance_id TEXT,
     worker_boot_epoch INTEGER,
     workspace_id TEXT NOT NULL,
+    candidate_required INTEGER NOT NULL CHECK (candidate_required IN (0, 1)),
     credential_profile_id TEXT NOT NULL,
     credential_generation INTEGER NOT NULL CHECK (credential_generation > 0),
     remote_thread_id TEXT,
@@ -2094,6 +2095,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec {
                         name: "workspace_id",
                         col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "candidate_required",
+                        col_type: "INTEGER",
                         pk: false,
                         not_null: true,
                     },
@@ -3287,6 +3294,7 @@ pub struct NewDedicatedSession<'a> {
     pub owner_principal: &'a str,
     pub admitted_capsule_hash: &'a str,
     pub workspace_id: &'a str,
+    pub candidate_required: bool,
     pub credential_profile_id: &'a str,
     pub credential_generation: u64,
     pub credential_lock_owner: &'a str,
@@ -3302,6 +3310,7 @@ pub struct DedicatedSessionRecord {
     pub worker_instance_id: Option<String>,
     pub worker_boot_epoch: Option<u64>,
     pub workspace_id: String,
+    pub candidate_required: bool,
     pub credential_profile_id: String,
     pub credential_generation: u64,
     pub remote_thread_id: Option<String>,
@@ -4074,22 +4083,23 @@ impl RuntimeDb {
         let changed = self.conn.execute(
             "INSERT INTO dedicated_session (
                 session_id, root_thread_id, owner_principal, admitted_capsule_hash,
-                worker_instance_id, worker_boot_epoch, workspace_id,
+                worker_instance_id, worker_boot_epoch, workspace_id, candidate_required,
                 credential_profile_id, credential_generation, remote_thread_id,
                 current_turn_id, state, send_boundary, candidate_snapshot_hash,
                 candidate_validation_hash, publication_result, terminal_reason,
                 created_at_ms, updated_at_ms
-             ) SELECT ?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6, ?7, NULL, NULL,
-                       'admitted', 'none', NULL, NULL, NULL, NULL, ?9, ?9
+             ) SELECT ?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6, ?7, ?8, NULL, NULL,
+                       'admitted', 'none', NULL, NULL, NULL, NULL, ?10, ?10
                WHERE EXISTS(SELECT 1 FROM credential_profile
-                 WHERE profile_id=?6 AND owner_principal=?3 AND credential_generation=?7
-                   AND lock_owner=?8 AND state IN ('unauthenticated','enrolling','confirming','active'))",
+                 WHERE profile_id=?7 AND owner_principal=?3 AND credential_generation=?8
+                   AND lock_owner=?9 AND state IN ('unauthenticated','enrolling','confirming','active'))",
             params![
                 session.session_id,
                 session.root_thread_id,
                 session.owner_principal,
                 session.admitted_capsule_hash,
                 session.workspace_id,
+                i64::from(session.candidate_required),
                 session.credential_profile_id,
                 i64::try_from(session.credential_generation)
                     .context("credential generation exceeds SQLite integer range")?,
@@ -4109,7 +4119,7 @@ impl RuntimeDb {
             .conn
             .query_row(
                 "SELECT session_id, root_thread_id, owner_principal, admitted_capsule_hash,
-                    worker_instance_id, worker_boot_epoch, workspace_id,
+                    worker_instance_id, worker_boot_epoch, workspace_id, candidate_required,
                     credential_profile_id, credential_generation, remote_thread_id,
                     current_turn_id, state, send_boundary, candidate_snapshot_hash,
                     candidate_validation_hash, publication_result, terminal_reason,
@@ -4125,18 +4135,19 @@ impl RuntimeDb {
                         row.get::<_, Option<String>>(4)?,
                         row.get::<_, Option<i64>>(5)?,
                         row.get::<_, String>(6)?,
-                        row.get::<_, String>(7)?,
-                        row.get::<_, i64>(8)?,
-                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, i64>(9)?,
                         row.get::<_, Option<String>>(10)?,
-                        row.get::<_, String>(11)?,
+                        row.get::<_, Option<String>>(11)?,
                         row.get::<_, String>(12)?,
-                        row.get::<_, Option<String>>(13)?,
+                        row.get::<_, String>(13)?,
                         row.get::<_, Option<String>>(14)?,
                         row.get::<_, Option<String>>(15)?,
                         row.get::<_, Option<String>>(16)?,
-                        row.get::<_, i64>(17)?,
+                        row.get::<_, Option<String>>(17)?,
                         row.get::<_, i64>(18)?,
+                        row.get::<_, i64>(19)?,
                     ))
                 },
             )
@@ -4154,19 +4165,20 @@ impl RuntimeDb {
                     .transpose()
                     .context("negative worker boot epoch")?,
                 workspace_id: row.6,
-                credential_profile_id: row.7,
-                credential_generation: u64::try_from(row.8)
+                candidate_required: row.7 != 0,
+                credential_profile_id: row.8,
+                credential_generation: u64::try_from(row.9)
                     .context("negative credential generation")?,
-                remote_thread_id: row.9,
-                current_turn_id: row.10,
-                state: row.11,
-                send_boundary: row.12,
-                candidate_snapshot_hash: row.13,
-                candidate_validation_hash: row.14,
-                publication_result: row.15,
-                terminal_reason: row.16,
-                created_at_ms: row.17,
-                updated_at_ms: row.18,
+                remote_thread_id: row.10,
+                current_turn_id: row.11,
+                state: row.12,
+                send_boundary: row.13,
+                candidate_snapshot_hash: row.14,
+                candidate_validation_hash: row.15,
+                publication_result: row.16,
+                terminal_reason: row.17,
+                created_at_ms: row.18,
+                updated_at_ms: row.19,
             })
         })
         .transpose()
@@ -4184,6 +4196,22 @@ impl RuntimeDb {
         )?;
         let ids = statement
             .query_map([profile_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
+            .map(|session_id| {
+                self.dedicated_session(&session_id)?
+                    .ok_or_else(|| anyhow!("listed dedicated session disappeared"))
+            })
+            .collect()
+    }
+
+    pub fn dedicated_sessions_in_state(&self, state: &str) -> Result<Vec<DedicatedSessionRecord>> {
+        validate_bounded_runtime_text("dedicated session state", state, 32)?;
+        let mut statement = self.conn.prepare(
+            "SELECT session_id FROM dedicated_session WHERE state=?1 ORDER BY session_id",
+        )?;
+        let ids = statement
+            .query_map([state], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         ids.into_iter()
             .map(|session_id| {
@@ -4952,12 +4980,21 @@ impl RuntimeDb {
         if let Some(existing) =
             read_dedicated_command_by_key(&tx, command.session_id, command.idempotency_key)?
         {
-            if existing.worker_boot_epoch != command.worker_boot_epoch
-                || existing.command_kind != command.command_kind
+            if existing.command_kind != command.command_kind
                 || existing.request_digest != command.request_digest
                 || existing.payload != *command.payload
             {
                 bail!("command idempotency key was reused for different authority");
+            }
+            if existing.worker_boot_epoch != command.worker_boot_epoch
+                && !(existing.state == "failed"
+                    && existing.result.as_ref().and_then(|value| {
+                        value
+                            .get("retryable_uncontacted")
+                            .and_then(serde_json::Value::as_bool)
+                    }) == Some(true))
+            {
+                bail!("command idempotency key belongs to a different contacted worker epoch");
             }
             tx.commit()?;
             return Ok(existing);
@@ -5031,6 +5068,30 @@ impl RuntimeDb {
                 .ok_or_else(|| anyhow!("committed command disappeared"))?;
         tx.commit()?;
         Ok(record)
+    }
+
+    /// Durable command-outbox rows whose canonical root testimony may need to
+    /// be completed after a daemon crash. The root chain remains authoritative;
+    /// these rows only retain enough exact material to idempotently finish it.
+    pub fn dedicated_command_outbox_records(&self) -> Result<Vec<DedicatedSessionCommandRecord>> {
+        let mut statement = self.conn.prepare(
+            "SELECT session_id, idempotency_key
+               FROM dedicated_session_command
+              WHERE state IN ('committed','dispatched','outcome_unknown','failed')
+              ORDER BY session_id, command_sequence",
+        )?;
+        let identities = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        identities
+            .into_iter()
+            .map(|(session_id, idempotency_key)| {
+                read_dedicated_command_by_key(&self.conn, &session_id, &idempotency_key)?
+                    .ok_or_else(|| anyhow!("listed dedicated command outbox row disappeared"))
+            })
+            .collect()
     }
 
     pub fn mark_dedicated_command_contacted(
@@ -5866,6 +5927,7 @@ impl RuntimeDb {
         let mut statement = self.conn.prepare(
             "SELECT worker_instance_id FROM worker_process
               WHERE state IN ('starting','attached','live','draining')
+                 OR (state='dead' AND cleanup_state='unproved')
               ORDER BY created_at_ms, worker_instance_id",
         )?;
         let ids = statement
@@ -5916,46 +5978,77 @@ impl RuntimeDb {
                 AND state IN ('pending', 'decision_reserved')",
             params![session_id, epoch, now],
         )?;
+        // `committed` is mechanically before possible worker contact: the
+        // contacting transition is durable before the socket write. Retire
+        // these old-epoch reservations as a stable retryable failure so they
+        // cannot block recovery or a later command.
+        tx.execute(
+            "UPDATE dedicated_session_command
+                SET state='failed', result_json=?3, updated_at_ms=?4
+              WHERE session_id=?1 AND worker_boot_epoch=?2 AND state='committed'",
+            params![
+                session_id,
+                epoch,
+                serde_json::to_string(&serde_json::json!({
+                    "error":"worker epoch ended before contact",
+                    "retryable_uncontacted":true,
+                }))?,
+                now
+            ],
+        )?;
         let contacted = tx.execute(
             "UPDATE dedicated_session_command SET state='outcome_unknown', updated_at_ms=?3
               WHERE session_id=?1 AND worker_boot_epoch=?2 AND state='dispatched'",
             params![session_id, epoch, now],
         )?;
-        let next_state = if contacted > 0 {
+        let next_state = if contacted > 0 || cleanup_state == "unproved" {
             "outcome_unknown"
         } else {
             "recovering"
         };
-        let next_boundary = if contacted > 0 {
+        let next_boundary = if contacted > 0 || cleanup_state == "unproved" {
             "outcome_unknown"
         } else {
             "none"
         };
-        let session_changed = tx.execute(
-            "UPDATE dedicated_session
-                SET worker_instance_id=NULL, worker_boot_epoch=NULL, state=?4,
-                    send_boundary=?5, current_turn_id=NULL, updated_at_ms=?6
-              WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
-                AND state NOT IN ('terminal','frozen','publish_ready')",
-            params![
-                session_id,
-                worker_instance_id,
-                epoch,
-                next_state,
-                next_boundary,
-                now
-            ],
-        )?;
+        let session_changed = if cleanup_state == "reaped" {
+            tx.execute(
+                "UPDATE dedicated_session
+                    SET worker_instance_id=NULL, worker_boot_epoch=NULL, state=?4,
+                        send_boundary=?5, current_turn_id=NULL, updated_at_ms=?6
+                  WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                    AND state NOT IN ('terminal','frozen','publish_ready')",
+                params![
+                    session_id,
+                    worker_instance_id,
+                    epoch,
+                    next_state,
+                    next_boundary,
+                    now
+                ],
+            )?
+        } else {
+            // Unproved cleanup is still a live-credential possibility. Retain
+            // the exact worker identity and profile fence so revocation and
+            // recovery can never mistake it for a safely unattached session.
+            tx.execute(
+                "UPDATE dedicated_session
+                    SET state='outcome_unknown', send_boundary='outcome_unknown', updated_at_ms=?4
+                  WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                    AND state NOT IN ('terminal','frozen','publish_ready')",
+                params![session_id, worker_instance_id, epoch, now],
+            )?
+        };
         if session_changed != 1 {
             bail!("abandoned worker fence lost its session-epoch CAS");
         }
-        tx.execute(
-            "UPDATE execution_workspace SET state='ready', process_identity=NULL, updated_at_ms=?2
-              WHERE workspace_id=(SELECT workspace_id FROM dedicated_session WHERE session_id=?1)
-                AND state='active'",
-            params![session_id, now],
-        )?;
         if cleanup_state == "reaped" {
+            tx.execute(
+                "UPDATE execution_workspace SET state='ready', process_identity=NULL, updated_at_ms=?2
+                  WHERE workspace_id=(SELECT workspace_id FROM dedicated_session WHERE session_id=?1)
+                    AND state='active'",
+                params![session_id, now],
+            )?;
             tx.execute(
                 "UPDATE credential_profile SET lock_owner=NULL, updated_at_ms=?3
                   WHERE profile_id=(SELECT credential_profile_id FROM dedicated_session
@@ -6043,7 +6136,8 @@ impl RuntimeDb {
             "UPDATE worker_process SET state = 'dead', cleanup_state = ?4,
                     updated_at_ms = ?5
              WHERE worker_instance_id = ?1 AND session_id = ?2 AND boot_epoch = ?3
-               AND state IN ('attached', 'live', 'draining')",
+               AND (state IN ('attached', 'live', 'draining')
+                    OR (state='dead' AND cleanup_state='unproved' AND ?4='reaped'))",
             params![worker_instance_id, session_id, epoch, cleanup_state, now],
         )?;
         let session_changed = tx.execute(
@@ -6096,7 +6190,13 @@ impl RuntimeDb {
         validate_bounded_runtime_text("dedicated terminal reason", reason, 2048)?;
         let now = lillux::time::timestamp_millis() as i64;
         let tx = self.conn.unchecked_transaction()?;
-        let terminal_state = if reason == "completed" {
+        let candidate_required: bool = tx.query_row(
+            "SELECT candidate_required != 0 FROM dedicated_session
+              WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3",
+            params![session_id, worker_instance_id, i64::try_from(boot_epoch)?],
+            |row| row.get(0),
+        )?;
+        let terminal_state = if reason == "completed" && candidate_required {
             "freezing"
         } else {
             "terminal"
@@ -6187,6 +6287,7 @@ impl RuntimeDb {
                     publication_result='retained', state='frozen', updated_at_ms=?4
               WHERE root_thread_id=?1 AND state='freezing'
                 AND terminal_reason='completed'
+                AND candidate_required=1
                 AND candidate_snapshot_hash IS NULL
                 AND EXISTS(SELECT 1 FROM execution_workspace
                     WHERE workspace_id=dedicated_session.workspace_id AND state='closed')",
@@ -6568,6 +6669,18 @@ impl RuntimeDb {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(records)
+    }
+
+    pub fn dedicated_approval_outbox_session_ids(&self) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT DISTINCT session_id FROM dedicated_session_approval
+              WHERE state IN ('decision_reserved','delivery_contacting','delivery_unknown')
+              ORDER BY session_id",
+        )?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn cancel_unbound_launch_planning(&self, launch_id: &str) -> Result<bool> {
@@ -11229,6 +11342,7 @@ mod tests {
             owner_principal: "fp:operator",
             admitted_capsule_hash: &"a".repeat(64),
             workspace_id: "W-one",
+            candidate_required: false,
             credential_profile_id: "P-one",
             credential_generation: 1,
             credential_lock_owner: "worker-one",
@@ -11289,6 +11403,11 @@ mod tests {
         let settled = db.worker_process("worker-one").unwrap().unwrap();
         assert_eq!(settled.state, WorkerProcessState::Dead);
         assert_eq!(settled.cleanup_state, "reaped");
+        db.terminalize_dedicated_session("S-one", "worker-one", 1, "completed")
+            .unwrap();
+        let login_terminal = db.dedicated_session("S-one").unwrap().unwrap();
+        assert_eq!(login_terminal.state, "terminal");
+        assert!(login_terminal.candidate_snapshot_hash.is_none());
     }
 
     #[test]
@@ -11311,6 +11430,7 @@ mod tests {
             owner_principal: "fp:operator",
             admitted_capsule_hash: &"a".repeat(64),
             workspace_id: "W-fence",
+            candidate_required: false,
             credential_profile_id: "P-fence",
             credential_generation: 1,
             credential_lock_owner: "worker-fence",
@@ -11359,6 +11479,7 @@ mod tests {
             owner_principal: "fp:operator",
             admitted_capsule_hash: &"a".repeat(64),
             workspace_id: "W-abandoned",
+            candidate_required: false,
             credential_profile_id: "P-abandoned",
             credential_generation: 1,
             credential_lock_owner: "worker-abandoned",
@@ -11383,10 +11504,133 @@ mod tests {
         .unwrap();
         db.complete_worker_binding("worker-abandoned", "S-abandoned", 1)
             .unwrap();
+        let payload = serde_json::json!({"work":"never-contacted"});
+        let committed = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                session_id: "S-abandoned",
+                idempotency_key: "before-crash",
+                worker_boot_epoch: 1,
+                command_kind: "fixture",
+                request_digest: &"d".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        assert_eq!(committed.state, "committed");
         db.fence_abandoned_worker_process("worker-abandoned", "S-abandoned", 1, "reaped")
             .unwrap();
         assert_eq!(
             db.credential_profile("P-abandoned")
+                .unwrap()
+                .unwrap()
+                .lock_owner,
+            None
+        );
+        let retry = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                session_id: "S-abandoned",
+                idempotency_key: "before-crash",
+                worker_boot_epoch: 2,
+                command_kind: "fixture",
+                request_digest: &"d".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        assert_eq!(retry.state, "failed");
+        assert_eq!(
+            retry
+                .result
+                .as_ref()
+                .and_then(|value| value.get("retryable_uncontacted"))
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        let outbox = db.dedicated_command_outbox_records().unwrap();
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox[0], retry);
+    }
+
+    #[test]
+    fn unproved_abandoned_worker_retains_identity_and_credential_fence() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-unproved", "worker-unproved");
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    lower_snapshot, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-unproved', 'T-unproved', 'owner', 'backend',
+                           'a', '/tmp/workspace-unproved', 'ready', 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            session_id: "S-unproved",
+            root_thread_id: "T-unproved",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-unproved",
+            candidate_required: false,
+            credential_profile_id: "P-unproved",
+            credential_generation: 1,
+            credential_lock_owner: "worker-unproved",
+        })
+        .unwrap();
+        db.attach_worker_process(&WorkerProcessRecord {
+            worker_instance_id: "worker-unproved".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "a".repeat(64),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(128, 128),
+            control_channel_identity: "fd:14".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "daemon-one".to_owned(),
+            session_id: "S-unproved".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: 2,
+            updated_at_ms: 2,
+        })
+        .unwrap();
+        db.complete_worker_binding("worker-unproved", "S-unproved", 1)
+            .unwrap();
+        db.fence_abandoned_worker_process("worker-unproved", "S-unproved", 1, "unproved")
+            .unwrap();
+
+        let session = db.dedicated_session("S-unproved").unwrap().unwrap();
+        assert_eq!(session.state, "outcome_unknown");
+        assert_eq!(
+            session.worker_instance_id.as_deref(),
+            Some("worker-unproved")
+        );
+        assert_eq!(session.worker_boot_epoch, Some(1));
+        assert_eq!(
+            db.credential_profile("P-unproved")
+                .unwrap()
+                .unwrap()
+                .lock_owner
+                .as_deref(),
+            Some("worker-unproved")
+        );
+
+        db.settle_worker_process(
+            "worker-unproved",
+            "S-unproved",
+            1,
+            "reaped",
+            "credential_revoked",
+        )
+        .unwrap();
+        assert_eq!(
+            db.worker_process("worker-unproved")
+                .unwrap()
+                .unwrap()
+                .cleanup_state,
+            "reaped"
+        );
+        db.terminalize_dedicated_session("S-unproved", "worker-unproved", 1, "credential_revoked")
+            .unwrap();
+        assert_eq!(
+            db.credential_profile("P-unproved")
                 .unwrap()
                 .unwrap()
                 .lock_owner,
@@ -11414,6 +11658,7 @@ mod tests {
             owner_principal: "fp:operator",
             admitted_capsule_hash: &"a".repeat(64),
             workspace_id: "W-ready-fail",
+            candidate_required: false,
             credential_profile_id: "P-ready-fail",
             credential_generation: 1,
             credential_lock_owner: "worker-ready-fail",
@@ -11581,6 +11826,7 @@ mod tests {
             owner_principal: "fp:operator",
             admitted_capsule_hash: &"c".repeat(64),
             workspace_id: "W-ledger",
+            candidate_required: false,
             credential_profile_id: "P-one",
             credential_generation: generation,
             credential_lock_owner: "worker-ledger",
@@ -11815,6 +12061,7 @@ mod tests {
             owner_principal: "fp:operator",
             admitted_capsule_hash: &"a".repeat(64),
             workspace_id: "W-candidate",
+            candidate_required: true,
             credential_profile_id: "P-candidate",
             credential_generation: 1,
             credential_lock_owner: "worker-candidate",

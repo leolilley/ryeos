@@ -146,23 +146,34 @@ pub fn require_local_operator(
     state: &AppState,
     context: &HandlerContext,
 ) -> anyhow::Result<String> {
-    let operator = crate::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
-        .context("load configured local operator identity")?;
-    authenticated_operator_fingerprint(context, &operator)
+    if context.authenticated_origin_site_id.is_some() {
+        bail!("external-content operator actions are unavailable to remote-origin principals");
+    }
+    require_configured_operator(state, context)
 }
 
-fn authenticated_operator_fingerprint(
+/// Authenticate the node's configured operator principal without constraining
+/// transport origin. Hosted execution is deliberately remote-operable: the
+/// authenticated origin is retained as evidence, but it cannot replace or
+/// weaken the exact configured-operator fingerprint check.
+pub fn require_configured_operator(
+    state: &AppState,
+    context: &HandlerContext,
+) -> anyhow::Result<String> {
+    let operator = crate::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+        .context("load configured operator identity")?;
+    authenticated_configured_operator_fingerprint(context, &operator)
+}
+
+fn authenticated_configured_operator_fingerprint(
     context: &HandlerContext,
     operator: &crate::identity::NodeIdentity,
 ) -> anyhow::Result<String> {
     context
         .require_verified()
         .map_err(|error| anyhow::anyhow!(error))?;
-    if context.authenticated_origin_site_id.is_some() {
-        bail!("external-content operator actions are unavailable to remote-origin principals");
-    }
     if context.fingerprint != operator.principal_id() {
-        bail!("external-content operator action requires the configured local operator");
+        bail!("action requires the configured operator");
     }
     Ok(operator.fingerprint().to_owned())
 }
@@ -1169,25 +1180,28 @@ mod tests {
     }
 
     #[test]
-    fn local_operator_auth_uses_principal_id_and_returns_raw_fingerprint() {
+    fn configured_operator_auth_uses_principal_id_and_allows_remote_transport() {
         let directory = tempfile::tempdir().unwrap();
         let identity =
             crate::identity::NodeIdentity::create(&directory.path().join("operator.pem")).unwrap();
         let local = HandlerContext::new(identity.principal_id(), vec!["*".to_owned()], true);
         assert_eq!(
-            authenticated_operator_fingerprint(&local, &identity).unwrap(),
+            authenticated_configured_operator_fingerprint(&local, &identity).unwrap(),
             identity.fingerprint()
         );
 
         let raw = HandlerContext::new(identity.fingerprint().to_owned(), vec![], true);
-        assert!(authenticated_operator_fingerprint(&raw, &identity).is_err());
+        assert!(authenticated_configured_operator_fingerprint(&raw, &identity).is_err());
         let remote = HandlerContext::new_with_origin(
             identity.principal_id(),
             vec!["*".to_owned()],
             true,
             Some("site:remote".to_owned()),
         );
-        assert!(authenticated_operator_fingerprint(&remote, &identity).is_err());
+        assert_eq!(
+            authenticated_configured_operator_fingerprint(&remote, &identity).unwrap(),
+            identity.fingerprint()
+        );
     }
 }
 

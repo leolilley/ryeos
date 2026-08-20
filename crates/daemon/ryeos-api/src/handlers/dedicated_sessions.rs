@@ -42,6 +42,20 @@ fn root_fact_operation_lock(root_thread_id: &str) -> Arc<std::sync::Mutex<()>> {
     )
 }
 
+fn approval_delivery_lock(session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .expect("approval delivery lock map poisoned");
+    Arc::clone(
+        locks
+            .entry(session_id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+    )
+}
+
 fn owned_session(
     state: &AppState,
     ctx: &HandlerContext,
@@ -50,8 +64,8 @@ fn owned_session(
     // Initial hosted execution is deliberately a single configured-operator
     // trust domain. Enforce that predicate before lookup so discovery and
     // timing do not turn owner rows into an accidental multi-tenant boundary.
-    ryeos_app::operator_external_content::require_local_operator(state, ctx)
-        .map_err(|_| HandlerError::Forbidden("configured local operator required".into()))?;
+    ryeos_app::operator_external_content::require_configured_operator(state, ctx)
+        .map_err(|_| HandlerError::Forbidden("configured operator required".into()))?;
     let session = state
         .state_store
         .dedicated_session(session_id)
@@ -125,12 +139,26 @@ async fn approvals(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
-    let session = owned_session(&state, &ctx, &req.session_id)?;
-    let mut approvals = state
+    owned_session(&state, &ctx, &req.session_id)?;
+    let approvals = state
         .state_store
         .pending_dedicated_session_approvals(&req.session_id)
+        .map_err(internal)?
+        .into_iter()
+        .filter(|approval| approval.state == "pending")
+        .collect::<Vec<_>>();
+    Ok(json!({"approvals": approvals}))
+}
+
+fn repair_approval_outbox_for_session(
+    state: &AppState,
+    session: &ryeos_app::state_store::DedicatedSessionRecord,
+) -> Result<(), HandlerError> {
+    let approvals = state
+        .state_store
+        .pending_dedicated_session_approvals(&session.session_id)
         .map_err(internal)?;
-    for approval in &approvals {
+    for approval in approvals {
         if !matches!(
             approval.state.as_str(),
             "decision_reserved" | "delivery_contacting" | "delivery_unknown"
@@ -166,7 +194,7 @@ async fn approvals(
             .ok_or_else(|| internal("reserved approval has no valid semantic decision"))?;
         let decision_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
             "schema":"ryeos.hosted_approval_decision_fact.v1",
-            "session_id":req.session_id,
+            "session_id":session.session_id,
             "approval_id":approval.approval_id,
             "reservation_token":token,
             "stage":"decision_reserved",
@@ -180,7 +208,7 @@ async fn approvals(
             json!({
                 "schema":1,
                 "origin":"owner_authorized",
-                "session_id":req.session_id,
+                "session_id":session.session_id,
                 "approval_id":approval.approval_id,
                 "worker_boot_epoch":approval.worker_boot_epoch,
                 "request_digest":approval.request_digest,
@@ -196,7 +224,7 @@ async fn approvals(
         ) {
             let contacting_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
                 "schema":"ryeos.hosted_approval_delivery_fact.v1",
-                "session_id":req.session_id,
+                "session_id":session.session_id,
                 "approval_id":approval.approval_id,
                 "reservation_token":token,
                 "stage":"delivery_contacting",
@@ -210,7 +238,7 @@ async fn approvals(
                 json!({
                     "schema":1,
                     "origin":"daemon_observed_io",
-                    "session_id":req.session_id,
+                    "session_id":session.session_id,
                     "approval_id":approval.approval_id,
                     "worker_boot_epoch":approval.worker_boot_epoch,
                     "decision_digest":decision_digest,
@@ -222,7 +250,7 @@ async fn approvals(
             state
                 .state_store
                 .reconcile_dedicated_approval_delivery_unknown(
-                    &req.session_id,
+                    &session.session_id,
                     &approval.approval_id,
                     approval.worker_boot_epoch,
                 )
@@ -230,7 +258,7 @@ async fn approvals(
         }
         let unknown_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
             "schema":"ryeos.hosted_approval_delivery_fact.v1",
-            "session_id":req.session_id,
+            "session_id":session.session_id,
             "approval_id":approval.approval_id,
             "reservation_token":token,
             "stage":"delivery_unknown",
@@ -244,7 +272,7 @@ async fn approvals(
             json!({
                 "schema":1,
                 "origin":"daemon_observed_io",
-                "session_id":req.session_id,
+                "session_id":session.session_id,
                 "approval_id":approval.approval_id,
                 "worker_boot_epoch":approval.worker_boot_epoch,
                 "decision_digest":decision_digest,
@@ -252,11 +280,109 @@ async fn approvals(
             }),
         )?;
     }
-    approvals = state
+    Ok(())
+}
+
+/// Repair approval outbox evidence during daemon startup, before public
+/// service traffic can race the delivery state machine. Listing approvals is
+/// deliberately read-only and never invokes this reconciler.
+pub async fn reconcile_approval_outboxes(state: Arc<AppState>) -> anyhow::Result<()> {
+    for session_id in state.state_store.dedicated_approval_outbox_session_ids()? {
+        let _delivery_guard = approval_delivery_lock(&session_id).lock_owned().await;
+        let Some(session) = state.state_store.dedicated_session(&session_id)? else {
+            anyhow::bail!("approval outbox references a missing dedicated session");
+        };
+        repair_approval_outbox_for_session(&state, &session)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    }
+    Ok(())
+}
+
+/// Reconcile the only irreversible candidate-publication crash boundary. The
+/// project HEAD is read back under retained project authority before the root
+/// fact/projection is settled. A base or unrelated HEAD proves this operation
+/// did not publish the candidate and returns the reservation to publish-ready.
+pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::Result<()> {
+    for session in state
         .state_store
-        .pending_dedicated_session_approvals(&req.session_id)
-        .map_err(internal)?;
-    Ok(json!({"approvals": approvals}))
+        .dedicated_sessions_in_state("publishing")?
+    {
+        let _operation_guard = disposition_operation_lock(&session.session_id)
+            .lock_owned()
+            .await;
+        let candidate = session
+            .candidate_snapshot_hash
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("publishing session has no candidate"))?;
+        let validation = session
+            .candidate_validation_hash
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("publishing session has no validation identity"))?;
+        let thread = state
+            .state_store
+            .get_thread(&session.root_thread_id)?
+            .ok_or_else(|| anyhow::anyhow!("publishing root thread disappeared"))?;
+        let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+            base_snapshot_hash,
+            display_path,
+            ..
+        } = thread
+            .project_authority
+            .ok_or_else(|| anyhow::anyhow!("publishing root has no project authority"))?
+        else {
+            anyhow::bail!("publishing root project authority is not pinned");
+        };
+        let project_path = display_path
+            .or(thread.project_root.map(Into::into))
+            .ok_or_else(|| anyhow::anyhow!("publishing root has no stable project path"))?;
+        let canonical_project = ryeos_executor::execution::project_source::canonical_project_ref(
+            project_path
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("publishing project path is not UTF-8"))?,
+        )?;
+        let principal_key = ryeos_state::refs::principal_storage_key(&session.owner_principal)?;
+        let project_hash = lillux::cas::sha256_hex(canonical_project.as_bytes());
+        let current = state
+            .state_store
+            .with_state_db(|db| db.read_project_head(&principal_key, &project_hash))?;
+        if current.as_deref() == Some(candidate) {
+            let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
+                "schema":"ryeos.hosted_candidate_publication_operation.v1",
+                "session_id":session.session_id,
+                "candidate_snapshot_hash":candidate,
+                "expected_previous_hash":base_snapshot_hash,
+                "candidate_validation_hash":validation,
+            }))?;
+            append_root_fact_once(
+                &state,
+                &session,
+                "hosted_candidate.published",
+                &operation_id,
+                json!({
+                    "schema":1,
+                    "origin":"filesystem_verified",
+                    "owner_principal":session.owner_principal,
+                    "session_id":session.session_id,
+                    "candidate_snapshot_hash":candidate,
+                    "expected_previous_hash":base_snapshot_hash,
+                    "candidate_validation_hash":validation,
+                    "recovered_after_head_contact":true,
+                }),
+            )?;
+            state.state_store.settle_dedicated_candidate_publication(
+                &session.session_id,
+                candidate,
+                &format!("published:{candidate}"),
+            )?;
+            ryeos_app::dedicated_session_service::notify_projection_change(&session.session_id);
+        } else {
+            state
+                .state_store
+                .fail_dedicated_candidate_disposition(&session.session_id, "publishing")?;
+            ryeos_app::dedicated_session_service::notify_projection_change(&session.session_id);
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -273,6 +399,7 @@ async fn resolve_approval(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
+    let _delivery_guard = approval_delivery_lock(&req.session_id).lock_owned().await;
     let initial_session = owned_session(&state, &ctx, &req.session_id)?;
     let _credential_guard = super::credential_profiles::credential_profile_operation_lock(
         &initial_session.credential_profile_id,
@@ -711,6 +838,7 @@ async fn validate_candidate_closure_and_base(
             &evidence,
         )
         .map_err(internal)?;
+    ryeos_app::dedicated_session_service::notify_projection_change(&req.session_id);
     Ok(json!({
         "session_id":req.session_id,
         "state":"publish_ready",
@@ -770,6 +898,7 @@ async fn discard(
         .state_store
         .settle_dedicated_candidate_discard(&req.session_id, &req.candidate_snapshot_hash)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    ryeos_app::dedicated_session_service::notify_projection_change(&req.session_id);
     Ok(json!({"session_id":req.session_id,"discarded":true}))
 }
 
@@ -929,6 +1058,7 @@ async fn publish(
             .state_store
             .fail_dedicated_candidate_disposition(&req.session_id, "publishing")
             .map_err(internal)?;
+        ryeos_app::dedicated_session_service::notify_projection_change(&req.session_id);
         return Err(HandlerError::BadRequest(error.to_string()));
     }
     append_root_fact_once(
@@ -953,6 +1083,7 @@ async fn publish(
             &format!("published:{candidate}"),
         )
         .map_err(internal)?;
+    ryeos_app::dedicated_session_service::notify_projection_change(&req.session_id);
     Ok(json!({
         "session_id":req.session_id,
         "snapshot_hash":candidate,

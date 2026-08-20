@@ -4,8 +4,9 @@
 //! service owns only the generic durable contact boundary, event/approval
 //! ledgers, worker-epoch fencing, and cleanup proof consumption.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
@@ -27,6 +28,42 @@ struct WorkerObservationBatch {
     batch_digest: String,
     events: Vec<Value>,
     session_observations: Vec<Value>,
+}
+
+fn projection_signal(session_id: &str) -> Arc<tokio::sync::Notify> {
+    static SIGNALS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Notify>>>> = OnceLock::new();
+    let mut signals = SIGNALS
+        .get_or_init(Default::default)
+        .lock()
+        .expect("dedicated projection signal map poisoned");
+    Arc::clone(
+        signals
+            .entry(session_id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Notify::new())),
+    )
+}
+
+pub fn notify_projection_change(session_id: &str) {
+    projection_signal(session_id).notify_waiters();
+}
+
+pub async fn wait_for_projection_change(
+    state: &AppState,
+    session_id: &str,
+    observed_updated_at_ms: i64,
+    timeout: std::time::Duration,
+) -> Result<DedicatedSessionRecord> {
+    let signal = projection_signal(session_id);
+    loop {
+        let notified = signal.notified();
+        let current = current_session(state, session_id)?;
+        if current.updated_at_ms != observed_updated_at_ms || current.state == "terminal" {
+            return Ok(current);
+        }
+        if tokio::time::timeout(timeout, notified).await.is_err() {
+            return Ok(current_session(state, session_id)?);
+        }
+    }
 }
 
 /// Ingest one worker-pushed observation batch. The caller is the generic
@@ -97,6 +134,7 @@ pub fn ingest_observation_batch(
             batch.first_sequence,
             &batch.batch_digest,
         )?;
+        notify_projection_change(session_id);
         return Ok(json!({
             "through_sequence":through_sequence,
             "batch_digest":batch.batch_digest,
@@ -174,6 +212,7 @@ pub fn ingest_observation_batch(
         )?;
         return Err(error);
     }
+    notify_projection_change(session_id);
     Ok(json!({
         "through_sequence": through_sequence,
         "batch_digest": batch.batch_digest,
@@ -435,6 +474,139 @@ fn current_session(state: &AppState, session_id: &str) -> Result<DedicatedSessio
         .ok_or_else(|| anyhow!("dedicated session disappeared"))
 }
 
+/// Complete canonical command testimony after restart from the durable
+/// command outbox. This never contacts a worker. A possible-contact row is
+/// reconciled only to outcome-unknown; it is never replayed.
+pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
+    for record in state.state_store.dedicated_command_outbox_records()? {
+        let session = current_session(state, &record.session_id)?;
+        let (profile_hash, schema_hashes) =
+            structured_protocol_identity(state, &session.admitted_capsule_hash)?;
+        append_command_fact_once(
+            state,
+            &session,
+            "hosted_command.committed",
+            record.command_sequence,
+            &record.request_digest,
+            json!({
+                "schema":1,
+                "origin":"daemon_observed_io",
+                "worker_boot_epoch":record.worker_boot_epoch,
+                "route_id":&record.command_kind,
+                "idempotency_key":&record.idempotency_key,
+                "canonical_command":&record.payload,
+                "admitted_session_capsule_hash":&session.admitted_capsule_hash,
+                "protocol_profile_hash":profile_hash,
+                "protocol_schema_hashes":schema_hashes,
+                "recovered":true,
+            }),
+        )?;
+        match record.state.as_str() {
+            "committed" => {}
+            "dispatched" | "outcome_unknown" => {
+                append_command_fact_once(
+                    state,
+                    &session,
+                    "hosted_command.contacting",
+                    record.command_sequence,
+                    &record.request_digest,
+                    json!({
+                        "schema":1,
+                        "origin":"daemon_observed_io",
+                        "worker_boot_epoch":record.worker_boot_epoch,
+                        "recovered":true,
+                    }),
+                )?;
+                if record.state == "dispatched" {
+                    state.state_store.mark_dedicated_command_outcome_unknown(
+                        &record.session_id,
+                        record.command_sequence,
+                        record.worker_boot_epoch,
+                    )?;
+                }
+                append_command_fact_once(
+                    state,
+                    &session,
+                    "hosted_command.outcome_unknown",
+                    record.command_sequence,
+                    &record.request_digest,
+                    json!({
+                        "schema":1,
+                        "origin":"daemon_observed_io",
+                        "worker_boot_epoch":record.worker_boot_epoch,
+                        "cleanup_state":"restart_reconciliation",
+                        "recovered":true,
+                    }),
+                )?;
+            }
+            "completed" => {
+                let result = record.result.as_ref().unwrap_or(&Value::Null);
+                let response_digest = result
+                    .get("response_digest")
+                    .and_then(Value::as_str)
+                    .filter(|digest| lillux::valid_hash(digest))
+                    .map(ToOwned::to_owned)
+                    .unwrap_or(ryeos_state::objects::canonical_value_digest(result)?);
+                append_command_fact_once(
+                    state,
+                    &session,
+                    "hosted_command.settled",
+                    record.command_sequence,
+                    &record.request_digest,
+                    json!({
+                        "schema":1,
+                        "origin":"daemon_observed_io",
+                        "worker_boot_epoch":record.worker_boot_epoch,
+                        "response_digest":response_digest,
+                        "succeeded":true,
+                        "recovered":true,
+                    }),
+                )?;
+            }
+            "failed"
+                if record.result.as_ref().is_some_and(|result| {
+                    result.get("retryable_uncontacted").and_then(Value::as_bool) == Some(true)
+                }) =>
+            {
+                append_command_fact_once(
+                    state,
+                    &session,
+                    "hosted_command.failed_uncontacted",
+                    record.command_sequence,
+                    &record.request_digest,
+                    json!({
+                        "schema":1,
+                        "origin":"daemon_verified_process",
+                        "worker_boot_epoch":record.worker_boot_epoch,
+                        "retryable_uncontacted":true,
+                        "recovered":true,
+                    }),
+                )?;
+            }
+            "failed" => {
+                let result = record.result.as_ref().unwrap_or(&Value::Null);
+                append_command_fact_once(
+                    state,
+                    &session,
+                    "hosted_command.settled",
+                    record.command_sequence,
+                    &record.request_digest,
+                    json!({
+                        "schema":1,
+                        "origin":"daemon_observed_io",
+                        "worker_boot_epoch":record.worker_boot_epoch,
+                        "response_digest":ryeos_state::objects::canonical_value_digest(result)?,
+                        "succeeded":false,
+                        "recovered":true,
+                    }),
+                )?;
+            }
+            other => bail!("dedicated command outbox has invalid state `{other}`"),
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WorkerEvent {
@@ -536,6 +708,8 @@ pub async fn execute_command(
         "command_kind": command_kind,
         "payload": payload,
     }))?;
+    let (protocol_profile_hash, protocol_schema_hashes) =
+        structured_protocol_identity(state, &session.admitted_capsule_hash)?;
     let record =
         state
             .state_store
@@ -572,6 +746,11 @@ pub async fn execute_command(
             "origin":"daemon_observed_io",
             "worker_boot_epoch":worker_boot_epoch,
             "route_id":command_kind,
+            "idempotency_key":idempotency_key,
+            "canonical_command":payload,
+            "admitted_session_capsule_hash":session.admitted_capsule_hash,
+            "protocol_profile_hash":protocol_profile_hash,
+            "protocol_schema_hashes":protocol_schema_hashes,
         }),
     )?;
     state.state_store.mark_dedicated_command_contacted(
@@ -671,6 +850,7 @@ pub async fn execute_command(
                 true,
                 &persisted_result,
             )?;
+            notify_projection_change(session_id);
             Ok(json!({
                 "command_sequence": record.command_sequence,
                 "state": "completed",
@@ -705,11 +885,34 @@ pub async fn execute_command(
                     "cleanup_state":cleanup_state,
                 }),
             )?;
+            notify_projection_change(session_id);
             bail!(
                 "worker contact failed; command outcome is unknown, cleanup is {cleanup_state}, and it will not be resent: {error}"
             )
         }
     }
+}
+
+fn structured_protocol_identity(
+    state: &AppState,
+    capsule_hash: &str,
+) -> Result<(String, std::collections::BTreeMap<String, String>)> {
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&guard)?;
+    let value = authority
+        .cas_store()?
+        .get_object(capsule_hash)?
+        .ok_or_else(|| anyhow!("admitted session capsule disappeared"))?;
+    let capsule =
+        ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;
+    if capsule.content_hash()? != capsule_hash {
+        bail!("admitted session capsule content hash changed");
+    }
+    let profile = capsule
+        .structured_session_profile
+        .ok_or_else(|| anyhow!("structured session capsule has no admitted protocol profile"))?;
+    Ok((profile.profile_hash, profile.schema_hashes))
 }
 
 fn append_command_fact_once(
@@ -840,6 +1043,7 @@ pub async fn terminate_session(state: &AppState, session_id: &str, reason: &str)
             bail!("terminal session reason conflicts with the requested retry");
         }
         finish_terminal_credential_cleanup(state, &session)?;
+        notify_projection_change(session_id);
         return Ok(json!({
             "session_id":session_id,
             "state":"terminal",
@@ -864,6 +1068,7 @@ pub async fn terminate_session(state: &AppState, session_id: &str, reason: &str)
         state
             .state_store
             .terminalize_unattached_dedicated_session(session_id, reason)?;
+        notify_projection_change(session_id);
         return Ok(json!({
             "session_id":session_id,
             "state":"terminal",
@@ -935,9 +1140,11 @@ pub async fn terminate_session(state: &AppState, session_id: &str, reason: &str)
         bail!("cancelled termination cannot override a retained candidate disposition");
     }
     finish_terminal_credential_cleanup(state, &session)?;
+    let terminal = current_session(state, session_id)?;
+    notify_projection_change(session_id);
     Ok(json!({
         "session_id":session_id,
-        "state":if reason == "completed" { "freezing" } else { "terminal" },
+        "state":terminal.state,
         "reason":reason
     }))
 }

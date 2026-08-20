@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-29T01:42:53Z:d39977c04b8865321090c3798a65395fb055dfca15900b69dc40e70ddb8fb9f2:2K867OWjefWcwj752F8WtocoKza4WGj1UhJaZ6QEnZ53Q8lT1+Vx0oDa9weKoVISbE535K/EopQaR1WczDU2Dg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-20T07:22:59Z:4e2c4ec069f0c19345fb6601ca50d6b58e323216ea8079151f040dcb8420ae17:x3/wk+J4YFB+JKmJeo9HAcPNux5B2b+pWhGeiQOQGbfb/cJkcaT7GhfdaAYapEVYLyAXtqobzq5MwwvBlbeHDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "persistence-schema-evolution"
 title: "Persistence Schema Evolution"
 description: "Rules for immutable CAS wire identities, retained SQLite migrations, rebuildable projections, and explicit history retirement"
 entry_type: reference
-version: "1.2.0"
+version: "1.3.0"
 ```
 
 # Persistence Schema Evolution
@@ -34,7 +34,7 @@ The current clean-cut execution formats include:
 - admitted launch capsule schema 9;
 - runtime launch metadata epoch 15;
 - the standalone runtime project-authority envelope epoch 2; and
-- the owned runtime SQLite operator schema epoch 1 (encoded in the RyeOS
+- the owned runtime SQLite operator schema epoch 7 (encoded in the RyeOS
   `PRAGMA application_id` family).
 
 The numbers identify independently evolving contracts. A change to a nested
@@ -58,6 +58,12 @@ solely from signed heads, but they have different retirement policies.
 the exact current envelopes stored in its JSON columns. Normal open never
 migrates or normalizes a predecessor. Any mismatch leaves the file untouched
 and requires the explicit operator-confirmed thread-history/project-head reset.
+
+Runtime epoch 7 is the clean cut adding session-bound workers,
+credential-generation fencing, command/approval contact ledgers, observation
+frontiers, and candidate disposition projections. No epoch-1-through-6 reader
+or migration remains. Earlier history requires the explicit retirement
+ceremony below; normal startup never rewrites it.
 
 `operational.sqlite3` accepts only its exact current schema today. If a deployed
 predecessor ever exists, preserving its non-reconstructable facts requires a

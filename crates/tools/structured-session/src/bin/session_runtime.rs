@@ -175,12 +175,18 @@ async fn run_session(
                 .map_err(|error| anyhow!(error.to_string()))?;
             return Ok(terminal_result(thread_id, terminal));
         }
-        // Worker observations are pushed over the admitted full-duplex target
-        // socket and durably appended before ACK. This controller checks only
-        // the projection lifecycle; it never creates polling commands.
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let observed_updated_at_ms = started
+            .get("updated_at_ms")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| anyhow!("dedicated session projection has no update sequence"))?;
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let wait = remaining.min(std::time::Duration::from_secs(300));
         let current = client
-            .dedicated_session_status(&thread_id)
+            .wait_dedicated_session(ryeos_runtime::callback::DedicatedSessionWaitRequest {
+                thread_id: thread_id.clone(),
+                observed_updated_at_ms,
+                timeout_ms: u64::try_from(wait.as_millis()).unwrap_or(300_000).max(1),
+            })
             .await
             .map_err(|error| anyhow!(error.to_string()))?;
         if matches!(
@@ -208,5 +214,34 @@ fn terminal_result(thread_id: String, session: Value) -> RuntimeResult {
         outputs: json!({}),
         cost: None,
         warnings: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_projection_preserves_outcome_instead_of_reporting_success() {
+        let completed = terminal_result(
+            "completed".to_owned(),
+            json!({"terminal_reason":"completed"}),
+        );
+        assert_eq!(completed.status, RuntimeResultStatus::Completed);
+        assert!(completed.success);
+
+        let cancelled = terminal_result(
+            "cancelled".to_owned(),
+            json!({"terminal_reason":"cancelled"}),
+        );
+        assert_eq!(cancelled.status, RuntimeResultStatus::Cancelled);
+        assert!(!cancelled.success);
+
+        let revoked = terminal_result(
+            "revoked".to_owned(),
+            json!({"terminal_reason":"credential_revoked"}),
+        );
+        assert_eq!(revoked.status, RuntimeResultStatus::Failed);
+        assert!(!revoked.success);
     }
 }

@@ -600,6 +600,14 @@ pub struct DedicatedSessionTerminateRequest {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DedicatedSessionWaitRequest {
+    pub thread_id: String,
+    pub observed_updated_at_ms: i64,
+    pub timeout_ms: u64,
+}
+
 #[async_trait]
 pub trait RuntimeCallbackAPI: Send + Sync {
     async fn dispatch_action(&self, request: DispatchActionRequest)
@@ -620,6 +628,18 @@ pub trait RuntimeCallbackAPI: Send + Sync {
     }
 
     async fn dedicated_session_status(&self, _thread_id: &str) -> Result<Value, CallbackError> {
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message: "dedicated sessions are only supported by the daemon UDS client".to_string(),
+            retryable: false,
+        })
+    }
+
+    async fn wait_dedicated_session(
+        &self,
+        request: DedicatedSessionWaitRequest,
+    ) -> Result<Value, CallbackError> {
+        let _ = request;
         Err(CallbackError::ActionFailed {
             code: "unsupported".to_string(),
             message: "dedicated sessions are only supported by the daemon UDS client".to_string(),

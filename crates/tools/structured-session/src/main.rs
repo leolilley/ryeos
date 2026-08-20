@@ -327,7 +327,7 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
         "structured-session baseline destination",
         &profile.baseline_destination,
     )?;
-    if profile.workload_args.len() > 16
+    if profile.workload_args.len() > 64
         || profile
             .workload_args
             .iter()
@@ -1044,7 +1044,7 @@ impl StructuredWorkload {
             .context("start bounded structured workload reader")?;
         thread::Builder::new()
             .name("ryeos-structured-session-stderr-drain".to_owned())
-            .spawn(move || drain_bounded_stderr(stderr))
+            .spawn(move || drain_private_stderr(stderr))
             .context("start bounded structured-session stderr drain")?;
         Ok(Self {
             child,
@@ -1734,22 +1734,16 @@ fn read_app_server(output: impl Read, sender: SyncSender<Result<Value, String>>)
     }
 }
 
-fn drain_bounded_stderr(stderr: impl Read) {
+fn drain_private_stderr(stderr: impl Read) {
     // Diagnostics are intentionally not forwarded: upstream stderr may
     // contain device material, host paths, prompts, or credentials. Draining
     // prevents child blockage while retaining no second secret-bearing log.
     let mut reader = BufReader::new(stderr);
     let mut buffer = [0u8; 8192];
-    let mut total = 0usize;
     loop {
         match reader.read(&mut buffer) {
             Ok(0) | Err(_) => return,
-            Ok(read) => {
-                total = total.saturating_add(read);
-                if total > 8 * 1024 * 1024 {
-                    return;
-                }
-            }
+            Ok(_) => {}
         }
     }
 }
@@ -2128,6 +2122,34 @@ mod tests {
         // SAFETY: F_GETFD only observes the borrowed descriptor.
         let flags = unsafe { libc::fcntl(left.as_raw_fd(), libc::F_GETFD) };
         assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
+    }
+
+    #[test]
+    fn private_stderr_drain_continues_beyond_retention_limits() {
+        struct CountingReader {
+            remaining: usize,
+            consumed: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl Read for CountingReader {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                let count = output.len().min(self.remaining);
+                output[..count].fill(b'x');
+                self.remaining -= count;
+                self.consumed
+                    .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+                Ok(count)
+            }
+        }
+        let expected = 10 * 1024 * 1024;
+        let consumed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        drain_private_stderr(CountingReader {
+            remaining: expected,
+            consumed: Arc::clone(&consumed),
+        });
+        assert_eq!(
+            consumed.load(std::sync::atomic::Ordering::Relaxed),
+            expected
+        );
     }
 
     #[test]

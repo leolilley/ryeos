@@ -3688,7 +3688,13 @@ pub async fn run_and_wait(
                     session.state
                 );
             }
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            ryeos_app::dedicated_session_service::wait_for_projection_change(
+                &state,
+                &running.thread_id,
+                session.updated_at_ms,
+                std::time::Duration::from_secs(3600),
+            )
+            .await?;
         }
     }
 
@@ -4898,7 +4904,13 @@ async fn dispatch_detached_bg_task(
                                 session.state
                             );
                         }
-                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        ryeos_app::dedicated_session_service::wait_for_projection_change(
+                            &bg_state,
+                            &bg_thread_id,
+                            session.updated_at_ms,
+                            std::time::Duration::from_secs(3600),
+                        )
+                        .await?;
                     }
                     Ok::<(), anyhow::Error>(())
                 }

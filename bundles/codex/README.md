@@ -12,14 +12,16 @@ credentials in NodeVault or bundle content.
 
 The integration admits OpenAI Codex `0.147.0` as external large content and
 runs its App Server behind the signed `ryeos-structured-session-bridge` using
-the admitted `codex_app_server_v2` profile. This is the common closed
+the admission-compiled profile embedded in `worker:codex/hosted`. This is the common closed
 structured-session boundary, not a Codex kind or a Codex branch in the engine.
 Authentication is Codex's supported ChatGPT device-code flow. Codex durably manages `auth.json`
 inside one daemon-owned, mode-0700 opaque profile `CODEX_HOME`; RyeOS never
 parses or copies the token document. The pinned `ryeos-workspace-only`
 permission profile denies the filesystem root, reopens only Codex's minimal
 runtime paths, and keeps the private CoW project writable while command
-networking stays disabled. There is no custom credential bridge, token injection, local-LLM
+networking stays disabled. Security-critical settings are repeated as immutable
+signed process arguments; the mode-0400 home config is compatibility state and
+drift detection, not a same-UID integrity boundary. There is no custom credential bridge, token injection, local-LLM
 route, worker pool, or cross-session process reuse.
 
 The exact executable is assembled with `assemble.py`, imported through the
@@ -48,14 +50,14 @@ ryeos codex profile create personal
 # Enrollment is projectless. Use the returned thread_id as LOGIN_SESSION. The
 # device response is ephemeral: display its URL/code and do not journal it.
 ryeos codex login open personal --async
-ryeos codex session command LOGIN_SESSION login-1 login \
-  --payload '{"operation":"call","method":"account/login/start","params":{}}'
+ryeos codex session command LOGIN_SESSION login-1 credential.login.start \
+  --input '{"payload":{}}'
 
 # After completing the browser/device ceremony, read only sanitized account
 # metadata, then close the short-lived login worker while retaining its profile.
-ryeos codex session command LOGIN_SESSION account-1 account \
-  --payload '{"operation":"call","method":"account/read","params":{}}'
-ryeos codex session terminate LOGIN_SESSION login-stop completed
+ryeos codex session command LOGIN_SESSION account-1 credential.account.read \
+  --input '{"payload":{}}'
+ryeos codex session terminate LOGIN_SESSION completed
 ryeos codex profile get personal
 ryeos codex profile confirm personal LOGIN_EPOCH EXPECTED_ACCOUNT_DIGEST
 
@@ -63,10 +65,10 @@ ryeos codex profile confirm personal LOGIN_EPOCH EXPECTED_ACCOUNT_DIGEST
 ryeos --project . codex session start personal --async --pin-project
 
 # Use the returned thread_id as SESSION.
-ryeos codex session command SESSION thread-1 thread \
-  --payload '{"operation":"call","method":"thread/start","params":{}}'
-ryeos codex session command SESSION turn-1 turn \
-  --payload '{"operation":"call","method":"turn/start","params":{"threadId":"THREAD","input":[{"type":"text","text":"Implement the requested change"}]}}'
+ryeos codex session command SESSION thread-1 session.start \
+  --input '{"payload":{}}'
+ryeos codex session command SESSION turn-1 turn.start \
+  --input '{"payload":{"input":[{"type":"text","text":"Implement the requested change","text_elements":[]}]}}'
 
 # App Server notifications are pushed into the root RyeOS thread event chain
 # before the worker receives its acknowledgement. Reattach or replay through
@@ -82,8 +84,8 @@ profile. Termination is explicit and publication is a separate terminal CAS:
 
 ```sh
 ryeos codex session approval SESSION APPROVAL_ID REQUEST_DIGEST false
-ryeos codex session terminate SESSION stop-1 completed
-ryeos codex session verify SESSION CANDIDATE_HASH CANDIDATE_VALIDATION_HASH
+ryeos codex session terminate SESSION completed
+ryeos codex session validate candidate SESSION CANDIDATE_HASH CANDIDATE_VALIDATION_HASH
 ryeos codex session publish SESSION EXPECTED_BASE_HASH
 # Or, instead of publication:
 ryeos codex session discard SESSION CANDIDATE_HASH
@@ -96,8 +98,9 @@ wildcard grants; the feature does not broaden a client's authority.
 
 Profile homes are plaintext node-private state visible to the node operator.
 They are capped at 2 GiB and survive sessions until explicit revoke/delete.
-Sessions have a seven-day hard lifetime, one active worker per profile, a
-256 MiB/250,000-event journal ceiling, and a 512 MiB command/output spool
-ceiling. RyeOS records live OpenAI inference using Codex-managed ChatGPT
+Sessions have a seven-day hard lifetime and one active worker per profile.
+Pushed batches, individual facts, bridge queues, and command/result ledgers are
+bounded; retained observations use the ordinary root thread-chain retention
+contract rather than a second Codex journal. RyeOS records live OpenAI inference using Codex-managed ChatGPT
 authentication; reported plan type is an observation, not proof of a
 subscription tier.

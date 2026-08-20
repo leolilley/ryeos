@@ -21,8 +21,8 @@ fn require_operator<'a>(
     state: &AppState,
     ctx: &'a HandlerContext,
 ) -> Result<&'a str, HandlerError> {
-    ryeos_app::operator_external_content::require_local_operator(state, ctx)
-        .map_err(|_| HandlerError::Forbidden("configured local operator required".into()))?;
+    ryeos_app::operator_external_content::require_configured_operator(state, ctx)
+        .map_err(|_| HandlerError::Forbidden("configured operator required".into()))?;
     Ok(&ctx.fingerprint)
 }
 
@@ -222,22 +222,31 @@ async fn revoke(
             session.worker_boot_epoch,
         ) {
             (Some(worker_instance_id), Some(worker_boot_epoch)) => {
-                let registry = Arc::clone(&state.persistent_sessions);
-                let session_id = session.session_id.clone();
-                tokio::task::spawn_blocking(move || registry.retire_exclusive(&session_id))
-                    .await
-                    .map_err(internal)?
-                    .map_err(internal)?;
-                state
+                let worker = state
                     .state_store
-                    .settle_worker_process(
-                        worker_instance_id,
-                        &session.session_id,
-                        worker_boot_epoch,
-                        "reaped",
-                        "credential_revoked",
-                    )
-                    .map_err(internal)?;
+                    .worker_process(worker_instance_id)
+                    .map_err(internal)?
+                    .ok_or_else(|| internal("credential session worker projection disappeared"))?;
+                if worker.state != ryeos_app::runtime_db::WorkerProcessState::Dead
+                    || worker.cleanup_state != "reaped"
+                {
+                    let registry = Arc::clone(&state.persistent_sessions);
+                    let session_id = session.session_id.clone();
+                    tokio::task::spawn_blocking(move || registry.retire_exclusive(&session_id))
+                        .await
+                        .map_err(internal)?
+                        .map_err(internal)?;
+                    state
+                        .state_store
+                        .settle_worker_process(
+                            worker_instance_id,
+                            &session.session_id,
+                            worker_boot_epoch,
+                            "reaped",
+                            "credential_revoked",
+                        )
+                        .map_err(internal)?;
+                }
                 state
                     .state_store
                     .terminalize_dedicated_session(

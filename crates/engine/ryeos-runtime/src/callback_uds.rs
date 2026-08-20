@@ -166,6 +166,22 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
+    async fn wait_dedicated_session(
+        &self,
+        request: crate::callback::DedicatedSessionWaitRequest,
+    ) -> Result<Value, CallbackError> {
+        let mut params = serde_json::to_value(request).map_err(|error| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "serialize dedicated-session wait request: {error}"
+            ))
+        })?;
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.wait_dedicated_session", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
     async fn dedicated_session_command(
         &self,
         request: DedicatedSessionCommandRequest,

@@ -444,6 +444,12 @@ pub(crate) async fn dispatch_runtime_method(
                 .ok_or_else(|| anyhow!("dedicated-session status requires callback authority"))?;
             dedicated_sessions::status(&clean_params, state, cap)
         }
+        "runtime.wait_dedicated_session" => {
+            let cap = callback_cap
+                .as_ref()
+                .ok_or_else(|| anyhow!("dedicated-session wait requires callback authority"))?;
+            dedicated_sessions::wait(&clean_params, state, cap).await
+        }
         "runtime.dedicated_session_command" => {
             let cap = callback_cap
                 .as_ref()
@@ -667,6 +673,7 @@ fn is_sensitive_runtime_read_method(method: &str) -> bool {
             | "runtime.vault_list"
             | "runtime.provider_attempt_local_stream_next"
             | "runtime.dedicated_session_status"
+            | "runtime.wait_dedicated_session"
     )
 }
 

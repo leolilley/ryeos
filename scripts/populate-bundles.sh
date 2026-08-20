@@ -273,11 +273,11 @@ case "$BUNDLE_SET" in
     ;;
   central-host)
     pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
-          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools)
+          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-structured-session)
     ;;
   standard)
     pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
-          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec)
+          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session)
     ;;
   hosted-workflow)
     pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
@@ -339,10 +339,17 @@ if readelf -l "$STATIC_RELEASE/ryeos-session-exec" | grep -Eq '(^|[[:space:]])IN
   exit 2
 fi
 
+RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+  "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-structured-session
+for hosted_execution_binary in ryeos-worker-execution-launch-preparer ryeos-worker-execution-runtime; do
+  if readelf -l "$STATIC_RELEASE/$hosted_execution_binary" | grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' \
+      || readelf -d "$STATIC_RELEASE/$hosted_execution_binary" | grep -Eq 'NEEDED'; then
+    ryeos_term_fail "$hosted_execution_binary is not fully static"
+    exit 2
+  fi
+done
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-node" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
-  RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
-    "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-structured-session
-  for codex_binary in ryeos-structured-session-bridge ryeos-worker-execution-launch-preparer ryeos-worker-execution-runtime; do
+  for codex_binary in ryeos-structured-session-bridge; do
     if readelf -l "$STATIC_RELEASE/$codex_binary" | grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' \
         || readelf -d "$STATIC_RELEASE/$codex_binary" | grep -Eq 'NEEDED'; then
       ryeos_term_fail "$codex_binary is not fully static"
@@ -376,10 +383,9 @@ staged_foundational_release_bins_for_set() {
     full|full-sandbox) printf '%s\n' ryeos-tui web ;;
   esac
   case "$BUNDLE_SET" in
-    full|full-sandbox|hosted-node|hosted-workflow)
-      printf '%s\n' ryeos-structured-session-bridge ryeos-worker-execution-launch-preparer ryeos-worker-execution-runtime
-      ;;
+    full|full-sandbox|hosted-node|hosted-workflow) printf '%s\n' ryeos-structured-session-bridge ;;
   esac
+  printf '%s\n' ryeos-worker-execution-launch-preparer ryeos-worker-execution-runtime
 }
 
 # `ryeos-session-exec` is intentionally absent from the skew set above. It is
@@ -435,12 +441,12 @@ install -m 0755 \
   "$STATIC_RELEASE/ryeos-session-exec" \
   "$CORE_BIN/"
 
+ryeos_term_update "installing hosted-execution core binaries" "$CORE_BIN"
+install -m 0755 \
+  "$STATIC_RELEASE/ryeos-worker-execution-launch-preparer" \
+  "$STATIC_RELEASE/ryeos-worker-execution-runtime" \
+  "$CORE_BIN/"
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-node" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
-  ryeos_term_update "installing hosted-execution core binaries" "$CORE_BIN"
-  install -m 0755 \
-    "$STATIC_RELEASE/ryeos-worker-execution-launch-preparer" \
-    "$STATIC_RELEASE/ryeos-worker-execution-runtime" \
-    "$CORE_BIN/"
   ryeos_term_update "installing codex workload bridge" "$CODEX_BIN"
   install -m 0755 \
     "$STATIC_RELEASE/ryeos-structured-session-bridge" \

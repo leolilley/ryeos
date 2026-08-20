@@ -904,6 +904,18 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                 );
             }
             let active_reconcile = reconcile::reconcile_active_threads(&app_state).await?;
+            ryeos_app::dedicated_session_service::reconcile_command_outboxes(&app_state)
+                .context("reconcile hosted command testimony outboxes")?;
+            ryeos_api::handlers::dedicated_sessions::reconcile_candidate_publications(Arc::new(
+                app_state.clone(),
+            ))
+            .await
+            .context("reconcile hosted candidate publications")?;
+            ryeos_api::handlers::dedicated_sessions::reconcile_approval_outboxes(Arc::new(
+                app_state.clone(),
+            ))
+            .await
+            .context("reconcile hosted approval delivery outboxes")?;
             startup.progress(|snapshot| {
                 snapshot.recovery_threads = Some(active_reconcile.active_thread_ids.len() as u64);
             })?;

@@ -3902,6 +3902,14 @@ impl StateStore {
             .nonterminal_dedicated_sessions_for_credential_profile(profile_id)
     }
 
+    pub fn dedicated_sessions_in_state(
+        &self,
+        state: &str,
+    ) -> Result<Vec<runtime_db::DedicatedSessionRecord>> {
+        let g = self.lock()?;
+        g.runtime_db.dedicated_sessions_in_state(state)
+    }
+
     pub fn terminalize_unattached_dedicated_session(
         &self,
         session_id: &str,
@@ -4181,6 +4189,11 @@ impl StateStore {
         g.runtime_db.reserve_dedicated_session_command(command)
     }
 
+    pub fn dedicated_command_outbox_records(&self) -> Result<Vec<DedicatedSessionCommandRecord>> {
+        let g = self.lock()?;
+        g.runtime_db.dedicated_command_outbox_records()
+    }
+
     pub fn mark_dedicated_command_contacted(
         &self,
         session_id: &str,
@@ -4293,6 +4306,11 @@ impl StateStore {
     ) -> Result<Vec<runtime_db::DedicatedSessionApprovalRecord>> {
         let g = self.lock()?;
         g.runtime_db.pending_dedicated_session_approvals(session_id)
+    }
+
+    pub fn dedicated_approval_outbox_session_ids(&self) -> Result<Vec<String>> {
+        let g = self.lock()?;
+        g.runtime_db.dedicated_approval_outbox_session_ids()
     }
 
     pub fn reconcile_dedicated_approval_delivery_unknown(

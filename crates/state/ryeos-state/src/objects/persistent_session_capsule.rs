@@ -296,6 +296,9 @@ impl AdmittedPersistentSessionCapsule {
 #[serde(deny_unknown_fields)]
 pub struct AdmittedStructuredSessionProfile {
     pub profile_hash: String,
+    /// The complete canonical, admission-compiled protocol contract.  This is
+    /// authority-bearing policy, not a hint for the workload to reinterpret.
+    pub contract: serde_json::Value,
     pub schema_hashes: std::collections::BTreeMap<String, String>,
     pub baseline_source: String,
     pub baseline_destination: String,
@@ -307,6 +310,19 @@ impl AdmittedStructuredSessionProfile {
             "structured-session profile hash",
             &self.profile_hash,
         )?;
+        let contract = self
+            .contract
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("structured-session contract is not an object"))?;
+        if contract.is_empty() {
+            anyhow::bail!("structured-session contract is empty");
+        }
+        let canonical = lillux::canonical_json(&self.contract)?;
+        if canonical.len() > 64 * 1024
+            || lillux::sha256_hex(canonical.as_bytes()) != self.profile_hash
+        {
+            anyhow::bail!("structured-session contract contradicts its admitted hash");
+        }
         if self.schema_hashes.is_empty() || self.schema_hashes.len() > 512 {
             anyhow::bail!("structured-session schema identity set is empty or too large");
         }

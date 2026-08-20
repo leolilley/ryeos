@@ -56,6 +56,15 @@ pub fn compile(
     validate_file_name(value_string(object, "baseline_destination")?)?;
     crate::protocol_vocabulary::validate_env_name(value_string(object, "workload_home_env")?)
         .map_err(|error| anyhow!(error))?;
+    let workload_args = bounded_array(object, "workload_args", 0, 64)?;
+    for argument in workload_args {
+        let argument = argument
+            .as_str()
+            .ok_or_else(|| anyhow!("structured-session workload argument must be a string"))?;
+        if argument.len() > 4096 || argument.chars().any(char::is_control) {
+            bail!("structured-session workload argument is not bounded portable text");
+        }
+    }
 
     let routes = bounded_array(object, "routes", 1, 128)?;
     let mut route_ids = BTreeSet::new();
@@ -132,6 +141,30 @@ pub fn compile(
                 }
             }
         }
+        let fixed_params = route
+            .get("fixed_params")
+            .and_then(Value::as_object)
+            .filter(|values| values.len() <= 32)
+            .ok_or_else(|| anyhow!("structured-session fixed parameters are invalid"))?;
+        for (field, value) in fixed_params {
+            validate_field_name(field)?;
+            validate_bounded_value(value, 0, &mut 0)?;
+        }
+        validate_string_array(route, "workspace_fields", 8, false)?;
+        validate_string_array(route, "forbidden_non_null_fields", 32, false)?;
+        validate_predicates(route.get("response_predicates"), 32)?;
+        validate_observations(route.get("observations"), 16)?;
+        if !matches!(
+            value_string(route, "result_retention")?,
+            "ephemeral" | "durable"
+        ) {
+            bail!("structured-session route has an unknown result-retention policy");
+        }
+        if let Some(ceremony) = route.get("ceremony").filter(|value| !value.is_null())
+            && !matches!(ceremony.as_str(), Some("start" | "clear"))
+        {
+            bail!("structured-session route has an unknown ceremony action");
+        }
         schema_ids.insert(value_string(route, "request_schema")?.to_owned());
         schema_ids.insert(value_string(route, "response_schema")?.to_owned());
     }
@@ -182,8 +215,23 @@ pub fn compile(
         }
         if let Some(schema) = step.get("response_schema").and_then(Value::as_str) {
             schema_ids.insert(schema.to_owned());
+        } else if !step.get("response_schema").is_some_and(Value::is_null) {
+            bail!("structured-session initialization response schema is invalid");
+        }
+        validate_bounded_value(
+            step.get("params").ok_or_else(|| {
+                anyhow!("structured-session initialization parameters are absent")
+            })?,
+            0,
+            &mut 0,
+        )?;
+        if let Some(notification) = step.get("notification").filter(|value| !value.is_null()) {
+            validate_identifier(notification.as_str().ok_or_else(|| {
+                anyhow!("structured-session initialization notification is invalid")
+            })?)?;
         }
     }
+    let mut notification_methods = BTreeSet::new();
     for item in bounded_array(object, "notifications", 0, 256)? {
         let item = item
             .as_object()
@@ -201,7 +249,22 @@ pub fn compile(
             ],
             &[],
         )?;
-        validate_identifier(value_string(item, "method")?)?;
+        let method = value_string(item, "method")?;
+        validate_identifier(method)?;
+        if !notification_methods.insert(method.to_owned()) {
+            bail!("structured-session notification method is duplicated");
+        }
+        validate_identifier(value_string(item, "event_type")?)?;
+        if item.get("durable").and_then(Value::as_bool).is_none()
+            || item
+                .get("ceremony_clear")
+                .and_then(Value::as_bool)
+                .is_none()
+        {
+            bail!("structured-session notification flags are invalid");
+        }
+        validate_template(item.get("payload"), 0, &mut 0)?;
+        validate_observations(item.get("observations"), 16)?;
         schema_ids.insert(value_string(item, "schema")?.to_owned());
     }
     let ignored = object
@@ -213,6 +276,9 @@ pub fn compile(
     }
     for (method, schema) in ignored {
         validate_identifier(method)?;
+        if notification_methods.contains(method) {
+            bail!("structured-session ignored notification duplicates a mapped notification");
+        }
         schema_ids.insert(
             schema
                 .as_str()
@@ -220,6 +286,7 @@ pub fn compile(
                 .to_owned(),
         );
     }
+    let mut server_request_methods = BTreeSet::new();
     for item in bounded_array(object, "server_requests", 0, 32)? {
         let item = item
             .as_object()
@@ -237,8 +304,29 @@ pub fn compile(
             ],
             &["required_review_fields"],
         )?;
-        validate_identifier(value_string(item, "method")?)?;
+        let method = value_string(item, "method")?;
+        validate_identifier(method)?;
+        if !server_request_methods.insert(method.to_owned())
+            || notification_methods.contains(method)
+            || ignored.contains_key(method)
+        {
+            bail!("structured-session server-request method is duplicated");
+        }
         validate_identifier(value_string(item, "operation_class")?)?;
+        if !matches!(
+            value_string(item, "response_style")?,
+            "decision" | "permissions_denial"
+        ) {
+            bail!("structured-session server request has an unknown response style");
+        }
+        if item.get("deny_only").and_then(Value::as_bool).is_none() {
+            bail!("structured-session server-request deny-only flag is invalid");
+        }
+        validate_string_array(item, "permission_delta_fields", 32, true)?;
+        if item.contains_key("required_review_fields") {
+            validate_string_array(item, "required_review_fields", 32, true)?;
+        }
+        validate_template(item.get("display"), 0, &mut 0)?;
         schema_ids.insert(value_string(item, "schema")?.to_owned());
     }
     if schema_ids.is_empty() || schema_ids.len() > 512 {
@@ -268,11 +356,14 @@ pub fn compile(
             .map_err(|error| anyhow!("compile structured-session schema `{identity}`: {error}"))?;
         schema_hashes.insert(identity, lillux::sha256_hex(bytes));
     }
+    let baseline_source = value_string(object, "baseline_config")?.to_owned();
+    let baseline_destination = value_string(object, "baseline_destination")?.to_owned();
     let admitted = AdmittedStructuredSessionProfile {
         profile_hash: ryeos_state::objects::canonical_value_digest(&profile)?,
+        contract: profile,
         schema_hashes,
-        baseline_source: value_string(object, "baseline_config")?.to_owned(),
-        baseline_destination: value_string(object, "baseline_destination")?.to_owned(),
+        baseline_source,
+        baseline_destination,
     };
     admitted.validate()?;
     Ok(admitted)
@@ -311,6 +402,206 @@ fn bounded_array<'a>(
         .and_then(Value::as_array)
         .filter(|values| values.len() >= minimum && values.len() <= maximum)
         .ok_or_else(|| anyhow!("structured-session `{key}` count is outside its bound"))
+}
+
+fn validate_field_name(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 256
+        || value.chars().any(char::is_control)
+        || value.contains('/')
+    {
+        bail!("structured-session field name is not bounded portable text");
+    }
+    Ok(())
+}
+
+fn validate_pointer(value: &str) -> Result<()> {
+    if value.len() > 1024
+        || (!value.is_empty() && !value.starts_with('/'))
+        || value.chars().any(char::is_control)
+    {
+        bail!("structured-session JSON pointer is invalid");
+    }
+    Ok(())
+}
+
+fn validate_string_array(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+    maximum: usize,
+    pointers: bool,
+) -> Result<()> {
+    let values = object
+        .get(key)
+        .and_then(Value::as_array)
+        .filter(|values| values.len() <= maximum)
+        .ok_or_else(|| anyhow!("structured-session `{key}` is not a bounded array"))?;
+    let mut seen = BTreeSet::new();
+    for value in values {
+        let value = value
+            .as_str()
+            .ok_or_else(|| anyhow!("structured-session `{key}` entry must be a string"))?;
+        if pointers {
+            validate_pointer(value)?;
+        } else {
+            validate_identifier(value)?;
+        }
+        if !seen.insert(value) {
+            bail!("structured-session `{key}` contains a duplicate");
+        }
+    }
+    Ok(())
+}
+
+fn validate_bounded_value(value: &Value, depth: usize, nodes: &mut usize) -> Result<()> {
+    if depth > 32 {
+        bail!("structured-session authored value exceeds its nesting bound");
+    }
+    *nodes = nodes
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("structured-session authored value node count overflow"))?;
+    if *nodes > 4096 {
+        bail!("structured-session authored value exceeds its node bound");
+    }
+    match value {
+        Value::String(value) if value.len() > 64 * 1024 => {
+            bail!("structured-session authored string exceeds its byte bound")
+        }
+        Value::Array(values) => {
+            if values.len() > 1024 {
+                bail!("structured-session authored array exceeds its element bound");
+            }
+            for value in values {
+                validate_bounded_value(value, depth + 1, nodes)?;
+            }
+        }
+        Value::Object(values) => {
+            if values.len() > 1024 {
+                bail!("structured-session authored object exceeds its field bound");
+            }
+            for (key, value) in values {
+                validate_field_name(key)?;
+                validate_bounded_value(value, depth + 1, nodes)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_predicates(value: Option<&Value>, maximum: usize) -> Result<()> {
+    let predicates = value
+        .and_then(Value::as_array)
+        .filter(|values| values.len() <= maximum)
+        .ok_or_else(|| anyhow!("structured-session predicates are not a bounded array"))?;
+    for predicate in predicates {
+        let predicate = predicate
+            .as_object()
+            .ok_or_else(|| anyhow!("structured-session predicate must be an object"))?;
+        require_keys(predicate, &["pointer", "equals"], &[])?;
+        validate_pointer(value_string(predicate, "pointer")?)?;
+        validate_bounded_value(
+            predicate
+                .get("equals")
+                .ok_or_else(|| anyhow!("structured-session predicate value is absent"))?,
+            0,
+            &mut 0,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_observations(value: Option<&Value>, maximum: usize) -> Result<()> {
+    let observations = value
+        .and_then(Value::as_array)
+        .filter(|values| values.len() <= maximum)
+        .ok_or_else(|| anyhow!("structured-session observations are not a bounded array"))?;
+    for observation in observations {
+        let observation = observation
+            .as_object()
+            .ok_or_else(|| anyhow!("structured-session observation must be an object"))?;
+        require_keys(observation, &["when", "value"], &[])?;
+        validate_predicates(observation.get("when"), 16)?;
+        validate_template(observation.get("value"), 0, &mut 0)?;
+    }
+    Ok(())
+}
+
+fn validate_template(value: Option<&Value>, depth: usize, nodes: &mut usize) -> Result<()> {
+    if depth > 32 {
+        bail!("structured-session value template exceeds its nesting bound");
+    }
+    *nodes = nodes
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("structured-session template node count overflow"))?;
+    if *nodes > 2048 {
+        bail!("structured-session value template exceeds its node bound");
+    }
+    let object = value
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("structured-session value template must be an object"))?;
+    match value_string(object, "op")? {
+        "literal" => {
+            require_keys(object, &["op", "value"], &[])?;
+            validate_bounded_value(
+                object
+                    .get("value")
+                    .ok_or_else(|| anyhow!("structured-session literal value is absent"))?,
+                0,
+                &mut 0,
+            )?;
+        }
+        "pointer" => {
+            require_keys(
+                object,
+                &["op", "pointer"],
+                &["optional", "max_string_bytes"],
+            )?;
+            validate_pointer(value_string(object, "pointer")?)?;
+            if object
+                .get("optional")
+                .is_some_and(|value| !value.is_boolean())
+            {
+                bail!("structured-session pointer optional flag is invalid");
+            }
+            if let Some(limit) = object.get("max_string_bytes") {
+                let limit = limit
+                    .as_u64()
+                    .filter(|limit| *limit > 0 && *limit <= 1024 * 1024)
+                    .ok_or_else(|| anyhow!("structured-session pointer byte bound is invalid"))?;
+                let _ = limit;
+            }
+        }
+        "object" => {
+            require_keys(object, &["op", "fields"], &[])?;
+            let fields = object
+                .get("fields")
+                .and_then(Value::as_object)
+                .filter(|fields| fields.len() <= 256)
+                .ok_or_else(|| anyhow!("structured-session template fields are invalid"))?;
+            for (field, value) in fields {
+                validate_field_name(field)?;
+                validate_template(Some(value), depth + 1, nodes)?;
+            }
+        }
+        "array" => {
+            require_keys(object, &["op", "values"], &[])?;
+            let values = object
+                .get("values")
+                .and_then(Value::as_array)
+                .filter(|values| values.len() <= 256)
+                .ok_or_else(|| anyhow!("structured-session template array is invalid"))?;
+            for value in values {
+                validate_template(Some(value), depth + 1, nodes)?;
+            }
+        }
+        "digest" => {
+            require_keys(object, &["op", "pointer"], &[])?;
+            validate_pointer(value_string(object, "pointer")?)?;
+        }
+        _ => bail!("structured-session value template operation is not admitted"),
+    }
+    Ok(())
 }
 
 fn validate_identifier(value: &str) -> Result<()> {
@@ -440,6 +731,10 @@ mod tests {
         let second = compile(&fixture_profile("job.status", "job/status"), &schemas()).unwrap();
         assert_ne!(first.profile_hash, second.profile_hash);
         assert_eq!(first.schema_hashes, second.schema_hashes);
+        assert_eq!(
+            first.contract.get("schema_version").and_then(Value::as_u64),
+            Some(1)
+        );
     }
 
     #[test]
@@ -450,5 +745,55 @@ mod tests {
             serde_json::to_vec(&json!({"$ref":"https://invalid.example/schema"})).unwrap(),
         );
         assert!(compile(&fixture_profile("job.status", "job/status"), &files).is_err());
+    }
+
+    #[test]
+    fn malformed_mapping_fails_before_worker_launch() {
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("document.inspect", "document/read")).unwrap();
+        profile["routes"][0]["observations"] = json!([{
+            "when": [],
+            "value": {"op":"execute_arbitrary_code","source":"oops"}
+        }]);
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
+
+        profile["routes"][0]["observations"] = json!([]);
+        profile["routes"][0]["response_predicates"] =
+            json!([{"pointer":"not-a-json-pointer","equals":true}]);
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
+    }
+
+    #[test]
+    fn shipped_codex_contract_is_fully_admitted_before_launch() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../bundles/codex/.ai/workers/codex/lib/hosted");
+        let profile = std::fs::read(root.join("structured-session.profile.json")).unwrap();
+        let mut files = BTreeMap::new();
+        for entry in std::fs::read_dir(root.join("schema")).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_file() {
+                files.insert(
+                    format!("schema/{}", entry.file_name().to_string_lossy()),
+                    std::fs::read(entry.path()).unwrap(),
+                );
+            }
+        }
+        let admitted = compile(&profile, &files).unwrap();
+        assert_eq!(
+            admitted
+                .contract
+                .get("schema_version")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert!(admitted.schema_hashes.len() > 10);
+        let args = admitted.contract["workload_args"].as_array().unwrap();
+        for required in [
+            "--strict-config",
+            "default_permissions=\"ryeos-workspace-only\"",
+            "approvals_reviewer=\"user\"",
+        ] {
+            assert!(args.iter().any(|value| value.as_str() == Some(required)));
+        }
     }
 }

@@ -182,6 +182,29 @@ pub(super) fn status(params: &Value, state: &AppState, cap: &CallbackCapability)
     Ok(serde_json::to_value(session)?)
 }
 
+pub(super) async fn wait(
+    params: &Value,
+    state: &AppState,
+    cap: &CallbackCapability,
+) -> Result<Value> {
+    let request: ryeos_runtime::callback::DedicatedSessionWaitRequest =
+        serde_json::from_value(params.clone())?;
+    if request.thread_id != cap.thread_id {
+        bail!("dedicated-session wait is restricted to the callback root");
+    }
+    if request.timeout_ms == 0 || request.timeout_ms > 300_000 {
+        bail!("dedicated-session wait timeout is outside its bound");
+    }
+    let session = ryeos_app::dedicated_session_service::wait_for_projection_change(
+        state,
+        &request.thread_id,
+        request.observed_updated_at_ms,
+        std::time::Duration::from_millis(request.timeout_ms),
+    )
+    .await?;
+    Ok(serde_json::to_value(session)?)
+}
+
 pub(super) async fn command(
     params: &Value,
     state: &AppState,
@@ -430,6 +453,7 @@ pub(super) async fn start(
                 owner_principal: owner,
                 admitted_capsule_hash: &capsule_hash,
                 workspace_id: &workspace.workspace_id,
+                candidate_required: request.required_terminal_publication != "any",
                 credential_profile_id: &request.credential_profile_id,
                 credential_generation,
                 credential_lock_owner: &worker_instance_id,

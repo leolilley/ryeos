@@ -2029,7 +2029,9 @@ async fn reconcile_active_threads_inner(
 fn reconcile_dedicated_workers(state: &AppState) -> Result<()> {
     let current_generation = ryeos_app::runtime_db::daemon_generation_id();
     for worker in state.state_store.live_worker_processes()? {
-        if worker.daemon_generation_id == current_generation {
+        let retained_unproved = worker.state == ryeos_app::runtime_db::WorkerProcessState::Dead
+            && worker.cleanup_state == "unproved";
+        if worker.daemon_generation_id == current_generation && !retained_unproved {
             continue;
         }
         let initial_liveness = execution_group_liveness(&worker.process_identity);
@@ -2051,12 +2053,24 @@ fn reconcile_dedicated_workers(state: &AppState) -> Result<()> {
             }
             IdentityLiveness::Unavailable => "unproved",
         };
-        state.state_store.fence_abandoned_worker_process(
-            &worker.worker_instance_id,
-            &worker.session_id,
-            worker.boot_epoch,
-            cleanup_state,
-        )?;
+        if retained_unproved {
+            if cleanup_state == "reaped" {
+                state.state_store.settle_worker_process(
+                    &worker.worker_instance_id,
+                    &worker.session_id,
+                    worker.boot_epoch,
+                    "reaped",
+                    "abandoned worker cleanup proved during startup",
+                )?;
+            }
+        } else {
+            state.state_store.fence_abandoned_worker_process(
+                &worker.worker_instance_id,
+                &worker.session_id,
+                worker.boot_epoch,
+                cleanup_state,
+            )?;
+        }
         tracing::warn!(
             worker_instance_id = %worker.worker_instance_id,
             session_id = %worker.session_id,
