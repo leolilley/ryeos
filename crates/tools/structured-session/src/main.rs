@@ -836,10 +836,11 @@ fn disable_core_dumps() -> Result<()> {
     Ok(())
 }
 
-/// Installs and verifies the destination that the enforced isolation launcher
-/// overlays from a pinned admitted source file. Mode 0400 is not treated as a
-/// same-UID boundary; the read-only mount is the mechanical protection, while
-/// immutable admitted argv remains the primary security configuration.
+/// Installs and verifies the admitted compatibility baseline. Mode 0400 and
+/// the before/after drift checks are not a same-UID authority boundary. The
+/// signed immutable argv is the sole security configuration authority; an
+/// enforced generic isolation backend may additionally overlay this file
+/// read-only.
 fn install_or_verify_baseline_config(
     workload_home: &std::path::Path,
     source: &std::path::Path,
@@ -885,7 +886,7 @@ fn install_or_verify_baseline_config(
     let actual =
         std::fs::read(&destination).context("read profile structured-session baseline config")?;
     if actual != admitted {
-        bail!("profile workload home/config.toml differs from its admitted read-only baseline");
+        bail!("profile workload home/config.toml differs from its admitted compatibility baseline");
     }
     Ok(())
 }

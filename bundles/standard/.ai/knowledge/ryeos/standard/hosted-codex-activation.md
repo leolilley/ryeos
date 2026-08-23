@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-23T23:13:16Z:16914ef243b48e1f5fdc46008ada3d405d63e85d6bd4cbaf09c06c2dbca772a5:5top7tivO+0yuxHXehqNUte7lx0CLueyc0kuhK5iCgAcwLjgnkWhCrhEERSapsEExNh8v4vnwUu4+VSmpuUYBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-23T23:41:10Z:b3cab1f5fa5228716d008c4722e165f0d61528dca880c1298512bba967f37be2:B5iPt7ouZh/MaifNkvPXl+ZeIUGI8bKHK6lYfr2kUkZMtDvWtmltJEbVkNmanPtPSj33DXKRL9P+Oec3Cw22Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/standard"
 name: "hosted-codex-activation"
@@ -48,11 +48,13 @@ contracts.
 ## Mechanical policy boundary
 
 The signed profile launches Codex with immutable argv containing every
-security-critical override. A same-UID process can replace a file in its
-writable home, so mode 0400 alone is never treated as authority. RyeOS requires
-enforced isolation and overlays the admitted compatibility config read-only;
-launch fails if that mechanical overlay is unavailable. Immutable CLI
-overrides independently fix login, credential store, approval routing,
+security-critical override; those immutable arguments are the sole
+configuration authority. A same-UID process can replace a file in its writable
+home, so the mode-0400 compatibility config and bridge drift checks are never
+treated as an integrity boundary. If the node enables a generic enforced
+isolation backend, RyeOS additionally overlays that file read-only, but hosted
+Codex does not require Bubblewrap or another isolation backend. Immutable CLI
+overrides fix login, credential store, approval routing,
 permission profile, command network, shell environment, and disabled helpers
 for process life. Thread start/resume checks supported response fields for
 effective approval and sandbox policy.
@@ -63,9 +65,11 @@ because the stable App Server rejects that granular field unless the forbidden
 `experimentalApi` capability is enabled.
 
 App Server inherits a cleared minimal environment and no RyeOS control FD.
-Model commands receive narrower shell policy and cannot see profile home,
-boot/capsule metadata, callback authority, DBus/keyring coordinates, or direct
-network. Stderr drains continuously to a non-retained private sink.
+Model commands receive the signed Codex permission profile and cannot access
+profile home, boot/capsule metadata, callback authority, DBus/keyring
+coordinates, or direct network through that contract. Without an enforced
+node-isolation backend this is not an OS-level hostile-workload containment
+claim. Stderr drains continuously to a non-retained private sink.
 
 ## Release acceptance
 

@@ -751,15 +751,14 @@ fn spawn_capsule_process_held(
         None => (None, None),
     };
     if let Some(profile) = capsule.structured_session_profile.as_ref() {
-        if !state.isolation.is_enforced() {
-            bail!(
-                "structured-session execution requires enforced isolation for its read-only baseline overlay"
-            );
-        }
         let source_entry = source_entry
             .ok_or_else(|| anyhow!("structured-session capsule has no bound source entry"))?;
         let state_root = state_root
             .ok_or_else(|| anyhow!("structured-session capsule has no exact state root"))?;
+        // The admission-compiled immutable argv is the structured workload's
+        // configuration authority. An enforced generic isolation backend adds
+        // a read-only overlay for the compatibility baseline, but the
+        // structured-session substrate does not require one.
         if let Some(overlay) = prepare_structured_session_baseline(
             profile,
             source_entry,
@@ -1402,6 +1401,40 @@ mod tests {
         symlink("/tmp", colliding_workspace.path().join(".ai")).unwrap();
         let error = create_node_owned_runtime_view(colliding_workspace.path()).unwrap_err();
         assert!(error.to_string().contains("collides with a non-directory"));
+    }
+
+    #[test]
+    fn structured_session_baseline_does_not_require_enforced_isolation() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let source_root = tempfile::tempdir().unwrap();
+        let source_entry = source_root.path().join("worker.yaml");
+        std::fs::write(&source_entry, b"worker").unwrap();
+        std::fs::write(
+            source_root.path().join("baseline.toml"),
+            b"setting = true\n",
+        )
+        .unwrap();
+        let state_root = tempfile::tempdir().unwrap();
+        let profile = ryeos_state::objects::AdmittedStructuredSessionProfile {
+            profile_hash: "a".repeat(64),
+            contract: json!({"fixture": true}),
+            schema_hashes: BTreeMap::from([("fixture.json".to_owned(), "b".repeat(64))]),
+            baseline_source: "baseline.toml".to_owned(),
+            baseline_destination: "config.toml".to_owned(),
+        };
+
+        let overlay =
+            prepare_structured_session_baseline(&profile, &source_entry, state_root.path(), false)
+                .unwrap();
+
+        assert!(overlay.is_none());
+        let destination = state_root.path().join("config.toml");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"setting = true\n");
+        assert_eq!(
+            std::fs::metadata(destination).unwrap().permissions().mode() & 0o777,
+            0o400
+        );
     }
 
     #[test]
