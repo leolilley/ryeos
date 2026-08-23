@@ -1,6 +1,6 @@
-<!-- ryeos:signed:2026-08-23T22:45:21Z:7c934a0c6af774416df2c770f2c17071eeeb62272ef2be69b76353e4deba62df:8KM+yenF/VGXqSdKouLT3ESjm9A5q/YXysnBwzd7f5th9ph1LIx28F2p/CfFSsoxVJvuUpsocO/ciW0pjRr4Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-23T23:13:16Z:16914ef243b48e1f5fdc46008ada3d405d63e85d6bd4cbaf09c06c2dbca772a5:5top7tivO+0yuxHXehqNUte7lx0CLueyc0kuhK5iCgAcwLjgnkWhCrhEERSapsEExNh8v4vnwUu4+VSmpuUYBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
-category: "ryeos/development"
+category: "ryeos/standard"
 name: "hosted-codex-activation"
 title: "Hosted Codex Activation and Acceptance"
 description: "Activation, credential ceremony, command routes, and release acceptance for the pinned Codex structured-session workload"
@@ -14,6 +14,10 @@ The Codex bundle hosts the pinned Codex App Server using ChatGPT subscription
 authentication managed by Codex. It does not route Codex through RyeOS local
 inference. The executable and App Server schemas are pinned by activation and
 source closure.
+
+This is installed operator knowledge shipped by the standard bundle. It
+documents how to activate and accept the optional Codex bundle; it is not a
+RyeOS repository-development workflow.
 
 ## Activation
 
@@ -37,8 +41,9 @@ source closure.
    admitted reviewable effect.
 8. Complete work, validate the frozen candidate, then publish or discard.
 
-Exact CLI examples are in `bundles/codex/README.md` and must match signed
-command and service contracts.
+The route IDs above are canonical. Inspect `ryeos codex --help` for the current
+CLI presentation; every command must still match the signed command and service
+contracts.
 
 ## Mechanical policy boundary
 
@@ -80,3 +85,7 @@ installed node, and prove:
 
 Environmental inability to run a probe is not passing evidence and does not
 justify changing the live local installation.
+
+See `knowledge:ryeos/core/execution/worker-hosted-execution` for the generic
+authority, lifecycle, recovery, and publication contract beneath this
+integration.

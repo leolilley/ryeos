@@ -8,6 +8,11 @@ authorization, and publication authority remain in generic RyeOS substrate.
 This bundle does not provide RyeOS local inference and does not place ChatGPT
 credentials in NodeVault or bundle content.
 
+Installed knowledge separates the generic substrate from this integration:
+`knowledge:ryeos/core/execution/worker-hosted-execution` defines worker-hosted
+execution, while `knowledge:ryeos/standard/hosted-codex-activation` defines the
+Codex activation and release-acceptance runbook.
+
 ## Runtime contract
 
 The integration admits OpenAI Codex `0.147.0` as external large content and

@@ -413,6 +413,11 @@ projection of its thread's durable state.
 
 ## Development
 
+Contributor documentation is indexed in
+[RyeOS repository development knowledge](.ai/knowledge/ryeos/development/README.md).
+Installed product and operator knowledge lives in the signed bundle trees,
+primarily `bundles/standard/.ai/knowledge/`.
+
 Use the repository scripts rather than hand-editing derived bundle state.
 
 ```bash

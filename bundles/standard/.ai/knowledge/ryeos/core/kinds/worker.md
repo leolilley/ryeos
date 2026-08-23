@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-13T03:35:01Z:7a76c8d1ddf933aa97044ec444e036b3393b20ff88d1cc807723100ded9182e5:ELo9Qmc5CZ1Uk1diYYO6gUMZz7KrjJdcYr4vAzipxwAQGnCWXm3fuZuPSveyxjfskBCc5ADdu2duJF95li9cAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-23T23:14:59Z:05df131769977f15adff15d293d339277b2b549d5b4d08c47a51aef3134ad1d4:Hh9abQTa1YAtcuv/5Bd/fRhVf0vAjQCDxm89HhaUSigkhsHweAh4of7HtSdMhzUfSuW69adtbSLTdiE9lLFHCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/kinds
 tags: [kind, worker, persistent-session, source]
-version: "1.0.0"
+version: "1.0.1"
 description: Worker kind and adjacent-source reference.
 ---
 
@@ -31,3 +31,6 @@ retains a separate authority binding. Recovery reopens only retained CAS
 content and rechecks current publisher/kind trust. External runtimes, models,
 datasets, toolchains, and other opaque dependencies remain separate
 `external_content` declarations.
+
+See `knowledge:ryeos/core/execution/worker-hosted-execution` for the
+session-bound hosted-execution lifecycle built on this kind.

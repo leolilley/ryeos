@@ -1,6 +1,6 @@
-<!-- ryeos:signed:2026-08-23T22:45:21Z:4b0b4be26d15499185dbbe1173d295346459de0646478392ce3d5dac24043159:Rhgv3FDYdGxKadwu1Em1A2JrZMf7+BHOYpPF+geqiSvfCfQDToaEP+jEBANc0s6A5mNX9BhPuxHrcVEav2SpCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-23T23:14:20Z:65fb2c59de51cd888b12a0a671cdd73b140ad3f09685270cd4eb73a9e6362061:YQtEBQLdIFboKyZOyldnmLFguG7gwIuHqeT3+K9llzeDMhWiX36s261ZSF3aSX89IDCvHC7HulCOeTT0yOQeBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
-category: "ryeos/development"
+category: "ryeos/core/execution"
 name: "worker-hosted-execution"
 title: "Worker-Hosted Execution"
 description: "Implemented authority, protocol, lifecycle, recovery, and publication contracts for session-bound hosted workers"
@@ -14,6 +14,10 @@ Worker-hosted execution runs one long-lived subordinate workload for one
 ordinary RyeOS root execution. It is generic execution substrate. Codex is its
 first structured-session consumer; it is not an engine kind, agent identity,
 or local-inference implementation.
+
+This is installed RyeOS runtime knowledge shipped by the standard bundle. It
+describes the authority visible to operators and authored integrations; it is
+not a repository implementation plan.
 
 ## Authority and ownership
 
@@ -133,6 +137,10 @@ executions admit exactly `retain_result`; projectless executions admit exactly
 
 ## Explicit non-claims
 
-This feature does not provide hostile multi-principal containment,
+This substrate release does not provide hostile multi-principal containment,
 provider-only egress, aggregate descendant quotas, worker pooling, invocation
 leasing, cross-session reset, federation, or RyeOS local inference.
+
+See also `knowledge:ryeos/core/kinds/worker` for the generic authored worker
+kind and `knowledge:ryeos/standard/hosted-codex-activation` for the first
+operator-facing structured-session integration.
