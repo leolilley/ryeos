@@ -179,6 +179,12 @@ fn validate_execution_config(value: &serde_json::Value) -> Result<String, Launch
             "worker execution worker ref must be an unsuffixed worker item",
         ));
     }
+    let require_pinned_cow = object
+        .get("require_pinned_cow")
+        .and_then(serde_json::Value::as_bool);
+    let required_terminal_publication = object
+        .get("required_terminal_publication")
+        .and_then(serde_json::Value::as_str);
     if !matches!(
         object
             .get("required_credential_state")
@@ -188,7 +194,7 @@ fn validate_execution_config(value: &serde_json::Value) -> Result<String, Launch
         object
             .get("required_terminal_publication")
             .and_then(serde_json::Value::as_str),
-        Some("retain_result" | "discard" | "advance_head" | "any")
+        Some("retain_result" | "any")
     ) || object
         .get("max_lifetime_seconds")
         .and_then(serde_json::Value::as_u64)
@@ -203,6 +209,15 @@ fn validate_execution_config(value: &serde_json::Value) -> Result<String, Launch
         return Err(wire_error(
             "worker_execution_policy_invalid",
             "worker execution config is outside the admitted policy vocabulary",
+        ));
+    }
+    if !matches!(
+        (require_pinned_cow, required_terminal_publication),
+        (Some(true), Some("retain_result")) | (Some(false), Some("any"))
+    ) {
+        return Err(wire_error(
+            "worker_execution_policy_invalid",
+            "pinned CoW worker execution requires retain_result; projectless execution requires any",
         ));
     }
     let route_set = object
@@ -287,7 +302,7 @@ mod tests {
             "credential_home_env": "RYEOS_WORKLOAD_HOME",
             "workspace_env": "RYEOS_WORKSPACE",
             "require_pinned_cow": true,
-            "required_terminal_publication": "any",
+            "required_terminal_publication": "retain_result",
             "max_lifetime_seconds": 86_400,
             "recover_remote_session": true
         })
@@ -339,6 +354,25 @@ mod tests {
             validate_execution_config(&lifetime).unwrap_err().code,
             "worker_execution_policy_invalid"
         );
+    }
+
+    #[test]
+    fn rejects_cross_field_terminal_publication_expansion() {
+        for (pinned, publication) in [
+            (true, "any"),
+            (true, "discard"),
+            (true, "advance_head"),
+            (false, "retain_result"),
+        ] {
+            let mut config = valid_config();
+            config["require_pinned_cow"] = serde_json::Value::Bool(pinned);
+            config["required_terminal_publication"] =
+                serde_json::Value::String(publication.to_owned());
+            assert_eq!(
+                validate_execution_config(&config).unwrap_err().code,
+                "worker_execution_policy_invalid"
+            );
+        }
     }
 }
 

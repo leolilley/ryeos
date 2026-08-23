@@ -142,6 +142,30 @@ pub fn remove(runtime_state_dir: &Path, home_id: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Removes only an empty, exact-identity home left behind before its durable
+/// ownership row was committed. Non-empty homes are deliberately preserved:
+/// their contents may be the only remaining upstream credential evidence and
+/// therefore require explicit operator recovery rather than inference.
+pub fn remove_empty_orphan(runtime_state_dir: &Path, home_id: &str) -> Result<bool> {
+    validate_component("private artifact home id", home_id, MAX_HOME_ID_BYTES)?;
+    let Some(root) = lillux::PinnedDirectory::open(&runtime_state_dir.join(HOME_ROOT))? else {
+        return Ok(false);
+    };
+    let name = OsString::from(home_id);
+    let Some(home) = root.open_child_directory(&name)? else {
+        return Ok(false);
+    };
+    if !home.entries_no_follow()?.is_empty() {
+        bail!("private artifact orphan is non-empty and requires explicit recovery");
+    }
+    let removed = root.remove_empty_child_if_same(&name, &home)?;
+    if !removed {
+        bail!("private artifact home identity changed during orphan recovery");
+    }
+    root.sync()?;
+    Ok(true)
+}
+
 pub fn require_within_default_limit(runtime_state_dir: &Path, home_id: &str) -> Result<u64> {
     let path = home_path(runtime_state_dir, home_id)?;
     let home = lillux::PinnedDirectory::open(&path)?
@@ -225,6 +249,19 @@ mod tests {
         assert!(create(tmp.path(), "../escape", &BTreeMap::new()).is_err());
         create(tmp.path(), "home-one", &BTreeMap::new()).unwrap();
         assert!(create(tmp.path(), "home-one", &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn recovers_only_empty_creation_orphans() {
+        let tmp = tempfile::tempdir().unwrap();
+        let empty = create(tmp.path(), "empty-orphan", &BTreeMap::new()).unwrap();
+        assert!(remove_empty_orphan(tmp.path(), "empty-orphan").unwrap());
+        assert!(!empty.exists());
+
+        let files = BTreeMap::from([("credential.json".to_owned(), b"opaque".to_vec())]);
+        let nonempty = create(tmp.path(), "nonempty-orphan", &files).unwrap();
+        assert!(remove_empty_orphan(tmp.path(), "nonempty-orphan").is_err());
+        assert!(nonempty.exists());
     }
 
     #[test]

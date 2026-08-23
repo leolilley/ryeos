@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-20T07:22:59Z:6aa6a6303bace87fc1a5282074533946aaee3794e0648f22d2b3dcf5617acea4:rKMzJRjiqQiD4DArOXxB09s1H87whypHPIKyYPSxQJMzhXqKN0ym97hHUZoX7j+DXhehpMHYSIOQMKdmXHKBCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-23T22:45:21Z:7c934a0c6af774416df2c770f2c17071eeeb62272ef2be69b76353e4deba62df:8KM+yenF/VGXqSdKouLT3ESjm9A5q/YXysnBwzd7f5th9ph1LIx28F2p/CfFSsoxVJvuUpsocO/ciW0pjRr4Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "hosted-codex-activation"
@@ -44,11 +44,18 @@ command and service contracts.
 
 The signed profile launches Codex with immutable argv containing every
 security-critical override. A same-UID process can replace a file in its
-writable home, so mode 0400 on `baseline.config.toml` is drift detection and
-compatibility state—not policy authority. CLI overrides fix login, credential
-store, approval routing, permission profile, command network, shell environment,
-and disabled helpers for process life. Thread start/resume checks supported
-response fields for effective approval and sandbox policy.
+writable home, so mode 0400 alone is never treated as authority. RyeOS requires
+enforced isolation and overlays the admitted compatibility config read-only;
+launch fails if that mechanical overlay is unavailable. Immutable CLI
+overrides independently fix login, credential store, approval routing,
+permission profile, command network, shell environment, and disabled helpers
+for process life. Thread start/resume checks supported response fields for
+effective approval and sandbox policy.
+
+For pinned Codex 0.147 the granular approval policy is inherited from immutable
+CLI configuration. Request-level `approvalPolicy` is intentionally omitted
+because the stable App Server rejects that granular field unless the forbidden
+`experimentalApi` capability is enabled.
 
 App Server inherits a cleared minimal environment and no RyeOS control FD.
 Model commands receive narrower shell policy and cannot see profile home,

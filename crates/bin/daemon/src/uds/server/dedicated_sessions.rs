@@ -263,6 +263,12 @@ pub(super) async fn start(
     if request.thread_id != cap.thread_id {
         bail!("dedicated-session start is restricted to the callback root");
     }
+    let _root_operation =
+        ryeos_app::hosted_operation::begin_hosted_root_operation(&request.thread_id)?;
+    let _credential_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
+        &request.credential_profile_id,
+    )
+    .await?;
     ryeos_engine::protocol_vocabulary::validate_env_name(&request.credential_home_env)?;
     ryeos_engine::protocol_vocabulary::validate_env_name(&request.workspace_env)?;
     if request.route_set.is_empty()
@@ -297,7 +303,10 @@ pub(super) async fn start(
     if request.credential_home_env == request.workspace_env {
         bail!("credential-home and workspace environment slots must be distinct");
     }
-    if request.require_pinned_cow || request.required_terminal_publication != "any" {
+    if request.require_pinned_cow {
+        if request.required_terminal_publication != "retain_result" {
+            bail!("pinned CoW worker execution requires retain_result terminal publication");
+        }
         use ryeos_state::objects::{
             ExecutionProjectAuthority, PinnedProjectRealization, PinnedTerminalPublication,
         };
@@ -312,18 +321,11 @@ pub(super) async fn start(
         else {
             bail!("dedicated-session launch requires a private CoW realization");
         };
-        let observed = match terminal_publication {
-            PinnedTerminalPublication::Discard => "discard",
-            PinnedTerminalPublication::RetainResult => "retain_result",
-            PinnedTerminalPublication::AdvanceHead { .. } => "advance_head",
-        };
-        if request.required_terminal_publication != "any"
-            && request.required_terminal_publication != observed
-        {
-            bail!(
-                "dedicated-session terminal publication authority differs from its signed controller requirement"
-            );
+        if *terminal_publication != PinnedTerminalPublication::RetainResult {
+            bail!("worker execution requires a retain-result pinned CoW realization");
         }
+    } else if request.required_terminal_publication != "any" {
+        bail!("projectless worker execution requires any terminal publication");
     }
     let recovering =
         if let Some(existing) = state.state_store.dedicated_session(&request.thread_id)? {
@@ -453,7 +455,7 @@ pub(super) async fn start(
                 owner_principal: owner,
                 admitted_capsule_hash: &capsule_hash,
                 workspace_id: &workspace.workspace_id,
-                candidate_required: request.required_terminal_publication != "any",
+                candidate_required: request.require_pinned_cow,
                 credential_profile_id: &request.credential_profile_id,
                 credential_generation,
                 credential_lock_owner: &worker_instance_id,
@@ -527,10 +529,31 @@ pub(super) async fn start(
     .context("join dedicated-session worker start")?;
     if let Err(error) = started {
         let reason = format!("dedicated worker start failed: {error:#}");
+        let mut cleanup_proved = error
+            .downcast_ref::<
+                ryeos_executor::execution::persistent_session::ExclusiveWorkerCleanupUnproved,
+            >()
+            .is_none();
+        if let Some(worker) = state.state_store.worker_process(&worker_instance_id)? {
+            let cleanup_state = ryeos_app::dedicated_session_service::retire_worker_process(
+                state,
+                &request.thread_id,
+                &worker,
+            )?;
+            cleanup_proved = cleanup_state == "reaped";
+            state.state_store.settle_worker_process(
+                &worker_instance_id,
+                &request.thread_id,
+                boot_epoch,
+                cleanup_state,
+                &reason,
+            )?;
+        }
         state.state_store.fail_dedicated_session_start(
             &request.thread_id,
             &worker_instance_id,
             &reason,
+            cleanup_proved,
         )?;
         return Err(anyhow!(reason));
     }
@@ -547,12 +570,18 @@ pub(super) async fn start(
             )
         })
     {
-        let cleanup = state
-            .persistent_sessions
-            .retire_exclusive(&request.thread_id);
+        let worker = state
+            .state_store
+            .worker_process(&worker_instance_id)?
+            .ok_or_else(|| anyhow!("observation-sink failure lost its worker identity"))?;
+        let cleanup_state = ryeos_app::dedicated_session_service::retire_worker_process(
+            state,
+            &request.thread_id,
+            &worker,
+        )?;
         let reason = format!("install worker observation sink: {error:#}");
-        match cleanup {
-            Ok(()) => {
+        match cleanup_state {
+            "reaped" => {
                 state.state_store.settle_worker_process(
                     &worker_instance_id,
                     &request.thread_id,
@@ -567,7 +596,7 @@ pub(super) async fn start(
                     "cancelled",
                 )?;
             }
-            Err(cleanup) => {
+            _ => {
                 state.state_store.fence_abandoned_worker_process(
                     &worker_instance_id,
                     &request.thread_id,
@@ -575,7 +604,7 @@ pub(super) async fn start(
                     "unproved",
                 )?;
                 return Err(anyhow!(
-                    "{reason}; worker cleanup could not be proved and the credential profile remains fenced: {cleanup:#}"
+                    "{reason}; worker cleanup could not be proved and the credential profile remains fenced"
                 ));
             }
         }

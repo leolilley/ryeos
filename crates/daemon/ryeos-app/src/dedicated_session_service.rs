@@ -12,7 +12,13 @@ use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::runtime_db::{WorkerProcessState, WorkspaceState};
+use crate::hosted_operation::{
+    acquire_credential_profile_operation, acquire_credential_profile_operation_sync,
+    begin_hosted_root_operation,
+};
+use crate::persistent_session::ExclusiveRetirementOutcome;
+use crate::process::{IdentityLiveness, ShutdownAction, execution_group_liveness, kill_by_action};
+use crate::runtime_db::{WorkerProcessRecord, WorkerProcessState, WorkspaceState};
 use crate::state::AppState;
 use crate::state_store::{
     DedicatedSessionRecord, NewDedicatedSessionApproval, NewDedicatedSessionCommand,
@@ -56,6 +62,8 @@ pub async fn wait_for_projection_change(
     let signal = projection_signal(session_id);
     loop {
         let notified = signal.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         let current = current_session(state, session_id)?;
         if current.updated_at_ms != observed_updated_at_ms || current.state == "terminal" {
             return Ok(current);
@@ -75,6 +83,10 @@ pub fn ingest_observation_batch(
     worker_boot_epoch: u64,
     raw: Value,
 ) -> Result<Value> {
+    let session = current_session(state, session_id)?;
+    let _root_operation = begin_hosted_root_operation(&session.root_thread_id)?;
+    let _credential_operation =
+        acquire_credential_profile_operation_sync(&session.credential_profile_id);
     let mut digest_input = raw.clone();
     let supplied_digest = digest_input
         .as_object_mut()
@@ -112,7 +124,6 @@ pub fn ingest_observation_batch(
             "batch_digest": batch.batch_digest,
         }));
     }
-    let session = current_session(state, session_id)?;
     let result = json!({
         "events": batch.events,
         "session_observations": batch.session_observations,
@@ -480,6 +491,9 @@ fn current_session(state: &AppState, session_id: &str) -> Result<DedicatedSessio
 pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
     for record in state.state_store.dedicated_command_outbox_records()? {
         let session = current_session(state, &record.session_id)?;
+        let _root_operation = begin_hosted_root_operation(&session.root_thread_id)?;
+        let _credential_operation =
+            acquire_credential_profile_operation_sync(&session.credential_profile_id);
         let (profile_hash, schema_hashes) =
             structured_protocol_identity(state, &session.admitted_capsule_hash)?;
         append_command_fact_once(
@@ -492,7 +506,8 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
                 "schema":1,
                 "origin":"daemon_observed_io",
                 "worker_boot_epoch":record.worker_boot_epoch,
-                "route_id":&record.command_kind,
+                "command_kind":&record.command_kind,
+                "route_id":record.payload.get("route_id").and_then(Value::as_str),
                 "idempotency_key":&record.idempotency_key,
                 "canonical_command":&record.payload,
                 "admitted_session_capsule_hash":&session.admitted_capsule_hash,
@@ -504,6 +519,55 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
         match record.state.as_str() {
             "committed" => {}
             "dispatched" | "outcome_unknown" => {
+                if let Some((canonical_batch, response_digest)) =
+                    find_authoritative_command_observation_batch(
+                        state,
+                        &session,
+                        record.worker_boot_epoch,
+                        record.command_sequence,
+                        &record.request_digest,
+                    )?
+                {
+                    project_worker_events(
+                        state,
+                        &session,
+                        record.worker_boot_epoch,
+                        &canonical_batch,
+                    )?;
+                    apply_worker_observations(
+                        state,
+                        &record.session_id,
+                        record.worker_boot_epoch,
+                        &canonical_batch,
+                    )?;
+                    append_command_fact_once(
+                        state,
+                        &session,
+                        "hosted_command.settled",
+                        record.command_sequence,
+                        &record.request_digest,
+                        json!({
+                            "schema":1,
+                            "origin":"daemon_observed_io",
+                            "worker_boot_epoch":record.worker_boot_epoch,
+                            "response_digest":response_digest,
+                            "succeeded":true,
+                            "recovered":true,
+                        }),
+                    )?;
+                    state.state_store.settle_recovered_dedicated_command(
+                        &record.session_id,
+                        record.command_sequence,
+                        record.worker_boot_epoch,
+                        &json!({
+                            "redacted":true,
+                            "response_digest":response_digest,
+                            "recovered_from_root_chain":true,
+                        }),
+                    )?;
+                    notify_projection_change(&record.session_id);
+                    continue;
+                }
                 append_command_fact_once(
                     state,
                     &session,
@@ -700,6 +764,10 @@ pub async fn execute_command(
     command_kind: &str,
     payload: Value,
 ) -> Result<Value> {
+    let initial = current_session(state, session_id)?;
+    let _root_operation = begin_hosted_root_operation(&initial.root_thread_id)?;
+    let _credential_operation =
+        acquire_credential_profile_operation(&initial.credential_profile_id).await?;
     let session = current_session(state, session_id)?;
     let worker_boot_epoch = session
         .worker_boot_epoch
@@ -745,7 +813,8 @@ pub async fn execute_command(
             "schema":1,
             "origin":"daemon_observed_io",
             "worker_boot_epoch":worker_boot_epoch,
-            "route_id":command_kind,
+            "command_kind":command_kind,
+            "route_id":payload.get("route_id").and_then(Value::as_str),
             "idempotency_key":idempotency_key,
             "canonical_command":payload,
             "admitted_session_capsule_hash":session.admitted_capsule_hash,
@@ -802,7 +871,7 @@ pub async fn execute_command(
     .await?;
     match outcome {
         Ok(result) => {
-            if let Err(error) = append_command_observations(
+            if let Err(error) = append_command_observation_batch(
                 state,
                 &session,
                 worker_boot_epoch,
@@ -986,7 +1055,7 @@ fn append_command_fact_once(
     Ok(())
 }
 
-fn append_command_observations(
+fn append_command_observation_batch(
     state: &AppState,
     session: &DedicatedSessionRecord,
     worker_boot_epoch: u64,
@@ -994,40 +1063,118 @@ fn append_command_observations(
     request_digest: &str,
     result: &Value,
 ) -> Result<()> {
-    let Some(observations) = result.get("session_observations") else {
-        return Ok(());
-    };
-    let observations = observations
-        .as_array()
-        .ok_or_else(|| anyhow!("command session observations are not an array"))?;
-    if observations.is_empty() {
-        return Ok(());
+    let events = result.get("events").cloned().unwrap_or_else(|| json!([]));
+    let observations = result
+        .get("session_observations")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    if !events.is_array() || !observations.is_array() {
+        bail!("command observation batch fields are not arrays");
     }
+    let response_digest = ryeos_state::objects::canonical_value_digest(result)?;
+    append_command_fact_once(
+        state,
+        session,
+        "hosted_worker_command_observation_batch",
+        command_sequence,
+        request_digest,
+        json!({
+            "schema":1,
+            "origin":"daemon_observed_io",
+            "worker_boot_epoch":worker_boot_epoch,
+            "response_digest":response_digest,
+            "canonical_batch":{
+                "events":events,
+                "session_observations":observations,
+            },
+        }),
+    )
+}
+
+fn find_authoritative_command_observation_batch(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    worker_boot_epoch: u64,
+    command_sequence: u64,
+    request_digest: &str,
+) -> Result<Option<(Value, String)>> {
     let thread = state
-        .threads
+        .state_store
         .get_thread(&session.root_thread_id)?
         .ok_or_else(|| anyhow!("hosted execution root thread disappeared"))?;
-    let events = observations
-        .iter()
-        .map(|observation| NewEventRecord {
-            event_type: "hosted_worker_command_observation".to_owned(),
-            storage_class: "indexed".to_owned(),
-            payload: json!({
-                "schema": 1,
-                "origin": "upstream_reported",
-                "session_id": session.session_id,
-                "worker_boot_epoch": worker_boot_epoch,
-                "command_sequence": command_sequence,
-                "request_digest": request_digest,
-                "observation": observation,
-            }),
-        })
-        .collect::<Vec<_>>();
-    state
-        .threads
-        .append_thread_events(&thread.chain_root_id, &thread.thread_id, &events)?
-        .ok_or_else(|| anyhow!("hosted execution root is no longer running"))?;
-    Ok(())
+    let mut after = None;
+    loop {
+        let page = state.state_store.replay_events(
+            &thread.chain_root_id,
+            Some(&thread.thread_id),
+            after,
+            1024,
+            8 * 1024 * 1024,
+        )?;
+        for event in &page.events {
+            let payload = &event.payload;
+            if event.event_type != "hosted_worker_command_observation_batch"
+                || payload.get("session_id").and_then(Value::as_str)
+                    != Some(session.session_id.as_str())
+                || payload.get("worker_boot_epoch").and_then(Value::as_u64)
+                    != Some(worker_boot_epoch)
+                || payload.get("command_sequence").and_then(Value::as_u64) != Some(command_sequence)
+                || payload.get("request_digest").and_then(Value::as_str) != Some(request_digest)
+            {
+                continue;
+            }
+            let response_digest = payload
+                .get("response_digest")
+                .and_then(Value::as_str)
+                .filter(|digest| lillux::valid_hash(digest))
+                .ok_or_else(|| anyhow!("authoritative command batch has no response digest"))?;
+            let batch = payload
+                .get("canonical_batch")
+                .cloned()
+                .ok_or_else(|| anyhow!("authoritative command batch has no canonical body"))?;
+            if !batch.get("events").is_some_and(Value::is_array)
+                || !batch
+                    .get("session_observations")
+                    .is_some_and(Value::is_array)
+            {
+                bail!("authoritative command batch body is malformed");
+            }
+            return Ok(Some((batch, response_digest.to_owned())));
+        }
+        after = page.events.last().map(|event| event.chain_seq);
+        if !page.has_more {
+            return Ok(None);
+        }
+    }
+}
+
+/// Retire one exact durable worker identity without treating registry absence
+/// as process-death proof. The process identity is the final authority when
+/// the in-memory registry cannot prove that it reaped the owned group.
+pub fn retire_worker_process(
+    state: &AppState,
+    session_id: &str,
+    worker: &WorkerProcessRecord,
+) -> Result<&'static str> {
+    let registry_outcome = state.persistent_sessions.retire_exclusive(session_id)?;
+    if registry_outcome == ExclusiveRetirementOutcome::Reaped {
+        return Ok("reaped");
+    }
+    let prove_from_identity = || match execution_group_liveness(&worker.process_identity) {
+        IdentityLiveness::DeadOrStale => true,
+        IdentityLiveness::Alive => {
+            let killed = kill_by_action(&worker.process_identity, ShutdownAction::Hard);
+            killed.success
+                && execution_group_liveness(&worker.process_identity)
+                    == IdentityLiveness::DeadOrStale
+        }
+        IdentityLiveness::Unavailable => false,
+    };
+    Ok(if prove_from_identity() {
+        "reaped"
+    } else {
+        "unproved"
+    })
 }
 
 /// Drain and terminally settle one session after its caller has already
@@ -1037,6 +1184,10 @@ pub async fn terminate_session(state: &AppState, session_id: &str, reason: &str)
     if !matches!(reason, "completed" | "cancelled") {
         bail!("terminal reason must be completed or cancelled");
     }
+    let initial = current_session(state, session_id)?;
+    let _root_operation = begin_hosted_root_operation(&initial.root_thread_id)?;
+    let _credential_operation =
+        acquire_credential_profile_operation(&initial.credential_profile_id).await?;
     let session = current_session(state, session_id)?;
     if session.state == "terminal" {
         if session.terminal_reason.as_deref() != Some(reason) {
@@ -1103,10 +1254,17 @@ pub async fn terminate_session(state: &AppState, session_id: &str, reason: &str)
         .state_store
         .worker_process(worker_instance_id)?
         .ok_or_else(|| anyhow!("dedicated worker process projection disappeared"))?;
-    if worker.state != WorkerProcessState::Dead {
-        let registry = Arc::clone(&state.persistent_sessions);
-        let retire_id = session_id.to_owned();
-        tokio::task::spawn_blocking(move || registry.retire_exclusive(&retire_id)).await??;
+    if worker.state != WorkerProcessState::Dead || worker.cleanup_state != "reaped" {
+        let cleanup_state = retire_worker_process(state, session_id, &worker)?;
+        if cleanup_state != "reaped" {
+            state.state_store.fence_abandoned_worker_process(
+                worker_instance_id,
+                session_id,
+                worker_boot_epoch,
+                cleanup_state,
+            )?;
+            bail!("dedicated worker cleanup remains unproved");
+        }
     }
     let after_retire = current_session(state, session_id)?;
     if !matches!(
@@ -1149,13 +1307,26 @@ pub async fn terminate_session(state: &AppState, session_id: &str, reason: &str)
     }))
 }
 
-fn finish_terminal_credential_cleanup(
+pub fn finish_terminal_credential_cleanup(
     state: &AppState,
     session: &DedicatedSessionRecord,
 ) -> Result<()> {
     let Some(worker_instance_id) = session.worker_instance_id.as_deref() else {
         return Ok(());
     };
+    let worker_boot_epoch = session
+        .worker_boot_epoch
+        .ok_or_else(|| anyhow!("terminal session has a partial worker identity"))?;
+    let worker = state
+        .state_store
+        .worker_process(worker_instance_id)?
+        .ok_or_else(|| anyhow!("terminal session worker projection disappeared"))?;
+    if worker.session_id != session.session_id || worker.boot_epoch != worker_boot_epoch {
+        bail!("terminal session worker identity does not match its durable owner");
+    }
+    if worker.state != WorkerProcessState::Dead || worker.cleanup_state != "reaped" {
+        bail!("terminal credential cleanup requires proved worker death and reap");
+    }
     let profile = state
         .state_store
         .credential_profile(&session.credential_profile_id)?
@@ -1181,7 +1352,11 @@ fn finish_terminal_credential_cleanup(
             .state_store
             .release_credential_profile(&session.credential_profile_id, worker_instance_id)?,
         None => {}
-        Some(_) => bail!("terminal credential cleanup encountered another lock owner"),
+        // This terminal session may be historical: after its exact worker was
+        // proved reaped and its lease released, the same profile can safely
+        // serve a later session. Idempotent cleanup must never release or
+        // reject that later exact owner.
+        Some(_) => {}
     }
     Ok(())
 }
@@ -1192,6 +1367,8 @@ pub fn abort_session_for_root_stop(state: &AppState, root_thread_id: &str) -> Re
     let Some(session) = state.state_store.dedicated_session(root_thread_id)? else {
         return Ok(());
     };
+    let _credential_operation =
+        acquire_credential_profile_operation_sync(&session.credential_profile_id);
     if session.state == "terminal" {
         finish_terminal_credential_cleanup(state, &session)?;
         return close_session_workspace(state, &session);
@@ -1218,10 +1395,20 @@ pub fn abort_session_for_root_stop(state: &AppState, root_thread_id: &str) -> Re
                 .state_store
                 .worker_process(worker_instance_id)?
                 .ok_or_else(|| anyhow!("root-owned worker process projection disappeared"))?;
-            if worker.state != WorkerProcessState::Dead {
-                state
-                    .persistent_sessions
-                    .retire_exclusive(&session.session_id)?;
+            let cleanup_state =
+                if worker.state == WorkerProcessState::Dead && worker.cleanup_state == "reaped" {
+                    "reaped"
+                } else {
+                    retire_worker_process(state, &session.session_id, &worker)?
+                };
+            if cleanup_state != "reaped" {
+                state.state_store.fence_abandoned_worker_process(
+                    worker_instance_id,
+                    &session.session_id,
+                    worker_boot_epoch,
+                    cleanup_state,
+                )?;
+                bail!("root-owned worker cleanup remains unproved");
             }
             state.state_store.settle_worker_process(
                 worker_instance_id,

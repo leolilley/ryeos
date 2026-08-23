@@ -30,6 +30,7 @@ pub mod extension_state;
 pub mod external_content_admission;
 pub mod handler_context;
 pub mod handler_error;
+pub mod hosted_operation;
 pub mod identity;
 pub mod ignore;
 #[path = "io/mod.rs"]

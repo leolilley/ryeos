@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-20T07:22:59Z:af48a32232b9210faabf211610d653c5ebac8b756a777b095c5cff5bfe02d335:W+eWB8NODDYv2S7vihsQXC65AUAKA4In658VZ/urEzg8/83QR93Q/i2QSDjcYFFzEC8xAdirN5y1598nFq6jDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-23T22:45:21Z:4b0b4be26d15499185dbbe1173d295346459de0646478392ce3d5dac24043159:Rhgv3FDYdGxKadwu1Em1A2JrZMf7+BHOYpPF+geqiSvfCfQDToaEP+jEBANc0s6A5mNX9BhPuxHrcVEav2SpCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "worker-hosted-execution"
@@ -70,7 +70,11 @@ Command contact is durable-before-write. A committed command in a dead epoch
 without contact becomes a stable retryable-uncontacted failure; contacted or
 ambiguous work is never replayed. Root facts retain canonical command,
 idempotency identity, route/request digest, boot epoch, subordinate capsule,
-profile, and schema identities.
+profile, and schema identities. A successful response first appends one
+canonical redacted command-observation batch to the root chain; only then are
+events, approvals, session observations, and the result projection advanced.
+Restart can therefore rebuild a dispatched command from that batch instead of
+incorrectly downgrading authoritative success to outcome-unknown.
 
 Approval consent covers one exact action inside the admitted ceiling. It never
 expands authority. The outbox reserves the decision, records possible contact
@@ -101,6 +105,15 @@ home. Admission, attachment, readiness, command, approval, and recovery recheck
 the exact generation and lock. Unproved death retains worker identity and the
 credential fence; the home is removed only after every worker proves cleanup.
 Cleanup and lock release are transactional or resumable at durable boundaries.
+One generic per-profile operation coordinator covers start through readiness,
+every worker contact, termination, confirmation, revocation, and deletion.
+Root ownership is always acquired before profile ownership.
+
+In-memory retirement returns distinct `reaped`, `unproved`, `reserved`, and
+`absent` evidence. Reservation or registry absence is never process-death
+proof. If attachment fails after spawn, the exact Lillux process identity is
+persisted as unproved before control returns; failure to persist that evidence
+keeps the credential lock fenced.
 
 ## Workspace and publication
 
@@ -112,7 +125,11 @@ ancestry only; project tests remain ordinary executions.
 Publication additionally requires `ryeos.write.project.live`, expected base,
 owner authorization, and HEAD CAS. A durable reservation and startup recovery
 close the HEAD-before-root-fact crash gap. Root terminalization waits while
-publication may have contacted HEAD.
+publication may have contacted HEAD. A process-local root-operation lease
+fences every hosted root-chain mutation; terminalization closes admission and
+waits on its condition variable rather than polling SQLite. Pinned CoW worker
+executions admit exactly `retain_result`; projectless executions admit exactly
+`any`. Discard/advance launch authority is not accepted by this release.
 
 ## Explicit non-claims
 

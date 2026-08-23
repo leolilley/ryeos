@@ -292,6 +292,13 @@ pub async fn reconcile_approval_outboxes(state: Arc<AppState>) -> anyhow::Result
         let Some(session) = state.state_store.dedicated_session(&session_id)? else {
             anyhow::bail!("approval outbox references a missing dedicated session");
         };
+        let _root_operation =
+            ryeos_app::hosted_operation::begin_hosted_root_operation(&session.root_thread_id)?;
+        let _credential_operation =
+            ryeos_app::hosted_operation::acquire_credential_profile_operation(
+                &session.credential_profile_id,
+            )
+            .await?;
         repair_approval_outbox_for_session(&state, &session)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     }
@@ -310,6 +317,8 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
         let _operation_guard = disposition_operation_lock(&session.session_id)
             .lock_owned()
             .await;
+        let _root_operation =
+            ryeos_app::hosted_operation::begin_hosted_root_operation(&session.root_thread_id)?;
         let candidate = session
             .candidate_snapshot_hash
             .as_deref()
@@ -401,11 +410,14 @@ async fn resolve_approval(
 ) -> Result<Value, HandlerError> {
     let _delivery_guard = approval_delivery_lock(&req.session_id).lock_owned().await;
     let initial_session = owned_session(&state, &ctx, &req.session_id)?;
-    let _credential_guard = super::credential_profiles::credential_profile_operation_lock(
+    let _root_operation =
+        ryeos_app::hosted_operation::begin_hosted_root_operation(&initial_session.root_thread_id)
+            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let _credential_guard = ryeos_app::hosted_operation::acquire_credential_profile_operation(
         &initial_session.credential_profile_id,
     )
-    .lock_owned()
-    .await;
+    .await
+    .map_err(internal)?;
     let session = owned_session(&state, &ctx, &req.session_id)?;
     let approval = state
         .state_store
@@ -552,6 +564,24 @@ async fn resolve_approval(
                     approval.worker_boot_epoch,
                     &reservation_token,
                     &decision_digest,
+                )
+                .map_err(internal)?;
+            let cleanup_state = state
+                .persistent_sessions
+                .take_exclusive_failure_cleanup_state(&req.session_id)
+                .map_err(internal)?
+                .ok_or_else(|| internal("approval contact failure lost its cleanup proof"))?;
+            let worker_instance_id = session
+                .worker_instance_id
+                .as_deref()
+                .ok_or_else(|| internal("approval contact failure has no worker identity"))?;
+            state
+                .state_store
+                .fence_abandoned_worker_process(
+                    worker_instance_id,
+                    &req.session_id,
+                    approval.worker_boot_epoch,
+                    cleanup_state,
                 )
                 .map_err(internal)?;
             let unknown_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
@@ -727,6 +757,9 @@ async fn validate_candidate_closure_and_base(
     let operation_lock = disposition_operation_lock(&req.session_id);
     let _operation_guard = operation_lock.lock_owned().await;
     let session = owned_session(&state, &ctx, &req.session_id)?;
+    let _root_operation =
+        ryeos_app::hosted_operation::begin_hosted_root_operation(&session.root_thread_id)
+            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     if session.state == "publish_ready"
         && session.candidate_snapshot_hash.as_deref() == Some(req.candidate_snapshot_hash.as_str())
         && session.candidate_validation_hash.as_deref()
@@ -863,6 +896,9 @@ async fn discard(
     let operation_lock = disposition_operation_lock(&req.session_id);
     let _operation_guard = operation_lock.lock_owned().await;
     let session = owned_session(&state, &ctx, &req.session_id)?;
+    let _root_operation =
+        ryeos_app::hosted_operation::begin_hosted_root_operation(&session.root_thread_id)
+            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     if session.publication_result.as_deref() == Some("discarded") {
         if session.candidate_snapshot_hash.as_deref() != Some(req.candidate_snapshot_hash.as_str())
         {
@@ -924,6 +960,9 @@ async fn publish(
             ))
         })?;
     let session = owned_session(&state, &ctx, &req.session_id)?;
+    let _root_operation =
+        ryeos_app::hosted_operation::begin_hosted_root_operation(&session.root_thread_id)
+            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     if !matches!(
         session.state.as_str(),
         "publish_ready" | "publishing" | "terminal"

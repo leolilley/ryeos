@@ -3893,13 +3893,13 @@ impl StateStore {
         g.runtime_db.dedicated_session(session_id)
     }
 
-    pub fn nonterminal_dedicated_sessions_for_credential_profile(
+    pub fn dedicated_sessions_for_credential_profile(
         &self,
         profile_id: &str,
     ) -> Result<Vec<DedicatedSessionRecord>> {
         let g = self.lock()?;
         g.runtime_db
-            .nonterminal_dedicated_sessions_for_credential_profile(profile_id)
+            .dedicated_sessions_for_credential_profile(profile_id)
     }
 
     pub fn dedicated_sessions_in_state(
@@ -3925,10 +3925,15 @@ impl StateStore {
         session_id: &str,
         worker_instance_id: &str,
         reason: &str,
+        cleanup_proved: bool,
     ) -> Result<()> {
         let g = self.lock()?;
-        g.runtime_db
-            .fail_dedicated_session_start(session_id, worker_instance_id, reason)
+        g.runtime_db.fail_dedicated_session_start(
+            session_id,
+            worker_instance_id,
+            reason,
+            cleanup_proved,
+        )
     }
 
     pub fn bind_dedicated_remote_thread(
@@ -4226,6 +4231,22 @@ impl StateStore {
         )
     }
 
+    pub fn settle_recovered_dedicated_command(
+        &self,
+        session_id: &str,
+        command_sequence: u64,
+        worker_boot_epoch: u64,
+        result: &Value,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.settle_recovered_dedicated_command(
+            session_id,
+            command_sequence,
+            worker_boot_epoch,
+            result,
+        )
+    }
+
     pub fn mark_dedicated_command_outcome_unknown(
         &self,
         session_id: &str,
@@ -4430,6 +4451,15 @@ impl StateStore {
     pub fn attach_worker_process(&self, record: &WorkerProcessRecord) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.attach_worker_process(record)
+    }
+
+    pub fn fence_unproved_worker_start(
+        &self,
+        record: &WorkerProcessRecord,
+        reason: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.fence_unproved_worker_start(record, reason)
     }
 
     pub fn worker_process(&self, worker_instance_id: &str) -> Result<Option<WorkerProcessRecord>> {

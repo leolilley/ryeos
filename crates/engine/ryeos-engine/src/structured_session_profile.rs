@@ -31,6 +31,7 @@ pub fn compile(
         .ok_or_else(|| anyhow!("structured-session profile must be an object"))?;
     let required = [
         "schema_version",
+        "configuration_authority",
         "workload_realization_id",
         "workload_executable",
         "workload_args",
@@ -49,6 +50,13 @@ pub fn compile(
     }
     if object.get("schema_version").and_then(Value::as_u64) != Some(1) {
         bail!("structured-session profile schema is not admitted");
+    }
+    if object
+        .get("configuration_authority")
+        .and_then(Value::as_str)
+        != Some("immutable_argv")
+    {
+        bail!("structured-session configuration authority is not immutable argv");
     }
     validate_identifier(value_string(object, "workload_realization_id")?)?;
     validate_file_name(value_string(object, "workload_executable")?)?;
@@ -679,6 +687,7 @@ mod tests {
             "workload_home_env":"FIXTURE_HOME",
             "baseline_config":"baseline.conf",
             "baseline_destination":"runtime.conf",
+            "configuration_authority":"immutable_argv",
             "initialization":[{
                 "method":"initialize",
                 "effect_class":"pure_read",

@@ -3,8 +3,7 @@
 //! File names and contents remain opaque to RyeOS. A bundle adapter owns their
 //! meaning and must verify them against its admitted immutable inputs.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -24,19 +23,6 @@ fn require_operator<'a>(
     ryeos_app::operator_external_content::require_configured_operator(state, ctx)
         .map_err(|_| HandlerError::Forbidden("configured operator required".into()))?;
     Ok(&ctx.fingerprint)
-}
-
-/// Serializes every credential-bearing contact with revocation/deletion for
-/// one profile. The lock is process-local by design: the runtime DB generation
-/// fence remains the durable authority across daemon restart.
-pub(crate) fn credential_profile_operation_lock(profile_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
-    let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut locks = locks.lock().unwrap_or_else(|error| error.into_inner());
-    locks
-        .entry(profile_id.to_owned())
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone()
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,17 +47,31 @@ async fn create(
 ) -> Result<Value, HandlerError> {
     let owner = require_operator(&state, &ctx)?.to_owned();
     let home_id = profile_home_id(&owner, &req.profile_id).map_err(internal)?;
-    if state
+    let _operation_guard =
+        ryeos_app::hosted_operation::acquire_credential_profile_operation(&req.profile_id)
+            .await
+            .map_err(internal)?;
+    if let Some(existing) = state
         .state_store
         .credential_profile(&req.profile_id)
         .map_err(internal)?
-        .is_some()
     {
-        return Err(HandlerError::BadRequest(
-            "credential profile already exists".into(),
-        ));
+        if existing.owner_principal != owner || existing.home_id != home_id {
+            return Err(HandlerError::BadRequest(
+                "credential profile identity conflicts with existing ownership".into(),
+            ));
+        }
+        return Ok(json!({
+            "profile_id":existing.profile_id,
+            "home_id":existing.home_id,
+            "credential_generation":existing.credential_generation,
+            "state":existing.state,
+            "idempotent":true,
+        }));
     }
     let state_dir = state.config.runtime_state_dir();
+    ryeos_app::private_artifact_home::remove_empty_orphan(&state_dir, &home_id)
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     ryeos_app::private_artifact_home::create(&state_dir, &home_id, &Default::default())
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     if let Err(error) = state
@@ -155,9 +155,10 @@ async fn confirm(
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     let owner = require_operator(&state, &ctx)?.to_owned();
-    let _operation_guard = credential_profile_operation_lock(&req.profile_id)
-        .lock_owned()
-        .await;
+    let _operation_guard =
+        ryeos_app::hosted_operation::acquire_credential_profile_operation(&req.profile_id)
+            .await
+            .map_err(internal)?;
     let profile = state
         .state_store
         .credential_profile(&req.profile_id)
@@ -187,9 +188,30 @@ async fn revoke(
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     let owner = require_operator(&state, &ctx)?.to_owned();
-    let _operation_guard = credential_profile_operation_lock(&req.profile_id)
-        .lock_owned()
-        .await;
+    let initial_profile = state
+        .state_store
+        .credential_profile(&req.profile_id)
+        .map_err(internal)?
+        .ok_or(HandlerError::NotFound)?;
+    ctx.require_owner(Some(&initial_profile.owner_principal))?;
+    let mut root_ids = state
+        .state_store
+        .dedicated_sessions_for_credential_profile(&req.profile_id)
+        .map_err(internal)?
+        .into_iter()
+        .map(|session| session.root_thread_id)
+        .collect::<Vec<_>>();
+    root_ids.sort();
+    root_ids.dedup();
+    let _root_operations = root_ids
+        .iter()
+        .map(|root| ryeos_app::hosted_operation::begin_hosted_root_operation(root))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let _operation_guard =
+        ryeos_app::hosted_operation::acquire_credential_profile_operation(&req.profile_id)
+            .await
+            .map_err(internal)?;
     let profile = state
         .state_store
         .credential_profile(&req.profile_id)
@@ -212,17 +234,21 @@ async fn revoke(
 
     // Revocation is the first authoritative commit. Command contact checks
     // this generation, so cleanup retries cannot contact the fenced worker.
-    let sessions = state
+    let mut sessions = state
         .state_store
-        .nonterminal_dedicated_sessions_for_credential_profile(&req.profile_id)
+        .dedicated_sessions_for_credential_profile(&req.profile_id)
         .map_err(internal)?;
+    // Prove and settle every enumerated worker before considering unattached
+    // historical sessions. This preserves the conservative orphan fence
+    // without making lexical session ordering affect revocation progress.
+    sessions.sort_by_key(|session| session.worker_instance_id.is_none());
     for session in sessions {
         match (
             session.worker_instance_id.as_deref(),
             session.worker_boot_epoch,
         ) {
             (Some(worker_instance_id), Some(worker_boot_epoch)) => {
-                let worker = state
+                let mut worker = state
                     .state_store
                     .worker_process(worker_instance_id)
                     .map_err(internal)?
@@ -230,12 +256,30 @@ async fn revoke(
                 if worker.state != ryeos_app::runtime_db::WorkerProcessState::Dead
                     || worker.cleanup_state != "reaped"
                 {
-                    let registry = Arc::clone(&state.persistent_sessions);
-                    let session_id = session.session_id.clone();
-                    tokio::task::spawn_blocking(move || registry.retire_exclusive(&session_id))
-                        .await
-                        .map_err(internal)?
+                    let cleanup_state =
+                        ryeos_app::dedicated_session_service::retire_worker_process(
+                            &state,
+                            &session.session_id,
+                            &worker,
+                        )
                         .map_err(internal)?;
+                    if cleanup_state != "reaped" {
+                        if worker.state != ryeos_app::runtime_db::WorkerProcessState::Dead {
+                            state
+                                .state_store
+                                .fence_abandoned_worker_process(
+                                    worker_instance_id,
+                                    &session.session_id,
+                                    worker_boot_epoch,
+                                    "unproved",
+                                )
+                                .map_err(internal)?;
+                        }
+                        return Err(HandlerError::BadRequest(
+                            "credential revocation is fenced until every owned worker reap is proved"
+                                .into(),
+                        ));
+                    }
                     state
                         .state_store
                         .settle_worker_process(
@@ -246,23 +290,81 @@ async fn revoke(
                             "credential_revoked",
                         )
                         .map_err(internal)?;
+                    worker = state
+                        .state_store
+                        .worker_process(worker_instance_id)
+                        .map_err(internal)?
+                        .ok_or_else(|| {
+                            internal("settled credential worker projection disappeared")
+                        })?;
+                }
+                if worker.state != ryeos_app::runtime_db::WorkerProcessState::Dead
+                    || worker.cleanup_state != "reaped"
+                {
+                    return Err(internal("credential worker is not proved reaped"));
+                }
+                let refreshed = state
+                    .state_store
+                    .dedicated_session(&session.session_id)
+                    .map_err(internal)?
+                    .ok_or_else(|| internal("credential session disappeared during revoke"))?;
+                if refreshed.state == "recovering" {
+                    state
+                        .state_store
+                        .terminalize_dedicated_session(
+                            &session.session_id,
+                            worker_instance_id,
+                            worker_boot_epoch,
+                            "credential_revoked",
+                        )
+                        .map_err(internal)?;
+                }
+                let refreshed = state
+                    .state_store
+                    .dedicated_session(&session.session_id)
+                    .map_err(internal)?
+                    .ok_or_else(|| internal("credential session disappeared after revoke"))?;
+                if refreshed.state == "terminal" {
+                    ryeos_app::dedicated_session_service::finish_terminal_credential_cleanup(
+                        &state, &refreshed,
+                    )
+                    .map_err(internal)?;
+                }
+            }
+            (None, None) if session.state == "terminal" => {}
+            (None, None) => {
+                let current_profile = state
+                    .state_store
+                    .credential_profile(&req.profile_id)
+                    .map_err(internal)?
+                    .ok_or_else(|| internal("credential profile disappeared during revocation"))?;
+                if current_profile.lock_owner.is_some() {
+                    return Err(HandlerError::BadRequest(
+                        "credential revocation is fenced by an unproved unattached worker start"
+                            .into(),
+                    ));
                 }
                 state
                     .state_store
-                    .terminalize_dedicated_session(
+                    .terminalize_unattached_dedicated_session(
                         &session.session_id,
-                        worker_instance_id,
-                        worker_boot_epoch,
                         "credential_revoked",
                     )
                     .map_err(internal)?;
             }
-            (None, None) => state
-                .state_store
-                .terminalize_unattached_dedicated_session(&session.session_id, "credential_revoked")
-                .map_err(internal)?,
             _ => return Err(internal("dedicated session has a partial worker identity")),
         }
+    }
+    let final_profile = state
+        .state_store
+        .credential_profile(&req.profile_id)
+        .map_err(internal)?
+        .ok_or_else(|| internal("credential profile disappeared before revocation cleanup"))?;
+    if final_profile.lock_owner.is_some() {
+        return Err(HandlerError::BadRequest(
+            "credential revocation cannot remove its home while worker ownership remains fenced"
+                .into(),
+        ));
     }
     ryeos_app::private_artifact_home::remove(&state.config.runtime_state_dir(), &profile.home_id)
         .map_err(internal)?;
@@ -294,9 +396,10 @@ async fn delete(
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     let owner = require_operator(&state, &ctx)?.to_owned();
-    let _operation_guard = credential_profile_operation_lock(&req.profile_id)
-        .lock_owned()
-        .await;
+    let _operation_guard =
+        ryeos_app::hosted_operation::acquire_credential_profile_operation(&req.profile_id)
+            .await
+            .map_err(internal)?;
     let profile = state
         .state_store
         .credential_profile(&req.profile_id)
@@ -309,6 +412,35 @@ async fn delete(
         }));
     };
     ctx.require_owner(Some(&profile.owner_principal))?;
+    if profile.lock_owner.is_some() {
+        return Err(HandlerError::BadRequest(
+            "credential deletion requires the profile worker fence to be released".into(),
+        ));
+    }
+    for session in state
+        .state_store
+        .dedicated_sessions_for_credential_profile(&req.profile_id)
+        .map_err(internal)?
+    {
+        match session.worker_instance_id.as_deref() {
+            Some(worker_instance_id) => {
+                let worker = state
+                    .state_store
+                    .worker_process(worker_instance_id)
+                    .map_err(internal)?
+                    .ok_or_else(|| internal("credential worker projection disappeared"))?;
+                if worker.state != ryeos_app::runtime_db::WorkerProcessState::Dead
+                    || worker.cleanup_state != "reaped"
+                {
+                    return Err(HandlerError::BadRequest(
+                        "credential deletion requires proved reap of every owned worker".into(),
+                    ));
+                }
+            }
+            None if session.worker_boot_epoch.is_none() => {}
+            None => return Err(internal("credential session has a partial worker identity")),
+        }
+    }
     let deleting_generation = if profile.state == "deleting" {
         if profile.credential_generation != req.credential_generation.saturating_add(1) {
             return Err(HandlerError::BadRequest(

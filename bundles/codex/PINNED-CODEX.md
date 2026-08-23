@@ -17,3 +17,9 @@ Do not pass `--experimental`. The structured-session bridge initializes without 
 `experimentalApi` capability and rejects methods outside its closed stable
 allowlist. The upstream protocol reference is the official
 [Codex App Server documentation](https://developers.openai.com/codex/app-server/).
+
+Codex 0.147 rejects a request-level granular `approvalPolicy` without the
+experimental capability. RyeOS therefore supplies the granular policy only in
+the immutable CLI configuration and omits that field from `thread/start`,
+`thread/resume`, and `turn/start`. The admitted response predicates still
+require `ryeos-workspace-only`, user review, and disabled command networking.

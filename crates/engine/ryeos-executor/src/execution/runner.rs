@@ -451,31 +451,11 @@ pub(crate) fn stop_owner_dropped_execution_tree(
     if !state.state_store.process_attachment_admission_is_open() {
         return Ok(OwnerDropStopOutcome::PreservedForShutdown);
     }
-    // Publication has crossed a separately authorized external-effect
-    // reservation. Keep the authoritative root open until that short
-    // operation either settles or rolls back; terminalizing it first would
-    // make the keyed publication fact impossible to append. A wedged
-    // publication remains durable for recovery instead of being misreported
-    // as cancelled.
-    for _ in 0..400 {
-        let publishing = state
-            .state_store
-            .dedicated_session(root_thread_id)?
-            .is_some_and(|session| session.state == "publishing");
-        if !publishing {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
-    if state
-        .state_store
-        .dedicated_session(root_thread_id)?
-        .is_some_and(|session| session.state == "publishing")
-    {
-        anyhow::bail!(
-            "candidate publication remains at a possible-contact boundary; preserving root for recovery"
-        );
-    }
+    // Fence new hosted mutations and wait for every pre-existing root-chain
+    // lease to settle before terminalization. This is a pushed ownership
+    // barrier, not a SQLite polling loop.
+    let mut root_terminalization =
+        ryeos_app::hosted_operation::begin_hosted_root_terminalization(root_thread_id)?;
     // These are independent ownership domains. A projection/cleanup error in
     // the subordinate session must never prevent the root process tree from
     // being stopped. Preserve both errors and report them only after the root
@@ -547,6 +527,13 @@ pub(crate) fn stop_owner_dropped_execution_tree(
             .context("settle session-bound worker after root-owner cancellation")
     {
         failures.push(format!("session-bound worker: {error:#}"));
+    }
+    if state
+        .threads
+        .get_thread(root_thread_id)?
+        .is_some_and(|thread| is_terminal_status(&thread.status))
+    {
+        root_terminalization.commit();
     }
     if !failures.is_empty() {
         anyhow::bail!(

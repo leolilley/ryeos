@@ -20,8 +20,10 @@ parses or copies the token document. The pinned `ryeos-workspace-only`
 permission profile denies the filesystem root, reopens only Codex's minimal
 runtime paths, and keeps the private CoW project writable while command
 networking stays disabled. Security-critical settings are repeated as immutable
-signed process arguments; the mode-0400 home config is compatibility state and
-drift detection, not a same-UID integrity boundary. There is no custom credential bridge, token injection, local-LLM
+signed process arguments. The compatibility config is mounted read-only by the
+enforced RyeOS isolation backend; structured-session launch is refused without
+that overlay. Its mode 0400 is only drift evidence, not a same-UID integrity
+claim. There is no custom credential bridge, token injection, local-LLM
 route, worker pool, or cross-session process reuse.
 
 The exact executable is assembled with `assemble.py`, imported through the

@@ -173,6 +173,9 @@ struct SessionProcess {
     buffered_observations: Mutex<VecDeque<PersistentSessionFrame>>,
     reader_failure: Mutex<Option<String>>,
     running: Mutex<Option<ryeos_engine::dispatch::RunningExecution>>,
+    /// Once ownership was consumed by an abort attempt whose reap proof
+    /// failed, absence of `running` must never be reinterpreted as proof.
+    cleanup_unproved: Mutex<Option<String>>,
     leased: AtomicBool,
     last_used_ms: AtomicU64,
     _lifelines: Vec<Box<dyn Send + Sync>>,
@@ -328,15 +331,28 @@ impl SessionProcess {
     }
 
     fn retire(&self) -> Result<()> {
+        if let Some(reason) = self
+            .cleanup_unproved
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_deref()
+        {
+            bail!("persistent-session cleanup remains unproved: {reason}");
+        }
         if let Some(running) = self
             .running
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
         {
-            running.abort_and_reap_checked().map_err(|error| {
-                anyhow!("persistent-session cleanup could not be proved: {error}")
-            })?;
+            if let Err(error) = running.abort_and_reap_checked() {
+                let reason = format!("persistent-session cleanup could not be proved: {error}");
+                *self
+                    .cleanup_unproved
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason.clone());
+                bail!("{reason}");
+            }
         }
         Ok(())
     }
@@ -528,6 +544,20 @@ struct ReadyProcessFailure {
     cleanup_unproved: bool,
 }
 
+/// Typed evidence that an exclusive bind failure consumed process ownership
+/// without proving the exact process group reaped. Callers must preserve the
+/// durable worker and credential fences when this marker is present.
+#[derive(Debug)]
+pub struct PersistentSessionCleanupUnproved;
+
+impl std::fmt::Display for PersistentSessionCleanupUnproved {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("persistent-session cleanup is unproved")
+    }
+}
+
+impl std::error::Error for PersistentSessionCleanupUnproved {}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PersistentSessionStreamEvent {
@@ -642,6 +672,17 @@ struct BacklogBudget {
 pub struct PersistentSessionPool {
     inner: Arc<PoolInner>,
     streams: Arc<StreamRegistry>,
+}
+
+/// Exact process-registry evidence returned by an exclusive retirement.
+/// `Absent` and `Reserved` are intentionally distinct from `Reaped`: neither
+/// is process-death proof for a durable worker identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExclusiveRetirementOutcome {
+    Reaped,
+    Unproved,
+    Reserved,
+    Absent,
 }
 
 /// A node-capacity reservation for one exclusive persistent subprocess.
@@ -810,13 +851,19 @@ impl PersistentSessionPool {
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            state.exclusive.remove(session_id);
             let cleanup_state = if let Some(cleanup) = cleanup {
                 state
                     .cleanup_unproved
                     .get_or_insert_with(|| cleanup.to_string());
                 "unproved"
             } else {
+                if state
+                    .exclusive
+                    .get(session_id)
+                    .is_some_and(|entry| Arc::ptr_eq(&entry.process, &process))
+                {
+                    state.exclusive.remove(session_id);
+                }
                 "reaped"
             };
             state
@@ -866,13 +913,19 @@ impl PersistentSessionPool {
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            state.exclusive.remove(session_id);
             let cleanup_state = if let Some(cleanup) = cleanup {
                 state
                     .cleanup_unproved
                     .get_or_insert_with(|| cleanup.to_string());
                 "unproved"
             } else {
+                if state
+                    .exclusive
+                    .get(session_id)
+                    .is_some_and(|entry| Arc::ptr_eq(&entry.process, &process))
+                {
+                    state.exclusive.remove(session_id);
+                }
                 "reaped"
             };
             state
@@ -924,35 +977,51 @@ impl PersistentSessionPool {
         Ok(state.exclusive_failure_cleanup.remove(session_id))
     }
 
-    pub fn retire_exclusive(&self, session_id: &str) -> Result<()> {
+    pub fn retire_exclusive(&self, session_id: &str) -> Result<ExclusiveRetirementOutcome> {
         validate_exclusive_session_id(session_id)?;
         let process = {
-            let mut state = self
+            let state = self
                 .inner
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.exclusive_reservations.contains_key(session_id) {
+                return Ok(ExclusiveRetirementOutcome::Reserved);
+            }
             state
                 .exclusive
-                .remove(session_id)
-                .map(|entry| entry.process)
+                .get(session_id)
+                .map(|entry| Arc::clone(&entry.process))
         };
         let Some(process) = process else {
-            return Ok(());
+            return Ok(ExclusiveRetirementOutcome::Absent);
         };
         let result = process.retire();
-        if let Err(error) = result.as_ref() {
-            let mut state = self
-                .inner
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            state
-                .cleanup_unproved
-                .get_or_insert_with(|| error.to_string());
-        }
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let outcome = match result {
+            Ok(()) => {
+                if state
+                    .exclusive
+                    .get(session_id)
+                    .is_some_and(|entry| Arc::ptr_eq(&entry.process, &process))
+                {
+                    state.exclusive.remove(session_id);
+                }
+                ExclusiveRetirementOutcome::Reaped
+            }
+            Err(error) => {
+                state
+                    .cleanup_unproved
+                    .get_or_insert_with(|| error.to_string());
+                ExclusiveRetirementOutcome::Unproved
+            }
+        };
         self.inner.changed.notify_all();
-        result
+        Ok(outcome)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1450,8 +1519,19 @@ impl ExclusivePersistentSessionReservation {
                     self.release_reservation();
                     let cleanup = process.retire().err();
                     return Err(match cleanup {
-                        Some(cleanup) => error
-                            .context(format!("exclusive reader start cleanup failed: {cleanup}")),
+                        Some(cleanup) => {
+                            let reason =
+                                format!("exclusive reader start cleanup failed: {cleanup}");
+                            let mut state = self
+                                .inner
+                                .state
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            state.cleanup_unproved.get_or_insert_with(|| reason.clone());
+                            error
+                                .context(reason)
+                                .context(PersistentSessionCleanupUnproved)
+                        }
                         None => error,
                     });
                 }
@@ -1469,7 +1549,11 @@ impl ExclusivePersistentSessionReservation {
                         .cleanup_unproved
                         .get_or_insert_with(|| failure.error.to_string());
                 }
-                return Err(failure.error);
+                return Err(if failure.cleanup_unproved {
+                    failure.error.context(PersistentSessionCleanupUnproved)
+                } else {
+                    failure.error
+                });
             }
         };
         let mut state = self
@@ -1485,9 +1569,18 @@ impl ExclusivePersistentSessionReservation {
             drop(state);
             let cleanup = ready.retire().err();
             return Err(match cleanup {
-                Some(cleanup) => anyhow!(
-                    "exclusive persistent-session reservation changed; cleanup failed: {cleanup}"
-                ),
+                Some(cleanup) => {
+                    let reason = format!(
+                        "exclusive persistent-session reservation changed; cleanup failed: {cleanup}"
+                    );
+                    let mut state = self
+                        .inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state.cleanup_unproved.get_or_insert_with(|| reason.clone());
+                    anyhow!(reason).context(PersistentSessionCleanupUnproved)
+                }
                 None => anyhow!("exclusive persistent-session reservation changed"),
             });
         }
@@ -1502,9 +1595,18 @@ impl ExclusivePersistentSessionReservation {
                 drop(state);
                 let cleanup = ready.retire().err();
                 return Err(match cleanup {
-                    Some(cleanup) => anyhow!(
-                        "exclusive session was concurrently attached; cleanup failed: {cleanup}"
-                    ),
+                    Some(cleanup) => {
+                        let reason = format!(
+                            "exclusive session was concurrently attached; cleanup failed: {cleanup}"
+                        );
+                        let mut state = self
+                            .inner
+                            .state
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        state.cleanup_unproved.get_or_insert_with(|| reason.clone());
+                        anyhow!(reason).context(PersistentSessionCleanupUnproved)
+                    }
                     None => anyhow!("exclusive persistent session was concurrently attached"),
                 });
             }
@@ -1956,6 +2058,7 @@ fn ready_process(
         buffered_observations: Mutex::new(VecDeque::new()),
         reader_failure: Mutex::new(None),
         running: Mutex::new(Some(running)),
+        cleanup_unproved: Mutex::new(None),
         leased: AtomicBool::new(false),
         last_used_ms: AtomicU64::new(now_ms()),
         _lifelines: lifelines,
@@ -2729,6 +2832,35 @@ while True:
         pool.retire_exclusive(&session_id).unwrap();
         pool.reserve_exclusive(&session_id, &lifecycle, &wire)
             .unwrap();
+    }
+
+    #[test]
+    fn exclusive_retirement_never_conflates_reserved_absent_and_reaped() {
+        let pool = PersistentSessionPool::new();
+        let mut lifecycle = test_lifecycle();
+        lifecycle.ready_timeout_ms = 2_000;
+        let wire = test_wire();
+        let session_id = "r".repeat(64);
+        let reservation = pool
+            .reserve_exclusive(&session_id, &lifecycle, &wire)
+            .unwrap();
+        assert_eq!(
+            pool.retire_exclusive(&session_id).unwrap(),
+            ExclusiveRetirementOutcome::Reserved
+        );
+        drop(reservation);
+        assert_eq!(
+            pool.retire_exclusive(&session_id).unwrap(),
+            ExclusiveRetirementOutcome::Absent
+        );
+        pool.reserve_exclusive(&session_id, &lifecycle, &wire)
+            .unwrap()
+            .bind(fake_framed_session().unwrap())
+            .unwrap();
+        assert_eq!(
+            pool.retire_exclusive(&session_id).unwrap(),
+            ExclusiveRetirementOutcome::Reaped
+        );
     }
 
     #[test]

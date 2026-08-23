@@ -4184,14 +4184,14 @@ impl RuntimeDb {
         .transpose()
     }
 
-    pub fn nonterminal_dedicated_sessions_for_credential_profile(
+    pub fn dedicated_sessions_for_credential_profile(
         &self,
         profile_id: &str,
     ) -> Result<Vec<DedicatedSessionRecord>> {
         validate_bounded_runtime_text("credential profile id", profile_id, 256)?;
         let mut statement = self.conn.prepare(
             "SELECT session_id FROM dedicated_session
-              WHERE credential_profile_id=?1 AND state!='terminal'
+              WHERE credential_profile_id=?1
               ORDER BY session_id",
         )?;
         let ids = statement
@@ -4259,31 +4259,41 @@ impl RuntimeDb {
         session_id: &str,
         worker_instance_id: &str,
         reason: &str,
+        cleanup_proved: bool,
     ) -> Result<()> {
         validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
         validate_bounded_runtime_text("worker instance id", worker_instance_id, 256)?;
         validate_bounded_runtime_text("dedicated terminal reason", reason, 4096)?;
         let now = lillux::time::timestamp_millis() as i64;
         let tx = self.conn.unchecked_transaction()?;
+        let next_state = if cleanup_proved {
+            "terminal"
+        } else {
+            "outcome_unknown"
+        };
         let changed = tx.execute(
             "UPDATE dedicated_session
-                SET state='terminal', terminal_reason=?3, updated_at_ms=?4
+                SET state=?5, terminal_reason=?3,
+                    send_boundary=CASE WHEN ?5='outcome_unknown' THEN 'outcome_unknown' ELSE send_boundary END,
+                    updated_at_ms=?4
               WHERE session_id=?1 AND state IN ('admitted','binding','recovering')",
-            params![session_id, worker_instance_id, reason, now],
+            params![session_id, worker_instance_id, reason, now, next_state],
         )?;
         if changed != 1 {
             bail!("dedicated start failure lost its session-state CAS");
         }
-        tx.execute(
-            "UPDATE credential_profile SET lock_owner=NULL, updated_at_ms=?3
+        if cleanup_proved {
+            tx.execute(
+                "UPDATE credential_profile SET lock_owner=NULL, updated_at_ms=?3
               WHERE profile_id=(SELECT credential_profile_id FROM dedicated_session
                                   WHERE session_id=?1)
                 AND lock_owner=?2
                 AND (NOT EXISTS(SELECT 1 FROM worker_process WHERE worker_instance_id=?2)
                      OR EXISTS(SELECT 1 FROM worker_process
                          WHERE worker_instance_id=?2 AND cleanup_state='reaped'))",
-            params![session_id, worker_instance_id, now],
-        )?;
+                params![session_id, worker_instance_id, now],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -5158,6 +5168,43 @@ impl RuntimeDb {
         Ok(())
     }
 
+    /// Settle a command whose authoritative response batch was recovered
+    /// from the root event chain after a daemon crash. The response body is
+    /// intentionally not reconstructed; only its retained redacted digest is
+    /// projected back into the outbox.
+    pub fn settle_recovered_dedicated_command(
+        &self,
+        session_id: &str,
+        command_sequence: u64,
+        worker_boot_epoch: u64,
+        result: &serde_json::Value,
+    ) -> Result<()> {
+        let result_json = serde_json::to_string(result)?;
+        validate_bounded_runtime_text("recovered command result", &result_json, 256 * 1024)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE dedicated_session_command SET state='completed', result_json=?4, updated_at_ms=?5
+              WHERE session_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3
+                AND state IN ('dispatched','outcome_unknown')",
+            params![session_id, i64::try_from(command_sequence)?, i64::try_from(worker_boot_epoch)?, result_json, now],
+        )?;
+        let session_changed = tx.execute(
+            "UPDATE dedicated_session SET send_boundary='settled',
+                    state=CASE WHEN state='outcome_unknown' THEN 'idle' ELSE state END,
+                    updated_at_ms=?3
+              WHERE session_id=?1 AND worker_boot_epoch=?2
+                AND state IN ('idle','turn_running','awaiting_approval','outcome_unknown')
+                AND send_boundary IN ('contacted','outcome_unknown')",
+            params![session_id, i64::try_from(worker_boot_epoch)?, now],
+        )?;
+        if changed != 1 || session_changed != 1 {
+            bail!("recovered command settlement lost its command/session CAS");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn mark_dedicated_command_outcome_unknown(
         &self,
         session_id: &str,
@@ -5850,6 +5897,80 @@ impl RuntimeDb {
         )?;
         if workspace_changed != 1 || session_changed != 1 {
             bail!("dedicated worker atomic attachment lost its workspace/session CAS");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Preserve exact process evidence when atomic attachment failed and the
+    /// held child could not be proved reaped. This quarantine row lets
+    /// revocation/restart verify the exact group before releasing credentials.
+    pub fn fence_unproved_worker_start(
+        &self,
+        record: &WorkerProcessRecord,
+        reason: &str,
+    ) -> Result<()> {
+        validate_worker_process_record(record)?;
+        validate_bounded_runtime_text("unproved worker start reason", reason, 4096)?;
+        let process_identity = serde_json::to_string(&record.process_identity)?;
+        let epoch = i64::try_from(record.boot_epoch)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO worker_process (
+                worker_instance_id, boot_identity_hash, session_capsule_hash,
+                boot_epoch, lifecycle_generation, process_identity,
+                control_channel_identity, state, daemon_generation_id,
+                session_id, cleanup_state, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'dead', ?8, ?9, 'unproved', ?10, ?10)
+             ON CONFLICT(worker_instance_id) DO NOTHING",
+            params![
+                record.worker_instance_id,
+                record.boot_identity_hash,
+                record.session_capsule_hash,
+                epoch,
+                i64::try_from(record.lifecycle_generation)?,
+                process_identity,
+                record.control_channel_identity,
+                record.daemon_generation_id,
+                record.session_id,
+                now,
+            ],
+        )?;
+        let exact: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM worker_process
+              WHERE worker_instance_id=?1 AND session_id=?2 AND boot_epoch=?3
+                AND process_identity=?4 AND state='dead' AND cleanup_state='unproved')",
+            params![
+                record.worker_instance_id,
+                record.session_id,
+                epoch,
+                serde_json::to_string(&record.process_identity)?,
+            ],
+            |row| row.get(0),
+        )?;
+        if !exact {
+            bail!("unproved worker identity conflicts with existing durable evidence");
+        }
+        let changed = tx.execute(
+            "UPDATE dedicated_session
+                SET worker_instance_id=?2, worker_boot_epoch=?3,
+                    state='outcome_unknown', send_boundary='outcome_unknown',
+                    terminal_reason=?4, updated_at_ms=?5
+              WHERE session_id=?1
+                AND (worker_instance_id IS NULL OR worker_instance_id=?2)
+                AND (worker_boot_epoch IS NULL OR worker_boot_epoch=?3)
+                AND state IN ('admitted','binding','recovering','outcome_unknown')",
+            params![
+                record.session_id,
+                record.worker_instance_id,
+                epoch,
+                reason,
+                now
+            ],
+        )?;
+        if changed != 1 {
+            bail!("unproved worker start fence lost its session identity CAS");
         }
         tx.commit()?;
         Ok(())
@@ -11639,6 +11760,77 @@ mod tests {
     }
 
     #[test]
+    fn unproved_attachment_failure_persists_exact_worker_and_credential_fence() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-start-unproved", "worker-start-unproved");
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    lower_snapshot, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-start-unproved', 'T-start-unproved', 'owner', 'backend',
+                           'a', '/tmp/workspace-start-unproved', 'ready', 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            session_id: "S-start-unproved",
+            root_thread_id: "T-start-unproved",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-start-unproved",
+            candidate_required: false,
+            credential_profile_id: "P-start-unproved",
+            credential_generation: 1,
+            credential_lock_owner: "worker-start-unproved",
+        })
+        .unwrap();
+        let record = WorkerProcessRecord {
+            worker_instance_id: "worker-start-unproved".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "a".repeat(64),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(129, 129),
+            control_channel_identity: "fd:15".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "daemon-one".to_owned(),
+            session_id: "S-start-unproved".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: 2,
+            updated_at_ms: 2,
+        };
+        db.fence_unproved_worker_start(&record, "attach cleanup unproved")
+            .unwrap();
+
+        let worker = db.worker_process("worker-start-unproved").unwrap().unwrap();
+        assert_eq!(worker.process_identity, record.process_identity);
+        assert_eq!(worker.state, WorkerProcessState::Dead);
+        assert_eq!(worker.cleanup_state, "unproved");
+        let session = db.dedicated_session("S-start-unproved").unwrap().unwrap();
+        assert_eq!(session.state, "outcome_unknown");
+        assert_eq!(session.send_boundary, "outcome_unknown");
+        assert_eq!(
+            db.credential_profile("P-start-unproved")
+                .unwrap()
+                .unwrap()
+                .lock_owner
+                .as_deref(),
+            Some("worker-start-unproved")
+        );
+        assert!(
+            db.fence_unproved_worker_start(
+                &WorkerProcessRecord {
+                    process_identity: fake_process_identity(130, 130),
+                    ..record
+                },
+                "conflicting retry",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn readiness_failure_terminalizes_a_recovering_dedicated_session() {
         let (_tmp, db) = fresh_db();
         create_locked_profile(&db, "P-ready-fail", "worker-ready-fail");
@@ -11692,8 +11884,13 @@ mod tests {
             db.dedicated_session("S-ready-fail").unwrap().unwrap().state,
             "recovering"
         );
-        db.fail_dedicated_session_start("S-ready-fail", "worker-ready-fail", "readiness failed")
-            .unwrap();
+        db.fail_dedicated_session_start(
+            "S-ready-fail",
+            "worker-ready-fail",
+            "readiness failed",
+            true,
+        )
+        .unwrap();
         let session = db.dedicated_session("S-ready-fail").unwrap().unwrap();
         assert_eq!(session.state, "terminal");
         assert_eq!(session.terminal_reason.as_deref(), Some("readiness failed"));
@@ -11960,6 +12157,45 @@ mod tests {
             db.dedicated_session("S-ledger").unwrap().unwrap().state,
             "idle"
         );
+        let recovered_command = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                session_id: "S-ledger",
+                idempotency_key: "request-recovered",
+                worker_boot_epoch: 4,
+                command_kind: "request",
+                request_digest: &"c".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        db.mark_dedicated_command_contacted("S-ledger", recovered_command.command_sequence, 4)
+            .unwrap();
+        db.mark_dedicated_command_outcome_unknown(
+            "S-ledger",
+            recovered_command.command_sequence,
+            4,
+        )
+        .unwrap();
+        db.settle_recovered_dedicated_command(
+            "S-ledger",
+            recovered_command.command_sequence,
+            4,
+            &serde_json::json!({"redacted":true,"response_digest":"c".repeat(64)}),
+        )
+        .unwrap();
+        let recovered = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                session_id: "S-ledger",
+                idempotency_key: "request-recovered",
+                worker_boot_epoch: 4,
+                command_kind: "request",
+                request_digest: &"c".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        assert_eq!(recovered.state, "completed");
+        let session = db.dedicated_session("S-ledger").unwrap().unwrap();
+        assert_eq!(session.state, "idle");
+        assert_eq!(session.send_boundary, "settled");
         let expiry_command = db
             .reserve_dedicated_session_command(NewDedicatedSessionCommand {
                 session_id: "S-ledger",

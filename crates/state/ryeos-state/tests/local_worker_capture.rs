@@ -5,15 +5,8 @@ use ryeos_state::objects::{
     LogicalSourceRoot, SourceClosureFile, SourceClosureManifest, SourceFileMode,
 };
 
-#[test]
-fn shipped_local_worker_pins_the_production_capture_digest() {
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .expect("ryeos-state lives below the repository root");
-    let worker_root =
-        repository.join("bundles/local-inference/.ai/workers/local-inference/lib/local-tinygrad");
-    let mut pending = vec![worker_root.clone()];
+fn captured_directory_digest(worker_root: &Path) -> String {
+    let mut pending = vec![worker_root.to_path_buf()];
     let mut entries = Vec::new();
     while let Some(directory) = pending.pop() {
         let mut children = std::fs::read_dir(&directory)
@@ -33,7 +26,7 @@ fn shipped_local_worker_pins_the_production_capture_digest() {
             );
             let child_path = child.path();
             let bytes = std::fs::read(&child_path).unwrap();
-            let relative = child_path.strip_prefix(&worker_root).unwrap();
+            let relative = child_path.strip_prefix(worker_root).unwrap();
             let path = relative
                 .to_str()
                 .expect("worker source paths are UTF-8")
@@ -58,7 +51,7 @@ fn shipped_local_worker_pins_the_production_capture_digest() {
             });
         }
     }
-    let observed = SourceClosureManifest::new(
+    SourceClosureManifest::new(
         vec![LogicalSourceRoot {
             id: "source".to_owned(),
         }],
@@ -66,7 +59,18 @@ fn shipped_local_worker_pins_the_production_capture_digest() {
     )
     .unwrap()
     .digest()
-    .unwrap();
+    .unwrap()
+}
+
+#[test]
+fn shipped_local_worker_pins_the_production_capture_digest() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("ryeos-state lives below the repository root");
+    let worker_root =
+        repository.join("bundles/local-inference/.ai/workers/local-inference/lib/local-tinygrad");
+    let observed = captured_directory_digest(&worker_root);
 
     let worker_item = std::fs::read_to_string(
         repository.join("bundles/local-inference/.ai/workers/local-inference/local-tinygrad.yaml"),
@@ -77,6 +81,25 @@ fn shipped_local_worker_pins_the_production_capture_digest() {
     let declared = value["source"]["digest"]
         .as_str()
         .expect("worker item declares its adjacent source digest");
+    assert_eq!(observed, declared);
+}
+
+#[test]
+fn shipped_codex_worker_pins_the_production_capture_digest() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("ryeos-state lives below the repository root");
+    let worker_root = repository.join("bundles/codex/.ai/workers/codex/lib/hosted");
+    let observed = captured_directory_digest(&worker_root);
+    let worker_item =
+        std::fs::read_to_string(repository.join("bundles/codex/.ai/workers/codex/hosted.yaml"))
+            .unwrap();
+    let body = lillux::signature::strip_signature_lines(&worker_item);
+    let value: serde_yaml::Value = serde_yaml::from_str(&body).unwrap();
+    let declared = value["source"]["digest"]
+        .as_str()
+        .expect("Codex worker item declares its adjacent source digest");
     assert_eq!(observed, declared);
 }
 

@@ -56,6 +56,20 @@ pub struct ExclusivePersistentSessionIdentity {
     pub control_channel_identity: String,
 }
 
+/// Typed evidence for the caller that a start failure crossed process
+/// creation and RyeOS could not prove cleanup. The caller must preserve the
+/// durable worker/profile fence instead of terminalizing the session.
+#[derive(Debug)]
+pub struct ExclusiveWorkerCleanupUnproved;
+
+impl std::fmt::Display for ExclusiveWorkerCleanupUnproved {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("exclusive worker cleanup is unproved")
+    }
+}
+
+impl std::error::Error for ExclusiveWorkerCleanupUnproved {}
+
 struct HeldPersistentSession {
     process: ryeos_app::thread_lifecycle::SpawnedPersistentSessionAwaitingAttachment,
     socket: std::os::unix::net::UnixStream,
@@ -737,6 +751,11 @@ fn spawn_capsule_process_held(
         None => (None, None),
     };
     if let Some(profile) = capsule.structured_session_profile.as_ref() {
+        if !state.isolation.is_enforced() {
+            bail!(
+                "structured-session execution requires enforced isolation for its read-only baseline overlay"
+            );
+        }
         let source_entry = source_entry
             .ok_or_else(|| anyhow!("structured-session capsule has no bound source entry"))?;
         let state_root = state_root
@@ -889,9 +908,21 @@ pub fn start_exclusive_capsule(
     if let Err(error) = state.state_store.attach_worker_process(&record) {
         let cleanup = held.process.abort_and_reap().err();
         return Err(match cleanup {
-            Some(cleanup) => error.context(format!(
-                "exclusive held-process attachment cleanup failed: {cleanup}"
-            )),
+            Some(cleanup) => {
+                let reason = format!("exclusive held-process attachment cleanup failed: {cleanup}");
+                let evidence = state
+                    .state_store
+                    .fence_unproved_worker_start(&record, &reason);
+                let error = error.context(reason);
+                match evidence {
+                    Ok(()) => error.context(ExclusiveWorkerCleanupUnproved),
+                    Err(evidence) => error
+                        .context(format!(
+                            "persist exact unproved worker evidence failed: {evidence}"
+                        ))
+                        .context(ExclusiveWorkerCleanupUnproved),
+                }
+            }
             None => error,
         });
     }
@@ -905,7 +936,7 @@ pub fn start_exclusive_capsule(
                 "unproved",
                 "held process release failed",
             );
-            return Err(error);
+            return Err(error.context(ExclusiveWorkerCleanupUnproved));
         }
     };
     let started = StartedPersistentSession {
@@ -915,28 +946,38 @@ pub fn start_exclusive_capsule(
         expected_boot_identity: Some(identity.boot_identity_hash.clone()),
     };
     if let Err(error) = reservation.bind(started) {
+        let cleanup_unproved = error
+            .downcast_ref::<ryeos_app::persistent_session::PersistentSessionCleanupUnproved>()
+            .is_some();
+        let cleanup_state = if cleanup_unproved {
+            "unproved"
+        } else {
+            "reaped"
+        };
         let _ = state.state_store.settle_worker_process(
             &identity.worker_instance_id,
             &identity.session_id,
             identity.boot_epoch,
-            "unproved",
+            cleanup_state,
             "exclusive worker readiness failed",
         );
-        return Err(error);
+        return Err(if cleanup_unproved {
+            error.context(ExclusiveWorkerCleanupUnproved)
+        } else {
+            error
+        });
     }
     if let Err(error) = state.state_store.complete_worker_binding(
         &identity.worker_instance_id,
         &identity.session_id,
         identity.boot_epoch,
     ) {
-        let cleanup = state
-            .persistent_sessions
-            .retire_exclusive(&identity.session_id);
-        let cleanup_state = if cleanup.is_ok() {
-            "reaped"
-        } else {
-            "unproved"
-        };
+        let cleanup_state = ryeos_app::dedicated_session_service::retire_worker_process(
+            state,
+            &identity.session_id,
+            &record,
+        )
+        .unwrap_or("unproved");
         let _ = state.state_store.settle_worker_process(
             &identity.worker_instance_id,
             &identity.session_id,
@@ -944,7 +985,11 @@ pub fn start_exclusive_capsule(
             cleanup_state,
             "durable readiness publication failed",
         );
-        return Err(error);
+        return Err(if cleanup_state == "reaped" {
+            error
+        } else {
+            error.context(ExclusiveWorkerCleanupUnproved)
+        });
     }
     Ok(())
 }

@@ -63,6 +63,9 @@ struct StructuredWorkload {
     workload_home: String,
     active_login_id: Option<String>,
     bound_session_id: Option<String>,
+    /// Byte identity for the baseline that the executor independently pins as
+    /// a read-only isolation overlay. The exact admitted argv remains the
+    /// primary security configuration authority.
     admitted_baseline_config: Vec<u8>,
     profile: StructuredSessionProfile,
     route_set: String,
@@ -90,6 +93,7 @@ type WorkloadCommandResult = (String, std::result::Result<Value, String>);
 #[serde(deny_unknown_fields)]
 struct StructuredSessionProfile {
     schema_version: u32,
+    configuration_authority: ConfigurationAuthority,
     workload_realization_id: String,
     workload_executable: String,
     workload_args: Vec<String>,
@@ -103,6 +107,15 @@ struct StructuredSessionProfile {
     #[serde(default)]
     ignored_notifications: BTreeMap<String, String>,
     server_requests: Vec<ServerRequestRule>,
+}
+
+/// Mechanical source of workload configuration authority. Immutable argv is
+/// retained in the signed profile, verified by its admitted digest, and
+/// supplied by the bridge itself; the same-UID workload cannot rewrite it.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ConfigurationAuthority {
+    ImmutableArgv,
 }
 
 #[derive(Debug, Deserialize)]
@@ -320,9 +333,11 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
         }
         Ok(())
     }
-
     ryeos_engine::protocol_vocabulary::validate_env_name(&profile.workload_home_env)
         .map_err(|error| anyhow!(error))?;
+    if profile.configuration_authority != ConfigurationAuthority::ImmutableArgv {
+        bail!("structured-session configuration authority is not immutable argv");
+    }
     file_name(
         "structured-session baseline destination",
         &profile.baseline_destination,
@@ -587,7 +602,7 @@ fn run() -> Result<()> {
         &profile,
     )?;
     let admitted_baseline_config = std::fs::read(&baseline_config)
-        .context("retain admitted structured-session baseline config")?;
+        .context("retain read-only structured-session baseline evidence")?;
     // SAFETY: the signed protocol gives this process unique ownership of the
     // inherited descriptor. No other safe Rust owner is constructed.
     let mut channel = unsafe { UnixStream::from_raw_fd(fd) };
@@ -821,6 +836,10 @@ fn disable_core_dumps() -> Result<()> {
     Ok(())
 }
 
+/// Installs and verifies the destination that the enforced isolation launcher
+/// overlays from a pinned admitted source file. Mode 0400 is not treated as a
+/// same-UID boundary; the read-only mount is the mechanical protection, while
+/// immutable admitted argv remains the primary security configuration.
 fn install_or_verify_baseline_config(
     workload_home: &std::path::Path,
     source: &std::path::Path,
@@ -866,7 +885,7 @@ fn install_or_verify_baseline_config(
     let actual =
         std::fs::read(&destination).context("read profile structured-session baseline config")?;
     if actual != admitted {
-        bail!("profile workload home/config.toml differs from the admitted baseline");
+        bail!("profile workload home/config.toml differs from its admitted read-only baseline");
     }
     Ok(())
 }
@@ -2008,6 +2027,41 @@ fn write_error(stream: &mut UnixStream, request_id: &str, message: &str) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pinned_codex_profile_uses_stable_nonexperimental_approval_handshake() {
+        let profile: Value = serde_json::from_str(include_str!(
+            "../../../../bundles/codex/.ai/workers/codex/lib/hosted/structured-session.profile.json"
+        ))
+        .unwrap();
+        let arguments = profile["workload_args"].as_array().unwrap();
+        let joined = arguments
+            .iter()
+            .map(Value::as_str)
+            .collect::<Option<Vec<_>>>()
+            .unwrap()
+            .join("\n");
+        assert!(joined.contains("approval_policy={ granular="));
+        assert!(!joined.contains("experimental"));
+        assert!(joined.contains("\"HOME\"=\"exclude\""));
+
+        let routes = profile["routes"].as_array().unwrap();
+        for route_id in ["session.start", "session.resume", "turn.start"] {
+            let route = routes.iter().find(|route| route["id"] == route_id).unwrap();
+            assert!(route["fixed_params"].get("approvalPolicy").is_none());
+        }
+        for route_id in ["session.start", "session.resume"] {
+            let route = routes.iter().find(|route| route["id"] == route_id).unwrap();
+            assert!(
+                route["response_predicates"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|predicate| predicate["pointer"]
+                        == "/response/result/activePermissionProfile/id")
+            );
+        }
+    }
 
     #[test]
     fn approval_without_reviewable_command_is_deny_only() {
