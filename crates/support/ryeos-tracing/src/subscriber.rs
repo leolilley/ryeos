@@ -18,8 +18,7 @@ use std::sync::{Arc, Mutex};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, Layer};
 
-const DAEMON_DEFAULT_FILTER: &str =
-    "ryeosd=info,ryeos_engine=info,ryeos_state=info,ryeos_executor=info,ryeos_app=info,ryeos.metrics=info";
+const DAEMON_DEFAULT_FILTER: &str = "ryeosd=info,ryeos_engine=info,ryeos_state=info,ryeos_executor=info,ryeos_app=info,ryeos.metrics=info";
 
 /// Configuration for the tracing subscriber.
 #[derive(Debug)]

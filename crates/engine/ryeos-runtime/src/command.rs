@@ -848,7 +848,10 @@ mod tests {
         assert_eq!(value["dispatch"]["validate_only"], true);
 
         let mut missing = value;
-        missing["dispatch"].as_object_mut().unwrap().remove("validate_only");
+        missing["dispatch"]
+            .as_object_mut()
+            .unwrap()
+            .remove("validate_only");
         let error = serde_json::from_value::<CommandDef>(missing).unwrap_err();
         assert!(error.to_string().contains("validate_only"));
     }

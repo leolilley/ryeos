@@ -6231,7 +6231,10 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(compiled.cwd.as_deref(), Some(lower.to_string_lossy().as_ref()));
+        assert_eq!(
+            compiled.cwd.as_deref(),
+            Some(lower.to_string_lossy().as_ref())
+        );
         assert!(lillux::run(compiled).success);
 
         let destroyed = runtime

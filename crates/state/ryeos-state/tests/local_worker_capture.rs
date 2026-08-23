@@ -11,8 +11,8 @@ fn shipped_local_worker_pins_the_production_capture_digest() {
         .ancestors()
         .nth(3)
         .expect("ryeos-state lives below the repository root");
-    let worker_root = repository
-        .join("bundles/local-inference/.ai/workers/local-inference/lib/local-tinygrad");
+    let worker_root =
+        repository.join("bundles/local-inference/.ai/workers/local-inference/lib/local-tinygrad");
     let mut pending = vec![worker_root.clone()];
     let mut entries = Vec::new();
     while let Some(directory) = pending.pop() {
@@ -69,9 +69,7 @@ fn shipped_local_worker_pins_the_production_capture_digest() {
     .unwrap();
 
     let worker_item = std::fs::read_to_string(
-        repository.join(
-            "bundles/local-inference/.ai/workers/local-inference/local-tinygrad.yaml",
-        ),
+        repository.join("bundles/local-inference/.ai/workers/local-inference/local-tinygrad.yaml"),
     )
     .unwrap();
     let body = lillux::signature::strip_signature_lines(&worker_item);
@@ -89,9 +87,7 @@ fn activation_fixture_matches_every_sourceless_worker_realization() {
         .nth(3)
         .expect("ryeos-state lives below the repository root");
     let worker_item = std::fs::read_to_string(
-        repository.join(
-            "bundles/local-inference/.ai/workers/local-inference/local-tinygrad.yaml",
-        ),
+        repository.join("bundles/local-inference/.ai/workers/local-inference/local-tinygrad.yaml"),
     )
     .unwrap();
     let body = lillux::signature::strip_signature_lines(&worker_item);
@@ -120,11 +116,9 @@ fn activation_fixture_matches_every_sourceless_worker_realization() {
 
     let fixture: serde_yaml::Value =
         serde_yaml::from_str(&lillux::signature::strip_signature_lines(
-            &std::fs::read_to_string(
-                repository.join(
-                    "bundles/local-inference/.ai/config/ryeos-runtime/local-tinygrad-activation.yaml",
-                ),
-            )
+            &std::fs::read_to_string(repository.join(
+                "bundles/local-inference/.ai/config/ryeos-runtime/local-tinygrad-activation.yaml",
+            ))
             .unwrap(),
         ))
         .unwrap();
