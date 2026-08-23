@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-23T10:04:34Z:0ec316196c89c6d68f8ea0604d3083e2e3ad293d5816cd3c03c6d9ca34237ed4:XLw4F+6uvaUaLkUiG/qkcGIwNH4RD/MjnlnF6T1nH7faah/P4jkrqt+b5Ms+7O6L0HFAuIdoPxObmPpAUdC+Cg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-08-23T21:53:41Z:e1ee287f29fa89bdb0265f71f3da4086cbccca1d0b8f300a0892685adf7d25e9:IjICkWai1ph9hDMtYEdgxQXLCjKPK4RtCWSCP/Jk0ka9ZT84jImH3Id1mYXSgUQ0ngIcyZWk1uSPc/GKeSfmAg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 category: ryeos/papers
 tags: [papers, series-map, derivation, vocabulary]
@@ -111,3 +111,13 @@ Each term is defined in exactly one file. Reference, never redefine.
 - 2026-07-23: Paper 2 is the flagship. The earlier candidate ("portability
   forces proof") is real but is setup; it now lives in the white paper's
   necessity argument and step 2 of the derivation above.
+- 2026-08-10: Measurement-of-executors material (observer frames, folds,
+  invariants) is a **research note beside the program**
+  (`measurement-not-benchmarking.md`), not paper 5. It identifies a
+  candidate fifth strain point — step 3's "sufficiently trusted":
+  fungibility forces comparison of authored-output executors, and the
+  specification gap forbids a canonical benchmark. Its vocabulary (frame,
+  fold, admissible observer, invariant candidate) is owned by the note and
+  enters this map only on promotion. Promotion requires its demonstrations
+  landing (the measurement fold; a frame-diff run) and a decision recorded
+  here.

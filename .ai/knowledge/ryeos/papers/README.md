@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-23T10:04:31Z:9210f18d9c8f7d1644f5275acb7f21d926d2492b6aa924bafae58bed2bfed8fb:I2Z2ELCpgsZZmNYfMIGLbE8x7gWQIKDh2WsAFvCFuCkMZ5q1o7TiJppxJfqAGj6ydfQxB6iu7xhpYsJVzPyRDg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-08-23T21:53:41Z:f3dada8709f91d9bab02d04b47671a448b3939d226b15941081ba33b57b60a7c:vVuqVvDhgVqcRO9hlW9SuSy6NsOAfiknqgiix04kZadHfz/Y51SRAMVZpK4zhzoBDmfCH66d8+5eg/EB0B2EBA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 category: ryeos/papers
 tags: [papers, research-program, index]
@@ -42,6 +42,8 @@ permanence.
 | `the-corporate-agent.md`                   | Paper 3 — downstream. What agents *are and owe*.                |
 | `semantics-of-forgetting.md`               | Paper 4 — the open-theory paper. What permanence *costs*.       |
 | `white-paper-relation.md`                  | The contract between the series and the white paper.            |
+| `measurement-not-benchmarking.md`          | Research note beside the program: measurement of authored-output executors. Candidate paper 5 (see decisions log). |
+| `sincerity-under-open-frames.md`           | Math companion to the measurement note: absorption theorem, corrected sincerity conjecture, toy models. |
 
 ## Reading order
 
