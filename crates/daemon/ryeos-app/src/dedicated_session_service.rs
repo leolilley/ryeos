@@ -530,28 +530,24 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
                         &record.request_digest,
                     )?
                 {
-                    project_worker_events(
-                        state,
-                        &session,
-                        record.worker_boot_epoch,
-                        &canonical_batch,
-                    )?;
-                    apply_worker_observations(
-                        state,
-                        &record.session_id,
-                        record.worker_boot_epoch,
-                        &canonical_batch,
-                    )?;
-                    state.state_store.settle_recovered_dedicated_command(
-                        &record.session_id,
-                        record.command_sequence,
-                        record.worker_boot_epoch,
-                        &json!({
-                            "redacted":true,
-                            "response_digest":response_digest,
-                            "recovered_from_root_chain":true,
-                        }),
-                    )?;
+                    // The batch and its projected events were admitted before
+                    // this root became terminal. Replaying lifecycle
+                    // observations now could resurrect or mutate authority for
+                    // a dead worker epoch; repair only the historical command
+                    // row from the terminal root's exact testimony.
+                    let _ = canonical_batch;
+                    state
+                        .state_store
+                        .settle_terminal_recovered_dedicated_command(
+                            &record.session_id,
+                            record.command_sequence,
+                            record.worker_boot_epoch,
+                            &json!({
+                                "redacted":true,
+                                "response_digest":response_digest,
+                                "recovered_from_root_chain":true,
+                            }),
+                        )?;
                     notify_projection_change(&record.session_id);
                     continue;
                 }

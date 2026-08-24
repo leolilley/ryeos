@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-13T05:00:11Z:3166fd1f5b5f796ca4ef794f48dd181874b1777b7184d0dae71cd7f9bcd1e181:/uKTiSjShCyO3+f8k+5sSFiSGGlB5rVVNELeEESniFchcrpDMyWdZzfqDe6+kHGqosx4DemPMPfFaNTJVl8oBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-24T11:56:58Z:f0d7334ea801ceaa21a8590a259f755bf876ce52354c63238dedbb2c48d07d1d:lcnWdSGPCBPOnj0mYPk+qrtENURyqKHjFJmmvm4CbwqGGv52gswLv4qePEOX3g0cW1GhP8So+PnsqoEqTJo8CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - execute
 description: "Execute an item (tool, directive, service, graph). On a terminal, streams the live execution log then prints the final result; --no-stream/--json print only the buffered JSON result (also the default when piped), and --stream forces streaming even when piped."
@@ -39,6 +39,9 @@ control_flags:
 - flag: pin-project
   help: "Capture the complete project at admission and execute from a retained daemon-owned copy-on-write generation"
   binding: pin_project_at_admission
+- flag: current-head
+  help: "Execute from the current principal project HEAD in a retained daemon-owned copy-on-write generation"
+  binding: pin_current_head_at_admission
 - flag: method
   help: "Method selector for method-dispatch kinds (e.g. knowledge query); sets call.method"
   binding: call_method

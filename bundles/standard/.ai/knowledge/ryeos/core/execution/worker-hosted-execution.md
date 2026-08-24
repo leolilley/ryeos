@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T06:23:44Z:5d6b6cccef198a9c9fdabe0314c19273e81e8ccfd066a4b75c0ebf9e0443db1d:NGF5navFf12IQp9+ttyRqeSFgZ2UXv0KWD5XJLXd/s/2unLhqk9xw4QtzyLGVTYjuMJkmczmPeyYGYjp9JbsCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T11:57:13Z:e400890d1389c6df3dda438332d4070cc2d74d31a86a826d147cfa0a0e82b87e:8OzSSnGr9rMj1qhpfMyRiZiJsf2t6reWgnM9LWQgQ6tO/AyIzrgf5BY6K5EY/1P96EiC1BB87RYGGAopoHOVAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -158,6 +158,11 @@ keeps the credential lock fenced.
 ## Workspace and publication
 
 Project sessions require root-capsule `PinnedGeneration` plus `Cow` authority.
+An execution that will explicitly publish a retained result starts from the
+owner's existing principal-scoped project `HEAD`; this preserves the exact CAS
+boundary later consumed by publication. Capture-live pinning remains a valid
+private execution source, but its newly captured parentless snapshot is not an
+existing `HEAD` and therefore is not the publication source for this workflow.
 Workspace IDs and candidate rows are projections. Completion never publishes.
 After the worker and managed controller have stopped, RyeOS freezes the exact
 workspace generation and appends `hosted_candidate.captured` to the still-live

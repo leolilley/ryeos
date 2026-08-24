@@ -79,8 +79,11 @@ ryeos codex session terminate LOGIN_SESSION completed
 ryeos codex profile get personal
 ryeos codex profile confirm personal LOGIN_EPOCH EXPECTED_ACCOUNT_DIGEST
 
-# Project sessions require the now-active profile and a pinned CoW project.
-ryeos --project . codex session start personal --async --pin-project
+# Project sessions require the now-active profile and an existing
+# principal-scoped project HEAD. On the hosted node use `ryeos commit`; from a
+# client node use the standard full-project `ryeos remote push` workflow.
+ryeos --project . commit "Codex hosted-session base"
+ryeos --project . codex session start personal --async --current-head
 
 # Use the returned thread_id as SESSION.
 ryeos codex session command SESSION thread-1 session.start \

@@ -107,6 +107,110 @@ fn admitted_session_capsule(
         .ok_or_else(|| anyhow!("admitted dependency has no retained session capsule"))
 }
 
+fn require_structured_session_route_effect_contract(
+    state: &AppState,
+    capsule_hash: &str,
+    route_set: &str,
+    allowed_effect_classes: &[String],
+) -> Result<()> {
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&guard)?;
+    let value = authority
+        .cas_store()?
+        .get_object(capsule_hash)?
+        .ok_or_else(|| anyhow!("admitted session capsule disappeared"))?;
+    let capsule =
+        ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;
+    if capsule.content_hash()? != capsule_hash {
+        bail!("admitted session capsule content hash changed");
+    }
+    let profile = capsule
+        .structured_session_profile
+        .ok_or_else(|| anyhow!("structured session capsule has no admitted protocol profile"))?;
+    validate_structured_session_route_effect_contract(
+        &profile.contract,
+        route_set,
+        allowed_effect_classes,
+    )
+}
+
+fn validate_structured_session_route_effect_contract(
+    contract: &Value,
+    route_set: &str,
+    allowed_effect_classes: &[String],
+) -> Result<()> {
+    let object = contract
+        .as_object()
+        .ok_or_else(|| anyhow!("admitted structured-session contract is not an object"))?;
+    let selected_routes = object
+        .get("route_sets")
+        .and_then(Value::as_object)
+        .and_then(|sets| sets.get(route_set))
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            anyhow!("worker execution selects an unknown structured-session route set")
+        })?;
+    let routes = object
+        .get("routes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("admitted structured-session contract has no route table"))?;
+    let route_effects = routes
+        .iter()
+        .map(|route| {
+            let route = route
+                .as_object()
+                .ok_or_else(|| anyhow!("admitted structured-session route is not an object"))?;
+            let id = route
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("admitted structured-session route has no identity"))?;
+            let effect = route
+                .get("effect_class")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("admitted structured-session route has no effect class"))?;
+            Ok((id, effect))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    for route_id in selected_routes {
+        let route_id = route_id
+            .as_str()
+            .ok_or_else(|| anyhow!("admitted structured-session route-set entry is invalid"))?;
+        let effect = route_effects
+            .get(route_id)
+            .ok_or_else(|| anyhow!("admitted structured-session route set lost a route"))?;
+        if !allowed_effect_classes
+            .iter()
+            .any(|allowed| allowed == effect)
+        {
+            bail!(
+                "structured-session route `{route_id}` effect `{effect}` exceeds the root launch ceiling"
+            );
+        }
+    }
+    let initialization = object
+        .get("initialization")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("admitted structured-session contract has no initialization"))?;
+    for step in initialization {
+        let effect = step
+            .get("effect_class")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                anyhow!("admitted structured-session initialization has no effect class")
+            })?;
+        if !allowed_effect_classes
+            .iter()
+            .any(|allowed| allowed == effect)
+        {
+            bail!(
+                "structured-session initialization effect `{effect}` exceeds the root launch ceiling"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn scratch_home_id(thread_id: &str) -> String {
     let digest = lillux::cas::sha256_hex(thread_id.as_bytes());
     format!("scratch-{}", &digest[..32])
@@ -439,6 +543,12 @@ pub(super) async fn start(
     }
     let capsule_hash =
         admitted_session_capsule(state, &request.thread_id, &request.dependency_ref)?;
+    require_structured_session_route_effect_contract(
+        state,
+        &capsule_hash,
+        &request.route_set,
+        &request.allowed_effect_classes,
+    )?;
     let worker_instance_id = ryeos_app::thread_lifecycle::new_thread_id();
     let credential_generation = state.state_store.acquire_credential_profile(
         &request.credential_profile_id,
@@ -655,7 +765,18 @@ pub(super) async fn start(
 
 #[cfg(test)]
 mod tests {
-    use super::bounded_worker_failure_reason;
+    use super::{bounded_worker_failure_reason, validate_structured_session_route_effect_contract};
+
+    fn structured_contract() -> serde_json::Value {
+        serde_json::json!({
+            "initialization":[{"effect_class":"pure_read"}],
+            "route_sets":{"session":["credential.account.read", "turn.start"]},
+            "routes":[
+                {"id":"credential.account.read", "effect_class":"credential_read"},
+                {"id":"turn.start", "effect_class":"external_effect"}
+            ]
+        })
+    }
 
     #[test]
     fn worker_failure_reason_is_canonical_and_bounded_by_bytes() {
@@ -666,5 +787,29 @@ mod tests {
         assert_eq!(reason.trim(), reason);
         assert!(!reason.chars().any(char::is_control));
         assert!(reason.starts_with("worker failed: first line "));
+    }
+
+    #[test]
+    fn route_effect_contract_is_rejected_before_worker_launch() {
+        let missing_credential_read = vec!["external_effect".to_owned(), "pure_read".to_owned()];
+        let error = validate_structured_session_route_effect_contract(
+            &structured_contract(),
+            "session",
+            &missing_credential_read,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("credential_read"));
+
+        let complete = vec![
+            "credential_read".to_owned(),
+            "external_effect".to_owned(),
+            "pure_read".to_owned(),
+        ];
+        validate_structured_session_route_effect_contract(
+            &structured_contract(),
+            "session",
+            &complete,
+        )
+        .unwrap();
     }
 }

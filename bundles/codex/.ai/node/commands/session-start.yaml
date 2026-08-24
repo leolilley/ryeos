@@ -1,10 +1,10 @@
-# ryeos:signed:2026-08-24T03:55:20Z:61e4d2b55e2f8ca9122a2d377fc097d4756494a9cae49cb89dbd7b19075ae34b:prVKuHqYR1pEJsnOgGN0yn6i4L0Nw8jNaTo5MnX+Y4XMDoHQH57xlw0kSu8T+oj8HlCj0X7IQPkkZlnXfwBBBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-24T11:57:26Z:aebbb421dd282b29e41cdbe5fe4464158da3c19b037725ed39894923f0a69693:zJxVwc4xOy4DaoEkyl0B6alccx/2fjAs9J0/hOFIR6YbXsVvxVQazRNrdpDxGQ7RVkqu0AeAs/D3sWU7nf1JCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [codex, session, start]
-description: "Start a pinned-project Codex session; --async and --pin-project are required"
+description: "Start a Codex session from the principal's pushed project HEAD; --async and --current-head are required"
 help:
-  usage: "ryeos --project <path> codex session start <credential-profile-id> --async --pin-project"
+  usage: "ryeos --project <path> codex session start <credential-profile-id> --async --current-head"
   examples:
-    - "ryeos --project . codex session start personal --async --pin-project"
+    - "ryeos --project . codex session start personal --async --current-head"
 forms:
   - slots:
       - field: credential_profile_id
@@ -19,9 +19,9 @@ control_flags:
   - flag: async
     help: "Return after durable accepted launch"
     binding: launch_mode_accepted
-  - flag: pin-project
-    help: "Capture the project into a retained copy-on-write generation"
-    binding: pin_project_at_admission
+  - flag: current-head
+    help: "Resolve the principal's pushed project HEAD into a retained copy-on-write generation"
+    binding: pin_current_head_at_admission
 dispatch:
   kind: execute_ref
   execute: worker_execution:codex/session

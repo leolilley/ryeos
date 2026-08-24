@@ -2062,7 +2062,7 @@ fn reconcile_dedicated_candidate_bindings(state: &AppState) -> Result<usize> {
         if thread.status != "running" {
             continue;
         }
-        let workspace = state
+        let mut workspace = state
             .state_store
             .execution_workspace(&session.workspace_id)?
             .ok_or_else(|| {
@@ -2079,27 +2079,98 @@ fn reconcile_dedicated_candidate_bindings(state: &AppState) -> Result<usize> {
                 session.workspace_id
             );
         }
-        if workspace.state != WorkspaceState::Freezing {
+        if !matches!(
+            workspace.state,
+            WorkspaceState::Freezing | WorkspaceState::Closed
+        ) {
             // The replayed controller owns capture when the workspace has not
             // crossed its freeze barrier yet.
             continue;
         }
-        let Some(snapshot_hash) = workspace.frozen_snapshot_hash.as_deref() else {
+        let Some(snapshot_hash) = workspace.frozen_snapshot_hash.clone() else {
             continue;
         };
         state
             .state_store
-            .verify_project_snapshot_closure(snapshot_hash)
+            .verify_project_snapshot_closure(&snapshot_hash)
             .with_context(|| {
                 format!(
                     "verify retained candidate closure for dedicated session {}",
                     session.session_id
                 )
             })?;
+        if workspace.state == WorkspaceState::Freezing {
+            let workspace_identity = workspace
+                .process_identity
+                .as_deref()
+                .map(serde_json::from_str::<ryeos_app::process::ExecutionProcessIdentity>)
+                .transpose()
+                .context("decode freezing candidate workspace process identity")?;
+            for identity in thread
+                .runtime
+                .process_identity
+                .iter()
+                .chain(workspace_identity.iter())
+            {
+                if execution_group_liveness(identity) != IdentityLiveness::DeadOrStale
+                    || execution_liveness(identity) != IdentityLiveness::DeadOrStale
+                {
+                    anyhow::bail!(
+                        "dedicated session {} candidate workspace owner is not proved dead",
+                        session.session_id
+                    );
+                }
+            }
+            let launch_owner = workspace.launch_owner.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "dedicated session {} candidate workspace has no launch owner",
+                    session.session_id
+                )
+            })?;
+            state
+                .state_store
+                .transition_abandoned_execution_workspace_owned(
+                    &workspace.workspace_id,
+                    &session.root_thread_id,
+                    launch_owner,
+                    &[WorkspaceState::Freezing],
+                    WorkspaceState::Orphaned,
+                )?;
+            workspace = state
+                .state_store
+                .execution_workspace(&session.workspace_id)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "dedicated session {} candidate workspace disappeared before close",
+                        session.session_id
+                    )
+                })?;
+            cleanup_dead_execution_workspace(state, &workspace).with_context(|| {
+                format!(
+                    "close retained candidate workspace for dedicated session {}",
+                    session.session_id
+                )
+            })?;
+            workspace = state
+                .state_store
+                .execution_workspace(&session.workspace_id)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "dedicated session {} candidate workspace disappeared after close",
+                        session.session_id
+                    )
+                })?;
+        }
+        if workspace.state != WorkspaceState::Closed {
+            anyhow::bail!(
+                "dedicated session {} candidate workspace did not reach closed state",
+                session.session_id
+            );
+        }
         ryeos_app::dedicated_session_service::append_candidate_capture_fact(
             state,
             &session.session_id,
-            snapshot_hash,
+            &snapshot_hash,
         )
         .with_context(|| {
             format!(
@@ -2109,7 +2180,7 @@ fn reconcile_dedicated_candidate_bindings(state: &AppState) -> Result<usize> {
         })?;
         if !state
             .state_store
-            .bind_dedicated_session_candidate(&session.root_thread_id, snapshot_hash)?
+            .bind_dedicated_session_candidate(&session.root_thread_id, &snapshot_hash)?
         {
             anyhow::bail!(
                 "dedicated session {} candidate repair lost its exact freezing-state CAS",

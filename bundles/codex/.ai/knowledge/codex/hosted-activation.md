@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T05:17:06Z:360ccc6bf83ec252490dd4cec936888538ab5856e6378e840449bb26d4d168c5:3qexksxFgTSIpDrFZnee8pX/HPSvrXCbjclzac7TKWrcH1ePq25t45GuQqMCSHv8m+933fcB++EL8i2BnkRNDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T11:57:25Z:97e75742d56d1a8f51f455ea5cc024db39dfe1e1c18e4ef33262d27283914043:CH4TmUeyPRt/E+A3uworsVua0CdU6nJWwu82TPU/R/8Dw+cRdDU+2e0l/E3dw6RzZNxP8/JMAk1YLaneW11oDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -38,9 +38,11 @@ knowledge bundle.
 5. Open projectless login, call `credential.login.start`, finish the ephemeral
    ceremony, call `credential.account.read`, close it, and confirm the exact
    login epoch/account digest.
-6. Start a pinned-project worker, call `session.start`, then `turn.start`,
-   `turn.steer`, and `turn.interrupt`. Every turn is bound to the one returned
-   remote thread; cross-thread targeting is rejected.
+6. Establish the configured operator's principal-scoped project HEAD through
+   the standard local `commit` or full-project `remote push` workflow, then
+   start the worker with `--current-head`. Call `session.start`, then
+   `turn.start`, `turn.steer`, and `turn.interrupt`. Every turn is bound to the
+   one returned remote thread; cross-thread targeting is rejected.
 7. Resolve digest-fenced pending approvals. Command approval displays bounded
    command/cwd. File or permission expansion is deny-only without an exact
    admitted reviewable effect.

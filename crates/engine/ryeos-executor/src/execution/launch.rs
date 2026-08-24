@@ -6395,6 +6395,7 @@ async fn run_claimed_thread_row_inner(
     // misleading `thread_not_terminal` error.
     let mut thread_detail = state.threads.get_thread(&thread_id)?.unwrap_or(thread);
     let already_finalized = is_thread_terminal_status(&thread_detail.status);
+    let mut hosted_candidate_workspace_closed = false;
     if !already_finalized {
         let mut terminal_status = runtime_terminal_status(runtime_result.status);
         // Kill-intent: a subprocess SIGKILLed by a daemon-issued `kill` exits
@@ -6426,6 +6427,30 @@ async fn run_claimed_thread_row_inner(
             && let Some(session) = state.state_store.dedicated_session(&thread_id)?
             && session.state == "freezing"
         {
+            let terminal_publication = provenance
+                .project_authority()
+                .terminal_publication()
+                .ok_or_else(|| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "managed hosted candidate has no terminal publication authority"
+                    ))
+                })?;
+            let workspace_lifeline = provenance.workspace_lifeline();
+            if let Err(error) = super::runner::close_managed_runtime_workspace(
+                state,
+                workspace_lifeline.as_ref(),
+                &thread_id,
+                terminal_publication,
+                Some(candidate_snapshot_hash),
+            ) {
+                if let Some(workspace) = workspace_lifeline.as_ref() {
+                    workspace.disarm();
+                }
+                return Err(BuildAndLaunchError::Internal(error.context(
+                    "close managed hosted candidate workspace before binding",
+                )));
+            }
+            hosted_candidate_workspace_closed = true;
             ryeos_app::dedicated_session_service::append_candidate_capture_fact(
                 state,
                 &thread_id,
@@ -6534,17 +6559,19 @@ async fn run_claimed_thread_row_inner(
         outputs: (!runtime_result.outputs.is_null()).then(|| runtime_result.outputs.clone()),
         ..meta
     };
-    if let Err(e) = super::thread_meta::write_thread_meta(
-        runtime_state_root,
-        &thread_id,
-        &settled_meta,
-        identity,
-    ) {
-        tracing::warn!(
-            thread_id = %thread_id,
-            error = %e,
-            "failed to update thread.json audit record to its settled status"
-        );
+    if !hosted_candidate_workspace_closed {
+        if let Err(e) = super::thread_meta::write_thread_meta(
+            runtime_state_root,
+            &thread_id,
+            &settled_meta,
+            identity,
+        ) {
+            tracing::warn!(
+                thread_id = %thread_id,
+                error = %e,
+                "failed to update thread.json audit record to its settled status"
+            );
+        }
     }
 
     // Managed native runtimes own the same COW lifecycle as ordinary direct
@@ -6553,7 +6580,7 @@ async fn run_claimed_thread_row_inner(
     // audit record is written, destroy the backend workspace synchronously.
     // Nothing may write beneath `runtime_state_root` after this point, or it
     // would recreate a closed workspace outside the lifecycle journal.
-    if owns_workspace {
+    if owns_workspace && !hosted_candidate_workspace_closed {
         let terminal_publication = provenance
             .project_authority()
             .terminal_publication()
@@ -7806,37 +7833,49 @@ async fn finalize_recovered_hosted_candidate_disposition(
     state: &AppState,
     thread_id: &str,
     launch_owner: &str,
-    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+    project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+    provenance: Option<&ryeos_app::execution_provenance::ExecutionProvenance>,
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
-    let terminal_publication = provenance
-        .project_authority()
-        .terminal_publication()
-        .ok_or_else(|| {
-            BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "recovered hosted candidate has no terminal publication authority"
-            ))
-        })?;
+    let terminal_publication = project_authority.terminal_publication().ok_or_else(|| {
+        BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "recovered hosted candidate has no terminal publication authority"
+        ))
+    })?;
     if terminal_publication != &ryeos_state::objects::PinnedTerminalPublication::RetainResult {
         return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
             "recovered hosted candidate does not have retain-result authority"
         )));
     }
+    let candidate_session = state
+        .state_store
+        .dedicated_session(thread_id)?
+        .ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "recovered hosted candidate session disappeared"
+            ))
+        })?;
     let workspace = state
         .state_store
-        .execution_workspace_for_thread(thread_id)?
+        .execution_workspace(&candidate_session.workspace_id)?
         .ok_or_else(|| {
             BuildAndLaunchError::Internal(anyhow::anyhow!(
                 "recovered hosted candidate workspace disappeared"
             ))
         })?;
-    if workspace.state != ryeos_app::runtime_db::WorkspaceState::Freezing
-        || workspace.launch_owner.as_deref() != Some(launch_owner)
-        || workspace.process_identity.is_some()
+    let workspace_already_closed = if workspace.state
+        == ryeos_app::runtime_db::WorkspaceState::Closed
     {
+        true
+    } else if workspace.state == ryeos_app::runtime_db::WorkspaceState::Freezing
+        && workspace.launch_owner.as_deref() == Some(launch_owner)
+        && workspace.process_identity.is_none()
+    {
+        false
+    } else {
         return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-            "recovered hosted candidate workspace is not frozen under the current claim"
+            "recovered hosted candidate workspace is neither closed nor frozen under the current claim"
         )));
-    }
+    };
     let candidate_snapshot_hash = workspace.frozen_snapshot_hash.as_deref().ok_or_else(|| {
         BuildAndLaunchError::Internal(anyhow::anyhow!(
             "recovered hosted candidate workspace has no frozen generation"
@@ -7916,20 +7955,27 @@ async fn finalize_recovered_hosted_candidate_disposition(
     )?;
     kick_launch_window_for_terminal(state, &finalized.chain_root_id);
     kick_follow_resume_if_ready(state, &finalized.chain_root_id);
-    let workspace_lifeline = provenance.workspace_lifeline();
-    if let Err(error) = super::runner::close_managed_runtime_workspace(
-        state,
-        workspace_lifeline.as_ref(),
-        thread_id,
-        terminal_publication,
-        Some(candidate_snapshot_hash),
-    ) {
-        if let Some(workspace) = workspace_lifeline.as_ref() {
-            workspace.disarm();
+    if !workspace_already_closed {
+        let provenance = provenance.ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "recovered frozen hosted candidate has no retained workspace provenance"
+            ))
+        })?;
+        let workspace_lifeline = provenance.workspace_lifeline();
+        if let Err(error) = super::runner::close_managed_runtime_workspace(
+            state,
+            workspace_lifeline.as_ref(),
+            thread_id,
+            terminal_publication,
+            Some(candidate_snapshot_hash),
+        ) {
+            if let Some(workspace) = workspace_lifeline.as_ref() {
+                workspace.disarm();
+            }
+            return Err(BuildAndLaunchError::Internal(
+                error.context("close recovered hosted candidate workspace"),
+            ));
         }
-        return Err(BuildAndLaunchError::Internal(
-            error.context("close recovered hosted candidate workspace"),
-        ));
     }
     Ok(NativeLaunchResult {
         thread: serde_json::to_value(&finalized)?,
@@ -7964,6 +8010,34 @@ async fn launch_claimed_native_resume(
             anyhow::anyhow!("native resume: {thread_id} has no sealed admitted request")
         })?;
 
+    let recovered_candidate_workspace_id = state
+        .state_store
+        .dedicated_session(&thread_id)?
+        .filter(|session| {
+            matches!(
+                session.state.as_str(),
+                "frozen" | "verifying" | "publish_ready" | "publishing" | "discarding" | "terminal"
+            ) && session.candidate_snapshot_hash.is_some()
+        })
+        .map(|session| session.workspace_id);
+    if let Some(workspace_id) = recovered_candidate_workspace_id.as_deref()
+        && state
+            .state_store
+            .execution_workspace(workspace_id)?
+            .is_some_and(|workspace| {
+                workspace.state == ryeos_app::runtime_db::WorkspaceState::Closed
+            })
+    {
+        return finalize_recovered_hosted_candidate_disposition(
+            state,
+            &thread_id,
+            launch_owner,
+            &resume.project_authority,
+            None,
+        )
+        .await;
+    }
+
     // Provenance selection (pushed-head rebuild / live-fs / loud refusal)
     // happens inside; working dir + runtime registry then follow the
     // provenance so the resumed run resolves against the pinned overlay
@@ -7975,19 +8049,15 @@ async fn launch_claimed_native_resume(
             launch_owner,
             &resume,
         )?;
-    if let Some(provenance) = retained_provenance.as_ref()
-        && let Some(session) = state.state_store.dedicated_session(&thread_id)?
-        && matches!(
-            session.state.as_str(),
-            "frozen" | "verifying" | "publish_ready" | "publishing" | "discarding" | "terminal"
-        )
-        && session.candidate_snapshot_hash.is_some()
+    if recovered_candidate_workspace_id.is_some()
+        && let Some(provenance) = retained_provenance.as_ref()
     {
         return finalize_recovered_hosted_candidate_disposition(
             state,
             &thread_id,
             launch_owner,
-            provenance,
+            &resume.project_authority,
+            Some(provenance),
         )
         .await;
     }

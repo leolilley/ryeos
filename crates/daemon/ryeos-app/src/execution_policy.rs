@@ -210,6 +210,24 @@ impl ExecutionPolicy {
         }
     }
 
+    /// Execute from the caller's already-published principal project HEAD in
+    /// a daemon-owned copy-on-write generation. Unlike
+    /// [`Self::local_pinned_capture`], this preserves an existing publication
+    /// boundary that a later explicit retain-result disposition can compare
+    /// and swap.
+    pub fn local_pinned_current_head(response: ExecutionResponse) -> Self {
+        Self {
+            project: ProjectExecutionPolicy::Pinned {
+                source: PinnedSource::CurrentHead,
+                realization: PinnedRealization::Cow {
+                    terminal_publication: TerminalPublication::RetainResult,
+                },
+                child_policy: ChildProjectPolicy::Inherit,
+            },
+            ..Self::local_live(response)
+        }
+    }
+
     pub fn projectless(response: ExecutionResponse) -> Self {
         Self {
             recovery: ExecutionRecovery::RestartRecoverable,
@@ -665,6 +683,25 @@ mod policy_tests {
                 child_policy: ChildProjectPolicy::Inherit,
             }
         ));
+    }
+
+    #[test]
+    fn local_pinned_current_head_is_daemon_owned_cow_with_retained_result() {
+        let policy = ExecutionPolicy::local_pinned_current_head(ExecutionResponse::Accepted);
+        assert_eq!(policy.response, ExecutionResponse::Accepted);
+        assert_eq!(policy.ownership, ExecutionOwnership::DaemonOwned);
+        assert_eq!(policy.recovery, ExecutionRecovery::RestartRecoverable);
+        assert!(matches!(
+            policy.project,
+            ProjectExecutionPolicy::Pinned {
+                source: PinnedSource::CurrentHead,
+                realization: PinnedRealization::Cow {
+                    terminal_publication: TerminalPublication::RetainResult,
+                },
+                child_policy: ChildProjectPolicy::Inherit,
+            }
+        ));
+        policy.validate().unwrap();
     }
 
     #[test]

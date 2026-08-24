@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-24T03:55:20Z:cd6bdda8fb99aca3036630050a9599d69d3479777773a228a660ee89985849b7:ekI1vJE8flBOQ7H5g209Y0usBVUWjQWqVJWm5EkXL31EYfYIndep2MGMw7Ls+0YuU1h1oszm+VG9CHZCyMXHAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-24T10:54:03Z:2500985744e6c1c91480fd8954712a0940226dcb3a1b8691bf9caa61cd33ef63:QYhXwEAQlHgx7APAKW0WGsUFMlY1V3q8J9k5brzIe9xfOt8E4Cyd0pYMgiNF+7GDwy2CYOW2rUeuRKsRbeDbAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "codex"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -12,12 +12,12 @@ supported_target:
 # process tree. The kind-owned compiler caps and freezes this signed override;
 # RyeOS separately limits session groups and total dedicated workers.
 session_resources:
-  real_uid_process_limit: 1024
+  real_uid_process_limit: 4096
 
 source:
   root: "lib/hosted"
   entry: "structured-session.profile.json"
-  digest: "0c5f923fdcdfcfa3559bab2948b73733d57bc425293a802a2361da17e353aca5"
+  digest: "ce14d9bbf3cb1aaae89ba8d8bd36bddd3e156a87bb3b54d10af5fd148fb44e21"
 
 external_content:
   - id: codex

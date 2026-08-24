@@ -921,6 +921,7 @@
   "ignored_notifications": {
     "skills/changed": "schema/SkillsChangedNotification.json",
     "thread/closed": "schema/ThreadClosedNotification.json",
+    "thread/goal/cleared": "schema/ThreadGoalClearedNotification.json",
     "thread/tokenUsage/updated": "schema/ThreadTokenUsageUpdatedNotification.json",
     "turn/diff/updated": "schema/TurnDiffUpdatedNotification.json",
     "turn/plan/updated": "schema/TurnPlanUpdatedNotification.json",

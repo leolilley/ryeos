@@ -4251,6 +4251,22 @@ impl StateStore {
         )
     }
 
+    pub fn settle_terminal_recovered_dedicated_command(
+        &self,
+        session_id: &str,
+        command_sequence: u64,
+        worker_boot_epoch: u64,
+        result: &Value,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.settle_terminal_recovered_dedicated_command(
+            session_id,
+            command_sequence,
+            worker_boot_epoch,
+            result,
+        )
+    }
+
     pub fn mark_dedicated_command_outcome_unknown(
         &self,
         session_id: &str,

@@ -5169,7 +5169,7 @@ impl RuntimeDb {
         let session_changed = tx.execute(
             "UPDATE dedicated_session SET send_boundary='settled', updated_at_ms=?3
               WHERE session_id=?1 AND worker_boot_epoch=?2
-                AND state IN ('idle','turn_running','awaiting_approval')
+                AND state IN ('idle','turn_running','awaiting_approval','recovering')
                 AND send_boundary='contacted'",
             params![session_id, i64::try_from(worker_boot_epoch)?, now],
         )?;
@@ -5206,7 +5206,7 @@ impl RuntimeDb {
                     state=CASE WHEN state='outcome_unknown' THEN 'idle' ELSE state END,
                     updated_at_ms=?3
               WHERE session_id=?1 AND worker_boot_epoch=?2
-                AND state IN ('idle','turn_running','awaiting_approval','outcome_unknown')
+                AND state IN ('idle','turn_running','awaiting_approval','recovering','outcome_unknown')
                 AND send_boundary IN ('contacted','outcome_unknown')",
             params![session_id, i64::try_from(worker_boot_epoch)?, now],
         )?;
@@ -5214,6 +5214,40 @@ impl RuntimeDb {
             bail!("recovered command settlement lost its command/session CAS");
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Project an authoritative response for a historical worker epoch after
+    /// the owning root is already terminal.  The terminal root is the caller's
+    /// authority for this transition; the current session projection may have
+    /// detached or advanced past the dead worker epoch, so it must not be
+    /// rewritten while repairing the exact command row.
+    pub fn settle_terminal_recovered_dedicated_command(
+        &self,
+        session_id: &str,
+        command_sequence: u64,
+        worker_boot_epoch: u64,
+        result: &serde_json::Value,
+    ) -> Result<()> {
+        let result_json = serde_json::to_string(result)?;
+        validate_bounded_runtime_text("recovered command result", &result_json, 256 * 1024)?;
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session_command
+                SET state='completed', result_json=?4, updated_at_ms=?5
+              WHERE session_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3
+                AND state IN ('dispatched','outcome_unknown')
+                AND EXISTS(SELECT 1 FROM dedicated_session WHERE session_id=?1)",
+            params![
+                session_id,
+                i64::try_from(command_sequence)?,
+                i64::try_from(worker_boot_epoch)?,
+                result_json,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            bail!("terminal recovered command settlement lost its exact command CAS");
+        }
         Ok(())
     }
 
@@ -11698,6 +11732,8 @@ mod tests {
         db.attach_worker_process(&first).unwrap();
         db.complete_worker_binding("worker-recover-1", "S-recover", 1)
             .unwrap();
+        db.bind_dedicated_remote_thread("S-recover", "worker-recover-1", 1, "remote-recover")
+            .unwrap();
         db.fence_abandoned_worker_process("worker-recover-1", "S-recover", 1, "reaped")
             .unwrap();
 
@@ -11720,6 +11756,101 @@ mod tests {
             ..first.clone()
         };
         db.attach_worker_process(&second).unwrap();
+        db.complete_worker_binding("worker-recover-2", "S-recover", 2)
+            .unwrap();
+
+        let payload = serde_json::json!({"route_id":"session.resume","payload":{}});
+        let reattach = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                session_id: "S-recover",
+                idempotency_key: "reattach-two",
+                worker_boot_epoch: 2,
+                command_kind: "reattach",
+                request_digest: &"d".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        db.mark_dedicated_command_contacted("S-recover", reattach.command_sequence, 2)
+            .unwrap();
+        db.settle_dedicated_command(
+            "S-recover",
+            reattach.command_sequence,
+            2,
+            true,
+            &serde_json::json!({"redacted":true}),
+        )
+        .unwrap();
+        let recovering = db.dedicated_session("S-recover").unwrap().unwrap();
+        assert_eq!(recovering.state, "recovering");
+        assert_eq!(recovering.send_boundary, "settled");
+
+        let recovered_reattach = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                session_id: "S-recover",
+                idempotency_key: "reattach-recovered-two",
+                worker_boot_epoch: 2,
+                command_kind: "reattach",
+                request_digest: &"e".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        db.mark_dedicated_command_contacted("S-recover", recovered_reattach.command_sequence, 2)
+            .unwrap();
+        db.settle_recovered_dedicated_command(
+            "S-recover",
+            recovered_reattach.command_sequence,
+            2,
+            &serde_json::json!({"redacted":true}),
+        )
+        .unwrap();
+        db.observe_dedicated_remote_reattach("S-recover", 2, "remote-recover")
+            .unwrap();
+        db.settle_dedicated_remote_recovery_status("S-recover", 2, "remote-recover", "idle")
+            .unwrap();
+        let recovered = db.dedicated_session("S-recover").unwrap().unwrap();
+        assert_eq!(recovered.state, "idle");
+        assert_eq!(recovered.send_boundary, "settled");
+
+        let terminal_recovered = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                session_id: "S-recover",
+                idempotency_key: "reattach-terminal-two",
+                worker_boot_epoch: 2,
+                command_kind: "reattach",
+                request_digest: &"f".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        db.mark_dedicated_command_contacted("S-recover", terminal_recovered.command_sequence, 2)
+            .unwrap();
+        db.fence_abandoned_worker_process("worker-recover-2", "S-recover", 2, "reaped")
+            .unwrap();
+        let detached = db.dedicated_session("S-recover").unwrap().unwrap();
+        assert_eq!(detached.state, "outcome_unknown");
+        assert!(detached.worker_instance_id.is_none());
+        assert!(detached.worker_boot_epoch.is_none());
+        db.settle_terminal_recovered_dedicated_command(
+            "S-recover",
+            terminal_recovered.command_sequence,
+            2,
+            &serde_json::json!({"redacted":true}),
+        )
+        .unwrap();
+        let projected = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                session_id: "S-recover",
+                idempotency_key: "reattach-terminal-two",
+                worker_boot_epoch: 2,
+                command_kind: "reattach",
+                request_digest: &"f".repeat(64),
+                payload: &payload,
+            })
+            .unwrap();
+        assert_eq!(projected.state, "completed");
+        assert_eq!(
+            db.dedicated_session("S-recover").unwrap().unwrap().state,
+            "outcome_unknown"
+        );
 
         assert_eq!(
             db.worker_process("worker-recover-1")
