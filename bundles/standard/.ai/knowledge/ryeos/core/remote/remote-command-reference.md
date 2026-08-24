@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T15:37:10Z:2c5f0be98b94803e7dcd48f728265029e56e847984519abf7009260c0a581d5d:L0Z6NPc3lgaDPVrkei7jEmvcmooGahTuxAdP5sg7s8G0r9IqGPboInPweg+70suMM+BX6YJ0k6pe0NIiaj1AAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T16:23:36Z:391101d150fe4cd7f1f5f0ceaad30e84b860da5535fa41007f7e7a4886e2625c:Ah5Oz21xr6x1JxWZ20sUhFG556yJrjF/dn/PAjJ6r2tZ5xAl/yxrFn2kNeYBm+fFfmf5kbyAaMeY/6p5QuqfBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]

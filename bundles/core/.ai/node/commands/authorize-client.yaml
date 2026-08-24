@@ -1,3 +1,4 @@
+# ryeos:signed:2026-08-24T16:23:18Z:ccb9bb99161b7e78e39cd4774547a91f3b5fcdc381d7523a9100e6f252fcc939:HhHIzN4JLAbwqBGEkEvkRb4JHRqzC//we040r1fcA6QTMDEL5C3e7Wp9t9onLp02hSZNtz6PElMeTIgbfZveDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - authorize-client
 description: Reconcile one authorized client grant under stopped-node authority

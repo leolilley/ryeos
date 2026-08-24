@@ -1,3 +1,4 @@
+# ryeos:signed:2026-08-24T16:23:24Z:57567a24db3661ae84761b42a245683580fea958d0a0a1503932517b290b3e41:S3KMbCygGeuWzDQ+QxfaVXPtzkgPDWxcc6vyM2rU5iVGad0DPuCtB0rXNKtsRcREoYC7sFjJkYXLhOoDx9dZBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: identity.authorize-client
 availability: stopped_node

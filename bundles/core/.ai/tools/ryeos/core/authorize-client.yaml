@@ -1,3 +1,4 @@
+# ryeos:signed:2026-08-24T16:23:27Z:f79268cf9eedebe89a1ac11cec61dd55019d87268cd6def05a545cfac11f7284:n//UoM81iK6dUtYSaq61wJPHXs/PfBXPVkBm1CdjBtrSCmL1DoNmyxTLQ9zEB1xsneuFp3khFdVEMSHf6pOpAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 executor_id: "@subprocess"
 category: "ryeos/core"
