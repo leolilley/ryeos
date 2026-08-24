@@ -500,8 +500,33 @@ async fn resolve_approval(
             "decision":if req.accept { "accept" } else { "decline" },
         }),
     )?;
-    // This transition is durable before the first possible write. A crash or
-    // error after it is delivery-unknown and must never cause automatic replay.
+    let contacting_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
+        "schema":"ryeos.hosted_approval_delivery_fact.v1",
+        "session_id":req.session_id,
+        "approval_id":req.approval_id,
+        "reservation_token":reservation_token,
+        "stage":"delivery_contacting",
+    }))
+    .map_err(internal)?;
+    // The root chain receives the exact possible-delivery boundary before
+    // SQLite advances to `delivery_contacting`. A crash between these steps
+    // leaves a retryable reservation whose repeated fact append is
+    // idempotent; advancing SQLite first could strand delivery-unknown state
+    // after the root had become terminal, with no authoritative testimony.
+    append_root_fact_once(
+        &state,
+        &session,
+        "hosted_approval.delivery_contacting",
+        &contacting_operation_id,
+        json!({
+            "schema":1,
+            "origin":"daemon_reserved_io",
+            "session_id":req.session_id,
+            "approval_id":req.approval_id,
+            "worker_boot_epoch":approval.worker_boot_epoch,
+            "decision_digest":decision_digest,
+        }),
+    )?;
     state
         .state_store
         .mark_dedicated_approval_delivery_contacting(
@@ -512,40 +537,6 @@ async fn resolve_approval(
             &decision_digest,
         )
         .map_err(internal)?;
-    let contacting_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
-        "schema":"ryeos.hosted_approval_delivery_fact.v1",
-        "session_id":req.session_id,
-        "approval_id":req.approval_id,
-        "reservation_token":reservation_token,
-        "stage":"delivery_contacting",
-    }))
-    .map_err(internal)?;
-    if let Err(error) = append_root_fact_once(
-        &state,
-        &session,
-        "hosted_approval.delivery_contacting",
-        &contacting_operation_id,
-        json!({
-            "schema":1,
-            "origin":"daemon_observed_io",
-            "session_id":req.session_id,
-            "approval_id":req.approval_id,
-            "worker_boot_epoch":approval.worker_boot_epoch,
-            "decision_digest":decision_digest,
-        }),
-    ) {
-        state
-            .state_store
-            .mark_dedicated_approval_delivery_unknown(
-                &req.session_id,
-                &req.approval_id,
-                approval.worker_boot_epoch,
-                &reservation_token,
-                &decision_digest,
-            )
-            .map_err(internal)?;
-        return Err(error);
-    }
     let registry = Arc::clone(&state.persistent_sessions);
     let session_id = req.session_id.clone();
     let delivery = tokio::task::spawn_blocking(move || {

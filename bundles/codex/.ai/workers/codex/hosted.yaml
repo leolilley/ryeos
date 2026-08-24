@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-23T22:45:21Z:d3467aadb5da7ed8fb766fee8cc053e606b29085a97d425e5544b9cb77dbf443:0/RzkU0G+hCAMeuKbnT4RFIRyzk29qcn0iQDSacbZ4hfj530Ivq8WI5x007JYMffmDCNC8EmV7YrBAYq6kZVBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-24T03:55:20Z:cd6bdda8fb99aca3036630050a9599d69d3479777773a228a660ee89985849b7:ekI1vJE8flBOQ7H5g209Y0usBVUWjQWqVJWm5EkXL31EYfYIndep2MGMw7Ls+0YuU1h1oszm+VG9CHZCyMXHAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "codex"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -8,10 +8,16 @@ supported_target:
   os: linux
   arch: x86_64
 
+# RLIMIT_NPROC is shared by the daemon's real UID rather than scoped to this
+# process tree. The kind-owned compiler caps and freezes this signed override;
+# RyeOS separately limits session groups and total dedicated workers.
+session_resources:
+  real_uid_process_limit: 1024
+
 source:
   root: "lib/hosted"
   entry: "structured-session.profile.json"
-  digest: "e292c6aabf81ba4cbfd2fa3f3e175027425ef840ae4e957a953586e28cab4520"
+  digest: "0c5f923fdcdfcfa3559bab2948b73733d57bc425293a802a2361da17e353aca5"
 
 external_content:
   - id: codex
@@ -20,6 +26,30 @@ external_content:
     digest: "713c3d1985ca438d8c309631d665c14f8fa0afedfce8b73dc93d0646edfe11ff"
     metadata_hint: "openai-codex-rust-v0.147.0-x86_64-unknown-linux-musl"
     mount: codex
+  - id: codex-code-mode-host
+    kind: file
+    mode: pinned
+    digest: "984168b4c3f0efcbee4d1707fda8f8320bdb08a75cb704a8205f853e79e4dc2d"
+    metadata_hint: "openai-codex-code-mode-host-v0.147.0-x86_64-unknown-linux-musl"
+    mount: codex-code-mode-host
+  - id: codex-bwrap
+    kind: file
+    mode: pinned
+    digest: "5f2c25277b1a2150937372ade46eef46aa2227b749f984bea208b5467540b86f"
+    metadata_hint: "openai-codex-bwrap-v0.147.0-x86_64-unknown-linux-musl"
+    mount: codex-resources/bwrap
+  - id: codex-zsh
+    kind: file
+    mode: pinned
+    digest: "bda40827700404df0317f0e83951a4f6b6fb0933b3eec3af29c1a903c39aa008"
+    metadata_hint: "openai-codex-zsh-v0.147.0-x86_64-unknown-linux-musl"
+    mount: codex-resources/zsh/bin/zsh
+  - id: codex-rg
+    kind: file
+    mode: pinned
+    digest: "a7a1a4fdb45e9231b80a9840c22728b05625ed1e21cc155d3995697eeeec22c0"
+    metadata_hint: "openai-codex-rg-v0.147.0-x86_64-unknown-linux-musl"
+    mount: codex-path/rg
 
 config:
   command: "bin:codex/ryeos-structured-session-bridge"

@@ -14,7 +14,7 @@
 #
 # Bundle sets:
 #   full            core + standard + web + browser + ryeos-ui + hosted-node +
-#                   local-inference (default)
+#                   codex + local-inference (default)
 #   full-sandbox    full + the separately authored Linux isolation backend;
 #                   build its payload explicitly first
 #   central-host    core + standard + web — standard node plus the rye/web/search
@@ -22,8 +22,8 @@
 #                   its own central-auth realm
 #   standard        core + standard — scheduler/graph/directive standard node
 #   hosted-node     core + hosted-node — lean remote-admission control plane
-#   hosted-workflow core + standard + hosted-node — hosted node that also
-#                   runs scheduler/graph/directive workloads
+#   hosted-workflow core + standard + hosted-node + codex — hosted node that
+#                   also runs scheduler/graph/directive and hosted Codex workloads
 #
 # Env:
 #   CARGO              cargo binary (default: cargo from PATH)
@@ -348,7 +348,7 @@ for hosted_execution_binary in ryeos-worker-execution-launch-preparer ryeos-work
     exit 2
   fi
 done
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-node" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
   for codex_binary in ryeos-structured-session-bridge; do
     if readelf -l "$STATIC_RELEASE/$codex_binary" | grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' \
         || readelf -d "$STATIC_RELEASE/$codex_binary" | grep -Eq 'NEEDED'; then
@@ -383,7 +383,7 @@ staged_foundational_release_bins_for_set() {
     full|full-sandbox) printf '%s\n' ryeos-tui web ;;
   esac
   case "$BUNDLE_SET" in
-    full|full-sandbox|hosted-node|hosted-workflow) printf '%s\n' ryeos-structured-session-bridge ;;
+    full|full-sandbox|hosted-workflow) printf '%s\n' ryeos-structured-session-bridge ;;
   esac
   printf '%s\n' ryeos-worker-execution-launch-preparer ryeos-worker-execution-runtime
 }
@@ -446,7 +446,7 @@ install -m 0755 \
   "$STATIC_RELEASE/ryeos-worker-execution-launch-preparer" \
   "$STATIC_RELEASE/ryeos-worker-execution-runtime" \
   "$CORE_BIN/"
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-node" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
   ryeos_term_update "installing codex workload bridge" "$CODEX_BIN"
   install -m 0755 \
     "$STATIC_RELEASE/ryeos-structured-session-bridge" \
@@ -569,10 +569,11 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET
     --owner "$OWNER" >/dev/null
 fi
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-node" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
   ryeos_term_update "publishing codex bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$CODEX" \
     --registry-root "$CORE" \
+    --registry-root "$STD" \
     --owner "$OWNER" >/dev/null
 fi
 

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-19T08:24:56Z:100dd11cd923386bb3ff968a69b01773fb85204836dbee336c1ee8c7a3e99d0b:8NGKfptzELOYYI8Uf7cnMO0J4S7HKEF3pxIMWjlnmOLDnE6FuQzEd9G2wybotoY2eHMqSlZ8kzaVzxA0lHiiAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-24T03:55:20Z:100dd11cd923386bb3ff968a69b01773fb85204836dbee336c1ee8c7a3e99d0b:8NGKfptzELOYYI8Uf7cnMO0J4S7HKEF3pxIMWjlnmOLDnE6FuQzEd9G2wybotoY2eHMqSlZ8kzaVzxA0lHiiAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: codex
 description: Open one RyeOS-owned Codex session against an immutable project generation.

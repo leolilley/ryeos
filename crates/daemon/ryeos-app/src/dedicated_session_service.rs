@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -494,6 +494,117 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
         let _root_operation = begin_hosted_root_operation(&session.root_thread_id)?;
         let _credential_operation =
             acquire_credential_profile_operation_sync(&session.credential_profile_id);
+        let root = state
+            .state_store
+            .get_thread(&session.root_thread_id)?
+            .ok_or_else(|| anyhow!("hosted execution root thread disappeared"))?;
+        if crate::state_store::is_terminal_status(&root.status) {
+            // A terminal chain cannot accept repair facts. Its existing facts
+            // are nevertheless sufficient to classify every valid crash
+            // boundary: committed without contacting is uncontacted;
+            // contacting without a response batch is outcome-unknown; and a
+            // response batch is an authoritative completed response. Do not
+            // turn one historical session's unappendable projection repair
+            // into a node-wide startup outage.
+            if !command_fact_exists(
+                state,
+                &session,
+                "hosted_command.committed",
+                record.command_sequence,
+                &record.request_digest,
+            )? {
+                tracing::warn!(
+                    session_id = %record.session_id,
+                    command_sequence = record.command_sequence,
+                    "terminal hosted root has an untestified uncontacted command reservation"
+                );
+                continue;
+            }
+            if matches!(record.state.as_str(), "dispatched" | "outcome_unknown") {
+                if let Some((canonical_batch, response_digest)) =
+                    find_authoritative_command_observation_batch(
+                        state,
+                        &session,
+                        record.worker_boot_epoch,
+                        record.command_sequence,
+                        &record.request_digest,
+                    )?
+                {
+                    project_worker_events(
+                        state,
+                        &session,
+                        record.worker_boot_epoch,
+                        &canonical_batch,
+                    )?;
+                    apply_worker_observations(
+                        state,
+                        &record.session_id,
+                        record.worker_boot_epoch,
+                        &canonical_batch,
+                    )?;
+                    state.state_store.settle_recovered_dedicated_command(
+                        &record.session_id,
+                        record.command_sequence,
+                        record.worker_boot_epoch,
+                        &json!({
+                            "redacted":true,
+                            "response_digest":response_digest,
+                            "recovered_from_root_chain":true,
+                        }),
+                    )?;
+                    notify_projection_change(&record.session_id);
+                    continue;
+                }
+                let contacted = command_fact_exists(
+                    state,
+                    &session,
+                    "hosted_command.contacting",
+                    record.command_sequence,
+                    &record.request_digest,
+                )?;
+                if record.state == "dispatched" {
+                    state.state_store.mark_dedicated_command_outcome_unknown(
+                        &record.session_id,
+                        record.command_sequence,
+                        record.worker_boot_epoch,
+                    )?;
+                }
+                tracing::warn!(
+                    session_id = %record.session_id,
+                    command_sequence = record.command_sequence,
+                    contacted,
+                    "terminal hosted root retains a command without a response batch"
+                );
+                continue;
+            }
+            let expected_terminal_fact = match record.state.as_str() {
+                "committed" => None,
+                "completed" | "failed" => Some(
+                    if record.result.as_ref().is_some_and(|result| {
+                        result.get("retryable_uncontacted").and_then(Value::as_bool) == Some(true)
+                    }) {
+                        "hosted_command.failed_uncontacted"
+                    } else {
+                        "hosted_command.settled"
+                    },
+                ),
+                other => bail!("dedicated command outbox has invalid state `{other}`"),
+            };
+            if let Some(event_type) = expected_terminal_fact
+                && !command_fact_exists(
+                    state,
+                    &session,
+                    event_type,
+                    record.command_sequence,
+                    &record.request_digest,
+                )?
+            {
+                bail!(
+                    "terminal hosted command projection has no authoritative `{event_type}` fact"
+                );
+            }
+            continue;
+        }
         let (profile_hash, schema_hashes) =
             structured_protocol_identity(state, &session.admitted_capsule_hash)?;
         append_command_fact_once(
@@ -822,12 +933,13 @@ pub async fn execute_command(
             "protocol_schema_hashes":protocol_schema_hashes,
         }),
     )?;
-    state.state_store.mark_dedicated_command_contacted(
-        session_id,
-        record.command_sequence,
-        worker_boot_epoch,
-    )?;
-    if let Err(error) = append_command_fact_once(
+    // Publish the exact possible-contact boundary before advancing the
+    // rebuildable outbox projection to `dispatched`. If the root becomes
+    // terminal while this append races it, the command remains provably
+    // uncontacted and worker cleanup can fail it retryably. Advancing SQLite
+    // first would create an outcome-unknown row whose authoritative root
+    // could no longer testify to the boundary.
+    append_command_fact_once(
         state,
         &session,
         "hosted_command.contacting",
@@ -835,17 +947,16 @@ pub async fn execute_command(
         &request_digest,
         json!({
             "schema":1,
-            "origin":"daemon_observed_io",
+            "origin":"daemon_reserved_io",
             "worker_boot_epoch":worker_boot_epoch,
         }),
-    ) {
-        state.state_store.mark_dedicated_command_outcome_unknown(
-            session_id,
-            record.command_sequence,
-            worker_boot_epoch,
-        )?;
-        return Err(error.context("persist command possible-contact boundary"));
-    }
+    )
+    .context("persist command possible-contact boundary")?;
+    state.state_store.mark_dedicated_command_contacted(
+        session_id,
+        record.command_sequence,
+        worker_boot_epoch,
+    )?;
     let pool = Arc::clone(&state.persistent_sessions);
     let execution_session_id = session_id.to_string();
     let is_runtime_route = command_kind == "reattach";
@@ -984,6 +1095,115 @@ fn structured_protocol_identity(
     Ok((profile.profile_hash, profile.schema_hashes))
 }
 
+/// Testify the exact retained project generation on the still-running hosted
+/// execution root before the mutable session projection may expose it for
+/// validation or publication.
+///
+/// The workspace journal corroborates capture and recovery, but it is not the
+/// durable authorization history. This idempotent root fact makes the
+/// candidate identity, base, admitted capsule, credential generation, and
+/// workspace owner reconstructable from the root chain.
+pub fn append_candidate_capture_fact(
+    state: &AppState,
+    session_id: &str,
+    candidate_snapshot_hash: &str,
+) -> Result<()> {
+    if !lillux::valid_hash(candidate_snapshot_hash) {
+        bail!("hosted candidate snapshot hash is not canonical");
+    }
+    let _root_operation = begin_hosted_root_operation(session_id)?;
+    let session = current_session(state, session_id)?;
+    if session.root_thread_id != session_id
+        || !session.candidate_required
+        || session.terminal_reason.as_deref() != Some("completed")
+        || !matches!(session.state.as_str(), "freezing" | "frozen")
+    {
+        bail!("hosted candidate capture contradicts the dedicated-session lifecycle");
+    }
+    let thread = state
+        .state_store
+        .get_thread(&session.root_thread_id)?
+        .ok_or_else(|| anyhow!("hosted execution root thread disappeared"))?;
+    if thread.status != "running" {
+        bail!("hosted candidate capture requires a running root thread");
+    }
+    let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+        base_snapshot_hash,
+        ..
+    } = thread
+        .project_authority
+        .as_ref()
+        .ok_or_else(|| anyhow!("hosted execution root has no project authority"))?
+    else {
+        bail!("hosted candidate capture requires pinned project authority");
+    };
+    let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
+        "schema":"ryeos.hosted_candidate_capture_operation.v1",
+        "session_id":session.session_id,
+        "candidate_snapshot_hash":candidate_snapshot_hash,
+    }))?;
+    let mut after = None;
+    loop {
+        let page = state.state_store.replay_events(
+            &thread.chain_root_id,
+            Some(&thread.thread_id),
+            after,
+            1024,
+            8 * 1024 * 1024,
+        )?;
+        if let Some(event) = page.events.iter().find(|event| {
+            event.event_type == "hosted_candidate.captured"
+                && event.payload.get("operation_id").and_then(Value::as_str)
+                    == Some(operation_id.as_str())
+        }) {
+            if event
+                .payload
+                .get("candidate_snapshot_hash")
+                .and_then(Value::as_str)
+                != Some(candidate_snapshot_hash)
+                || event.payload.get("workspace_id").and_then(Value::as_str)
+                    != Some(session.workspace_id.as_str())
+                || event
+                    .payload
+                    .get("base_snapshot_hash")
+                    .and_then(Value::as_str)
+                    != Some(base_snapshot_hash.as_str())
+            {
+                bail!("authoritative hosted candidate capture fact is contradictory");
+            }
+            return Ok(());
+        }
+        after = page.events.last().map(|event| event.chain_seq);
+        if !page.has_more {
+            break;
+        }
+    }
+    state
+        .threads
+        .append_thread_events(
+            &thread.chain_root_id,
+            &thread.thread_id,
+            &[NewEventRecord {
+                event_type: "hosted_candidate.captured".to_owned(),
+                storage_class: "indexed".to_owned(),
+                payload: json!({
+                    "schema":1,
+                    "origin":"filesystem_verified",
+                    "operation_id":operation_id,
+                    "session_id":session.session_id,
+                    "workspace_id":session.workspace_id,
+                    "candidate_snapshot_hash":candidate_snapshot_hash,
+                    "base_snapshot_hash":base_snapshot_hash,
+                    "admitted_capsule_hash":session.admitted_capsule_hash,
+                    "credential_profile_id":session.credential_profile_id,
+                    "credential_generation":session.credential_generation,
+                }),
+            }],
+        )?
+        .ok_or_else(|| anyhow!("hosted execution root is no longer running"))?;
+    Ok(())
+}
+
 fn append_command_fact_once(
     state: &AppState,
     session: &DedicatedSessionRecord,
@@ -992,6 +1212,9 @@ fn append_command_fact_once(
     request_digest: &str,
     mut payload: Value,
 ) -> Result<()> {
+    if command_fact_exists(state, session, event_type, command_sequence, request_digest)? {
+        return Ok(());
+    }
     let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.hosted_command_fact.v1",
         "session_id":session.session_id,
@@ -1003,27 +1226,6 @@ fn append_command_fact_once(
         .state_store
         .get_thread(&session.root_thread_id)?
         .ok_or_else(|| anyhow!("hosted execution root thread disappeared"))?;
-    let mut after = None;
-    loop {
-        let page = state.state_store.replay_events(
-            &thread.chain_root_id,
-            Some(&thread.thread_id),
-            after,
-            1024,
-            8 * 1024 * 1024,
-        )?;
-        if page.events.iter().any(|event| {
-            event.event_type == event_type
-                && event.payload.get("operation_id").and_then(Value::as_str)
-                    == Some(operation_id.as_str())
-        }) {
-            return Ok(());
-        }
-        after = page.events.last().map(|event| event.chain_seq);
-        if !page.has_more {
-            break;
-        }
-    }
     let object = payload
         .as_object_mut()
         .ok_or_else(|| anyhow!("hosted command fact payload is not an object"))?;
@@ -1053,6 +1255,47 @@ fn append_command_fact_once(
         )?
         .ok_or_else(|| anyhow!("hosted execution root is no longer running"))?;
     Ok(())
+}
+
+fn command_fact_exists(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    event_type: &str,
+    command_sequence: u64,
+    request_digest: &str,
+) -> Result<bool> {
+    let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
+        "schema":"ryeos.hosted_command_fact.v1",
+        "session_id":session.session_id,
+        "command_sequence":command_sequence,
+        "request_digest":request_digest,
+        "event_type":event_type,
+    }))?;
+    let thread = state
+        .state_store
+        .get_thread(&session.root_thread_id)?
+        .ok_or_else(|| anyhow!("hosted execution root thread disappeared"))?;
+    let mut after = None;
+    loop {
+        let page = state.state_store.replay_events(
+            &thread.chain_root_id,
+            Some(&thread.thread_id),
+            after,
+            1024,
+            8 * 1024 * 1024,
+        )?;
+        if page.events.iter().any(|event| {
+            event.event_type == event_type
+                && event.payload.get("operation_id").and_then(Value::as_str)
+                    == Some(operation_id.as_str())
+        }) {
+            return Ok(true);
+        }
+        after = page.events.last().map(|event| event.chain_seq);
+        if !page.has_more {
+            return Ok(false);
+        }
+    }
 }
 
 fn append_command_observation_batch(

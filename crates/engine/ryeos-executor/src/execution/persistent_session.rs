@@ -155,9 +155,10 @@ fn session_contract(
         .get(kind)
         .and_then(|schema| schema.execution.as_ref())
         .ok_or_else(|| anyhow!("execution dependency kind `{kind}` is not executable"))?;
-    let Some(declaration) = execution.persistent_session.clone() else {
+    let Some(mut declaration) = execution.persistent_session.clone() else {
         return Ok(None);
     };
+    apply_resource_overrides(&mut declaration, &dependency.resolution.composed.composed)?;
     let TerminatorDecl::Subprocess {
         protocol: protocol_selection,
     } = execution
@@ -182,6 +183,40 @@ fn session_contract(
         &declaration.target_path,
     )?;
     Ok(Some((declaration, protocol)))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistentSessionResourceOverrides {
+    real_uid_process_limit: Option<u64>,
+}
+
+fn apply_resource_overrides(
+    declaration: &mut PersistentSessionDecl,
+    composed: &Value,
+) -> Result<()> {
+    let Some(path) = declaration.resource_overrides_path.as_ref() else {
+        return Ok(());
+    };
+    let mut value = composed;
+    for segment in path {
+        let Some(next) = value.get(segment) else {
+            return Ok(());
+        };
+        value = next;
+    }
+    let overrides: PersistentSessionResourceOverrides = serde_json::from_value(value.clone())
+        .context("decode signed persistent-session resource overrides")?;
+    if let Some(limit) = overrides.real_uid_process_limit {
+        if limit == 0 || limit > declaration.max_real_uid_process_limit {
+            bail!(
+                "persistent-session real-UID process limit {limit} exceeds its signed kind ceiling {}",
+                declaration.max_real_uid_process_limit
+            );
+        }
+        declaration.real_uid_process_limit = limit;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -643,29 +678,41 @@ fn prepare_structured_session_baseline(
     let bytes = std::fs::read(&source).context("read admitted structured-session baseline")?;
     let destination = state_root.join(&profile.baseline_destination);
     match std::fs::symlink_metadata(&destination) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink()
-                || !metadata.is_file()
-                || metadata.permissions().mode() & 0o777 != 0o400
-                || std::fs::read(&destination)? != bytes
-            {
-                bail!("workload baseline differs from the admission-compiled generation");
-            }
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            bail!("workload compatibility seed is not a regular file");
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        Ok(metadata)
+            if metadata.permissions().mode() & 0o777 == 0o400
+                && std::fs::read(&destination)? == bytes => {}
+        Ok(_) | Err(_) => {
+            if let Err(error) = std::fs::symlink_metadata(&destination)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(error).context("inspect workload compatibility seed");
+            }
             let temporary = state_root.join(".ryeos-baseline.pending");
+            match std::fs::symlink_metadata(&temporary) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                    bail!("incomplete workload compatibility seed is not a regular file");
+                }
+                Ok(_) => std::fs::remove_file(&temporary)
+                    .context("remove incomplete workload compatibility seed")?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).context("inspect workload compatibility seed staging file");
+                }
+            }
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o400)
                 .open(&temporary)
-                .context("create structured-session baseline staging file")?;
+                .context("create structured-session compatibility seed staging file")?;
             file.write_all(&bytes)?;
             file.sync_all()?;
             std::fs::rename(&temporary, &destination)?;
             std::fs::File::open(state_root)?.sync_all()?;
         }
-        Err(error) => return Err(error).context("inspect workload baseline destination"),
     }
     if !enforced {
         return Ok(None);
@@ -1182,6 +1229,52 @@ fn canonical_hash(value: &Value) -> Result<String> {
 mod tests {
     use super::*;
 
+    fn resource_override_declaration() -> PersistentSessionDecl {
+        PersistentSessionDecl {
+            target_path: vec!["supported_target".to_owned()],
+            max_processes: 1,
+            max_inflight_per_process: 1,
+            max_address_space_bytes: 64 * 1024 * 1024,
+            max_cpu_seconds: 1,
+            real_uid_process_limit: 512,
+            resource_overrides_path: Some(vec!["session_resources".to_owned()]),
+            max_real_uid_process_limit: 4_096,
+            ready_timeout_ms: 1,
+            request_timeout_ms: 1,
+            idle_timeout_ms: 1,
+        }
+    }
+
+    #[test]
+    fn signed_worker_resource_override_is_capped_and_frozen() {
+        let mut declaration = resource_override_declaration();
+        apply_resource_overrides(
+            &mut declaration,
+            &json!({"session_resources":{"real_uid_process_limit":1024}}),
+        )
+        .unwrap();
+        assert_eq!(declaration.real_uid_process_limit, 1_024);
+
+        let mut absent = resource_override_declaration();
+        apply_resource_overrides(&mut absent, &json!({})).unwrap();
+        assert_eq!(absent.real_uid_process_limit, 512);
+
+        let mut excessive = resource_override_declaration();
+        assert!(
+            apply_resource_overrides(
+                &mut excessive,
+                &json!({"session_resources":{"real_uid_process_limit":4097}}),
+            )
+            .is_err()
+        );
+
+        let mut unknown = resource_override_declaration();
+        assert!(
+            apply_resource_overrides(&mut unknown, &json!({"session_resources":{"unknown":1}}),)
+                .is_err()
+        );
+    }
+
     fn retained_program_fixture(
         source_path: &str,
         body_digest_byte: char,
@@ -1430,6 +1523,21 @@ mod tests {
 
         assert!(overlay.is_none());
         let destination = state_root.path().join("config.toml");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"setting = true\n");
+        assert_eq!(
+            std::fs::metadata(&destination)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o400
+        );
+        std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&destination, b"workload = true\n").unwrap();
+        let overlay =
+            prepare_structured_session_baseline(&profile, &source_entry, state_root.path(), false)
+                .unwrap();
+        assert!(overlay.is_none());
         assert_eq!(std::fs::read(&destination).unwrap(), b"setting = true\n");
         assert_eq!(
             std::fs::metadata(destination).unwrap().permissions().mode() & 0o777,

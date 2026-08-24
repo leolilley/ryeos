@@ -6418,6 +6418,79 @@ async fn run_claimed_thread_row_inner(
         } else {
             None
         };
+        // A retained worker-hosted candidate is a pre-terminal disposition
+        // saga. Its worker and managed controller have stopped, but the RyeOS
+        // root remains running so validation and the owner's publish/discard
+        // decision can be testified on that same authoritative chain.
+        if let Some(candidate_snapshot_hash) = result_project_snapshot_hash.as_deref()
+            && let Some(session) = state.state_store.dedicated_session(&thread_id)?
+            && session.state == "freezing"
+        {
+            ryeos_app::dedicated_session_service::append_candidate_capture_fact(
+                state,
+                &thread_id,
+                candidate_snapshot_hash,
+            )
+            .map_err(BuildAndLaunchError::Internal)?;
+            if !state
+                .state_store
+                .bind_dedicated_session_candidate(&thread_id, candidate_snapshot_hash)
+                .map_err(BuildAndLaunchError::Internal)?
+            {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "managed hosted candidate lost its exact freezing-state CAS"
+                )));
+            }
+            ryeos_app::dedicated_session_service::notify_projection_change(&thread_id);
+            let terminal_session = loop {
+                let session = state
+                    .state_store
+                    .dedicated_session(&thread_id)?
+                    .ok_or_else(|| {
+                        BuildAndLaunchError::Internal(anyhow::anyhow!(
+                            "managed hosted session projection disappeared"
+                        ))
+                    })?;
+                if session.state == "terminal" {
+                    break session;
+                }
+                if !matches!(
+                    session.state.as_str(),
+                    "frozen" | "verifying" | "publish_ready" | "publishing" | "discarding"
+                ) {
+                    return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "managed hosted candidate entered invalid disposition state {}",
+                        session.state
+                    )));
+                }
+                if !state.state_store.process_attachment_admission_is_open() {
+                    let _ = state.state_store.reset_resume_attempts(&thread_id);
+                    return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "managed hosted candidate disposition interrupted by daemon shutdown; root preserved for recovery"
+                    )));
+                }
+                tokio::select! {
+                    result = ryeos_app::dedicated_session_service::wait_for_projection_change(
+                        state,
+                        &thread_id,
+                        session.updated_at_ms,
+                        std::time::Duration::from_secs(24 * 60 * 60),
+                    ) => {
+                        result.map_err(BuildAndLaunchError::Internal)?;
+                    }
+                    _ = state.state_store.wait_for_process_attachment_admission_close() => {
+                        let _ = state.state_store.reset_resume_attempts(&thread_id);
+                        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                            "managed hosted candidate disposition interrupted by daemon shutdown; root preserved for recovery"
+                        )));
+                    }
+                }
+            };
+            runtime_result = ryeos_runtime::envelope::dedicated_session_terminal_result(
+                thread_id.clone(),
+                serde_json::to_value(terminal_session)?,
+            );
+        }
         let fallback = fallback_finalization(&thread_id, &runtime_result, terminal_status);
         runtime_result = fallback.runtime_result;
         let finalized = state.threads.finalize_thread_with_managed_envelope_owned(
@@ -7729,9 +7802,152 @@ async fn launch_claimed_successor(
 /// `launch_claimed_successor`, but it is the SAME thread (no upstream/braid), so
 /// `previous_thread_id` is `None`, there is no copy-forward, and `RYEOS_RESUME=1`
 /// makes the runtime load its OWN checkpoint.
+async fn finalize_recovered_hosted_candidate_disposition(
+    state: &AppState,
+    thread_id: &str,
+    launch_owner: &str,
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+) -> Result<NativeLaunchResult, BuildAndLaunchError> {
+    let terminal_publication = provenance
+        .project_authority()
+        .terminal_publication()
+        .ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "recovered hosted candidate has no terminal publication authority"
+            ))
+        })?;
+    if terminal_publication != &ryeos_state::objects::PinnedTerminalPublication::RetainResult {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "recovered hosted candidate does not have retain-result authority"
+        )));
+    }
+    let workspace = state
+        .state_store
+        .execution_workspace_for_thread(thread_id)?
+        .ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "recovered hosted candidate workspace disappeared"
+            ))
+        })?;
+    if workspace.state != ryeos_app::runtime_db::WorkspaceState::Freezing
+        || workspace.launch_owner.as_deref() != Some(launch_owner)
+        || workspace.process_identity.is_some()
+    {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "recovered hosted candidate workspace is not frozen under the current claim"
+        )));
+    }
+    let candidate_snapshot_hash = workspace.frozen_snapshot_hash.as_deref().ok_or_else(|| {
+        BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "recovered hosted candidate workspace has no frozen generation"
+        ))
+    })?;
+    let terminal_session = loop {
+        let session = state
+            .state_store
+            .dedicated_session(thread_id)?
+            .ok_or_else(|| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "recovered hosted session projection disappeared"
+                ))
+            })?;
+        if session.candidate_snapshot_hash.as_deref() != Some(candidate_snapshot_hash) {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "recovered hosted session candidate differs from its frozen workspace"
+            )));
+        }
+        if session.state == "terminal" {
+            break session;
+        }
+        if !matches!(
+            session.state.as_str(),
+            "frozen" | "verifying" | "publish_ready" | "publishing" | "discarding"
+        ) {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "recovered hosted candidate entered invalid disposition state {}",
+                session.state
+            )));
+        }
+        if !state.state_store.process_attachment_admission_is_open() {
+            let _ = state.state_store.reset_resume_attempts(thread_id);
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "recovered hosted candidate disposition interrupted by daemon shutdown"
+            )));
+        }
+        tokio::select! {
+            result = ryeos_app::dedicated_session_service::wait_for_projection_change(
+                state,
+                thread_id,
+                session.updated_at_ms,
+                std::time::Duration::from_secs(24 * 60 * 60),
+            ) => {
+                result.map_err(BuildAndLaunchError::Internal)?;
+            }
+            _ = state.state_store.wait_for_process_attachment_admission_close() => {
+                let _ = state.state_store.reset_resume_attempts(thread_id);
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "recovered hosted candidate disposition interrupted by daemon shutdown"
+                )));
+            }
+        }
+    };
+    let published_result = format!("published:{candidate_snapshot_hash}");
+    let has_owner_disposition = matches!(
+        terminal_session.publication_result.as_deref(),
+        Some("discarded")
+    ) || terminal_session.publication_result.as_deref()
+        == Some(published_result.as_str());
+    if terminal_session.terminal_reason.as_deref() != Some("completed") || !has_owner_disposition {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "recovered hosted candidate has no completed owner disposition"
+        )));
+    }
+    let runtime_result = ryeos_runtime::envelope::dedicated_session_terminal_result(
+        thread_id.to_owned(),
+        serde_json::to_value(terminal_session)?,
+    );
+    let terminal_status = runtime_terminal_status(runtime_result.status);
+    let fallback = fallback_finalization(thread_id, &runtime_result, terminal_status);
+    let finalized = state.threads.finalize_thread_with_managed_envelope_owned(
+        &fallback.params,
+        fallback.managed_envelope,
+        launch_owner,
+        Some(candidate_snapshot_hash),
+    )?;
+    kick_launch_window_for_terminal(state, &finalized.chain_root_id);
+    kick_follow_resume_if_ready(state, &finalized.chain_root_id);
+    let workspace_lifeline = provenance.workspace_lifeline();
+    if let Err(error) = super::runner::close_managed_runtime_workspace(
+        state,
+        workspace_lifeline.as_ref(),
+        thread_id,
+        terminal_publication,
+        Some(candidate_snapshot_hash),
+    ) {
+        if let Some(workspace) = workspace_lifeline.as_ref() {
+            workspace.disarm();
+        }
+        return Err(BuildAndLaunchError::Internal(
+            error.context("close recovered hosted candidate workspace"),
+        ));
+    }
+    Ok(NativeLaunchResult {
+        thread: serde_json::to_value(&finalized)?,
+        result: json!({
+            "success": fallback.runtime_result.success,
+            "status": fallback.runtime_result.status,
+            "result": fallback.runtime_result.result,
+            "outputs": fallback.runtime_result.outputs,
+            "cost": fallback.runtime_result.cost,
+            "warnings": fallback.runtime_result.warnings,
+        }),
+    })
+}
+
 async fn launch_claimed_native_resume(
     state: &AppState,
     thread: ryeos_app::state_store::ThreadDetail,
+    launch_owner: &str,
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     let thread_id = thread.thread_id.clone();
     let launch_metadata = state
@@ -7752,8 +7968,35 @@ async fn launch_claimed_native_resume(
     // happens inside; working dir + runtime registry then follow the
     // provenance so the resumed run resolves against the pinned overlay
     // engine when the original spawn was pushed-head.
+    let retained_provenance =
+        crate::execution::runner::retained_workspace_provenance_for_native_resume(
+            state,
+            &thread_id,
+            launch_owner,
+            &resume,
+        )?;
+    if let Some(provenance) = retained_provenance.as_ref()
+        && let Some(session) = state.state_store.dedicated_session(&thread_id)?
+        && matches!(
+            session.state.as_str(),
+            "frozen" | "verifying" | "publish_ready" | "publishing" | "discarding" | "terminal"
+        )
+        && session.candidate_snapshot_hash.is_some()
+    {
+        return finalize_recovered_hosted_candidate_disposition(
+            state,
+            &thread_id,
+            launch_owner,
+            provenance,
+        )
+        .await;
+    }
     let params = crate::execution::runner::execution_params_from_sealed_root_request(
-        state, &thread_id, &resume, sealed, None,
+        state,
+        &thread_id,
+        &resume,
+        sealed,
+        retained_provenance,
     )?;
     let project_path = params.provenance.effective_path().to_path_buf();
 
@@ -8074,7 +8317,7 @@ async fn launch_existing_native_resume_with_claim(
     // (flipping the awaiting waiter to `ready`) — so the parent must be kicked here
     // too, not left for the next restart.
     let child_chain_root_id = thread.chain_root_id.clone();
-    let result = launch_claimed_native_resume(&state, thread).await;
+    let result = launch_claimed_native_resume(&state, thread, &launch_owner).await;
 
     match result {
         Ok(native) => Ok(SuccessorLaunchOutcome::Launched(native)),

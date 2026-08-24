@@ -3,6 +3,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt as _;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use std::sync::{Arc, Mutex};
@@ -63,10 +64,6 @@ struct StructuredWorkload {
     workload_home: String,
     active_login_id: Option<String>,
     bound_session_id: Option<String>,
-    /// Byte identity for the baseline that the executor independently pins as
-    /// a read-only isolation overlay. The exact admitted argv remains the
-    /// primary security configuration authority.
-    admitted_baseline_config: Vec<u8>,
     profile: StructuredSessionProfile,
     route_set: String,
     allowed_effect_classes: HashSet<RouteEffectClass>,
@@ -590,7 +587,7 @@ fn run() -> Result<()> {
         &profile.workload_realization_id,
         executable_name,
     )?;
-    install_or_verify_baseline_config(
+    reset_compatibility_baseline_config(
         std::path::Path::new(&workload_home),
         &baseline_config,
         &profile.baseline_destination,
@@ -601,8 +598,6 @@ fn run() -> Result<()> {
             .ok_or_else(|| anyhow!("structured-session profile has no parent"))?,
         &profile,
     )?;
-    let admitted_baseline_config = std::fs::read(&baseline_config)
-        .context("retain read-only structured-session baseline evidence")?;
     // SAFETY: the signed protocol gives this process unique ownership of the
     // inherited descriptor. No other safe Rust owner is constructed.
     let mut channel = unsafe { UnixStream::from_raw_fd(fd) };
@@ -613,13 +608,13 @@ fn run() -> Result<()> {
         })?,
         &workspace,
         &workload_home,
-        admitted_baseline_config,
         profile,
         route_set,
         allowed_effect_classes,
         schemas,
     )?;
     app.initialize()?;
+    protect_profile_home(std::path::Path::new(&workload_home))?;
     let workload_pid = app.child.id();
     let app = Arc::new(Mutex::new(app));
     let (workload_result_sender, workload_results) = sync_channel::<WorkloadCommandResult>(32);
@@ -836,12 +831,13 @@ fn disable_core_dumps() -> Result<()> {
     Ok(())
 }
 
-/// Installs and verifies the admitted compatibility baseline. Mode 0400 and
-/// the before/after drift checks are not a same-UID authority boundary. The
-/// signed immutable argv is the sole security configuration authority; an
-/// enforced generic isolation backend may additionally overlay this file
-/// read-only.
-fn install_or_verify_baseline_config(
+/// Atomically reset the workload's compatibility seed before each process
+/// generation. This file is deliberately not a same-UID authority boundary:
+/// the signed immutable argv is the sole security configuration authority,
+/// and an enforced generic isolation backend may additionally overlay the
+/// seed read-only. Workload-authored compatible state is discarded at the
+/// next launch rather than mistaken for admitted policy.
+fn reset_compatibility_baseline_config(
     workload_home: &std::path::Path,
     source: &std::path::Path,
     destination_name: &str,
@@ -852,42 +848,41 @@ fn install_or_verify_baseline_config(
         bail!("admitted structured-session baseline config is empty or exceeds its bound");
     }
     let destination = workload_home.join(destination_name);
-    if !destination.exists() {
-        let temporary = workload_home.join(".ryeos-baseline.pending");
-        if temporary.exists() {
-            let metadata = std::fs::symlink_metadata(&temporary)
-                .context("inspect incomplete baseline config")?;
-            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-                bail!("incomplete baseline config is not a regular file");
-            }
-            std::fs::remove_file(&temporary).context("remove incomplete baseline config")?;
+    match std::fs::symlink_metadata(&destination) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_file() => {
+            bail!("profile workload compatibility seed is not a regular file");
         }
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true).mode(0o400);
-        let mut file = options
-            .open(&temporary)
-            .context("create incomplete baseline config")?;
-        file.write_all(&admitted)
-            .context("write admitted baseline config")?;
-        file.sync_all().context("sync admitted baseline config")?;
-        std::fs::rename(&temporary, &destination).context("publish admitted baseline config")?;
-        let directory =
-            std::fs::File::open(workload_home).context("open workload home for sync")?;
-        directory.sync_all().context("sync workload home")?;
+        Ok(metadata)
+            if metadata.permissions().mode() & 0o777 == 0o400
+                && std::fs::read(&destination)? == admitted =>
+        {
+            return Ok(());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("inspect profile compatibility seed"),
     }
-    let metadata =
-        std::fs::symlink_metadata(&destination).context("inspect profile baseline config")?;
-    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-        bail!("profile workload home/config.toml is not a regular file");
+    let temporary = workload_home.join(".ryeos-baseline.pending");
+    if temporary.exists() {
+        let metadata = std::fs::symlink_metadata(&temporary)
+            .context("inspect incomplete compatibility seed")?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            bail!("incomplete compatibility seed is not a regular file");
+        }
+        std::fs::remove_file(&temporary).context("remove incomplete compatibility seed")?;
     }
-    if metadata.permissions().mode() & 0o777 != 0o400 {
-        bail!("profile workload home/config.toml is not owner-read-only");
-    }
-    let actual =
-        std::fs::read(&destination).context("read profile structured-session baseline config")?;
-    if actual != admitted {
-        bail!("profile workload home/config.toml differs from its admitted compatibility baseline");
-    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true).mode(0o400);
+    let mut file = options
+        .open(&temporary)
+        .context("create compatibility seed staging file")?;
+    file.write_all(&admitted)
+        .context("write admitted compatibility seed")?;
+    file.sync_all()
+        .context("sync admitted compatibility seed")?;
+    std::fs::rename(&temporary, &destination).context("publish compatibility seed")?;
+    let directory = std::fs::File::open(workload_home).context("open workload home for sync")?;
+    directory.sync_all().context("sync workload home")?;
     Ok(())
 }
 
@@ -959,48 +954,75 @@ fn resolve_pinned_executable(
     Ok(path)
 }
 
-fn require_profile_home_within_limit(root: &std::path::Path) -> Result<u64> {
-    fn visit(path: &std::path::Path, entries: &mut usize, bytes: &mut u64) -> Result<()> {
-        for entry in std::fs::read_dir(path).context("enumerate profile home")? {
-            let entry = entry.context("read profile-home entry")?;
+fn protect_profile_home(root: &std::path::Path) -> Result<u64> {
+    const MAX_PROFILE_HOME_DEPTH: usize = 64;
+
+    fn visit(
+        directory: &lillux::PinnedDirectory,
+        root_device: u64,
+        depth: usize,
+        entries: &mut usize,
+        bytes: &mut u64,
+    ) -> Result<()> {
+        if depth > MAX_PROFILE_HOME_DEPTH {
+            bail!("profile workload home reached its directory-depth ceiling");
+        }
+        let remaining = MAX_PROFILE_HOME_ENTRIES
+            .checked_sub(*entries)
+            .ok_or_else(|| anyhow!("profile-home entry count underflow"))?;
+        for observed in directory
+            .entries_no_follow_bounded(remaining)
+            .context("enumerate profile home without following links")?
+        {
             *entries = entries
                 .checked_add(1)
                 .ok_or_else(|| anyhow!("profile-home entry count overflow"))?;
-            if *entries > MAX_PROFILE_HOME_ENTRIES {
-                bail!("profile workload home reached its entry ceiling");
+            if observed.containing_device != root_device {
+                bail!("profile workload home crosses a mounted filesystem");
             }
-            let metadata = std::fs::symlink_metadata(entry.path())
-                .context("inspect profile-home entry without following links")?;
-            if metadata.file_type().is_symlink() || !metadata.is_file() && !metadata.is_dir() {
-                bail!("profile workload home contains a link or special entry");
-            }
-            if metadata.permissions().mode() & 0o077 != 0 {
-                bail!("profile workload home entry grants group or other permissions");
-            }
-            if metadata.is_dir() {
-                visit(&entry.path(), entries, bytes)?;
-            } else {
-                *bytes = bytes
-                    .checked_add(metadata.len())
-                    .ok_or_else(|| anyhow!("profile-home byte count overflow"))?;
-                if *bytes > MAX_PROFILE_HOME_BYTES {
-                    bail!("profile workload home reached its byte ceiling");
+            let opened = directory
+                .open_entry(&observed.name, false)
+                .context("open profile-home entry without following links")?
+                .ok_or_else(|| anyhow!("profile-home entry disappeared during protection"))?;
+            match opened {
+                lillux::PinnedDirectoryEntry::Directory(child) => {
+                    if observed.entry_type != lillux::PinnedEntryType::Directory {
+                        bail!("profile-home entry identity changed during protection");
+                    }
+                    if observed.mode & 0o700 != 0o700 {
+                        bail!("profile workload home directory is not owner-accessible");
+                    }
+                    child.set_mode(0o700)?;
+                    visit(&child, root_device, depth + 1, entries, bytes)?;
+                }
+                lillux::PinnedDirectoryEntry::Regular(file) => {
+                    if observed.entry_type != lillux::PinnedEntryType::Regular {
+                        bail!("profile-home entry identity changed during protection");
+                    }
+                    let metadata = file.metadata().context("inspect open profile-home file")?;
+                    if !metadata.is_file() {
+                        bail!("profile workload home contains a special entry");
+                    }
+                    *bytes = bytes
+                        .checked_add(metadata.len())
+                        .ok_or_else(|| anyhow!("profile-home byte count overflow"))?;
+                    if *bytes > MAX_PROFILE_HOME_BYTES {
+                        bail!("profile workload home reached its byte ceiling");
+                    }
+                    lillux::set_open_regular_file_mode(&file, observed.mode & 0o700)?;
                 }
             }
         }
         Ok(())
     }
 
-    let metadata = std::fs::symlink_metadata(root).context("inspect profile workload home")?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        bail!("profile workload home is not a directory");
-    }
-    if metadata.permissions().mode() & 0o077 != 0 {
-        bail!("profile workload home grants group or other permissions");
-    }
+    let home = lillux::PinnedDirectory::open(root)?
+        .ok_or_else(|| anyhow!("profile workload home is missing"))?;
+    let (root_device, _) = home.device_inode()?;
+    home.set_mode(0o700)?;
     let mut entries = 0usize;
     let mut bytes = 0u64;
-    visit(root, &mut entries, &mut bytes)?;
+    visit(&home, root_device, 0, &mut entries, &mut bytes)?;
     Ok(bytes)
 }
 
@@ -1019,12 +1041,24 @@ fn set_close_on_exec(stream: &UnixStream) -> Result<()> {
     Ok(())
 }
 
+fn configure_private_creation_mask(command: &mut Command) {
+    // The structured workload owns opaque credential/state bytes under its
+    // node-private home. Install the creation mask only in the forked child:
+    // changing the daemon/bridge process-wide umask would race unrelated
+    // threads. The workload and all descendants inherit this owner-only mask.
+    unsafe {
+        command.pre_exec(|| {
+            libc::umask(0o077);
+            Ok(())
+        });
+    }
+}
+
 impl StructuredWorkload {
     fn start(
         executable: &str,
         workspace: &str,
         workload_home: &str,
-        admitted_baseline_config: Vec<u8>,
         profile: StructuredSessionProfile,
         route_set: String,
         allowed_effect_classes: HashSet<RouteEffectClass>,
@@ -1042,6 +1076,7 @@ impl StructuredWorkload {
             .env("LC_ALL", "C")
             .env(&profile.workload_home_env, workload_home)
             .env("HOME", workload_home);
+        configure_private_creation_mask(&mut command);
         let mut child = command
             .spawn()
             .with_context(|| format!("start pinned structured-session workload `{executable}`"))?;
@@ -1079,7 +1114,6 @@ impl StructuredWorkload {
             workload_home: workload_home.to_owned(),
             active_login_id: None,
             bound_session_id: None,
-            admitted_baseline_config,
             profile,
             route_set,
             allowed_effect_classes,
@@ -1114,7 +1148,7 @@ impl StructuredWorkload {
     }
 
     fn handle(&mut self, body: Value, workspace: &str) -> Result<Value> {
-        self.verify_baseline_config()?;
+        protect_profile_home(std::path::Path::new(&self.workload_home))?;
         self.drain_incoming()?;
         self.expire_server_requests()?;
         if let Some(reason) = self.fatal.as_deref() {
@@ -1133,12 +1167,12 @@ impl StructuredWorkload {
             .ok_or_else(|| anyhow!("structured-session command has no route id"))?;
         let payload = object.get("payload").cloned().unwrap_or_else(|| json!({}));
         let result = self.handle_route(route_id, payload, workspace, RouteAudience::Public);
-        self.verify_baseline_config()?;
+        protect_profile_home(std::path::Path::new(&self.workload_home))?;
         result
     }
 
     fn handle_control(&mut self, body: Value) -> Result<Value> {
-        self.verify_baseline_config()?;
+        protect_profile_home(std::path::Path::new(&self.workload_home))?;
         let control = body
             .as_object()
             .ok_or_else(|| anyhow!("RyeOS session control must be an object"))?;
@@ -1169,23 +1203,8 @@ impl StructuredWorkload {
             }
             _ => bail!("unsupported RyeOS session control"),
         };
-        self.verify_baseline_config()?;
+        protect_profile_home(std::path::Path::new(&self.workload_home))?;
         result
-    }
-
-    fn verify_baseline_config(&self) -> Result<()> {
-        let destination =
-            std::path::Path::new(&self.workload_home).join(&self.profile.baseline_destination);
-        let metadata = std::fs::symlink_metadata(&destination)
-            .context("inspect retained structured-session baseline")?;
-        if metadata.file_type().is_symlink()
-            || !metadata.file_type().is_file()
-            || metadata.permissions().mode() & 0o777 != 0o400
-            || std::fs::read(&destination)? != self.admitted_baseline_config
-        {
-            bail!("structured-session baseline config changed after admission");
-        }
-        Ok(())
     }
 
     fn validate_schema(&self, identity: &str, value: &Value) -> Result<()> {
@@ -1260,7 +1279,6 @@ impl StructuredWorkload {
         if matches!(route.ceremony, Some(CeremonyAction::Start)) && self.active_login_id.is_some() {
             bail!("one credential enrollment is already active for this worker");
         }
-        require_profile_home_within_limit(std::path::Path::new(&self.workload_home))?;
         let expected_binding = prepare_session_binding(
             route.session_binding.as_ref(),
             &self.bound_session_id,
@@ -2152,11 +2170,11 @@ mod tests {
     }
 
     #[test]
-    fn baseline_is_owner_only_and_detects_drift() {
+    fn compatibility_baseline_is_owner_only_and_resets_workload_state() {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("admitted.conf");
         std::fs::write(&source, b"policy = \"fixed\"\n").unwrap();
-        install_or_verify_baseline_config(root.path(), &source, "runtime.conf").unwrap();
+        reset_compatibility_baseline_config(root.path(), &source, "runtime.conf").unwrap();
         assert_eq!(
             std::fs::metadata(root.path().join("runtime.conf"))
                 .unwrap()
@@ -2165,8 +2183,93 @@ mod tests {
                 & 0o777,
             0o400
         );
-        std::fs::write(&source, b"policy = \"changed\"\n").unwrap();
-        assert!(install_or_verify_baseline_config(root.path(), &source, "runtime.conf").is_err());
+        std::fs::set_permissions(
+            root.path().join("runtime.conf"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        std::fs::write(root.path().join("runtime.conf"), b"workload = \"state\"\n").unwrap();
+        reset_compatibility_baseline_config(root.path(), &source, "runtime.conf").unwrap();
+        assert_eq!(
+            std::fs::read(root.path().join("runtime.conf")).unwrap(),
+            b"policy = \"fixed\"\n"
+        );
+    }
+
+    #[test]
+    fn structured_workload_creates_owner_only_files_and_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("touch child-file && mkdir child-dir")
+            .current_dir(root.path());
+        // Prove the structured-session hook wins over a permissive mask
+        // installed by an earlier child-only hook.
+        unsafe {
+            command.pre_exec(|| {
+                libc::umask(0o000);
+                Ok(())
+            });
+        }
+        configure_private_creation_mask(&mut command);
+        assert!(command.status().unwrap().success());
+        assert_eq!(
+            std::fs::metadata(root.path().join("child-file"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(root.path().join("child-dir"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn profile_home_protection_tightens_only_group_and_other_permissions() {
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        let writable = child.join("state");
+        let read_only = root.path().join("baseline");
+        std::fs::write(&writable, b"state").unwrap();
+        std::fs::write(&read_only, b"baseline").unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&writable, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        assert_eq!(protect_profile_home(root.path()).unwrap(), 13);
+        assert_eq!(
+            std::fs::metadata(root.path()).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&child).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&writable).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&read_only).unwrap().permissions().mode() & 0o777,
+            0o400
+        );
+    }
+
+    #[test]
+    fn profile_home_protection_rejects_links() {
+        let root = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("missing", root.path().join("link")).unwrap();
+        assert!(protect_profile_home(root.path()).is_err());
     }
 
     #[test]

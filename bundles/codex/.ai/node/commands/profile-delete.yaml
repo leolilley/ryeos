@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-18T23:04:02Z:5a14ef93ec29f0afb4520162edfda5eb44d9382c0b53dad123d9bacbedabed85:Sd06Q+CBI7c/y9P/OvSGDmL4+CUvxqcuWhJYZlFTOq44Rqm1FaWnY+pwTgwsRMqDo8InBxmCK2NXjXF6UF+PAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-24T03:55:19Z:5a14ef93ec29f0afb4520162edfda5eb44d9382c0b53dad123d9bacbedabed85:Sd06Q+CBI7c/y9P/OvSGDmL4+CUvxqcuWhJYZlFTOq44Rqm1FaWnY+pwTgwsRMqDo8InBxmCK2NXjXF6UF+PAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [codex, profile, delete]
 description: "Delete one revoked or unauthenticated Codex credential profile"
 forms:

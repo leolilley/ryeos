@@ -1000,7 +1000,7 @@ CREATE TABLE IF NOT EXISTS worker_process (
     control_channel_identity TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('starting', 'attached', 'live', 'draining', 'dead')),
     daemon_generation_id TEXT NOT NULL,
-    session_id TEXT NOT NULL UNIQUE,
+    session_id TEXT NOT NULL,
     cleanup_state TEXT NOT NULL CHECK (cleanup_state IN ('owned', 'draining', 'reaped', 'unproved')),
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL
@@ -1008,6 +1008,9 @@ CREATE TABLE IF NOT EXISTS worker_process (
 
 CREATE INDEX IF NOT EXISTS idx_worker_process_daemon_state
     ON worker_process(daemon_generation_id, state);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_process_session_epoch
+    ON worker_process(session_id, boot_epoch);
 
 CREATE TABLE IF NOT EXISTS dedicated_session (
     session_id TEXT PRIMARY KEY,
@@ -1138,7 +1141,10 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // metadata. It deliberately has no open-time migration.
 // Epoch 7 adds the durable pre-contact boundary for worker-pushed observation
 // batches. It deliberately has no open-time migration.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 7;
+// Epoch 8 retains every worker boot as immutable process-history evidence and
+// uniquely identifies an epoch within its session. Predecessor epoch 7's
+// single-row-per-session constraint cannot represent a recovered worker.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 8;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -2577,6 +2583,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 table: "worker_process",
                 columns: &["daemon_generation_id", "state"],
                 unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_worker_process_session_epoch",
+                table: "worker_process",
+                columns: &["session_id", "boot_epoch"],
+                unique: true,
             },
             sqlite_schema::IndexSpec {
                 name: "idx_dedicated_session_owner_state",
@@ -5838,17 +5850,29 @@ impl RuntimeDb {
         if !credential_fenced {
             bail!("dedicated worker attachment lost its credential generation/lock fence");
         }
-        let workspace_state: Option<String> = tx
+        let workspace: Option<(String, Option<String>, Option<String>)> = tx
             .query_row(
-                "SELECT state FROM execution_workspace
-                 WHERE workspace_id = ?1 AND thread_id = ?2",
+                "SELECT execution_workspace.state,
+                        execution_workspace.process_identity,
+                        thread_runtime.process_identity
+                   FROM execution_workspace
+                   LEFT JOIN thread_runtime ON thread_runtime.thread_id = ?2
+                  WHERE workspace_id = ?1 AND execution_workspace.thread_id = ?2",
                 params![workspace_id, root_thread_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
-        if workspace_state.as_deref() != Some("ready") {
-            bail!("dedicated worker workspace is not ready and owned by its session");
-        }
+        let workspace_handoff_identity = match workspace {
+            Some((state, None, _)) if state == "ready" => None,
+            Some((state, Some(workspace_identity), Some(root_identity)))
+                if state == "active" && workspace_identity == root_identity =>
+            {
+                Some(workspace_identity)
+            }
+            _ => bail!(
+                "dedicated worker workspace is not ready or actively owned by its root process"
+            ),
+        };
         let process_identity = serde_json::to_string(&record.process_identity)
             .context("serialize worker process identity")?;
         tx.execute(
@@ -5876,12 +5900,28 @@ impl RuntimeDb {
                 record.updated_at_ms,
             ],
         )?;
-        let workspace_changed = tx.execute(
-            "UPDATE execution_workspace
-             SET state = 'active', process_identity = ?2, updated_at_ms = ?3
-             WHERE workspace_id = ?1 AND state = 'ready'",
-            params![workspace_id, process_identity, record.updated_at_ms],
-        )?;
+        let workspace_changed = match workspace_handoff_identity {
+            None => tx.execute(
+                "UPDATE execution_workspace
+                    SET state = 'active', process_identity = ?2, updated_at_ms = ?3
+                  WHERE workspace_id = ?1 AND state = 'ready' AND process_identity IS NULL",
+                params![workspace_id, process_identity, record.updated_at_ms],
+            )?,
+            Some(root_identity) => tx.execute(
+                "UPDATE execution_workspace
+                    SET process_identity = ?2, updated_at_ms = ?3
+                  WHERE workspace_id = ?1 AND state = 'active' AND process_identity = ?4
+                    AND EXISTS(SELECT 1 FROM thread_runtime
+                      WHERE thread_id = ?5 AND process_identity = ?4)",
+                params![
+                    workspace_id,
+                    process_identity,
+                    record.updated_at_ms,
+                    root_identity,
+                    root_thread_id,
+                ],
+            )?,
+        };
         let session_changed = tx.execute(
             "UPDATE dedicated_session
              SET worker_instance_id = ?2, worker_boot_epoch = ?3,
@@ -9561,6 +9601,89 @@ impl RuntimeDb {
         Ok(())
     }
 
+    /// Transfer a retained workspace from one proved-dead launch owner to the
+    /// current same-thread recovery claim. Backend/root evidence is verified
+    /// by the caller before this transaction; this boundary makes the owner
+    /// replacement and removal of the stale process attachment indivisible.
+    pub fn rebind_workspace_for_recovery(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        previous_launch_owner: &str,
+        recovery_launch_owner: &str,
+        expected_state: WorkspaceState,
+        expected_process_identity: Option<&str>,
+    ) -> Result<()> {
+        if !matches!(
+            expected_state,
+            WorkspaceState::Ready | WorkspaceState::Active | WorkspaceState::Freezing
+        ) {
+            bail!("retained workspace recovery requires ready, active, or freezing state");
+        }
+        let recovery_state = if expected_state == WorkspaceState::Freezing {
+            WorkspaceState::Freezing
+        } else {
+            WorkspaceState::Ready
+        };
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+            .context("begin retained workspace owner transfer")?;
+        let claim_owner: Option<String> = tx
+            .query_row(
+                "SELECT claimed_by FROM thread_launch_claim WHERE thread_id=?1",
+                params![thread_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if claim_owner.as_deref() != Some(recovery_launch_owner) {
+            bail!("retained workspace recovery lost its current launch claim");
+        }
+        let existing: Option<(
+            Option<String>,
+            Option<String>,
+            WorkspaceState,
+            Option<String>,
+        )> = tx
+            .query_row(
+                "SELECT thread_id, launch_owner, state, process_identity
+                   FROM execution_workspace WHERE workspace_id=?1",
+                params![workspace_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((workspace_thread, workspace_owner, state, process_identity)) = existing else {
+            bail!("retained workspace {workspace_id} disappeared");
+        };
+        if workspace_thread.as_deref() != Some(thread_id)
+            || workspace_owner.as_deref() != Some(previous_launch_owner)
+            || state != expected_state
+            || process_identity.as_deref() != expected_process_identity
+        {
+            bail!("retained workspace owner or process evidence changed before recovery");
+        }
+        let changed = tx.execute(
+            "UPDATE execution_workspace
+                SET launch_owner=?4, state=?5, process_identity=NULL, updated_at_ms=?6
+              WHERE workspace_id=?1 AND thread_id=?2 AND launch_owner=?3
+                AND state=?7
+                AND ((?8 IS NULL AND process_identity IS NULL) OR process_identity=?8)",
+            params![
+                workspace_id,
+                thread_id,
+                previous_launch_owner,
+                recovery_launch_owner,
+                recovery_state.as_str(),
+                lillux::time::timestamp_millis(),
+                expected_state.as_str(),
+                expected_process_identity,
+            ],
+        )?;
+        if changed != 1 {
+            bail!("retained workspace owner transfer lost its exact row CAS");
+        }
+        tx.commit()
+            .context("commit retained workspace owner transfer")
+    }
+
     /// Atomically publish the result of a callback freeze into both durable
     /// recovery authorities. The workspace row is the lifecycle journal; the
     /// thread launch metadata is the native-resume seed. They must never name
@@ -11532,6 +11655,268 @@ mod tests {
     }
 
     #[test]
+    fn dedicated_worker_recovery_retains_prior_boot_and_attaches_next_epoch() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-recover", "worker-recover-1");
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    lower_snapshot, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-recover', 'T-recover', 'owner', 'backend',
+                           'a', '/tmp/workspace-recover', 'ready', 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            session_id: "S-recover",
+            root_thread_id: "T-recover",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-recover",
+            candidate_required: false,
+            credential_profile_id: "P-recover",
+            credential_generation: 1,
+            credential_lock_owner: "worker-recover-1",
+        })
+        .unwrap();
+        let first = WorkerProcessRecord {
+            worker_instance_id: "worker-recover-1".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "a".repeat(64),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(131, 131),
+            control_channel_identity: "fd:recover-1".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "daemon-one".to_owned(),
+            session_id: "S-recover".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: 2,
+            updated_at_ms: 2,
+        };
+        db.attach_worker_process(&first).unwrap();
+        db.complete_worker_binding("worker-recover-1", "S-recover", 1)
+            .unwrap();
+        db.fence_abandoned_worker_process("worker-recover-1", "S-recover", 1, "reaped")
+            .unwrap();
+
+        db.acquire_credential_profile("P-recover", "fp:operator", "worker-recover-2")
+            .unwrap();
+        assert_eq!(
+            db.prepare_dedicated_session_recovery("S-recover", 1, "worker-recover-2")
+                .unwrap(),
+            2
+        );
+        let second = WorkerProcessRecord {
+            worker_instance_id: "worker-recover-2".to_owned(),
+            boot_identity_hash: "c".repeat(64),
+            boot_epoch: 2,
+            process_identity: fake_process_identity(132, 132),
+            control_channel_identity: "fd:recover-2".to_owned(),
+            daemon_generation_id: "daemon-two".to_owned(),
+            created_at_ms: 3,
+            updated_at_ms: 3,
+            ..first.clone()
+        };
+        db.attach_worker_process(&second).unwrap();
+
+        assert_eq!(
+            db.worker_process("worker-recover-1")
+                .unwrap()
+                .unwrap()
+                .cleanup_state,
+            "reaped"
+        );
+        assert_eq!(
+            db.worker_process("worker-recover-2")
+                .unwrap()
+                .unwrap()
+                .boot_epoch,
+            2
+        );
+        let history_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM worker_process WHERE session_id='S-recover'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(history_count, 2);
+    }
+
+    #[test]
+    fn retained_workspace_recovery_is_exact_claim_and_owner_fenced() {
+        let (_tmp, db) = fresh_db();
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id, backend_version,
+                    pinned_root_identities, mount_identity, lower_snapshot, root_path,
+                    state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-retained', 'T-retained', 'old-owner', 'backend', 'v1',
+                           '{}', 'mount', ?1, '/tmp/W-retained', 'ready', 1, 1)",
+                [&"a".repeat(64)],
+            )
+            .unwrap();
+        assert!(matches!(
+            db.claim_thread_launch("T-retained", "claim-retained", "daemon-new")
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
+        ));
+        let recovery_owner = db
+            .get_launch_claim("T-retained")
+            .unwrap()
+            .unwrap()
+            .claimed_by;
+
+        assert!(
+            db.rebind_workspace_for_recovery(
+                "W-retained",
+                "T-retained",
+                "wrong-old-owner",
+                &recovery_owner,
+                WorkspaceState::Ready,
+                None,
+            )
+            .is_err()
+        );
+        db.rebind_workspace_for_recovery(
+            "W-retained",
+            "T-retained",
+            "old-owner",
+            &recovery_owner,
+            WorkspaceState::Ready,
+            None,
+        )
+        .unwrap();
+        let retained = db.workspace("W-retained").unwrap().unwrap();
+        assert_eq!(retained.state, WorkspaceState::Ready);
+        assert_eq!(
+            retained.launch_owner.as_deref(),
+            Some(recovery_owner.as_str())
+        );
+        assert!(retained.process_identity.is_none());
+
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id, backend_version,
+                    pinned_root_identities, mount_identity, lower_snapshot,
+                    frozen_snapshot_hash, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-frozen', 'T-frozen', 'old-frozen-owner', 'backend', 'v1',
+                           '{}', 'mount', ?1, ?2, '/tmp/W-frozen', 'freezing', 1, 1)",
+                rusqlite::params!["b".repeat(64), "c".repeat(64)],
+            )
+            .unwrap();
+        assert!(matches!(
+            db.claim_thread_launch("T-frozen", "claim-frozen", "daemon-new")
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
+        ));
+        let frozen_recovery_owner = db.get_launch_claim("T-frozen").unwrap().unwrap().claimed_by;
+        db.rebind_workspace_for_recovery(
+            "W-frozen",
+            "T-frozen",
+            "old-frozen-owner",
+            &frozen_recovery_owner,
+            WorkspaceState::Freezing,
+            None,
+        )
+        .unwrap();
+        let frozen = db.workspace("W-frozen").unwrap().unwrap();
+        assert_eq!(frozen.state, WorkspaceState::Freezing);
+        assert_eq!(
+            frozen.frozen_snapshot_hash.as_deref(),
+            Some("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+        );
+        assert_eq!(
+            frozen.launch_owner.as_deref(),
+            Some(frozen_recovery_owner.as_str())
+        );
+    }
+
+    #[test]
+    fn dedicated_worker_attachment_hands_off_an_active_root_workspace_exactly() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-handoff", "worker-handoff");
+        let root_identity = serde_json::to_string(&fake_process_identity(124, 124)).unwrap();
+        let stale_identity = serde_json::to_string(&fake_process_identity(125, 125)).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO thread_runtime (thread_id, chain_root_id, process_identity)
+                 VALUES ('T-handoff', 'T-handoff', ?1)",
+                [&root_identity],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    lower_snapshot, root_path, state, process_identity,
+                    created_at_ms, updated_at_ms
+                 ) VALUES ('W-handoff', 'T-handoff', 'owner', 'backend',
+                           'a', '/tmp/workspace-handoff', 'active', ?1, 1, 1)",
+                [&stale_identity],
+            )
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            session_id: "S-handoff",
+            root_thread_id: "T-handoff",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-handoff",
+            candidate_required: true,
+            credential_profile_id: "P-handoff",
+            credential_generation: 1,
+            credential_lock_owner: "worker-handoff",
+        })
+        .unwrap();
+        let record = WorkerProcessRecord {
+            worker_instance_id: "worker-handoff".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "a".repeat(64),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(126, 126),
+            control_channel_identity: "fd:handoff".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "daemon-one".to_owned(),
+            session_id: "S-handoff".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: 2,
+            updated_at_ms: 2,
+        };
+
+        assert!(db.attach_worker_process(&record).is_err());
+        assert!(db.worker_process("worker-handoff").unwrap().is_none());
+        db.conn
+            .execute(
+                "UPDATE execution_workspace SET process_identity=?2
+                  WHERE workspace_id=?1",
+                params!["W-handoff", root_identity],
+            )
+            .unwrap();
+        db.attach_worker_process(&record).unwrap();
+
+        let (state, process_identity): (String, String) = db
+            .conn
+            .query_row(
+                "SELECT state, process_identity FROM execution_workspace
+                  WHERE workspace_id='W-handoff'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "active");
+        assert_eq!(
+            process_identity,
+            serde_json::to_string(&record.process_identity).unwrap()
+        );
+    }
+
+    #[test]
     fn credential_revocation_fences_worker_attachment() {
         let (_tmp, db) = fresh_db();
         create_locked_profile(&db, "P-fence", "worker-fence");
@@ -11911,12 +12296,12 @@ mod tests {
                 "INSERT INTO dedicated_session(
                     session_id, root_thread_id, owner_principal, admitted_capsule_hash,
                     worker_instance_id, worker_boot_epoch, workspace_id,
-                    credential_profile_id, credential_generation, remote_thread_id,
+                    candidate_required, credential_profile_id, credential_generation, remote_thread_id,
                     current_turn_id, state, send_boundary, candidate_snapshot_hash,
                     candidate_validation_hash, publication_result, terminal_reason,
                     created_at_ms, updated_at_ms
                  ) VALUES ('S-observe', 'T-observe', 'fp:operator', ?1,
-                           'worker-observe', 3, 'W-observe', 'P-observe', 1,
+                           'worker-observe', 3, 'W-observe', 0, 'P-observe', 1,
                            NULL, NULL, 'idle', 'none', NULL, NULL, NULL, NULL, 1, 1)",
                 [&"a".repeat(64)],
             )

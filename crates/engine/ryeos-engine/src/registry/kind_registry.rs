@@ -977,9 +977,24 @@ pub struct PersistentSessionDecl {
     /// Kernel RLIMIT_NPROC ceiling. On Unix this counts processes owned by the
     /// process's real UID, not only descendants of the admitted process.
     pub real_uid_process_limit: u64,
+    /// Optional composed-value path to signed per-worker resource overrides.
+    /// Absence uses the kind default above. The generic compiler accepts only
+    /// its closed override schema and freezes the result into the capsule.
+    #[serde(default)]
+    pub resource_overrides_path: Option<Vec<String>>,
+    /// Kind-owned upper bound for a signed per-worker real-UID ceiling.
+    #[serde(default = "default_max_real_uid_process_limit")]
+    pub max_real_uid_process_limit: u64,
     pub ready_timeout_ms: u64,
     pub request_timeout_ms: u64,
     pub idle_timeout_ms: u64,
+}
+
+fn default_max_real_uid_process_limit() -> u64 {
+    // Backward-reading default for the immediately preceding worker schema.
+    // It preserves that schema's exact effective limit during bundle cutover;
+    // a higher cap exists only when a new kind schema signs it explicitly.
+    512
 }
 
 /// Execution configuration for a kind (resolution pipeline + aliases).
@@ -2493,7 +2508,20 @@ fn parse_execution_schema(
                 || declaration.max_cpu_seconds == 0
                 || declaration.max_cpu_seconds > 7 * 24 * 60 * 60
                 || declaration.real_uid_process_limit == 0
-                || declaration.real_uid_process_limit > 4096
+                || declaration.max_real_uid_process_limit
+                    < declaration.real_uid_process_limit
+                || declaration.max_real_uid_process_limit > 4096
+                || declaration.resource_overrides_path.as_ref().is_some_and(|path| {
+                    path.is_empty()
+                        || path.iter().any(|segment| {
+                            segment.trim().is_empty()
+                                || segment.contains('.')
+                                || segment.chars().any(char::is_control)
+                        })
+                })
+                || (declaration.resource_overrides_path.is_none()
+                    && declaration.max_real_uid_process_limit
+                        != declaration.real_uid_process_limit)
                 || declaration.ready_timeout_ms == 0
                 || declaration.ready_timeout_ms > 10 * 60 * 1000
                 || declaration.request_timeout_ms == 0
@@ -3160,6 +3188,17 @@ mod tests {
     use base64::Engine;
     use lillux::crypto::SigningKey;
     use std::fs;
+
+    #[test]
+    fn persistent_session_decl_reads_pre_override_schema_at_exact_old_limit() {
+        let declaration: PersistentSessionDecl = serde_yaml::from_str(
+            "target_path: [supported_target]\nmax_processes: 1\nmax_inflight_per_process: 1\nmax_address_space_bytes: 17179869184\nmax_cpu_seconds: 3600\nreal_uid_process_limit: 512\nready_timeout_ms: 600000\nrequest_timeout_ms: 3600000\nidle_timeout_ms: 1800000\n",
+        )
+        .unwrap();
+        assert_eq!(declaration.real_uid_process_limit, 512);
+        assert_eq!(declaration.max_real_uid_process_limit, 512);
+        assert!(declaration.resource_overrides_path.is_none());
+    }
 
     #[test]
     fn string_seq_metadata_accepts_comma_separated_scalar() {

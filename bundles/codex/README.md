@@ -10,8 +10,8 @@ credentials in NodeVault or bundle content.
 
 Installed knowledge separates the generic substrate from this integration:
 `knowledge:ryeos/core/execution/worker-hosted-execution` defines worker-hosted
-execution, while `knowledge:ryeos/standard/hosted-codex-activation` defines the
-Codex activation and release-acceptance runbook.
+execution, while `knowledge:codex/hosted-activation` defines the Codex
+activation and release-acceptance runbook shipped by this bundle.
 
 ## Runtime contract
 
@@ -21,21 +21,31 @@ the admission-compiled profile embedded in `worker:codex/hosted`. This is the co
 structured-session boundary, not a Codex kind or a Codex branch in the engine.
 Authentication is Codex's supported ChatGPT device-code flow. Codex durably manages `auth.json`
 inside one daemon-owned, mode-0700 opaque profile `CODEX_HOME`; RyeOS never
-parses or copies the token document. The pinned `ryeos-workspace-only`
+parses or copies the token document. The common bridge applies an owner-only
+creation mask and descriptor-safely strips group/other mode bits at worker IPC
+boundaries; this is generic private-home enforcement, not knowledge of Codex
+filenames. The pinned `ryeos-workspace-only`
 permission profile denies the filesystem root, reopens only Codex's minimal
 runtime paths, and keeps the private CoW project writable while command
 networking stays disabled. Security-critical settings are repeated as immutable
-signed process arguments and are the sole configuration authority. The mode-0400
-compatibility config and bridge drift checks are evidence, not a same-UID
-integrity boundary. When a generic RyeOS isolation backend is enabled it also
-overlays that file read-only, but Codex activation does not require Bubblewrap
-or any other isolation backend. There is no custom credential bridge, token injection, local-LLM
-route, worker pool, or cross-session process reuse.
+signed process arguments and are the sole configuration authority, including
+the built-in OpenAI provider and an empty MCP-server map. RyeOS atomically
+resets the mode-0400 compatibility config before every worker generation; the
+workload may rewrite that seed, but it is neither retained policy nor a
+same-UID integrity boundary. When a generic RyeOS isolation backend is enabled
+it also overlays that file read-only, but Codex activation does not require
+RyeOS's optional Bubblewrap isolation bundle or any other RyeOS isolation
+backend. The official Codex package's own private `codex-resources/bwrap` is a
+separately pinned workload resource used by Codex to enforce the narrower
+model-command permission profile; it is not a RyeOS launch backend. There is no
+custom credential bridge, token injection, local-LLM route, worker pool, or
+cross-session process reuse.
 
-The exact executable is assembled with `assemble.py`, imported through the
-ordinary `external-content import`/`external-content bind` ceremony, and must
-resolve to manifest
-`713c3d1985ca438d8c309631d665c14f8fa0afedfce8b73dc93d0646edfe11ff`.
+The exact Codex executable, same-version code-mode host, and the package's
+`bwrap`, `zsh`, and `rg` runtime resources are assembled from OpenAI's pinned
+standalone package with `assemble.py`. Import and bind all five files through
+the ordinary `external-content import`/`external-content bind` ceremony. Their
+expected manifest hashes and individual file checksums are fixed in
 The activation declaration at `.ai/config/codex/activation.yaml` is the
 machine-readable source of the import bounds and checksums.
 
@@ -59,12 +69,12 @@ ryeos codex profile create personal
 # device response is ephemeral: display its URL/code and do not journal it.
 ryeos codex login open personal --async
 ryeos codex session command LOGIN_SESSION login-1 credential.login.start \
-  --input '{"payload":{}}'
+  --payload '{}'
 
 # After completing the browser/device ceremony, read only sanitized account
 # metadata, then close the short-lived login worker while retaining its profile.
 ryeos codex session command LOGIN_SESSION account-1 credential.account.read \
-  --input '{"payload":{}}'
+  --payload '{}'
 ryeos codex session terminate LOGIN_SESSION completed
 ryeos codex profile get personal
 ryeos codex profile confirm personal LOGIN_EPOCH EXPECTED_ACCOUNT_DIGEST
@@ -74,9 +84,9 @@ ryeos --project . codex session start personal --async --pin-project
 
 # Use the returned thread_id as SESSION.
 ryeos codex session command SESSION thread-1 session.start \
-  --input '{"payload":{}}'
+  --payload '{}'
 ryeos codex session command SESSION turn-1 turn.start \
-  --input '{"payload":{"input":[{"type":"text","text":"Implement the requested change","text_elements":[]}]}}'
+  --payload '{"input":[{"type":"text","text":"Implement the requested change","text_elements":[]}]}'
 
 # App Server notifications are pushed into the root RyeOS thread event chain
 # before the worker receives its acknowledgement. Reattach or replay through

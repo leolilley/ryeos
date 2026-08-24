@@ -16,7 +16,7 @@
 //! the spawned task so background-task panic, error, and success exits
 //! all revoke the per-thread tokens.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -3675,13 +3675,22 @@ pub async fn run_and_wait(
                     session.state
                 );
             }
-            ryeos_app::dedicated_session_service::wait_for_projection_change(
-                &state,
-                &running.thread_id,
-                session.updated_at_ms,
-                std::time::Duration::from_secs(3600),
-            )
-            .await?;
+            tokio::select! {
+                result = ryeos_app::dedicated_session_service::wait_for_projection_change(
+                    &state,
+                    &running.thread_id,
+                    session.updated_at_ms,
+                    std::time::Duration::from_secs(24 * 60 * 60),
+                ) => {
+                    result?;
+                }
+                _ = state.state_store.wait_for_process_attachment_admission_close() => {
+                    let _ = state.state_store.reset_resume_attempts(&running.thread_id);
+                    anyhow::bail!(
+                        "session-bound candidate disposition interrupted by daemon shutdown"
+                    );
+                }
+            }
         }
     }
 
@@ -4891,13 +4900,22 @@ async fn dispatch_detached_bg_task(
                                 session.state
                             );
                         }
-                        ryeos_app::dedicated_session_service::wait_for_projection_change(
-                            &bg_state,
-                            &bg_thread_id,
-                            session.updated_at_ms,
-                            std::time::Duration::from_secs(3600),
-                        )
-                        .await?;
+                        tokio::select! {
+                            result = ryeos_app::dedicated_session_service::wait_for_projection_change(
+                                &bg_state,
+                                &bg_thread_id,
+                                session.updated_at_ms,
+                                std::time::Duration::from_secs(24 * 60 * 60),
+                            ) => {
+                                result?;
+                            }
+                            _ = bg_state.state_store.wait_for_process_attachment_admission_close() => {
+                                let _ = bg_state.state_store.reset_resume_attempts(&bg_thread_id);
+                                anyhow::bail!(
+                                    "detached session-bound candidate disposition interrupted by daemon shutdown"
+                                );
+                            }
+                        }
                     }
                     Ok::<(), anyhow::Error>(())
                 }
@@ -5340,6 +5358,178 @@ fn execution_provenance_from_resume_context(
             );
         }
     }
+}
+
+/// Recover the exact unpublished CoW workspace owned by a same-thread native
+/// resume. This is generic execution infrastructure: the admitted runtime and
+/// worker data decide whether the resumed program reattaches any remote
+/// session.
+///
+/// Reconciliation first proves the previous process owner dead and preserves
+/// this row. Here the new launch claim re-verifies the backend/root journal,
+/// rebuilds immutable resolution authority from the admitted CAS snapshot,
+/// and atomically transfers only the operational workspace owner.
+pub fn retained_workspace_provenance_for_native_resume(
+    state: &AppState,
+    thread_id: &str,
+    recovery_launch_owner: &str,
+    resume: &ResumeContext,
+) -> Result<Option<ExecutionProvenance>> {
+    let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+        snapshot_hash,
+        realization: ryeos_state::objects::PinnedProjectRealization::Cow { .. },
+        ..
+    } = &resume.project_authority
+    else {
+        return Ok(None);
+    };
+    let original_project_path = match decide_resume_provenance(resume) {
+        ResumeProvenanceDecision::PinnedPushedHead(pinned) => {
+            if pinned.snapshot_hash != *snapshot_hash {
+                anyhow::bail!("retained pushed-head identity changed before native resume");
+            }
+            pinned.original_project_path.clone()
+        }
+        ResumeProvenanceDecision::PinnedLocalSnapshot {
+            snapshot_hash: retained_snapshot,
+            original_path,
+        } => {
+            if retained_snapshot != snapshot_hash {
+                anyhow::bail!("retained local snapshot identity changed before native resume");
+            }
+            original_path.to_path_buf()
+        }
+        _ => return Ok(None),
+    };
+    let Some(workspace) = state
+        .state_store
+        .execution_workspace_for_thread(thread_id)?
+    else {
+        return Ok(None);
+    };
+    if workspace.thread_id.as_deref() != Some(thread_id)
+        || workspace.lower_snapshot != *snapshot_hash
+        || !matches!(
+            workspace.state,
+            WorkspaceState::Ready | WorkspaceState::Active | WorkspaceState::Freezing
+        )
+        || workspace.backend_id.is_none()
+        || workspace.backend_version.is_none()
+        || workspace.pinned_root_identities.is_none()
+        || workspace.mount_identity.is_none()
+    {
+        anyhow::bail!("retained execution workspace journal is incomplete or contradictory");
+    }
+    let previous_launch_owner = workspace
+        .launch_owner
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("retained execution workspace has no launch owner"))?;
+    let recorded_process_identity = workspace
+        .process_identity
+        .as_deref()
+        .map(serde_json::from_str::<ryeos_app::process::ExecutionProcessIdentity>)
+        .transpose()
+        .context("decode retained execution-workspace process identity")?;
+    if matches!(
+        workspace.state,
+        WorkspaceState::Ready | WorkspaceState::Freezing
+    ) && recorded_process_identity.is_some()
+    {
+        anyhow::bail!("ready/frozen retained execution workspace still has a process attachment");
+    }
+    if workspace.state == WorkspaceState::Freezing && workspace.frozen_snapshot_hash.is_none() {
+        anyhow::bail!("frozen retained execution workspace has no candidate generation");
+    }
+    if recorded_process_identity.as_ref().is_some_and(|identity| {
+        ryeos_app::process::execution_group_liveness(identity)
+            != ryeos_app::process::IdentityLiveness::DeadOrStale
+    }) {
+        anyhow::bail!("retained execution workspace process owner is not proved dead");
+    }
+    let root = PathBuf::from(&workspace.root_path);
+    if root.file_name().and_then(|name| name.to_str()) != Some(workspace.workspace_id.as_str()) {
+        anyhow::bail!("retained execution workspace root does not encode its journal identity");
+    }
+    let layout = super::workspace::WorkspaceLayout::from_root(root.clone());
+    let observed = state
+        .isolation
+        .workspace_lifecycle(ryeos_engine::isolation::WorkspaceLifecycleInvocation {
+            operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create,
+            workspace_id: &workspace.workspace_id,
+            launch_owner: previous_launch_owner,
+            lower_snapshot: snapshot_hash,
+            lower_path: &layout.lower,
+            upper_path: &layout.upper,
+            work_path: &layout.work,
+        })
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let observed_roots =
+        lillux::canonical_json(&serde_json::to_value(&observed.pinned_root_identities)?)?;
+    if workspace.backend_id.as_deref() != Some(observed.backend_id.as_str())
+        || workspace.backend_version.as_deref() != Some(observed.backend_version.as_str())
+        || workspace.pinned_root_identities.as_deref() != Some(observed_roots.as_str())
+        || workspace.mount_identity.as_deref() != Some(observed.mount_identity.as_str())
+    {
+        anyhow::bail!("retained execution workspace no longer matches its backend/root journal");
+    }
+    let pinned_roots: BTreeMap<String, String> = serde_json::from_str(
+        workspace
+            .pinned_root_identities
+            .as_deref()
+            .expect("complete retained workspace has pinned roots"),
+    )
+    .context("decode retained workspace root identities")?;
+    let expected_lower_identity = pinned_roots
+        .get("lower")
+        .ok_or_else(|| anyhow::anyhow!("retained workspace journal has no lower identity"))?;
+
+    // Build the immutable project engine from a shared read-only realization;
+    // mutable workspace bytes are never re-admitted as engine configuration.
+    let resolved = super::project_source::resolve_pinned_snapshot_context(
+        state,
+        snapshot_hash,
+        original_project_path.clone(),
+        "retained-native-resume-resolution",
+        super::project_source::PinnedContextRealization::ReadOnly,
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let authority = super::pinned_state_authority(state)?;
+    let cas_guard = authority.acquire_shared_guard()?;
+    let closure = ryeos_state::project_materialization::VerifiedProjectSnapshotClosure::load(
+        &authority.cas_store()?,
+        snapshot_hash,
+    )?;
+    let materialization =
+        ryeos_state::PinnedProjectMaterialization::recover_retained_workspace_from_closure(
+            &authority,
+            &cas_guard,
+            &closure,
+            &layout.lower,
+            expected_lower_identity,
+        )?;
+    state.state_store.rebind_execution_workspace_for_recovery(
+        &workspace.workspace_id,
+        thread_id,
+        previous_launch_owner,
+        recovery_launch_owner,
+        workspace.state,
+        workspace.process_identity.as_deref(),
+    )?;
+    let lifeline = Arc::new(TempDirGuard::new_workspace(root, layout.lower)?);
+    let provenance = ExecutionProvenance::root_pushed_head(
+        original_project_path,
+        resolved.request_engine,
+        lifeline,
+        materialization,
+        resume.project_authority.clone(),
+    )?;
+    tracing::info!(
+        thread_id,
+        workspace_id = %workspace.workspace_id,
+        snapshot_hash,
+        "native resume retained the exact unpublished execution workspace"
+    );
+    Ok(Some(provenance))
 }
 
 /// Reconstruct a created root from its exact, already-admitted authority.

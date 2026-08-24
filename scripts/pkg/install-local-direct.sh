@@ -7,7 +7,7 @@
 #   - bundle sources -> /usr/share/ryeos/<name> for each bundle in the set.
 #     The set membership is the single source of truth in
 #     scripts/pkg/bundle-sets.sh (full = core, central-auth, standard, web,
-#     browser, ryeos-ui, hosted-node, local-inference; the lean sets are
+#     browser, ryeos-ui, hosted-node, codex, local-inference; the lean sets are
 #     subsets).
 #   - ryeos init copies bundle sources into ~/.local/share/ryeos
 #
@@ -29,7 +29,7 @@ Fast-install the current checkout using the packaged RyeOS layout:
   /usr/share/ryeos/<name>/.ai                      (each bundle in the set)
   ~/.local/share/ryeos/.ai/bundles/<name>          (after init)
 Set membership is defined in scripts/pkg/bundle-sets.sh (full = core,
-central-auth, standard, web, browser, ryeos-ui, hosted-node,
+central-auth, standard, web, browser, ryeos-ui, hosted-node, codex,
 local-inference).
 
 Options:
@@ -49,8 +49,9 @@ Options:
   --bundle-set SET      Bundle set to populate/install: full,
                         full-sandbox (full plus the separately built optional
                         isolation backend), standard
-                        (core+standard), hosted-node, or hosted-workflow
-                        (core+standard+hosted-node)
+                        (core+standard), hosted-node
+                        (core+central-auth+hosted-node), or hosted-workflow
+                        (core+standard+hosted-node+codex)
                         (default: full)
   --jobs N              Cap cargo build parallelism during --populate (cargo -j N).
                         Use a smaller N if a full release build exhausts memory.

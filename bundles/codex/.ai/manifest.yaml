@@ -1,10 +1,11 @@
-# ryeos:signed:2026-08-19T08:24:56Z:95b337bc0711e1fab26523a23632245e8c300e9ac66f60a8e91685555f849d28:ldY3VcUq0PKUBmBlVsqgPJLYi/MutZWSizMkJP3+dOOJ3HchLRQHajvxU14JPWQoYhet/lKMTCmPq2TvX65WDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-24T03:55:20Z:1b689d31715022a10fc240ef3e2503915cab622d65f31477100b3668b0318799:wQBzScfeRL1XmAI2x6etxPdu8yppz1D4vapyrg/H3OJvlIcYAjMu/Z5e0oXHOlgwsSuN474mL/d+uLQYG4JYCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: codex
 version: 1.0.0
 description: Supported RyeOS-hosted Codex structured-session worker and remote session surfaces
 provides_kinds: []
 requires_kinds:
 - handler
+- knowledge
 - protocol
 - runtime
 - worker

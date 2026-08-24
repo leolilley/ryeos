@@ -6,7 +6,9 @@ use ryeos_runtime::callback::{
     RuntimeCallbackAPI,
 };
 use ryeos_runtime::callback_uds::UdsRuntimeClient;
-use ryeos_runtime::envelope::{LaunchEnvelope, RuntimeResult, RuntimeResultStatus};
+#[cfg(test)]
+use ryeos_runtime::envelope::RuntimeResultStatus;
+use ryeos_runtime::envelope::{LaunchEnvelope, RuntimeResult};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -113,7 +115,14 @@ async fn run_session(
         .map_err(|error| anyhow!(error.to_string()))?;
     if started.get("state").and_then(Value::as_str) == Some("recovering") {
         if !config.recover_remote_session {
-            bail!("worker execution profile does not admit remote-session recovery");
+            let terminal = client
+                .terminate_dedicated_session(DedicatedSessionTerminateRequest {
+                    thread_id: thread_id.clone(),
+                    reason: "cancelled".to_string(),
+                })
+                .await
+                .map_err(|error| anyhow!(error.to_string()))?;
+            return Ok(terminal_result(thread_id, terminal));
         }
         let remote_thread_id = started
             .get("remote_thread_id")
@@ -200,21 +209,7 @@ async fn run_session(
 }
 
 fn terminal_result(thread_id: String, session: Value) -> RuntimeResult {
-    let status = match session.get("terminal_reason").and_then(Value::as_str) {
-        Some("completed") => RuntimeResultStatus::Completed,
-        Some("cancelled") => RuntimeResultStatus::Cancelled,
-        Some("credential_revoked") => RuntimeResultStatus::Failed,
-        _ => RuntimeResultStatus::Failed,
-    };
-    RuntimeResult {
-        success: status.is_success(),
-        status,
-        thread_id,
-        result: Some(json!({"session": session})),
-        outputs: json!({}),
-        cost: None,
-        warnings: Vec::new(),
-    }
+    ryeos_runtime::envelope::dedicated_session_terminal_result(thread_id, session)
 }
 
 #[cfg(test)]

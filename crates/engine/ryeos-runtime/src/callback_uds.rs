@@ -170,14 +170,25 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         &self,
         request: crate::callback::DedicatedSessionWaitRequest,
     ) -> Result<Value, CallbackError> {
+        let server_wait = std::time::Duration::from_millis(request.timeout_ms);
         let mut params = serde_json::to_value(request).map_err(|error| {
             CallbackError::Transport(anyhow::anyhow!(
                 "serialize dedicated-session wait request: {error}"
             ))
         })?;
         self.inject_callback_token(&mut params);
+        // This is a bounded long-poll, not an ordinary control-plane RPC. It
+        // must not occupy the shared callback connection, and its transport
+        // deadline must extend beyond the server-side wait (which is allowed
+        // to be longer than DEFAULT_RPC_TIMEOUT). The additional default RPC
+        // bound still turns a daemon that fails to answer after the admitted
+        // wait expires into an attributable transport failure.
         self.rpc
-            .request("runtime.wait_dedicated_session", params)
+            .request_dedicated(
+                "runtime.wait_dedicated_session",
+                params,
+                Some(server_wait.saturating_add(crate::daemon_rpc::DEFAULT_RPC_TIMEOUT)),
+            )
             .await
             .map_err(Self::map_rpc_error)
     }

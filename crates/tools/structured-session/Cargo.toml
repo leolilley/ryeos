@@ -22,6 +22,7 @@ libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 jsonschema.workspace = true
+lillux.workspace = true
 ryeos-engine.workspace = true
 ryeos-handler-protocol.workspace = true
 ryeos-handler-bins = { path = "../handler-bins" }

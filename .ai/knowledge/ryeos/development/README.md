@@ -47,7 +47,7 @@ contributor guide rather than duplicating the product documentation.
 - `admitted-execution-recovery`: a contributor-facing map of the recovery code
   and the invariants changes to that code must preserve.
 
-The installed worker-hosted execution contract now lives at
-`knowledge:ryeos/core/execution/worker-hosted-execution`; the installed Codex
-operator runbook lives at
-`knowledge:ryeos/standard/hosted-codex-activation`.
+The installed worker-hosted execution contract lives at
+`knowledge:ryeos/core/execution/worker-hosted-execution` in Standard.
+Provider-specific activation and operator knowledge belongs to the optional
+feature bundle that implements that provider integration.

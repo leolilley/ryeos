@@ -1119,6 +1119,15 @@ async fn reconcile_active_threads_inner(
     repair_detached_spawn_links(state)?;
     reconcile_accounting(state)?;
     let blocked_freezes = reconcile_execution_workspaces(state, mode)?;
+    if mode == ActiveReconcileMode::Startup {
+        let repaired_candidates = reconcile_dedicated_candidate_bindings(state)?;
+        if repaired_candidates != 0 {
+            tracing::warn!(
+                repaired = repaired_candidates,
+                "repaired completed dedicated-session candidate bindings"
+            );
+        }
+    }
     let mut reconciled = reconcile_in_process_handler_reservations(state, mode)?;
     // Orphan thread cleanup.
     let mut running_threads = state
@@ -2026,6 +2035,92 @@ async fn reconcile_active_threads_inner(
     })
 }
 
+/// Repair the crash boundary after a running hosted root's workspace durably
+/// captured a frozen generation but before its operational session projection
+/// was moved from `freezing` to `frozen`.
+///
+/// The complete CAS closure and exact workspace journal are verified first;
+/// the authoritative root fact is then appended before the mutable projection
+/// CAS. Incomplete sagas are left for native runtime recovery.
+fn reconcile_dedicated_candidate_bindings(state: &AppState) -> Result<usize> {
+    let mut repaired = 0usize;
+    for session in state.state_store.dedicated_sessions_in_state("freezing")? {
+        if !session.candidate_required
+            || session.terminal_reason.as_deref() != Some("completed")
+            || session.candidate_snapshot_hash.is_some()
+            || session.candidate_validation_hash.is_some()
+        {
+            continue;
+        }
+        let Some(thread) = state.state_store.get_thread(&session.root_thread_id)? else {
+            anyhow::bail!(
+                "freezing dedicated session {} has no authoritative root thread {}",
+                session.session_id,
+                session.root_thread_id
+            );
+        };
+        if thread.status != "running" {
+            continue;
+        }
+        let workspace = state
+            .state_store
+            .execution_workspace(&session.workspace_id)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "freezing dedicated session {} lost workspace {}",
+                    session.session_id,
+                    session.workspace_id
+                )
+            })?;
+        if workspace.thread_id.as_deref() != Some(session.root_thread_id.as_str()) {
+            anyhow::bail!(
+                "dedicated session {} workspace {} is bound to a different root thread",
+                session.session_id,
+                session.workspace_id
+            );
+        }
+        if workspace.state != WorkspaceState::Freezing {
+            // The replayed controller owns capture when the workspace has not
+            // crossed its freeze barrier yet.
+            continue;
+        }
+        let Some(snapshot_hash) = workspace.frozen_snapshot_hash.as_deref() else {
+            continue;
+        };
+        state
+            .state_store
+            .verify_project_snapshot_closure(snapshot_hash)
+            .with_context(|| {
+                format!(
+                    "verify retained candidate closure for dedicated session {}",
+                    session.session_id
+                )
+            })?;
+        ryeos_app::dedicated_session_service::append_candidate_capture_fact(
+            state,
+            &session.session_id,
+            snapshot_hash,
+        )
+        .with_context(|| {
+            format!(
+                "repair retained candidate root fact for dedicated session {}",
+                session.session_id
+            )
+        })?;
+        if !state
+            .state_store
+            .bind_dedicated_session_candidate(&session.root_thread_id, snapshot_hash)?
+        {
+            anyhow::bail!(
+                "dedicated session {} candidate repair lost its exact freezing-state CAS",
+                session.session_id
+            );
+        }
+        repaired += 1;
+    }
+    Ok(repaired)
+}
+
 fn reconcile_dedicated_workers(state: &AppState) -> Result<()> {
     let current_generation = ryeos_app::runtime_db::daemon_generation_id();
     for worker in state.state_store.live_worker_processes()? {
@@ -2371,6 +2466,15 @@ fn reconcile_execution_workspaces(
             // may safely reconcile these pre-bind rows.
             continue;
         }
+        if should_retain_workspace_for_native_resume(state, &workspace)? {
+            tracing::warn!(
+                workspace_id = %workspace.workspace_id,
+                thread_id = workspace.thread_id.as_deref().unwrap_or(""),
+                root_path = %workspace.root_path,
+                "proved-dead execution owner left a resume-eligible unpublished workspace; preserving it for claim-fenced reattachment"
+            );
+            continue;
+        }
         if workspace.state != WorkspaceState::Orphaned {
             if let (Some(thread_id), Some(launch_owner)) = (
                 workspace.thread_id.as_deref(),
@@ -2409,6 +2513,55 @@ fn reconcile_execution_workspaces(
         }
     }
     Ok(blocked_freezes)
+}
+
+fn should_retain_workspace_for_native_resume(
+    state: &AppState,
+    workspace: &ryeos_app::runtime_db::WorkspaceRecord,
+) -> Result<bool> {
+    if !matches!(
+        workspace.state,
+        WorkspaceState::Ready | WorkspaceState::Active
+    ) {
+        return Ok(false);
+    }
+    let Some(thread_id) = workspace.thread_id.as_deref() else {
+        return Ok(false);
+    };
+    let Some(thread) = state.state_store.get_thread(thread_id)? else {
+        return Ok(false);
+    };
+    if thread.status != ryeos_state::objects::ThreadStatus::Running.as_str() {
+        return Ok(false);
+    }
+    let Some(metadata) = thread.runtime.launch_metadata.as_ref() else {
+        return Ok(false);
+    };
+    let attempts = state.state_store.get_resume_attempts(thread_id)?;
+    if !matches!(
+        decide_resume(Some(metadata), attempts),
+        ResumeDecision::Resume { .. }
+    ) || metadata.sealed_root_request.is_none()
+    {
+        return Ok(false);
+    }
+    let Some(resume) = metadata.resume_context.as_ref() else {
+        return Ok(false);
+    };
+    let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+        snapshot_hash,
+        realization: ryeos_state::objects::PinnedProjectRealization::Cow { .. },
+        ..
+    } = &resume.project_authority
+    else {
+        return Ok(false);
+    };
+    Ok(workspace.lower_snapshot == *snapshot_hash
+        && workspace.launch_owner.is_some()
+        && workspace.backend_id.is_some()
+        && workspace.backend_version.is_some()
+        && workspace.pinned_root_identities.is_some()
+        && workspace.mount_identity.is_some())
 }
 
 fn cleanup_dead_execution_workspace(

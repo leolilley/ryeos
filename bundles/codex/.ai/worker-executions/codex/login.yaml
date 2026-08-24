@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-19T08:24:56Z:3800092ca892c82faaeb610f1f86f28c45593334950d9f35720fc9f501204ebb:BmozR3KXyd1YKUAHSzKaoZpdX+QfK6iyggrsLCgoRnVbQpZTifxKGrvIOgCn4EVZGGZSWmbJBHpUWvLoysQDCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-24T03:55:20Z:3800092ca892c82faaeb610f1f86f28c45593334950d9f35720fc9f501204ebb:BmozR3KXyd1YKUAHSzKaoZpdX+QfK6iyggrsLCgoRnVbQpZTifxKGrvIOgCn4EVZGGZSWmbJBHpUWvLoysQDCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: codex
 description: Open one short-lived RyeOS-owned Codex credential-enrollment execution.

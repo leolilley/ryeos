@@ -5371,6 +5371,15 @@ impl StateDb {
                 );
             }
         }
+        if !explicit_reset
+            && !self
+                .list_generic_head_refs(crate::objects::EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE)?
+                .is_empty()
+        {
+            anyhow::bail!(
+                "external-content binding epoch is absent while binding heads exist; explicit reset is required"
+            );
+        }
         if !guard.is_exclusive() {
             anyhow::bail!(
                 "external-content binding epoch publication requires exclusive state authority"
@@ -6030,6 +6039,53 @@ mod tests {
         let guard = authority.acquire_shared_guard().unwrap();
         db.ensure_current_external_content_binding_epoch(&guard)
             .expect("ordinary online binding may validate an already-current epoch");
+    }
+
+    #[test]
+    fn fresh_external_content_epoch_requires_exclusive_authority_and_no_heads() {
+        let signer = TestSigner::default();
+        let (_dir, db) = open_temp_trusted(&signer);
+        let authority = db.pinned_authority().unwrap();
+
+        let shared = authority.acquire_shared_guard().unwrap();
+        let error = db
+            .ensure_current_external_content_binding_epoch(&shared)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires exclusive state authority")
+        );
+        drop(shared);
+
+        let exclusive = authority.acquire_exclusive_guard(true).unwrap();
+        db.ensure_current_external_content_binding_epoch(&exclusive)
+            .unwrap();
+        assert_eq!(
+            db.external_content_binding_schema_epoch().unwrap(),
+            Some(crate::objects::EXTERNAL_CONTENT_BINDING_SCHEMA_EPOCH)
+        );
+    }
+
+    #[test]
+    fn missing_external_content_epoch_with_heads_requires_explicit_reset() {
+        let signer = TestSigner::default();
+        let (_dir, db) = open_temp_trusted(&signer);
+        let authority = db.pinned_authority().unwrap();
+        let guard = authority.acquire_exclusive_guard(true).unwrap();
+        db.write_generic_head_ref(
+            crate::objects::EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            &signer,
+            &guard,
+        )
+        .unwrap();
+
+        let error = db
+            .ensure_current_external_content_binding_epoch(&guard)
+            .unwrap_err();
+        assert!(error.to_string().contains("while binding heads exist"));
     }
 
     #[test]

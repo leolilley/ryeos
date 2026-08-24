@@ -1,12 +1,16 @@
-# ryeos:signed:2026-08-18T23:04:02Z:c6bb738152be321fd83cb311b20f7531666165faedded8cfa562870553e739cb:00Nv1GWZijeEHoJwMVbNEZlXYsGiqpJnhOLUu3XCKQmk1aKdjbl+DxI7DDmJT3PTHry0nAnCGSRP6HGtXcP3DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-24T03:55:19Z:88b9cd3aefcb99b4ef8c888e16f5ae7d89a7a253672fab07cf7369d27ecb7498:K89HTaTtW/u11dO4jksElZ4Nr+429G9QR6dINT81mglsRiagB7a4ZmLHIaP9SFrmuHyxoSF/dbp8BLrDy1zpAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "codex"
 schema: 1
 consumer_ref: worker:codex/hosted
 codex:
   version: "0.147.0"
   target: "x86_64-unknown-linux-musl"
-  archive_sha256: "0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a9690544c36"
+  archive_sha256: "bd758d53d56e41dc65e045f4589df79a038ed197a011adcb52a258e6ad64cfda"
   executable_sha256: "cb0a15567e9a60a5820d54b0f6ae86d504dc3805c1eab21a47f70e3eb7b73a40"
+  code_mode_host_sha256: "00ecf5d040865b97884c488883abd342581c2a432debe7a54e4646bceee3d2d6"
+  bwrap_sha256: "77360cb751ccedc5971391444ac86a8a33c15b04d6b4a6fe45f5d25496e62c4c"
+  zsh_sha256: "67faaaa89242c4a332e16e508a1977cffc24bf7fca31d4411cdfd101f3831ef3"
+  rg_sha256: "e62198eb19b136b88c330af83647b5a962cb99b6b1f066758568f12de1974849"
 persistent_session_policy:
   max_pool_groups: 4
   max_total_processes: 4
@@ -25,3 +29,31 @@ components:
     manifest_schema: ryeos.external_content.large.v2
     maximum_bytes: 268435456
     expected_manifest_hash: "713c3d1985ca438d8c309631d665c14f8fa0afedfce8b73dc93d0646edfe11ff"
+  - id: codex-code-mode-host
+    path: codex-code-mode-host
+    shape: file
+    storage: large_content
+    manifest_schema: ryeos.external_content.large.v2
+    maximum_bytes: 67108864
+    expected_manifest_hash: "984168b4c3f0efcbee4d1707fda8f8320bdb08a75cb704a8205f853e79e4dc2d"
+  - id: codex-bwrap
+    path: codex-resources/bwrap
+    shape: file
+    storage: large_content
+    manifest_schema: ryeos.external_content.large.v2
+    maximum_bytes: 1048576
+    expected_manifest_hash: "5f2c25277b1a2150937372ade46eef46aa2227b749f984bea208b5467540b86f"
+  - id: codex-zsh
+    path: codex-resources/zsh/bin/zsh
+    shape: file
+    storage: large_content
+    manifest_schema: ryeos.external_content.large.v2
+    maximum_bytes: 2097152
+    expected_manifest_hash: "bda40827700404df0317f0e83951a4f6b6fb0933b3eec3af29c1a903c39aa008"
+  - id: codex-rg
+    path: codex-path/rg
+    shape: file
+    storage: large_content
+    manifest_schema: ryeos.external_content.large.v2
+    maximum_bytes: 8388608
+    expected_manifest_hash: "a7a1a4fdb45e9231b80a9840c22728b05625ed1e21cc155d3995697eeeec22c0"

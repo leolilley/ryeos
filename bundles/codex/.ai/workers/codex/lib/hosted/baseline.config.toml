@@ -1,5 +1,7 @@
 forced_login_method = "chatgpt"
 cli_auth_credentials_store = "file"
+model_provider = "openai"
+mcp_servers = {}
 check_for_update_on_startup = false
 approval_policy = { granular = { sandbox_approval = true, rules = false, mcp_elicitations = false, request_permissions = false, skill_approval = false } }
 approvals_reviewer = "user"
@@ -46,6 +48,7 @@ hooks = false
 multi_agent = false
 memories = false
 network_proxy = false
+code_mode_host = true
 
 [features.code_mode]
 enabled = false

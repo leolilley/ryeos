@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-23T23:14:59Z:05df131769977f15adff15d293d339277b2b549d5b4d08c47a51aef3134ad1d4:Hh9abQTa1YAtcuv/5Bd/fRhVf0vAjQCDxm89HhaUSigkhsHweAh4of7HtSdMhzUfSuW69adtbSLTdiE9lLFHCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T03:14:21Z:0e2ee8b110b00fa7a044c6e40bc1026164579bb7765438726d3a1e302399859b:6LTYsj4ZMobi0TralVTSUF3dw69UbGuOWiB8CXGAVTQRzURYrU/+Z6aK+bE9aT1usr/BqJlDK4cVS47dlsbGDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/kinds
 tags: [kind, worker, persistent-session, source]
@@ -31,6 +31,13 @@ retains a separate authority binding. Recovery reopens only retained CAS
 content and rechecks current publisher/kind trust. External runtimes, models,
 datasets, toolchains, and other opaque dependencies remain separate
 `external_content` declarations.
+
+`session_resources` is a closed, kind-admitted override mapping. The current
+contract permits a signed worker to request a `real_uid_process_limit` no
+higher than the kind-owned ceiling; absence retains the kind default, unknown
+fields fail admission, and the effective value is capsule-bound. Because
+`RLIMIT_NPROC` is real-UID scoped, it is a finite shared-host ceiling rather
+than per-worker containment.
 
 See `knowledge:ryeos/core/execution/worker-hosted-execution` for the
 session-bound hosted-execution lifecycle built on this kind.

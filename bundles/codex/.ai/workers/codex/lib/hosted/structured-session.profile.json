@@ -7,6 +7,8 @@
     "--strict-config",
     "-c", "forced_login_method=\"chatgpt\"",
     "-c", "cli_auth_credentials_store=\"file\"",
+    "-c", "model_provider=\"openai\"",
+    "-c", "mcp_servers={}",
     "-c", "check_for_update_on_startup=false",
     "-c", "approval_policy={ granular={ sandbox_approval=true, rules=false, mcp_elicitations=false, request_permissions=false, skill_approval=false } }",
     "-c", "approvals_reviewer=\"user\"",
@@ -16,7 +18,7 @@
     "-c", "shell_environment_policy={ inherit=\"core\", ignore_default_excludes=false, filters={ \"HOME\"=\"exclude\", \"CODEX_HOME\"=\"exclude\", \"RYEOS_*\"=\"exclude\", \"DBUS_*\"=\"exclude\", \"SSH_*\"=\"exclude\", \"*PROXY\"=\"exclude\" } }",
     "-c", "permissions={ ryeos-workspace-only={ extends=\":workspace\", filesystem={ \":root\"=\"deny\", \":minimal\"=\"read\", \":tmpdir\"=\"deny\", \":slash_tmp\"=\"deny\", \":workspace_roots\"={ \".ai/cache/ryeos-runtime\"=\"read\" } }, network={ enabled=false } } }",
     "-c", "agents={ enabled=false }",
-    "-c", "features={ apps=false, remote_plugin=false, hooks=false, multi_agent=false, memories=false, network_proxy=false, code_mode={ enabled=false } }",
+    "-c", "features={ apps=false, remote_plugin=false, hooks=false, multi_agent=false, memories=false, network_proxy=false, code_mode_host=true, code_mode={ enabled=false } }",
     "app-server"
   ],
   "workload_home_env": "CODEX_HOME",
@@ -917,6 +919,7 @@
     }
   ],
   "ignored_notifications": {
+    "skills/changed": "schema/SkillsChangedNotification.json",
     "thread/closed": "schema/ThreadClosedNotification.json",
     "thread/tokenUsage/updated": "schema/ThreadTokenUsageUpdatedNotification.json",
     "turn/diff/updated": "schema/TurnDiffUpdatedNotification.json",

@@ -307,6 +307,26 @@ pub async fn bind(
         bail!("external-content bind request contains a non-canonical digest");
     }
     let authority = state.state_store.pinned_state_authority()?;
+    let current_binding_epoch = state
+        .state_store
+        .with_state_db(|db| db.external_content_binding_schema_epoch())?;
+    if current_binding_epoch != Some(ryeos_state::objects::EXTERNAL_CONTENT_BINDING_SCHEMA_EPOCH) {
+        // A fresh node has no binding epoch until its first bind. Publish that
+        // epoch under the same barrier -> exclusive-CAS order used by
+        // maintenance, before this request acquires its ordinary shared CAS
+        // guard. Predecessor epochs still fail closed and require the explicit
+        // stopped-node reset ceremony.
+        let _permit = state
+            .write_barrier
+            .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
+            .map_err(|error| {
+                anyhow::anyhow!("cannot acquire external-content epoch write permit: {error}")
+            })?;
+        let epoch_guard = authority.acquire_exclusive_guard(true)?;
+        state
+            .state_store
+            .with_state_db(|db| db.ensure_current_external_content_binding_epoch(&epoch_guard))?;
+    }
     let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
     let store = authority.large_object_store()?;

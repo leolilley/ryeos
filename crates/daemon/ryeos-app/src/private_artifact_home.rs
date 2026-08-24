@@ -269,8 +269,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let files = BTreeMap::from([("fixture.conf".to_owned(), b"fixture".to_vec())]);
         let path = create(tmp.path(), "home-one", &files).unwrap();
-        std::fs::create_dir(path.join("nested")).unwrap();
-        std::fs::write(path.join("nested/state"), b"state").unwrap();
+        let nested = path.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let state = nested.join("state");
+        std::fs::write(&state, b"state").unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(
             require_within_default_limit(tmp.path(), "home-one").unwrap(),
             12

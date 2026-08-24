@@ -18,6 +18,28 @@ const START_CAPABILITY: &str = "ryeos.runtime.dedicated_session.start";
 const COMMAND_CAPABILITY: &str = "ryeos.runtime.dedicated_session.command";
 const TERMINATE_CAPABILITY: &str = "ryeos.runtime.dedicated_session.terminate";
 
+/// Normalize an internal diagnostic before it crosses the durable session
+/// boundary. Worker stderr may contain newlines and can be much larger than
+/// the database contract; neither property is valid for a terminal reason.
+fn bounded_worker_failure_reason(prefix: &str, detail: &str) -> String {
+    const MAX_BYTES: usize = 2_048;
+    let normalized = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    let available = MAX_BYTES.saturating_sub(prefix.len());
+    let detail = normalized
+        .chars()
+        .scan(0usize, |bytes, character| {
+            let next = *bytes + character.len_utf8();
+            if next > available {
+                None
+            } else {
+                *bytes = next;
+                Some(character)
+            }
+        })
+        .collect::<String>();
+    format!("{prefix}{detail}").trim().to_owned()
+}
+
 fn require_start_authority(state: &AppState, cap: &CallbackCapability) -> Result<()> {
     state
         .authorizer
@@ -394,8 +416,20 @@ pub(super) async fn start(
         }
         None => bail!("dedicated-session root has no owned execution workspace"),
     };
-    if workspace.state != WorkspaceState::Ready {
-        bail!("dedicated-session workspace is not ready for worker attachment");
+    match workspace.state {
+        WorkspaceState::Ready => {}
+        WorkspaceState::Active if request.require_pinned_cow => {
+            let root_process_identity =
+                thread.runtime.process_identity.as_ref().ok_or_else(|| {
+                    anyhow!("active dedicated workspace has no attached root process")
+                })?;
+            let root_process_identity = serde_json::to_string(root_process_identity)
+                .context("serialize attached root process identity")?;
+            if workspace.process_identity.as_deref() != Some(root_process_identity.as_str()) {
+                bail!("active dedicated workspace is not owned by the callback root process");
+            }
+        }
+        _ => bail!("dedicated-session workspace is not attachable by this worker root"),
     }
     let workspace_root = PathBuf::from(&workspace.root_path);
     let workspace_path =
@@ -528,7 +562,8 @@ pub(super) async fn start(
     .await
     .context("join dedicated-session worker start")?;
     if let Err(error) = started {
-        let reason = format!("dedicated worker start failed: {error:#}");
+        let detail = format!("{error:#}");
+        let reason = bounded_worker_failure_reason("dedicated worker start failed: ", &detail);
         let mut cleanup_proved = error
             .downcast_ref::<
                 ryeos_executor::execution::persistent_session::ExclusiveWorkerCleanupUnproved,
@@ -579,7 +614,8 @@ pub(super) async fn start(
             &request.thread_id,
             &worker,
         )?;
-        let reason = format!("install worker observation sink: {error:#}");
+        let detail = format!("{error:#}");
+        let reason = bounded_worker_failure_reason("install worker observation sink: ", &detail);
         match cleanup_state {
             "reaped" => {
                 state.state_store.settle_worker_process(
@@ -615,4 +651,20 @@ pub(super) async fn start(
         .dedicated_session(&request.thread_id)?
         .ok_or_else(|| anyhow!("started dedicated session disappeared"))?;
     Ok(serde_json::to_value(session)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bounded_worker_failure_reason;
+
+    #[test]
+    fn worker_failure_reason_is_canonical_and_bounded_by_bytes() {
+        let detail = format!("first line\n{}\tend", "é".repeat(2_048));
+        let reason = bounded_worker_failure_reason("worker failed: ", &detail);
+        assert!(reason.len() <= 2_048);
+        assert!(!reason.is_empty());
+        assert_eq!(reason.trim(), reason);
+        assert!(!reason.chars().any(char::is_control));
+        assert!(reason.starts_with("worker failed: first line "));
+    }
 }

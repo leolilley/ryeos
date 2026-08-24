@@ -1338,6 +1338,7 @@ pub struct StateStore {
     /// StateStore mutex (never a mutex probe followed by permit acquisition).
     write_barrier: WriteBarrier,
     process_attachment_admission_open: AtomicBool,
+    process_attachment_admission_closed: tokio::sync::Notify,
     /// Exact process attachments currently recorded in durable runtime state.
     ///
     /// Durable `thread_runtime.process_identity` rows remain authoritative and
@@ -3350,6 +3351,7 @@ impl StateStore {
             allow_projection_rebuild: false,
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
+            process_attachment_admission_closed: tokio::sync::Notify::new(),
             attached_thread_ids: Mutex::new(BTreeSet::new()),
             active_launch_owners: Mutex::new(HashSet::new()),
             launch_task_abort_handles: Mutex::new(HashMap::new()),
@@ -3393,6 +3395,7 @@ impl StateStore {
             allow_projection_rebuild: true,
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
+            process_attachment_admission_closed: tokio::sync::Notify::new(),
             attached_thread_ids: Mutex::new(attached_thread_ids),
             active_launch_owners: Mutex::new(HashSet::new()),
             launch_task_abort_handles: Mutex::new(HashMap::new()),
@@ -3504,6 +3507,7 @@ impl StateStore {
             allow_projection_rebuild: false,
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
+            process_attachment_admission_closed: tokio::sync::Notify::new(),
             attached_thread_ids: Mutex::new(attached_thread_ids),
             active_launch_owners: Mutex::new(HashSet::new()),
             launch_task_abort_handles: Mutex::new(HashMap::new()),
@@ -9490,6 +9494,24 @@ impl StateStore {
             .and_then(|snapshot| snapshot.result_project_snapshot_hash))
     }
 
+    /// Prove that an authoritative project snapshot still has its complete,
+    /// canonical CAS closure under this store's pinned state generation.
+    ///
+    /// Startup repair uses this before reconnecting an operational session row
+    /// to a snapshot already testified by the root thread chain. A hash-shaped
+    /// SQLite value alone is never sufficient publication authority.
+    pub fn verify_project_snapshot_closure(&self, snapshot_hash: &str) -> Result<()> {
+        if !lillux::valid_hash(snapshot_hash) {
+            bail!("project snapshot hash is not canonical");
+        }
+        let cas = self.state_authority.cas_store()?;
+        ryeos_state::project_materialization::VerifiedProjectSnapshotClosure::load(
+            &cas,
+            snapshot_hash,
+        )?;
+        Ok(())
+    }
+
     pub fn admitted_launch_capsule_hash(&self, thread_id: &str) -> Result<Option<String>> {
         let g = self.lock()?;
         Ok(g.state_db
@@ -9892,6 +9914,7 @@ impl StateStore {
         let _g = self.lock()?;
         self.process_attachment_admission_open
             .store(false, Ordering::Release);
+        self.process_attachment_admission_closed.notify_waiters();
         Ok(())
     }
 
@@ -9902,6 +9925,21 @@ impl StateStore {
     pub fn process_attachment_admission_is_open(&self) -> bool {
         self.process_attachment_admission_open
             .load(Ordering::Acquire)
+    }
+
+    /// Pushed shutdown fence for long-lived execution controllers. The atomic
+    /// predicate closes the notify-before-subscribe race, so callers never
+    /// need to poll SQLite merely to notice daemon shutdown.
+    pub async fn wait_for_process_attachment_admission_close(&self) {
+        loop {
+            let notified = self.process_attachment_admission_closed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.process_attachment_admission_is_open() {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// Fail closed before a runtime callback authors or dispatches new work.
@@ -10585,6 +10623,35 @@ impl StateStore {
             expected,
             next,
             process_identity,
+        )
+    }
+
+    pub fn rebind_execution_workspace_for_recovery(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        previous_launch_owner: &str,
+        recovery_launch_owner: &str,
+        expected_state: runtime_db::WorkspaceState,
+        expected_process_identity: Option<&str>,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
+        let claim = g
+            .runtime_db
+            .get_launch_claim(thread_id)?
+            .ok_or_else(|| anyhow!("thread {thread_id} has no recovery launch owner"))?;
+        if claim.claimed_by != recovery_launch_owner {
+            bail!("stale recovery launch owner for thread {thread_id}");
+        }
+        g.runtime_db.rebind_workspace_for_recovery(
+            workspace_id,
+            thread_id,
+            previous_launch_owner,
+            recovery_launch_owner,
+            expected_state,
+            expected_process_identity,
         )
     }
 

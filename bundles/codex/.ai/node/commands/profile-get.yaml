@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-18T23:04:02Z:2c8007b006650d8f5e6b5af3d2e71139b227ff69cd2f56ddedf3dc719b2c0916:F29UuWQKcfBv2ewkU32rgWf8uqvygGaAoG9k9INsx9rrbxCHBQf2UqUzmgBwVaHwNQSSKBIRLjf5Z3Ebq8mnBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-24T03:55:19Z:2c8007b006650d8f5e6b5af3d2e71139b227ff69cd2f56ddedf3dc719b2c0916:F29UuWQKcfBv2ewkU32rgWf8uqvygGaAoG9k9INsx9rrbxCHBQf2UqUzmgBwVaHwNQSSKBIRLjf5Z3Ebq8mnBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [codex, profile, get]
 description: "Read sanitized Codex credential-profile state"
 forms:

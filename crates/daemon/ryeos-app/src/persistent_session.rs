@@ -2302,8 +2302,32 @@ fn decode_frame_body(body: &[u8], max_frame_bytes: u32) -> Result<PersistentSess
     {
         bail!("persistent-session frame must contain exactly five protocol fields");
     }
-    validate_frame_shape(&frame, None)?;
+    validate_decoded_frame_shape(&frame)?;
     Ok(frame)
+}
+
+/// Validate wire shape before the caller knows whether this is pooled
+/// readiness or exclusive-session readiness. The exclusive boot identity is
+/// checked against daemon-minted authority by `ready_process`; the decoder may
+/// only prove that its carrier is canonical.
+fn validate_decoded_frame_shape(frame: &PersistentSessionFrame) -> Result<()> {
+    if frame.kind != PersistentSessionFrameKind::Ready {
+        return validate_frame_shape(frame, None);
+    }
+    let valid_body = match frame.body.as_ref() {
+        None => true,
+        Some(body) => body.as_object().is_some_and(|object| {
+            object.len() == 1
+                && object
+                    .get("boot_identity")
+                    .and_then(Value::as_str)
+                    .is_some_and(lillux::valid_hash)
+        }),
+    };
+    if frame.request_id.is_some() || !valid_body {
+        bail!("persistent-session frame fields contradict its kind");
+    }
+    Ok(())
 }
 
 impl FrameReader {
@@ -2986,6 +3010,14 @@ while True:
             ..valid
         };
         assert!(validate_frame_shape(&stale, Some(&"a".repeat(64))).is_err());
+    }
+
+    #[test]
+    fn decoder_defers_exclusive_readiness_identity_to_the_boot_authority() {
+        let body = br#"{"protocol":"fixture","version":1,"kind":"ready","request_id":null,"body":{"boot_identity":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#;
+        let frame = decode_frame_body(body, 4096).unwrap();
+        assert!(validate_frame_shape(&frame, Some(&"a".repeat(64))).is_ok());
+        assert!(validate_frame_shape(&frame, Some(&"b".repeat(64))).is_err());
     }
 
     #[test]

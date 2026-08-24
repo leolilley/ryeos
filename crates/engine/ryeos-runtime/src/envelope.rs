@@ -12,6 +12,34 @@ pub use ryeos_engine::launch_envelope_types::{
     RuntimeCostError, RuntimeResult, RuntimeResultStatus, UsdNanos,
 };
 
+/// Canonical managed-runtime result for the provider-neutral dedicated-session
+/// controller. Both the subprocess and post-freeze crash recovery use this
+/// constructor so a resumed disposition cannot invent a second terminal
+/// payload shape.
+pub fn dedicated_session_terminal_result(
+    thread_id: String,
+    session: serde_json::Value,
+) -> RuntimeResult {
+    let status = match session
+        .get("terminal_reason")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("completed") => RuntimeResultStatus::Completed,
+        Some("cancelled") => RuntimeResultStatus::Cancelled,
+        Some("credential_revoked") => RuntimeResultStatus::Failed,
+        _ => RuntimeResultStatus::Failed,
+    };
+    RuntimeResult {
+        success: status.is_success(),
+        status,
+        thread_id,
+        result: Some(serde_json::json!({"session": session})),
+        outputs: serde_json::json!({}),
+        cost: None,
+        warnings: Vec::new(),
+    }
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ManagedNativeEnvelope {

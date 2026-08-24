@@ -34,7 +34,7 @@ The current clean-cut execution formats include:
 - admitted launch capsule schema 9;
 - runtime launch metadata epoch 15;
 - the standalone runtime project-authority envelope epoch 2; and
-- the owned runtime SQLite operator schema epoch 7 (encoded in the RyeOS
+- the owned runtime SQLite operator schema epoch 8 (encoded in the RyeOS
   `PRAGMA application_id` family).
 
 The numbers identify independently evolving contracts. A change to a nested
@@ -59,10 +59,11 @@ the exact current envelopes stored in its JSON columns. Normal open never
 migrates or normalizes a predecessor. Any mismatch leaves the file untouched
 and requires the explicit operator-confirmed thread-history/project-head reset.
 
-Runtime epoch 7 is the clean cut adding session-bound workers,
+Runtime epoch 8 is the clean cut adding session-bound workers,
 credential-generation fencing, command/approval contact ledgers, observation
-frontiers, and candidate disposition projections. No epoch-1-through-6 reader
-or migration remains. Earlier history requires the explicit retirement
+frontiers, candidate disposition projections, and multi-epoch worker process
+history keyed by `(session_id, boot_epoch)`. No epoch-1-through-7 reader or
+migration remains. Earlier history requires the explicit retirement
 ceremony below; normal startup never rewrites it.
 
 `operational.sqlite3` accepts only its exact current schema today. If a deployed
