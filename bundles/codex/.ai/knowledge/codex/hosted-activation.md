@@ -25,8 +25,8 @@ knowledge bundle.
 
 ## Activation
 
-1. Publish the `hosted-workflow` set containing `core`, `standard`,
-   `hosted-node`, and `codex`. Generic worker-execution runtime/preparer
+1. Publish the `hosted-workflow` set containing `core`, `central-auth`,
+   `standard`, `hosted-node`, and `codex`. Generic worker-execution runtime/preparer
    binaries belong to `core`; the generic knowledge kind belongs to
    `standard`; bridge/profile and all Codex-specific data belong to `codex`.
 2. Import and bind the exact realization in
@@ -38,8 +38,8 @@ knowledge bundle.
    as `remote_node` with only
    `ryeos.attest.request.forwarded-operator`; this key co-signs the exact
    configured-operator request and proves source-node transit. Then stop the
-   hosted daemon and run
-   `ryeos-core-tools authorize-client --app-root <hosted-root> --public-key
+   hosted daemon and run the supported stopped-node command
+   `RYEOS_APP_ROOT=<hosted-root> ryeos authorize-client --public-key
    <raw-base64> --origin-site-id site:<source>
    --allow-semantic-conversion --scopes <exact-scopes>` on the hosted node.
    Use the complete exact scope set printed in the Codex bundle README. The

@@ -1,0 +1,40 @@
+version: "1.0.0"
+executor_id: "@subprocess"
+category: "ryeos/core"
+name: "authorize-client"
+required_caps: ["ryeos.execute.tool.ryeos.core.authorize-client"]
+description: "Reconcile one exact authorized-key grant with node-signed stopped-node authority."
+
+config:
+  command: "bin:ryeos-core-tools"
+  args:
+    - "authorize-client"
+    - "--stdin-json"
+  input_data: "${params_json}"
+  timeout_secs: 30
+
+config_schema:
+  type: object
+  properties:
+    public_key:
+      type: string
+      description: "Raw 32-byte Ed25519 public key encoded as standard base64."
+    scopes:
+      type: string
+      description: "Comma-separated exact canonical scopes. Wildcards are rejected."
+    label:
+      type: string
+      description: "Human-readable grant label."
+      default: "cli-authorized"
+    merge_scopes:
+      type: boolean
+      description: "Union requested scopes with an incumbent same-class grant."
+      default: false
+    origin_site_id:
+      type: string
+      description: "Allowed forwarding site. Presence selects the remote_operator principal class."
+    allow_semantic_conversion:
+      type: boolean
+      description: "Explicitly permit an incumbent class or origin transition while the daemon state lock is held."
+      default: false
+  required: [public_key, scopes]

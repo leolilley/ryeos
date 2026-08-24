@@ -82,8 +82,7 @@ grant. This is a semantic class conversion, not a scope update:
 
 ```sh
 HOSTED_SCOPES='ryeos.execute.worker_execution.codex/login,ryeos.execute.worker_execution.codex/session,ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.system/push-head,ryeos.execute.service.credential-profiles/create,ryeos.execute.service.credential-profiles/get,ryeos.execute.service.credential-profiles/revoke,ryeos.execute.service.credential-profiles/confirm,ryeos.execute.service.credential-profiles/delete,ryeos.execute.service.worker-executions/status,ryeos.execute.service.worker-executions/command,ryeos.execute.service.worker-executions/approvals,ryeos.execute.service.worker-executions/resolve-approval,ryeos.execute.service.worker-executions/terminate,ryeos.execute.service.worker-executions/publish,ryeos.execute.service.worker-executions/validate-candidate-closure-and-base,ryeos.execute.service.worker-executions/discard,ryeos.write.project.live'
-ryeos-core-tools authorize-client \
-  --app-root /path/to/hosted-app-root \
+RYEOS_APP_ROOT=/path/to/hosted-app-root ryeos authorize-client \
   --public-key "<configured_operator_raw_ed25519_base64>" \
   --label "hosted operator forwarded from source" \
   --origin-site-id "site:<source>" \
@@ -106,15 +105,15 @@ the hosted daemon, and run:
 
 ```sh
 MAINTENANCE_SCOPES='ryeos.execute.service.external-content/import,ryeos.execute.service.external-content/bind,ryeos.execute.service.external-content/release,ryeos.execute.service.external-content/scrub'
-ryeos-core-tools authorize-client \
-  --app-root /path/to/hosted-app-root \
+RYEOS_APP_ROOT=/path/to/hosted-app-root ryeos authorize-client \
   --public-key "<configured_operator_raw_ed25519_base64>" \
   --label "hosted operator local maintenance" \
   --allow-semantic-conversion \
   --scopes "$MAINTENANCE_SCOPES"
 ```
 
-The tool mechanically acquires the daemon's exclusive state lock before a
+The supported stopped-node command mechanically acquires the daemon's
+exclusive state lock before a
 semantic conversion and refuses while the daemon owns it. Start the daemon and
 perform maintenance, stop it again, then reinstall the exact `remote_operator`
 grant above with `--allow-semantic-conversion`. A separate key cannot satisfy

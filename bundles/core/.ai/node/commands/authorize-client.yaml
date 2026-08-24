@@ -1,0 +1,11 @@
+tokens:
+- authorize-client
+description: Reconcile one authorized client grant under stopped-node authority
+help:
+  usage: "ryeos authorize-client --public-key <raw-ed25519-base64> --scopes <scope,...> [--label <label>] [--origin-site-id <site:id>] [--allow-semantic-conversion] [--merge-scopes]"
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: execute_ref
+  execute: service:identity/authorize-client

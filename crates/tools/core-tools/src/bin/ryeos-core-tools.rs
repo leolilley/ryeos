@@ -610,22 +610,16 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             merge_scopes,
             origin_site_id,
             allow_semantic_conversion,
-        } => {
-            let scopes = scopes.ok_or_else(|| anyhow::anyhow!(
-                "--scopes required, comma-separated, in canonical form. \
-                 Example: --scopes ryeos.execute.service.remote/admin,ryeos.execute.service.bundle/install"
-            ))?;
-            run_authorize_client(
-                app_root,
-                public_key,
-                scopes,
-                label,
-                merge_scopes,
-                origin_site_id,
-                allow_semantic_conversion,
-                cli.stdin_json,
-            )
-        }
+        } => run_authorize_client(
+            app_root,
+            public_key,
+            scopes,
+            label,
+            merge_scopes,
+            origin_site_id,
+            allow_semantic_conversion,
+            cli.stdin_json,
+        ),
         Cmd::AdmissionToken {
             app_root,
             scopes,
@@ -1682,10 +1676,31 @@ fn run_vault(cmd: VaultCmd) -> anyhow::Result<()> {
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthorizeClientStdinParams {
+    #[serde(default)]
+    app_root: Option<String>,
+    public_key: String,
+    scopes: String,
+    #[serde(default = "default_authorize_client_label")]
+    label: String,
+    #[serde(default)]
+    merge_scopes: bool,
+    #[serde(default)]
+    origin_site_id: Option<String>,
+    #[serde(default)]
+    allow_semantic_conversion: bool,
+}
+
+fn default_authorize_client_label() -> String {
+    "cli-authorized".to_string()
+}
+
 fn run_authorize_client(
     app_root: Option<String>,
     public_key: Option<String>,
-    scopes: String,
+    scopes: Option<String>,
     label: String,
     merge_scopes: bool,
     origin_site_id: Option<String>,
@@ -1698,30 +1713,44 @@ fn run_authorize_client(
     };
 
     let params = if stdin_json {
-        let val = read_stdin_json()?;
-        let ssd = val["app_root"].as_str().map(String::from);
-        let pk = val["public_key"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("public_key required"))?
-            .to_string();
-        let sc = val["scopes"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("scopes required in stdin JSON"))?
-            .to_string();
-        let lb = val["label"]
-            .as_str()
-            .unwrap_or("cli-authorized")
-            .to_string();
-        let origin = val["origin_site_id"].as_str().map(String::from);
-        (ssd, pk, sc, lb, origin)
+        let value: AuthorizeClientStdinParams = serde_json::from_value(read_stdin_json()?)?;
+        (
+            value.app_root,
+            value.public_key,
+            value.scopes,
+            value.label,
+            value.merge_scopes,
+            value.origin_site_id,
+            value.allow_semantic_conversion,
+        )
     } else {
         let pk = public_key.ok_or_else(|| anyhow::anyhow!("--public-key required"))?;
-        (app_root, pk, scopes, label, origin_site_id)
+        let scopes = scopes.ok_or_else(|| anyhow::anyhow!(
+            "--scopes required, comma-separated, in canonical form. \
+             Example: --scopes ryeos.execute.service.remote/admin,ryeos.execute.service.bundle/install"
+        ))?;
+        (
+            app_root,
+            pk,
+            scopes,
+            label,
+            merge_scopes,
+            origin_site_id,
+            allow_semantic_conversion,
+        )
     };
 
-    let (ssd, pk_b64, scopes_str, label, origin_site_id) = params;
+    let (
+        app_root,
+        pk_b64,
+        scopes_str,
+        label,
+        merge_scopes,
+        origin_site_id,
+        allow_semantic_conversion,
+    ) = params;
 
-    let app_root = resolve_app_root(ssd)?;
+    let app_root = resolve_app_root(app_root)?;
 
     let pk_bytes = base64::engine::general_purpose::STANDARD
         .decode(&pk_b64)
@@ -1898,6 +1927,35 @@ mod tests {
     use super::*;
     use lillux::crypto::SigningKey;
     use rand::rngs::OsRng;
+
+    #[test]
+    fn authorize_client_stdin_contract_carries_transition_authority() {
+        let params: AuthorizeClientStdinParams = serde_json::from_value(serde_json::json!({
+            "public_key": "ZmFrZQ==",
+            "scopes": "scope:a,scope:b",
+            "origin_site_id": "site:source",
+            "allow_semantic_conversion": true,
+            "merge_scopes": true
+        }))
+        .unwrap();
+
+        assert_eq!(params.label, "cli-authorized");
+        assert_eq!(params.origin_site_id.as_deref(), Some("site:source"));
+        assert!(params.allow_semantic_conversion);
+        assert!(params.merge_scopes);
+    }
+
+    #[test]
+    fn authorize_client_stdin_contract_rejects_unknown_fields() {
+        let error = serde_json::from_value::<AuthorizeClientStdinParams>(serde_json::json!({
+            "public_key": "ZmFrZQ==",
+            "scopes": "scope:a",
+            "principal_class": "remote_operator"
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown field"));
+    }
 
     struct InstalledFixture {
         _tmp: tempfile::TempDir,

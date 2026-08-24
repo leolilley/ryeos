@@ -209,8 +209,7 @@ action, not by remote delegation. With the target daemon stopped, the target
 operator replaces that key's grant with an origin-bound, exact-scope grant:
 
 ```bash
-ryeos-core-tools authorize-client \
-  --app-root /path/to/target-app-root \
+RYEOS_APP_ROOT=/path/to/target-app-root ryeos authorize-client \
   --public-key "<configured_operator_raw_ed25519_base64>" \
   --label "operator forwarded from source" \
   --origin-site-id "site:<source>" \

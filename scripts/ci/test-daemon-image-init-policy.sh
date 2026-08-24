@@ -101,6 +101,41 @@ for image in "${daemon_images[@]}"; do
     fi
 done
 
+# The hosted-workflow image promises one exact source bundle set to init.
+# Keep its runtime COPY inventory mechanically identical to the shared
+# authoring/install bundle-set definition: publishing a bundle in the builder
+# but omitting it from /opt/ryeos makes a green image that cannot install the
+# advertised workload.
+# shellcheck source=scripts/pkg/bundle-sets.sh
+source "$root/scripts/pkg/bundle-sets.sh"
+hosted_workflow_instructions="$(dockerfile_instructions "$root/Dockerfile.hosted-workflow")"
+hosted_workflow_final_stage="$(awk '
+    tolower($1) == "from" { stage = "" }
+    { stage = stage $0 ORS }
+    END { printf "%s", stage }
+' <<<"$hosted_workflow_instructions")"
+
+expected_hosted_workflow_bundles="$(ryeos_bundle_set_names hosted-workflow | sort)"
+actual_hosted_workflow_bundles="$(sed -nE \
+    's#^COPY --from=builder /build/bundles/([^/.][^ /]*) /opt/ryeos/([^ /]+)$#\1 \2#p' \
+    <<<"$hosted_workflow_final_stage" | awk '
+        $1 != $2 {
+            print "hosted-workflow bundle COPY changes the bundle name: " $1 " -> " $2 > "/dev/stderr"
+            failed = 1
+            next
+        }
+        { print $1 }
+        END { if (failed) exit 1 }
+    ' | sort)"
+if [[ "$actual_hosted_workflow_bundles" != "$expected_hosted_workflow_bundles" ]]; then
+    echo "Dockerfile.hosted-workflow runtime bundle inventory does not match bundle set" >&2
+    echo "expected:" >&2
+    printf '%s\n' "$expected_hosted_workflow_bundles" >&2
+    echo "actual:" >&2
+    printf '%s\n' "$actual_hosted_workflow_bundles" >&2
+    exit 1
+fi
+
 release_bundle_instructions="$(dockerfile_instructions "$root/Dockerfile.release-bundles")"
 if grep -Eqi '^run .*apt-get .*install .*tini([[:space:]]|$)|^copy .* /usr/bin/tini([[:space:]]|$)|^entrypoint ' <<<"$release_bundle_instructions"; then
     echo "Dockerfile.release-bundles is an artifact export and must not gain runtime init policy" >&2

@@ -127,13 +127,12 @@ choose its authenticated origin.
 
 For configured-operator continuity, do not use admission claim or the remote
 authorize endpoint: both create ordinary remote-node/client authority. Stop
-the hosted target and use its offline tool to install the exact origin-bound
-operator grant. If the configured operator already has its bootstrap
+the hosted target and use the supported stopped-node command to install the
+exact origin-bound operator grant. If the configured operator already has its bootstrap
 `local_client` grant, the explicit semantic-conversion flag is required:
 
 ```bash
-ryeos-core-tools authorize-client \
-  --app-root /path/to/target-app-root \
+RYEOS_APP_ROOT=/path/to/target-app-root ryeos authorize-client \
   --public-key "<configured_operator_raw_ed25519_base64>" \
   --label "operator forwarded from source" \
   --origin-site-id "site:<source>" \

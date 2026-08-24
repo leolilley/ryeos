@@ -1,0 +1,14 @@
+kind: service
+endpoint: identity.authorize-client
+availability: stopped_node
+record_thread: false
+local_execute: tool:ryeos/core/authorize-client
+required_caps: ["ryeos.execute.service.identity/authorize-client"]
+schema:
+  public_key: string
+  scopes: string
+  label: string?
+  merge_scopes: boolean?
+  origin_site_id: string?
+  allow_semantic_conversion: boolean?
+description: "Reconcile one exact authorized-key grant with node-signed stopped-node authority. Semantic class or origin conversion additionally holds the daemon state lock through publication."
