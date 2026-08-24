@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T16:23:45Z:2a3401b8ce85eae7853de0790a8b09744efec738bc33425089c1c16e1daa9e18:dKDx71/DRPQFQMzthuAZMPhDrO/FZC5qpdFYOJOz8wgzb3LbsrdP99/LHfEhlSfk+E6UwUwtTRzLZ/Bg0udyDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T16:46:45Z:b23c45b5040b3324616a463727eb84b3100fe22dcf270ae202ac2eddcd5590cf:noTBtI1C6xuuNi5cPIf+gAFcjU/JOpywDZx+obXr63iTXseYDHhcBemfR/0GeTnpJjcjSmpAaRgTfrPuiIrQBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -38,7 +38,7 @@ knowledge bundle.
    as `remote_node` with only
    `ryeos.attest.request.forwarded-operator`; this key co-signs the exact
    configured-operator request and proves source-node transit. Then stop the
-   hosted daemon and run the supported stopped-node command
+   hosted daemon and run the supported local command
    `RYEOS_APP_ROOT=<hosted-root> ryeos authorize-client --public-key
    <raw-base64> --origin-site-id site:<source>
    --allow-semantic-conversion --scopes <exact-scopes>` on the hosted node.

@@ -112,9 +112,9 @@ RYEOS_APP_ROOT=/path/to/hosted-app-root ryeos authorize-client \
   --scopes "$MAINTENANCE_SCOPES"
 ```
 
-The supported stopped-node command mechanically acquires the daemon's
-exclusive state lock before a
-semantic conversion and refuses while the daemon owns it. Start the daemon and
+The supported local command mechanically acquires the daemon's exclusive state
+lock before a semantic conversion and refuses while the daemon owns it. Start
+the daemon and
 perform maintenance, stop it again, then reinstall the exact `remote_operator`
 grant above with `--allow-semantic-conversion`. A separate key cannot satisfy
 the configured-operator check. Never merge scopes across a class or origin

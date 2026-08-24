@@ -1,7 +1,7 @@
-# ryeos:signed:2026-08-24T16:23:18Z:ccb9bb99161b7e78e39cd4774547a91f3b5fcdc381d7523a9100e6f252fcc939:HhHIzN4JLAbwqBGEkEvkRb4JHRqzC//we040r1fcA6QTMDEL5C3e7Wp9t9onLp02hSZNtz6PElMeTIgbfZveDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-24T16:46:17Z:d3d2ef49b1187e3b9028104922a8ec0d64925f878937bc0dc5dfd32428fa85a4:qZF/SiOcDe5QFGko7JOhgrFRlksKFTW5qR8rQlfAIfJzFX3eoY6bp55NmsnRva/MRGDVP8xWEAMCkezkRVlJBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - authorize-client
-description: Reconcile one authorized client grant under stopped-node authority
+description: Reconcile one authorized client grant with local node authority
 help:
   usage: "ryeos authorize-client --public-key <raw-ed25519-base64> --scopes <scope,...> [--label <label>] [--origin-site-id <site:id>] [--allow-semantic-conversion] [--merge-scopes]"
 parameter_binding:

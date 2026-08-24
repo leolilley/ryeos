@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T16:23:36Z:f012eb9a5fe711bb36419b3130f4f7f15cb1d200f0a0ced043a477791aabc51e:4LMmxUw5qO0QiGiRzQpHoX5GPWyVvWOUQm6HJhDr7pY1O/e/A4cDPsAwqs94EIDsOBGgvP6GpTlUpNV349xDDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T16:46:35Z:b77ba554061061fe3d9b937a752b38dc8d62bae1dba5a8f593bf606d5bb4e4ca:xuOzqUz3nccuZK63LFFpMfRfNQ9l5mklYjiTVDjAVQTteuusVkWHQvlsRsCHTzDbq+1Nl5lNvyTCLW/by23LCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -127,7 +127,7 @@ choose its authenticated origin.
 
 For configured-operator continuity, do not use admission claim or the remote
 authorize endpoint: both create ordinary remote-node/client authority. Stop
-the hosted target and use the supported stopped-node command to install the
+the hosted target and use the supported local command to install the
 exact origin-bound operator grant. If the configured operator already has its bootstrap
 `local_client` grant, the explicit semantic-conversion flag is required:
 
