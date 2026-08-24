@@ -1093,9 +1093,10 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     match controller.status().await {
         Ok(LifecycleStatus::Running { metadata, .. }) => {
             daemon_running = true;
-            let current = ryeos_app::build_info::get();
-            let skew = is_revision_skew(metadata.revision.as_deref(), current.revision)
-                || ryeosd_installed_after_daemon_started(&metadata);
+            let installed_revision = installed_ryeosd_revision();
+            let skew =
+                is_revision_skew(metadata.revision.as_deref(), installed_revision.as_deref())
+                    || ryeosd_installed_after_daemon_started(&metadata);
             if skew {
                 checks.push(check(
                     "daemon",
@@ -1103,8 +1104,8 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                     serde_json::json!({
                         "state": "running",
                         "running_revision": metadata.revision,
-                        "installed_revision": current.revision,
-                        "note": "the running daemon is an older build than the installed binary",
+                        "installed_revision": installed_revision,
+                        "note": "the running daemon does not match the installed daemon binary",
                         "fix": "ryeos stop && ryeos start",
                     }),
                 ));
@@ -1647,11 +1648,14 @@ async fn run_start_command(argv: &[String], console: &crate::tty::Console) -> Re
 }
 
 /// When `ryeos start` finds a daemon already running, warn loudly if that daemon
-/// is an older build than the installed binaries — the classic footgun where an
-/// install replaced `ryeosd` on disk but did not cycle the running daemon, so it
-/// keeps holding the state lock and serving stale behavior. `ryeos` and `ryeosd`
-/// are built and installed together, so this binary's build info stands in for
-/// the on-disk `ryeosd`.
+/// is an older build than the installed `ryeosd` — the classic footgun where an
+/// install replaced the daemon binary on disk but did not cycle the running
+/// process, so it keeps holding the state lock and serving stale behavior.
+///
+/// The querying `ryeos` binary is deliberately not used as a proxy for the
+/// installed daemon. Incremental builds and package staging can legitimately
+/// relink the CLI and daemon at different revisions even when the on-disk and
+/// running daemon artifacts are identical.
 ///
 /// Two independent signals, either of which fires the warning:
 ///   1. the daemon recorded a different VCS revision (or none — a build from
@@ -1664,23 +1668,27 @@ fn warn_if_stale_daemon(console: &crate::tty::Console, status: &LifecycleStatus)
     let LifecycleStatus::Running { metadata, .. } = status else {
         return Ok(());
     };
-    let current = ryeos_app::build_info::get();
+    let installed_revision = installed_ryeosd_revision();
 
-    let revision_skew = is_revision_skew(metadata.revision.as_deref(), current.revision);
+    let revision_skew =
+        is_revision_skew(metadata.revision.as_deref(), installed_revision.as_deref());
     let binary_is_newer = ryeosd_installed_after_daemon_started(metadata);
 
     if !revision_skew && !binary_is_newer {
         return Ok(());
     }
     let mut diagnostic = crate::tty::Diagnostic::warning(
-        "the running daemon is an older build than the installed binary",
+        "the running daemon does not match the installed daemon binary",
     );
     diagnostic.context = vec![
         format!(
             "running revision {}",
             metadata.revision.as_deref().unwrap_or("unknown")
         ),
-        format!("installed revision {}", current.revision),
+        format!(
+            "installed daemon revision {}",
+            installed_revision.as_deref().unwrap_or("unknown")
+        ),
         "newly installed changes do not take effect while the old daemon holds the state lock"
             .to_string(),
     ];
@@ -1689,15 +1697,54 @@ fn warn_if_stale_daemon(console: &crate::tty::Console, status: &LifecycleStatus)
     Ok(())
 }
 
-/// Whether the daemon's recorded revision indicates an older build than this
-/// one. A missing recorded revision (a daemon built before revisions were
-/// tracked) counts as skew; an "unknown" current revision (git unavailable at
-/// build time) can't discriminate, so it never fires on its own.
-fn is_revision_skew(recorded: Option<&str>, current: &str) -> bool {
-    match recorded {
-        Some(rev) => current != "unknown" && rev != current,
-        None => true,
+/// Whether the running daemon's recorded revision differs from the installed
+/// daemon artifact. If the installed artifact cannot report a revision, the
+/// revision signal is unavailable and the independent mtime signal remains.
+fn is_revision_skew(recorded: Option<&str>, installed: Option<&str>) -> bool {
+    match installed.filter(|revision| *revision != "unknown") {
+        Some(installed) => recorded != Some(installed),
+        None => false,
     }
+}
+
+/// Read build provenance from the installed `ryeosd` sibling without opening
+/// node state. `ryeosd build-info` exits before configuration or state loading.
+/// Any failure leaves revision comparison unavailable; lifecycle diagnostics
+/// remain best-effort and still retain the independent binary-mtime signal.
+fn installed_ryeosd_revision() -> Option<String> {
+    let ryeosd = sibling_ryeosd_path()?;
+    let output = std::process::Command::new(ryeosd)
+        .args(["build-info", "--revision"])
+        .env_clear()
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_installed_revision(&output.stdout)
+}
+
+fn parse_installed_revision(stdout: &[u8]) -> Option<String> {
+    const MAX_REVISION_BYTES: usize = 128;
+    if stdout.len() > MAX_REVISION_BYTES {
+        return None;
+    }
+    let revision = std::str::from_utf8(stdout).ok()?.trim();
+    if revision.is_empty()
+        || revision == "unknown"
+        || !revision.bytes().all(|byte| byte.is_ascii_graphic())
+    {
+        return None;
+    }
+    Some(revision.to_string())
+}
+
+fn sibling_ryeosd_path() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(|directory| directory.join("ryeosd"))
+        .filter(|path| path.is_file())
 }
 
 /// True when the on-disk `ryeosd` (sibling of this `ryeos` binary) has a newer
@@ -1705,11 +1752,7 @@ fn is_revision_skew(recorded: Option<&str>, current: &str) -> bool {
 /// starts. Any failure to resolve either path or its mtime returns false — a
 /// best-effort diagnostic must never block or mislead `start`.
 fn ryeosd_installed_after_daemon_started(metadata: &ryeos_node::DaemonMetadata) -> bool {
-    let Some(ryeosd) = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("ryeosd")))
-        .filter(|p| p.exists())
-    else {
+    let Some(ryeosd) = sibling_ryeosd_path() else {
         return false;
     };
     let daemon_json = ryeos_node::DaemonMetadata::path(&metadata.app_root);
@@ -2017,17 +2060,30 @@ mod tests {
     }
 
     #[test]
-    fn revision_skew_detects_mismatch_and_missing() {
-        // Same revision → not skewed.
-        assert!(!is_revision_skew(Some("abc123def456"), "abc123def456"));
-        // Different revision → skewed.
-        assert!(is_revision_skew(Some("oldsha000000"), "newsha111111"));
-        // No recorded revision (older daemon predating the field) → skewed.
-        assert!(is_revision_skew(None, "abc123def456"));
-        // Current revision unknown (git unavailable at build): a recorded
-        // revision can't be discriminated, but a missing one still skews.
-        assert!(!is_revision_skew(Some("abc123def456"), "unknown"));
-        assert!(is_revision_skew(None, "unknown"));
+    fn revision_skew_compares_running_and_installed_daemon() {
+        assert!(!is_revision_skew(
+            Some("abc123def456"),
+            Some("abc123def456")
+        ));
+        assert!(is_revision_skew(Some("oldsha000000"), Some("newsha111111")));
+        assert!(is_revision_skew(None, Some("abc123def456")));
+
+        // A CLI built at another revision is irrelevant. If the installed
+        // daemon revision cannot be read, this signal cannot claim skew.
+        assert!(!is_revision_skew(Some("abc123def456"), None));
+        assert!(!is_revision_skew(None, None));
+        assert!(!is_revision_skew(Some("abc123def456"), Some("unknown")));
+    }
+
+    #[test]
+    fn installed_revision_output_is_bounded_and_single_token() {
+        assert_eq!(
+            parse_installed_revision(b"331b98afb3b5\n").as_deref(),
+            Some("331b98afb3b5")
+        );
+        assert_eq!(parse_installed_revision(b"unknown\n"), None);
+        assert_eq!(parse_installed_revision(b"two revisions\n"), None);
+        assert_eq!(parse_installed_revision(&[b'a'; 129]), None);
     }
 
     #[test]
