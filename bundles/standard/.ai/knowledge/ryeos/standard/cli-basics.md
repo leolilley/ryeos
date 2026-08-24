@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-18T22:04:53Z:7d4c3c398d84d6a5cf94c0339549c68826a018045b30c0e499a8a57811084b15:1FplciaF2T+1l5CqiNGebIjSq0cuH4FcrKBxjeDnGUHnBL7UV8dZdi9VR3TQTwv3zylJaY9XdJYzMhFCk+4rAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T13:29:03Z:a6122d7d1073ff4036c3126048e2e61f9d70d9701129b9b9b5d9e6690aa187c2:HYm1KRy5fmLYtqAqHXConxR61NEzVmDftOL9FOVfxmc092Y9EatuZWBREj/NjzleHZ+4ZvpVxe9Dgia83ImKBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [cli, quickstart, reference, llm, execute, remote, threads, offline]
@@ -321,7 +321,10 @@ ryeos remote vault-list prod
 ## 11. Remote setup and diagnostics
 
 Remote commands are local daemon services that call another Rye daemon
-with signed HTTP requests. They use the caller's **node key**.
+with signed HTTP requests. They normally use the caller's **node key**. The
+generic push/run services also have a narrow configured-operator mode for
+durable operator-owned workflows; selecting it requires the incoming request
+itself to authenticate as that exact configured operator.
 
 Show the local node identity to a remote operator:
 

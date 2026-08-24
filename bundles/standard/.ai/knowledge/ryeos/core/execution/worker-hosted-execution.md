@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T11:57:13Z:e400890d1389c6df3dda438332d4070cc2d74d31a86a826d147cfa0a0e82b87e:8OzSSnGr9rMj1qhpfMyRiZiJsf2t6reWgnM9LWQgQ6tO/AyIzrgf5BY6K5EY/1P96EiC1BB87RYGGAopoHOVAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T13:28:59Z:442160f593e235a6efd6178c6bb9b20a136b3afffcc475d4ac10e7e5e91077b6:X6dMS2dns7Y/DBmGZraFPh5QQ8mERXhpN9qO4LtE0U8uYBgSJJQCm8slstxXtNNIPAxtndz6pTM718+PQACeAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -43,6 +43,15 @@ Every profile and worker-execution entry point admits only the exact configured
 operator fingerprint. Authenticated requests may use local or remote transport;
 local transport is not the predicate. Owner rows are defense in depth and do
 not claim hostile multi-principal isolation.
+
+Normal remote orchestration is node-to-node and therefore changes the acting
+principal to the source node. An operator-owned durable workflow cannot use
+that identity for its principal-scoped HEAD and later control. The generic
+remote push/run seam has an explicit configured-operator mode: the incoming
+request must already authenticate as the exact configured operator, the daemon
+then signs the outbound request with that same configured operator key, and
+the destination must authorize it explicitly. This is not caller-principal
+impersonation or a provider exception; delegated callers cannot select it.
 
 ## Closed structured-session protocol
 
@@ -165,21 +174,29 @@ private execution source, but its newly captured parentless snapshot is not an
 existing `HEAD` and therefore is not the publication source for this workflow.
 Workspace IDs and candidate rows are projections. Completion never publishes.
 After the worker and managed controller have stopped, RyeOS freezes the exact
-workspace generation and appends `hosted_candidate.captured` to the still-live
-root before exposing the candidate projection. That fact binds the candidate,
-admitted base/capsule, workspace, and credential generation. Validation,
-publish/discard, and only then root terminalization follow on the same chain.
+workspace generation, closes the private workspace, appends
+`hosted_candidate.captured` to the still-live root, and only then exposes the
+candidate projection. One root-operation lease covers close, fact, and bind.
+That fact binds the candidate, admitted base/capsule, workspace, and credential
+generation. The already-closed snapshot remains available in CAS for
+validation and publication; validation, publish/discard, and only then root
+terminalization follow on the same chain.
 `validate-candidate-closure-and-base` proves canonical closure and admitted-base
 ancestry only; project tests remain ordinary executions.
 
-Publication additionally requires `ryeos.write.project.live`, expected base,
-owner authorization, and HEAD CAS. A durable reservation and startup recovery
-close the HEAD-before-root-fact crash gap. Root terminalization waits while
+Publication additionally requires `ryeos.write.project.live`, the exact
+principal key/project hash and expected base retained in root authority at
+admission, owner authorization, and HEAD CAS. An owner-authorized root
+reservation precedes HEAD contact; startup recovery requires that reservation
+and appends a separately linked filesystem-verified result. Root
+terminalization waits while
 publication may have contacted HEAD. A process-local root-operation lease
 fences every hosted root-chain mutation; terminalization closes admission and
 waits on its condition variable rather than polling SQLite. Pinned CoW worker
-executions admit exactly `retain_result`; projectless executions admit exactly
-`any`. Discard/advance launch authority is not accepted by this release.
+executions admit a retained-result authority (including the exact explicit
+current-HEAD destination where applicable); projectless executions admit
+exactly `any`. Discard/automatic-advance launch authority is not accepted by
+this release.
 
 For a runtime that declares native resume, a proved-dead launch owner does not
 discard an unpublished CoW workspace. Startup retains the exact workspace
@@ -190,13 +207,13 @@ not re-admitted as engine configuration. A crash during transfer is retryable
 because owner replacement and stale process-attachment removal are one
 transaction.
 
-If restart occurs after candidate capture, startup keeps the workspace in its
-frozen state, repairs any missing root-fact-before-projection boundary, and
-runs only the generic in-process disposition controller. It does not restart
-or reattach the external worker to already-frozen mutable bytes. The controller
-waits on pushed projection changes, reconstructs the canonical generic session
-result after owner disposition, commits the terminal root event, and closes the
-workspace under the replacement claim.
+If restart occurs after candidate capture, startup first closes any interrupted
+freezing workspace, repairs the missing root-fact-before-projection boundary,
+and runs only the generic in-process disposition controller. It does not
+restart or reattach the external worker to already-frozen mutable bytes. The
+controller waits on pushed projection changes, reconstructs the canonical
+generic session result after owner disposition, and commits the terminal root
+event; candidate exposure is permitted only after workspace closure.
 
 ## Explicit non-claims
 

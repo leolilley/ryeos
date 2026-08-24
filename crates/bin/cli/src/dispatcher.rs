@@ -2321,7 +2321,7 @@ mod tests {
     }
 
     #[test]
-    fn pinned_current_head_execute_uses_existing_publication_boundary() {
+    fn pinned_current_head_execute_retains_exact_publication_boundary() {
         let policy = execution_policy_value(true, true, false, true);
         assert_eq!(policy["ownership"], "daemon_owned");
         assert_eq!(policy["recovery"], "restart_recoverable");
@@ -2331,7 +2331,7 @@ mod tests {
         assert_eq!(policy["project"]["realization"]["kind"], "cow");
         assert_eq!(
             policy["project"]["realization"]["terminal_publication"]["kind"],
-            "retain_result"
+            "retain_current_head"
         );
     }
 

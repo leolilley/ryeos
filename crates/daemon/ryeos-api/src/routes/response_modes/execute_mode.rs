@@ -230,6 +230,7 @@ fn resolve_project_authority(
     policy: &ExecutionPolicy,
     project_path: Option<&Path>,
     snapshot_hash: Option<&str>,
+    acting_principal: &str,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
     capability_ceiling: &[String],
 ) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority> {
@@ -349,6 +350,26 @@ fn resolve_project_authority(
                         TerminalPublication::RetainResult => {
                             PinnedTerminalPublication::RetainResult
                         }
+                        TerminalPublication::RetainCurrentHead => {
+                            let root = root.as_deref().ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "retain-current-head authority requires a destination project path"
+                                )
+                            })?;
+                            let canonical =
+                                project_source::canonical_project_ref(root.to_str().ok_or_else(
+                                    || anyhow::anyhow!("destination project path is not UTF-8"),
+                                )?)
+                                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                            PinnedTerminalPublication::RetainCurrentHead {
+                                principal_key: ryeos_state::refs::principal_storage_key(
+                                    acting_principal,
+                                )?
+                                .to_owned(),
+                                project_hash: lillux::sha256_hex(canonical.as_bytes()),
+                                expected_hash: snapshot_hash.to_owned(),
+                            }
+                        }
                         TerminalPublication::AdvanceHead {
                             head_ref,
                             expected_hash,
@@ -458,6 +479,7 @@ pub(crate) fn resolve_execution_contract(
         policy,
         (!no_project_requested).then_some(project_ctx.original_path.as_path()),
         project_ctx.snapshot_hash.as_deref(),
+        acting_principal,
         &state.isolation,
         caller_scopes,
     )?;
@@ -2271,6 +2293,7 @@ mod tests {
             &policy,
             Some(project.path()),
             None,
+            "fp:operator",
             &ryeos_engine::isolation::IsolationRuntime::default(),
             &capability_ceiling,
         )

@@ -46,7 +46,7 @@ The exact Codex executable, same-version code-mode host, and the package's
 standalone package with `assemble.py`. Import and bind all five files through
 the ordinary `external-content import`/`external-content bind` ceremony. Their
 expected manifest hashes and individual file checksums are fixed in
-The activation declaration at `.ai/config/codex/activation.yaml` is the
+the activation declaration at `.ai/config/codex/activation.yaml`, which is the
 machine-readable source of the import bounds and checksums.
 
 Persistent subprocesses are deliberately disabled when the node has no
@@ -80,8 +80,7 @@ ryeos codex profile get personal
 ryeos codex profile confirm personal LOGIN_EPOCH EXPECTED_ACCOUNT_DIGEST
 
 # Project sessions require the now-active profile and an existing
-# principal-scoped project HEAD. On the hosted node use `ryeos commit`; from a
-# client node use the standard full-project `ryeos remote push` workflow.
+# principal-scoped project HEAD. On the hosted node use `ryeos commit`.
 ryeos --project . commit "Codex hosted-session base"
 ryeos --project . codex session start personal --async --current-head
 
@@ -96,6 +95,70 @@ ryeos codex session command SESSION turn-1 turn.start \
 # the ordinary thread/SSE surfaces; there is no second Codex event journal.
 ryeos codex session approvals SESSION
 ```
+
+When the client and hosted node have different absolute project paths, first
+configure a standard full-project remote binding and create the remote HEAD
+under the configured operator. Then launch through the provider-neutral
+`service:remote/run` seam so the destination path comes from that binding
+rather than from the client path:
+
+```sh
+# This opt-in generic push signs the destination HEAD as the configured
+# operator. Ordinary `ryeos remote push` remains node-owned.
+ryeos execute service:remote/push --input - <<'JSON'
+{
+  "remote": "hosted",
+  "project": "/local/project",
+  "outbound_principal": "configured_operator"
+}
+JSON
+REMOTE_LAUNCH_ID="L-$(uuidgen | tr -d '-')"
+ryeos execute service:remote/run --input - <<JSON
+{
+  "remote": "hosted",
+  "item_ref": "worker_execution:codex/session",
+  "ref_bindings": {},
+  "project": "/local/project",
+  "parameters": {"credential_profile_id": "personal"},
+  "launch_id": "$REMOTE_LAUNCH_ID",
+  "execution_policy": {
+    "schema_version": 2,
+    "ownership": "daemon_owned",
+    "recovery": "restart_recoverable",
+    "response": "accepted",
+    "target": {"kind": "here"},
+    "environment": {
+      "kind": "project_overlay",
+      "include_operator_vault": true,
+      "name_policy": {"kind": "declared_required"}
+    },
+    "project": {
+      "kind": "pinned",
+      "source": {"kind": "current_head"},
+      "realization": {
+        "kind": "cow",
+        "terminal_publication": {"kind": "retain_current_head"}
+      },
+      "child_policy": {"kind": "inherit"}
+    }
+  }
+}
+JSON
+```
+
+The same configured-operator key must exist at both operator endpoints and be
+authorized by the hosted daemon for the exact push, execution, profile, and
+session scopes. The operator-owned push and launch deliberately use that key;
+ordinary node-key remote authorization cannot create or control this
+operator-owned workflow.
+
+The coordinate is printed before remote contact; retain it until the accepted
+response echoes the same value. The returned `result.thread_id` is the remote
+RyeOS root/session ID. Drive its
+projectless session endpoints with the same configured-operator key directly
+against the hosted daemon (for example by setting `RYEOSD_URL` for the CLI),
+or from a RyeOS UI connected to that daemon. No shared filesystem pathname is
+required after admission.
 
 Approval decisions require the exact pending request digest. Permission,
 network, exec-policy, session-wide, legacy patch, and legacy exec expansions

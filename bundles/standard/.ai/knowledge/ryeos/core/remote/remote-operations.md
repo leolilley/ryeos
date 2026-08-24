@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:34Z:8b54f0b2091f35998b15c471440af0de74fec66c9ffe51050c927d7c47134595:ICQsOkYHIaDlPFk+La4iEnPwAdB7T9OXFtf9OawQI1iLxJ8lPyFWhgUGH/BwkUHWaufrfaz0ilQ2/UsdbXFbCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T13:29:02Z:1abbbf5fb58fc5b52767c5608b0946dbd65ac967326ba49acbce8cebd2fa00a6:B+RD7fcTCz77G0kqRt+ZR7tbp2+JB1MhNR8MnEc5LBJrj+SKAAph1ooJZwvDRQt9F842Ko6C1/44fUGn3BjfBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -33,17 +33,18 @@ untrusted tenants.
   not storage partitioning.
 - Vault is a single shared store in v1; capability checks protect
   mutation/listing, not per-principal isolation.
-- All remote requests are signed with the **caller's node Ed25519 key**
-  (not the user/CLI key); the remote node verifies the signature against
-  its authorized-keys trust store.
+- Remote requests are normally signed with the **caller's node Ed25519 key**;
+  the remote node verifies the signature against its authorized-keys trust
+  store. The explicit configured-operator continuity mode described below is
+  the sole generic exception.
 - Granting the local `remote.admin` capability is operator-level access
   to high-impact remote orchestrators in v1. It does not replace
   target-node authorized-key scopes.
 
 ## Identity Requirements
 
-Remote outbound requests are signed with the **caller's node key**, not
-the user CLI key. This means:
+Remote outbound requests are normally signed with the **caller's node key**,
+not the user CLI key. This means:
 
 - The key that must be authorized on the remote is the caller's **node
   public key** (`<system>/.ai/node/identity/public-identity.json`).
@@ -55,6 +56,13 @@ ryeos identity
 
 - The remote operator authorizes the caller's **node key fingerprint**,
   not the user key fingerprint.
+
+Operator-owned durable workflows may explicitly select the configured
+operator on `service:remote/push`; the matching retained-current-HEAD accepted
+`service:remote/run` preserves it automatically. Both local requests must be
+made by that exact configured operator, and the destination must authorize the
+same operator key. A delegated caller cannot turn the node into an operator-key
+signing oracle.
 
 ## Prerequisites
 

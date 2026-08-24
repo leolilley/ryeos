@@ -132,6 +132,11 @@ pub enum PinnedProjectRealization {
 pub enum PinnedTerminalPublication {
     Discard,
     RetainResult,
+    RetainCurrentHead {
+        principal_key: String,
+        project_hash: String,
+        expected_hash: String,
+    },
     AdvanceHead {
         head_ref: String,
         expected_hash: String,
@@ -680,6 +685,24 @@ impl ExecutionProjectAuthority {
                     // admission. `snapshot_hash` may advance through private
                     // operational generations before terminal publication.
                 }
+                if let PinnedProjectRealization::Cow {
+                    terminal_publication:
+                        PinnedTerminalPublication::RetainCurrentHead {
+                            principal_key,
+                            project_hash,
+                            expected_hash,
+                        },
+                } = realization
+                {
+                    validate_hash("explicit publication principal key", principal_key)?;
+                    validate_hash("explicit publication project hash", project_hash)?;
+                    validate_hash("explicit publication expected hash", expected_hash)?;
+                    if expected_hash != base_snapshot_hash {
+                        anyhow::bail!(
+                            "explicit publication expected hash must equal the admitted base generation"
+                        );
+                    }
+                }
                 if matches!(realization, PinnedProjectRealization::ReadOnly)
                     && base_snapshot_hash != snapshot_hash
                 {
@@ -913,6 +936,7 @@ impl ExecutionProjectAuthority {
             Self::PinnedGeneration {
                 realization: PinnedProjectRealization::Cow {
                     terminal_publication: PinnedTerminalPublication::RetainResult
+                        | PinnedTerminalPublication::RetainCurrentHead { .. }
                         | PinnedTerminalPublication::AdvanceHead { .. },
                 },
                 ..
@@ -1237,6 +1261,70 @@ mod tests {
             left.stable_cache_identity().unwrap(),
             advanced.stable_cache_identity().unwrap()
         );
+    }
+
+    #[test]
+    fn retained_current_head_freezes_exact_destination_and_admitted_base() {
+        let base = "a".repeat(64);
+        let principal_key = "b".repeat(64);
+        let project_hash = "c".repeat(64);
+        let authority = ExecutionProjectAuthority::pinned(
+            "remote-project".to_string(),
+            Some(PathBuf::from("/srv/remote/materialization")),
+            base.clone(),
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::RetainCurrentHead {
+                    principal_key: principal_key.clone(),
+                    project_hash: project_hash.clone(),
+                    expected_hash: base.clone(),
+                },
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let restarted: ExecutionProjectAuthority =
+            serde_json::from_value(serde_json::to_value(&authority).unwrap()).unwrap();
+        restarted.validate().unwrap();
+        let identity = restarted.stable_cache_identity().unwrap();
+        assert_eq!(
+            identity["realization"]["terminal_publication"]["principal_key"].as_str(),
+            Some(principal_key.as_str())
+        );
+        assert_eq!(
+            identity["realization"]["terminal_publication"]["project_hash"].as_str(),
+            Some(project_hash.as_str())
+        );
+        assert_eq!(
+            identity["realization"]["terminal_publication"]["expected_hash"].as_str(),
+            Some(base.as_str())
+        );
+
+        let advanced = restarted
+            .transition_operational_generation(
+                OperationalProjectAuthorityTransition::AdvancePinnedCowContinuation {
+                    result_snapshot_hash: &"d".repeat(64),
+                },
+            )
+            .unwrap();
+        advanced.validate().unwrap();
+        assert_eq!(advanced.subject_base_snapshot_hash(), Some(base.as_str()));
+
+        let wrong_base = ExecutionProjectAuthority::pinned(
+            "remote-project".to_string(),
+            None,
+            base,
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::RetainCurrentHead {
+                    principal_key,
+                    project_hash,
+                    expected_hash: "e".repeat(64),
+                },
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        );
+        assert!(wrong_base.is_err());
     }
 
     #[test]

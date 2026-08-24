@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T11:57:25Z:97e75742d56d1a8f51f455ea5cc024db39dfe1e1c18e4ef33262d27283914043:CH4TmUeyPRt/E+A3uworsVua0CdU6nJWwu82TPU/R/8Dw+cRdDU+2e0l/E3dw6RzZNxP8/JMAk1YLaneW11oDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T13:29:11Z:a25d0a2fca25af52612444f0c08e3f19edf7314f55a9e3d3d3eb394d97ed287f:OHSAyF+bUd+S5AXUnseja4N+fN8QIeekueBv1Km4RgZDfGLjlr0B7q2uWIBwsCP9mR6I0jvits4zwr9+PCHnDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -33,14 +33,22 @@ knowledge bundle.
    `.ai/config/codex/activation.yaml`.
 3. Configure node-owned persistent-session limits. Bundles never enable node
    worker capacity themselves.
-4. Authorize the remote client key as configured operator with exact worker,
-   profile, project, and external-content scopes. Wildcards are unnecessary.
+4. Provision the same configured-operator identity at the operator endpoint
+   and hosted node, and authorize that key on the hosted daemon with exact
+   worker, profile, project, and external-content scopes. Wildcards are
+   unnecessary. Ordinary RyeOS remote-node grants remain node principals and
+   cannot own this workflow.
 5. Open projectless login, call `credential.login.start`, finish the ephemeral
    ceremony, call `credential.account.read`, close it, and confirm the exact
    login epoch/account digest.
 6. Establish the configured operator's principal-scoped project HEAD through
-   the standard local `commit` or full-project `remote push` workflow, then
-   start the worker with `--current-head`. Call `session.start`, then
+   the standard local `commit` or an explicit full-project
+   `service:remote/push` with `outbound_principal: configured_operator`. A
+   local launch uses `--current-head`; a client with a different absolute path
+   uses `service:remote/run`, whose configured project binding supplies the
+   destination path, preserves that configured-operator principal, and
+   returns the durable accepted thread ID. Call
+   `session.start`, then
    `turn.start`, `turn.steer`, and `turn.interrupt`. Every turn is bound to the
    one returned remote thread; cross-thread targeting is rejected.
 7. Resolve digest-fenced pending approvals. Command approval displays bounded
@@ -59,8 +67,8 @@ cancelled if interrupted.
 That App Server reattachment applies only while the hosted session itself is
 live. If restart occurs after Codex has stopped and RyeOS has frozen the
 candidate, RyeOS starts no new Codex process. The generic disposition controller
-repairs the root-tested candidate boundary, waits for validate/publish/discard,
-then finalizes the RyeOS root and closes the frozen workspace.
+repairs the root-tested candidate boundary only after the private workspace is
+closed, waits for validate/publish/discard, then finalizes the RyeOS root.
 
 The route IDs above are canonical. Inspect a complete leaf such as
 `ryeos help codex session command` for its current CLI presentation; every

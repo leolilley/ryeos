@@ -29,6 +29,11 @@ pub struct Request {
     pub parameters: Value,
     /// Explicit execution semantics for the destination project.
     pub execution_policy: ryeos_app::execution_policy::ExecutionPolicy,
+    /// Caller-retained remote request coordinate. Required exactly when the
+    /// destination policy returns `accepted`, so uncertain delivery can be
+    /// queried without risking a second launch.
+    #[serde(default)]
+    pub launch_id: Option<String>,
 }
 
 fn default_remote() -> String {
@@ -49,7 +54,6 @@ pub async fn handle(
         .map_err(|e| HandlerError::BadRequest(format!("project binding: {e:#}")))?;
     let remote_cfg = loaded_remote.config;
 
-    let client = RemoteClient::from_remote_cfg(&state, &remote_cfg);
     req.execution_policy
         .validate()
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
@@ -58,14 +62,69 @@ pub async fn handle(
             "remote run receives a destination-local policy; target must be `here`".to_string(),
         ));
     }
-    if !matches!(
-        req.execution_policy.project,
+    let live_direct = matches!(
+        &req.execution_policy.project,
         ryeos_app::execution_policy::ProjectExecutionPolicy::LiveDirect { .. }
-    ) {
+    );
+    let retained_current_head = matches!(
+        &req.execution_policy.project,
+        ryeos_app::execution_policy::ProjectExecutionPolicy::Pinned {
+            source: ryeos_app::execution_policy::PinnedSource::CurrentHead,
+            realization: ryeos_app::execution_policy::PinnedRealization::Cow {
+                terminal_publication:
+                    ryeos_app::execution_policy::TerminalPublication::RetainCurrentHead,
+            },
+            ..
+        }
+    );
+    if !live_direct && !retained_current_head {
         return Err(HandlerError::BadRequest(
-            "remote run executes the configured deployed project and requires live_direct project authority"
+            "remote run requires live_direct authority or a retained current_head COW launch"
                 .to_string(),
         ));
+    }
+    if retained_current_head
+        && req.execution_policy.response != ryeos_app::execution_policy::ExecutionResponse::Accepted
+    {
+        return Err(HandlerError::BadRequest(
+            "retained current_head remote launches must return accepted so the caller can drive the durable session"
+                .to_string(),
+        ));
+    }
+    if retained_current_head && binding.sync_scope != config::ProjectSyncScope::FullProject {
+        return Err(HandlerError::BadRequest(format!(
+            "retained current_head remote launches require a full_project binding; '{}' is {:?}",
+            binding.local_project_path.display(),
+            binding.sync_scope
+        )));
+    }
+    let client = if retained_current_head {
+        RemoteClient::from_remote_cfg_as_configured_operator(&state, &remote_cfg, &ctx)
+            .map_err(|error| HandlerError::Forbidden(error.to_string()))?
+    } else {
+        RemoteClient::from_remote_cfg(&state, &remote_cfg)
+    };
+    let accepted =
+        req.execution_policy.response == ryeos_app::execution_policy::ExecutionResponse::Accepted;
+    match (accepted, req.launch_id.as_deref()) {
+        (true, Some(launch_id)) if ryeos_app::state_store::is_canonical_launch_id(launch_id) => {}
+        (true, Some(_)) => {
+            return Err(HandlerError::BadRequest(
+                "accepted remote launch_id must be L- followed by exactly 32 hexadecimal characters"
+                    .to_string(),
+            ));
+        }
+        (true, None) => {
+            return Err(HandlerError::BadRequest(
+                "accepted remote launches require a caller-retained launch_id".to_string(),
+            ));
+        }
+        (false, Some(_)) => {
+            return Err(HandlerError::BadRequest(
+                "launch_id is valid only for an accepted remote launch".to_string(),
+            ));
+        }
+        (false, None) => {}
     }
     let remote_result = client
         .execute(
@@ -74,9 +133,21 @@ pub async fn handle(
             Some(&binding.remote_project_path),
             &req.parameters,
             &req.execution_policy,
+            req.launch_id.as_deref(),
         )
         .await
-        .map_err(|e| HandlerError::Internal(format!("remote run failed: {e:#}")))?;
+        .map_err(|error| {
+            let coordinate = req
+                .launch_id
+                .as_deref()
+                .map(|launch_id| {
+                    format!(
+                        "; retain remote launch coordinate {launch_id} and query that exact owner-bound launch before retrying"
+                    )
+                })
+                .unwrap_or_default();
+            HandlerError::Internal(format!("remote run failed: {error:#}{coordinate}"))
+        })?;
 
     Ok(serde_json::json!({
         "remote": req.remote,

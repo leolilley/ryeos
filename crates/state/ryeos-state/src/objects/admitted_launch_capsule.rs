@@ -6,7 +6,7 @@ use super::{
     ExecutionRecoveryAuthority, validate_trimmed_control_free,
 };
 
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 13;
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 14;
 pub const ADMITTED_DIRECT_COMMAND_ROOT: &str = "/ryeos/admitted-direct-command";
 
 pub fn admitted_direct_command_execution_path(

@@ -2,6 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use ryeos_app::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
+use ryeos_app::runtime_db::{
+    NewCredentialProfile, NewDedicatedSession, NewDedicatedSessionCommand, WorkerProcessRecord,
+    WorkerProcessState, WorkspaceBinding, WorkspaceState,
+};
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::{
     FinalizeThreadRecord, InProcessHandlerControl, NewEventRecord, NewThreadRecord,
@@ -1185,4 +1189,290 @@ async fn live_reconciliation_fails_an_unregistered_in_process_handler_idempotent
         created.payload["usage_subject_asserted_by"].as_str(),
         Some("user:test")
     );
+}
+
+#[tokio::test]
+async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_epoch() {
+    let (tmpdir, state) = build_test_state();
+    let session_id = "T-hosted-root-replay";
+    let workspace_id = "W-hosted-root-replay";
+    let worker_id = "worker-hosted-root-replay";
+    let profile_id = "P-hosted-root-replay";
+    let capsule_hash = "a".repeat(64);
+    let lower_snapshot = "b".repeat(64);
+    let request_digest = "c".repeat(64);
+    let observation_digest = "d".repeat(64);
+
+    state
+        .state_store
+        .create_thread_for_test(&thread_record(
+            session_id,
+            None,
+            ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+        ))
+        .unwrap();
+    state
+        .state_store
+        .mark_thread_running(session_id, None)
+        .unwrap();
+
+    let workspace_root = tmpdir.path().join("hosted-workspace");
+    std::fs::create_dir(&workspace_root).unwrap();
+    state
+        .state_store
+        .reserve_execution_workspace(
+            workspace_id,
+            &lower_snapshot,
+            workspace_root.to_str().unwrap(),
+        )
+        .unwrap();
+    state
+        .state_store
+        .transition_execution_workspace(
+            workspace_id,
+            &[WorkspaceState::Reserved],
+            WorkspaceState::Constructing,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        state
+            .state_store
+            .claim_thread_launch(session_id, "claim-hosted-replay", "launch-hosted-replay")
+            .unwrap(),
+        ryeos_app::runtime_db::LaunchClaimOutcome::Claimed
+    );
+    let launch_owner = state
+        .state_store
+        .get_launch_claim(session_id)
+        .unwrap()
+        .unwrap()
+        .claimed_by;
+    state
+        .state_store
+        .claim_execution_workspace_construction(workspace_id, session_id, &launch_owner)
+        .unwrap();
+    state
+        .state_store
+        .bind_execution_workspace(WorkspaceBinding {
+            workspace_id,
+            thread_id: session_id,
+            launch_owner: Some(&launch_owner),
+            backend_id: None,
+            backend_version: None,
+            pinned_root_identities: None,
+            mount_identity: None,
+        })
+        .unwrap();
+
+    state
+        .state_store
+        .create_credential_profile(NewCredentialProfile {
+            profile_id,
+            owner_principal: "fp:test",
+            home_id: "home-hosted-root-replay",
+        })
+        .unwrap();
+    let credential_generation = state
+        .state_store
+        .acquire_credential_profile(profile_id, "fp:test", worker_id)
+        .unwrap();
+    state
+        .state_store
+        .admit_dedicated_session(NewDedicatedSession {
+            session_id,
+            root_thread_id: session_id,
+            owner_principal: "fp:test",
+            admitted_capsule_hash: &capsule_hash,
+            workspace_id,
+            candidate_required: false,
+            credential_profile_id: profile_id,
+            credential_generation,
+            credential_lock_owner: worker_id,
+        })
+        .unwrap();
+    let now = lillux::time::timestamp_millis() as i64;
+    state
+        .state_store
+        .attach_worker_process(&WorkerProcessRecord {
+            worker_instance_id: worker_id.to_owned(),
+            boot_identity_hash: "e".repeat(64),
+            session_capsule_hash: capsule_hash.clone(),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: ryeos_app::process::ExecutionProcessIdentity {
+                schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                boot_id: "fixture-dead-boot".to_owned(),
+                target_pid: 999_999,
+                target_start_time_ticks: 1,
+                group_leader_pid: 999_999,
+                group_leader_start_time_ticks: 1,
+            },
+            control_channel_identity: "fd:fixture-dead".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "dead-daemon-generation".to_owned(),
+            session_id: session_id.to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: now,
+            updated_at_ms: now,
+        })
+        .unwrap();
+    state
+        .state_store
+        .complete_worker_binding(worker_id, session_id, 1)
+        .unwrap();
+
+    let command_payload = serde_json::json!({
+        "route_id":"session.start",
+        "payload":{},
+    });
+    let command = state
+        .state_store
+        .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+            session_id,
+            idempotency_key: "command-hosted-root-replay",
+            worker_boot_epoch: 1,
+            command_kind: "request",
+            request_digest: &request_digest,
+            payload: &command_payload,
+        })
+        .unwrap();
+    state
+        .state_store
+        .mark_dedicated_command_contacted(session_id, command.command_sequence, 1)
+        .unwrap();
+    state
+        .state_store
+        .reserve_dedicated_observation_batch(session_id, 1, 1, 1, None, &observation_digest)
+        .unwrap();
+
+    let committed_operation = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+        "schema":"ryeos.hosted_command_fact.v1",
+        "session_id":session_id,
+        "command_sequence":command.command_sequence,
+        "request_digest":request_digest,
+        "event_type":"hosted_command.committed",
+    }))
+    .unwrap();
+    let response_batch = serde_json::json!({
+        "events":[],
+        "session_observations":[],
+    });
+    let response_digest = ryeos_state::objects::canonical_value_digest(&response_batch).unwrap();
+    let response_operation = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+        "schema":"ryeos.hosted_command_fact.v1",
+        "session_id":session_id,
+        "command_sequence":command.command_sequence,
+        "request_digest":request_digest,
+        "event_type":"hosted_worker_command_observation_batch",
+    }))
+    .unwrap();
+    state
+        .threads
+        .append_thread_events(
+            session_id,
+            session_id,
+            &[
+                NewEventRecord {
+                    event_type: "hosted_command.committed".to_owned(),
+                    storage_class: "indexed".to_owned(),
+                    payload: serde_json::json!({
+                        "schema":1,
+                        "origin":"daemon_observed_io",
+                        "operation_id":committed_operation,
+                        "session_id":session_id,
+                        "command_sequence":command.command_sequence,
+                        "request_digest":request_digest,
+                        "worker_boot_epoch":1,
+                        "command_kind":"request",
+                        "route_id":"session.start",
+                        "idempotency_key":"command-hosted-root-replay",
+                        "canonical_command":command_payload,
+                        "admitted_session_capsule_hash":capsule_hash,
+                        "protocol_profile_hash":"f".repeat(64),
+                        "protocol_schema_hashes":{"fixture":"1".repeat(64)},
+                    }),
+                },
+                NewEventRecord {
+                    event_type: "hosted_worker_command_observation_batch".to_owned(),
+                    storage_class: "indexed".to_owned(),
+                    payload: serde_json::json!({
+                        "schema":1,
+                        "origin":"daemon_observed_io",
+                        "operation_id":response_operation,
+                        "session_id":session_id,
+                        "command_sequence":command.command_sequence,
+                        "request_digest":request_digest,
+                        "worker_boot_epoch":1,
+                        "response_digest":response_digest,
+                        "canonical_batch":response_batch,
+                    }),
+                },
+                NewEventRecord {
+                    event_type: "hosted_worker_observation_batch".to_owned(),
+                    storage_class: "indexed".to_owned(),
+                    payload: serde_json::json!({
+                        "schema":1,
+                        "origin":"daemon_observed_io",
+                        "session_id":session_id,
+                        "worker_boot_epoch":1,
+                        "batch_digest":observation_digest,
+                        "first_sequence":1,
+                        "through_sequence":1,
+                        "canonical_batch":{
+                            "events":[],
+                            "session_observations":[{
+                                "kind":"remote_thread",
+                                "id":"remote-thread-from-root",
+                            }],
+                        },
+                    }),
+                },
+            ],
+        )
+        .unwrap()
+        .unwrap();
+
+    super::reconcile::reconcile_dedicated_worker_startup(&state)
+        .await
+        .unwrap();
+
+    let recovered_command = state
+        .state_store
+        .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+            session_id,
+            idempotency_key: "command-hosted-root-replay",
+            worker_boot_epoch: 1,
+            command_kind: "request",
+            request_digest: &request_digest,
+            payload: &command_payload,
+        })
+        .unwrap();
+    assert_eq!(recovered_command.state, "completed");
+    assert!(
+        state
+            .state_store
+            .dedicated_observation_outbox_records()
+            .unwrap()
+            .is_empty()
+    );
+    let session = state
+        .state_store
+        .dedicated_session(session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        session.remote_thread_id.as_deref(),
+        Some("remote-thread-from-root")
+    );
+    assert_eq!(session.state, "recovering");
+    assert!(session.worker_instance_id.is_none());
+    assert!(session.worker_boot_epoch.is_none());
+    let worker = state
+        .state_store
+        .worker_process(worker_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(worker.state, WorkerProcessState::Dead);
+    assert_eq!(worker.cleanup_state, "reaped");
 }

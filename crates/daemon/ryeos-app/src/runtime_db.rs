@@ -1144,7 +1144,10 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 8 retains every worker boot as immutable process-history evidence and
 // uniquely identifies an epoch within its session. Predecessor epoch 7's
 // single-row-per-session constraint cannot represent a recovered worker.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 8;
+// Epoch 9 embeds the exact retained-current-HEAD destination in every durable
+// execution-project authority envelope. A predecessor row cannot authorize
+// publication under this contract.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 9;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -2630,10 +2633,10 @@ fn runtime_user_tables(conn: &Connection) -> Result<BTreeSet<String>> {
 }
 
 const PROJECT_AUTHORITY_ENVELOPE_KIND: &str = "execution_project_authority";
-// Epoch 2 adds the independently durable base snapshot identity to pinned
-// generations. There is deliberately no compatibility reader: a row admitted
-// under the predecessor authority shape must be restarted under this contract.
-const PROJECT_AUTHORITY_SCHEMA_EPOCH: u32 = 2;
+// Epoch 3 adds the exact principal/project/base destination for explicit
+// retained-current-HEAD publication. There is deliberately no compatibility
+// reader: a predecessor authority cannot be upgraded into publication rights.
+const PROJECT_AUTHORITY_SCHEMA_EPOCH: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IncompatibleRuntimeExecutionSchema {
@@ -3392,6 +3395,16 @@ pub enum ObservationBatchReservation {
     ContactAppend,
     AlreadySettled,
     RebuildProjection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DedicatedObservationBatchRecord {
+    pub session_id: String,
+    pub worker_boot_epoch: u64,
+    pub first_sequence: u64,
+    pub through_sequence: u64,
+    pub batch_digest: String,
+    pub state: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5418,6 +5431,73 @@ impl RuntimeDb {
         Ok(())
     }
 
+    /// Return pushed-observation reservations whose authoritative append or
+    /// rebuildable projection was interrupted. Startup repairs these while the
+    /// exact old worker epoch is still retained and after its process has been
+    /// quiesced.
+    pub fn dedicated_observation_outbox_records(
+        &self,
+    ) -> Result<Vec<DedicatedObservationBatchRecord>> {
+        let mut statement = self.conn.prepare(
+            "SELECT session_id, worker_boot_epoch, first_sequence,
+                    through_sequence, batch_digest, state
+               FROM dedicated_session_observation_batch
+              WHERE state IN ('append_contacting','append_unknown')
+              ORDER BY session_id, worker_boot_epoch, first_sequence",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })?
+            .map(|row| {
+                let row = row?;
+                Ok(DedicatedObservationBatchRecord {
+                    session_id: row.0,
+                    worker_boot_epoch: u64::try_from(row.1)?,
+                    first_sequence: u64::try_from(row.2)?,
+                    through_sequence: u64::try_from(row.3)?,
+                    batch_digest: row.4,
+                    state: row.5,
+                })
+            })
+            .collect()
+    }
+
+    /// Remove an exact append reservation only after the startup reconciler
+    /// has quiesced the old worker and proved that the immutable root chain has
+    /// no corresponding batch. No authority was published, so the reservation
+    /// itself is rebuildable and may be discarded.
+    pub fn discard_unappended_dedicated_observation_batch(
+        &self,
+        session_id: &str,
+        worker_boot_epoch: u64,
+        first_sequence: u64,
+        batch_digest: &str,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "DELETE FROM dedicated_session_observation_batch
+              WHERE session_id=?1 AND worker_boot_epoch=?2 AND first_sequence=?3
+                AND batch_digest=?4 AND state IN ('append_contacting','append_unknown')",
+            params![
+                session_id,
+                i64::try_from(worker_boot_epoch)?,
+                i64::try_from(first_sequence)?,
+                batch_digest,
+            ],
+        )?;
+        if changed != 1 {
+            bail!("unappended observation discard lost its exact reservation CAS");
+        }
+        Ok(())
+    }
+
     pub fn mark_dedicated_observation_batch_unknown(
         &self,
         session_id: &str,
@@ -5605,6 +5685,43 @@ impl RuntimeDb {
         Ok(())
     }
 
+    /// Retire a decision that was durably reserved but provably never crossed
+    /// the worker-contact boundary. This is distinct from delivery-unknown:
+    /// no external effect is possible, and a terminal root cannot accept new
+    /// delivery facts for the historical epoch.
+    pub fn reconcile_dedicated_approval_stale_epoch(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session_approval
+                SET state='stale_epoch', resolved_at_ms=?4
+              WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                AND state='decision_reserved'",
+            params![
+                session_id,
+                approval_id,
+                i64::try_from(worker_boot_epoch)?,
+                lillux::time::timestamp_millis() as i64
+            ],
+        )?;
+        if changed != 1 {
+            let retry: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session_approval
+                  WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                    AND state='stale_epoch')",
+                params![session_id, approval_id, i64::try_from(worker_boot_epoch)?],
+                |row| row.get(0),
+            )?;
+            if !retry {
+                bail!("approval stale-epoch reconciliation lost its identity/state CAS");
+            }
+        }
+        Ok(())
+    }
+
     /// Atomically closes command and approval admission before retirement.
     /// A retained draining reservation is safe to retry after a crash.
     pub fn reserve_dedicated_session_completion(
@@ -5766,6 +5883,57 @@ impl RuntimeDb {
         )?;
         if changed != 1 {
             bail!("approval delivery lost its contacted CAS");
+        }
+        Ok(())
+    }
+
+    /// Rebuild approval settlement from an exact authoritative root fact. The
+    /// fact can outlive both an interrupted SQLite settlement and detachment of
+    /// its historical worker epoch, so this repairs only the approval row.
+    pub fn settle_recovered_dedicated_approval_delivery(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+        reservation_token: &str,
+        decision_digest: &str,
+    ) -> Result<()> {
+        let epoch = i64::try_from(worker_boot_epoch)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session_approval
+                SET state='delivery_settled', delivery_settled_at_ms=?6
+              WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                AND reservation_token=?4 AND decision_digest=?5
+                AND state IN ('decision_reserved','delivery_contacting','delivery_unknown')",
+            params![
+                session_id,
+                approval_id,
+                epoch,
+                reservation_token,
+                decision_digest,
+                now,
+            ],
+        )?;
+        if changed == 1 {
+            return Ok(());
+        }
+        let settled: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM dedicated_session_approval
+              WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                AND reservation_token=?4 AND decision_digest=?5
+                AND state='delivery_settled')",
+            params![
+                session_id,
+                approval_id,
+                epoch,
+                reservation_token,
+                decision_digest,
+            ],
+            |row| row.get(0),
+        )?;
+        if !settled {
+            bail!("recovered approval settlement lost its exact decision CAS");
         }
         Ok(())
     }
@@ -12481,6 +12649,23 @@ mod tests {
             db.reserve_dedicated_observation_batch("S-observe", 2, 1, 1, None, &"d".repeat(64),)
                 .is_err()
         );
+        let unfinished = db.dedicated_observation_outbox_records().unwrap();
+        assert_eq!(unfinished.len(), 1);
+        assert_eq!(unfinished[0].first_sequence, 3);
+        assert_eq!(unfinished[0].state, "append_contacting");
+        db.mark_dedicated_observation_batch_unknown("S-observe", 3, 3, &"c".repeat(64))
+            .unwrap();
+        assert_eq!(
+            db.dedicated_observation_outbox_records().unwrap()[0].state,
+            "append_unknown"
+        );
+        db.discard_unappended_dedicated_observation_batch("S-observe", 3, 3, &"c".repeat(64))
+            .unwrap();
+        assert!(
+            db.dedicated_observation_outbox_records()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -12652,6 +12837,91 @@ mod tests {
             &approval_decision_digest,
         )
         .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO dedicated_session_approval (
+                    session_id, approval_id, worker_instance_id, worker_boot_epoch,
+                    request_digest, operation_class, requested_authority_json, state,
+                    decision_principal, decision_json, decision_digest, reservation_token,
+                    expires_at_ms, created_at_ms, resolved_at_ms,
+                    delivery_contacted_at_ms, delivery_settled_at_ms
+                 ) VALUES ('S-ledger', 'approval-recovered', 'worker-ledger', 4,
+                           ?1, 'fixture', '{}', 'delivery_unknown', 'fp:operator',
+                           ?2, ?3, 'reservation-recovered', ?4, 1, 1, 1, NULL)",
+                params![
+                    "9".repeat(64),
+                    serde_json::to_string(&approval_decision).unwrap(),
+                    approval_decision_digest,
+                    lillux::time::timestamp_millis() as i64 + 60_000,
+                ],
+            )
+            .unwrap();
+        db.settle_recovered_dedicated_approval_delivery(
+            "S-ledger",
+            "approval-recovered",
+            4,
+            "reservation-recovered",
+            &approval_decision_digest,
+        )
+        .unwrap();
+        // Root-derived projection repair is idempotent and does not depend on
+        // the session still retaining this historical worker epoch.
+        db.settle_recovered_dedicated_approval_delivery(
+            "S-ledger",
+            "approval-recovered",
+            4,
+            "reservation-recovered",
+            &approval_decision_digest,
+        )
+        .unwrap();
+        assert_eq!(
+            db.conn
+                .query_row(
+                    "SELECT state FROM dedicated_session_approval
+                      WHERE session_id='S-ledger' AND approval_id='approval-recovered'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "delivery_settled"
+        );
+        db.create_dedicated_session_approval(NewDedicatedSessionApproval {
+            session_id: "S-ledger",
+            approval_id: "approval-uncontacted",
+            worker_instance_id: "worker-ledger",
+            worker_boot_epoch: 4,
+            request_digest: &"8".repeat(64),
+            operation_class: "fixture",
+            requested_authority: &serde_json::json!({}),
+            expires_at_ms: lillux::time::timestamp_millis() as i64 + 60_000,
+        })
+        .unwrap();
+        db.reserve_dedicated_session_approval_decision(
+            "S-ledger",
+            "approval-uncontacted",
+            4,
+            &"8".repeat(64),
+            "fp:operator",
+            &approval_decision,
+            &approval_decision_digest,
+            "reservation-uncontacted",
+        )
+        .unwrap();
+        db.reconcile_dedicated_approval_stale_epoch("S-ledger", "approval-uncontacted", 4)
+            .unwrap();
+        db.reconcile_dedicated_approval_stale_epoch("S-ledger", "approval-uncontacted", 4)
+            .unwrap();
+        assert_eq!(
+            db.conn
+                .query_row(
+                    "SELECT state FROM dedicated_session_approval
+                      WHERE session_id='S-ledger' AND approval_id='approval-uncontacted'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "stale_epoch"
+        );
         db.settle_dedicated_command(
             "S-ledger",
             command.command_sequence,

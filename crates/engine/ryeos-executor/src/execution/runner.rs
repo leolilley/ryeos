@@ -1009,6 +1009,7 @@ fn managed_workspace_close_source(
             state => anyhow::bail!("discarded managed workspace cannot close from state {state}"),
         },
         ryeos_state::objects::PinnedTerminalPublication::RetainResult
+        | ryeos_state::objects::PinnedTerminalPublication::RetainCurrentHead { .. }
         | ryeos_state::objects::PinnedTerminalPublication::AdvanceHead { .. } => {
             if workspace_state != WorkspaceState::Freezing {
                 anyhow::bail!("retained managed workspace was not frozen before terminal commit");

@@ -104,6 +104,7 @@ fn requests_terminal_project_generation(policy: &ExecutionPolicy) -> bool {
         ryeos_app::execution_policy::ProjectExecutionPolicy::Pinned {
             realization: ryeos_app::execution_policy::PinnedRealization::Cow {
                 terminal_publication: ryeos_app::execution_policy::TerminalPublication::RetainResult
+                    | ryeos_app::execution_policy::TerminalPublication::RetainCurrentHead
                     | ryeos_app::execution_policy::TerminalPublication::AdvanceHead { .. },
             },
             ..

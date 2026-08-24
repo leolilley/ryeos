@@ -1,6 +1,6 @@
-# ryeos:signed:2026-08-24T11:57:26Z:aebbb421dd282b29e41cdbe5fe4464158da3c19b037725ed39894923f0a69693:zJxVwc4xOy4DaoEkyl0B6alccx/2fjAs9J0/hOFIR6YbXsVvxVQazRNrdpDxGQ7RVkqu0AeAs/D3sWU7nf1JCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-24T13:29:12Z:f8ec5a70b38c67edf151414bafdae9798bacc81ff4925eb6eafd477276f95880:9wQSkNUgELd3lzijfy4KqqFj+vTp9xafQ+JabHzq3CDq4Jsu4tprgmhEkK1vZDq/1XWYz1CRPYPuG2J8l9VPDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [codex, session, start]
-description: "Start a Codex session from the principal's pushed project HEAD; --async and --current-head are required"
+description: "Start a Codex session from the principal's pushed project HEAD; --current-head is required and --async is recommended for interactive control"
 help:
   usage: "ryeos --project <path> codex session start <credential-profile-id> --async --current-head"
   examples:

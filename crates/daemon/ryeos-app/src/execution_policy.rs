@@ -97,6 +97,11 @@ pub enum PinnedSource {
 pub enum TerminalPublication {
     Discard,
     RetainResult,
+    /// Retain a private result for a later explicit, owner-authorized CAS to
+    /// the principal project HEAD selected at admission. The exact destination
+    /// identity is derived by the destination node, never supplied as a path
+    /// after execution.
+    RetainCurrentHead,
     AdvanceHead {
         head_ref: String,
         expected_hash: String,
@@ -220,7 +225,7 @@ impl ExecutionPolicy {
             project: ProjectExecutionPolicy::Pinned {
                 source: PinnedSource::CurrentHead,
                 realization: PinnedRealization::Cow {
-                    terminal_publication: TerminalPublication::RetainResult,
+                    terminal_publication: TerminalPublication::RetainCurrentHead,
                 },
                 child_policy: ChildProjectPolicy::Inherit,
             },
@@ -309,6 +314,17 @@ impl ExecutionPolicy {
                     anyhow::bail!("advance-head publication requires a target ref");
                 }
                 validate_hash("advance-head expected hash", expected_hash)?;
+            }
+            if matches!(
+                realization,
+                PinnedRealization::Cow {
+                    terminal_publication: TerminalPublication::RetainCurrentHead,
+                }
+            ) && !matches!(source, PinnedSource::CurrentHead)
+            {
+                anyhow::bail!(
+                    "retain-current-head publication requires current_head pinned source"
+                );
             }
         }
         Ok(())
@@ -686,7 +702,7 @@ mod policy_tests {
     }
 
     #[test]
-    fn local_pinned_current_head_is_daemon_owned_cow_with_retained_result() {
+    fn local_pinned_current_head_is_daemon_owned_cow_with_retained_current_head() {
         let policy = ExecutionPolicy::local_pinned_current_head(ExecutionResponse::Accepted);
         assert_eq!(policy.response, ExecutionResponse::Accepted);
         assert_eq!(policy.ownership, ExecutionOwnership::DaemonOwned);
@@ -696,7 +712,7 @@ mod policy_tests {
             ProjectExecutionPolicy::Pinned {
                 source: PinnedSource::CurrentHead,
                 realization: PinnedRealization::Cow {
-                    terminal_publication: TerminalPublication::RetainResult,
+                    terminal_publication: TerminalPublication::RetainCurrentHead,
                 },
                 child_policy: ChildProjectPolicy::Inherit,
             }

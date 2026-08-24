@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-17T23:05:59Z:10df81e7209fd0cffe3a7ba62571d4e957700affcbf81287931b879970b2de70:ZCrGmWuKUtr0qa1WvPEl/Cup3BQh4oNwuUE279kl6xEvHqRD/RNuV0WHoOeAbWBg9qXLy5OQQhIi0P9XBqGPDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T13:29:01Z:af04e496d2ed5b87957bf3c7a5b2b7817354e7cbe240d3ebc1ef3f1fb1806e0d:wYywxzNzVCuWWSxUo53pFH6pxs6abu8MYCeHL+mrB2mh4w7xULmPKW1EPn9ZTrJ7srPjQgJHDEBWtgXq20TgDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -23,9 +23,13 @@ A remote command can require authority in two places:
 2. **Remote authorized-key scopes** — the target daemon must authorize
    the caller node key for the remote routes touched by the operation.
 
-Remote HTTP requests are signed with the caller **node key**, not the
-operator user key. Share `ryeos identity` output with the
-remote operator when requesting access.
+Remote HTTP requests are normally signed with the caller **node key**. Share
+`ryeos identity` output with the remote operator when requesting ordinary
+remote access. The generic `remote/push` and `remote/run` services additionally
+support an explicit configured-operator continuity mode for durable workflows:
+the local request must already be signed by the configured operator, and the
+target must separately authorize that same operator key. It is never selected
+implicitly and is not available to delegated callers.
 
 ## Authority Matrix
 
@@ -39,7 +43,7 @@ remote operator when requesting access.
 | `ryeos remote status` | `ryeos.execute.service.remote/status` | none | `GET /health`, `GET /public-key` |
 | `ryeos remote doctor` | `ryeos.execute.service.remote/doctor` | signed auth probe; project status if `--project` is supplied | `GET /health`, `GET /public-key`, `GET /threads?limit=1`, optionally `POST /project/status` |
 | `ryeos remote authorize` | `ryeos.execute.service.remote/admin` | `ryeos.execute.service.identity/authorize-key` | `POST /authorize-key` |
-| `ryeos remote push` | `ryeos.execute.service.remote/push` | `ryeos.execute.service.objects/has`, `ryeos.execute.service.objects/put`, `ryeos.execute.service.system/push-head` | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head` |
+| `ryeos remote push` / `service:remote/push` | `ryeos.execute.service.remote/push` | `ryeos.execute.service.objects/has`, `ryeos.execute.service.objects/put`, `ryeos.execute.service.system/push-head` | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head` |
 | `ryeos remote pull` | `ryeos.execute.service.objects/get` | `ryeos.execute.service.objects/get` | `POST /objects/get` |
 | `ryeos remote execute` | `ryeos.execute.service.remote/admin` | push scopes + `ryeos.execute.service.objects/get` + caps required by the executed item | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head`, `POST /execute`, `POST /objects/get` |
 | `ryeos remote run` | `ryeos.execute.service.remote/admin` | caps required by the executed item | `POST /execute` |
@@ -59,6 +63,11 @@ Notes:
 - `remote.admin` is a **local** umbrella capability for high-impact
   remote orchestration commands. It is not automatically sent to the
   target daemon and does not replace remote authorized-key scopes.
+- `outbound_principal: configured_operator` on `service:remote/push`, and a
+  retained-current-HEAD accepted launch through `service:remote/run`, require
+  the exact configured operator locally and preserve that principal remotely.
+  Their remote HEAD and session ownership do not interoperate with a HEAD
+  previously pushed under the default node principal.
 
 ## `ryeos remote configure`
 
@@ -198,6 +207,23 @@ objects, and writes a principal-scoped remote pushed HEAD via
 `/push-head`. It uses the remote's cached ingest-ignore rules; if the
 cache is missing the handler fetches `/ingest-ignore` inline and aborts
 if that fetch fails.
+
+The ordinary command is node-owned. A durable workflow that must retain the
+configured operator across later remote control uses the explicit service
+form:
+
+```bash
+ryeos execute service:remote/push --input - <<'JSON'
+{
+  "remote": "prod",
+  "project": "/absolute/path/to/project",
+  "outbound_principal": "configured_operator"
+}
+JSON
+```
+
+This does not reuse a node-owned remote HEAD; it creates/advances the distinct
+configured-operator principal-scoped HEAD.
 
 Failure modes:
 

@@ -241,6 +241,31 @@ impl RemoteClient {
         client
     }
 
+    /// Build an outbound client that preserves the already-authenticated
+    /// configured-operator principal across a remote transport hop.
+    ///
+    /// Normal node-to-node operations use [`Self::from_remote_cfg`] and are
+    /// owned by the source node principal. Durable operator-owned workflows
+    /// must instead keep the same principal for project HEAD, credential, and
+    /// later control operations. Requiring the authenticated handler context
+    /// here prevents a merely delegated remote-service capability from turning
+    /// the daemon's operator key into a signing oracle.
+    pub fn from_remote_cfg_as_configured_operator(
+        state: &AppState,
+        remote: &super::config::RemoteConfig,
+        context: &crate::handler_context::HandlerContext,
+    ) -> Result<Self> {
+        ryeos_app::operator_external_content::require_configured_operator(state, context)
+            .context("configured operator required for operator-owned remote execution")?;
+        let identity = Arc::new(
+            NodeIdentity::load(&state.config.operator_signing_key_path)
+                .context("load configured operator identity for remote execution")?,
+        );
+        let mut client = Self::new(&remote.url, &remote.principal_id, identity);
+        client.origin_site_id = Some(state.threads.site_id().to_string());
+        Ok(client)
+    }
+
     /// GET /public-key (no auth required).
     pub async fn get_public_key(&self) -> Result<PublicKeyResponse> {
         let url = format!("{}/public-key", self.base_url);
@@ -888,7 +913,8 @@ impl RemoteClient {
         self.signed_post("/project/status", &body).await
     }
 
-    /// POST /execute (authenticated).
+    /// POST `/execute` for wait mode or `/execute/launch` for accepted mode
+    /// (authenticated).
     pub async fn execute(
         &self,
         item_ref: &str,
@@ -896,15 +922,32 @@ impl RemoteClient {
         project_path: Option<&str>,
         parameters: &Value,
         execution_policy: &ryeos_app::execution_policy::ExecutionPolicy,
+        launch_id: Option<&str>,
     ) -> Result<Value> {
-        let body = serde_json::json!({
+        let path = remote_execute_path(&execution_policy.response, launch_id)?;
+        let mut body = serde_json::json!({
             "item_ref": item_ref,
             "ref_bindings": ref_bindings,
             "project_path": project_path,
             "parameters": parameters,
             "execution_policy": execution_policy,
         });
-        self.signed_post("/execute", &body).await
+        match (&execution_policy.response, launch_id) {
+            (ryeos_app::execution_policy::ExecutionResponse::Accepted, Some(launch_id)) => {
+                body["launch_id"] = Value::String(launch_id.to_owned());
+            }
+            (ryeos_app::execution_policy::ExecutionResponse::Wait, None) => {}
+            _ => unreachable!("remote_execute_path validated the response/coordinate pair"),
+        }
+        let response = self.signed_post(path, &body).await?;
+        if let Some(launch_id) = launch_id
+            && response.get("launch_id").and_then(Value::as_str) != Some(launch_id)
+        {
+            anyhow::bail!(
+                "accepted remote launch response did not echo caller-retained coordinate {launch_id}"
+            );
+        }
+        Ok(response)
     }
 
     /// POST /execute with a full method call (`call.method`, `call.args`).
@@ -1206,6 +1249,26 @@ impl RemoteClient {
             nonce,
             signature: sig_b64,
         })
+    }
+}
+
+fn remote_execute_path(
+    response: &ryeos_app::execution_policy::ExecutionResponse,
+    launch_id: Option<&str>,
+) -> Result<&'static str> {
+    match (response, launch_id) {
+        (ryeos_app::execution_policy::ExecutionResponse::Accepted, Some(launch_id))
+            if ryeos_app::state_store::is_canonical_launch_id(launch_id) =>
+        {
+            Ok("/execute/launch")
+        }
+        (ryeos_app::execution_policy::ExecutionResponse::Accepted, _) => anyhow::bail!(
+            "accepted remote execution requires a canonical caller-retained launch_id"
+        ),
+        (ryeos_app::execution_policy::ExecutionResponse::Wait, Some(_)) => {
+            anyhow::bail!("wait-mode remote execution cannot carry launch_id")
+        }
+        (ryeos_app::execution_policy::ExecutionResponse::Wait, None) => Ok("/execute"),
     }
 }
 
@@ -2617,6 +2680,26 @@ mod tests {
     #[test]
     fn canonicalize_path_no_query() {
         assert_eq!(canonicalize_path("/execute"), "/execute");
+    }
+
+    #[test]
+    fn accepted_remote_execution_uses_retained_launch_endpoint_only() {
+        use ryeos_app::execution_policy::ExecutionResponse;
+
+        let launch_id = format!("L-{}", "ab".repeat(16));
+        assert_eq!(
+            remote_execute_path(&ExecutionResponse::Accepted, Some(&launch_id)).unwrap(),
+            "/execute/launch"
+        );
+        assert!(remote_execute_path(&ExecutionResponse::Accepted, None).is_err());
+        assert!(
+            remote_execute_path(&ExecutionResponse::Accepted, Some("L-not-canonical")).is_err()
+        );
+        assert!(remote_execute_path(&ExecutionResponse::Wait, Some(&launch_id)).is_err());
+        assert_eq!(
+            remote_execute_path(&ExecutionResponse::Wait, None).unwrap(),
+            "/execute"
+        );
     }
 
     #[test]

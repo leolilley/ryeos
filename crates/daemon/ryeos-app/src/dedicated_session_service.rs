@@ -230,14 +230,14 @@ pub fn ingest_observation_batch(
     }))
 }
 
-fn require_authoritative_batch(
+fn find_authoritative_batch(
     state: &AppState,
     session: &DedicatedSessionRecord,
     worker_boot_epoch: u64,
     batch_digest: &str,
     first_sequence: u64,
     through_sequence: u64,
-) -> Result<Value> {
+) -> Result<Option<Value>> {
     let thread = state
         .state_store
         .get_thread(&session.root_thread_id)?
@@ -270,6 +270,12 @@ fn require_authoritative_batch(
                     .and_then(Value::as_u64)
                     == Some(through_sequence)
             {
+                if event.payload.get("schema").and_then(Value::as_u64) != Some(1)
+                    || event.payload.get("origin").and_then(Value::as_str)
+                        != Some("daemon_observed_io")
+                {
+                    bail!("authoritative observation batch identity is contradictory");
+                }
                 let batch = event
                     .payload
                     .get("canonical_batch")
@@ -277,6 +283,13 @@ fn require_authoritative_batch(
                     .ok_or_else(|| {
                         anyhow!("authoritative observation batch has no canonical payload")
                     })?;
+                if !batch.get("events").is_some_and(Value::is_array)
+                    || !batch
+                        .get("session_observations")
+                        .is_some_and(Value::is_array)
+                {
+                    bail!("authoritative observation batch body is malformed");
+                }
                 if authoritative.replace(batch).is_some() {
                     bail!("authoritative observation batch identity is duplicated");
                 }
@@ -287,9 +300,121 @@ fn require_authoritative_batch(
             break;
         }
     }
-    authoritative.ok_or_else(|| {
+    Ok(authoritative)
+}
+
+fn require_authoritative_batch(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    worker_boot_epoch: u64,
+    batch_digest: &str,
+    first_sequence: u64,
+    through_sequence: u64,
+) -> Result<Value> {
+    find_authoritative_batch(
+        state,
+        session,
+        worker_boot_epoch,
+        batch_digest,
+        first_sequence,
+        through_sequence,
+    )?
+    .ok_or_else(|| {
         anyhow!("observation projection cannot be rebuilt without its authoritative batch fact")
     })
+}
+
+/// Repair pushed-observation projection outboxes during startup, after old
+/// worker processes have been quiesced but before their retained epochs are
+/// detached. The root chain decides whether an append happened; SQLite never
+/// guesses across the append boundary.
+pub fn reconcile_observation_outboxes(state: &AppState) -> Result<()> {
+    for record in state.state_store.dedicated_observation_outbox_records()? {
+        let session = current_session(state, &record.session_id)?;
+        let _root_operation = begin_hosted_root_operation(&session.root_thread_id)?;
+        let _credential_operation =
+            acquire_credential_profile_operation_sync(&session.credential_profile_id);
+        let root = state
+            .state_store
+            .get_thread(&session.root_thread_id)?
+            .ok_or_else(|| anyhow!("hosted execution root thread disappeared"))?;
+        if let Some(authoritative) = find_authoritative_batch(
+            state,
+            &session,
+            record.worker_boot_epoch,
+            &record.batch_digest,
+            record.first_sequence,
+            record.through_sequence,
+        )? {
+            if !crate::state_store::is_terminal_status(&root.status) {
+                project_worker_events(state, &session, record.worker_boot_epoch, &authoritative)?;
+                apply_worker_observations(
+                    state,
+                    &record.session_id,
+                    record.worker_boot_epoch,
+                    &authoritative,
+                )?;
+            }
+            state.state_store.settle_dedicated_observation_batch(
+                &record.session_id,
+                record.worker_boot_epoch,
+                record.first_sequence,
+                &record.batch_digest,
+            )?;
+            notify_projection_change(&record.session_id);
+            continue;
+        }
+
+        if record.state == "append_contacting" {
+            state.state_store.mark_dedicated_observation_batch_unknown(
+                &record.session_id,
+                record.worker_boot_epoch,
+                record.first_sequence,
+                &record.batch_digest,
+            )?;
+        }
+        // A terminal root is immutable, so absence is conclusive. For a
+        // running root, discard only when exact process identity proves that
+        // the quiesced old worker cannot submit this reservation later.
+        let safely_absent = if crate::state_store::is_terminal_status(&root.status) {
+            true
+        } else if session.worker_boot_epoch == Some(record.worker_boot_epoch) {
+            match session.worker_instance_id.as_deref() {
+                Some(worker_id) => {
+                    state
+                        .state_store
+                        .worker_process(worker_id)?
+                        .is_some_and(|worker| {
+                            worker.session_id == record.session_id
+                                && worker.boot_epoch == record.worker_boot_epoch
+                                && execution_group_liveness(&worker.process_identity)
+                                    == IdentityLiveness::DeadOrStale
+                        })
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
+        if safely_absent {
+            state
+                .state_store
+                .discard_unappended_dedicated_observation_batch(
+                    &record.session_id,
+                    record.worker_boot_epoch,
+                    record.first_sequence,
+                    &record.batch_digest,
+                )?;
+        } else {
+            tracing::warn!(
+                session_id = %record.session_id,
+                worker_boot_epoch = record.worker_boot_epoch,
+                first_sequence = record.first_sequence,
+                "retaining observation append with no root fact because worker death is unproved"
+            );
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -506,13 +631,7 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
             // response batch is an authoritative completed response. Do not
             // turn one historical session's unappendable projection repair
             // into a node-wide startup outage.
-            if !command_fact_exists(
-                state,
-                &session,
-                "hosted_command.committed",
-                record.command_sequence,
-                &record.request_digest,
-            )? {
+            if !committed_command_fact_exists(state, &session, &record)? {
                 tracing::warn!(
                     session_id = %record.session_id,
                     command_sequence = record.command_sequence,
@@ -601,28 +720,34 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
             }
             continue;
         }
-        let (profile_hash, schema_hashes) =
-            structured_protocol_identity(state, &session.admitted_capsule_hash)?;
-        append_command_fact_once(
-            state,
-            &session,
-            "hosted_command.committed",
-            record.command_sequence,
-            &record.request_digest,
-            json!({
-                "schema":1,
-                "origin":"daemon_observed_io",
-                "worker_boot_epoch":record.worker_boot_epoch,
-                "command_kind":&record.command_kind,
-                "route_id":record.payload.get("route_id").and_then(Value::as_str),
-                "idempotency_key":&record.idempotency_key,
-                "canonical_command":&record.payload,
-                "admitted_session_capsule_hash":&session.admitted_capsule_hash,
-                "protocol_profile_hash":profile_hash,
-                "protocol_schema_hashes":schema_hashes,
-                "recovered":true,
-            }),
-        )?;
+        // A contacted command must already have crossed the root-chain
+        // committed boundary. When that exact fact exists, recovery derives
+        // authority from it and does not introduce an unnecessary dependency
+        // on mutable CAS availability before reading the response testimony.
+        if !committed_command_fact_exists(state, &session, &record)? {
+            let (profile_hash, schema_hashes) =
+                structured_protocol_identity(state, &session.admitted_capsule_hash)?;
+            append_command_fact_once(
+                state,
+                &session,
+                "hosted_command.committed",
+                record.command_sequence,
+                &record.request_digest,
+                json!({
+                    "schema":1,
+                    "origin":"daemon_observed_io",
+                    "worker_boot_epoch":record.worker_boot_epoch,
+                    "command_kind":&record.command_kind,
+                    "route_id":record.payload.get("route_id").and_then(Value::as_str),
+                    "idempotency_key":&record.idempotency_key,
+                    "canonical_command":&record.payload,
+                    "admitted_session_capsule_hash":&session.admitted_capsule_hash,
+                    "protocol_profile_hash":profile_hash,
+                    "protocol_schema_hashes":schema_hashes,
+                    "recovered":true,
+                }),
+            )?;
+        }
         match record.state.as_str() {
             "committed" => {}
             "dispatched" | "outcome_unknown" => {
@@ -1104,10 +1229,26 @@ pub fn append_candidate_capture_fact(
     session_id: &str,
     candidate_snapshot_hash: &str,
 ) -> Result<()> {
+    let root_operation = begin_hosted_root_operation(session_id)?;
+    append_candidate_capture_fact_under_lease(
+        state,
+        session_id,
+        candidate_snapshot_hash,
+        &root_operation,
+    )
+}
+
+/// Variant for a caller that already holds the root lease across the complete
+/// workspace-close → fact → projection-bind transaction.
+pub fn append_candidate_capture_fact_under_lease(
+    state: &AppState,
+    session_id: &str,
+    candidate_snapshot_hash: &str,
+    _root_operation: &crate::hosted_operation::HostedRootOperationLease,
+) -> Result<()> {
     if !lillux::valid_hash(candidate_snapshot_hash) {
         bail!("hosted candidate snapshot hash is not canonical");
     }
-    let _root_operation = begin_hosted_root_operation(session_id)?;
     let session = current_session(state, session_id)?;
     if session.root_thread_id != session_id
         || !session.candidate_required
@@ -1272,6 +1413,7 @@ fn command_fact_exists(
         .get_thread(&session.root_thread_id)?
         .ok_or_else(|| anyhow!("hosted execution root thread disappeared"))?;
     let mut after = None;
+    let mut found = false;
     loop {
         let page = state.state_store.replay_events(
             &thread.chain_root_id,
@@ -1280,16 +1422,129 @@ fn command_fact_exists(
             1024,
             8 * 1024 * 1024,
         )?;
-        if page.events.iter().any(|event| {
-            event.event_type == event_type
-                && event.payload.get("operation_id").and_then(Value::as_str)
-                    == Some(operation_id.as_str())
-        }) {
+        for event in &page.events {
+            if event.event_type != event_type
+                || event.payload.get("operation_id").and_then(Value::as_str)
+                    != Some(operation_id.as_str())
+            {
+                continue;
+            }
+            let exact = event.payload.get("schema").and_then(Value::as_u64) == Some(1)
+                && event.payload.get("session_id").and_then(Value::as_str)
+                    == Some(session.session_id.as_str())
+                && event
+                    .payload
+                    .get("command_sequence")
+                    .and_then(Value::as_u64)
+                    == Some(command_sequence)
+                && event.payload.get("request_digest").and_then(Value::as_str)
+                    == Some(request_digest);
+            if !exact {
+                bail!("hosted command operation id is bound to contradictory root testimony");
+            }
+            if found {
+                bail!("hosted command operation is duplicated in the root chain");
+            }
+            found = true;
+        }
+        after = page.events.last().map(|event| event.chain_seq);
+        if !page.has_more {
+            return Ok(found);
+        }
+    }
+}
+
+fn committed_command_fact_exists(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    record: &crate::runtime_db::DedicatedSessionCommandRecord,
+) -> Result<bool> {
+    if !command_fact_exists(
+        state,
+        session,
+        "hosted_command.committed",
+        record.command_sequence,
+        &record.request_digest,
+    )? {
+        return Ok(false);
+    }
+    let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
+        "schema":"ryeos.hosted_command_fact.v1",
+        "session_id":session.session_id,
+        "command_sequence":record.command_sequence,
+        "request_digest":record.request_digest,
+        "event_type":"hosted_command.committed",
+    }))?;
+    let thread = state
+        .state_store
+        .get_thread(&session.root_thread_id)?
+        .ok_or_else(|| anyhow!("hosted execution root thread disappeared"))?;
+    let mut after = None;
+    loop {
+        let page = state.state_store.replay_events(
+            &thread.chain_root_id,
+            Some(&thread.thread_id),
+            after,
+            1024,
+            8 * 1024 * 1024,
+        )?;
+        for event in &page.events {
+            if event.event_type != "hosted_command.committed"
+                || event.payload.get("operation_id").and_then(Value::as_str)
+                    != Some(operation_id.as_str())
+            {
+                continue;
+            }
+            let route_matches = match record.payload.get("route_id").and_then(Value::as_str) {
+                Some(route_id) => {
+                    event.payload.get("route_id").and_then(Value::as_str) == Some(route_id)
+                }
+                None => event.payload.get("route_id").is_some_and(Value::is_null),
+            };
+            let schema_hashes_are_exact = event
+                .payload
+                .get("protocol_schema_hashes")
+                .and_then(Value::as_object)
+                .is_some_and(|hashes| {
+                    !hashes.is_empty()
+                        && hashes
+                            .values()
+                            .all(|value| value.as_str().is_some_and(lillux::valid_hash))
+                });
+            let exact = event.payload.get("origin").and_then(Value::as_str)
+                == Some("daemon_observed_io")
+                && event
+                    .payload
+                    .get("worker_boot_epoch")
+                    .and_then(Value::as_u64)
+                    == Some(record.worker_boot_epoch)
+                && event.payload.get("command_kind").and_then(Value::as_str)
+                    == Some(record.command_kind.as_str())
+                && route_matches
+                && event.payload.get("idempotency_key").and_then(Value::as_str)
+                    == Some(record.idempotency_key.as_str())
+                && event.payload.get("canonical_command") == Some(&record.payload)
+                && event
+                    .payload
+                    .get("admitted_session_capsule_hash")
+                    .and_then(Value::as_str)
+                    == Some(session.admitted_capsule_hash.as_str())
+                && event
+                    .payload
+                    .get("protocol_profile_hash")
+                    .and_then(Value::as_str)
+                    .is_some_and(lillux::valid_hash)
+                && schema_hashes_are_exact;
+            if !exact {
+                bail!(
+                    "authoritative hosted command fact does not retain its exact command contract"
+                );
+            }
             return Ok(true);
         }
         after = page.events.last().map(|event| event.chain_seq);
         if !page.has_more {
-            return Ok(false);
+            bail!("hosted command fact disappeared during authoritative replay");
         }
     }
 }
@@ -1337,11 +1592,19 @@ fn find_authoritative_command_observation_batch(
     command_sequence: u64,
     request_digest: &str,
 ) -> Result<Option<(Value, String)>> {
+    let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
+        "schema":"ryeos.hosted_command_fact.v1",
+        "session_id":session.session_id,
+        "command_sequence":command_sequence,
+        "request_digest":request_digest,
+        "event_type":"hosted_worker_command_observation_batch",
+    }))?;
     let thread = state
         .state_store
         .get_thread(&session.root_thread_id)?
         .ok_or_else(|| anyhow!("hosted execution root thread disappeared"))?;
     let mut after = None;
+    let mut authoritative = None;
     loop {
         let page = state.state_store.replay_events(
             &thread.chain_root_id,
@@ -1362,6 +1625,12 @@ fn find_authoritative_command_observation_batch(
             {
                 continue;
             }
+            if payload.get("operation_id").and_then(Value::as_str) != Some(operation_id.as_str())
+                || payload.get("schema").and_then(Value::as_u64) != Some(1)
+                || payload.get("origin").and_then(Value::as_str) != Some("daemon_observed_io")
+            {
+                bail!("authoritative command batch identity is contradictory");
+            }
             let response_digest = payload
                 .get("response_digest")
                 .and_then(Value::as_str)
@@ -1378,11 +1647,16 @@ fn find_authoritative_command_observation_batch(
             {
                 bail!("authoritative command batch body is malformed");
             }
-            return Ok(Some((batch, response_digest.to_owned())));
+            if authoritative
+                .replace((batch, response_digest.to_owned()))
+                .is_some()
+            {
+                bail!("authoritative command batch identity is duplicated");
+            }
         }
         after = page.events.last().map(|event| event.chain_seq);
         if !page.has_more {
-            return Ok(None);
+            return Ok(authoritative);
         }
     }
 }

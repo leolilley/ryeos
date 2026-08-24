@@ -447,7 +447,11 @@ pub(super) async fn start(
         else {
             bail!("dedicated-session launch requires a private CoW realization");
         };
-        if *terminal_publication != PinnedTerminalPublication::RetainResult {
+        if !matches!(
+            terminal_publication,
+            PinnedTerminalPublication::RetainResult
+                | PinnedTerminalPublication::RetainCurrentHead { .. }
+        ) {
             bail!("worker execution requires a retain-result pinned CoW realization");
         }
     } else if request.required_terminal_publication != "any" {

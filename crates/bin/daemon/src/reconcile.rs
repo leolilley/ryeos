@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -1114,7 +1115,7 @@ async fn reconcile_active_threads_inner(
                 "dead-generation launch claims cleared at startup"
             );
         }
-        reconcile_dedicated_workers(state)?;
+        reconcile_dedicated_worker_startup(state).await?;
     }
     repair_detached_spawn_links(state)?;
     reconcile_accounting(state)?;
@@ -2035,6 +2036,22 @@ async fn reconcile_active_threads_inner(
     })
 }
 
+/// Staged hosted-worker startup recovery. Old workers stop before root replay
+/// can conclude absence, but the exact durable epoch/profile fence is retained
+/// through every root-backed projection repair and detached only afterward.
+#[doc(hidden)]
+pub async fn reconcile_dedicated_worker_startup(state: &AppState) -> Result<()> {
+    quiesce_dedicated_workers(state)?;
+    ryeos_app::dedicated_session_service::reconcile_command_outboxes(state)
+        .context("reconcile hosted command testimony before worker detachment")?;
+    ryeos_app::dedicated_session_service::reconcile_observation_outboxes(state)
+        .context("reconcile hosted pushed observations before worker detachment")?;
+    ryeos_api::handlers::dedicated_sessions::reconcile_approval_outboxes(Arc::new(state.clone()))
+        .await
+        .context("reconcile hosted approvals before worker detachment")?;
+    reconcile_dedicated_workers(state)
+}
+
 /// Repair the crash boundary after a running hosted root's workspace durably
 /// captured a frozen generation but before its operational session projection
 /// was moved from `freezing` to `frozen`.
@@ -2062,6 +2079,8 @@ fn reconcile_dedicated_candidate_bindings(state: &AppState) -> Result<usize> {
         if thread.status != "running" {
             continue;
         }
+        let candidate_root_operation =
+            ryeos_app::hosted_operation::begin_hosted_root_operation(&session.root_thread_id)?;
         let mut workspace = state
             .state_store
             .execution_workspace(&session.workspace_id)?
@@ -2167,10 +2186,11 @@ fn reconcile_dedicated_candidate_bindings(state: &AppState) -> Result<usize> {
                 session.session_id
             );
         }
-        ryeos_app::dedicated_session_service::append_candidate_capture_fact(
+        ryeos_app::dedicated_session_service::append_candidate_capture_fact_under_lease(
             state,
             &session.session_id,
             &snapshot_hash,
+            &candidate_root_operation,
         )
         .with_context(|| {
             format!(
@@ -2187,6 +2207,7 @@ fn reconcile_dedicated_candidate_bindings(state: &AppState) -> Result<usize> {
                 session.session_id
             );
         }
+        drop(candidate_root_operation);
         repaired += 1;
     }
     Ok(repaired)
@@ -2244,6 +2265,35 @@ fn reconcile_dedicated_workers(state: &AppState) -> Result<()> {
             cleanup_state,
             "fenced a dedicated worker retained from a previous daemon generation"
         );
+    }
+    Ok(())
+}
+
+/// Stop every worker retained from a previous daemon generation without
+/// changing its durable attachment. Root-derived projection recovery runs
+/// between this process barrier and `reconcile_dedicated_workers`, which then
+/// records the same exact death proof and releases the epoch/profile fence.
+fn quiesce_dedicated_workers(state: &AppState) -> Result<()> {
+    let current_generation = ryeos_app::runtime_db::daemon_generation_id();
+    for worker in state.state_store.live_worker_processes()? {
+        let retained_unproved = worker.state == ryeos_app::runtime_db::WorkerProcessState::Dead
+            && worker.cleanup_state == "unproved";
+        if worker.daemon_generation_id == current_generation && !retained_unproved {
+            continue;
+        }
+        if execution_group_liveness(&worker.process_identity) == IdentityLiveness::Alive {
+            let killed = kill_by_action(
+                &worker.process_identity,
+                ryeos_app::process::ShutdownAction::Hard,
+            );
+            if !killed.success {
+                tracing::warn!(
+                    worker_instance_id = %worker.worker_instance_id,
+                    session_id = %worker.session_id,
+                    "old dedicated worker could not be proved quiescent before root replay"
+                );
+            }
+        }
     }
     Ok(())
 }

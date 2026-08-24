@@ -56,6 +56,157 @@ fn approval_delivery_lock(session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
     )
 }
 
+fn find_authoritative_approval_delivery_settlement(
+    state: &AppState,
+    session: &ryeos_app::state_store::DedicatedSessionRecord,
+    approval: &ryeos_app::runtime_db::DedicatedSessionApprovalRecord,
+    reservation_token: &str,
+    decision_digest: &str,
+) -> Result<Option<String>, HandlerError> {
+    let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
+        "schema":"ryeos.hosted_approval_delivery_fact.v1",
+        "session_id":session.session_id,
+        "approval_id":approval.approval_id,
+        "reservation_token":reservation_token,
+        "stage":"delivery_settled",
+    }))
+    .map_err(internal)?;
+    let thread = state
+        .state_store
+        .get_thread(&session.root_thread_id)
+        .map_err(internal)?
+        .ok_or_else(|| internal("hosted execution root thread disappeared"))?;
+    let mut after = None;
+    let mut settlement = None;
+    loop {
+        let page = state
+            .state_store
+            .replay_events(
+                &thread.chain_root_id,
+                Some(&thread.thread_id),
+                after,
+                1024,
+                8 * 1024 * 1024,
+            )
+            .map_err(internal)?;
+        for event in &page.events {
+            let payload = &event.payload;
+            if event.event_type != "hosted_approval.delivery_settled"
+                || payload.get("operation_id").and_then(Value::as_str)
+                    != Some(operation_id.as_str())
+            {
+                continue;
+            }
+            let exact = payload.get("schema").and_then(Value::as_u64) == Some(1)
+                && payload.get("session_id").and_then(Value::as_str)
+                    == Some(session.session_id.as_str())
+                && payload.get("approval_id").and_then(Value::as_str)
+                    == Some(approval.approval_id.as_str())
+                && payload.get("worker_boot_epoch").and_then(Value::as_u64)
+                    == Some(approval.worker_boot_epoch)
+                && payload.get("request_digest").and_then(Value::as_str)
+                    == Some(approval.request_digest.as_str())
+                && payload.get("reservation_token").and_then(Value::as_str)
+                    == Some(reservation_token)
+                && payload.get("decision_digest").and_then(Value::as_str) == Some(decision_digest);
+            if !exact {
+                return Err(internal(
+                    "approval settlement operation id is bound to contradictory root testimony",
+                ));
+            }
+            let delivery_digest = payload
+                .get("delivery_digest")
+                .and_then(Value::as_str)
+                .filter(|digest| lillux::valid_hash(digest))
+                .ok_or_else(|| internal("approval settlement fact has no valid delivery digest"))?
+                .to_owned();
+            if settlement.replace(delivery_digest).is_some() {
+                return Err(internal(
+                    "approval settlement operation is duplicated in the root chain",
+                ));
+            }
+        }
+        after = page.events.last().map(|event| event.chain_seq);
+        if !page.has_more {
+            return Ok(settlement);
+        }
+    }
+}
+
+fn has_authoritative_candidate_publication_reservation(
+    state: &AppState,
+    session: &ryeos_app::state_store::DedicatedSessionRecord,
+    operation_id: &str,
+    candidate: &str,
+    expected_previous_hash: &str,
+    validation: &str,
+    principal_key: &str,
+    project_hash: &str,
+) -> Result<bool, HandlerError> {
+    let thread = state
+        .state_store
+        .get_thread(&session.root_thread_id)
+        .map_err(internal)?
+        .ok_or_else(|| internal("hosted execution root thread disappeared"))?;
+    let mut after = None;
+    let mut found = false;
+    loop {
+        let page = state
+            .state_store
+            .replay_events(
+                &thread.chain_root_id,
+                Some(&thread.thread_id),
+                after,
+                1024,
+                8 * 1024 * 1024,
+            )
+            .map_err(internal)?;
+        for event in &page.events {
+            let payload = &event.payload;
+            if event.event_type != "hosted_candidate.publication_reserved"
+                || payload.get("operation_id").and_then(Value::as_str) != Some(operation_id)
+            {
+                continue;
+            }
+            let exact = payload.get("schema").and_then(Value::as_u64) == Some(1)
+                && payload.get("origin").and_then(Value::as_str) == Some("owner_authorized")
+                && payload.get("owner_principal").and_then(Value::as_str)
+                    == Some(session.owner_principal.as_str())
+                && payload.get("session_id").and_then(Value::as_str)
+                    == Some(session.session_id.as_str())
+                && payload
+                    .get("candidate_snapshot_hash")
+                    .and_then(Value::as_str)
+                    == Some(candidate)
+                && payload
+                    .get("expected_previous_hash")
+                    .and_then(Value::as_str)
+                    == Some(expected_previous_hash)
+                && payload
+                    .get("candidate_validation_hash")
+                    .and_then(Value::as_str)
+                    == Some(validation)
+                && payload.get("principal_key").and_then(Value::as_str) == Some(principal_key)
+                && payload.get("project_hash").and_then(Value::as_str) == Some(project_hash);
+            if !exact {
+                return Err(internal(
+                    "candidate publication reservation operation is contradictory",
+                ));
+            }
+            if found {
+                return Err(internal(
+                    "candidate publication reservation is duplicated in the root chain",
+                ));
+            }
+            found = true;
+        }
+        after = page.events.last().map(|event| event.chain_seq);
+        if !page.has_more {
+            return Ok(found);
+        }
+    }
+}
+
 fn owned_session(
     state: &AppState,
     ctx: &HandlerContext,
@@ -192,6 +343,64 @@ fn repair_approval_outbox_for_session(
             .and_then(Value::as_str)
             .filter(|value| matches!(*value, "accept" | "decline"))
             .ok_or_else(|| internal("reserved approval has no valid semantic decision"))?;
+        if find_authoritative_approval_delivery_settlement(
+            state,
+            session,
+            &approval,
+            token,
+            decision_digest,
+        )?
+        .is_some()
+        {
+            state
+                .state_store
+                .settle_recovered_dedicated_approval_delivery(
+                    &session.session_id,
+                    &approval.approval_id,
+                    approval.worker_boot_epoch,
+                    token,
+                    decision_digest,
+                )
+                .map_err(internal)?;
+            continue;
+        }
+        let root = state
+            .state_store
+            .get_thread(&session.root_thread_id)
+            .map_err(internal)?
+            .ok_or_else(|| internal("hosted execution root thread disappeared"))?;
+        if ryeos_app::state_store::is_terminal_status(&root.status) {
+            match approval.state.as_str() {
+                "decision_reserved" => state
+                    .state_store
+                    .reconcile_dedicated_approval_stale_epoch(
+                        &session.session_id,
+                        &approval.approval_id,
+                        approval.worker_boot_epoch,
+                    )
+                    .map_err(internal)?,
+                "delivery_contacting" => state
+                    .state_store
+                    .reconcile_dedicated_approval_delivery_unknown(
+                        &session.session_id,
+                        &approval.approval_id,
+                        approval.worker_boot_epoch,
+                    )
+                    .map_err(internal)?,
+                "delivery_unknown" => {}
+                other => {
+                    return Err(internal(format!(
+                        "approval outbox has invalid terminal state `{other}`"
+                    )));
+                }
+            }
+            tracing::warn!(
+                session_id = %session.session_id,
+                approval_id = %approval.approval_id,
+                "terminal hosted root cannot accept missing historical approval outbox facts"
+            );
+            continue;
+        }
         let decision_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
             "schema":"ryeos.hosted_approval_decision_fact.v1",
             "session_id":session.session_id,
@@ -218,6 +427,12 @@ fn repair_approval_outbox_for_session(
                 "recovered_outbox":true,
             }),
         )?;
+        // No worker contact was possible yet. Retain the reservation until
+        // worker fencing classifies it as a stale old-epoch decision; calling
+        // this delivery-unknown would overstate the evidence boundary.
+        if approval.state == "decision_reserved" {
+            continue;
+        }
         if matches!(
             approval.state.as_str(),
             "delivery_contacting" | "delivery_unknown"
@@ -241,6 +456,8 @@ fn repair_approval_outbox_for_session(
                     "session_id":session.session_id,
                     "approval_id":approval.approval_id,
                     "worker_boot_epoch":approval.worker_boot_epoch,
+                    "request_digest":approval.request_digest,
+                    "reservation_token":token,
                     "decision_digest":decision_digest,
                     "recovered_outbox":true,
                 }),
@@ -275,6 +492,8 @@ fn repair_approval_outbox_for_session(
                 "session_id":session.session_id,
                 "approval_id":approval.approval_id,
                 "worker_boot_epoch":approval.worker_boot_epoch,
+                "request_digest":approval.request_digest,
+                "reservation_token":token,
                 "decision_digest":decision_digest,
                 "recovered_outbox":true,
             }),
@@ -333,7 +552,7 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
             .ok_or_else(|| anyhow::anyhow!("publishing root thread disappeared"))?;
         let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
             base_snapshot_hash,
-            display_path,
+            realization,
             ..
         } = thread
             .project_authority
@@ -341,27 +560,56 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
         else {
             anyhow::bail!("publishing root project authority is not pinned");
         };
-        let project_path = display_path
-            .or(thread.project_root.map(Into::into))
-            .ok_or_else(|| anyhow::anyhow!("publishing root has no stable project path"))?;
-        let canonical_project = ryeos_executor::execution::project_source::canonical_project_ref(
-            project_path
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("publishing project path is not UTF-8"))?,
-        )?;
-        let principal_key = ryeos_state::refs::principal_storage_key(&session.owner_principal)?;
-        let project_hash = lillux::cas::sha256_hex(canonical_project.as_bytes());
+        let ryeos_state::objects::PinnedProjectRealization::Cow {
+            terminal_publication:
+                ryeos_state::objects::PinnedTerminalPublication::RetainCurrentHead {
+                    principal_key,
+                    project_hash,
+                    expected_hash,
+                },
+        } = realization
+        else {
+            anyhow::bail!("publishing root lacks an admitted explicit project HEAD destination");
+        };
+        if expected_hash != base_snapshot_hash {
+            anyhow::bail!("publishing root HEAD fence differs from its admitted base");
+        }
+        let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
+            "schema":"ryeos.hosted_candidate_publication_operation.v1",
+            "session_id":session.session_id,
+            "candidate_snapshot_hash":candidate,
+            "expected_previous_hash":base_snapshot_hash,
+            "candidate_validation_hash":validation,
+            "principal_key":principal_key,
+            "project_hash":project_hash,
+        }))?;
+        let authorized = has_authoritative_candidate_publication_reservation(
+            &state,
+            &session,
+            &operation_id,
+            candidate,
+            &base_snapshot_hash,
+            validation,
+            &principal_key,
+            &project_hash,
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let current = state
             .state_store
             .with_state_db(|db| db.read_project_head(&principal_key, &project_hash))?;
+        if !authorized {
+            if current.as_deref() == Some(base_snapshot_hash.as_str()) {
+                state
+                    .state_store
+                    .fail_dedicated_candidate_disposition(&session.session_id, "publishing")?;
+                continue;
+            }
+            anyhow::bail!(
+                "publishing session {} contacted project HEAD without authoritative owner reservation",
+                session.session_id
+            );
+        }
         if current.as_deref() == Some(candidate) {
-            let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
-                "schema":"ryeos.hosted_candidate_publication_operation.v1",
-                "session_id":session.session_id,
-                "candidate_snapshot_hash":candidate,
-                "expected_previous_hash":base_snapshot_hash,
-                "candidate_validation_hash":validation,
-            }))?;
             append_root_fact_once(
                 &state,
                 &session,
@@ -375,6 +623,9 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
                     "candidate_snapshot_hash":candidate,
                     "expected_previous_hash":base_snapshot_hash,
                     "candidate_validation_hash":validation,
+                    "principal_key":principal_key,
+                    "project_hash":project_hash,
+                    "reservation_operation_id":operation_id,
                     "recovered_after_head_contact":true,
                 }),
             )?;
@@ -524,6 +775,8 @@ async fn resolve_approval(
             "session_id":req.session_id,
             "approval_id":req.approval_id,
             "worker_boot_epoch":approval.worker_boot_epoch,
+            "request_digest":req.request_digest,
+            "reservation_token":reservation_token,
             "decision_digest":decision_digest,
         }),
     )?;
@@ -594,6 +847,8 @@ async fn resolve_approval(
                     "session_id":req.session_id,
                     "approval_id":req.approval_id,
                     "worker_boot_epoch":approval.worker_boot_epoch,
+                    "request_digest":req.request_digest,
+                    "reservation_token":reservation_token,
                     "decision_digest":decision_digest,
                 }),
             )?;
@@ -621,10 +876,25 @@ async fn resolve_approval(
             "session_id":req.session_id,
             "approval_id":req.approval_id,
             "worker_boot_epoch":approval.worker_boot_epoch,
+            "request_digest":req.request_digest,
+            "reservation_token":reservation_token,
             "decision_digest":decision_digest,
             "delivery_digest":ryeos_state::objects::canonical_value_digest(&delivery).map_err(internal)?,
         }),
     )?;
+    if find_authoritative_approval_delivery_settlement(
+        &state,
+        &session,
+        &approval,
+        &reservation_token,
+        &decision_digest,
+    )?
+    .is_none()
+    {
+        return Err(internal(
+            "approval settlement fact disappeared after authoritative append",
+        ));
+    }
     if let Err(error) = state.state_store.settle_dedicated_approval_delivery(
         &req.session_id,
         &req.approval_id,
@@ -993,12 +1263,37 @@ async fn publish(
         .ok_or_else(|| internal("dedicated root has no project authority"))?;
     let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
         base_snapshot_hash,
-        display_path,
+        realization,
         ..
     } = authority
     else {
         return Err(internal("dedicated publication authority is not pinned"));
     };
+    let ryeos_state::objects::PinnedProjectRealization::Cow {
+        terminal_publication:
+            ryeos_state::objects::PinnedTerminalPublication::RetainCurrentHead {
+                principal_key,
+                project_hash,
+                expected_hash,
+            },
+    } = realization
+    else {
+        return Err(internal(
+            "dedicated publication authority has no admitted explicit HEAD destination",
+        ));
+    };
+    if expected_hash != base_snapshot_hash {
+        return Err(internal(
+            "dedicated publication HEAD fence differs from its admitted base",
+        ));
+    }
+    if ryeos_state::refs::principal_storage_key(&ctx.fingerprint).map_err(internal)?
+        != principal_key
+    {
+        return Err(HandlerError::Forbidden(
+            "publication caller differs from the admitted principal HEAD authority".into(),
+        ));
+    }
     if req.expected_previous_hash != base_snapshot_hash {
         return Err(HandlerError::BadRequest(
             "publication expected hash differs from the admitted base generation".into(),
@@ -1020,20 +1315,41 @@ async fn publish(
         "candidate_snapshot_hash":candidate,
         "expected_previous_hash":base_snapshot_hash,
         "candidate_validation_hash":candidate_validation_hash,
+        "principal_key":principal_key,
+        "project_hash":project_hash,
     }))
     .map_err(internal)?;
-    let project_path = display_path
-        .or_else(|| thread.project_root.map(Into::into))
-        .ok_or_else(|| internal("dedicated publication has no stable project path"))?;
-    let project_path = project_path
-        .to_str()
-        .ok_or_else(|| internal("dedicated project path is not UTF-8"))?;
-    let canonical_project =
-        ryeos_executor::execution::project_source::canonical_project_ref(project_path)
-            .map_err(internal)?;
-    let principal_key =
-        ryeos_state::refs::principal_storage_key(&ctx.fingerprint).map_err(internal)?;
-    let project_hash = lillux::cas::sha256_hex(canonical_project.as_bytes());
+    append_root_fact_once(
+        &state,
+        &session,
+        "hosted_candidate.publication_reserved",
+        &operation_id,
+        json!({
+            "schema":1,
+            "origin":"owner_authorized",
+            "owner_principal":session.owner_principal,
+            "session_id":req.session_id,
+            "candidate_snapshot_hash":candidate,
+            "expected_previous_hash":base_snapshot_hash,
+            "candidate_validation_hash":candidate_validation_hash,
+            "principal_key":principal_key,
+            "project_hash":project_hash,
+        }),
+    )?;
+    if !has_authoritative_candidate_publication_reservation(
+        &state,
+        &session,
+        &operation_id,
+        candidate,
+        &base_snapshot_hash,
+        candidate_validation_hash,
+        &principal_key,
+        &project_hash,
+    )? {
+        return Err(internal(
+            "candidate publication reservation disappeared after authoritative append",
+        ));
+    }
     let project_lock = super::project_apply_snapshot::project_apply_lock(&project_hash);
     let _project_guard = project_lock.lock_owned().await;
     let pinned = state
@@ -1063,7 +1379,7 @@ async fn publish(
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
     let publication = state.state_store.with_state_db(|db| {
-        let current = db.read_project_head(principal_key, &project_hash)?;
+        let current = db.read_project_head(&principal_key, &project_hash)?;
         if current.as_deref() == Some(candidate) {
             return Ok(());
         }
@@ -1075,7 +1391,7 @@ async fn publish(
             );
         }
         db.advance_project_head_ref(
-            principal_key,
+            &principal_key,
             &project_hash,
             candidate,
             &base_snapshot_hash,
@@ -1098,11 +1414,15 @@ async fn publish(
         &operation_id,
         json!({
             "schema":1,
-            "origin":"owner_authorized",
+            "origin":"filesystem_verified",
+            "owner_principal":session.owner_principal,
             "session_id":req.session_id,
             "candidate_snapshot_hash":candidate,
             "expected_previous_hash":base_snapshot_hash,
             "candidate_validation_hash":candidate_validation_hash,
+            "principal_key":principal_key,
+            "project_hash":project_hash,
+            "reservation_operation_id":operation_id,
         }),
     )?;
     state

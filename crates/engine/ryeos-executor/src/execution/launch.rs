@@ -6427,6 +6427,9 @@ async fn run_claimed_thread_row_inner(
             && let Some(session) = state.state_store.dedicated_session(&thread_id)?
             && session.state == "freezing"
         {
+            let candidate_root_operation =
+                ryeos_app::hosted_operation::begin_hosted_root_operation(&thread_id)
+                    .map_err(BuildAndLaunchError::Internal)?;
             let terminal_publication = provenance
                 .project_authority()
                 .terminal_publication()
@@ -6451,10 +6454,11 @@ async fn run_claimed_thread_row_inner(
                 )));
             }
             hosted_candidate_workspace_closed = true;
-            ryeos_app::dedicated_session_service::append_candidate_capture_fact(
+            ryeos_app::dedicated_session_service::append_candidate_capture_fact_under_lease(
                 state,
                 &thread_id,
                 candidate_snapshot_hash,
+                &candidate_root_operation,
             )
             .map_err(BuildAndLaunchError::Internal)?;
             if !state
@@ -6467,6 +6471,7 @@ async fn run_claimed_thread_row_inner(
                 )));
             }
             ryeos_app::dedicated_session_service::notify_projection_change(&thread_id);
+            drop(candidate_root_operation);
             let terminal_session = loop {
                 let session = state
                     .state_store
@@ -6518,12 +6523,30 @@ async fn run_claimed_thread_row_inner(
         }
         let fallback = fallback_finalization(&thread_id, &runtime_result, terminal_status);
         runtime_result = fallback.runtime_result;
+        let mut hosted_root_terminalization =
+            if state.state_store.dedicated_session(&thread_id)?.is_some() {
+                Some(
+                    ryeos_app::hosted_operation::begin_hosted_root_terminalization(&thread_id)
+                        .map_err(BuildAndLaunchError::Internal)?,
+                )
+            } else {
+                None
+            };
+        if let Some(session) = state.state_store.dedicated_session(&thread_id)?
+            && session.state != "terminal"
+        {
+            ryeos_app::dedicated_session_service::abort_session_for_root_stop(state, &thread_id)
+                .map_err(BuildAndLaunchError::Internal)?;
+        }
         let finalized = state.threads.finalize_thread_with_managed_envelope_owned(
             &fallback.params,
             fallback.managed_envelope,
             launch_owner,
             result_project_snapshot_hash.as_deref(),
         )?;
+        if let Some(terminalization) = hosted_root_terminalization.as_mut() {
+            terminalization.commit();
+        }
         // Live parent-resume kick: a followed child finalized on this fallback
         // (abnormal exit, no self-finalize over the callback) still flips its waiter
         // to `ready`, so wake the parent now instead of waiting for a restart.
@@ -7841,7 +7864,11 @@ async fn finalize_recovered_hosted_candidate_disposition(
             "recovered hosted candidate has no terminal publication authority"
         ))
     })?;
-    if terminal_publication != &ryeos_state::objects::PinnedTerminalPublication::RetainResult {
+    if !matches!(
+        terminal_publication,
+        ryeos_state::objects::PinnedTerminalPublication::RetainResult
+            | ryeos_state::objects::PinnedTerminalPublication::RetainCurrentHead { .. }
+    ) {
         return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
             "recovered hosted candidate does not have retain-result authority"
         )));
@@ -7881,6 +7908,28 @@ async fn finalize_recovered_hosted_candidate_disposition(
             "recovered hosted candidate workspace has no frozen generation"
         ))
     })?;
+    if !workspace_already_closed {
+        let provenance = provenance.ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "recovered frozen hosted candidate has no retained workspace provenance"
+            ))
+        })?;
+        let workspace_lifeline = provenance.workspace_lifeline();
+        if let Err(error) = super::runner::close_managed_runtime_workspace(
+            state,
+            workspace_lifeline.as_ref(),
+            thread_id,
+            terminal_publication,
+            Some(candidate_snapshot_hash),
+        ) {
+            if let Some(workspace) = workspace_lifeline.as_ref() {
+                workspace.disarm();
+            }
+            return Err(BuildAndLaunchError::Internal(error.context(
+                "close recovered hosted candidate workspace before disposition",
+            )));
+        }
+    }
     let terminal_session = loop {
         let session = state
             .state_store
@@ -7947,36 +7996,18 @@ async fn finalize_recovered_hosted_candidate_disposition(
     );
     let terminal_status = runtime_terminal_status(runtime_result.status);
     let fallback = fallback_finalization(thread_id, &runtime_result, terminal_status);
+    let mut root_terminalization =
+        ryeos_app::hosted_operation::begin_hosted_root_terminalization(thread_id)
+            .map_err(BuildAndLaunchError::Internal)?;
     let finalized = state.threads.finalize_thread_with_managed_envelope_owned(
         &fallback.params,
         fallback.managed_envelope,
         launch_owner,
         Some(candidate_snapshot_hash),
     )?;
+    root_terminalization.commit();
     kick_launch_window_for_terminal(state, &finalized.chain_root_id);
     kick_follow_resume_if_ready(state, &finalized.chain_root_id);
-    if !workspace_already_closed {
-        let provenance = provenance.ok_or_else(|| {
-            BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "recovered frozen hosted candidate has no retained workspace provenance"
-            ))
-        })?;
-        let workspace_lifeline = provenance.workspace_lifeline();
-        if let Err(error) = super::runner::close_managed_runtime_workspace(
-            state,
-            workspace_lifeline.as_ref(),
-            thread_id,
-            terminal_publication,
-            Some(candidate_snapshot_hash),
-        ) {
-            if let Some(workspace) = workspace_lifeline.as_ref() {
-                workspace.disarm();
-            }
-            return Err(BuildAndLaunchError::Internal(
-                error.context("close recovered hosted candidate workspace"),
-            ));
-        }
-    }
     Ok(NativeLaunchResult {
         thread: serde_json::to_value(&finalized)?,
         result: json!({

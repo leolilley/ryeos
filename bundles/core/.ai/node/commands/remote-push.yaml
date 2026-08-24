@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:09Z:2928b81707f63c682d1ec13f7b461675b096f792cf1bd9b7062e83c107eb0d7e:VM56pAJD0vuIZ+mvXjqFo+9tZfYnCa6gqDeYvUgpPfoba3OEYGtWj5lH48SRHTlWFE60lsBvtI7+8lxaGVeTAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-24T13:28:46Z:73272f0bd009d456fa0f387cf748d1640d8419c04005a95de66696838d38febc:ZRigR+ErcwkX6vRqV3uS7yNd1jl9oQG9DtRSbQTZuA3Qqp3T1Pe5dsmGOrVgq7dI0dNdgP3NnHsaElIkEJtGAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - push
@@ -9,6 +9,8 @@ forms:
 project:
   resolution: required
   bind_parameter: project
+defaults:
+  outbound_principal: node
 dispatch:
   kind: execute_ref
   execute: service:remote/push

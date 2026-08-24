@@ -4317,6 +4317,29 @@ impl StateStore {
         )
     }
 
+    pub fn dedicated_observation_outbox_records(
+        &self,
+    ) -> Result<Vec<runtime_db::DedicatedObservationBatchRecord>> {
+        let g = self.lock()?;
+        g.runtime_db.dedicated_observation_outbox_records()
+    }
+
+    pub fn discard_unappended_dedicated_observation_batch(
+        &self,
+        session_id: &str,
+        worker_boot_epoch: u64,
+        first_sequence: u64,
+        batch_digest: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.discard_unappended_dedicated_observation_batch(
+            session_id,
+            worker_boot_epoch,
+            first_sequence,
+            batch_digest,
+        )
+    }
+
     pub fn mark_dedicated_observation_batch_unknown(
         &self,
         session_id: &str,
@@ -4362,6 +4385,20 @@ impl StateStore {
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.reconcile_dedicated_approval_delivery_unknown(
+            session_id,
+            approval_id,
+            worker_boot_epoch,
+        )
+    }
+
+    pub fn reconcile_dedicated_approval_stale_epoch(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.reconcile_dedicated_approval_stale_epoch(
             session_id,
             approval_id,
             worker_boot_epoch,
@@ -4431,6 +4468,24 @@ impl StateStore {
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.settle_dedicated_approval_delivery(
+            session_id,
+            approval_id,
+            worker_boot_epoch,
+            reservation_token,
+            decision_digest,
+        )
+    }
+
+    pub fn settle_recovered_dedicated_approval_delivery(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+        reservation_token: &str,
+        decision_digest: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.settle_recovered_dedicated_approval_delivery(
             session_id,
             approval_id,
             worker_boot_epoch,

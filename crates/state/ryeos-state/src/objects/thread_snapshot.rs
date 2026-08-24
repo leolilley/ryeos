@@ -23,7 +23,9 @@ use super::validate_object_kind;
 /// current operational generation.
 /// v9: terminal result/error content has a dedicated bounded contract, and
 /// managed runtime terminal state stores only its non-derivable supplement.
-pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 9;
+/// v10: retained-current-HEAD authority embeds the exact principal/project
+/// destination and admitted compare-and-swap base.
+pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 10;
 
 /// Maximum compact-JSON bytes retained across a terminal snapshot's result and
 /// error values. Terminal content has its own bounded contract: it is not an

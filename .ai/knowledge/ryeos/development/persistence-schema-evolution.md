@@ -5,7 +5,7 @@ name: "persistence-schema-evolution"
 title: "Persistence Schema Evolution"
 description: "Rules for immutable CAS wire identities, retained SQLite migrations, rebuildable projections, and explicit history retirement"
 entry_type: reference
-version: "1.3.0"
+version: "1.4.0"
 ```
 
 # Persistence Schema Evolution
@@ -29,12 +29,12 @@ occupied. Removing old readers does not make the number reusable.
 
 The current clean-cut execution formats include:
 
-- thread snapshot schema 8;
+- thread snapshot schema 10;
 - project snapshot schema 5;
-- admitted launch capsule schema 9;
-- runtime launch metadata epoch 15;
-- the standalone runtime project-authority envelope epoch 2; and
-- the owned runtime SQLite operator schema epoch 8 (encoded in the RyeOS
+- admitted launch capsule schema 14;
+- runtime launch metadata epoch 18;
+- the standalone runtime project-authority envelope epoch 3; and
+- the owned runtime SQLite operator schema epoch 9 (encoded in the RyeOS
   `PRAGMA application_id` family).
 
 The numbers identify independently evolving contracts. A change to a nested
@@ -59,12 +59,13 @@ the exact current envelopes stored in its JSON columns. Normal open never
 migrates or normalizes a predecessor. Any mismatch leaves the file untouched
 and requires the explicit operator-confirmed thread-history/project-head reset.
 
-Runtime epoch 8 is the clean cut adding session-bound workers,
+Runtime epoch 9 includes the epoch-8 session-bound worker,
 credential-generation fencing, command/approval contact ledgers, observation
-frontiers, candidate disposition projections, and multi-epoch worker process
-history keyed by `(session_id, boot_epoch)`. No epoch-1-through-7 reader or
-migration remains. Earlier history requires the explicit retirement
-ceremony below; normal startup never rewrites it.
+frontier, candidate-disposition, and multi-epoch process-history contracts,
+then cleanly cuts the embedded execution-project authority to its exact
+retained-current-HEAD destination. No epoch-1-through-8 reader or migration
+remains. Earlier history requires the explicit retirement ceremony below;
+normal startup never rewrites it.
 
 `operational.sqlite3` accepts only its exact current schema today. If a deployed
 predecessor ever exists, preserving its non-reconstructable facts requires a
