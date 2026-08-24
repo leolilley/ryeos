@@ -59,6 +59,31 @@ capacity.
 
 ## Operator flow
 
+This workflow is intended for a dedicated hosted endpoint. Provision the same
+configured-operator key at the source and hosted nodes, then—with the hosted
+daemon stopped—replace that key's hosted authorized-key entry with a
+target-node-signed `remote_operator` grant. The grant preserves operator
+ownership and independently binds the authenticated source site; it never
+turns a remote call into a local one:
+
+```sh
+HOSTED_SCOPES='ryeos.execute.worker.codex/login,ryeos.execute.worker.codex/session,ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.system/push-head,ryeos.execute.service.credential-profiles/create,ryeos.execute.service.credential-profiles/get,ryeos.execute.service.credential-profiles/revoke,ryeos.execute.service.credential-profiles/confirm,ryeos.execute.service.credential-profiles/delete,ryeos.execute.service.worker-executions/status,ryeos.execute.service.worker-executions/command,ryeos.execute.service.worker-executions/approvals,ryeos.execute.service.worker-executions/resolve-approval,ryeos.execute.service.worker-executions/terminate,ryeos.execute.service.worker-executions/publish,ryeos.execute.service.worker-executions/validate-candidate-closure-and-base,ryeos.execute.service.worker-executions/discard,ryeos.write.project.live,ryeos.execute.service.external-content/import,ryeos.execute.service.external-content/bind,ryeos.execute.service.external-content/scrub,ryeos.execute.service.external-content/release'
+ryeos-core-tools authorize-client \
+  --app-root /path/to/hosted-app-root \
+  --public-key "<configured_operator_raw_ed25519_base64>" \
+  --label "hosted operator forwarded from source" \
+  --origin-site-id "site:<source>" \
+  --scopes "$HOSTED_SCOPES"
+```
+
+Use the exact `site_id` from the source node's identity. The origin is carried
+by the hosted node's signed grant, not by caller data. The forwarded HEAD and
+execute bodies include a signed required-origin assertion solely so a missing
+or mismatched target grant fails closed; the assertion cannot create origin.
+Because one authorized-key file exists per fingerprint, all use of this key on
+the hosted target is classified as remote-origin; use a separate key for
+target-local maintenance.
+
 The bundle registers terminal aliases over the same authenticated daemon
 services used by any remote RyeOS client. A minimal session is:
 
@@ -146,18 +171,21 @@ ryeos execute service:remote/run --input - <<JSON
 JSON
 ```
 
-The same configured-operator key must exist at both operator endpoints and be
-authorized by the hosted daemon for the exact push, execution, profile, and
-session scopes. The operator-owned push and launch deliberately use that key;
-ordinary node-key remote authorization cannot create or control this
-operator-owned workflow.
+The same configured-operator key must exist at both operator endpoints and use
+the origin-bound hosted grant above. The operator-owned push and launch
+deliberately use that key; ordinary node-key remote authorization cannot create
+or control this operator-owned workflow. A plain `local_client` grant is also
+incorrect: it erases forwarding origin and is rejected by this activation
+contract.
 
 The coordinate is printed before remote contact; retain it until the accepted
 response echoes the same value. The returned `result.thread_id` is the remote
 RyeOS root/session ID. Drive its
 projectless session endpoints with the same configured-operator key directly
 against the hosted daemon (for example by setting `RYEOSD_URL` for the CLI),
-or from a RyeOS UI connected to that daemon. No shared filesystem pathname is
+or from a RyeOS UI connected to that daemon. These requests remain attributed
+to the configured source site even when sent directly because the target grant
+is the authenticated origin boundary. No shared filesystem pathname is
 required after admission.
 
 Approval decisions require the exact pending request digest. Permission,

@@ -253,6 +253,11 @@ enum Cmd {
         /// printed).
         #[arg(long)]
         merge_scopes: bool,
+
+        /// Bind this operator key to an authenticated forwarding RyeOS site.
+        /// Emits a remote_operator grant and rejects wildcard scopes.
+        #[arg(long)]
+        origin_site_id: Option<String>,
     },
 
     /// Mint a one-time node-local admission token for remote bootstrap.
@@ -598,6 +603,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             scopes,
             label,
             merge_scopes,
+            origin_site_id,
         } => {
             let scopes = scopes.ok_or_else(|| anyhow::anyhow!(
                 "--scopes required, comma-separated, in canonical form. \
@@ -609,6 +615,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 scopes,
                 label,
                 merge_scopes,
+                origin_site_id,
                 cli.stdin_json,
             )
         }
@@ -1674,6 +1681,7 @@ fn run_authorize_client(
     scopes: String,
     label: String,
     merge_scopes: bool,
+    origin_site_id: Option<String>,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
     use lillux::crypto::VerifyingKey;
@@ -1696,13 +1704,14 @@ fn run_authorize_client(
             .as_str()
             .unwrap_or("cli-authorized")
             .to_string();
-        (ssd, pk, sc, lb)
+        let origin = val["origin_site_id"].as_str().map(String::from);
+        (ssd, pk, sc, lb, origin)
     } else {
         let pk = public_key.ok_or_else(|| anyhow::anyhow!("--public-key required"))?;
-        (app_root, pk, scopes, label)
+        (app_root, pk, scopes, label, origin_site_id)
     };
 
-    let (ssd, pk_b64, scopes_str, label) = params;
+    let (ssd, pk_b64, scopes_str, label, origin_site_id) = params;
 
     let app_root = resolve_app_root(ssd)?;
 
@@ -1741,6 +1750,7 @@ fn run_authorize_client(
         label,
         allow_wildcard: false, // core-tools is not the bootstrap path
         merge: merge_scopes,
+        origin_site_id,
     })?;
 
     if !result.dropped_scopes.is_empty() {
@@ -1760,6 +1770,7 @@ fn run_authorize_client(
             "path": result.path.to_string_lossy(),
             "merged": result.merged,
             "dropped_scopes": result.dropped_scopes,
+            "origin_site_id": result.origin_site_id,
         }))?
     );
 

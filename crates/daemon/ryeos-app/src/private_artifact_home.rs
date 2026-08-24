@@ -19,6 +19,9 @@ const MAX_INITIAL_FILE_BYTES: usize = 256 * 1024;
 const MAX_INITIAL_TOTAL_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_MAX_HOME_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_HOME_ENTRIES: usize = 100_000;
+const MAX_HOME_DEPTH: usize = 64;
+const HOME_TRAVERSAL_BUDGET: lillux::DirectoryTraversalBudget =
+    lillux::DirectoryTraversalBudget::new(MAX_HOME_ENTRIES, MAX_HOME_DEPTH);
 
 fn validate_component(label: &str, value: &str, maximum: usize) -> Result<()> {
     if value.is_empty()
@@ -104,16 +107,18 @@ pub fn create(
         Ok(())
     })();
     if let Err(error) = result {
-        let cleanup = home.remove_contents_recursive().and_then(|()| {
-            root.remove_empty_child_if_same(&home_name, &home)
-                .and_then(|removed| {
-                    if removed {
-                        Ok(())
-                    } else {
-                        bail!("private artifact home identity changed during rollback")
-                    }
-                })
-        });
+        let cleanup = home
+            .remove_contents_recursive_bounded(HOME_TRAVERSAL_BUDGET)
+            .and_then(|()| {
+                root.remove_empty_child_if_same(&home_name, &home)
+                    .and_then(|removed| {
+                        if removed {
+                            Ok(())
+                        } else {
+                            bail!("private artifact home identity changed during rollback")
+                        }
+                    })
+            });
         return Err(match cleanup {
             Ok(()) => error,
             Err(cleanup) => {
@@ -133,7 +138,7 @@ pub fn remove(runtime_state_dir: &Path, home_id: &str) -> Result<bool> {
     let Some(home) = root.open_child_directory(&name)? else {
         return Ok(false);
     };
-    home.remove_contents_recursive()?;
+    home.remove_contents_recursive_bounded(HOME_TRAVERSAL_BUDGET)?;
     let removed = root.remove_empty_child_if_same(&name, &home)?;
     if !removed {
         bail!("private artifact home identity changed during removal");
@@ -155,7 +160,7 @@ pub fn remove_empty_orphan(runtime_state_dir: &Path, home_id: &str) -> Result<bo
     let Some(home) = root.open_child_directory(&name)? else {
         return Ok(false);
     };
-    if !home.entries_no_follow()?.is_empty() {
+    if !home.entries_no_follow_bounded(1)?.is_empty() {
         bail!("private artifact orphan is non-empty and requires explicit recovery");
     }
     let removed = root.remove_empty_child_if_same(&name, &home)?;
@@ -170,47 +175,129 @@ pub fn require_within_default_limit(runtime_state_dir: &Path, home_id: &str) -> 
     let path = home_path(runtime_state_dir, home_id)?;
     let home = lillux::PinnedDirectory::open(&path)?
         .ok_or_else(|| anyhow::anyhow!("private artifact home is missing"))?;
-    let mut entries = 0usize;
-    let bytes = measure_directory(&home, &mut entries)?;
-    if bytes > DEFAULT_MAX_HOME_BYTES {
-        bail!("private artifact home reached its byte ceiling");
-    }
-    Ok(bytes)
+    measure_directory_bounded(&home, HOME_TRAVERSAL_BUDGET, DEFAULT_MAX_HOME_BYTES)
 }
 
-fn measure_directory(directory: &lillux::PinnedDirectory, entries: &mut usize) -> Result<u64> {
-    let mut bytes = 0u64;
-    for entry in directory.entries_no_follow()? {
-        *entries = entries
-            .checked_add(1)
-            .context("private artifact entry count overflow")?;
-        if *entries > MAX_HOME_ENTRIES {
-            bail!("private artifact home reached its entry ceiling");
-        }
-        if entry.mode & 0o077 != 0 {
-            bail!("private artifact entry grants group or other permissions");
-        }
-        if entry.entry_type == lillux::PinnedEntryType::Directory && entry.mode & 0o700 != 0o700 {
-            bail!("private artifact directory is not owner-accessible");
-        }
-        match directory.open_entry(&entry.name, false)? {
-            Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
-                bytes = bytes
-                    .checked_add(measure_directory(&child, entries)?)
-                    .context("private artifact byte count overflow")?;
-            }
-            Some(lillux::PinnedDirectoryEntry::Regular(file)) => {
-                bytes = bytes
-                    .checked_add(file.metadata()?.len())
-                    .context("private artifact byte count overflow")?;
-            }
-            None => continue,
-        }
-        if bytes > DEFAULT_MAX_HOME_BYTES {
-            bail!("private artifact home reached its byte ceiling");
-        }
+fn require_same_home_device(
+    root_device: u64,
+    entry: &lillux::PinnedDirectoryEntryMetadata,
+) -> Result<()> {
+    if entry.containing_device != root_device {
+        bail!("private artifact home crosses a mounted filesystem");
     }
-    Ok(bytes)
+    Ok(())
+}
+
+fn measure_directory_bounded(
+    root: &lillux::PinnedDirectory,
+    budget: lillux::DirectoryTraversalBudget,
+    maximum_bytes: u64,
+) -> Result<u64> {
+    #[cfg(not(unix))]
+    {
+        let _ = (root, budget, maximum_bytes);
+        bail!("private artifact home traversal is unavailable on this platform");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        fn visit(
+            directory: &lillux::PinnedDirectory,
+            root_device: u64,
+            remaining_entries: &mut usize,
+            max_depth: usize,
+            depth: usize,
+            maximum_bytes: u64,
+            bytes: &mut u64,
+        ) -> Result<()> {
+            if depth > max_depth {
+                bail!("private artifact home reached its directory-depth ceiling");
+            }
+            let observed = directory
+                .entries_no_follow_bounded(*remaining_entries)
+                .context("enumerate private artifact home within its entry ceiling")?;
+            *remaining_entries = remaining_entries
+                .checked_sub(observed.len())
+                .context("private artifact entry budget underflow")?;
+            for entry in observed {
+                require_same_home_device(root_device, &entry)?;
+                if entry.mode & 0o077 != 0 {
+                    bail!("private artifact entry grants group or other permissions");
+                }
+                let opened = directory
+                    .open_entry(&entry.name, false)
+                    .context("open private artifact entry without following links")?
+                    .ok_or_else(|| anyhow::anyhow!("private artifact entry disappeared"))?;
+                match opened {
+                    lillux::PinnedDirectoryEntry::Directory(child) => {
+                        if entry.entry_type != lillux::PinnedEntryType::Directory
+                            || entry.mode & 0o700 != 0o700
+                        {
+                            bail!("private artifact directory identity or mode changed");
+                        }
+                        let (device, inode) = child.device_inode()?;
+                        if device != root_device
+                            || device != entry.containing_device
+                            || inode != entry.inode
+                        {
+                            bail!("private artifact directory identity changed");
+                        }
+                        visit(
+                            &child,
+                            root_device,
+                            remaining_entries,
+                            max_depth,
+                            depth + 1,
+                            maximum_bytes,
+                            bytes,
+                        )?;
+                    }
+                    lillux::PinnedDirectoryEntry::Regular(file) => {
+                        if entry.entry_type != lillux::PinnedEntryType::Regular {
+                            bail!("private artifact file identity changed");
+                        }
+                        let metadata = file.metadata()?;
+                        if !metadata.is_file()
+                            || metadata.dev() != root_device
+                            || metadata.dev() != entry.containing_device
+                            || metadata.ino() != entry.inode
+                            || metadata.mode() & 0o077 != 0
+                        {
+                            bail!("private artifact file identity or mode changed");
+                        }
+                        *bytes = bytes
+                            .checked_add(metadata.len())
+                            .context("private artifact byte count overflow")?;
+                        if *bytes > maximum_bytes {
+                            bail!("private artifact home reached its byte ceiling");
+                        }
+                    }
+                }
+                directory.ensure_entry_observation(&entry)?;
+            }
+            Ok(())
+        }
+
+        let metadata = root.try_clone_descriptor()?.metadata()?;
+        if metadata.mode() & 0o077 != 0 || metadata.mode() & 0o700 != 0o700 {
+            bail!("private artifact home root is not owner-private and accessible");
+        }
+        let root_device = metadata.dev();
+        let mut remaining_entries = budget.max_entries;
+        let mut bytes = 0;
+        visit(
+            root,
+            root_device,
+            &mut remaining_entries,
+            budget.max_depth,
+            0,
+            maximum_bytes,
+            &mut bytes,
+        )?;
+        root.ensure_path_binding()?;
+        Ok(bytes)
+    }
 }
 
 #[cfg(test)]
@@ -281,5 +368,70 @@ mod tests {
         );
         std::os::unix::fs::symlink("fixture.conf", path.join("link")).unwrap();
         assert!(require_within_default_limit(tmp.path(), "home-one").is_err());
+    }
+
+    #[test]
+    fn bounded_home_walk_rejects_namespace_before_overallocation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = create(tmp.path(), "home-one", &BTreeMap::new()).unwrap();
+        for name in ["one", "two"] {
+            let file = path.join(name);
+            std::fs::write(&file, b"x").unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let home = lillux::PinnedDirectory::open(&path).unwrap().unwrap();
+        assert!(
+            measure_directory_bounded(
+                &home,
+                lillux::DirectoryTraversalBudget::new(1, MAX_HOME_DEPTH),
+                DEFAULT_MAX_HOME_BYTES,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn bounded_home_walk_and_removal_reject_excessive_depth() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = create(tmp.path(), "home-one", &BTreeMap::new()).unwrap();
+        let first = path.join("first");
+        let second = first.join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        for directory in [&first, &second] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let home = lillux::PinnedDirectory::open(&path).unwrap().unwrap();
+        assert!(
+            measure_directory_bounded(
+                &home,
+                lillux::DirectoryTraversalBudget::new(MAX_HOME_ENTRIES, 1),
+                DEFAULT_MAX_HOME_BYTES,
+            )
+            .is_err()
+        );
+
+        let mut current = second;
+        for index in 0..=MAX_HOME_DEPTH {
+            current = current.join(format!("depth-{index}"));
+            std::fs::create_dir(&current).unwrap();
+            std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        assert!(remove(tmp.path(), "home-one").is_err());
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn bounded_home_walk_rejects_a_mount_device_observation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = create(tmp.path(), "home-one", &BTreeMap::new()).unwrap();
+        let file = path.join("credential");
+        std::fs::write(&file, b"opaque").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let home = lillux::PinnedDirectory::open(&path).unwrap().unwrap();
+        let (root_device, _) = home.device_inode().unwrap();
+        let mut entry = home.entries_no_follow_bounded(1).unwrap().remove(0);
+        entry.containing_device = root_device.wrapping_add(1);
+        assert!(require_same_home_device(root_device, &entry).is_err());
     }
 }

@@ -461,6 +461,35 @@ mod tests {
     }
 
     #[test]
+    fn remote_operator_grant_rejects_missing_or_noncanonical_origin() {
+        let client_key = SigningKey::from_bytes(&[44u8; 32]);
+        let node_signer = SigningKey::from_bytes(&[99u8; 32]);
+        let tmp = TempDir::new().unwrap();
+        let node_identity = make_node_identity(&node_signer, tmp.path());
+        let auth_dir = tmp.path().join("auth");
+        std::fs::create_dir_all(&auth_dir).unwrap();
+        let client_vk = client_key.verifying_key();
+        let client_fp = lillux::signature::compute_fingerprint(&client_vk);
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(client_vk.as_bytes());
+        let path = auth_dir.join(format!("{client_fp}.toml"));
+
+        for origin_line in ["", "origin_site_id = \"source\"\n"] {
+            let body = format!(
+                "schema_version = 2\nprincipal_class = \"remote_operator\"\n{origin_line}fingerprint = \"{client_fp}\"\npublic_key = \"ed25519:{key_b64}\"\nscopes = [\"ryeos.execute.service.remote/run\"]\nlabel = \"remote operator\"\ngranted_by = \"test\"\ncreated_at = \"2026-01-01T00:00:00Z\"\n"
+            );
+            let signed = lillux::signature::sign_content_at(
+                &body,
+                &node_signer,
+                "#",
+                None,
+                "2026-01-01T00:00:00Z",
+            );
+            std::fs::write(&path, signed).unwrap();
+            assert!(load_authorized_key(&client_fp, &auth_dir, &node_identity).is_err());
+        }
+    }
+
+    #[test]
     fn directory_validation_rejects_unexpected_entries() {
         let node_signer = SigningKey::from_bytes(&[97u8; 32]);
         let tmp = TempDir::new().unwrap();

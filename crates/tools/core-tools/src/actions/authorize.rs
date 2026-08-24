@@ -39,6 +39,10 @@ pub struct AuthorizeClientParams {
     /// the write replaces the scope set (and any dropped scope is reported
     /// in `AuthorizeClientResult::dropped_scopes`).
     pub merge: bool,
+    /// Bind this operator-owned key to an authenticated forwarding site.
+    /// Presence emits a `remote_operator` grant and requires exact,
+    /// non-wildcard scopes.
+    pub origin_site_id: Option<String>,
 }
 
 /// Result of a successful authorize-client run.
@@ -54,6 +58,8 @@ pub struct AuthorizeClientResult {
     pub dropped_scopes: Vec<String>,
     /// Whether existing scopes were merged into the written set.
     pub merged: bool,
+    /// Authenticated forwarding origin for a `remote_operator` grant.
+    pub origin_site_id: Option<String>,
 }
 
 /// Reconcile a requested scope set against the scopes already on disk.
@@ -137,6 +143,9 @@ struct AdmissionTokenFile<'a> {
 /// Delegates to the canonical writer in `ryeos_app::identity` so the
 /// TOML format is identical to what the daemon's own handler produces.
 pub fn run_authorize_client(params: AuthorizeClientParams) -> Result<AuthorizeClientResult> {
+    if params.origin_site_id.is_some() && params.allow_wildcard {
+        bail!("remote-operator grants require exact, non-wildcard scopes");
+    }
     let node_key_path = params
         .app_root
         .join(".ai")
@@ -185,6 +194,7 @@ pub fn run_authorize_client(params: AuthorizeClientParams) -> Result<AuthorizeCl
         &node_identity,
         wildcard,
         params.merge,
+        params.origin_site_id.as_deref(),
     )
     .context("failed to write authorized-key TOML")?;
 
@@ -193,6 +203,7 @@ pub fn run_authorize_client(params: AuthorizeClientParams) -> Result<AuthorizeCl
         path,
         dropped_scopes,
         merged: params.merge,
+        origin_site_id: params.origin_site_id,
     })
 }
 
@@ -431,6 +442,28 @@ system_source_caps:
         let (final_scopes, dropped) = reconcile_scopes(&[], &["x".to_string()], false);
         assert_eq!(final_scopes, vec!["x".to_string()]);
         assert!(dropped.is_empty());
+    }
+
+    #[test]
+    fn authorize_client_can_emit_exact_scope_remote_operator_grant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _fixture = HostedPolicyFixture::new(tmp.path());
+        let client = lillux::crypto::SigningKey::generate(&mut OsRng).verifying_key();
+        let result = run_authorize_client(AuthorizeClientParams {
+            app_root: tmp.path().to_path_buf(),
+            public_key: client,
+            scopes: vec!["ryeos.execute.service.remote/run".to_owned()],
+            label: "forwarded operator".to_owned(),
+            allow_wildcard: false,
+            merge: false,
+            origin_site_id: Some("site:source".to_owned()),
+        })
+        .unwrap();
+
+        assert_eq!(result.origin_site_id.as_deref(), Some("site:source"));
+        let signed = std::fs::read_to_string(result.path).unwrap();
+        assert!(signed.contains("principal_class = \"remote_operator\""));
+        assert!(signed.contains("origin_site_id = \"site:source\""));
     }
 
     #[test]

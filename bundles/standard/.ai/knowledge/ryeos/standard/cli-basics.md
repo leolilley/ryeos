@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T13:29:03Z:a6122d7d1073ff4036c3126048e2e61f9d70d9701129b9b9b5d9e6690aa187c2:HYm1KRy5fmLYtqAqHXConxR61NEzVmDftOL9FOVfxmc092Y9EatuZWBREj/NjzleHZ+4ZvpVxe9Dgia83ImKBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T14:14:04Z:3dc1dfc18a8cf7134d19acc3b6b89dfe5227b77e5858f29009d859809287429b:NnMi64Jnb1t6oQKXAod5ktx+XEckkwqln2RP0JuPtIFWiPX4qfmXWhfSF7IYcQNspn10ycLC8zVFXyV6SX5fBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [cli, quickstart, reference, llm, execute, remote, threads, offline]
@@ -324,7 +324,9 @@ Remote commands are local daemon services that call another Rye daemon
 with signed HTTP requests. They normally use the caller's **node key**. The
 generic push/run services also have a narrow configured-operator mode for
 durable operator-owned workflows; selecting it requires the incoming request
-itself to authenticate as that exact configured operator.
+itself to authenticate as that exact configured operator. The hosted target
+must authorize the key with a node-signed `remote_operator` grant carrying the
+source `site:` ID and concrete scopes; this preserves remote-origin checks.
 
 Show the local node identity to a remote operator:
 

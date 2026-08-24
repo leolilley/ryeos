@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T13:28:59Z:442160f593e235a6efd6178c6bb9b20a136b3afffcc475d4ac10e7e5e91077b6:X6dMS2dns7Y/DBmGZraFPh5QQ8mERXhpN9qO4LtE0U8uYBgSJJQCm8slstxXtNNIPAxtndz6pTM718+PQACeAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T14:14:00Z:f55a7986af80192c2eb289b2f164618bba9598cf94a9d7c8c77d3282e701c84d:0DZkvxA5jFE7Bnwmukc+MnhHCenjzucKoesZpZvKZV4FfkQI8Ra2LZaZBzKWte4HKTcMOI26QSSd2mDv4LibDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -50,8 +50,14 @@ that identity for its principal-scoped HEAD and later control. The generic
 remote push/run seam has an explicit configured-operator mode: the incoming
 request must already authenticate as the exact configured operator, the daemon
 then signs the outbound request with that same configured operator key, and
-the destination must authorize it explicitly. This is not caller-principal
-impersonation or a provider exception; delegated callers cannot select it.
+the destination must authorize it with a node-signed, exact-scope
+`remote_operator` grant bound to the source site's canonical ID. The principal
+remains the operator while authenticated transport origin remains a separate
+remote fact, so local-only APIs still reject it. A grant is keyed by
+fingerprint; on the hosted target this classifies every request signed by that
+key as remote and is therefore intended for a dedicated hosted endpoint. This
+is not caller-principal impersonation or a provider exception; delegated
+callers cannot select it.
 
 ## Closed structured-session protocol
 

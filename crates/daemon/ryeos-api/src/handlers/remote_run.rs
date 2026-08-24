@@ -202,3 +202,53 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::Request;
+
+    fn retained_request() -> serde_json::Value {
+        serde_json::json!({
+            "remote": "hosted",
+            "item_ref": "worker_execution:codex/session",
+            "ref_bindings": {},
+            "project": "/project",
+            "parameters": {"credential_profile_id": "personal"},
+            "launch_id": "L-0123456789abcdef0123456789abcdef",
+            "execution_policy": {
+                "schema_version": 2,
+                "ownership": "daemon_owned",
+                "recovery": "restart_recoverable",
+                "response": "accepted",
+                "target": {"kind": "here"},
+                "environment": {"kind": "none"},
+                "project": {
+                    "kind": "pinned",
+                    "source": {"kind": "current_head"},
+                    "realization": {
+                        "kind": "cow",
+                        "terminal_publication": {"kind": "retain_current_head"}
+                    },
+                    "child_policy": {"kind": "inherit"}
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn signed_service_payload_requires_policy_and_carries_launch_coordinate() {
+        let request: Request = serde_json::from_value(retained_request()).unwrap();
+        assert_eq!(
+            request.launch_id.as_deref(),
+            Some("L-0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(
+            request.execution_policy.response,
+            ryeos_app::execution_policy::ExecutionResponse::Accepted
+        );
+
+        let mut missing = retained_request();
+        missing.as_object_mut().unwrap().remove("execution_policy");
+        assert!(serde_json::from_value::<Request>(missing).is_err());
+    }
+}

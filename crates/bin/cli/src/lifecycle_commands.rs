@@ -512,7 +512,7 @@ fn run_node_external_content_reset_command(
 #[command(
     name = "ryeos node reset authorization",
     about = "Discard every authorized-key grant and recreate only the local operator grant",
-    long_about = "Perform the explicit no-backcompat authorized-key cutover. The daemon must be stopped. Every local-client and remote-node grant is discarded atomically; only the configured local operator key is re-authorized. Remote nodes must be admitted again.",
+    long_about = "Perform the explicit no-backcompat authorized-key cutover. The daemon must be stopped. Every local-client, remote-node, and remote-operator grant is discarded atomically; only the configured local operator key is re-authorized. Remote nodes and forwarded operators must be authorized again.",
     no_binary_name = true
 )]
 struct NodeAuthResetArgs {

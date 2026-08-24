@@ -214,9 +214,35 @@ pub fn validate_canonical_site_id(site_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Check a caller-signed forwarding-origin assertion against origin derived
+/// from the target node's signed authorized-key grant. The assertion can only
+/// narrow: absence keeps ordinary local/direct compatibility, while presence
+/// never creates origin authority.
+pub fn validate_forwarding_origin_assertion(
+    required_origin_site_id: Option<&str>,
+    authenticated_origin_site_id: Option<&str>,
+) -> Result<()> {
+    let Some(required_origin_site_id) = required_origin_site_id else {
+        return Ok(());
+    };
+    validate_canonical_site_id(required_origin_site_id)?;
+    if authenticated_origin_site_id != Some(required_origin_site_id) {
+        bail!("authenticated origin does not match the signed forwarding assertion");
+    }
+    Ok(())
+}
+
 enum AuthorizedKeySubject<'a> {
     LocalClient,
-    RemoteNode { origin_site_id: &'a str },
+    RemoteNode {
+        origin_site_id: &'a str,
+    },
+    /// A configured operator key forwarded by another RyeOS node. The key
+    /// remains the workflow owner, while the node-signed grant preserves the
+    /// authenticated transport origin as an independent fact.
+    RemoteOperator {
+        origin_site_id: &'a str,
+    },
 }
 
 #[derive(Serialize)]
@@ -326,6 +352,15 @@ fn load_verified_authorized_key_from_directory(
             let site_id = grant.origin_site_id.as_deref().ok_or_else(|| {
                 anyhow::anyhow!(
                     "remote_node authorized-key grant has no authenticated origin_site_id"
+                )
+            })?;
+            validate_canonical_site_id(site_id)?;
+            Some(site_id.to_owned())
+        }
+        "remote_operator" => {
+            let site_id = grant.origin_site_id.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "remote_operator authorized-key grant has no authenticated origin_site_id"
                 )
             })?;
             validate_canonical_site_id(site_id)?;
@@ -525,6 +560,9 @@ fn render_authorized_key_toml_for_subject(
         AuthorizedKeySubject::RemoteNode { origin_site_id } => {
             ("remote_node", Some(origin_site_id))
         }
+        AuthorizedKeySubject::RemoteOperator { origin_site_id } => {
+            ("remote_operator", Some(origin_site_id))
+        }
     };
     let body = toml::to_string(&AuthorizedKeyGrantBody {
         schema_version: AUTHORIZED_KEY_SCHEMA_VERSION,
@@ -625,9 +663,13 @@ fn publish_authorized_key_bytes(
     }
 }
 
-/// Reconcile and publish one local-client grant under a single pinned
-/// directory lock. The verified incumbent is the exact compare-and-swap
-/// input, so concurrent merge operations cannot silently lose scopes.
+/// Reconcile and publish one client grant under a single pinned directory
+/// lock. When `remote_operator_origin_site_id` is present, the exact operator
+/// key remains the principal while the node-signed grant independently binds
+/// it to that authenticated forwarding origin. Remote-operator grants never
+/// accept wildcard scopes. The verified incumbent is the exact
+/// compare-and-swap input, so concurrent merge operations cannot silently
+/// lose scopes.
 #[allow(clippy::too_many_arguments)]
 pub fn reconcile_authorized_key_toml_scopes(
     auth_dir: &Path,
@@ -640,7 +682,15 @@ pub fn reconcile_authorized_key_toml_scopes(
     node_identity: &NodeIdentity,
     wildcard: WildcardPolicy,
     merge: bool,
+    remote_operator_origin_site_id: Option<&str>,
 ) -> Result<(std::path::PathBuf, Vec<String>)> {
+    if let Some(origin_site_id) = remote_operator_origin_site_id {
+        validate_canonical_site_id(origin_site_id)
+            .context("remote-operator origin_site_id is not canonical")?;
+        if wildcard != WildcardPolicy::Reject {
+            bail!("remote-operator grants require exact, non-wildcard scopes");
+        }
+    }
     let directory = lillux::PinnedDirectory::open_or_create(auth_dir)?;
     let _lock = directory.lock_exclusive()?;
     directory.ensure_path_binding()?;
@@ -667,6 +717,10 @@ pub fn reconcile_authorized_key_toml_scopes(
         .filter(|scope| !final_scopes.contains(scope))
         .cloned()
         .collect();
+    let subject = match remote_operator_origin_site_id {
+        Some(origin_site_id) => AuthorizedKeySubject::RemoteOperator { origin_site_id },
+        None => AuthorizedKeySubject::LocalClient,
+    };
     let signed = render_authorized_key_toml_for_subject(
         fingerprint,
         public_key_b64,
@@ -676,7 +730,7 @@ pub fn reconcile_authorized_key_toml_scopes(
         created_at,
         node_identity.signing_key(),
         wildcard,
-        AuthorizedKeySubject::LocalClient,
+        subject,
     )?;
     let expected_hash = existing
         .as_ref()
@@ -856,6 +910,82 @@ mod tests {
     }
 
     #[test]
+    fn forwarding_origin_assertion_can_only_narrow_authenticated_authority() {
+        validate_forwarding_origin_assertion(None, None).unwrap();
+        validate_forwarding_origin_assertion(None, Some("site:source")).unwrap();
+        validate_forwarding_origin_assertion(Some("site:source"), Some("site:source")).unwrap();
+        assert!(validate_forwarding_origin_assertion(Some("source"), Some("source")).is_err());
+        assert!(validate_forwarding_origin_assertion(Some("site:source"), None).is_err());
+        assert!(
+            validate_forwarding_origin_assertion(Some("site:source"), Some("site:different"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn remote_operator_reconciliation_preserves_owner_and_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = NodeIdentity::from_signing_key(test_signing_key()).unwrap();
+        let client = test_signing_key().verifying_key();
+        let fingerprint = lillux::signature::compute_fingerprint(&client);
+        let public_key = base64::engine::general_purpose::STANDARD.encode(client.as_bytes());
+
+        let (path, dropped) = reconcile_authorized_key_toml_scopes(
+            dir.path(),
+            &fingerprint,
+            &public_key,
+            &["ryeos.execute.service.remote/run".to_owned()],
+            "configured operator",
+            "test",
+            "2026-01-01T00:00:00Z",
+            &node,
+            WildcardPolicy::Reject,
+            false,
+            Some("site:source"),
+        )
+        .unwrap();
+
+        assert!(dropped.is_empty());
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(content.contains("principal_class = \"remote_operator\""));
+        assert!(content.contains("origin_site_id = \"site:source\""));
+        let grant = load_verified_authorized_key(&fingerprint, dir.path(), &node)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            lillux::signature::compute_fingerprint(&grant.public_key),
+            fingerprint
+        );
+        assert_eq!(grant.authenticated_site_id.as_deref(), Some("site:source"));
+    }
+
+    #[test]
+    fn remote_operator_reconciliation_rejects_invalid_origin_and_wildcard_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = NodeIdentity::from_signing_key(test_signing_key()).unwrap();
+        let client = test_signing_key().verifying_key();
+        let fingerprint = lillux::signature::compute_fingerprint(&client);
+        let public_key = base64::engine::general_purpose::STANDARD.encode(client.as_bytes());
+        let invoke = |origin, wildcard| {
+            reconcile_authorized_key_toml_scopes(
+                dir.path(),
+                &fingerprint,
+                &public_key,
+                &["ryeos.execute.service.remote/run".to_owned()],
+                "configured operator",
+                "test",
+                "2026-01-01T00:00:00Z",
+                &node,
+                wildcard,
+                false,
+                Some(origin),
+            )
+        };
+        assert!(invoke("source", WildcardPolicy::Reject).is_err());
+        assert!(invoke("site:source", WildcardPolicy::AllowBootstrap).is_err());
+    }
+
+    #[test]
     fn authorized_key_writer_uses_toml_escaping_for_audit_fields() {
         let dir = tempfile::tempdir().unwrap();
         let key = test_signing_key();
@@ -907,6 +1037,7 @@ mod tests {
                     &node,
                     WildcardPolicy::Reject,
                     true,
+                    None,
                 )
                 .unwrap();
             }));

@@ -185,10 +185,12 @@ pub struct RemoteClient {
     http: reqwest::Client,
     /// This node's identity for signing outbound requests.
     identity: Arc<NodeIdentity>,
-    /// Local site identity used only for the self-signed admission claim.
-    /// Normal signed HTTP requests never send this as caller-controlled
-    /// metadata; their locus comes from the destination's node-signed grant.
+    /// Local site identity used by the self-signed node admission claim.
     origin_site_id: Option<String>,
+    /// Configured-operator forwarding requires the target grant to preserve
+    /// this source site. Ordinary node-key clients remain compatible with
+    /// existing direct grants and do not add this narrowing assertion.
+    required_forwarding_origin_site_id: Option<String>,
 }
 
 impl RemoteClient {
@@ -208,6 +210,7 @@ impl RemoteClient {
                 .expect("failed to build remote signed HTTP client"),
             identity,
             origin_site_id: None,
+            required_forwarding_origin_site_id: None,
         }
     }
 
@@ -262,7 +265,9 @@ impl RemoteClient {
                 .context("load configured operator identity for remote execution")?,
         );
         let mut client = Self::new(&remote.url, &remote.principal_id, identity);
-        client.origin_site_id = Some(state.threads.site_id().to_string());
+        let site_id = state.threads.site_id().to_string();
+        client.origin_site_id = Some(site_id.clone());
+        client.required_forwarding_origin_site_id = Some(site_id);
         Ok(client)
     }
 
@@ -883,12 +888,15 @@ impl RemoteClient {
         staging_id: &str,
         expected_previous_hash: Option<&str>,
     ) -> Result<Value> {
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "project_path": project_path,
             "snapshot_hash": snapshot_hash,
             "staging_id": staging_id,
             "expected_previous_hash": expected_previous_hash,
         });
+        if let Some(origin_site_id) = self.required_forwarding_origin_site_id.as_deref() {
+            body["required_origin_site_id"] = Value::String(origin_site_id.to_owned());
+        }
         self.signed_post("/push-head", &body).await
     }
 
@@ -932,6 +940,9 @@ impl RemoteClient {
             "parameters": parameters,
             "execution_policy": execution_policy,
         });
+        if let Some(origin_site_id) = self.required_forwarding_origin_site_id.as_deref() {
+            body["required_origin_site_id"] = Value::String(origin_site_id.to_owned());
+        }
         match (&execution_policy.response, launch_id) {
             (ryeos_app::execution_policy::ExecutionResponse::Accepted, Some(launch_id)) => {
                 body["launch_id"] = Value::String(launch_id.to_owned());
@@ -940,13 +951,7 @@ impl RemoteClient {
             _ => unreachable!("remote_execute_path validated the response/coordinate pair"),
         }
         let response = self.signed_post(path, &body).await?;
-        if let Some(launch_id) = launch_id
-            && response.get("launch_id").and_then(Value::as_str) != Some(launch_id)
-        {
-            anyhow::bail!(
-                "accepted remote launch response did not echo caller-retained coordinate {launch_id}"
-            );
-        }
+        validate_remote_execute_response(&response, launch_id)?;
         Ok(response)
     }
 
@@ -1270,6 +1275,27 @@ fn remote_execute_path(
         }
         (ryeos_app::execution_policy::ExecutionResponse::Wait, None) => Ok("/execute"),
     }
+}
+
+fn validate_remote_execute_response(response: &Value, launch_id: Option<&str>) -> Result<()> {
+    let Some(launch_id) = launch_id else {
+        return Ok(());
+    };
+    if response.get("status").and_then(Value::as_str) != Some("accepted") {
+        anyhow::bail!("accepted remote launch response did not report accepted status");
+    }
+    if response.get("launch_id").and_then(Value::as_str) != Some(launch_id) {
+        anyhow::bail!(
+            "accepted remote launch response did not echo caller-retained coordinate {launch_id}"
+        );
+    }
+    let thread_id = response
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("accepted remote launch response omitted thread_id"))?;
+    ryeos_runtime::validate_runtime_thread_id(thread_id)
+        .map_err(|error| anyhow::anyhow!("accepted remote launch response: {error}"))?;
+    Ok(())
 }
 
 fn typed_hashes_request_body_size(object_hashes: &[String], blob_hashes: &[String]) -> usize {
@@ -2700,6 +2726,37 @@ mod tests {
             remote_execute_path(&ExecutionResponse::Wait, None).unwrap(),
             "/execute"
         );
+    }
+
+    #[test]
+    fn accepted_remote_response_binds_status_coordinate_and_thread() {
+        let launch_id = format!("L-{}", "ab".repeat(16));
+        let valid = serde_json::json!({
+            "status": "accepted",
+            "launch_id": launch_id,
+            "thread_id": "T-remote-session"
+        });
+        validate_remote_execute_response(&valid, Some(&launch_id)).unwrap();
+
+        for invalid in [
+            serde_json::json!({
+                "status": "completed",
+                "launch_id": launch_id,
+                "thread_id": "T-remote-session"
+            }),
+            serde_json::json!({
+                "status": "accepted",
+                "launch_id": format!("L-{}", "cd".repeat(16)),
+                "thread_id": "T-remote-session"
+            }),
+            serde_json::json!({
+                "status": "accepted",
+                "launch_id": launch_id,
+                "thread_id": "not-canonical"
+            }),
+        ] {
+            assert!(validate_remote_execute_response(&invalid, Some(&launch_id)).is_err());
+        }
     }
 
     #[test]

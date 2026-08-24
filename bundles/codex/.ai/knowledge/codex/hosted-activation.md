@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T13:29:11Z:a25d0a2fca25af52612444f0c08e3f19edf7314f55a9e3d3d3eb394d97ed287f:OHSAyF+bUd+S5AXUnseja4N+fN8QIeekueBv1Km4RgZDfGLjlr0B7q2uWIBwsCP9mR6I0jvits4zwr9+PCHnDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T14:14:12Z:f8d17b894ce58d1c9f9148b00f8eb05adecd77e439f6828fefb23c9f0511e303:CAmAhvRy9IEyPin6xbM1Tnl2cwBX8Q70gzsCaZJDoCy1PexG6UE9S3/2k8yY7aINGIghWI2IqnEzerJ+71w8CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -34,10 +34,16 @@ knowledge bundle.
 3. Configure node-owned persistent-session limits. Bundles never enable node
    worker capacity themselves.
 4. Provision the same configured-operator identity at the operator endpoint
-   and hosted node, and authorize that key on the hosted daemon with exact
-   worker, profile, project, and external-content scopes. Wildcards are
-   unnecessary. Ordinary RyeOS remote-node grants remain node principals and
-   cannot own this workflow.
+   and a dedicated hosted node. With the hosted daemon stopped, run
+   `ryeos-core-tools authorize-client --app-root <hosted-root> --public-key
+   <raw-base64> --origin-site-id site:<source> --scopes <exact-scopes>` on the
+   hosted node. Use the complete exact scope set printed in the Codex bundle
+   README. This target-node-signed `remote_operator` grant keeps the operator
+   as owner while preserving the source as authenticated remote origin. A
+   plain `local_client` grant is not acceptable, and ordinary remote-node
+   grants remain node principals that cannot own this workflow. One grant
+   exists per fingerprint, so use a separate identity for hosted-node local
+   maintenance.
 5. Open projectless login, call `credential.login.start`, finish the ephemeral
    ceremony, call `credential.account.read`, close it, and confirm the exact
    login epoch/account digest.
@@ -47,7 +53,8 @@ knowledge bundle.
    local launch uses `--current-head`; a client with a different absolute path
    uses `service:remote/run`, whose configured project binding supplies the
    destination path, preserves that configured-operator principal, and
-   returns the durable accepted thread ID. Call
+   retains the origin site bound by the hosted grant. It returns the durable
+   accepted thread ID. Call
    `session.start`, then
    `turn.start`, `turn.steer`, and `turn.interrupt`. Every turn is bound to the
    one returned remote thread; cross-thread targeting is rejected.
@@ -121,7 +128,9 @@ dedicated workers. Stderr drains continuously to a non-retained private sink.
 Run packaged artifacts in a disposable app/state root, never the developer's
 installed node, and prove:
 
-- remote configured-operator acceptance and rejection of another key;
+- remote configured-operator acceptance with the exact bound source origin,
+  rejection of another key, rejection of a plain local-client grant, and
+  rejection by local-only operator APIs;
 - device login, confirmation, fresh-process continuity, refresh, and restart;
 - real turn, pushed events, approval, interruption, and blocked-route cancel;
 - daemon restart before/after contact, during approval, and after HEAD contact;

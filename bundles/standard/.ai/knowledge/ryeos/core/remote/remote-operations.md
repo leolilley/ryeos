@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T13:29:02Z:1abbbf5fb58fc5b52767c5608b0946dbd65ac967326ba49acbce8cebd2fa00a6:B+RD7fcTCz77G0kqRt+ZR7tbp2+JB1MhNR8MnEc5LBJrj+SKAAph1ooJZwvDRQt9F842Ko6C1/44fUGn3BjfBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T14:14:03Z:8502dd83b927b4a893ea69b5d545cd20a3dd82f59753acf7740fa13492f1efe8:1k0pRXoGfW2BW4kuo9VFOqZblyHDSpLmNL+MeztTuJjj7D83HyruVINKHzlohodzmwcT5TDghXId0iGHmJO8AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -61,8 +61,11 @@ Operator-owned durable workflows may explicitly select the configured
 operator on `service:remote/push`; the matching retained-current-HEAD accepted
 `service:remote/run` preserves it automatically. Both local requests must be
 made by that exact configured operator, and the destination must authorize the
-same operator key. A delegated caller cannot turn the node into an operator-key
-signing oracle.
+same operator key through a node-signed `remote_operator` grant bound to the
+source site's canonical ID and exact scopes. That grant keeps the principal as
+the operator but makes remote origin visible to every destination policy
+check. A delegated caller cannot turn the node into an operator-key signing
+oracle or choose its authenticated origin.
 
 ## Prerequisites
 
@@ -117,6 +120,28 @@ signing oracle.
 3. **Choose scopes by operation**. Do not mix local remote-service caps
    with remote authorized-key scopes. The complete matrix is in
    [Remote Command Reference](remote-command-reference.md#authority-matrix).
+
+For configured-operator continuity, do not use admission claim or the remote
+authorize endpoint: both create ordinary remote-node/client authority. Stop
+the hosted target and use its offline tool to install the exact origin-bound
+operator grant:
+
+```bash
+ryeos-core-tools authorize-client \
+  --app-root /path/to/target-app-root \
+  --public-key "<configured_operator_raw_ed25519_base64>" \
+  --label "operator forwarded from source" \
+  --origin-site-id "site:<source>" \
+  --scopes "<comma-separated exact workflow scopes>"
+```
+
+This target-local node signature is the origin attestation. Forwarded HEAD and
+execute bodies include a caller-signed required-origin assertion so a missing
+or wrongly classified target grant fails closed, but that assertion only
+narrows the origin from the grant and can never create it. One grant exists per
+key fingerprint, so the target will classify all requests signed by this key
+as remote; reserve this setup for a dedicated hosted endpoint and use a
+separate target-local maintenance identity.
 
    Common remote-side scopes:
 

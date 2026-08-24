@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T13:29:01Z:af04e496d2ed5b87957bf3c7a5b2b7817354e7cbe240d3ebc1ef3f1fb1806e0d:wYywxzNzVCuWWSxUo53pFH6pxs6abu8MYCeHL+mrB2mh4w7xULmPKW1EPn9ZTrJ7srPjQgJHDEBWtgXq20TgDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T14:14:03Z:a857953d37a2ff9b130acb7fc903c9f82b919fe0bbf4d43a044b262c80fe2043:2xadecKaZzheyD839ZWPPHTaoFwkCpbDORXhegA9xFFHoWabv4hxWYVxNFMxOGvUs+C6TR3wMzrVZlhAQuViBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -28,8 +28,9 @@ Remote HTTP requests are normally signed with the caller **node key**. Share
 remote access. The generic `remote/push` and `remote/run` services additionally
 support an explicit configured-operator continuity mode for durable workflows:
 the local request must already be signed by the configured operator, and the
-target must separately authorize that same operator key. It is never selected
-implicitly and is not available to delegated callers.
+target must separately authorize that same operator key as `remote_operator`,
+bound by the target node to the source's canonical `site:` ID and exact scopes.
+It is never selected implicitly and is not available to delegated callers.
 
 ## Authority Matrix
 
@@ -66,6 +67,8 @@ Notes:
 - `outbound_principal: configured_operator` on `service:remote/push`, and a
   retained-current-HEAD accepted launch through `service:remote/run`, require
   the exact configured operator locally and preserve that principal remotely.
+  The target grant also preserves remote origin, so these calls do not satisfy
+  local-only operator checks.
   Their remote HEAD and session ownership do not interoperate with a HEAD
   previously pushed under the default node principal.
 
@@ -193,6 +196,28 @@ locally on the remote node instead.
 
 Remote authorization rejects wildcard scope delegation. Enumerate every
 scope explicitly.
+
+Configured-operator continuity is provisioned only by an offline target-node
+action, not by remote delegation. With the target daemon stopped, the target
+operator replaces that key's grant with an origin-bound, exact-scope grant:
+
+```bash
+ryeos-core-tools authorize-client \
+  --app-root /path/to/target-app-root \
+  --public-key "<configured_operator_raw_ed25519_base64>" \
+  --label "operator forwarded from source" \
+  --origin-site-id "site:<source>" \
+  --scopes "<comma-separated exact scopes>"
+```
+
+The source site ID is the canonical `site_id` reported by its RyeOS identity.
+The target node signs the grant; callers cannot assert an origin in the HTTP
+authentication context. Forwarded HEAD and execute requests do carry a signed
+`required_origin_site_id` assertion, but the target only uses it to require an
+exact match with that grant; it cannot create origin authority. Because
+authorized-key files are keyed by fingerprint, this converts that key's target
+grant to remote-only classification. Use a dedicated hosted target and a
+separate maintenance identity for target-local operator work.
 
 ## `ryeos remote push`
 

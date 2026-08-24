@@ -30,11 +30,19 @@ pub struct Request {
     /// Exact principal HEAD observed when the server minted `staging_id`.
     /// The field is mandatory and nullable for a first publication.
     pub expected_previous_hash: ExplicitExpectedHash,
+    /// Signed assertion made by a forwarding RyeOS node. It cannot create an
+    /// origin: the target requires an exact match with its node-signed grant.
+    #[serde(default)]
+    pub required_origin_site_id: Option<String>,
 }
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     // Caller identity used for principal-scoped storage — must be verified.
     ctx.require_verified().map_err(|e| anyhow::anyhow!(e))?;
+    ryeos_app::identity::validate_forwarding_origin_assertion(
+        req.required_origin_site_id.as_deref(),
+        ctx.authenticated_origin_site_id.as_deref(),
+    )?;
 
     // Compute principal-scoped project key before acquiring mutation locks.
     //

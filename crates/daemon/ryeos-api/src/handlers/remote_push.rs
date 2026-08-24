@@ -207,7 +207,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 
 #[cfg(test)]
 mod tests {
-    use super::OutboundPrincipal;
+    use super::{OutboundPrincipal, Request};
 
     #[test]
     fn outbound_principal_is_explicit_and_closed() {
@@ -220,5 +220,19 @@ mod tests {
             OutboundPrincipal::Node
         ));
         assert!(serde_json::from_str::<OutboundPrincipal>(r#""caller""#).is_err());
+    }
+
+    #[test]
+    fn signed_service_payload_exposes_outbound_principal() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "remote": "hosted",
+            "project": "/project",
+            "outbound_principal": "configured_operator"
+        }))
+        .unwrap();
+        assert!(matches!(
+            request.outbound_principal,
+            OutboundPrincipal::ConfiguredOperator
+        ));
     }
 }

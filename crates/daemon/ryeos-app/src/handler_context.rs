@@ -34,9 +34,9 @@ pub struct HandlerContext {
     /// `true` only for signed-request auth (ryeos_signed, hmac).
     /// `false` for anonymous routes and synthetic principals.
     pub verified: bool,
-    /// Site identity bound by the authenticated remote-node grant. Request
-    /// payloads never populate this field. `None` denotes a local or
-    /// non-RyeOS caller.
+    /// Site identity bound by an authenticated remote-node or remote-operator
+    /// grant. Request payloads never populate this field. `None` denotes a
+    /// local or non-RyeOS caller.
     pub authenticated_origin_site_id: Option<String>,
 }
 

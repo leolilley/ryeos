@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-17T23:06:00Z:8b2370a12803437f2deca1e64480e186a2e6cc82b0dc7e7a57fa14b77dd1804e:auEYD9rrjYZO67c+IaD5erVekk3YytlE/NtX8SmixLstGBjT/GAtl2OOQcTIXEEa+byTRUNCyHWUaDT+fy39AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T14:14:03Z:fcffd45e19184ddb12f005d5e47fb2a28a2add36a386ae2cf63478a6040173ae:si9i/nP5Pe2NFesIYuOBCfOS3xqgWyglTFNjYjXYB4Ek18Qr+ZKaCDiE3+8Uy1SvOU5pEpvUgf4mthITvF1wDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, remote, pushed-head, transfer, capabilities]
@@ -40,8 +40,10 @@ The authoritative matrix is in
 
 ## Operational invariants
 
-- Outbound remote requests are signed with the local **node key**, not
-  the operator user key.
+- Outbound remote requests normally use the local **node key**. The explicit
+  configured-operator push/run mode uses the exact configured operator only
+  after local operator authentication, and the target must bind it to the
+  forwarding site with an exact-scope `remote_operator` grant.
 - `remote configure` stores remote identity, vault fingerprint, URL, and
   ingest-ignore config in the local system space under
   `.ai/config/remotes/remotes.yaml`.

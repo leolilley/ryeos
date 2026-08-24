@@ -35,9 +35,9 @@ pub struct RoutePrincipal {
     pub verifier_key: &'static str,
     /// Whether the principal was cryptographically verified.
     pub verified: bool,
-    /// Site identity cryptographically bound to a v2 remote-node grant.
-    /// `None` for local clients and non-RyeOS verifiers. Execute routes must
-    /// never populate this from request data.
+    /// Site identity cryptographically bound to a v2 remote-node or
+    /// remote-operator grant. `None` for local clients and non-RyeOS
+    /// verifiers. Execute routes must never populate this from request data.
     pub authenticated_origin_site_id: Option<String>,
     /// Verifier-supplied metadata for downstream consumption.
     ///

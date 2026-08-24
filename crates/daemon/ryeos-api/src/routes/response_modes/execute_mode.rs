@@ -56,6 +56,11 @@ pub struct ExecuteRequest {
     /// lost, without discovering threads globally or risking a relaunch.
     #[serde(default)]
     pub launch_id: Option<String>,
+    /// Signed assertion made by a forwarding RyeOS node. The target compares
+    /// it to origin from the node-signed authorized-key grant; it is not an
+    /// origin claim by itself.
+    #[serde(default)]
+    pub required_origin_site_id: Option<String>,
     #[serde(skip)]
     pub launch_mode: String,
     #[serde(skip)]
@@ -230,7 +235,7 @@ fn resolve_project_authority(
     policy: &ExecutionPolicy,
     project_path: Option<&Path>,
     snapshot_hash: Option<&str>,
-    acting_principal: &str,
+    current_head_destination: Option<&project_source::ResolvedCurrentHeadDestination>,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
     capability_ceiling: &[String],
 ) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority> {
@@ -351,23 +356,20 @@ fn resolve_project_authority(
                             PinnedTerminalPublication::RetainResult
                         }
                         TerminalPublication::RetainCurrentHead => {
-                            let root = root.as_deref().ok_or_else(|| {
+                            let destination = current_head_destination.ok_or_else(|| {
                                 anyhow::anyhow!(
-                                    "retain-current-head authority requires a destination project path"
+                                    "retain-current-head authority requires the destination proven by the authoritative HEAD lookup"
                                 )
                             })?;
-                            let canonical =
-                                project_source::canonical_project_ref(root.to_str().ok_or_else(
-                                    || anyhow::anyhow!("destination project path is not UTF-8"),
-                                )?)
-                                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                            if destination.expected_hash != snapshot_hash {
+                                anyhow::bail!(
+                                    "retain-current-head destination expected hash does not match the admitted snapshot"
+                                );
+                            }
                             PinnedTerminalPublication::RetainCurrentHead {
-                                principal_key: ryeos_state::refs::principal_storage_key(
-                                    acting_principal,
-                                )?
-                                .to_owned(),
-                                project_hash: lillux::sha256_hex(canonical.as_bytes()),
-                                expected_hash: snapshot_hash.to_owned(),
+                                principal_key: destination.principal_key.clone(),
+                                project_hash: destination.project_hash.clone(),
+                                expected_hash: destination.expected_hash.clone(),
                             }
                         }
                         TerminalPublication::AdvanceHead {
@@ -479,7 +481,7 @@ pub(crate) fn resolve_execution_contract(
         policy,
         (!no_project_requested).then_some(project_ctx.original_path.as_path()),
         project_ctx.snapshot_hash.as_deref(),
-        acting_principal,
+        project_ctx.current_head_destination.as_ref(),
         &state.isolation,
         caller_scopes,
     )?;
@@ -887,7 +889,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
         let caller_principal_id = principal.id.clone();
         let caller_scopes = principal.scopes.clone();
         // A remote origin is accepted only when it came from the verifier's
-        // node-signed v2 remote-node grant. Local clients originate here.
+        // node-signed v2 remote-node or remote-operator grant. Local clients
+        // originate here.
         let execution_origin_site_id = principal
             .authenticated_origin_site_id
             .clone()
@@ -897,6 +900,11 @@ impl CompiledResponseMode for CompiledExecuteMode {
         let mut request: ExecuteRequest =
             ryeos_handler_protocol::from_json_slice_strict(&ctx.body_raw)
                 .map_err(|e| RouteDispatchError::BadRequest(format!("invalid JSON body: {e}")))?;
+        ryeos_app::identity::validate_forwarding_origin_assertion(
+            request.required_origin_site_id.as_deref(),
+            principal.authenticated_origin_site_id.as_deref(),
+        )
+        .map_err(|error| RouteDispatchError::Forbidden(error.to_string()))?;
         request
             .execution_policy
             .validate()
@@ -2293,13 +2301,86 @@ mod tests {
             &policy,
             Some(project.path()),
             None,
-            "fp:operator",
+            None,
             &ryeos_engine::isolation::IsolationRuntime::default(),
             &capability_ceiling,
         )
         .unwrap();
 
         assert_eq!(authority.capability_ceiling(), capability_ceiling);
+    }
+
+    #[test]
+    fn retain_current_head_consumes_only_the_retained_lookup_destination() {
+        let project = tempfile::tempdir().unwrap();
+        let snapshot_hash = "a".repeat(64);
+        let destination = project_source::ResolvedCurrentHeadDestination {
+            principal_key: "d".repeat(64),
+            project_hash: "b".repeat(64),
+            expected_hash: snapshot_hash.clone(),
+        };
+        let policy = ExecutionPolicy {
+            schema_version: 2,
+            ownership: ryeos_app::execution_policy::ExecutionOwnership::DaemonOwned,
+            recovery: ryeos_app::execution_policy::ExecutionRecovery::RestartRecoverable,
+            response: ExecutionResponse::Accepted,
+            target: ryeos_app::execution_policy::ExecutionTarget::Here,
+            environment: ExecutionEnvironmentPolicy::None,
+            project: ProjectExecutionPolicy::Pinned {
+                source: PinnedSource::CurrentHead,
+                realization: PinnedRealization::Cow {
+                    terminal_publication: TerminalPublication::RetainCurrentHead,
+                },
+                child_policy: ryeos_app::execution_policy::ChildProjectPolicy::Inherit,
+            },
+        };
+
+        let authority = resolve_project_authority(
+            &policy,
+            Some(project.path()),
+            Some(&snapshot_hash),
+            Some(&destination),
+            &ryeos_engine::isolation::IsolationRuntime::default(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            authority.terminal_publication(),
+            Some(
+                &ryeos_state::objects::PinnedTerminalPublication::RetainCurrentHead {
+                    principal_key: destination.principal_key.clone(),
+                    project_hash: destination.project_hash.clone(),
+                    expected_hash: snapshot_hash.clone(),
+                }
+            )
+        );
+
+        assert!(
+            resolve_project_authority(
+                &policy,
+                Some(project.path()),
+                Some(&snapshot_hash),
+                None,
+                &ryeos_engine::isolation::IsolationRuntime::default(),
+                &[],
+            )
+            .is_err()
+        );
+        let mismatch = project_source::ResolvedCurrentHeadDestination {
+            expected_hash: "c".repeat(64),
+            ..destination
+        };
+        assert!(
+            resolve_project_authority(
+                &policy,
+                Some(project.path()),
+                Some(&snapshot_hash),
+                Some(&mismatch),
+                &ryeos_engine::isolation::IsolationRuntime::default(),
+                &[],
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2501,6 +2582,7 @@ mod tests {
                 ..ExecutionPolicy::local_live(ExecutionResponse::Wait)
             },
             launch_id: None,
+            required_origin_site_id: None,
             launch_mode: "wait".into(),
             target_site_id: target_site_id.map(String::from),
             validate_only: false,

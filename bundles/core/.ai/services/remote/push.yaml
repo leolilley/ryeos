@@ -1,8 +1,9 @@
-# ryeos:signed:2026-08-11T02:28:17Z:415161204aeff8f8f938eef853f35d26e1405e068cbdab9e45afed74ae8646d6:XIE6RUvYGCoUxoqTj/aNtQy30kL4NENI8je0P4Fb8mfTLeylpixdtcrJtqFz92cyO1SyAzxyUB9bMfVSeU9UBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-24T14:13:52Z:23f709e0c634d68475cc4bfbc3e1e5f344b6ee7c1d7c345cde7cced19544cec1:fE5Uk3mejdesLTlWohFAQStKQWzu9R0beHzOV+kzPrDKvUWmnEbcOkhm4UeLL9hVZzDkH1+9j01kmTFYIUW/Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.push
 required_caps: ["ryeos.execute.service.remote/push"]
 schema:
   remote: string?
   project: string
-description: "Push project content to a remote node"
+  outbound_principal: string?
+description: "Push project content to a remote node; outbound_principal defaults to node and may explicitly select configured_operator"
