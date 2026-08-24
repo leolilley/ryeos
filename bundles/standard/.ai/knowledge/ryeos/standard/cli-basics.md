@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T14:14:04Z:3dc1dfc18a8cf7134d19acc3b6b89dfe5227b77e5858f29009d859809287429b:NnMi64Jnb1t6oQKXAod5ktx+XEckkwqln2RP0JuPtIFWiPX4qfmXWhfSF7IYcQNspn10ycLC8zVFXyV6SX5fBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T15:37:12Z:5681107e9cdac9131deedcfac42238231abf8812bcbd2ff97ee9137b62cf029f:uGMlDHAX7gSkAfQQysmntFYhxPUQZ607fPrJOqzz2VpLwEu3OqsGnBg9i34SUAxoYfDOB6RDuAoL5VI2xqosBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [cli, quickstart, reference, llm, execute, remote, threads, offline]
@@ -326,7 +326,9 @@ generic push/run services also have a narrow configured-operator mode for
 durable operator-owned workflows; selecting it requires the incoming request
 itself to authenticate as that exact configured operator. The hosted target
 must authorize the key with a node-signed `remote_operator` grant carrying the
-source `site:` ID and concrete scopes; this preserves remote-origin checks.
+source `site:` ID and concrete scopes. The target must separately admit the
+source node key with `ryeos.attest.request.forwarded-operator`; that node key
+co-signs the exact operator request and proves remote origin.
 
 Show the local node identity to a remote operator:
 

@@ -67,6 +67,15 @@ pub async fn handle(
 
     // 2. Compute fingerprint from the public key bytes.
     let fingerprint = lillux::sha256_hex(&key_bytes);
+    let configured_operator = ryeos_app::identity::NodeIdentity::load(
+        &state.config.operator_signing_key_path,
+    )
+    .map_err(|error| HandlerError::Internal(format!("load configured operator: {error}")))?;
+    if fingerprint == configured_operator.fingerprint() {
+        return Err(HandlerError::Forbidden(
+            "configured-operator authorization and class changes are offline-only".to_string(),
+        ));
+    }
 
     // 3. Validate label is non-empty.
     if req.label.trim().is_empty() {
@@ -128,7 +137,9 @@ pub async fn handle(
         }
     }
 
-    // 8. Write the authorized-key TOML.
+    // 8. Create the authorized-key TOML. Online delegation is deliberately
+    // create-only: an API caller may not replace or reclassify an existing
+    // local-client, remote-node, remote-operator, or bootstrap grant.
     let now = lillux::time::iso8601_now();
     let auth_dir = state
         .config
@@ -138,7 +149,7 @@ pub async fn handle(
         .join("auth")
         .join("authorized_keys");
 
-    let _path = ryeos_app::identity::write_authorized_key_toml(
+    let _path = ryeos_app::identity::create_authorized_key_toml(
         &auth_dir,
         &fingerprint,
         key_b64,
@@ -147,9 +158,20 @@ pub async fn handle(
         &ctx.fingerprint,
         &now,
         state.identity.signing_key(),
-        ryeos_app::identity::WildcardPolicy::Reject,
     )
-    .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    .map_err(|e| {
+        if matches!(
+            e.downcast_ref::<ryeos_app::identity::AuthorizedKeyCreateError>(),
+            Some(ryeos_app::identity::AuthorizedKeyCreateError::AlreadyExists)
+        ) {
+            HandlerError::Conflict(
+                "authorized-key fingerprint already exists; online replacement and reclassification are forbidden"
+                    .to_string(),
+            )
+        } else {
+            HandlerError::Internal(e.to_string())
+        }
+    })?;
 
     let response = Response {
         fingerprint,

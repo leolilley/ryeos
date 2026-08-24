@@ -986,6 +986,35 @@ mod tests {
     }
 
     #[test]
+    fn verified_dispatch_preserves_the_supplied_authorized_key_class() {
+        let metadata = HashMap::from([("ui_dispatch".to_string(), serde_json::json!("verified"))]);
+        let supplied = ryeos_app::handler_context::HandlerContext::new_with_authority(
+            "fp:operator".to_string(),
+            vec!["cap:verified".to_string()],
+            true,
+            Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some("site:source".to_string()),
+        );
+        let selected = select_service_handler_context(
+            &metadata,
+            Some(supplied),
+            "fp:operator",
+            &["cap:verified".to_string()],
+            "site:target",
+            "site:source",
+        )
+        .unwrap();
+        assert_eq!(
+            selected.authorized_key_class,
+            Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteOperator)
+        );
+        assert_eq!(
+            selected.authenticated_origin_site_id.as_deref(),
+            Some("site:source")
+        );
+    }
+
+    #[test]
     fn verified_dispatch_rejects_a_handler_context_with_different_identity() {
         let metadata = HashMap::new();
         let supplied = ryeos_app::handler_context::HandlerContext::new(

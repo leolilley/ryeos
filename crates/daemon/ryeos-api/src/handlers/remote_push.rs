@@ -15,7 +15,7 @@ use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_state::project_sync::ProjectSyncScope;
 
-#[derive(Clone, Copy, Debug, Default, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutboundPrincipal {
     /// Existing node-to-node remote synchronization semantics.

@@ -258,6 +258,11 @@ enum Cmd {
         /// Emits a remote_operator grant and rejects wildcard scopes.
         #[arg(long)]
         origin_site_id: Option<String>,
+
+        /// Explicitly permit an incumbent grant's principal class or origin
+        /// to change. Use only while the daemon is stopped.
+        #[arg(long)]
+        allow_semantic_conversion: bool,
     },
 
     /// Mint a one-time node-local admission token for remote bootstrap.
@@ -604,6 +609,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             label,
             merge_scopes,
             origin_site_id,
+            allow_semantic_conversion,
         } => {
             let scopes = scopes.ok_or_else(|| anyhow::anyhow!(
                 "--scopes required, comma-separated, in canonical form. \
@@ -616,6 +622,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 label,
                 merge_scopes,
                 origin_site_id,
+                allow_semantic_conversion,
                 cli.stdin_json,
             )
         }
@@ -1682,6 +1689,7 @@ fn run_authorize_client(
     label: String,
     merge_scopes: bool,
     origin_site_id: Option<String>,
+    allow_semantic_conversion: bool,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
     use lillux::crypto::VerifyingKey;
@@ -1751,6 +1759,7 @@ fn run_authorize_client(
         allow_wildcard: false, // core-tools is not the bootstrap path
         merge: merge_scopes,
         origin_site_id,
+        allow_semantic_conversion,
     })?;
 
     if !result.dropped_scopes.is_empty() {
@@ -1762,6 +1771,18 @@ fn run_authorize_client(
             dropped = result.dropped_scopes.join(", "),
         );
     }
+    if result.previous_principal_class.as_deref() != Some(result.principal_class.as_str())
+        || result.previous_origin_site_id != result.origin_site_id
+    {
+        eprintln!(
+            "authorized-key semantic transition for {fp}: class {old_class:?} -> {new_class}, origin {old_origin:?} -> {new_origin:?}",
+            fp = result.fingerprint,
+            old_class = result.previous_principal_class,
+            new_class = result.principal_class,
+            old_origin = result.previous_origin_site_id,
+            new_origin = result.origin_site_id,
+        );
+    }
 
     println!(
         "{}",
@@ -1770,6 +1791,9 @@ fn run_authorize_client(
             "path": result.path.to_string_lossy(),
             "merged": result.merged,
             "dropped_scopes": result.dropped_scopes,
+            "previous_principal_class": result.previous_principal_class,
+            "previous_origin_site_id": result.previous_origin_site_id,
+            "principal_class": result.principal_class,
             "origin_site_id": result.origin_site_id,
         }))?
     );

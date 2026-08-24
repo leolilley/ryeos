@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T14:14:12Z:f8d17b894ce58d1c9f9148b00f8eb05adecd77e439f6828fefb23c9f0511e303:CAmAhvRy9IEyPin6xbM1Tnl2cwBX8Q70gzsCaZJDoCy1PexG6UE9S3/2k8yY7aINGIghWI2IqnEzerJ+71w8CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T15:37:20Z:9db52a629eb21be3213ed2ef4c47c0892ab4efcf9ff81588addd87535644015b:0exIPQqDkpkyizQHlF8MuJ/vqtFfe0JC8vlv22YFUqdgXo/HKQPUQkCtD0fnJLVAMl8WV8AWhWTUPpbc3firAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -34,16 +34,20 @@ knowledge bundle.
 3. Configure node-owned persistent-session limits. Bundles never enable node
    worker capacity themselves.
 4. Provision the same configured-operator identity at the operator endpoint
-   and a dedicated hosted node. With the hosted daemon stopped, run
+   and a dedicated hosted node. First admit the source node key on the target
+   as `remote_node` with only
+   `ryeos.attest.request.forwarded-operator`; this key co-signs the exact
+   configured-operator request and proves source-node transit. Then stop the
+   hosted daemon and run
    `ryeos-core-tools authorize-client --app-root <hosted-root> --public-key
-   <raw-base64> --origin-site-id site:<source> --scopes <exact-scopes>` on the
-   hosted node. Use the complete exact scope set printed in the Codex bundle
-   README. This target-node-signed `remote_operator` grant keeps the operator
-   as owner while preserving the source as authenticated remote origin. A
-   plain `local_client` grant is not acceptable, and ordinary remote-node
-   grants remain node principals that cannot own this workflow. One grant
-   exists per fingerprint, so use a separate identity for hosted-node local
-   maintenance.
+   <raw-base64> --origin-site-id site:<source>
+   --allow-semantic-conversion --scopes <exact-scopes>` on the hosted node.
+   Use the complete exact scope set printed in the Codex bundle README. The
+   target-signed `remote_operator` grant constrains which source site may
+   forward the operator; it is not transit proof without the separate
+   source-node co-signature. A plain `local_client` grant is not acceptable,
+   and ordinary remote-node grants remain node principals that cannot own this
+   workflow.
 5. Open projectless login, call `credential.login.start`, finish the ephemeral
    ceremony, call `credential.account.read`, close it, and confirm the exact
    login epoch/account digest.
@@ -53,8 +57,11 @@ knowledge bundle.
    local launch uses `--current-head`; a client with a different absolute path
    uses `service:remote/run`, whose configured project binding supplies the
    destination path, preserves that configured-operator principal, and
-   retains the origin site bound by the hosted grant. It returns the durable
-   accepted thread ID. Call
+   co-signs the request with the admitted source-node key. It returns the
+   durable accepted thread ID. Drive projectless credential and session
+   services through wait-mode `service:remote/run` with
+   `outbound_principal: configured_operator`; do not connect an operator-key
+   client directly to the hosted daemon. Call
    `session.start`, then
    `turn.start`, `turn.steer`, and `turn.interrupt`. Every turn is bound to the
    one returned remote thread; cross-thread targeting is rejected.
@@ -62,6 +69,15 @@ knowledge bundle.
    command/cwd. File or permission expansion is deny-only without an exact
    admitted reviewable effect.
 8. Complete work, validate the frozen candidate, then publish or discard.
+
+External-content maintenance after activation requires a quiesced class
+transition, not another identity. Finish or terminate hosted executions, stop
+the daemon, run offline `authorize-client` without `--origin-site-id`, with
+`--allow-semantic-conversion`, and with only the required local maintenance
+scopes. Start the daemon and perform import/bind/scrub/release; stop it again;
+then reinstall the exact `remote_operator` grant with
+`--allow-semantic-conversion`. Never use `--merge-scopes` across either
+transition. A separate key cannot pass the exact configured-operator check.
 
 On daemon restart, the generic worker-execution runtime reclaims the same root
 thread and exact unpublished CoW workspace, starts a fresh pinned App Server
@@ -128,9 +144,11 @@ dedicated workers. Stderr drains continuously to a non-retained private sink.
 Run packaged artifacts in a disposable app/state root, never the developer's
 installed node, and prove:
 
-- remote configured-operator acceptance with the exact bound source origin,
-  rejection of another key, rejection of a plain local-client grant, and
-  rejection by local-only operator APIs;
+- remote configured-operator acceptance only with the exact admitted
+  source-node co-signature, rejection of a missing/wrong-site proof, another
+  key, a plain local-client grant, and local-only operator APIs;
+- online delegation/admission create-only behavior, explicit stopped-daemon
+  class transition in both directions, and the complete maintenance ceremony;
 - device login, confirmation, fresh-process continuity, refresh, and restart;
 - real turn, pushed events, approval, interruption, and blocked-route cancel;
 - daemon restart before/after contact, during approval, and after HEAD contact;

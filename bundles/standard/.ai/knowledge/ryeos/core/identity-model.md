@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T14:14:01Z:64250d30d04294462a265d834cbdd4bfdfe82bbc9b7a466266b8be8c8c61c774:z9ctq0nidIgfdV+gdfvsX5T2THLLQFE4Nlg3lsO5lWgd9AL0JHxq+agPDSx9Xh/Pww5RyIdkxt+2pVMS1NRgBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T15:37:08Z:55b391d4d15ecd9a744d141dbcfcd11b9c7d183aaeba14d064eeb2d963a186de:kwvhMVPHaeWmgZubuKwsM6X/wscTYc5Wi9D0Hj7xPKH/y9Subb09VV7cEzsr9vFhyHyBsRDq1r6pnBuTpoibAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
@@ -59,13 +59,16 @@ never writes user trust.
 An opt-in `remote_operator` grant is the narrow exception for an
 operator-owned workflow forwarded by another RyeOS node. The principal is
 still the exact configured operator key, while the target node's signed grant
-binds that key to one canonical `origin_site_id` and concrete scopes. Requests
-using that grant therefore remain remote-origin for local-only policy checks;
-the caller cannot supply or remove the origin in a request header. Because a
-grant is keyed by fingerprint, converting a target's configured-operator grant
-to `remote_operator` classifies every use of that key at that target as remote.
-Use it only on a dedicated hosted endpoint and do not treat the same grant as a
-local-maintenance identity.
+constrains that key to one canonical `origin_site_id` and concrete scopes. The
+target separately admits the source node key as `remote_node` with
+`ryeos.attest.request.forwarded-operator`; it must co-sign the exact primary
+request. Only the two verified grants plus that co-signature create
+authenticated remote origin. A caller header cannot create or remove it.
+Because a grant is keyed by fingerprint, converting a target's
+configured-operator grant to `remote_operator` classifies every use of that key
+at that target as remote and makes requests without the source-node proof fail.
+Local maintenance requires an explicit stopped-daemon conversion of the same
+configured-operator grant back to `local_client`, followed by restoration.
 
 ## Vault X25519
 
@@ -78,6 +81,7 @@ vault rewrap flows.
 Local CLI requests are signed with the user key and verified against the local
 authorized-keys store. Ordinary daemon-to-daemon requests are signed with the
 caller node key. Explicit configured-operator forwarding is instead signed by
-that operator key and accepted only through a target-local node-signed
-`remote_operator` grant. In both cases, the verified target grant—not an
-unsigned caller claim—determines the authenticated origin.
+that operator key and co-signed by the source node key. The target requires an
+exact `remote_operator` allowed-site grant and an exact `remote_node`
+forwarding-attestation grant. In both cases, authenticated origin comes from
+verified key/grant evidence, never an unsigned caller claim.

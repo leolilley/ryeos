@@ -70,6 +70,7 @@ impl CompiledRouteInvocation for CompiledBrowserSessionVerifier {
             scopes: session.granted_caps,
             verifier_key: "browser_session",
             verified: false,
+            authorized_key_class: None,
             authenticated_origin_site_id: None,
             metadata: {
                 let mut m = BTreeMap::new();

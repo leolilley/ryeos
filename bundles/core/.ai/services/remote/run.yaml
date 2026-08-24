@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-24T14:13:53Z:153f8a6177efadbd02576f914dd4de7350df4af6cc43684c505e4d8c1d8cbee1:AbABF1GHSx3XkPCOLDt01eN7+19ibvaMHk41Qa+rOxhNDjRGWZcdtC9JOt/LSlPiH7lmUm/vy5DcLuhzB/mzAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-24T15:36:59Z:f885b773374a1695336a48486cf33270983c78c049ea990545d67903bac1a2f1:pzYCsxKDHd+uHPJxyp3TWxR2Da2wmCsA/ugVVjiVIZKH2K712yn5rLiBcCuSxRUYEJAIGZgJMjY6yeXQSghuAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.run
 required_caps: ["ryeos.execute.service.remote/admin"]
@@ -6,8 +6,9 @@ schema:
   remote: string?
   item_ref: string
   ref_bindings: object
-  project: string
+  project: string?
+  outbound_principal: string?
   parameters: object?
   execution_policy: object
   launch_id: string?
-description: "Launch an item against a configured remote project using an explicit execution policy and optional caller-retained launch coordinate"
+description: "Execute an item on a configured remote using an explicit projectless or project-backed policy, optional configured-operator continuity, and an optional caller-retained launch coordinate"

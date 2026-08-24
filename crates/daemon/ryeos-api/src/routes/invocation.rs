@@ -35,9 +35,13 @@ pub struct RoutePrincipal {
     pub verifier_key: &'static str,
     /// Whether the principal was cryptographically verified.
     pub verified: bool,
-    /// Site identity cryptographically bound to a v2 remote-node or
-    /// remote-operator grant. `None` for local clients and non-RyeOS
-    /// verifiers. Execute routes must never populate this from request data.
+    /// Closed node-signed authorized-key class. `None` for non-RyeOS
+    /// verifiers; policies must not infer this class from origin presence.
+    pub authorized_key_class: Option<ryeos_app::identity::AuthorizedKeyPrincipalClass>,
+    /// Site identity cryptographically established by a remote-node request,
+    /// or by a remote-operator request plus its source-node co-signature.
+    /// `None` for local clients and non-RyeOS verifiers. Execute routes must
+    /// never populate this from request data.
     pub authenticated_origin_site_id: Option<String>,
     /// Verifier-supplied metadata for downstream consumption.
     ///
@@ -53,6 +57,7 @@ impl RoutePrincipal {
             scopes: Vec::new(),
             verifier_key,
             verified: false,
+            authorized_key_class: None,
             authenticated_origin_site_id: None,
             metadata: BTreeMap::new(),
         }

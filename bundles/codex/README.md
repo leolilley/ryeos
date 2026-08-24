@@ -59,67 +59,146 @@ capacity.
 
 ## Operator flow
 
-This workflow is intended for a dedicated hosted endpoint. Provision the same
-configured-operator key at the source and hosted nodes, then—with the hosted
-daemon stopped—replace that key's hosted authorized-key entry with a
-target-node-signed `remote_operator` grant. The grant preserves operator
-ownership and independently binds the authenticated source site; it never
-turns a remote call into a local one:
+This workflow is intended for a dedicated hosted endpoint. Complete Codex
+external-content import/bind and node policy setup while the hosted configured
+operator is still a `local_client`. Provision the same configured-operator key
+at the source and hosted nodes. Separately admit the source node key on the
+hosted target as `remote_node` with only the generic forwarding-attestation
+scope:
 
 ```sh
-HOSTED_SCOPES='ryeos.execute.worker.codex/login,ryeos.execute.worker.codex/session,ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.system/push-head,ryeos.execute.service.credential-profiles/create,ryeos.execute.service.credential-profiles/get,ryeos.execute.service.credential-profiles/revoke,ryeos.execute.service.credential-profiles/confirm,ryeos.execute.service.credential-profiles/delete,ryeos.execute.service.worker-executions/status,ryeos.execute.service.worker-executions/command,ryeos.execute.service.worker-executions/approvals,ryeos.execute.service.worker-executions/resolve-approval,ryeos.execute.service.worker-executions/terminate,ryeos.execute.service.worker-executions/publish,ryeos.execute.service.worker-executions/validate-candidate-closure-and-base,ryeos.execute.service.worker-executions/discard,ryeos.write.project.live,ryeos.execute.service.external-content/import,ryeos.execute.service.external-content/bind,ryeos.execute.service.external-content/scrub,ryeos.execute.service.external-content/release'
+FORWARDING_SCOPE='ryeos.attest.request.forwarded-operator'
+# Hosted target, while its daemon is still locally maintainable:
+ryeos admission-token --label 'hosted operator forwarding node' \
+  --scopes "$FORWARDING_SCOPE" --ttl-secs 600
+# Source node, using the one-time token printed above:
+ryeos remote admit --remote hosted --token '<one-time-token>' \
+  --label 'hosted operator forwarding node' --scopes "$FORWARDING_SCOPE"
+```
+
+Then stop the hosted daemon and explicitly replace the configured-operator
+key's hosted `local_client` grant with a target-node-signed `remote_operator`
+grant. This is a semantic class conversion, not a scope update:
+
+```sh
+HOSTED_SCOPES='ryeos.execute.worker_execution.codex/login,ryeos.execute.worker_execution.codex/session,ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.system/push-head,ryeos.execute.service.credential-profiles/create,ryeos.execute.service.credential-profiles/get,ryeos.execute.service.credential-profiles/revoke,ryeos.execute.service.credential-profiles/confirm,ryeos.execute.service.credential-profiles/delete,ryeos.execute.service.worker-executions/status,ryeos.execute.service.worker-executions/command,ryeos.execute.service.worker-executions/approvals,ryeos.execute.service.worker-executions/resolve-approval,ryeos.execute.service.worker-executions/terminate,ryeos.execute.service.worker-executions/publish,ryeos.execute.service.worker-executions/validate-candidate-closure-and-base,ryeos.execute.service.worker-executions/discard,ryeos.write.project.live'
 ryeos-core-tools authorize-client \
   --app-root /path/to/hosted-app-root \
   --public-key "<configured_operator_raw_ed25519_base64>" \
   --label "hosted operator forwarded from source" \
   --origin-site-id "site:<source>" \
+  --allow-semantic-conversion \
   --scopes "$HOSTED_SCOPES"
 ```
 
-Use the exact `site_id` from the source node's identity. The origin is carried
-by the hosted node's signed grant, not by caller data. The forwarded HEAD and
-execute bodies include a signed required-origin assertion solely so a missing
-or mismatched target grant fails closed; the assertion cannot create origin.
-Because one authorized-key file exists per fingerprint, all use of this key on
-the hosted target is classified as remote-origin; use a separate key for
-target-local maintenance.
+Use the exact `site_id` from the source node's identity. The operator grant is
+an allowed-source constraint, not source proof by itself. Each forwarded
+request is signed first by the configured operator and then co-signed over the
+exact request authorization by the separately admitted source-node key. The
+target accepts `remote_operator` only when both grants, the co-signature, the
+site, and the caller-signed required-origin assertion agree. A key holder
+calling the hosted daemon directly has no source-node proof and is rejected.
 
-The bundle registers terminal aliases over the same authenticated daemon
-services used by any remote RyeOS client. A minimal session is:
+There is one authorized-key file per fingerprint. Local-only external-content
+maintenance therefore uses the same configured-operator key in an explicit
+quiesced class-transition ceremony: finish or terminate hosted sessions, stop
+the hosted daemon, and run:
 
 ```sh
-ryeos codex profile create personal
-
-# Enrollment is projectless. Use the returned thread_id as LOGIN_SESSION. The
-# device response is ephemeral: display its URL/code and do not journal it.
-ryeos codex login open personal --async
-ryeos codex session command LOGIN_SESSION login-1 credential.login.start \
-  --payload '{}'
-
-# After completing the browser/device ceremony, read only sanitized account
-# metadata, then close the short-lived login worker while retaining its profile.
-ryeos codex session command LOGIN_SESSION account-1 credential.account.read \
-  --payload '{}'
-ryeos codex session terminate LOGIN_SESSION completed
-ryeos codex profile get personal
-ryeos codex profile confirm personal LOGIN_EPOCH EXPECTED_ACCOUNT_DIGEST
-
-# Project sessions require the now-active profile and an existing
-# principal-scoped project HEAD. On the hosted node use `ryeos commit`.
-ryeos --project . commit "Codex hosted-session base"
-ryeos --project . codex session start personal --async --current-head
-
-# Use the returned thread_id as SESSION.
-ryeos codex session command SESSION thread-1 session.start \
-  --payload '{}'
-ryeos codex session command SESSION turn-1 turn.start \
-  --payload '{"input":[{"type":"text","text":"Implement the requested change","text_elements":[]}]}'
-
-# App Server notifications are pushed into the root RyeOS thread event chain
-# before the worker receives its acknowledgement. Reattach or replay through
-# the ordinary thread/SSE surfaces; there is no second Codex event journal.
-ryeos codex session approvals SESSION
+MAINTENANCE_SCOPES='ryeos.execute.service.external-content/import,ryeos.execute.service.external-content/bind,ryeos.execute.service.external-content/release,ryeos.execute.service.external-content/scrub'
+ryeos-core-tools authorize-client \
+  --app-root /path/to/hosted-app-root \
+  --public-key "<configured_operator_raw_ed25519_base64>" \
+  --label "hosted operator local maintenance" \
+  --allow-semantic-conversion \
+  --scopes "$MAINTENANCE_SCOPES"
 ```
+
+The tool mechanically acquires the daemon's exclusive state lock before a
+semantic conversion and refuses while the daemon owns it. Start the daemon and
+perform maintenance, stop it again, then reinstall the exact `remote_operator`
+grant above with `--allow-semantic-conversion`. A separate key cannot satisfy
+the configured-operator check. Never merge scopes across a class or origin
+transition.
+
+The bundle registers daemon-local terminal aliases, but an activated hosted
+target deliberately rejects direct operator-key HTTP requests because they
+lack the source-node co-signature. Drive it from the source RyeOS node through
+the provider-neutral `service:remote/run` seam. For example, create the empty
+credential profile with a projectless, wait-mode service execution:
+
+```sh
+ryeos execute service:remote/run --input - <<'JSON'
+{
+  "remote": "hosted",
+  "item_ref": "service:credential-profiles/create",
+  "ref_bindings": {},
+  "outbound_principal": "configured_operator",
+  "parameters": {"profile_id": "personal"},
+  "execution_policy": {
+    "schema_version": 2,
+    "ownership": "daemon_owned",
+    "recovery": "restart_recoverable",
+    "response": "wait",
+    "target": {"kind": "here"},
+    "environment": {"kind": "none"},
+    "project": {"kind": "projectless"}
+  }
+}
+JSON
+```
+
+Open the projectless login worker through the same seam, this time retaining a
+launch coordinate and using `accepted` response semantics:
+
+```sh
+LOGIN_LAUNCH_ID="L-$(uuidgen | tr -d '-')"
+ryeos execute service:remote/run --input - <<JSON
+{
+  "remote": "hosted",
+  "item_ref": "worker_execution:codex/login",
+  "ref_bindings": {},
+  "outbound_principal": "configured_operator",
+  "parameters": {"credential_profile_id": "personal"},
+  "launch_id": "$LOGIN_LAUNCH_ID",
+  "execution_policy": {
+    "schema_version": 2,
+    "ownership": "daemon_owned",
+    "recovery": "restart_recoverable",
+    "response": "accepted",
+    "target": {"kind": "here"},
+    "environment": {"kind": "none"},
+    "project": {"kind": "projectless"}
+  }
+}
+JSON
+```
+
+Retain the returned remote `thread_id` as `LOGIN_SESSION`. Send the first
+structured command with a projectless wait-mode `service:remote/run` envelope
+like the first example, changing only `item_ref` and `parameters`:
+
+```json
+{
+  "item_ref": "service:worker-executions/command",
+  "parameters": {
+    "session_id": "LOGIN_SESSION",
+    "idempotency_key": "login-1",
+    "route_id": "credential.login.start",
+    "payload": {}
+  }
+}
+```
+
+The device URL/code in the result is ephemeral: display it and do not journal
+it. After the browser ceremony, use the same command service with route
+`credential.account.read`; terminate the login execution through
+`service:worker-executions/terminate`; read and confirm the profile through
+`service:credential-profiles/get` and `service:credential-profiles/confirm`.
+The exact parameter schemas are the signed service items. App Server
+notifications are pushed into the root RyeOS thread chain before worker
+acknowledgement; reattach/replay uses the ordinary thread/event surfaces, not
+a second Codex journal.
 
 When the client and hosted node have different absolute project paths, first
 configure a standard full-project remote binding and create the remote HEAD
@@ -144,6 +223,7 @@ ryeos execute service:remote/run --input - <<JSON
   "item_ref": "worker_execution:codex/session",
   "ref_bindings": {},
   "project": "/local/project",
+  "outbound_principal": "configured_operator",
   "parameters": {"credential_profile_id": "personal"},
   "launch_id": "$REMOTE_LAUNCH_ID",
   "execution_policy": {
@@ -180,32 +260,32 @@ contract.
 
 The coordinate is printed before remote contact; retain it until the accepted
 response echoes the same value. The returned `result.thread_id` is the remote
-RyeOS root/session ID. Drive its
-projectless session endpoints with the same configured-operator key directly
-against the hosted daemon (for example by setting `RYEOSD_URL` for the CLI),
-or from a RyeOS UI connected to that daemon. These requests remain attributed
-to the configured source site even when sent directly because the target grant
-is the authenticated origin boundary. No shared filesystem pathname is
-required after admission.
+RyeOS root/session ID. Drive its projectless status, command, approval,
+termination, validation, publication, and discard services through
+projectless wait-mode `service:remote/run` calls from the source node, always
+selecting `outbound_principal: configured_operator`. This generic service path
+is also the backend contract for a future RyeOS UI, but neither the current UI
+browser-session principal nor this bundle supplies that configured-operator
+forwarding workflow. Direct target requests are intentionally rejected because
+operator-key possession alone does not prove source-node transit. No shared
+filesystem pathname is required after admission.
 
 Approval decisions require the exact pending request digest. Permission,
 network, exec-policy, session-wide, legacy patch, and legacy exec expansions
 are deny-only; an accepted operation retries under the unchanged
 `ryeos-workspace-only`
-profile. Termination is explicit and publication is a separate terminal CAS:
+profile. Termination is explicit and publication is a separate terminal CAS.
+Use the same projectless remote service envelope with the signed generic
+services `worker-executions/resolve-approval`, `terminate`,
+`validate-candidate-closure-and-base`, `publish`, or `discard`; their exact
+parameters and digest fences are declared by their signed service items.
 
-```sh
-ryeos codex session approval SESSION APPROVAL_ID REQUEST_DIGEST false
-ryeos codex session terminate SESSION completed
-ryeos codex session validate candidate SESSION CANDIDATE_HASH CANDIDATE_VALIDATION_HASH
-ryeos codex session publish SESSION EXPECTED_BASE_HASH
-# Or, instead of publication:
-ryeos codex session discard SESSION CANDIDATE_HASH
-```
-
-The remote authorized key must carry the exact execution and service scopes
-for the Codex worker-execution item, credential-profile endpoints,
-worker-execution endpoints, and external-content import/bind. The hosted-node policy rejects
+The remote operator grant must carry only the exact execution and service
+scopes for the Codex worker-execution item, credential-profile endpoints,
+worker-execution endpoints, object upload, project HEAD publication, and live
+project publication. External-content services are local-only and must not be
+present. The separate source-node `remote_node` grant needs only
+`ryeos.attest.request.forwarded-operator`. The hosted-node policy rejects
 wildcard grants; the feature does not broaden a client's authority.
 
 Profile homes are plaintext node-private state visible to the node operator.

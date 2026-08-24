@@ -34,9 +34,13 @@ pub struct HandlerContext {
     /// `true` only for signed-request auth (ryeos_signed, hmac).
     /// `false` for anonymous routes and synthetic principals.
     pub verified: bool,
-    /// Site identity bound by an authenticated remote-node or remote-operator
-    /// grant. Request payloads never populate this field. `None` denotes a
-    /// local or non-RyeOS caller.
+    /// Closed class from the node-signed authorized-key grant. `None` for
+    /// non-RyeOS verifiers and synthetic contexts.
+    pub authorized_key_class: Option<crate::identity::AuthorizedKeyPrincipalClass>,
+    /// Site identity established by a remote-node request, or by a
+    /// remote-operator request plus its source-node co-signature. Request
+    /// payloads never populate this field. `None` denotes a local or non-RyeOS
+    /// caller.
     pub authenticated_origin_site_id: Option<String>,
 }
 
@@ -47,6 +51,7 @@ impl HandlerContext {
             fingerprint,
             scopes,
             verified,
+            authorized_key_class: None,
             authenticated_origin_site_id: None,
         }
     }
@@ -61,6 +66,23 @@ impl HandlerContext {
             fingerprint,
             scopes,
             verified,
+            authorized_key_class: None,
+            authenticated_origin_site_id,
+        }
+    }
+
+    pub fn new_with_authority(
+        fingerprint: String,
+        scopes: Vec<String>,
+        verified: bool,
+        authorized_key_class: Option<crate::identity::AuthorizedKeyPrincipalClass>,
+        authenticated_origin_site_id: Option<String>,
+    ) -> Self {
+        Self {
+            fingerprint,
+            scopes,
+            verified,
+            authorized_key_class,
             authenticated_origin_site_id,
         }
     }

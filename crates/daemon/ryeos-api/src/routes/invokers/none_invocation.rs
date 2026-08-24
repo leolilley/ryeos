@@ -32,6 +32,7 @@ impl CompiledRouteInvocation for CompiledNoneVerifier {
             scopes: vec![],
             verifier_key: "none",
             verified: false,
+            authorized_key_class: None,
             authenticated_origin_site_id: None,
             metadata: BTreeMap::new(),
         }))

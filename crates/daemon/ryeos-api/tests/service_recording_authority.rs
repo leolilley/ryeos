@@ -134,6 +134,7 @@ async fn compiled_recorded_route_returns_thread_identity_and_persists_attributio
         scopes: Vec::new(),
         verifier_key: "none",
         verified: false,
+        authorized_key_class: None,
         authenticated_origin_site_id: None,
         metadata: Default::default(),
     };
@@ -364,6 +365,7 @@ async fn anonymous_cap_protected_route_is_unauthorized_before_service_execution(
                 scopes: Vec::new(),
                 verifier_key: "none",
                 verified: false,
+                authorized_key_class: None,
                 authenticated_origin_site_id: None,
                 metadata: Default::default(),
             }),
@@ -404,6 +406,9 @@ async fn authenticated_route_cap_denial_is_forbidden_without_a_durable_thread() 
                 scopes: Vec::new(),
                 verifier_key: "ryeos_signed",
                 verified: true,
+                authorized_key_class: Some(
+                    ryeos_app::identity::AuthorizedKeyPrincipalClass::LocalClient,
+                ),
                 authenticated_origin_site_id: None,
                 metadata: Default::default(),
             }),

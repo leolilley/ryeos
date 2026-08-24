@@ -7,6 +7,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::handler_error::{HandlerError, HandlerResult};
+use crate::handlers::remote_push::OutboundPrincipal;
 use crate::registry::ServiceDescriptor;
 use crate::remote::client::RemoteClient;
 use crate::remote::config;
@@ -23,7 +24,14 @@ pub struct Request {
     pub item_ref: String,
     pub ref_bindings: BTreeMap<String, String>,
     /// Local project path used to resolve the configured remote binding.
-    pub project: PathBuf,
+    /// Omit only for an explicitly projectless execution policy.
+    #[serde(default)]
+    pub project: Option<PathBuf>,
+    /// Principal used to sign the destination request. Retained-current-HEAD
+    /// launches always preserve the configured operator; projectless session
+    /// control selects it explicitly.
+    #[serde(default)]
+    pub outbound_principal: OutboundPrincipal,
     /// Parameters for the item.
     #[serde(default)]
     pub parameters: Value,
@@ -46,11 +54,16 @@ pub async fn handle(
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
     authorize_execution_refs(&req.item_ref, &req.ref_bindings, &ctx, &state)?;
-    let report = config::load_remotes_layered_report(&state.config.app_root, Some(&req.project))
-        .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
+    let report =
+        config::load_remotes_layered_report(&state.config.app_root, req.project.as_deref())
+            .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
     let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote)
         .map_err(|e| HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote)))?;
-    let binding = config::resolve_loaded_project_binding(&loaded_remote, &req.project)
+    let binding = req
+        .project
+        .as_ref()
+        .map(|project| config::resolve_loaded_project_binding(&loaded_remote, project))
+        .transpose()
         .map_err(|e| HandlerError::BadRequest(format!("project binding: {e:#}")))?;
     let remote_cfg = loaded_remote.config;
 
@@ -77,10 +90,23 @@ pub async fn handle(
             ..
         }
     );
-    if !live_direct && !retained_current_head {
+    let projectless = matches!(
+        &req.execution_policy.project,
+        ryeos_app::execution_policy::ProjectExecutionPolicy::Projectless
+    );
+    if !live_direct && !retained_current_head && !projectless {
         return Err(HandlerError::BadRequest(
-            "remote run requires live_direct authority or a retained current_head COW launch"
-                .to_string(),
+            "remote run requires projectless authority, live_direct authority, or a retained current_head COW launch".to_string(),
+        ));
+    }
+    if projectless && req.project.is_some() {
+        return Err(HandlerError::BadRequest(
+            "projectless remote run must omit project".to_string(),
+        ));
+    }
+    if !projectless && binding.is_none() {
+        return Err(HandlerError::BadRequest(
+            "project-backed remote run requires a project and configured binding".to_string(),
         ));
     }
     if retained_current_head
@@ -91,14 +117,22 @@ pub async fn handle(
                 .to_string(),
         ));
     }
-    if retained_current_head && binding.sync_scope != config::ProjectSyncScope::FullProject {
+    if retained_current_head
+        && binding.as_ref().map(|value| value.sync_scope)
+            != Some(config::ProjectSyncScope::FullProject)
+    {
+        let binding = binding
+            .as_ref()
+            .expect("project-backed binding checked above");
         return Err(HandlerError::BadRequest(format!(
             "retained current_head remote launches require a full_project binding; '{}' is {:?}",
             binding.local_project_path.display(),
             binding.sync_scope
         )));
     }
-    let client = if retained_current_head {
+    let use_configured_operator =
+        retained_current_head || req.outbound_principal == OutboundPrincipal::ConfiguredOperator;
+    let client = if use_configured_operator {
         RemoteClient::from_remote_cfg_as_configured_operator(&state, &remote_cfg, &ctx)
             .map_err(|error| HandlerError::Forbidden(error.to_string()))?
     } else {
@@ -130,7 +164,9 @@ pub async fn handle(
         .execute(
             &req.item_ref,
             &req.ref_bindings,
-            Some(&binding.remote_project_path),
+            binding
+                .as_ref()
+                .map(|binding| binding.remote_project_path.as_str()),
             &req.parameters,
             &req.execution_policy,
             req.launch_id.as_deref(),
@@ -151,9 +187,10 @@ pub async fn handle(
 
     Ok(serde_json::json!({
         "remote": req.remote,
-        "local_project_path": binding.local_project_path,
-        "remote_project_path": binding.remote_project_path,
-        "sync_scope": binding.sync_scope,
+        "outbound_principal": if use_configured_operator { "configured_operator" } else { "node" },
+        "local_project_path": binding.as_ref().map(|value| &value.local_project_path),
+        "remote_project_path": binding.as_ref().map(|value| &value.remote_project_path),
+        "sync_scope": binding.as_ref().map(|value| value.sync_scope),
         "result": remote_result,
     }))
 }
@@ -250,5 +287,35 @@ mod tests {
         let mut missing = retained_request();
         missing.as_object_mut().unwrap().remove("execution_policy");
         assert!(serde_json::from_value::<Request>(missing).is_err());
+    }
+
+    #[test]
+    fn projectless_control_request_selects_configured_operator_without_project() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "remote": "hosted",
+            "item_ref": "service:worker-executions/status",
+            "ref_bindings": {},
+            "outbound_principal": "configured_operator",
+            "parameters": {"session_id": "T-session"},
+            "execution_policy": {
+                "schema_version": 2,
+                "ownership": "daemon_owned",
+                "recovery": "restart_recoverable",
+                "response": "wait",
+                "target": {"kind": "here"},
+                "environment": {"kind": "none"},
+                "project": {"kind": "projectless"}
+            }
+        }))
+        .unwrap();
+        assert!(request.project.is_none());
+        assert_eq!(
+            request.outbound_principal,
+            crate::handlers::remote_push::OutboundPrincipal::ConfiguredOperator
+        );
+        assert!(matches!(
+            request.execution_policy.project,
+            ryeos_app::execution_policy::ProjectExecutionPolicy::Projectless
+        ));
     }
 }

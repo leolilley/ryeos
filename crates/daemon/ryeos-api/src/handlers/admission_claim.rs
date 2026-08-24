@@ -124,6 +124,16 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     }
 
     let (key_b64, verifying_key, fingerprint) = parse_public_key(&req.public_key)?;
+    let configured_operator = ryeos_app::identity::NodeIdentity::load(
+        &state.config.operator_signing_key_path,
+    )
+    .map_err(|error| HandlerError::Internal(format!("load configured operator: {error}")))?;
+    if fingerprint == configured_operator.fingerprint() {
+        return Err(HandlerError::Forbidden(
+            "configured operator cannot be admitted as remote_node; use the stopped-daemon offline conversion path"
+                .to_string(),
+        ));
+    }
     let scopes = normalize_scopes(&req.scopes, "admission claim requests")?;
     let allowed_scopes = normalize_scopes(&token.scopes, "admission token files")?;
     ensure_scope_subset(&scopes, &allowed_scopes, &state)?;
@@ -161,7 +171,19 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
         &req.origin_site_id,
         state.identity.signing_key(),
     )
-    .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    .map_err(|e| {
+        if matches!(
+            e.downcast_ref::<ryeos_app::identity::AuthorizedKeyCreateError>(),
+            Some(ryeos_app::identity::AuthorizedKeyCreateError::AlreadyExists)
+        ) {
+            HandlerError::Conflict(
+                "authorized-key fingerprint already exists; admission cannot replace or reclassify it"
+                    .to_string(),
+            )
+        } else {
+            HandlerError::Internal(e.to_string())
+        }
+    })?;
 
     let response = Response {
         admitted: true,

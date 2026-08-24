@@ -43,9 +43,14 @@ pub struct AuthorizeClientParams {
     /// Presence emits a `remote_operator` grant and requires exact,
     /// non-wildcard scopes.
     pub origin_site_id: Option<String>,
+    /// Explicitly authorize changing an incumbent grant's principal class or
+    /// origin constraint. Operationally this is valid only with the daemon
+    /// stopped; ordinary scope updates leave it false.
+    pub allow_semantic_conversion: bool,
 }
 
 /// Result of a successful authorize-client run.
+#[derive(Debug)]
 pub struct AuthorizeClientResult {
     /// Fingerprint of the authorized key.
     pub fingerprint: String,
@@ -58,8 +63,14 @@ pub struct AuthorizeClientResult {
     pub dropped_scopes: Vec<String>,
     /// Whether existing scopes were merged into the written set.
     pub merged: bool,
-    /// Authenticated forwarding origin for a `remote_operator` grant.
+    /// Allowed forwarding site constraint for a `remote_operator` grant.
     pub origin_site_id: Option<String>,
+    /// Exact incumbent semantic class observed under the publication lock.
+    pub previous_principal_class: Option<String>,
+    /// Exact incumbent origin constraint observed under the publication lock.
+    pub previous_origin_site_id: Option<String>,
+    /// Semantic class written by this operation.
+    pub principal_class: String,
 }
 
 /// Reconcile a requested scope set against the scopes already on disk.
@@ -137,8 +148,8 @@ struct AdmissionTokenFile<'a> {
 
 /// Authorize a client by writing a node-signed authorized-key TOML.
 ///
-/// Idempotent: if the file already exists with the same fingerprint,
-/// it is overwritten with the new scopes/label.
+/// Reconciles an existing fingerprint only within the explicitly selected
+/// same-class or stopped-node semantic-transition contract.
 ///
 /// Delegates to the canonical writer in `ryeos_app::identity` so the
 /// TOML format is identical to what the daemon's own handler produces.
@@ -159,6 +170,21 @@ pub fn run_authorize_client(params: AuthorizeClientParams) -> Result<AuthorizeCl
             node_key_path.display()
         );
     }
+
+    // Principal-class and origin changes alter the meaning of an existing
+    // fingerprint. Prove stopped-node ownership and retain it through the
+    // read/verify/sign/publish transaction instead of treating the CLI flag
+    // as sufficient authority on its own. Ordinary same-class provisioning
+    // remains usable for bootstrap and release tooling while the daemon runs.
+    let _stopped_node_lock = params
+        .allow_semantic_conversion
+        .then(|| {
+            let lock_path = ryeos_app::state_lock::default_lock_path(&params.app_root);
+            ryeos_app::state_lock::StateLock::acquire(&lock_path).with_context(
+                || "semantic authorized-key conversion requires stopped-node authority",
+            )
+        })
+        .transpose()?;
 
     let node_identity = ryeos_app::identity::NodeIdentity::load(&node_key_path)?;
 
@@ -183,20 +209,22 @@ pub fn run_authorize_client(params: AuthorizeClientParams) -> Result<AuthorizeCl
     // Verified load, scope reconciliation, signing, and conditional
     // publication share one descriptor-pinned directory lock. A concurrent
     // merge can therefore never silently lose scopes.
-    let (path, dropped_scopes) = ryeos_app::identity::reconcile_authorized_key_toml_scopes(
-        &auth_dir,
-        &fp,
-        &key_b64,
-        &params.scopes,
-        &params.label,
-        "cli-authorize-key",
-        &now,
-        &node_identity,
-        wildcard,
-        params.merge,
-        params.origin_site_id.as_deref(),
-    )
-    .context("failed to write authorized-key TOML")?;
+    let (path, dropped_scopes, transition) =
+        ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+            &auth_dir,
+            &fp,
+            &key_b64,
+            &params.scopes,
+            &params.label,
+            "cli-authorize-key",
+            &now,
+            &node_identity,
+            wildcard,
+            params.merge,
+            params.origin_site_id.as_deref(),
+            params.allow_semantic_conversion,
+        )
+        .context("failed to write authorized-key TOML")?;
 
     Ok(AuthorizeClientResult {
         fingerprint: fp,
@@ -204,6 +232,11 @@ pub fn run_authorize_client(params: AuthorizeClientParams) -> Result<AuthorizeCl
         dropped_scopes,
         merged: params.merge,
         origin_site_id: params.origin_site_id,
+        previous_principal_class: transition
+            .previous_principal_class
+            .map(|class| class.as_str().to_string()),
+        previous_origin_site_id: transition.previous_origin_site_id,
+        principal_class: transition.principal_class.as_str().to_string(),
     })
 }
 
@@ -457,6 +490,7 @@ system_source_caps:
             allow_wildcard: false,
             merge: false,
             origin_site_id: Some("site:source".to_owned()),
+            allow_semantic_conversion: false,
         })
         .unwrap();
 
@@ -464,6 +498,79 @@ system_source_caps:
         let signed = std::fs::read_to_string(result.path).unwrap();
         assert!(signed.contains("principal_class = \"remote_operator\""));
         assert!(signed.contains("origin_site_id = \"site:source\""));
+    }
+
+    #[test]
+    fn authorize_client_reports_and_requires_explicit_semantic_conversion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _fixture = HostedPolicyFixture::new(tmp.path());
+        let client = lillux::crypto::SigningKey::generate(&mut OsRng).verifying_key();
+        let local = run_authorize_client(AuthorizeClientParams {
+            app_root: tmp.path().to_path_buf(),
+            public_key: client,
+            scopes: vec!["ryeos.execute.service.remote/run".to_owned()],
+            label: "operator".to_owned(),
+            allow_wildcard: false,
+            merge: false,
+            origin_site_id: None,
+            allow_semantic_conversion: false,
+        })
+        .unwrap();
+        assert_eq!(local.principal_class, "local_client");
+        assert_eq!(local.previous_principal_class, None);
+
+        let denied = run_authorize_client(AuthorizeClientParams {
+            app_root: tmp.path().to_path_buf(),
+            public_key: client,
+            scopes: vec!["ryeos.execute.service.remote/run".to_owned()],
+            label: "operator".to_owned(),
+            allow_wildcard: false,
+            merge: false,
+            origin_site_id: Some("site:source".to_owned()),
+            allow_semantic_conversion: false,
+        })
+        .expect_err("class conversion must require explicit authorization");
+        assert!(
+            format!("{denied:#}").contains("semantic-conversion"),
+            "got: {denied:#}"
+        );
+
+        let converted = run_authorize_client(AuthorizeClientParams {
+            app_root: tmp.path().to_path_buf(),
+            public_key: client,
+            scopes: vec!["ryeos.execute.service.remote/run".to_owned()],
+            label: "operator".to_owned(),
+            allow_wildcard: false,
+            merge: false,
+            origin_site_id: Some("site:source".to_owned()),
+            allow_semantic_conversion: true,
+        })
+        .unwrap();
+        assert_eq!(
+            converted.previous_principal_class.as_deref(),
+            Some("local_client")
+        );
+        assert_eq!(converted.previous_origin_site_id, None);
+        assert_eq!(converted.principal_class, "remote_operator");
+        assert_eq!(converted.origin_site_id.as_deref(), Some("site:source"));
+
+        let lock_path = ryeos_app::state_lock::default_lock_path(tmp.path());
+        let _live_daemon_lock = ryeos_app::state_lock::StateLock::acquire(&lock_path).unwrap();
+        let while_live = run_authorize_client(AuthorizeClientParams {
+            app_root: tmp.path().to_path_buf(),
+            public_key: client,
+            scopes: vec!["ryeos.execute.service.remote/run".to_owned()],
+            label: "operator".to_owned(),
+            allow_wildcard: false,
+            merge: false,
+            origin_site_id: None,
+            allow_semantic_conversion: true,
+        })
+        .expect_err("semantic conversion must prove stopped-node ownership");
+        assert!(
+            format!("{while_live:#}").contains("stopped-node authority"),
+            "got: {while_live:#}"
+        );
     }
 
     #[test]

@@ -146,8 +146,11 @@ pub fn require_local_operator(
     state: &AppState,
     context: &HandlerContext,
 ) -> anyhow::Result<String> {
-    if context.authenticated_origin_site_id.is_some() {
-        bail!("external-content operator actions are unavailable to remote-origin principals");
+    if context.authorized_key_class
+        != Some(crate::identity::AuthorizedKeyPrincipalClass::LocalClient)
+        || context.authenticated_origin_site_id.is_some()
+    {
+        bail!("external-content operator actions require a local_client configured operator");
     }
     require_configured_operator(state, context)
 }
@@ -174,6 +177,20 @@ fn authenticated_configured_operator_fingerprint(
         .map_err(|error| anyhow::anyhow!(error))?;
     if context.fingerprint != operator.principal_id() {
         bail!("action requires the configured operator");
+    }
+    match (
+        context.authorized_key_class,
+        context.authenticated_origin_site_id.as_deref(),
+    ) {
+        (Some(crate::identity::AuthorizedKeyPrincipalClass::LocalClient), None)
+        | (Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator), Some(_)) => {}
+        (Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteNode), _) => {
+            bail!("configured operator actions reject remote_node grants")
+        }
+        (Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator), None) => {
+            bail!("remote_operator request has no authenticated source-node forwarding proof")
+        }
+        _ => bail!("configured operator action requires an authenticated authorized-key class"),
     }
     Ok(operator.fingerprint().to_owned())
 }
@@ -1204,7 +1221,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let identity =
             crate::identity::NodeIdentity::create(&directory.path().join("operator.pem")).unwrap();
-        let local = HandlerContext::new(identity.principal_id(), vec!["*".to_owned()], true);
+        let local = HandlerContext::new_with_authority(
+            identity.principal_id(),
+            vec!["*".to_owned()],
+            true,
+            Some(crate::identity::AuthorizedKeyPrincipalClass::LocalClient),
+            None,
+        );
         assert_eq!(
             authenticated_configured_operator_fingerprint(&local, &identity).unwrap(),
             identity.fingerprint()
@@ -1212,15 +1235,28 @@ mod tests {
 
         let raw = HandlerContext::new(identity.fingerprint().to_owned(), vec![], true);
         assert!(authenticated_configured_operator_fingerprint(&raw, &identity).is_err());
-        let remote = HandlerContext::new_with_origin(
+        let remote = HandlerContext::new_with_authority(
             identity.principal_id(),
             vec!["*".to_owned()],
             true,
+            Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
             Some("site:remote".to_owned()),
         );
         assert_eq!(
             authenticated_configured_operator_fingerprint(&remote, &identity).unwrap(),
             identity.fingerprint()
+        );
+
+        let confused_remote_node = HandlerContext::new_with_authority(
+            identity.principal_id(),
+            vec!["*".to_owned()],
+            true,
+            Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteNode),
+            Some("site:remote".to_owned()),
+        );
+        assert!(
+            authenticated_configured_operator_fingerprint(&confused_remote_node, &identity)
+                .is_err()
         );
     }
 }

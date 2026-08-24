@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T14:14:00Z:f55a7986af80192c2eb289b2f164618bba9598cf94a9d7c8c77d3282e701c84d:0DZkvxA5jFE7Bnwmukc+MnhHCenjzucKoesZpZvKZV4FfkQI8Ra2LZaZBzKWte4HKTcMOI26QSSd2mDv4LibDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T15:37:08Z:36714bd1d8eea5876ea001ea834b9642879ad031fb2c17fbd995eb76f8c52895:03wH0bpVHJw58D6rYfHtcAVFtyW/IkT0HOVGtZP8/OA7GkcX2Erc2z+oheeFLomwaeWwi+tV4D06e5s8IbasCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -51,13 +51,16 @@ remote push/run seam has an explicit configured-operator mode: the incoming
 request must already authenticate as the exact configured operator, the daemon
 then signs the outbound request with that same configured operator key, and
 the destination must authorize it with a node-signed, exact-scope
-`remote_operator` grant bound to the source site's canonical ID. The principal
-remains the operator while authenticated transport origin remains a separate
-remote fact, so local-only APIs still reject it. A grant is keyed by
+`remote_operator` grant bound to the source site's canonical ID. The source
+node also co-signs the exact request, and the destination accepts that proof
+only from a separately admitted `remote_node` grant carrying
+`ryeos.attest.request.forwarded-operator`. The principal remains the operator
+while authenticated transport origin remains a separate remote fact, so
+local-only APIs still reject it. A grant is keyed by
 fingerprint; on the hosted target this classifies every request signed by that
-key as remote and is therefore intended for a dedicated hosted endpoint. This
-is not caller-principal impersonation or a provider exception; delegated
-callers cannot select it.
+key as remote and rejects it without the source-node proof. This is not
+caller-principal impersonation or a provider exception; delegated callers
+cannot select it.
 
 ## Closed structured-session protocol
 

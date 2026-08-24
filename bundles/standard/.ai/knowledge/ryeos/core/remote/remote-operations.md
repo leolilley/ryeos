@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T14:14:03Z:8502dd83b927b4a893ea69b5d545cd20a3dd82f59753acf7740fa13492f1efe8:1k0pRXoGfW2BW4kuo9VFOqZblyHDSpLmNL+MeztTuJjj7D83HyruVINKHzlohodzmwcT5TDghXId0iGHmJO8AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T15:37:10Z:fff5a649dfd91c2b9dceca83aa8bd0e6bceed2d75f0b0ab9ae3083b54772c526:6MJxLM06qrITXJiGADXArHsaLLYs3LbWqppotroP5vmCmpWo+8A+b2ozYl9foVR2TZY/oncJBJ5Qziflp9MKAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -62,10 +62,14 @@ operator on `service:remote/push`; the matching retained-current-HEAD accepted
 `service:remote/run` preserves it automatically. Both local requests must be
 made by that exact configured operator, and the destination must authorize the
 same operator key through a node-signed `remote_operator` grant bound to the
-source site's canonical ID and exact scopes. That grant keeps the principal as
-the operator but makes remote origin visible to every destination policy
-check. A delegated caller cannot turn the node into an operator-key signing
-oracle or choose its authenticated origin.
+source site's canonical ID and exact scopes. The destination separately admits
+the source node key as `remote_node` with
+`ryeos.attest.request.forwarded-operator`; that key co-signs every exact
+operator request. The operator grant constrains the permitted site, while the
+source-node signature proves transit. Together they keep the principal as the
+operator and make verified remote origin visible to destination policy. A
+delegated caller cannot turn the node into an operator-key signing oracle or
+choose its authenticated origin.
 
 ## Prerequisites
 
@@ -124,7 +128,8 @@ oracle or choose its authenticated origin.
 For configured-operator continuity, do not use admission claim or the remote
 authorize endpoint: both create ordinary remote-node/client authority. Stop
 the hosted target and use its offline tool to install the exact origin-bound
-operator grant:
+operator grant. If the configured operator already has its bootstrap
+`local_client` grant, the explicit semantic-conversion flag is required:
 
 ```bash
 ryeos-core-tools authorize-client \
@@ -132,16 +137,28 @@ ryeos-core-tools authorize-client \
   --public-key "<configured_operator_raw_ed25519_base64>" \
   --label "operator forwarded from source" \
   --origin-site-id "site:<source>" \
+  --allow-semantic-conversion \
   --scopes "<comma-separated exact workflow scopes>"
 ```
 
-This target-local node signature is the origin attestation. Forwarded HEAD and
-execute bodies include a caller-signed required-origin assertion so a missing
-or wrongly classified target grant fails closed, but that assertion only
-narrows the origin from the grant and can never create it. One grant exists per
-key fingerprint, so the target will classify all requests signed by this key
-as remote; reserve this setup for a dedicated hosted endpoint and use a
-separate target-local maintenance identity.
+Before conversion, separately admit the source node key with the exact scope
+`ryeos.attest.request.forwarded-operator`. The target-local operator-grant
+signature is an allowed-site constraint, not evidence that a request transited
+the source. The source-node co-signature covers the exact primary request and
+supplies that proof. Forwarded HEAD and execute bodies also include a
+caller-signed required-origin assertion so a missing or wrongly classified
+grant/proof fails closed; the assertion only narrows verified authority and
+can never create it.
+
+One grant exists per key fingerprint, so the target classifies the configured
+operator key as remote. For local maintenance, quiesce hosted workflows, stop
+the daemon, explicitly convert the same configured-operator grant back to
+`local_client` without `--origin-site-id`, perform maintenance after restart,
+then stop and explicitly restore `remote_operator`. Both transitions require
+`--allow-semantic-conversion`; `--merge-scopes` is forbidden across them. A
+separate maintenance key cannot satisfy exact configured-operator policy. The
+offline tool holds the same exclusive state lock as the daemon throughout each
+conversion and refuses if the daemon is live.
 
    Common remote-side scopes:
 

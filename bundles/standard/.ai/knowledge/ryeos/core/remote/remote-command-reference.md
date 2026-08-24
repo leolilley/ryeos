@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T14:14:03Z:a857953d37a2ff9b130acb7fc903c9f82b919fe0bbf4d43a044b262c80fe2043:2xadecKaZzheyD839ZWPPHTaoFwkCpbDORXhegA9xFFHoWabv4hxWYVxNFMxOGvUs+C6TR3wMzrVZlhAQuViBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T15:37:10Z:2c5f0be98b94803e7dcd48f728265029e56e847984519abf7009260c0a581d5d:L0Z6NPc3lgaDPVrkei7jEmvcmooGahTuxAdP5sg7s8G0r9IqGPboInPweg+70suMM+BX6YJ0k6pe0NIiaj1AAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -30,7 +30,12 @@ support an explicit configured-operator continuity mode for durable workflows:
 the local request must already be signed by the configured operator, and the
 target must separately authorize that same operator key as `remote_operator`,
 bound by the target node to the source's canonical `site:` ID and exact scopes.
-It is never selected implicitly and is not available to delegated callers.
+The target must also admit the source node key as `remote_node` with
+`ryeos.attest.request.forwarded-operator`. Each forwarded operator request is
+co-signed by that source-node key over the exact operator authorization. The
+operator grant is therefore an allowed-source constraint; the co-signature is
+the transit proof. This mode is never selected implicitly and is not available
+to delegated callers.
 
 ## Authority Matrix
 
@@ -67,8 +72,8 @@ Notes:
 - `outbound_principal: configured_operator` on `service:remote/push`, and a
   retained-current-HEAD accepted launch through `service:remote/run`, require
   the exact configured operator locally and preserve that principal remotely.
-  The target grant also preserves remote origin, so these calls do not satisfy
-  local-only operator checks.
+  The target grant and independently admitted source-node co-signature preserve
+  remote origin, so these calls do not satisfy local-only operator checks.
   Their remote HEAD and session ownership do not interoperate with a HEAD
   previously pushed under the default node principal.
 
@@ -195,7 +200,9 @@ For initial bootstrap, the remote operator can run `ryeos authorize-key`
 locally on the remote node instead.
 
 Remote authorization rejects wildcard scope delegation. Enumerate every
-scope explicitly.
+scope explicitly. It is create-only: `/authorize-key` cannot replace or
+reclassify any existing local-client, remote-node, remote-operator, bootstrap,
+or configured-operator grant. Admission claims are likewise create-only.
 
 Configured-operator continuity is provisioned only by an offline target-node
 action, not by remote delegation. With the target daemon stopped, the target
@@ -207,17 +214,33 @@ ryeos-core-tools authorize-client \
   --public-key "<configured_operator_raw_ed25519_base64>" \
   --label "operator forwarded from source" \
   --origin-site-id "site:<source>" \
+  --allow-semantic-conversion \
   --scopes "<comma-separated exact scopes>"
 ```
 
-The source site ID is the canonical `site_id` reported by its RyeOS identity.
-The target node signs the grant; callers cannot assert an origin in the HTTP
-authentication context. Forwarded HEAD and execute requests do carry a signed
-`required_origin_site_id` assertion, but the target only uses it to require an
-exact match with that grant; it cannot create origin authority. Because
-authorized-key files are keyed by fingerprint, this converts that key's target
-grant to remote-only classification. Use a dedicated hosted target and a
-separate maintenance identity for target-local operator work.
+Before that conversion, admit the source node key with the exact
+`ryeos.attest.request.forwarded-operator` scope. The source site ID is the
+canonical `site_id` reported by its RyeOS identity. The target-signed operator
+grant constrains the permitted forwarding site; callers cannot create origin
+authority in request data. The separately admitted source node co-signs the
+method, path, body hash, timestamp, nonce, target audience, primary operator
+key/signature, forwarding key, and site. Forwarded HEAD and execute requests
+also carry a primary-signed `required_origin_site_id` assertion, which must
+match the verified proof. Missing, partial, wrong-class, wrong-site, or invalid
+proof fails authentication.
+
+Authorized-key files are keyed by fingerprint, so conversion makes that exact
+configured-operator key remote-only. Local maintenance uses the same key after
+quiescing workflows and stopping the daemon: rerun the offline tool without
+`--origin-site-id`, with only local maintenance scopes and
+`--allow-semantic-conversion`; start the daemon and maintain; stop it; then
+reinstall the exact remote grant with the same explicit flag. A different key
+cannot pass an exact configured-operator check. Scope merging is forbidden
+across class or origin changes, and the offline tool reports previous and new
+class/origin values. The conversion flag also makes the tool acquire and retain
+the node's exclusive daemon state lock through publication; a live daemon
+therefore causes a mechanical refusal rather than relying on operator
+procedure.
 
 ## `ryeos remote push`
 
@@ -328,6 +351,18 @@ the verb or as the command's service field after the verb:
 ryeos -p /absolute/path remote run prod tool:my/task
 ryeos remote run prod tool:my/task --project /absolute/path
 ```
+
+The signed `service:remote/run` contract is broader than the project-bound
+terminal presentation. It accepts `project: {kind: projectless}` with no
+`project` field for remote control-plane service execution, and accepts
+`outbound_principal: configured_operator` when owner continuity is required.
+That path signs with the configured operator and co-signs with the source node;
+the target `/execute` boundary retains both the closed authorized-key class and
+the verified origin into any in-process service handler. Wait mode is used for
+unary service calls. Accepted mode additionally requires a caller-retained
+`launch_id` and is used for durable projectless or project-backed workers.
+Project-backed live/current-HEAD modes still require a configured project
+binding.
 
 ## `ryeos remote doctor`
 

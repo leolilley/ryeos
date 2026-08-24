@@ -57,8 +57,8 @@ pub struct ExecuteRequest {
     #[serde(default)]
     pub launch_id: Option<String>,
     /// Signed assertion made by a forwarding RyeOS node. The target compares
-    /// it to origin from the node-signed authorized-key grant; it is not an
-    /// origin claim by itself.
+    /// it to origin from the verified source-node proof and target-signed
+    /// grant constraints; it is not an origin claim by itself.
     #[serde(default)]
     pub required_origin_site_id: Option<String>,
     #[serde(skip)]
@@ -902,6 +902,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 .map_err(|e| RouteDispatchError::BadRequest(format!("invalid JSON body: {e}")))?;
         ryeos_app::identity::validate_forwarding_origin_assertion(
             request.required_origin_site_id.as_deref(),
+            principal.authorized_key_class,
             principal.authenticated_origin_site_id.as_deref(),
         )
         .map_err(|error| RouteDispatchError::Forbidden(error.to_string()))?;
@@ -1900,24 +1901,21 @@ impl CompiledResponseMode for CompiledExecuteMode {
             effect_authority: None,
         };
 
-        let dispatch_result = if lifecycle_authority.ownership
-            == ryeos_state::objects::ExecutionOwnershipAuthority::DaemonOwned
-        {
-            ryeos_executor::dispatch::dispatch_daemon_owned(
-                item_ref,
-                &dispatch_req,
-                &exec_ctx,
-                &state,
-            )
-            .await
-            .map_err(|error| {
-                RouteDispatchError::Internal(format!(
-                    "daemon-owned execution task ended without a dispatch result: {error}"
-                ))
-            })?
-        } else {
-            ryeos_executor::dispatch::dispatch(item_ref, &dispatch_req, &exec_ctx, &state).await
-        };
+        let handler_context = ryeos_app::handler_context::HandlerContext::new_with_authority(
+            principal.id.clone(),
+            principal.scopes.clone(),
+            principal.verified,
+            principal.authorized_key_class,
+            principal.authenticated_origin_site_id.clone(),
+        );
+        let dispatch_result = ryeos_executor::dispatch::dispatch_with_handler_context(
+            item_ref,
+            handler_context,
+            &dispatch_req,
+            &exec_ctx,
+            &state,
+        )
+        .await;
 
         match dispatch_result {
             Ok(mut value) => {

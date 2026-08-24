@@ -3741,6 +3741,46 @@ pub async fn dispatch(
     .await
 }
 
+/// Dispatch while retaining transport-authenticated handler authority for a
+/// possible in-process service terminator. Other terminators ignore the
+/// context. This keeps key class and forwarding proof out of item-kind logic
+/// while preventing `/execute` from erasing them before service policy.
+pub async fn dispatch_with_handler_context(
+    item_ref: &str,
+    local_handler_context: ryeos_app::handler_context::HandlerContext,
+    request: &DispatchRequest<'_>,
+    ctx: &ExecutionContext,
+    state: &AppState,
+) -> Result<Value, DispatchError> {
+    if request.lifecycle_authority.ownership
+        == ryeos_state::objects::ExecutionOwnershipAuthority::DaemonOwned
+    {
+        return dispatch_daemon_owned_inner(
+            item_ref,
+            Some(local_handler_context),
+            request,
+            ctx,
+            state,
+        )
+        .await
+        .map_err(|error| {
+            DispatchError::Internal(anyhow::anyhow!(
+                "daemon-owned dispatch task ended before settlement: {error}"
+            ))
+        })?;
+    }
+    Box::pin(dispatch_inner(
+        item_ref,
+        None,
+        Some(local_handler_context),
+        request,
+        ctx,
+        state,
+        None,
+    ))
+    .await
+}
+
 /// Transfer a unary dispatch onto a daemon-owned task before awaiting it.
 ///
 /// The HTTP response policy is deliberately separate from execution
@@ -3750,6 +3790,16 @@ pub async fn dispatch(
 /// settlement.
 pub fn dispatch_daemon_owned(
     item_ref: &str,
+    request: &DispatchRequest<'_>,
+    ctx: &ExecutionContext,
+    state: &AppState,
+) -> tokio::task::JoinHandle<Result<Value, DispatchError>> {
+    dispatch_daemon_owned_inner(item_ref, None, request, ctx, state)
+}
+
+fn dispatch_daemon_owned_inner(
+    item_ref: &str,
+    local_handler_context: Option<ryeos_app::handler_context::HandlerContext>,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
@@ -3806,7 +3856,13 @@ pub fn dispatch_daemon_owned(
             effect_authority,
         };
         let result = Box::pin(dispatch_inner(
-            &item_ref, None, None, &request, &ctx, &state, None,
+            &item_ref,
+            None,
+            local_handler_context,
+            &request,
+            &ctx,
+            &state,
+            None,
         ))
         .await;
         drop(request);

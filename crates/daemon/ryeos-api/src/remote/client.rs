@@ -191,6 +191,10 @@ pub struct RemoteClient {
     /// this source site. Ordinary node-key clients remain compatible with
     /// existing direct grants and do not add this narrowing assertion.
     required_forwarding_origin_site_id: Option<String>,
+    /// Source RyeOS node identity that co-signs configured-operator requests.
+    /// The target admits this key independently as `remote_node`; its proof is
+    /// what turns the configured site constraint into transport provenance.
+    forwarding_identity: Option<Arc<NodeIdentity>>,
 }
 
 impl RemoteClient {
@@ -211,6 +215,7 @@ impl RemoteClient {
             identity,
             origin_site_id: None,
             required_forwarding_origin_site_id: None,
+            forwarding_identity: None,
         }
     }
 
@@ -268,6 +273,7 @@ impl RemoteClient {
         let site_id = state.threads.site_id().to_string();
         client.origin_site_id = Some(site_id.clone());
         client.required_forwarding_origin_site_id = Some(site_id);
+        client.forwarding_identity = Some(state.identity.clone());
         Ok(client)
     }
 
@@ -1122,14 +1128,21 @@ impl RemoteClient {
         // sign_request will sort query params to match server-side.
         let headers = self.sign_request("GET", path, &[])?;
 
-        let resp = self
+        let mut request = self
             .http
             .get(&url)
             .timeout(CONTROL_PLANE_TIMEOUT)
             .header("x-ryeos-key-id", &headers.key_id)
             .header("x-ryeos-timestamp", &headers.timestamp)
             .header("x-ryeos-nonce", &headers.nonce)
-            .header("x-ryeos-signature", &headers.signature)
+            .header("x-ryeos-signature", &headers.signature);
+        if let Some(forwarding) = headers.forwarding.as_ref() {
+            request = request
+                .header("x-ryeos-forwarding-key-id", &forwarding.key_id)
+                .header("x-ryeos-forwarding-site-id", &forwarding.site_id)
+                .header("x-ryeos-forwarding-signature", &forwarding.signature);
+        }
+        let resp = request
             .send()
             .await
             .with_context(|| format!("GET {} failed", url))?;
@@ -1152,7 +1165,7 @@ impl RemoteClient {
         let body_bytes = serde_json::to_vec(body)?;
         let headers = self.sign_request("POST", path, &body_bytes)?;
 
-        let resp = self
+        let mut request = self
             .http
             .post(&url)
             .header("content-type", "application/json")
@@ -1160,7 +1173,14 @@ impl RemoteClient {
             .header("x-ryeos-timestamp", &headers.timestamp)
             .header("x-ryeos-nonce", &headers.nonce)
             .header("x-ryeos-signature", &headers.signature)
-            .body(body_bytes)
+            .body(body_bytes);
+        if let Some(forwarding) = headers.forwarding.as_ref() {
+            request = request
+                .header("x-ryeos-forwarding-key-id", &forwarding.key_id)
+                .header("x-ryeos-forwarding-site-id", &forwarding.site_id)
+                .header("x-ryeos-forwarding-signature", &forwarding.signature);
+        }
+        let resp = request
             .send()
             .await
             .with_context(|| format!("POST {} failed", url))?;
@@ -1248,11 +1268,48 @@ impl RemoteClient {
             lillux::crypto::Signer::sign(self.identity.signing_key(), content_hash.as_bytes());
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
 
+        let key_id = self.identity.principal_id();
+        let forwarding = match (
+            self.forwarding_identity.as_ref(),
+            self.required_forwarding_origin_site_id.as_deref(),
+        ) {
+            (Some(forwarding_identity), Some(forwarding_site_id)) => {
+                let forwarding_key_id = forwarding_identity.principal_id();
+                let forwarding_content_hash = crate::auth::forwarding_request_content_hash(
+                    method,
+                    &canon_path,
+                    &body_hash,
+                    &timestamp.to_string(),
+                    &nonce,
+                    &self.audience,
+                    &key_id,
+                    &sig_b64,
+                    &forwarding_key_id,
+                    forwarding_site_id,
+                );
+                let signature = lillux::crypto::Signer::sign(
+                    forwarding_identity.signing_key(),
+                    forwarding_content_hash.as_bytes(),
+                );
+                Some(ForwardingHeaders {
+                    key_id: forwarding_key_id,
+                    site_id: forwarding_site_id.to_string(),
+                    signature: base64::engine::general_purpose::STANDARD
+                        .encode(signature.to_bytes()),
+                })
+            }
+            (None, None) => None,
+            _ => anyhow::bail!(
+                "configured-operator forwarding requires both a source-node identity and site"
+            ),
+        };
+
         Ok(SignedHeaders {
-            key_id: self.identity.principal_id(),
+            key_id,
             timestamp: timestamp.to_string(),
             nonce,
             signature: sig_b64,
+            forwarding,
         })
     }
 }
@@ -1395,6 +1452,13 @@ struct SignedHeaders {
     key_id: String,
     timestamp: String,
     nonce: String,
+    signature: String,
+    forwarding: Option<ForwardingHeaders>,
+}
+
+struct ForwardingHeaders {
+    key_id: String,
+    site_id: String,
     signature: String,
 }
 
@@ -2706,6 +2770,50 @@ mod tests {
     #[test]
     fn canonicalize_path_no_query() {
         assert_eq!(canonicalize_path("/execute"), "/execute");
+    }
+
+    #[test]
+    fn configured_operator_request_is_cosigned_by_source_node() {
+        let directory = tempfile::tempdir().unwrap();
+        let operator =
+            Arc::new(NodeIdentity::create(&directory.path().join("operator.pem")).unwrap());
+        let forwarding =
+            Arc::new(NodeIdentity::create(&directory.path().join("forwarding-node.pem")).unwrap());
+        let mut client = RemoteClient::new("https://target.invalid", "fp:target", operator);
+        client.required_forwarding_origin_site_id = Some("site:source".to_string());
+        client.forwarding_identity = Some(forwarding.clone());
+
+        let headers = client
+            .sign_request("POST", "/execute", br#"{"item_ref":"test"}"#)
+            .unwrap();
+        let proof = headers
+            .forwarding
+            .as_ref()
+            .expect("operator request must carry forwarding proof");
+        assert_eq!(proof.key_id, forwarding.principal_id());
+        assert_eq!(proof.site_id, "site:source");
+        let content_hash = crate::auth::forwarding_request_content_hash(
+            "POST",
+            "/execute",
+            &lillux::cas::sha256_hex(br#"{"item_ref":"test"}"#),
+            &headers.timestamp,
+            &headers.nonce,
+            "fp:target",
+            &headers.key_id,
+            &headers.signature,
+            &proof.key_id,
+            &proof.site_id,
+        );
+        let signature_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&proof.signature)
+            .unwrap();
+        let signature = lillux::crypto::Signature::from_slice(&signature_bytes).unwrap();
+        lillux::crypto::Verifier::verify(
+            forwarding.verifying_key(),
+            content_hash.as_bytes(),
+            &signature,
+        )
+        .expect("source-node proof must cover the exact primary request authorization");
     }
 
     #[test]

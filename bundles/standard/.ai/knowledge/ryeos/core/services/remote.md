@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T14:14:03Z:fcffd45e19184ddb12f005d5e47fb2a28a2add36a386ae2cf63478a6040173ae:si9i/nP5Pe2NFesIYuOBCfOS3xqgWyglTFNjYjXYB4Ek18Qr+ZKaCDiE3+8Uy1SvOU5pEpvUgf4mthITvF1wDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-24T15:37:11Z:efa182aeca77d1da29d1da476fe8baf3174a50e282fe081d29c7bc7777c6384b:gagSCE48YLaDwIKsUa6UqUgHOAen14Dwesv9e2RBKtaTiGXMPceFYIEQpMPXv9vpeF7D5d1z6X0SFZ8zDIzqAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, remote, pushed-head, transfer, capabilities]
@@ -43,7 +43,9 @@ The authoritative matrix is in
 - Outbound remote requests normally use the local **node key**. The explicit
   configured-operator push/run mode uses the exact configured operator only
   after local operator authentication, and the target must bind it to the
-  forwarding site with an exact-scope `remote_operator` grant.
+  forwarding site with an exact-scope `remote_operator` grant. The source node
+  co-signs each exact request, and its independently admitted `remote_node`
+  grant must carry `ryeos.attest.request.forwarded-operator`.
 - `remote configure` stores remote identity, vault fingerprint, URL, and
   ingest-ignore config in the local system space under
   `.ai/config/remotes/remotes.yaml`.
@@ -54,7 +56,9 @@ The authoritative matrix is in
 - Initial remote authorization can use `admission/claim` when the target
   node has a one-time local admission token. Claiming the token creates a
   normal authorized-key grant on the target node; execution traffic still
-  uses signed requests checked against target-node grants.
+  uses signed requests checked against target-node grants. Admission and
+  online `authorize-key` are create-only and cannot replace/reclassify an
+  existing fingerprint.
 - `remote doctor` is an operator diagnostic: it combines remote discovery,
   pinned-identity checks, signed authorization probing, project binding
   checks, and next-step commands.
