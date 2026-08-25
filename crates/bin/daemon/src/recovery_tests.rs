@@ -1332,7 +1332,7 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
             session_id,
             idempotency_key: "command-hosted-root-replay",
             worker_boot_epoch: 1,
-            command_kind: "request",
+            command_kind: "route",
             request_digest: &request_digest,
             payload: &command_payload,
         })
@@ -1341,9 +1341,34 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
         .state_store
         .mark_dedicated_command_contacted(session_id, command.command_sequence, 1)
         .unwrap();
+    let response_batch = serde_json::json!({
+        "events":[],
+        "session_observations":[],
+    });
+    let observation_batch = serde_json::json!({
+        "events":[
+            {"event_type":"fixture.first","payload":{"value":1}},
+            {"event_type":"fixture.second","payload":{"value":2}},
+        ],
+        // More than the former flat limit of 16, but legal for two worker
+        // events under the admitted per-event ceiling. Repeated identical
+        // binding observations are deliberately idempotent.
+        "session_observations":(0..17).map(|_| serde_json::json!({
+            "kind":"remote_thread",
+            "id":"remote-thread-from-root",
+        })).collect::<Vec<_>>(),
+    });
     state
         .state_store
-        .reserve_dedicated_observation_batch(session_id, 1, 1, 1, None, &observation_digest)
+        .reserve_dedicated_observation_batch(
+            session_id,
+            1,
+            1,
+            2,
+            None,
+            &observation_digest,
+            &observation_batch,
+        )
         .unwrap();
 
     let committed_operation = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
@@ -1354,10 +1379,6 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
         "event_type":"hosted_command.committed",
     }))
     .unwrap();
-    let response_batch = serde_json::json!({
-        "events":[],
-        "session_observations":[],
-    });
     let response_digest = ryeos_state::objects::canonical_value_digest(&response_batch).unwrap();
     let response_operation = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
         "schema":"ryeos.hosted_command_fact.v1",
@@ -1365,6 +1386,15 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
         "command_sequence":command.command_sequence,
         "request_digest":request_digest,
         "event_type":"hosted_worker_command_observation_batch",
+    }))
+    .unwrap();
+    let observation_operation = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+        "schema":"ryeos.hosted_observation_batch_operation.v1",
+        "session_id":session_id,
+        "worker_boot_epoch":1,
+        "batch_digest":observation_digest,
+        "first_sequence":1,
+        "through_sequence":2,
     }))
     .unwrap();
     state
@@ -1384,7 +1414,7 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
                         "command_sequence":command.command_sequence,
                         "request_digest":request_digest,
                         "worker_boot_epoch":1,
-                        "command_kind":"request",
+                        "command_kind":"route",
                         "route_id":"session.start",
                         "idempotency_key":"command-hosted-root-replay",
                         "canonical_command":command_payload,
@@ -1414,18 +1444,13 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
                     payload: serde_json::json!({
                         "schema":1,
                         "origin":"daemon_observed_io",
+                        "operation_id":observation_operation,
                         "session_id":session_id,
                         "worker_boot_epoch":1,
                         "batch_digest":observation_digest,
                         "first_sequence":1,
-                        "through_sequence":1,
-                        "canonical_batch":{
-                            "events":[],
-                            "session_observations":[{
-                                "kind":"remote_thread",
-                                "id":"remote-thread-from-root",
-                            }],
-                        },
+                        "through_sequence":2,
+                        "canonical_batch":observation_batch,
                     }),
                 },
             ],
@@ -1443,7 +1468,7 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
             session_id,
             idempotency_key: "command-hosted-root-replay",
             worker_boot_epoch: 1,
-            command_kind: "request",
+            command_kind: "route",
             request_digest: &request_digest,
             payload: &command_payload,
         })

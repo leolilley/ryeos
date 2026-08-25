@@ -148,7 +148,7 @@ fn validate_execution_config(value: &serde_json::Value) -> Result<String, Launch
         "require_pinned_cow",
         "required_terminal_publication",
         "max_lifetime_seconds",
-        "recover_remote_session",
+        "recover_upstream_session",
     ];
     if object.len() != KEYS.len() || object.keys().any(|key| !KEYS.contains(&key.as_str())) {
         return Err(wire_error(
@@ -203,7 +203,7 @@ fn validate_execution_config(value: &serde_json::Value) -> Result<String, Launch
             .get("require_pinned_cow")
             .is_some_and(serde_json::Value::is_boolean)
         || !object
-            .get("recover_remote_session")
+            .get("recover_upstream_session")
             .is_some_and(serde_json::Value::is_boolean)
     {
         return Err(wire_error(
@@ -295,7 +295,7 @@ mod tests {
 
     fn valid_config() -> serde_json::Value {
         serde_json::json!({
-            "worker_ref": "worker:codex/hosted",
+            "worker_ref": "worker:fixture/hosted",
             "required_credential_state": "active",
             "route_set": "session",
             "allowed_effect_classes": ["external_effect", "pure_read", "session_mutation"],
@@ -304,7 +304,7 @@ mod tests {
             "require_pinned_cow": true,
             "required_terminal_publication": "retain_result",
             "max_lifetime_seconds": 86_400,
-            "recover_remote_session": true
+            "recover_upstream_session": true
         })
     }
 
@@ -312,7 +312,7 @@ mod tests {
     fn accepts_only_the_closed_worker_execution_policy_shape() {
         assert_eq!(
             validate_execution_config(&valid_config()).unwrap(),
-            "worker:codex/hosted"
+            "worker:fixture/hosted"
         );
 
         let mut unknown = valid_config();
@@ -327,8 +327,8 @@ mod tests {
     fn rejects_noncanonical_or_authority_suffixed_worker_refs() {
         for worker_ref in [
             "worker:../hosted",
-            "worker:codex/hosted@t:2026-08-19T00:00:00Z",
-            "directive:codex/hosted",
+            "worker:fixture/hosted@t:2026-08-19T00:00:00Z",
+            "directive:fixture/hosted",
         ] {
             let mut config = valid_config();
             config["worker_ref"] = serde_json::Value::String(worker_ref.to_owned());

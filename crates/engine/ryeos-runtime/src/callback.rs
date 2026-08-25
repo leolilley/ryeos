@@ -579,6 +579,10 @@ pub struct DedicatedSessionStartRequest {
     pub workspace_env: String,
     pub require_pinned_cow: bool,
     pub required_terminal_publication: String,
+    /// Whether this execution may recover a retained upstream session after a
+    /// worker restart. The daemon verifies this against the signed protocol
+    /// profile before launching the worker.
+    pub recover_upstream_session: bool,
 }
 
 /// One opaque command issued by the integration runtime that owns a dedicated

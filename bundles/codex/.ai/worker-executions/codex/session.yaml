@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-24T09:59:24Z:5d3b217b5b1ccf16f0102d67bcc6bd071ded679cbfe8c893ae7c2e3dec2f9174:v6tj4IWF4NVnCx376oOF36aHER2NEe+St+rgjO2zAZMifkndt2EtpPNVitIwhxR4AiKSwjj5ez9T7TACq4oDCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-24T22:45:39Z:71c9569840e12aca1f40c1fe432454e48c085e96099cd6985a43caa9d7c01592:Im78kaL8Oc0awKzcAPupT3L4sXkD3t4sX8olZJa7i0DLFrkTve0FisXNYPcMu9bZUlcJtzit/sba/wZAkM+tBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: codex
 description: Open one RyeOS-owned Codex session against an immutable project generation.
@@ -16,7 +16,7 @@ config:
   require_pinned_cow: true
   required_terminal_publication: retain_result
   max_lifetime_seconds: 603600
-  recover_remote_session: true
+  recover_upstream_session: true
 limits:
   duration_seconds: 604200
 requires:

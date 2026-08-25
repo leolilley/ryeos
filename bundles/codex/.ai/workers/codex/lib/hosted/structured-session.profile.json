@@ -10,7 +10,7 @@
     "-c", "model_provider=\"openai\"",
     "-c", "mcp_servers={}",
     "-c", "check_for_update_on_startup=false",
-    "-c", "approval_policy={ granular={ sandbox_approval=true, rules=false, mcp_elicitations=false, request_permissions=false, skill_approval=false } }",
+    "-c", "approval_policy={ granular={ sandbox_approval=false, rules=false, mcp_elicitations=false, request_permissions=false, skill_approval=false } }",
     "-c", "approvals_reviewer=\"user\"",
     "-c", "default_permissions=\"ryeos-workspace-only\"",
     "-c", "web_search=\"disabled\"",
@@ -46,6 +46,13 @@
       "notification": "initialized"
     }
   ],
+  "recovery": {
+    "resume_route": "session.resume",
+    "inspect_route": "session.read",
+    "route_sets": [
+      "session"
+    ]
+  },
   "route_sets": {
     "enrollment": [
       "credential.account.read",
@@ -247,6 +254,10 @@
         "modelProvider",
         "sandbox"
       ],
+      "forbidden_fields": [
+        "approvalPolicy",
+        "ephemeral"
+      ],
       "observations": [
         {
           "when": [],
@@ -307,9 +318,17 @@
         "modelProvider",
         "sandbox"
       ],
+      "forbidden_fields": [
+        "approvalPolicy"
+      ],
       "observations": [
         {
-          "when": [],
+          "when": [
+            {
+              "pointer": "/response/result/thread/status/type",
+              "equals": "idle"
+            }
+          ],
           "value": {
             "op": "object",
             "fields": {
@@ -362,7 +381,12 @@
       ],
       "observations": [
         {
-          "when": [],
+          "when": [
+            {
+              "pointer": "/response/result/thread/status/type",
+              "equals": "idle"
+            }
+          ],
           "value": {
             "op": "object",
             "fields": {
@@ -375,11 +399,58 @@
                 "pointer": "/response/result/thread/id",
                 "max_string_bytes": 256
               },
-              "status": {
-                "op": "pointer",
-                "pointer": "/response/result/thread/status/type",
-                "max_string_bytes": 32
+              "outcome": {
+                "op": "literal",
+                "value": "safe_idle"
               }
+            }
+          }
+        },
+        {
+          "when": [
+            {
+              "pointer": "/response/result/thread/status/type",
+              "equals": "active"
+            }
+          ],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {"op": "literal", "value": "remote_thread_recovery_status"},
+              "id": {"op": "pointer", "pointer": "/response/result/thread/id", "max_string_bytes": 256},
+              "outcome": {"op": "literal", "value": "uncertain"}
+            }
+          }
+        },
+        {
+          "when": [
+            {
+              "pointer": "/response/result/thread/status/type",
+              "equals": "notLoaded"
+            }
+          ],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {"op": "literal", "value": "remote_thread_recovery_status"},
+              "id": {"op": "pointer", "pointer": "/response/result/thread/id", "max_string_bytes": 256},
+              "outcome": {"op": "literal", "value": "uncertain"}
+            }
+          }
+        },
+        {
+          "when": [
+            {
+              "pointer": "/response/result/thread/status/type",
+              "equals": "systemError"
+            }
+          ],
+          "value": {
+            "op": "object",
+            "fields": {
+              "kind": {"op": "literal", "value": "remote_thread_recovery_status"},
+              "id": {"op": "pointer", "pointer": "/response/result/thread/id", "max_string_bytes": 256},
+              "outcome": {"op": "literal", "value": "uncertain"}
             }
           }
         }
@@ -408,6 +479,9 @@
       "forbidden_non_null_fields": [
         "sandboxPolicy",
         "outputSchema"
+      ],
+      "forbidden_fields": [
+        "approvalPolicy"
       ],
       "observations": [
         {
@@ -938,8 +1012,17 @@
       "method": "item/commandExecution/requestApproval",
       "schema": "schema/CommandExecutionRequestApprovalParams.json",
       "operation_class": "command_execution",
-      "response_style": "decision",
-      "deny_only": false,
+      "correlation": {
+        "upstream_session_pointer": "/message/params/threadId",
+        "operation_pointer": "/message/params/turnId"
+      },
+      "responses": {
+        "accept": {"op": "literal", "value": {"decision": "accept"}},
+        "cancel": {"op": "literal", "value": {"decision": "cancel"}},
+        "decline": {"op": "literal", "value": {"decision": "decline"}},
+        "expire": {"op": "literal", "value": {"decision": "decline"}}
+      },
+      "deny_only": true,
       "permission_delta_fields": [
         "/message/params/networkApprovalContext",
         "/message/params/proposedExecpolicyAmendment",
@@ -993,7 +1076,16 @@
       "method": "item/fileChange/requestApproval",
       "schema": "schema/FileChangeRequestApprovalParams.json",
       "operation_class": "file_change",
-      "response_style": "decision",
+      "correlation": {
+        "upstream_session_pointer": "/message/params/threadId",
+        "operation_pointer": "/message/params/turnId"
+      },
+      "responses": {
+        "accept": {"op": "literal", "value": {"decision": "accept"}},
+        "cancel": {"op": "literal", "value": {"decision": "cancel"}},
+        "decline": {"op": "literal", "value": {"decision": "decline"}},
+        "expire": {"op": "literal", "value": {"decision": "decline"}}
+      },
       "deny_only": true,
       "permission_delta_fields": [
         "/message/params/grantRoot"
@@ -1029,7 +1121,16 @@
       "method": "item/permissions/requestApproval",
       "schema": "schema/PermissionsRequestApprovalParams.json",
       "operation_class": "additional_permissions",
-      "response_style": "permissions_denial",
+      "correlation": {
+        "upstream_session_pointer": "/message/params/threadId",
+        "operation_pointer": "/message/params/turnId"
+      },
+      "responses": {
+        "accept": {"op": "literal", "value": {"permissions": {"fileSystem": null, "network": null}, "scope": "turn", "strictAutoReview": true}},
+        "cancel": {"op": "literal", "value": {"permissions": {"fileSystem": null, "network": null}, "scope": "turn", "strictAutoReview": true}},
+        "decline": {"op": "literal", "value": {"permissions": {"fileSystem": null, "network": null}, "scope": "turn", "strictAutoReview": true}},
+        "expire": {"op": "literal", "value": {"permissions": {"fileSystem": null, "network": null}, "scope": "turn", "strictAutoReview": true}}
+      },
       "deny_only": true,
       "permission_delta_fields": [
         "/message/params/permissions"

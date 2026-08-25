@@ -112,6 +112,7 @@ fn require_structured_session_route_effect_contract(
     capsule_hash: &str,
     route_set: &str,
     allowed_effect_classes: &[String],
+    recover_upstream_session: bool,
 ) -> Result<()> {
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
@@ -132,6 +133,7 @@ fn require_structured_session_route_effect_contract(
         &profile.contract,
         route_set,
         allowed_effect_classes,
+        recover_upstream_session,
     )
 }
 
@@ -139,6 +141,7 @@ fn validate_structured_session_route_effect_contract(
     contract: &Value,
     route_set: &str,
     allowed_effect_classes: &[String],
+    recover_upstream_session: bool,
 ) -> Result<()> {
     let object = contract
         .as_object()
@@ -205,6 +208,28 @@ fn validate_structured_session_route_effect_contract(
         {
             bail!(
                 "structured-session initialization effect `{effect}` exceeds the root launch ceiling"
+            );
+        }
+    }
+    if recover_upstream_session {
+        let recovery = object
+            .get("recovery")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                anyhow!(
+                    "worker execution enables upstream recovery but the admitted protocol does not"
+                )
+            })?;
+        let recovery_route_sets = recovery
+            .get("route_sets")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("admitted structured-session recovery has no route sets"))?;
+        if !recovery_route_sets
+            .iter()
+            .any(|candidate| candidate.as_str() == Some(route_set))
+        {
+            bail!(
+                "worker execution enables upstream recovery for a route set not admitted by the protocol"
             );
         }
     }
@@ -389,8 +414,10 @@ pub(super) async fn start(
     if request.thread_id != cap.thread_id {
         bail!("dedicated-session start is restricted to the callback root");
     }
-    let _root_operation =
-        ryeos_app::hosted_operation::begin_hosted_root_operation(&request.thread_id)?;
+    let _root_operation = ryeos_app::hosted_operation::begin_hosted_root_operation(
+        &state.state_store,
+        &request.thread_id,
+    )?;
     let _credential_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
         &request.credential_profile_id,
     )
@@ -552,6 +579,7 @@ pub(super) async fn start(
         &capsule_hash,
         &request.route_set,
         &request.allowed_effect_classes,
+        request.recover_upstream_session,
     )?;
     let worker_instance_id = ryeos_app::thread_lifecycle::new_thread_id();
     let credential_generation = state.state_store.acquire_credential_profile(
@@ -774,10 +802,15 @@ mod tests {
     fn structured_contract() -> serde_json::Value {
         serde_json::json!({
             "initialization":[{"effect_class":"pure_read"}],
-            "route_sets":{"session":["credential.account.read", "turn.start"]},
+            "recovery":{
+                "resume_route":"record.restore",
+                "inspect_route":"record.inspect",
+                "route_sets":["records"]
+            },
+            "route_sets":{"records":["record.read", "operation.run"]},
             "routes":[
-                {"id":"credential.account.read", "effect_class":"credential_read"},
-                {"id":"turn.start", "effect_class":"external_effect"}
+                {"id":"record.read", "effect_class":"credential_read"},
+                {"id":"operation.run", "effect_class":"external_effect"}
             ]
         })
     }
@@ -798,8 +831,9 @@ mod tests {
         let missing_credential_read = vec!["external_effect".to_owned(), "pure_read".to_owned()];
         let error = validate_structured_session_route_effect_contract(
             &structured_contract(),
-            "session",
+            "records",
             &missing_credential_read,
+            true,
         )
         .unwrap_err();
         assert!(error.to_string().contains("credential_read"));
@@ -811,9 +845,26 @@ mod tests {
         ];
         validate_structured_session_route_effect_contract(
             &structured_contract(),
-            "session",
+            "records",
             &complete,
+            true,
         )
         .unwrap();
+
+        let error = validate_structured_session_route_effect_contract(
+            &structured_contract(),
+            "records",
+            &complete,
+            false,
+        );
+        assert!(error.is_ok());
+
+        let mut contract = structured_contract();
+        contract["recovery"] = serde_json::Value::Null;
+        let error = validate_structured_session_route_effect_contract(
+            &contract, "records", &complete, true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("enables upstream recovery"));
     }
 }

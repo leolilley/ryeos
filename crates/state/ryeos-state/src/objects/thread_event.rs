@@ -15,6 +15,15 @@ use super::{SCHEMA_VERSION, validate_object_kind};
 /// daemon. This limit is enforced on the complete event object, not only its
 /// payload, so every writer shares the same resource ceiling.
 pub const MAX_THREAD_EVENT_SERIALIZED_BYTES: usize = 512 * 1024;
+/// Exact serialized JSON ceiling for a worker observation batch before the
+/// daemon wraps it in a root-chain event.  The reserved 128 KiB covers every
+/// bounded root-event identity/hash field and keeps the resulting event below
+/// [`MAX_THREAD_EVENT_SERIALIZED_BYTES`].
+pub const MAX_STRUCTURED_OBSERVATION_BATCH_BYTES: usize = 384 * 1024;
+/// Hard cumulative ceiling for worker events accepted by one hosted session
+/// across all of its worker epochs. This bounds root-chain and projection
+/// growth independently of the seven-day lifetime ceiling.
+pub const MAX_HOSTED_SESSION_OBSERVATION_EVENTS: u64 = 1_048_576;
 
 /// Event durability classes.
 ///

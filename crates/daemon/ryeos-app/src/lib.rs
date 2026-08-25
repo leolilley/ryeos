@@ -6,6 +6,7 @@
 pub mod accounting_anchor;
 pub mod accounting_db;
 pub mod admission_events;
+pub mod authoritative_root_fact;
 pub mod build_info;
 pub mod bundle_event_service;
 pub mod bundle_transaction;

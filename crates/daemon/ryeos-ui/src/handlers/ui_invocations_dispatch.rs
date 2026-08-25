@@ -284,6 +284,7 @@ async fn execute_read_only_service(
                 terminator,
                 ryeos_engine::kind_registry::TerminatorDecl::InProcess {
                     registry: ryeos_engine::kind_registry::InProcessRegistryKind::Services,
+                    ..
                 }
             )
         });

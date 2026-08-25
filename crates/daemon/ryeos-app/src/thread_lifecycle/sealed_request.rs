@@ -125,7 +125,7 @@ where
 /// v7 seals subject-resolution authority independently for the project
 /// binding, admitted resolution closure, resolved root item, and the complete
 /// typed executor route selected at admission.
-pub(super) const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 8;
+pub(super) const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -545,6 +545,7 @@ pub struct SealedRootExecutionRequest {
     execution_hints: HashMap<String, Value>,
     validate_only: bool,
     resolved_history_policy: ResolvedThreadHistoryPolicy,
+    resolved_result_policy: ryeos_engine::history_policy::ResolvedThreadResultPolicy,
     captured_history_policy: ryeos_state::objects::CapturedThreadHistoryPolicy,
 }
 
@@ -677,6 +678,7 @@ impl SealedRootExecutionRequest {
             execution_hints: admission.plan_context.execution_hints.values.clone(),
             validate_only: admission.plan_context.validate_only,
             resolved_history_policy: admission.resolved_history_policy.clone(),
+            resolved_result_policy: admission.resolved_result_policy.clone(),
             captured_history_policy: admission.captured_history_policy.clone(),
         })
     }
@@ -900,11 +902,20 @@ impl SealedRootExecutionRequest {
             item_content_hash: content_hash.clone(),
             item_signer_fingerprint: None,
             item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Unsigned,
-            kind_schema_content_hash,
+            kind_schema_content_hash: kind_schema_content_hash.clone(),
             resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
                 node_policy:
                     ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig,
             },
+        };
+        let resolved_result_policy = ryeos_engine::history_policy::ResolvedThreadResultPolicy {
+            retention: ryeos_engine::history_policy::ThreadResultRetention::Full,
+            canonical_item_ref: canonical_item_ref.clone(),
+            item_content_hash: content_hash.clone(),
+            item_signer_fingerprint: None,
+            item_trust_class: TrustClass::Unsigned,
+            kind_schema_content_hash: kind_schema_content_hash.clone(),
+            source: ryeos_engine::history_policy::ResultPolicyProvenance::DefaultFull,
         };
         let mut fixture = Self {
             schema_version: SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION,
@@ -1002,6 +1013,7 @@ impl SealedRootExecutionRequest {
             execution_hints: HashMap::new(),
             validate_only: false,
             resolved_history_policy,
+            resolved_result_policy,
             captured_history_policy,
         };
         fixture.effective_definition_digest = fixture
@@ -1118,6 +1130,7 @@ impl SealedRootExecutionRequest {
             usage_subject_asserted_by: self.usage_subject_asserted_by.clone(),
             ref_bindings: self.ref_bindings.clone(),
             resolved_history_policy: self.resolved_history_policy.clone(),
+            resolved_result_policy: self.resolved_result_policy.clone(),
             captured_history_policy: self.captured_history_policy.clone(),
             project_binding,
             admitted_request_snapshot: None,

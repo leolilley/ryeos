@@ -2079,8 +2079,10 @@ fn reconcile_dedicated_candidate_bindings(state: &AppState) -> Result<usize> {
         if thread.status != "running" {
             continue;
         }
-        let candidate_root_operation =
-            ryeos_app::hosted_operation::begin_hosted_root_operation(&session.root_thread_id)?;
+        let candidate_root_operation = ryeos_app::hosted_operation::begin_hosted_root_operation(
+            &state.state_store,
+            &session.root_thread_id,
+        )?;
         let mut workspace = state
             .state_store
             .execution_workspace(&session.workspace_id)?

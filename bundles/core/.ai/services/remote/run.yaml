@@ -1,7 +1,8 @@
-# ryeos:signed:2026-08-24T15:36:59Z:f885b773374a1695336a48486cf33270983c78c049ea990545d67903bac1a2f1:pzYCsxKDHd+uHPJxyp3TWxR2Da2wmCsA/ugVVjiVIZKH2K712yn5rLiBcCuSxRUYEJAIGZgJMjY6yeXQSghuAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-24T22:45:17Z:8e2439ad472fa4eea9eaffd6e33697ffaebe95974db752b57db5e088375e9b58:DuEla6ic97QS+BPUswvmDzrFGKKdApVom1nDUcwWvFPBy2K/MSVWSkI0p+/AunAhd3cQzMpbh247/IKkPGKNDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.run
 required_caps: ["ryeos.execute.service.remote/admin"]
+result_retention: digest_only
 schema:
   remote: string?
   item_ref: string

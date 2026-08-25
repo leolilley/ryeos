@@ -583,7 +583,14 @@ impl SubprocessProtocolDecl {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TerminatorDecl {
     /// Daemon calls a registered Rust fn in a named registry.
-    InProcess { registry: InProcessRegistryKind },
+    InProcess {
+        registry: InProcessRegistryKind,
+        /// Closed, signed claims about terminal mechanics implemented by this
+        /// dispatch path. These are capabilities of the terminator, not of an
+        /// item kind or provider.
+        #[serde(default)]
+        capabilities: InProcessTerminatorCapabilities,
+    },
     /// Daemon spawns a child binary; envelope shape comes from the
     /// referenced protocol descriptor.
     Subprocess {
@@ -591,6 +598,20 @@ pub enum TerminatorDecl {
         #[serde(rename = "protocol")]
         protocol: SubprocessProtocolDecl,
     },
+}
+
+/// Mechanics an in-process terminator promises to enforce. New registry
+/// implementations must explicitly implement and advertise each capability;
+/// omission is fail-closed.
+#[derive(
+    Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash,
+)]
+#[serde(deny_unknown_fields)]
+pub struct InProcessTerminatorCapabilities {
+    /// The terminator returns the live result to the caller while projecting
+    /// the frozen result-retention policy into its durable terminal.
+    #[serde(default)]
+    pub durable_result_projection: bool,
 }
 
 /// Closed enum of named in-process handler registries. Single variant in V5.3
@@ -874,6 +895,15 @@ pub struct ThreadHistoryPolicyDecl {
     pub composed_path: String,
 }
 
+/// Kind-declared source for the durable representation of a successful
+/// execution result. The engine resolves the named scalar from the verified
+/// composed item; executors consume only the resulting closed policy.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadResultPolicyDecl {
+    pub composed_path: String,
+}
+
 /// Signed, kind-owned hook admission contract.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1042,6 +1072,10 @@ pub struct ExecutionSchema {
     /// cannot author an override; the node default still applies.
     #[serde(default)]
     pub history_policy: Option<ThreadHistoryPolicyDecl>,
+    /// Optional authored durable-result policy source. Absence resolves to
+    /// full result retention.
+    #[serde(default)]
+    pub result_policy: Option<ThreadResultPolicyDecl>,
     /// Complete hook/event contract. Hook-capable kinds must produce one
     /// captured plan in the declared derived slot before finalization.
     #[serde(default)]
@@ -1788,6 +1822,7 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         }
     };
     validate_history_policy_value_contract(execution.as_ref(), &composed_value_contract, display)?;
+    validate_result_policy_value_contract(execution.as_ref(), &composed_value_contract, display)?;
 
     let composer = data
         .get("composer")
@@ -2347,6 +2382,7 @@ fn parse_execution_schema(
         "delegate",
         "thread_profile",
         "history_policy",
+        "result_policy",
         "hooks",
         "external_content",
         "source_closure",
@@ -2439,6 +2475,21 @@ fn parse_execution_schema(
                 },
             )?;
             validate_history_policy_decl(&decl, display)?;
+            Some(decl)
+        }
+        None => None,
+    };
+
+    let result_policy = match execution_value.get("result_policy") {
+        Some(value) => {
+            let decl = serde_yaml::from_value::<ThreadResultPolicyDecl>(value.clone()).map_err(
+                |error| EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: invalid execution.result_policy declaration: {error}"
+                    ),
+                },
+            )?;
+            validate_policy_composed_path("result_policy", &decl.composed_path, display)?;
             Some(decl)
         }
         None => None,
@@ -2787,6 +2838,7 @@ fn parse_execution_schema(
         delegate,
         thread_profile,
         history_policy,
+        result_policy,
         hooks,
         external_content,
         source_closure,
@@ -2984,7 +3036,15 @@ fn validate_history_policy_decl(
     decl: &ThreadHistoryPolicyDecl,
     display: &str,
 ) -> Result<(), EngineError> {
-    let mut chars = decl.composed_path.chars();
+    validate_policy_composed_path("history_policy", &decl.composed_path, display)
+}
+
+fn validate_policy_composed_path(
+    policy_name: &str,
+    composed_path: &str,
+    display: &str,
+) -> Result<(), EngineError> {
+    let mut chars = composed_path.chars();
     let starts_valid = chars
         .next()
         .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic());
@@ -2992,8 +3052,56 @@ fn validate_history_policy_decl(
     if !starts_valid || !rest_valid {
         return Err(EngineError::SchemaLoaderError {
             reason: format!(
-                "{display}: execution.history_policy.composed_path `{}` is invalid; use one ASCII identifier key",
-                decl.composed_path
+                "{display}: execution.{policy_name}.composed_path `{composed_path}` is invalid; use one ASCII identifier key"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_result_policy_value_contract(
+    execution: Option<&ExecutionSchema>,
+    contract: &ValueShape,
+    display: &str,
+) -> Result<(), EngineError> {
+    let Some(declaration) = execution.and_then(|value| value.result_policy.as_ref()) else {
+        return Ok(());
+    };
+    let supports_projection = matches!(
+        execution.and_then(|value| value.terminator.as_ref()),
+        Some(TerminatorDecl::InProcess { capabilities, .. })
+            if capabilities.durable_result_projection
+    );
+    if !supports_projection {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: execution.result_policy requires an in-process terminator declaring capabilities.durable_result_projection"
+            ),
+        });
+    }
+    let field = contract
+        .optional
+        .get(&declaration.composed_path)
+        .ok_or_else(|| EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: execution.result_policy.composed_path `{}` must be admitted as an optional string in composed_value_contract",
+                declaration.composed_path
+            ),
+        })?;
+    let valid = matches!(
+        field,
+        FieldType::Single {
+            prim: PrimType::String,
+            enum_values: Some(values),
+            nested_contract: None,
+            element_type: None,
+        } if values == &["full".to_owned(), "digest_only".to_owned()]
+    );
+    if !valid {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: composed_value_contract.{} must be exactly the string enum [full, digest_only]",
+                declaration.composed_path
             ),
         });
     }
@@ -3909,6 +4017,79 @@ formats:
     }
 
     #[test]
+    fn execution_result_policy_requires_the_exact_kind_declared_enum() {
+        let valid = "\
+location:\n  directory: services\nresolution: []\nexecution:\n  terminator:\n    kind: in_process\n    registry: services\n    capabilities:\n      durable_result_projection: true\n  result_policy:\n    composed_path: result_retention\nformats:\n  - extensions: [\".yaml\"]\n    parser: parser:ryeos/core/yaml/yaml\n    signature:\n      prefix: \"#\"\ncomposed_value_contract:\n  root_type: mapping\n  required: {}\n  optional:\n    result_retention:\n      type: single\n      prim: string\n      enum: [full, digest_only]\n";
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        sign_and_write_schema(&tmp, "service", valid, &sk);
+        let registry = KindRegistry::load_base(&[tmp], &ts).unwrap();
+        assert_eq!(
+            registry
+                .get("service")
+                .and_then(KindSchema::execution)
+                .and_then(|execution| execution.result_policy.as_ref())
+                .map(|declaration| declaration.composed_path.as_str()),
+            Some("result_retention")
+        );
+
+        for invalid_field in [
+            "      prim: string\n",
+            "      prim: string\n      enum: [digest_only, full]\n",
+            "      prim: string\n      enum: [full, digest_only, ephemeral]\n",
+        ] {
+            let tmp = tempdir();
+            let sk = test_signing_key();
+            let ts = test_trust_store(&sk);
+            let invalid = valid.replace(
+                "      prim: string\n      enum: [full, digest_only]\n",
+                invalid_field,
+            );
+            sign_and_write_schema(&tmp, "service", &invalid, &sk);
+            let error = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("must be exactly the string enum [full, digest_only]"),
+                "unexpected error: {error}"
+            );
+        }
+
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let unsupported = valid.replace(
+            "  terminator:\n    kind: in_process\n    registry: services\n    capabilities:\n      durable_result_projection: true\n",
+            "  terminator:\n    kind: subprocess\n    protocol: protocol:test/fixture\n",
+        );
+        sign_and_write_schema(&tmp, "service", &unsupported, &sk);
+        let error = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "requires an in-process terminator declaring capabilities.durable_result_projection"
+            ),
+            "unexpected error: {error}"
+        );
+
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let unsupported = valid.replace(
+            "    capabilities:\n      durable_result_projection: true\n",
+            "",
+        );
+        sign_and_write_schema(&tmp, "service", &unsupported, &sk);
+        let error = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "requires an in-process terminator declaring capabilities.durable_result_projection"
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn empty_resolution_is_explicit() {
         let tmp = tempdir();
         let sk = test_signing_key();
@@ -4089,7 +4270,8 @@ execution:
         assert_eq!(
             exec.terminator,
             Some(TerminatorDecl::InProcess {
-                registry: InProcessRegistryKind::Services
+                registry: InProcessRegistryKind::Services,
+                capabilities: InProcessTerminatorCapabilities::default(),
             })
         );
     }

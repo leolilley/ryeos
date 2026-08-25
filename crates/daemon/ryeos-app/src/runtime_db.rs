@@ -1065,6 +1065,8 @@ CREATE TABLE IF NOT EXISTS dedicated_session_observation_batch (
     through_sequence INTEGER NOT NULL CHECK (through_sequence >= first_sequence),
     previous_digest TEXT,
     batch_digest TEXT NOT NULL,
+    cumulative_event_count INTEGER NOT NULL CHECK (cumulative_event_count > 0),
+    canonical_batch_json TEXT,
     state TEXT NOT NULL CHECK (state IN ('append_contacting', 'settled', 'append_unknown')),
     created_at_ms INTEGER NOT NULL,
     settled_at_ms INTEGER,
@@ -1147,7 +1149,9 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 9 embeds the exact retained-current-HEAD destination in every durable
 // execution-project authority envelope. A predecessor row cannot authorize
 // publication under this contract.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 9;
+// Epoch 10 retains the exact canonical observation batch before root-chain
+// contact, so startup can complete an accepted append without worker replay.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 10;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -2411,6 +2415,18 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         not_null: true,
                     },
                     sqlite_schema::ColumnSpec {
+                        name: "cumulative_event_count",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "canonical_batch_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
                         name: "state",
                         col_type: "TEXT",
                         pk: false,
@@ -3404,6 +3420,7 @@ pub struct DedicatedObservationBatchRecord {
     pub first_sequence: u64,
     pub through_sequence: u64,
     pub batch_digest: String,
+    pub canonical_batch: serde_json::Value,
     pub state: String,
 }
 
@@ -4400,15 +4417,12 @@ impl RuntimeDb {
         session_id: &str,
         worker_boot_epoch: u64,
         remote_thread_id: &str,
-        remote_status: &str,
+        recovery_outcome: &str,
     ) -> Result<()> {
-        if !matches!(
-            remote_status,
-            "idle" | "active" | "notLoaded" | "systemError"
-        ) {
-            bail!("remote recovery status is outside the pinned vocabulary");
+        if !matches!(recovery_outcome, "safe_idle" | "uncertain") {
+            bail!("upstream recovery outcome is outside the generic vocabulary");
         }
-        let next = if remote_status == "idle" {
+        let next = if recovery_outcome == "safe_idle" {
             "idle"
         } else {
             "outcome_unknown"
@@ -5290,9 +5304,9 @@ impl RuntimeDb {
     }
 
     /// Reserve the possible-contact boundary before appending a worker batch
-    /// to the authoritative root thread event chain. A contacting row is never
-    /// automatically retried: after a crash RyeOS cannot prove whether the CAS
-    /// append happened.
+    /// to the authoritative root thread event chain. The exact canonical batch
+    /// is retained so startup, after quiescing the old worker epoch, can inspect
+    /// root testimony and safely append or rebuild the missing projection.
     pub fn reserve_dedicated_observation_batch(
         &self,
         session_id: &str,
@@ -5301,6 +5315,7 @@ impl RuntimeDb {
         through_sequence: u64,
         previous_digest: Option<&str>,
         batch_digest: &str,
+        canonical_batch: &serde_json::Value,
     ) -> Result<ObservationBatchReservation> {
         validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
         validate_bounded_runtime_text("observation batch digest", batch_digest, 128)?;
@@ -5314,13 +5329,34 @@ impl RuntimeDb {
         {
             bail!("observation batch sequence range is invalid or unbounded");
         }
+        let canonical_batch_json = serde_json::to_string(canonical_batch)?;
+        if canonical_batch_json.len() > ryeos_state::objects::MAX_STRUCTURED_OBSERVATION_BATCH_BYTES
+        {
+            bail!("observation batch exceeds its exact serialized-byte ceiling");
+        }
         let epoch = i64::try_from(worker_boot_epoch)?;
         let first = i64::try_from(first_sequence)?;
         let through = i64::try_from(through_sequence)?;
         let tx = self.conn.unchecked_transaction()?;
         let attached: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM dedicated_session
-              WHERE session_id=?1 AND worker_boot_epoch=?2 AND state!='terminal')",
+            "SELECT EXISTS(
+                SELECT 1
+                  FROM dedicated_session
+                  JOIN worker_process
+                    ON worker_process.worker_instance_id=dedicated_session.worker_instance_id
+                   AND worker_process.session_id=dedicated_session.session_id
+                   AND worker_process.boot_epoch=dedicated_session.worker_boot_epoch
+                  JOIN credential_profile
+                    ON credential_profile.profile_id=dedicated_session.credential_profile_id
+                 WHERE dedicated_session.session_id=?1
+                   AND dedicated_session.worker_boot_epoch=?2
+                   AND dedicated_session.state IN ('idle','turn_running','awaiting_approval','recovering')
+                   AND worker_process.state='live'
+                   AND worker_process.cleanup_state='owned'
+                   AND credential_profile.credential_generation=dedicated_session.credential_generation
+                   AND credential_profile.lock_owner=dedicated_session.worker_instance_id
+                   AND credential_profile.state IN ('unauthenticated','enrolling','confirming','active')
+            )",
             params![session_id, epoch],
             |row| row.get(0),
         )?;
@@ -5329,7 +5365,8 @@ impl RuntimeDb {
         }
         let existing = tx
             .query_row(
-                "SELECT through_sequence, previous_digest, batch_digest, state
+                "SELECT through_sequence, previous_digest, batch_digest, cumulative_event_count,
+                        canonical_batch_json, state
                    FROM dedicated_session_observation_batch
                   WHERE session_id=?1 AND worker_boot_epoch=?2 AND first_sequence=?3",
                 params![session_id, epoch, first],
@@ -5338,7 +5375,9 @@ impl RuntimeDb {
                         row.get::<_, i64>(0)?,
                         row.get::<_, Option<String>>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
                     ))
                 },
             )
@@ -5350,10 +5389,23 @@ impl RuntimeDb {
             {
                 bail!("observation batch sequence identity was reused with different content");
             }
-            return match existing.3.as_str() {
-                "settled" => Ok(ObservationBatchReservation::AlreadySettled),
-                "append_contacting" | "append_unknown" => {
+            if existing.3 <= 0
+                || u64::try_from(existing.3)?
+                    > ryeos_state::objects::MAX_HOSTED_SESSION_OBSERVATION_EVENTS
+            {
+                bail!("observation batch has an invalid cumulative event count");
+            }
+            return match existing.5.as_str() {
+                "settled" if existing.4.is_none() => {
+                    Ok(ObservationBatchReservation::AlreadySettled)
+                }
+                "append_contacting" | "append_unknown"
+                    if existing.4.as_deref() == Some(canonical_batch_json.as_str()) =>
+                {
                     Ok(ObservationBatchReservation::RebuildProjection)
+                }
+                "append_contacting" | "append_unknown" => {
+                    bail!("observation batch sequence identity was reused with different content")
                 }
                 _ => bail!("observation batch has an invalid durable state"),
             };
@@ -5385,12 +5437,37 @@ impl RuntimeDb {
             }
             _ => bail!("observation batch has a gap, reordering, or broken digest chain"),
         }
+        let settled_event_count = tx
+            .query_row(
+                "SELECT cumulative_event_count
+                   FROM dedicated_session_observation_batch
+                  WHERE session_id=?1 AND state='settled'
+                  ORDER BY settled_at_ms DESC, worker_boot_epoch DESC, through_sequence DESC
+                  LIMIT 1",
+                [session_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        let batch_event_count = through
+            .checked_sub(first)
+            .and_then(|count| count.checked_add(1))
+            .ok_or_else(|| anyhow!("observation batch event count overflow"))?;
+        let cumulative_event_count = settled_event_count
+            .checked_add(batch_event_count)
+            .ok_or_else(|| anyhow!("hosted session observation event count overflow"))?;
+        if cumulative_event_count
+            > i64::try_from(ryeos_state::objects::MAX_HOSTED_SESSION_OBSERVATION_EVENTS)?
+        {
+            bail!("hosted session observation event ceiling is exhausted");
+        }
         let now = lillux::time::timestamp_millis() as i64;
         tx.execute(
             "INSERT INTO dedicated_session_observation_batch(
                 session_id, worker_boot_epoch, first_sequence, through_sequence,
-                previous_digest, batch_digest, state, created_at_ms, settled_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'append_contacting', ?7, NULL)",
+                previous_digest, batch_digest, cumulative_event_count, canonical_batch_json,
+                state, created_at_ms, settled_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'append_contacting', ?9, NULL)",
             params![
                 session_id,
                 epoch,
@@ -5398,6 +5475,8 @@ impl RuntimeDb {
                 through,
                 previous_digest,
                 batch_digest,
+                cumulative_event_count,
+                canonical_batch_json,
                 now
             ],
         )?;
@@ -5412,15 +5491,18 @@ impl RuntimeDb {
         first_sequence: u64,
         batch_digest: &str,
     ) -> Result<()> {
-        let changed = self.conn.execute(
+        let epoch = i64::try_from(worker_boot_epoch)?;
+        let first = i64::try_from(first_sequence)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
             "UPDATE dedicated_session_observation_batch
-                SET state='settled', settled_at_ms=?5
+                SET state='settled', canonical_batch_json=NULL, settled_at_ms=?5
               WHERE session_id=?1 AND worker_boot_epoch=?2 AND first_sequence=?3
                 AND batch_digest=?4 AND state IN ('append_contacting','append_unknown')",
             params![
                 session_id,
-                i64::try_from(worker_boot_epoch)?,
-                i64::try_from(first_sequence)?,
+                epoch,
+                first,
                 batch_digest,
                 lillux::time::timestamp_millis() as i64
             ],
@@ -5428,6 +5510,17 @@ impl RuntimeDb {
         if changed != 1 {
             bail!("observation batch lost its append-contacting reservation");
         }
+        // The root chain retains complete authoritative testimony. SQLite
+        // keeps one cumulative predecessor frontier per session plus any
+        // currently ambiguous outbox body; settled per-batch metadata is not
+        // a second unbounded journal.
+        tx.execute(
+            "DELETE FROM dedicated_session_observation_batch
+              WHERE session_id=?1 AND state='settled'
+                AND NOT (worker_boot_epoch=?2 AND first_sequence=?3)",
+            params![session_id, epoch, first],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -5440,7 +5533,7 @@ impl RuntimeDb {
     ) -> Result<Vec<DedicatedObservationBatchRecord>> {
         let mut statement = self.conn.prepare(
             "SELECT session_id, worker_boot_epoch, first_sequence,
-                    through_sequence, batch_digest, state
+                    through_sequence, batch_digest, canonical_batch_json, state
                FROM dedicated_session_observation_batch
               WHERE state IN ('append_contacting','append_unknown')
               ORDER BY session_id, worker_boot_epoch, first_sequence",
@@ -5454,6 +5547,7 @@ impl RuntimeDb {
                     row.get::<_, i64>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
                 ))
             })?
             .map(|row| {
@@ -5464,7 +5558,14 @@ impl RuntimeDb {
                     first_sequence: u64::try_from(row.2)?,
                     through_sequence: u64::try_from(row.3)?,
                     batch_digest: row.4,
-                    state: row.5,
+                    canonical_batch: serde_json::from_str(&row.5).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            5,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    state: row.6,
                 })
             })
             .collect()
@@ -5650,6 +5751,44 @@ impl RuntimeDb {
             })
         })
         .collect()
+    }
+
+    pub fn dedicated_approval_has_exact_state(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+        request_digest: &str,
+        reservation_token: &str,
+        decision_digest: &str,
+        state: &str,
+    ) -> Result<bool> {
+        validate_bounded_runtime_text("approval session id", session_id, 256)?;
+        validate_bounded_runtime_text("approval id", approval_id, 256)?;
+        validate_sha256("approval request digest", request_digest)?;
+        validate_bounded_runtime_text("approval reservation token", reservation_token, 256)?;
+        validate_sha256("approval decision digest", decision_digest)?;
+        if !matches!(state, "expired" | "delivery_settled") {
+            bail!("approval exact-state query is outside its fixed vocabulary");
+        }
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session_approval
+                  WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                    AND request_digest=?4 AND reservation_token=?5
+                    AND decision_digest=?6 AND state=?7)",
+                params![
+                    session_id,
+                    approval_id,
+                    i64::try_from(worker_boot_epoch)?,
+                    request_digest,
+                    reservation_token,
+                    decision_digest,
+                    state,
+                ],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     pub fn reconcile_dedicated_approval_delivery_unknown(
@@ -5960,9 +6099,71 @@ impl RuntimeDb {
             ],
         )?;
         if changed != 1 {
-            bail!("approval unknown settlement lost its contacted CAS");
+            let expiry_won: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dedicated_session_approval
+                  WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                    AND reservation_token=?4 AND decision_digest=?5 AND state='expired')",
+                params![
+                    session_id,
+                    approval_id,
+                    i64::try_from(worker_boot_epoch)?,
+                    reservation_token,
+                    decision_digest,
+                ],
+                |row| row.get(0),
+            )?;
+            if !expiry_won {
+                bail!("approval unknown settlement lost its contacted CAS");
+            }
         }
         Ok(())
+    }
+
+    /// Project an exact root-appended worker expiry observation. The worker
+    /// protocol has already sent its admitted fail-closed response before this
+    /// fact is accepted, so it—not projection-time wall clock—is the authority.
+    /// Expiry may win against a concurrently reserved/contacting decision, but
+    /// never against a delivery already proven settled.
+    pub fn observe_dedicated_session_approval_expiry(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+        request_digest: &str,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("approval session id", session_id, 256)?;
+        validate_bounded_runtime_text("approval id", approval_id, 256)?;
+        validate_sha256("approval request digest", request_digest)?;
+        let epoch = i64::try_from(worker_boot_epoch)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let changed = self.conn.execute(
+            "UPDATE dedicated_session_approval
+                SET state='expired', resolved_at_ms=?5
+              WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                AND request_digest=?4
+                AND state IN ('pending','decision_reserved','delivery_contacting','delivery_unknown')",
+            params![session_id, approval_id, epoch, request_digest, now],
+        )?;
+        if changed == 1 {
+            return Ok(());
+        }
+        let state = self
+            .conn
+            .query_row(
+                "SELECT state FROM dedicated_session_approval
+                  WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                    AND request_digest=?4",
+                params![session_id, approval_id, epoch, request_digest],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        match state.as_deref() {
+            Some("expired") => Ok(()),
+            Some("delivery_settled") => {
+                bail!("worker expiry contradicts an already-settled approval delivery")
+            }
+            _ => bail!("observed approval expiry lost its exact id/epoch/digest CAS"),
+        }
     }
 
     pub fn expire_dedicated_session_approval(
@@ -11927,7 +12128,7 @@ mod tests {
         db.complete_worker_binding("worker-recover-2", "S-recover", 2)
             .unwrap();
 
-        let payload = serde_json::json!({"route_id":"session.resume","payload":{}});
+        let payload = serde_json::json!({"upstream_session_id":"upstream-recover"});
         let reattach = db
             .reserve_dedicated_session_command(NewDedicatedSessionCommand {
                 session_id: "S-recover",
@@ -11973,7 +12174,7 @@ mod tests {
         .unwrap();
         db.observe_dedicated_remote_reattach("S-recover", 2, "remote-recover")
             .unwrap();
-        db.settle_dedicated_remote_recovery_status("S-recover", 2, "remote-recover", "idle")
+        db.settle_dedicated_remote_recovery_status("S-recover", 2, "remote-recover", "safe_idle")
             .unwrap();
         let recovered = db.dedicated_session("S-recover").unwrap().unwrap();
         assert_eq!(recovered.state, "idle");
@@ -12592,6 +12793,29 @@ mod tests {
         let (_tmp, db) = fresh_db();
         db.conn
             .execute(
+                "INSERT INTO credential_profile(
+                    profile_id, owner_principal, home_id, credential_generation, state,
+                    active_login_id, login_epoch, login_expires_at_ms, sanitized_account_json,
+                    lock_owner, created_at_ms, updated_at_ms
+                 ) VALUES ('P-observe', 'fp:operator', 'home-observe', 1, 'active',
+                           NULL, 0, NULL, NULL, 'worker-observe', 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO worker_process(
+                    worker_instance_id, boot_identity_hash, session_capsule_hash,
+                    boot_epoch, lifecycle_generation, process_identity,
+                    control_channel_identity, state, daemon_generation_id,
+                    session_id, cleanup_state, created_at_ms, updated_at_ms
+                 ) VALUES ('worker-observe', ?1, ?2, 3, 1, '{}', 'fd:observe',
+                           'live', 'daemon-observe', 'S-observe', 'owned', 1, 1)",
+                [&"e".repeat(64), &"a".repeat(64)],
+            )
+            .unwrap();
+        db.conn
+            .execute(
                 "INSERT INTO dedicated_session(
                     session_id, root_thread_id, owner_principal, admitted_capsule_hash,
                     worker_instance_id, worker_boot_epoch, workspace_id,
@@ -12605,21 +12829,74 @@ mod tests {
                 [&"a".repeat(64)],
             )
             .unwrap();
+        let canonical_batch = serde_json::json!({
+            "events": [],
+            "session_observations": [],
+        });
         assert_eq!(
-            db.reserve_dedicated_observation_batch("S-observe", 3, 1, 2, None, &"b".repeat(64),)
-                .unwrap(),
+            db.reserve_dedicated_observation_batch(
+                "S-observe",
+                3,
+                1,
+                2,
+                None,
+                &"b".repeat(64),
+                &canonical_batch,
+            )
+            .unwrap(),
             ObservationBatchReservation::ContactAppend
         );
         assert_eq!(
-            db.reserve_dedicated_observation_batch("S-observe", 3, 1, 2, None, &"b".repeat(64),)
-                .unwrap(),
+            db.reserve_dedicated_observation_batch(
+                "S-observe",
+                3,
+                1,
+                2,
+                None,
+                &"b".repeat(64),
+                &canonical_batch,
+            )
+            .unwrap(),
             ObservationBatchReservation::RebuildProjection
+        );
+        assert!(
+            db.reserve_dedicated_observation_batch(
+                "S-observe",
+                3,
+                1,
+                2,
+                None,
+                &"b".repeat(64),
+                &serde_json::json!({"events":[{"changed":true}],"session_observations":[]}),
+            )
+            .is_err(),
+            "an accepted observation coordinate must retain one exact canonical batch"
         );
         db.settle_dedicated_observation_batch("S-observe", 3, 1, &"b".repeat(64))
             .unwrap();
+        assert!(
+            db.conn
+                .query_row(
+                    "SELECT canonical_batch_json FROM dedicated_session_observation_batch
+                      WHERE session_id='S-observe' AND worker_boot_epoch=3 AND first_sequence=1",
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .unwrap()
+                .is_none(),
+            "the authoritative root fact replaces the settled SQLite body"
+        );
         assert_eq!(
-            db.reserve_dedicated_observation_batch("S-observe", 3, 1, 2, None, &"b".repeat(64),)
-                .unwrap(),
+            db.reserve_dedicated_observation_batch(
+                "S-observe",
+                3,
+                1,
+                2,
+                None,
+                &"b".repeat(64),
+                &canonical_batch,
+            )
+            .unwrap(),
             ObservationBatchReservation::AlreadySettled
         );
         assert!(
@@ -12630,6 +12907,7 @@ mod tests {
                 4,
                 Some(&"b".repeat(64)),
                 &"c".repeat(64),
+                &canonical_batch,
             )
             .is_err()
         );
@@ -12641,13 +12919,22 @@ mod tests {
                 3,
                 Some(&"b".repeat(64)),
                 &"c".repeat(64),
+                &canonical_batch,
             )
             .unwrap(),
             ObservationBatchReservation::ContactAppend
         );
         assert!(
-            db.reserve_dedicated_observation_batch("S-observe", 2, 1, 1, None, &"d".repeat(64),)
-                .is_err()
+            db.reserve_dedicated_observation_batch(
+                "S-observe",
+                2,
+                1,
+                1,
+                None,
+                &"d".repeat(64),
+                &canonical_batch,
+            )
+            .is_err()
         );
         let unfinished = db.dedicated_observation_outbox_records().unwrap();
         assert_eq!(unfinished.len(), 1);
@@ -12665,6 +12952,86 @@ mod tests {
             db.dedicated_observation_outbox_records()
                 .unwrap()
                 .is_empty()
+        );
+        assert_eq!(
+            db.reserve_dedicated_observation_batch(
+                "S-observe",
+                3,
+                3,
+                3,
+                Some(&"b".repeat(64)),
+                &"c".repeat(64),
+                &canonical_batch,
+            )
+            .unwrap(),
+            ObservationBatchReservation::ContactAppend
+        );
+        db.settle_dedicated_observation_batch("S-observe", 3, 3, &"c".repeat(64))
+            .unwrap();
+        let frontier = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*), first_sequence, cumulative_event_count
+                   FROM dedicated_session_observation_batch
+                  WHERE session_id='S-observe' AND state='settled'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(frontier, (1, 3, 3));
+        db.conn
+            .execute(
+                "UPDATE dedicated_session_observation_batch
+                    SET cumulative_event_count=?2
+                  WHERE session_id=?1 AND state='settled'",
+                params![
+                    "S-observe",
+                    i64::try_from(ryeos_state::objects::MAX_HOSTED_SESSION_OBSERVATION_EVENTS)
+                        .unwrap()
+                ],
+            )
+            .unwrap();
+        let ceiling = db
+            .reserve_dedicated_observation_batch(
+                "S-observe",
+                3,
+                4,
+                4,
+                Some(&"c".repeat(64)),
+                &"d".repeat(64),
+                &canonical_batch,
+            )
+            .unwrap_err();
+        assert!(
+            ceiling
+                .to_string()
+                .contains("observation event ceiling is exhausted")
+        );
+
+        let generation = db
+            .revoke_credential_profile("P-observe", "fp:operator", 1)
+            .unwrap();
+        assert_eq!(generation, 2);
+        db.fence_abandoned_worker_process("worker-observe", "S-observe", 3, "unproved")
+            .unwrap();
+        assert!(
+            db.reserve_dedicated_observation_batch(
+                "S-observe",
+                3,
+                3,
+                3,
+                Some(&"b".repeat(64)),
+                &"d".repeat(64),
+                &canonical_batch,
+            )
+            .is_err(),
+            "a revoked unproved worker epoch must not append buffered testimony"
         );
     }
 
@@ -13014,15 +13381,80 @@ mod tests {
             expires_at_ms: lillux::time::timestamp_millis() as i64 + 60_000,
         })
         .unwrap();
-        db.conn
-            .execute(
-                "UPDATE dedicated_session_approval SET expires_at_ms=?1
-                  WHERE session_id='S-ledger' AND approval_id='approval-expiry'",
-                [lillux::time::timestamp_millis() as i64 - 1],
+        db.observe_dedicated_session_approval_expiry(
+            "S-ledger",
+            "approval-expiry",
+            4,
+            &"b".repeat(64),
+        )
+        .unwrap();
+        db.create_dedicated_session_approval(NewDedicatedSessionApproval {
+            session_id: "S-ledger",
+            approval_id: "approval-expiry-contacting",
+            worker_instance_id: "worker-ledger",
+            worker_boot_epoch: 4,
+            request_digest: &"d".repeat(64),
+            operation_class: "fixture",
+            requested_authority: &serde_json::json!({}),
+            expires_at_ms: lillux::time::timestamp_millis() as i64 + 60_000,
+        })
+        .unwrap();
+        db.reserve_dedicated_session_approval_decision(
+            "S-ledger",
+            "approval-expiry-contacting",
+            4,
+            &"d".repeat(64),
+            "fp:operator",
+            &approval_decision,
+            &approval_decision_digest,
+            "reservation-expiry-contacting",
+        )
+        .unwrap();
+        db.mark_dedicated_approval_delivery_contacting(
+            "S-ledger",
+            "approval-expiry-contacting",
+            4,
+            "reservation-expiry-contacting",
+            &approval_decision_digest,
+        )
+        .unwrap();
+        db.observe_dedicated_session_approval_expiry(
+            "S-ledger",
+            "approval-expiry-contacting",
+            4,
+            &"d".repeat(64),
+        )
+        .unwrap();
+        db.mark_dedicated_approval_delivery_unknown(
+            "S-ledger",
+            "approval-expiry-contacting",
+            4,
+            "reservation-expiry-contacting",
+            &approval_decision_digest,
+        )
+        .unwrap();
+        assert!(
+            db.settle_dedicated_approval_delivery(
+                "S-ledger",
+                "approval-expiry-contacting",
+                4,
+                "reservation-expiry-contacting",
+                &approval_decision_digest,
             )
-            .unwrap();
-        db.expire_dedicated_session_approval("S-ledger", "approval-expiry", 4)
-            .unwrap();
+            .is_err(),
+            "a root-observed expiry must win over an unsettled delivery attempt"
+        );
+        assert_eq!(
+            db.conn
+                .query_row(
+                    "SELECT state FROM dedicated_session_approval
+                      WHERE session_id='S-ledger' AND approval_id='approval-expiry-contacting'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "expired"
+        );
         assert!(
             db.pending_dedicated_session_approvals("S-ledger")
                 .unwrap()
@@ -13158,6 +13590,31 @@ mod tests {
             db.dedicated_session("S-candidate").unwrap().unwrap().state,
             "publish_ready"
         );
+        db.reserve_dedicated_candidate_publication("S-candidate", &candidate)
+            .unwrap();
+        let unknown_result = format!("publication_unknown:{candidate}");
+        db.settle_dedicated_candidate_publication("S-candidate", &candidate, &unknown_result)
+            .unwrap();
+        let unknown = db.dedicated_session("S-candidate").unwrap().unwrap();
+        assert_eq!(unknown.state, "terminal");
+        assert_eq!(
+            unknown.publication_result.as_deref(),
+            Some(unknown_result.as_str())
+        );
+        assert!(
+            db.reserve_dedicated_candidate_publication("S-candidate", &candidate)
+                .is_err()
+        );
+
+        // Reuse the fully constructed candidate to retain independent discard
+        // settlement coverage in this state-machine test.
+        db.conn
+            .execute(
+                "UPDATE dedicated_session SET state='publish_ready', publication_result='retained'
+                  WHERE session_id='S-candidate'",
+                [],
+            )
+            .unwrap();
         db.reserve_dedicated_candidate_discard("S-candidate", &candidate)
             .unwrap();
         db.settle_dedicated_candidate_discard("S-candidate", &candidate)

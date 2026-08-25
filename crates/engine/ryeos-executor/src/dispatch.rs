@@ -2902,6 +2902,7 @@ pub async fn dispatch_service(
     match terminator {
         TerminatorDecl::InProcess {
             registry: InProcessRegistryKind::Services,
+            ..
         } => {
             if request.effect_authority.is_some() {
                 return Err(DispatchError::SchemaMisconfigured {
@@ -5168,7 +5169,8 @@ fn map_dispatch_root_resolution_validation_error(
             matches!(
                 terminator,
                 TerminatorDecl::InProcess {
-                    registry: InProcessRegistryKind::Services
+                    registry: InProcessRegistryKind::Services,
+                    ..
                 }
             )
         });
@@ -5972,6 +5974,7 @@ async fn dispatch_by(
         }
         TerminatorDecl::InProcess {
             registry: InProcessRegistryKind::Services,
+            ..
         } => {
             if request.root_admission.is_some() && request.pre_minted_thread_id.is_some() {
                 return Err(DispatchError::Internal(anyhow::anyhow!(
@@ -7692,6 +7695,7 @@ requires:
             delegate: None,
             thread_profile: None,
             history_policy: None,
+            result_policy: None,
             method_dispatch: Some(MethodDispatchDecl {
                 via: MethodDispatchVia::RuntimeRegistry,
                 protocol: "protocol:ryeos/core/method_runtime".to_string(),

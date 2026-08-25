@@ -790,6 +790,7 @@ mod tests {
                 delegate: None,
                 thread_profile: None,
                 history_policy: None,
+                result_policy: None,
                 method_dispatch: None,
                 methods: std::collections::BTreeMap::new(),
                 augmentation_methods: std::collections::BTreeMap::new(),

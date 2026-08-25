@@ -5,7 +5,7 @@ use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -20,10 +20,11 @@ const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_APP_SERVER_LINE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EVENTS: usize = 4_096;
 const MAX_PENDING_SERVER_REQUESTS: usize = 128;
-// The durable ledger starts its 15-minute clock after this request is emitted.
-// The small skew keeps the adapter-side decline from racing just ahead of the
-// daemon's wall-clock expiry CAS.
-const APPROVAL_TTL: Duration = Duration::from_secs(15 * 60 + 5);
+const APPROVAL_TTL: Duration = Duration::from_secs(15 * 60);
+// A route that is gated by an admitted server request must remain alive long
+// enough for that request to expire and send its fail-closed upstream reply.
+// The enclosing persistent-session contract admits a one-hour request bound.
+const ROUTE_CALL_TIMEOUT: Duration = Duration::from_secs(16 * 60);
 const MAX_PROFILE_HOME_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_PROFILE_HOME_ENTRIES: usize = 100_000;
 
@@ -57,12 +58,16 @@ struct StructuredWorkload {
     incoming: Receiver<Result<Value, String>>,
     responses: HashMap<String, Value>,
     server_requests: HashMap<String, PendingServerRequest>,
-    events: VecDeque<Value>,
+    expired_server_requests: VecDeque<ExpiredServerRequest>,
+    seen_server_request_ids: HashSet<String>,
+    events: Arc<Mutex<EventQueue>>,
+    pending_controls: Receiver<PendingControl>,
+    control_results: SyncSender<WorkloadCommandResult>,
     next_id: u64,
     fatal: Option<String>,
     workspace: String,
     workload_home: String,
-    active_login_id: Option<String>,
+    ceremony_active: bool,
     bound_session_id: Option<String>,
     profile: StructuredSessionProfile,
     route_set: String,
@@ -70,12 +75,28 @@ struct StructuredWorkload {
     schemas: HashMap<String, serde_json::Value>,
     outstanding: HashSet<String>,
     response_bytes: usize,
-    event_bytes: usize,
+}
+
+#[derive(Default)]
+struct EventQueue {
+    events: VecDeque<Value>,
+    bytes: usize,
+}
+
+struct PendingControl {
+    request_id: String,
+    body: Value,
 }
 
 struct PendingServerRequest {
     message: Value,
+    request_digest: String,
     expires_at: Instant,
+}
+
+struct ExpiredServerRequest {
+    id: String,
+    request_digest: String,
 }
 
 struct PendingObservationBatch {
@@ -98,6 +119,7 @@ struct StructuredSessionProfile {
     baseline_config: String,
     baseline_destination: String,
     initialization: Vec<InitializationStep>,
+    recovery: Option<RecoveryRule>,
     route_sets: BTreeMap<String, Vec<String>>,
     routes: Vec<RouteRule>,
     notifications: Vec<NotificationRule>,
@@ -154,6 +176,8 @@ struct RouteRule {
     #[serde(default)]
     forbidden_non_null_fields: Vec<String>,
     #[serde(default)]
+    forbidden_fields: Vec<String>,
+    #[serde(default)]
     response_predicates: Vec<ValuePredicate>,
     #[serde(default)]
     observations: Vec<ObservationRule>,
@@ -170,6 +194,14 @@ struct SessionBindingRule {
     action: SessionBindingAction,
     request_field: Option<String>,
     response_pointer: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryRule {
+    resume_route: String,
+    inspect_route: String,
+    route_sets: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -246,7 +278,8 @@ struct ServerRequestRule {
     method: String,
     schema: String,
     operation_class: String,
-    response_style: ApprovalResponseStyle,
+    correlation: ServerRequestCorrelation,
+    responses: ApprovalResponses,
     #[serde(default)]
     deny_only: bool,
     #[serde(default)]
@@ -256,11 +289,20 @@ struct ServerRequestRule {
     display: ValueTemplate,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ApprovalResponseStyle {
-    Decision,
-    PermissionsDenial,
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServerRequestCorrelation {
+    upstream_session_pointer: String,
+    operation_pointer: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApprovalResponses {
+    accept: ValueTemplate,
+    cancel: ValueTemplate,
+    decline: ValueTemplate,
+    expire: ValueTemplate,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -366,6 +408,7 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
         if route.fixed_params.len() > 32
             || route.workspace_fields.len() > 8
             || route.forbidden_non_null_fields.len() > 32
+            || route.forbidden_fields.len() > 32
             || route.observations.len() > 16
         {
             bail!("structured-session route exceeds a mapping bound");
@@ -380,6 +423,51 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
                 .any(|route| !route_ids.contains(route.as_str()))
         {
             bail!("structured-session route set contains an unknown or invalid route");
+        }
+    }
+    if let Some(recovery) = &profile.recovery {
+        identifier(
+            "structured-session recovery resume route",
+            &recovery.resume_route,
+        )?;
+        identifier(
+            "structured-session recovery inspect route",
+            &recovery.inspect_route,
+        )?;
+        if recovery.resume_route == recovery.inspect_route
+            || recovery.route_sets.is_empty()
+            || recovery.route_sets.len() > 16
+            || recovery
+                .route_sets
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            bail!("structured-session recovery contract is not canonical");
+        }
+        for route_set in &recovery.route_sets {
+            let routes = profile
+                .route_sets
+                .get(route_set)
+                .ok_or_else(|| anyhow!("structured-session recovery route set is absent"))?;
+            if !routes.contains(&recovery.resume_route) || !routes.contains(&recovery.inspect_route)
+            {
+                bail!("structured-session recovery routes are outside their admitted route set");
+            }
+        }
+        for (route_id, action) in [
+            (&recovery.resume_route, SessionBindingAction::BindExpected),
+            (&recovery.inspect_route, SessionBindingAction::Require),
+        ] {
+            let route = profile
+                .routes
+                .iter()
+                .find(|route| &route.id == route_id)
+                .ok_or_else(|| anyhow!("structured-session recovery route is absent"))?;
+            if route.audience != RouteAudience::Runtime
+                || route.session_binding.as_ref().map(|binding| binding.action) != Some(action)
+            {
+                bail!("structured-session recovery route has the wrong audience or binding");
+            }
         }
     }
     let mut notification_methods = HashSet::new();
@@ -548,9 +636,8 @@ fn run() -> Result<()> {
     let profile_digest = ryeos_state::objects::canonical_value_digest(&serde_json::from_slice::<
         Value,
     >(&profile_bytes)?)?;
-    if let Ok(expected) = std::env::var("RYEOS_STRUCTURED_SESSION_PROFILE_HASH")
-        && expected != profile_digest
-    {
+    let expected = required_env("RYEOS_STRUCTURED_SESSION_PROFILE_HASH")?;
+    if expected != profile_digest {
         bail!("structured-session profile differs from its admitted digest");
     }
     if !profile.route_sets.contains_key(&route_set) {
@@ -602,6 +689,9 @@ fn run() -> Result<()> {
     // inherited descriptor. No other safe Rust owner is constructed.
     let mut channel = unsafe { UnixStream::from_raw_fd(fd) };
     set_close_on_exec(&channel)?;
+    let events = Arc::new(Mutex::new(EventQueue::default()));
+    let (workload_result_sender, workload_results) = sync_channel::<WorkloadCommandResult>(32);
+    let (pending_control_sender, pending_controls) = sync_channel::<PendingControl>(32);
     let mut app = StructuredWorkload::start(
         executable.to_str().ok_or_else(|| {
             anyhow!("pinned structured-session workload executable path is not UTF-8")
@@ -612,12 +702,14 @@ fn run() -> Result<()> {
         route_set,
         allowed_effect_classes,
         schemas,
+        Arc::clone(&events),
+        pending_controls,
+        workload_result_sender.clone(),
     )?;
     app.initialize()?;
     protect_profile_home(std::path::Path::new(&workload_home))?;
     let workload_pid = app.child.id();
     let app = Arc::new(Mutex::new(app));
-    let (workload_result_sender, workload_results) = sync_channel::<WorkloadCommandResult>(32);
     write_frame(
         &mut channel,
         &Frame {
@@ -641,11 +733,19 @@ fn run() -> Result<()> {
     let mut previous_observation_digest: Option<String> = None;
     let mut pending_observation: Option<PendingObservationBatch> = None;
     let mut active_request: Option<String> = None;
+    let mut active_controls = HashSet::new();
     let mut cancelled_requests = HashSet::new();
     let mut cancelled_workload = false;
     loop {
         while let Ok((request_id, outcome)) = workload_results.try_recv() {
             if cancelled_requests.remove(&request_id) {
+                continue;
+            }
+            if active_controls.remove(&request_id) {
+                match outcome {
+                    Ok(result) => write_final(&mut channel, &request_id, result)?,
+                    Err(error) => write_error(&mut channel, &request_id, &error)?,
+                }
                 continue;
             }
             if active_request.as_deref() != Some(request_id.as_str()) {
@@ -657,38 +757,26 @@ fn run() -> Result<()> {
                 Err(error) => write_error(&mut channel, &request_id, &error)?,
             }
         }
-        let event_batch = match app.try_lock() {
+        match app.try_lock() {
             Ok(mut app) => {
                 app.drain_incoming()?;
                 app.expire_server_requests()?;
-                if pending_observation.is_none() {
-                    app.take_event_batch(128)?
-                } else {
-                    None
-                }
             }
-            Err(std::sync::TryLockError::WouldBlock) => None,
+            Err(std::sync::TryLockError::WouldBlock) => {}
             Err(std::sync::TryLockError::Poisoned(_)) => {
                 bail!("structured-session workload state is poisoned")
             }
         };
         if pending_observation.is_none() {
-            if let Some((events, observations)) = event_batch {
-                let count = u64::try_from(events.len())?;
-                let through_sequence = next_observation_sequence
-                    .checked_add(count - 1)
-                    .ok_or_else(|| anyhow!("observation sequence overflow"))?;
-                let mut body = json!({
-                    "first_sequence": next_observation_sequence,
-                    "count": count,
-                    "previous_digest": previous_observation_digest,
-                    "events": events,
-                    "session_observations": observations,
-                });
-                let digest = ryeos_state::objects::canonical_value_digest(&body)?;
-                body.as_object_mut()
-                    .expect("observation batch is an object")
-                    .insert("batch_digest".to_owned(), Value::String(digest.clone()));
+            let event_batch = events
+                .lock()
+                .map_err(|_| anyhow!("structured-session event queue is poisoned"))?
+                .take_batch(
+                    128,
+                    next_observation_sequence,
+                    previous_observation_digest.as_deref(),
+                )?;
+            if let Some((body, through_sequence, digest)) = event_batch {
                 write_frame(
                     &mut channel,
                     &Frame {
@@ -736,15 +824,37 @@ fn run() -> Result<()> {
                     )?;
                     continue;
                 }
+                let control = matches!(frame.kind, FrameKind::Control);
                 if active_request.is_some() {
-                    bail!("daemon contacted more than one structured-session request at once");
+                    if !control
+                        || body.get("kind").and_then(Value::as_str) != Some("approval_decision")
+                    {
+                        bail!(
+                            "only an approval decision may run full-duplex with an active structured-session request"
+                        );
+                    }
+                    if !active_controls.insert(request_id.to_owned()) {
+                        bail!("daemon reused an active structured-session control id");
+                    }
+                    match pending_control_sender.try_send(PendingControl {
+                        request_id: request_id.to_owned(),
+                        body,
+                    }) {
+                        Ok(()) => {}
+                        Err(TrySendError::Full(_)) => {
+                            bail!("structured-session approval control backlog is exhausted")
+                        }
+                        Err(TrySendError::Disconnected(_)) => {
+                            bail!("structured-session command worker stopped accepting controls")
+                        }
+                    }
+                    continue;
                 }
                 active_request = Some(request_id.to_owned());
                 let request_id = request_id.to_owned();
                 let workload = Arc::clone(&app);
                 let sender = workload_result_sender.clone();
                 let workspace = workspace.clone();
-                let control = matches!(frame.kind, FrameKind::Control);
                 thread::Builder::new()
                     .name("ryeos-structured-session-command".to_owned())
                     .spawn(move || {
@@ -787,6 +897,10 @@ fn run() -> Result<()> {
                 }
                 active_request = None;
                 cancelled_requests.insert(request_id.to_owned());
+                for control_id in active_controls.drain() {
+                    cancelled_requests.insert(control_id.clone());
+                    write_error(&mut channel, &control_id, "request cancelled")?;
+                }
                 cancelled_workload = true;
                 write_error(&mut channel, request_id, "request cancelled")?;
             }
@@ -1063,6 +1177,9 @@ impl StructuredWorkload {
         route_set: String,
         allowed_effect_classes: HashSet<RouteEffectClass>,
         schemas: HashMap<String, Value>,
+        events: Arc<Mutex<EventQueue>>,
+        pending_controls: Receiver<PendingControl>,
+        control_results: SyncSender<WorkloadCommandResult>,
     ) -> Result<Self> {
         let mut command = Command::new(executable);
         command
@@ -1107,12 +1224,16 @@ impl StructuredWorkload {
             incoming,
             responses: HashMap::new(),
             server_requests: HashMap::new(),
-            events: VecDeque::new(),
+            expired_server_requests: VecDeque::new(),
+            seen_server_request_ids: HashSet::new(),
+            events,
+            pending_controls,
+            control_results,
             next_id: 1,
             fatal: None,
             workspace: workspace.to_owned(),
             workload_home: workload_home.to_owned(),
-            active_login_id: None,
+            ceremony_active: false,
             bound_session_id: None,
             profile,
             route_set,
@@ -1120,7 +1241,6 @@ impl StructuredWorkload {
             schemas,
             outstanding: HashSet::new(),
             response_bytes: 0,
-            event_bytes: 0,
         })
     }
 
@@ -1156,7 +1276,7 @@ impl StructuredWorkload {
         }
         let object = body
             .as_object()
-            .ok_or_else(|| anyhow!("adapter request body must be an object"))?;
+            .ok_or_else(|| anyhow!("structured workload request body must be an object"))?;
         if object.contains_key("ryeos_control") {
             bail!("reserved RyeOS control is not a public session command");
         }
@@ -1180,7 +1300,13 @@ impl StructuredWorkload {
             Some("approval_decision") => {
                 require_exact_keys(
                     control,
-                    &["kind", "request_id", "decision", "reservation_token"],
+                    &[
+                        "kind",
+                        "request_id",
+                        "request_digest",
+                        "decision",
+                        "reservation_token",
+                    ],
                 )?;
                 let token = control
                     .get("reservation_token")
@@ -1201,6 +1327,16 @@ impl StructuredWorkload {
                 let workspace = self.workspace.clone();
                 self.handle_route(route_id, payload, &workspace, RouteAudience::Runtime)
             }
+            Some("runtime_recover") => {
+                require_exact_keys(control, &["kind", "upstream_session_id"])?;
+                let upstream_session_id = control
+                    .get("upstream_session_id")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty() && value.len() <= 256)
+                    .ok_or_else(|| anyhow!("runtime recovery has no bounded upstream session id"))?
+                    .to_owned();
+                self.handle_runtime_recovery(&upstream_session_id)
+            }
             _ => bail!("unsupported RyeOS session control"),
         };
         protect_profile_home(std::path::Path::new(&self.workload_home))?;
@@ -1214,13 +1350,21 @@ impl StructuredWorkload {
             .ok_or_else(|| anyhow!("structured-session schema identity is not admitted"))?;
         let validator = jsonschema::validator_for(schema)
             .map_err(|error| anyhow!("compile admitted JSON schema `{identity}`: {error}"))?;
-        if let Err(error) = validator.validate(value) {
-            bail!("structured-session value failed schema `{identity}`: {error}");
+        if validator.validate(value).is_err() {
+            let instance_digest = ryeos_state::objects::canonical_value_digest(value)?;
+            bail!(
+                "structured-session value failed schema `{identity}` (instance digest {instance_digest})"
+            );
         }
         Ok(())
     }
 
     fn handle_approval_control(&mut self, control: &Map<String, Value>) -> Result<Value> {
+        let request_digest = control
+            .get("request_digest")
+            .and_then(Value::as_str)
+            .filter(|digest| lillux::valid_hash(digest))
+            .ok_or_else(|| anyhow!("approval control has no canonical request digest"))?;
         let request = Map::from_iter([
             (
                 "operation".to_string(),
@@ -1241,7 +1385,66 @@ impl StructuredWorkload {
                     .ok_or_else(|| anyhow!("approval control has no decision"))?,
             ),
         ]);
-        self.handle_approval(&request)
+        self.handle_approval(&request, request_digest)
+    }
+
+    fn handle_runtime_recovery(&mut self, upstream_session_id: &str) -> Result<Value> {
+        let recovery = self
+            .profile
+            .recovery
+            .clone()
+            .ok_or_else(|| anyhow!("structured-session profile does not admit recovery"))?;
+        if !recovery
+            .route_sets
+            .iter()
+            .any(|route_set| route_set == &self.route_set)
+        {
+            bail!("active structured-session route set does not admit recovery");
+        }
+        let resume = self
+            .profile
+            .routes
+            .iter()
+            .find(|route| route.id == recovery.resume_route)
+            .cloned()
+            .ok_or_else(|| anyhow!("admitted recovery resume route disappeared"))?;
+        let request_field = resume
+            .session_binding
+            .as_ref()
+            .filter(|binding| binding.action == SessionBindingAction::BindExpected)
+            .and_then(|binding| binding.request_field.as_deref())
+            .ok_or_else(|| anyhow!("recovery resume route has no expected-session field"))?
+            .to_owned();
+        let mut resume_payload = Map::new();
+        resume_payload.insert(request_field, Value::String(upstream_session_id.to_owned()));
+        let workspace = self.workspace.clone();
+        let resume_result = self.handle_route(
+            &recovery.resume_route,
+            Value::Object(resume_payload),
+            &workspace,
+            RouteAudience::Runtime,
+        )?;
+        require_successful_internal_route(&resume_result, "resume")?;
+        let inspect_result = self.handle_route(
+            &recovery.inspect_route,
+            json!({}),
+            &workspace,
+            RouteAudience::Runtime,
+        )?;
+        require_successful_internal_route(&inspect_result, "inspect")?;
+        let mut observations = Vec::new();
+        for result in [&resume_result, &inspect_result] {
+            let values = result
+                .get("session_observations")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("internal recovery route omitted its observations"))?;
+            observations.extend(values.iter().cloned());
+        }
+        Ok(json!({
+            "response":{"recovered":true},
+            "session_observations":observations,
+            "result_retention":"ephemeral"
+        }))
     }
 
     fn handle_route(
@@ -1276,7 +1479,7 @@ impl StructuredWorkload {
             );
         }
         let method = route.method.as_str();
-        if matches!(route.ceremony, Some(CeremonyAction::Start)) && self.active_login_id.is_some() {
+        if matches!(route.ceremony, Some(CeremonyAction::Start)) && self.ceremony_active {
             bail!("one credential enrollment is already active for this worker");
         }
         let expected_binding = prepare_session_binding(
@@ -1286,9 +1489,8 @@ impl StructuredWorkload {
         )?;
         apply_route_parameters(&route, &mut params, workspace)?;
         self.validate_schema(&route.request_schema, &params)?;
-        let timeout_ms = 60_000;
         let observed_params = params.clone();
-        let response = self.call_raw(method, params, Duration::from_millis(timeout_ms))?;
+        let response = self.call_raw(method, params, ROUTE_CALL_TIMEOUT)?;
         if response.get("error").is_none() {
             self.validate_schema(
                 &route.response_schema,
@@ -1317,13 +1519,8 @@ impl StructuredWorkload {
                 &mut self.bound_session_id,
             )?;
             match route.ceremony {
-                Some(CeremonyAction::Start) => {
-                    self.active_login_id = response
-                        .pointer("/result/loginId")
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned);
-                }
-                Some(CeremonyAction::Clear) => self.active_login_id = None,
+                Some(CeremonyAction::Start) => self.ceremony_active = true,
+                Some(CeremonyAction::Clear) => self.ceremony_active = false,
                 _ => {}
             }
         }
@@ -1341,44 +1538,37 @@ impl StructuredWorkload {
         )
     }
 
-    fn take_event_batch(&mut self, limit: usize) -> Result<Option<(Vec<Value>, Vec<Value>)>> {
-        if self.events.is_empty() {
-            return Ok(None);
-        }
-        let mut events = Vec::new();
-        while events.len() < limit {
-            let Some(event) = self.events.pop_front() else {
-                break;
-            };
-            self.event_bytes = self
-                .event_bytes
-                .saturating_sub(serde_json::to_vec(&event)?.len());
-            events.push(event);
-        }
-        let observations = events
-            .iter_mut()
-            .flat_map(|event| {
-                event
-                    .as_object_mut()
-                    .and_then(|object| object.remove("session_observations"))
-                    .and_then(|value| value.as_array().cloned())
-                    .unwrap_or_default()
-            })
-            .collect::<Vec<_>>();
-        Ok(Some((events, observations)))
-    }
-
-    fn handle_approval(&mut self, request: &Map<String, Value>) -> Result<Value> {
+    fn handle_approval(
+        &mut self,
+        request: &Map<String, Value>,
+        expected_request_digest: &str,
+    ) -> Result<Value> {
         require_exact_keys(request, &["operation", "requestId", "decision"])?;
         let request_id = request
             .get("requestId")
             .ok_or_else(|| anyhow!("approval has no requestId"))?;
         let key = canonical_id(request_id)?;
-        let pending = self
-            .server_requests
-            .remove(&key)
-            .ok_or_else(|| anyhow!("approval is absent, stale, or already resolved"))?
-            .message;
+        let pending = match self.server_requests.get(&key) {
+            Some(pending) if pending.request_digest == expected_request_digest => {
+                self.server_requests
+                    .remove(&key)
+                    .expect("pending server request disappeared")
+                    .message
+            }
+            Some(_) => bail!("approval request digest does not match the pending request"),
+            None if self.expired_server_requests.iter().any(|expired| {
+                expired.id == key && expired.request_digest == expected_request_digest
+            }) =>
+            {
+                return Ok(json!({
+                    "resolved":false,
+                    "outcome":"expired",
+                    "request_id":request_id,
+                    "request_digest":expected_request_digest,
+                }));
+            }
+            None => bail!("approval is absent, stale, or already resolved"),
+        };
         let method = pending
             .get("method")
             .and_then(Value::as_str)
@@ -1400,16 +1590,13 @@ impl StructuredWorkload {
         if decision == "accept" && !approval_accept_allowed(rule, &context) {
             bail!("approval with a filesystem, network, or policy delta cannot be accepted");
         }
-        let response = match rule.response_style {
-            ApprovalResponseStyle::Decision => json!({"decision":decision}),
-            ApprovalResponseStyle::PermissionsDenial => {
-                if decision == "accept" {
-                    bail!("additional-permission requests are denied by the baseline");
-                }
-                json!({"permissions":{"fileSystem":null,"network":null},
-                       "scope":"turn","strictAutoReview":true})
-            }
+        let response_template = match decision {
+            "accept" => &rule.responses.accept,
+            "decline" => &rule.responses.decline,
+            "cancel" => &rule.responses.cancel,
+            _ => unreachable!("decision vocabulary checked above"),
         };
+        let response = evaluate_template(response_template, &context)?;
         self.send(&json!({"id":request_id,"result":response}))?;
         Ok(json!({"resolved":true}))
     }
@@ -1442,18 +1629,19 @@ impl StructuredWorkload {
                 .iter()
                 .find(|rule| rule.method == method)
                 .ok_or_else(|| anyhow!("expired server request has no admitted rule"))?;
-            let response = match rule.response_style {
-                ApprovalResponseStyle::Decision => json!({"decision":"decline"}),
-                ApprovalResponseStyle::PermissionsDenial => json!({
-                    "permissions":{"fileSystem":null,"network":null},
-                    "scope":"turn","strictAutoReview":true
-                }),
-            };
+            let context = json!({"message":pending});
+            let expiry_event = approval_expired_event(rule, &context)?;
+            let response = evaluate_template(&rule.responses.expire, &context)?;
             self.send(&json!({"id":request_id,"result":response}))?;
-            self.push_event(json!({
-                "event_type":"approval.expired",
-                "payload":{"request_id":request_id,"operation_class":method}
-            }))?;
+            self.push_event(expiry_event)?;
+            self.expired_server_requests
+                .push_back(ExpiredServerRequest {
+                    id,
+                    request_digest: ryeos_state::objects::canonical_value_digest(&pending)?,
+                });
+            while self.expired_server_requests.len() > MAX_PENDING_SERVER_REQUESTS {
+                self.expired_server_requests.pop_front();
+            }
         }
         Ok(())
     }
@@ -1471,6 +1659,8 @@ impl StructuredWorkload {
         }
         let deadline = Instant::now() + timeout;
         loop {
+            self.service_pending_controls()?;
+            self.expire_server_requests()?;
             if let Some(response) = self.responses.remove(&key) {
                 self.response_bytes = self
                     .response_bytes
@@ -1485,7 +1675,23 @@ impl StructuredWorkload {
                 self.outstanding.remove(&key);
                 bail!("structured-session workload request `{method}` timed out");
             }
-            self.receive_one(remaining.min(Duration::from_millis(250)))?;
+            self.receive_one(remaining.min(Duration::from_millis(50)))?;
+        }
+    }
+
+    fn service_pending_controls(&mut self) -> Result<()> {
+        loop {
+            let control = match self.pending_controls.try_recv() {
+                Ok(control) => control,
+                Err(TryRecvError::Empty) => return Ok(()),
+                Err(TryRecvError::Disconnected) => return Ok(()),
+            };
+            let outcome = self
+                .handle_control(control.body)
+                .map_err(|error| error.to_string());
+            self.control_results
+                .send((control.request_id, outcome))
+                .map_err(|_| anyhow!("structured-session control result receiver disconnected"))?;
         }
     }
 
@@ -1550,12 +1756,20 @@ impl StructuredWorkload {
                     bail!("pending structured workload approval bound is exhausted");
                 }
                 let key = canonical_id(id)?;
+                if self.seen_server_request_ids.len() >= MAX_EVENTS {
+                    bail!("structured workload server-request lifetime bound is exhausted");
+                }
+                if !self.seen_server_request_ids.insert(key.clone()) {
+                    bail!("structured workload reused a server-request id");
+                }
+                let request_digest = ryeos_state::objects::canonical_value_digest(&message)?;
                 if self
                     .server_requests
                     .insert(
                         key,
                         PendingServerRequest {
                             message: message.clone(),
+                            request_digest: request_digest.clone(),
                             expires_at: Instant::now() + APPROVAL_TTL,
                         },
                     )
@@ -1566,13 +1780,32 @@ impl StructuredWorkload {
                 let context = json!({"message":message});
                 let display = evaluate_template(&rule.display, &context)?;
                 let accept_allowed = approval_accept_allowed(&rule, &context);
+                let upstream_session_id = context
+                    .pointer(&rule.correlation.upstream_session_pointer)
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty() && value.len() <= 256)
+                    .ok_or_else(|| {
+                        anyhow!("server request has no bounded upstream session correlation")
+                    })?;
+                if self.bound_session_id.as_deref() != Some(upstream_session_id) {
+                    bail!("server request does not target the bound upstream session");
+                }
+                let operation_id = context
+                    .pointer(&rule.correlation.operation_pointer)
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty() && value.len() <= 256)
+                    .ok_or_else(|| {
+                        anyhow!("server request has no bounded operation correlation")
+                    })?;
                 self.push_event(json!({
                     "event_type":"approval.requested",
                     "payload":{
                         "request_id":id,
                         "operation_class":rule.operation_class,
+                        "upstream_session_id":upstream_session_id,
+                        "operation_id":operation_id,
                         "accept_allowed":accept_allowed,
-                        "request_digest":ryeos_state::objects::canonical_value_digest(&message)?,
+                        "request_digest":request_digest,
                         "display":display
                     }
                 }))
@@ -1615,7 +1848,7 @@ impl StructuredWorkload {
                 let payload = evaluate_template(&rule.payload, &context)?;
                 let observations = evaluate_observations(&rule.observations, &context)?;
                 if rule.ceremony_clear {
-                    self.active_login_id = None;
+                    self.ceremony_active = false;
                 }
                 self.push_event(json!({
                     "event_type":rule.event_type,
@@ -1628,19 +1861,134 @@ impl StructuredWorkload {
     }
 
     fn push_event(&mut self, event: Value) -> Result<()> {
+        self.events
+            .lock()
+            .map_err(|_| anyhow!("structured-session event queue is poisoned"))?
+            .push(event)
+    }
+}
+
+fn approval_expired_event(rule: &ServerRequestRule, context: &Value) -> Result<Value> {
+    let message = context
+        .get("message")
+        .ok_or_else(|| anyhow!("approval expiry context has no pending message"))?;
+    let request_id = message
+        .get("id")
+        .filter(|value| !value.is_null())
+        .ok_or_else(|| anyhow!("expired approval has no request id"))?;
+    let request_digest = ryeos_state::objects::canonical_value_digest(message)?;
+    let upstream_session_id = context
+        .pointer(&rule.correlation.upstream_session_pointer)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .ok_or_else(|| anyhow!("expired approval lost its upstream-session correlation"))?;
+    let operation_id = context
+        .pointer(&rule.correlation.operation_pointer)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .ok_or_else(|| anyhow!("expired approval lost its operation correlation"))?;
+    Ok(json!({
+        "event_type":"approval.expired",
+        "payload":{
+            "request_id":request_id,
+            "operation_class":rule.operation_class,
+            "upstream_session_id":upstream_session_id,
+            "operation_id":operation_id,
+            "request_digest":request_digest
+        }
+    }))
+}
+
+fn require_successful_internal_route(result: &Value, stage: &str) -> Result<()> {
+    let response = result
+        .get("response")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("internal recovery {stage} route omitted its response"))?;
+    if response.get("error").is_some_and(|value| !value.is_null()) {
+        bail!("structured workload rejected internal recovery {stage} route");
+    }
+    Ok(())
+}
+
+impl EventQueue {
+    fn push(&mut self, event: Value) -> Result<()> {
         if self.events.len() >= MAX_EVENTS {
             bail!("structured workload event backlog is exhausted");
         }
         let bytes = serde_json::to_vec(&event)?.len();
-        self.event_bytes = self
-            .event_bytes
+        self.bytes = self
+            .bytes
             .checked_add(bytes)
             .ok_or_else(|| anyhow!("event byte accounting overflow"))?;
-        if self.event_bytes > 8 * 1024 * 1024 {
+        if self.bytes > 8 * 1024 * 1024 {
             bail!("structured-session event backlog byte ceiling is exhausted");
         }
         self.events.push_back(event);
         Ok(())
+    }
+
+    fn take_batch(
+        &mut self,
+        event_limit: usize,
+        first_sequence: u64,
+        previous_digest: Option<&str>,
+    ) -> Result<Option<(Value, u64, String)>> {
+        if self.events.is_empty() {
+            return Ok(None);
+        }
+        let mut events = Vec::new();
+        let mut observations = Vec::new();
+        let mut accepted: Option<(Value, u64, String)> = None;
+        for queued in self.events.iter().take(event_limit) {
+            let mut event = queued.clone();
+            observations.extend(
+                event
+                    .as_object_mut()
+                    .and_then(|object| object.remove("session_observations"))
+                    .and_then(|value| value.as_array().cloned())
+                    .unwrap_or_default(),
+            );
+            events.push(event);
+            let count = u64::try_from(events.len())?;
+            let through_sequence = first_sequence
+                .checked_add(count - 1)
+                .ok_or_else(|| anyhow!("observation sequence overflow"))?;
+            let mut body = json!({
+                "first_sequence": first_sequence,
+                "count": count,
+                "previous_digest": previous_digest,
+                "events": events,
+                "session_observations": observations,
+            });
+            let digest = ryeos_state::objects::canonical_value_digest(&body)?;
+            body.as_object_mut()
+                .expect("observation batch is an object")
+                .insert("batch_digest".to_owned(), Value::String(digest.clone()));
+            if serde_json::to_vec(&body)?.len()
+                > ryeos_state::objects::MAX_STRUCTURED_OBSERVATION_BATCH_BYTES
+            {
+                if accepted.is_none() {
+                    bail!(
+                        "one structured-session event exceeds the observation batch byte ceiling"
+                    );
+                }
+                break;
+            }
+            accepted = Some((body, through_sequence, digest));
+        }
+        let accepted_count = accepted
+            .as_ref()
+            .and_then(|(body, _, _)| body.get("count"))
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow!("observation batch selection produced no event"))?;
+        for _ in 0..usize::try_from(accepted_count)? {
+            let event = self
+                .events
+                .pop_front()
+                .ok_or_else(|| anyhow!("observation event queue changed during selection"))?;
+            self.bytes = self.bytes.saturating_sub(serde_json::to_vec(&event)?.len());
+        }
+        Ok(accepted)
     }
 }
 
@@ -1790,6 +2138,11 @@ fn apply_route_parameters(route: &RouteRule, params: &mut Value, workspace: &str
     let object = params
         .as_object_mut()
         .ok_or_else(|| anyhow!("structured-session route payload must be an object"))?;
+    for field in &route.forbidden_fields {
+        if object.contains_key(field) {
+            bail!("structured-session route field `{field}` is not admitted");
+        }
+    }
     for field in &route.forbidden_non_null_fields {
         if object.get(field).is_some_and(|value| !value.is_null()) {
             bail!("structured-session route field `{field}` is not admitted");
@@ -1910,7 +2263,7 @@ fn approval_accept_allowed(rule: &ServerRequestRule, context: &Value) -> bool {
 
 fn require_exact_keys(object: &Map<String, Value>, allowed: &[&str]) -> Result<()> {
     if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
-        bail!("unknown adapter request field `{key}`");
+        bail!("unknown structured-session request field `{key}`");
     }
     Ok(())
 }
@@ -2048,38 +2401,262 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pinned_codex_profile_uses_stable_nonexperimental_approval_handshake() {
-        let profile: Value = serde_json::from_str(include_str!(
-            "../../../../bundles/codex/.ai/workers/codex/lib/hosted/structured-session.profile.json"
-        ))
+    fn forbidden_fields_reject_presence_including_null() {
+        let rule: RouteRule = serde_json::from_value(json!({
+            "id":"record.open",
+            "method":"record/open",
+            "effect_class":"session_mutation",
+            "request_schema":"request.json",
+            "response_schema":"response.json",
+            "fixed_params":{},
+            "workspace_fields":[],
+            "forbidden_non_null_fields":[],
+            "forbidden_fields":["authorityOverride"],
+            "response_predicates":[],
+            "observations":[],
+            "result_retention":"ephemeral",
+            "ceremony":null
+        }))
         .unwrap();
-        let arguments = profile["workload_args"].as_array().unwrap();
-        let joined = arguments
-            .iter()
-            .map(Value::as_str)
-            .collect::<Option<Vec<_>>>()
-            .unwrap()
-            .join("\n");
-        assert!(joined.contains("approval_policy={ granular="));
-        assert!(!joined.contains("experimental"));
-        assert!(joined.contains("\"HOME\"=\"exclude\""));
+        for value in [Value::Null, Value::String("disabled".to_owned())] {
+            let mut params = json!({"authorityOverride": value});
+            assert!(apply_route_parameters(&rule, &mut params, "/workspace").is_err());
+        }
+    }
 
-        let routes = profile["routes"].as_array().unwrap();
-        for route_id in ["session.start", "session.resume", "turn.start"] {
-            let route = routes.iter().find(|route| route["id"] == route_id).unwrap();
-            assert!(route["fixed_params"].get("approvalPolicy").is_none());
+    #[test]
+    fn observation_batches_respect_the_exact_serialized_byte_ceiling() {
+        let mut queue = EventQueue::default();
+        for index in 0..8 {
+            queue
+                .push(json!({
+                    "event_type":"delta",
+                    "payload":{"index":index,"text":"x".repeat(64 * 1024)},
+                    "session_observations":[]
+                }))
+                .unwrap();
         }
-        for route_id in ["session.start", "session.resume"] {
-            let route = routes.iter().find(|route| route["id"] == route_id).unwrap();
-            assert!(
-                route["response_predicates"]
-                    .as_array()
+        let (body, through, _) = queue.take_batch(128, 1, None).unwrap().unwrap();
+        assert!(
+            serde_json::to_vec(&body).unwrap().len()
+                <= ryeos_state::objects::MAX_STRUCTURED_OBSERVATION_BATCH_BYTES
+        );
+        let count = body["count"].as_u64().unwrap();
+        assert!(count > 0 && count < 8);
+        assert_eq!(through, count);
+        assert_eq!(queue.events.len(), 8 - usize::try_from(count).unwrap());
+    }
+
+    #[test]
+    fn in_flight_upstream_call_services_a_gating_approval() {
+        let root = tempfile::tempdir().unwrap();
+        let workload_home = root.path().join("home");
+        std::fs::create_dir(&workload_home).unwrap();
+        let profile: StructuredSessionProfile = serde_json::from_value(json!({
+            "schema_version":1,
+            "configuration_authority":"immutable_argv",
+            "workload_realization_id":"test-realization",
+            "workload_executable":"sh",
+            "workload_args":[
+                "-c",
+                "IFS= read -r request; printf '%s\\n' '{\"id\":\"approval-one\",\"method\":\"approval/request\",\"params\":{\"session\":\"session-one\",\"operation\":\"operation-one\",\"command\":\"true\"}}'; IFS= read -r decision; printf '%s\\n' '{\"id\":1,\"result\":{\"ok\":true}}'"
+            ],
+            "workload_home_env":"TEST_WORKLOAD_HOME",
+            "baseline_config":"baseline.conf",
+            "baseline_destination":"config.toml",
+            "initialization":[],
+            "recovery":null,
+            "route_sets":{"session":["operation.run"]},
+            "routes":[{
+                "id":"operation.run",
+                "method":"operation/run",
+                "effect_class":"session_mutation",
+                "request_schema":"request.json",
+                "response_schema":"response.json",
+                "fixed_params":{},
+                "workspace_fields":[],
+                "forbidden_non_null_fields":[],
+                "forbidden_fields":[],
+                "response_predicates":[],
+                "observations":[],
+                "result_retention":"ephemeral",
+                "ceremony":null,
+                "session_binding":null
+            }],
+            "notifications":[],
+            "ignored_notifications":{},
+            "server_requests":[{
+                "method":"approval/request",
+                "schema":"approval.json",
+                "operation_class":"command",
+                "correlation":{
+                    "upstream_session_pointer":"/message/params/session",
+                    "operation_pointer":"/message/params/operation"
+                },
+                "responses":{
+                    "accept":{"op":"literal","value":{"decision":"accept"}},
+                    "cancel":{"op":"literal","value":{"decision":"cancel"}},
+                    "decline":{"op":"literal","value":{"decision":"decline"}},
+                    "expire":{"op":"literal","value":{"decision":"decline"}}
+                },
+                "deny_only":false,
+                "permission_delta_fields":[],
+                "required_review_fields":["/message/params/command"],
+                "display":{"op":"literal","value":{"command":"true"}}
+            }]
+        }))
+        .unwrap();
+        let schemas = HashMap::from([
+            (
+                "request.json".to_owned(),
+                json!({"type":"object","additionalProperties":false}),
+            ),
+            (
+                "response.json".to_owned(),
+                json!({
+                    "type":"object",
+                    "required":["ok"],
+                    "properties":{"ok":{"const":true}},
+                    "additionalProperties":false
+                }),
+            ),
+            (
+                "approval.json".to_owned(),
+                json!({
+                    "type":"object",
+                    "required":["session","operation","command"],
+                    "properties":{
+                        "session":{"type":"string"},
+                        "operation":{"type":"string"},
+                        "command":{"type":"string"}
+                    },
+                    "additionalProperties":false
+                }),
+            ),
+        ]);
+        let events = Arc::new(Mutex::new(EventQueue::default()));
+        let (control_sender, controls) = sync_channel(1);
+        let (result_sender, results) = sync_channel(1);
+        let observed_events = Arc::clone(&events);
+        let controller = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                if observed_events
+                    .lock()
                     .unwrap()
+                    .events
                     .iter()
-                    .any(|predicate| predicate["pointer"]
-                        == "/response/result/activePermissionProfile/id")
-            );
-        }
+                    .any(|event| event["event_type"] == "approval.requested")
+                {
+                    control_sender
+                        .send(PendingControl {
+                            request_id: "control-one".to_owned(),
+                            body: json!({
+                                "kind":"approval_decision",
+                                "request_id":"approval-one",
+                                "request_digest":ryeos_state::objects::canonical_value_digest(&json!({
+                                    "id":"approval-one",
+                                    "method":"approval/request",
+                                    "params":{"session":"session-one","operation":"operation-one","command":"true"}
+                                })).unwrap(),
+                                "decision":"accept",
+                                "reservation_token":"reservation-one"
+                            }),
+                        })
+                        .unwrap();
+                    return;
+                }
+                assert!(Instant::now() < deadline, "approval event was not surfaced");
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+        let mut workload = StructuredWorkload::start(
+            "/bin/sh",
+            root.path().to_str().unwrap(),
+            workload_home.to_str().unwrap(),
+            profile,
+            "session".to_owned(),
+            HashSet::from([RouteEffectClass::SessionMutation]),
+            schemas,
+            events,
+            controls,
+            result_sender,
+        )
+        .unwrap();
+        workload.bound_session_id = Some("session-one".to_owned());
+
+        let result = workload
+            .handle(
+                json!({"route_id":"operation.run","payload":{}}),
+                root.path().to_str().unwrap(),
+            )
+            .unwrap();
+
+        controller.join().unwrap();
+        assert_eq!(result["response"]["result"], json!({"ok":true}));
+        let (control_id, control_result) = results.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(control_id, "control-one");
+        assert_eq!(control_result.unwrap(), json!({"resolved":true}));
+
+        let sentinel = "DEVICE-CREDENTIAL-SENTINEL";
+        let schema_error = workload
+            .validate_schema("response.json", &json!({"ok":sentinel}))
+            .unwrap_err()
+            .to_string();
+        assert!(!schema_error.contains(sentinel));
+        assert!(schema_error.contains("instance digest"));
+
+        let expired_digest = "a".repeat(64);
+        workload
+            .expired_server_requests
+            .push_back(ExpiredServerRequest {
+                id: canonical_id(&json!("approval-expired")).unwrap(),
+                request_digest: expired_digest.clone(),
+            });
+        let expired_request = json!({
+            "operation":"approval",
+            "requestId":"approval-expired",
+            "decision":"decline",
+        });
+        let expired = workload
+            .handle_approval(expired_request.as_object().unwrap(), &expired_digest)
+            .unwrap();
+        assert_eq!(
+            expired,
+            json!({
+                "resolved":false,
+                "outcome":"expired",
+                "request_id":"approval-expired",
+                "request_digest":expired_digest,
+            })
+        );
+
+        let reused_key = canonical_id(&json!("approval-reused")).unwrap();
+        let old_digest = "b".repeat(64);
+        let new_digest = "c".repeat(64);
+        workload.server_requests.insert(
+            reused_key.clone(),
+            PendingServerRequest {
+                message: json!({
+                    "id":"approval-reused",
+                    "method":"approval/request",
+                    "params":{"session":"session-one","operation":"operation-new","command":"false"}
+                }),
+                request_digest: new_digest,
+                expires_at: Instant::now() + APPROVAL_TTL,
+            },
+        );
+        let late_old_decision = json!({
+            "operation":"approval",
+            "requestId":"approval-reused",
+            "decision":"decline",
+        });
+        assert!(
+            workload
+                .handle_approval(late_old_decision.as_object().unwrap(), &old_digest)
+                .is_err()
+        );
+        assert!(workload.server_requests.contains_key(&reused_key));
     }
 
     #[test]
@@ -2088,7 +2665,16 @@ mod tests {
             method: "approval".to_owned(),
             schema: "approval.json".to_owned(),
             operation_class: "command".to_owned(),
-            response_style: ApprovalResponseStyle::Decision,
+            correlation: ServerRequestCorrelation {
+                upstream_session_pointer: "/message/session".to_owned(),
+                operation_pointer: "/message/operation".to_owned(),
+            },
+            responses: ApprovalResponses {
+                accept: ValueTemplate::Literal { value: Value::Null },
+                cancel: ValueTemplate::Literal { value: Value::Null },
+                decline: ValueTemplate::Literal { value: Value::Null },
+                expire: ValueTemplate::Literal { value: Value::Null },
+            },
             deny_only: false,
             permission_delta_fields: Vec::new(),
             required_review_fields: vec!["/message/params/command".to_owned()],
@@ -2102,6 +2688,44 @@ mod tests {
             &rule,
             &json!({"message":{"params":{"command":"cargo test"}}})
         ));
+    }
+
+    #[test]
+    fn approval_expiry_is_inside_route_deadline_and_retains_exact_correlation() {
+        assert!(ROUTE_CALL_TIMEOUT > APPROVAL_TTL);
+        let rule = ServerRequestRule {
+            method: "approval/request".to_owned(),
+            schema: "approval.json".to_owned(),
+            operation_class: "command".to_owned(),
+            correlation: ServerRequestCorrelation {
+                upstream_session_pointer: "/message/params/session".to_owned(),
+                operation_pointer: "/message/params/operation".to_owned(),
+            },
+            responses: ApprovalResponses {
+                accept: ValueTemplate::Literal { value: Value::Null },
+                cancel: ValueTemplate::Literal { value: Value::Null },
+                decline: ValueTemplate::Literal { value: Value::Null },
+                expire: ValueTemplate::Literal { value: Value::Null },
+            },
+            deny_only: false,
+            permission_delta_fields: Vec::new(),
+            required_review_fields: Vec::new(),
+            display: ValueTemplate::Literal { value: Value::Null },
+        };
+        let message = json!({
+            "id":"approval-one",
+            "method":"approval/request",
+            "params":{"session":"session-one","operation":"operation-one"}
+        });
+        let event = approval_expired_event(&rule, &json!({"message":message.clone()})).unwrap();
+        assert_eq!(event["event_type"], "approval.expired");
+        assert_eq!(event["payload"]["request_id"], "approval-one");
+        assert_eq!(event["payload"]["upstream_session_id"], "session-one");
+        assert_eq!(event["payload"]["operation_id"], "operation-one");
+        assert_eq!(
+            event["payload"]["request_digest"],
+            ryeos_state::objects::canonical_value_digest(&message).unwrap()
+        );
     }
 
     #[test]
@@ -2311,45 +2935,45 @@ mod tests {
     }
 
     #[test]
-    fn session_binding_rejects_cross_thread_and_unbound_routes() {
+    fn session_binding_rejects_cross_session_and_unbound_routes() {
         let require = SessionBindingRule {
             action: SessionBindingAction::Require,
-            request_field: Some("threadId".to_owned()),
+            request_field: Some("sessionKey".to_owned()),
             response_pointer: None,
         };
         assert!(prepare_session_binding(Some(&require), &None, &mut json!({})).is_err());
-        let bound = Some("thread-one".to_owned());
+        let bound = Some("session-one".to_owned());
         assert!(
             prepare_session_binding(
                 Some(&require),
                 &bound,
-                &mut json!({"threadId":"thread-two"}),
+                &mut json!({"sessionKey":"session-two"}),
             )
             .is_err()
         );
         let mut params = json!({});
         assert_eq!(
             prepare_session_binding(Some(&require), &bound, &mut params).unwrap(),
-            Some("thread-one".to_owned())
+            Some("session-one".to_owned())
         );
-        assert_eq!(params, json!({"threadId":"thread-one"}));
+        assert_eq!(params, json!({"sessionKey":"session-one"}));
     }
 
     #[test]
-    fn recovery_binding_requires_the_exact_returned_thread() {
+    fn recovery_binding_requires_the_exact_returned_session() {
         let recovery = SessionBindingRule {
             action: SessionBindingAction::BindExpected,
-            request_field: Some("threadId".to_owned()),
-            response_pointer: Some("/result/thread/id".to_owned()),
+            request_field: Some("sessionKey".to_owned()),
+            response_pointer: Some("/result/session/key".to_owned()),
         };
-        let mut params = json!({"threadId":"thread-one"});
+        let mut params = json!({"sessionKey":"session-one"});
         let expected = prepare_session_binding(Some(&recovery), &None, &mut params).unwrap();
         let mut bound = None;
         assert!(
             settle_session_binding(
                 Some(&recovery),
                 expected.as_deref(),
-                &json!({"result":{"thread":{"id":"thread-two"}}}),
+                &json!({"result":{"session":{"key":"session-two"}}}),
                 &mut bound,
             )
             .is_err()
@@ -2357,10 +2981,10 @@ mod tests {
         settle_session_binding(
             Some(&recovery),
             expected.as_deref(),
-            &json!({"result":{"thread":{"id":"thread-one"}}}),
+            &json!({"result":{"session":{"key":"session-one"}}}),
             &mut bound,
         )
         .unwrap();
-        assert_eq!(bound.as_deref(), Some("thread-one"));
+        assert_eq!(bound.as_deref(), Some("session-one"));
     }
 }

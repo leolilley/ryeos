@@ -30,7 +30,7 @@ struct WorkerExecutionConfig {
     require_pinned_cow: bool,
     required_terminal_publication: String,
     max_lifetime_seconds: u64,
-    recover_remote_session: bool,
+    recover_upstream_session: bool,
 }
 
 fn main() {
@@ -110,11 +110,12 @@ async fn run_session(
             workspace_env: config.workspace_env.clone(),
             require_pinned_cow: config.require_pinned_cow,
             required_terminal_publication: config.required_terminal_publication.clone(),
+            recover_upstream_session: config.recover_upstream_session,
         })
         .await
         .map_err(|error| anyhow!(error.to_string()))?;
     if started.get("state").and_then(Value::as_str) == Some("recovering") {
-        if !config.recover_remote_session {
+        if !config.recover_upstream_session {
             let terminal = client
                 .terminate_dedicated_session(DedicatedSessionTerminateRequest {
                     thread_id: thread_id.clone(),
@@ -124,10 +125,12 @@ async fn run_session(
                 .map_err(|error| anyhow!(error.to_string()))?;
             return Ok(terminal_result(thread_id, terminal));
         }
-        let remote_thread_id = started
+        let upstream_session_id = started
             .get("remote_thread_id")
             .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("recovering dedicated session has no retained remote thread"))?;
+            .ok_or_else(|| {
+                anyhow!("recovering dedicated session has no retained upstream session")
+            })?;
         let worker_boot_epoch = started
             .get("worker_boot_epoch")
             .and_then(Value::as_u64)
@@ -135,23 +138,10 @@ async fn run_session(
         client
             .dedicated_session_command(DedicatedSessionCommandRequest {
                 thread_id: thread_id.clone(),
-                idempotency_key: format!("recovery:{worker_boot_epoch}:{remote_thread_id}"),
+                idempotency_key: format!("recovery:{worker_boot_epoch}:{upstream_session_id}"),
                 command_kind: "reattach".to_string(),
                 payload: json!({
-                    "route_id":"session.resume",
-                    "payload":{"threadId":remote_thread_id},
-                }),
-            })
-            .await
-            .map_err(|error| anyhow!(error.to_string()))?;
-        client
-            .dedicated_session_command(DedicatedSessionCommandRequest {
-                thread_id: thread_id.clone(),
-                idempotency_key: format!("recovery-status:{worker_boot_epoch}:{remote_thread_id}"),
-                command_kind: "reattach".to_string(),
-                payload: json!({
-                    "route_id":"session.read",
-                    "payload":{"threadId":remote_thread_id},
+                    "upstream_session_id":upstream_session_id,
                 }),
             })
             .await
@@ -162,7 +152,7 @@ async fn run_session(
             .map_err(|error| anyhow!(error.to_string()))?;
         if started.get("state").and_then(Value::as_str) != Some("idle") {
             bail!(
-                "remote session was reattached but its pinned status did not prove an idle turn boundary"
+                "upstream session was reattached but its admitted inspection did not prove an idle operation boundary"
             );
         }
     }

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T15:37:08Z:36714bd1d8eea5876ea001ea834b9642879ad031fb2c17fbd995eb76f8c52895:03wH0bpVHJw58D6rYfHtcAVFtyW/IkT0HOVGtZP8/OA7GkcX2Erc2z+oheeFLomwaeWwi+tV4D06e5s8IbasCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-25T02:34:22Z:6706d385b3d6cab5693adb9589aab08c5d3728903329eb360f4d0ba9fbef718a:J9zAon0is9cgEhk9u/wvJOF06ctz6Z9ELUv3JHGTcrtIQOS5E2JTiXPZXOL/aJ1e8DKJb1JJa5iJt3SbY/nUAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -87,11 +87,37 @@ session binding are capsule-bound. Clients never submit upstream methods or
 RyeOS control frames. Runtime resume/read routes are not public. Unsupported
 semantics require a reviewed Rust capability; authored data cannot become code.
 
+Live command responses and durable execution results are separate contracts.
+A kind may declare one optional composed result-policy field with the exact
+generic vocabulary `full` or `digest_only` only when its terminator advertises
+the closed `durable_result_projection` capability. Other terminators are
+rejected until their terminal executor implements and declares that mechanic.
+Absence means `full`, and only an effectively trusted signed item may select
+`digest_only`. Root admission freezes the resolved policy and its
+item/kind-schema identity into the sealed request. The current in-process
+service terminator implements the capability: it still returns the full live
+response or error to its attached caller, but its durable terminal stores only
+the canonical response/error digest and frozen policy identity. The core
+worker-command and remote-run services use this generic contract so a
+confidential structured-session response is not copied into either the target
+command thread or the source remote-execution thread.
+
 The inherited target socket is full duplex. A persistent reader demultiplexes
 responses and pushed observation batches while independent bounded queues keep
 control moving. Batches bind session, worker, boot epoch, sequence, and digest.
 RyeOS appends canonical facts to the root chain before acknowledgement. Stale,
 duplicate, uncorrelated, unknown, or over-budget output cannot advance authority.
+Pushed observation cardinality is bounded per worker event and by an exact
+serialized-byte ceiling; ordinary commands and the two-route recovery control
+have separate admitted aggregate ceilings. A hard cumulative event ceiling
+applies across every worker epoch of one hosted session. SQLite retains one
+cumulative settled predecessor frontier plus any exact ambiguous outbox body;
+complete batch testimony remains solely on the root chain.
+Root-fact idempotence is accelerated only by a bounded process-local index
+derived from one complete authoritative replay plus every subsequent replayed
+tail. Its Bloom filter proves absence only; an evicted or possible hit falls
+back to complete root replay. It never consults a mutable projection as
+testimony, and restart merely pays the one-time replay cost again.
 
 ## Lifecycle and evidence
 
@@ -129,7 +155,10 @@ expands authority. The outbox reserves the decision, writes its root
 possible-delivery fact before advancing the SQLite contacting projection and
 before socket write, and distinguishes settled from delivery-unknown. Startup
 idempotently completes missing decision/contact/unknown root facts without
-refiring possible contact. Listing approvals is read-only.
+refiring possible contact. Listing approvals is read-only. A signed workload
+profile must mark an approval class deny-only unless its accepted upstream
+effect is proven to remain inside the identical frozen permission profile;
+displayable fields alone are not proof that consent preserves the ceiling.
 
 Worker facts are `worker_asserted` or `upstream_reported`, not proof of success.
 Reserved I/O boundaries are `daemon_reserved_io`; observed responses are
@@ -154,9 +183,11 @@ profile serializes login, refresh, logout, revoke, and restart. Credentials are
 plaintext node-private state visible to the configured operator.
 
 Login is projectless and generation-bound. Device material uses only the
-confidential ephemeral response lane. Owner confirmation of sanitized account
-identity precedes project use. Cancellation, expiry, disconnect, and restart
-invalidate the ceremony and allow a fresh login epoch.
+confidential live response lane; the surrounding recorded command and remote
+execution services retain only a digest under their signed result policy.
+Owner confirmation of sanitized account identity precedes project use.
+Cancellation, expiry, disconnect, and restart invalidate the ceremony and
+allow a fresh login epoch.
 
 Revocation enters durable `revoking` before reaping workers or removing the
 home. Admission, attachment, readiness, command, approval, and recovery recheck
@@ -197,7 +228,11 @@ Publication additionally requires `ryeos.write.project.live`, the exact
 principal key/project hash and expected base retained in root authority at
 admission, owner authorization, and HEAD CAS. An owner-authorized root
 reservation precedes HEAD contact; startup recovery requires that reservation
-and appends a separately linked filesystem-verified result. Root
+and appends a separately linked filesystem-verified result. After possible
+contact, `HEAD == base` proves no publication and is the only retryable state;
+`HEAD == candidate` proves success. A missing or different HEAD is
+irreducibly ambiguous, receives authoritative `publication_unknown` testimony,
+and terminalizes without retry. Root
 terminalization waits while
 publication may have contacted HEAD. A process-local root-operation lease
 fences every hosted root-chain mutation; terminalization closes admission and

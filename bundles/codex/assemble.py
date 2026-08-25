@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import stat
@@ -54,11 +55,19 @@ def obtain(cache: Path, offline: bool) -> Path:
 
 def assemble(cache: Path, output: Path, offline: bool) -> None:
     cache.mkdir(parents=True, exist_ok=True)
+    output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
         raise RuntimeError(f"output already exists: {output}")
     archive = obtain(cache, offline)
-    with tempfile.TemporaryDirectory(prefix="ryeos-codex-") as scratch_name:
-        scratch = Path(scratch_name)
+    # The completed realization is published with one directory rename.  The
+    # staging directory must therefore be a sibling of the destination: /tmp
+    # may be a different filesystem and item-by-item publication can expose a
+    # partial, unretryable realization.
+    with tempfile.TemporaryDirectory(
+        prefix=f".{output.name}.assemble-", dir=output.parent
+    ) as scratch_name:
+        scratch = Path(scratch_name) / "complete"
+        scratch.mkdir()
         with tarfile.open(archive, "r:gz") as source:
             members = source.getmembers()
             by_name = {member.name: member for member in members}
@@ -119,17 +128,24 @@ def assemble(cache: Path, output: Path, offline: bool) -> None:
         )
         for executable in (candidate, code_mode_host, bwrap, zsh, rg):
             executable.chmod(executable_mode)
-        output.mkdir(parents=True)
-        for output_name in (
-            "codex",
-            "codex-code-mode-host",
-            "codex-resources/bwrap",
-            "codex-resources/zsh/bin/zsh",
-            "codex-path/rg",
-        ):
-            destination = output / output_name
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            candidates[output_name].replace(destination)
+        candidates["codex-package.json"].unlink()
+        for path in (path for path in scratch.rglob("*") if path.is_file()):
+            with path.open("rb") as handle:
+                os.fsync(handle.fileno())
+        for directory in sorted(
+            (path for path in scratch.rglob("*") if path.is_dir()), reverse=True
+        ) + [scratch]:
+            descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        os.rename(scratch, output)
+        parent_descriptor = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
 
 
 def main() -> None:

@@ -353,6 +353,90 @@ fn confirm_recorded_service_terminal(
     Ok(())
 }
 
+/// Build the exact daemon-owned terminal that the recorded service path will
+/// commit. The handler's live result remains untouched for its caller; only
+/// this durable terminal projection applies the frozen, kind-declared policy.
+fn recorded_service_terminal_projection(
+    thread_id: &str,
+    dispatch_result: &Result<Value>,
+    result_policy: &ryeos_engine::history_policy::ResolvedThreadResultPolicy,
+) -> (
+    ryeos_app::thread_lifecycle::ThreadFinalizeParams,
+    Option<anyhow::Error>,
+) {
+    let (durable_result, durable_error, result_retention_error) = match dispatch_result {
+        Ok(value) => {
+            match ryeos_app::thread_lifecycle::retained_thread_result(value, result_policy) {
+                Ok(value) => (Some(value), None, None),
+                Err(error) => (
+                    None,
+                    None,
+                    Some(recording_integrity(format!(
+                        "apply admitted durable-result policy: {error:#}"
+                    ))),
+                ),
+            }
+        }
+        Err(error) => {
+            let live_error = match ryeos_app::handler_error::extract_handler_error(error) {
+                Some(ryeos_app::handler_error::HandlerError::Structured { body, .. }) => body,
+                _ => serde_json::json!({ "error": error.to_string() }),
+            };
+            match ryeos_app::thread_lifecycle::retained_thread_error(&live_error, result_policy) {
+                Ok(value) => (None, Some(value), None),
+                Err(error) => (
+                    None,
+                    None,
+                    Some(recording_integrity(format!(
+                        "apply admitted durable-error policy: {error:#}"
+                    ))),
+                ),
+            }
+        }
+    };
+
+    let terminal = match (dispatch_result, &result_retention_error) {
+        (Ok(_), None) => ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+            thread_id: thread_id.to_owned(),
+            status: "completed".to_string(),
+            outcome_code: Some("success".to_string()),
+            result: durable_result,
+            error: None,
+            metadata: None,
+            artifacts: Vec::new(),
+            final_cost: None,
+            summary_json: None,
+        },
+        (Ok(_), Some(error)) => ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+            thread_id: thread_id.to_owned(),
+            status: "failed".to_string(),
+            outcome_code: Some("result_retention_failed".to_string()),
+            result: None,
+            error: Some(serde_json::json!({ "error": error.to_string() })),
+            metadata: None,
+            artifacts: Vec::new(),
+            final_cost: None,
+            summary_json: None,
+        },
+        (Err(_), _) => ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+            thread_id: thread_id.to_owned(),
+            status: "failed".to_string(),
+            outcome_code: Some("handler_error".to_string()),
+            result: None,
+            error: durable_error.or_else(|| {
+                Some(serde_json::json!({
+                    "error": "durable error retention failed"
+                }))
+            }),
+            metadata: None,
+            artifacts: Vec::new(),
+            final_cost: None,
+            summary_json: None,
+        },
+    };
+    (terminal, result_retention_error)
+}
+
 /// Commit and confirm a recorded service outcome before allowing the handler
 /// result to escape. A failed write acknowledgement is not decisive because
 /// the write may have committed; exact readback after each bounded attempt
@@ -704,6 +788,7 @@ pub async fn execute_service_verified(
             recording.usage_subject.cloned(),
             recording.usage_subject_asserted_by.map(str::to_owned),
         )?;
+        let result_policy = root_admission.resolved_result_policy().clone();
         let recorded_admission = ryeos_app::thread_lifecycle::RecordedServiceAdmission::new(
             root_admission,
             endpoint.clone(),
@@ -763,38 +848,11 @@ pub async fn execute_service_verified(
             }
             .await;
 
-            let terminal = match &dispatch_result {
-                Ok(value) => ryeos_app::thread_lifecycle::ThreadFinalizeParams {
-                    thread_id: task_invocation_id.clone(),
-                    status: "completed".to_string(),
-                    outcome_code: Some("success".to_string()),
-                    result: Some(value.clone()),
-                    error: None,
-                    metadata: None,
-                    artifacts: Vec::new(),
-                    final_cost: None,
-                    summary_json: None,
-                },
-                Err(error) => ryeos_app::thread_lifecycle::ThreadFinalizeParams {
-                    thread_id: task_invocation_id.clone(),
-                    status: "failed".to_string(),
-                    outcome_code: Some("handler_error".to_string()),
-                    result: None,
-                    error: Some(
-                        match ryeos_app::handler_error::extract_handler_error(error) {
-                            Some(ryeos_app::handler_error::HandlerError::Structured {
-                                body,
-                                ..
-                            }) => body,
-                            _ => serde_json::json!({ "error": error.to_string() }),
-                        },
-                    ),
-                    metadata: None,
-                    artifacts: Vec::new(),
-                    final_cost: None,
-                    summary_json: None,
-                },
-            };
+            let (terminal, result_retention_error) = recorded_service_terminal_projection(
+                &task_invocation_id,
+                &dispatch_result,
+                &result_policy,
+            );
             lifecycle_guard.record_completed_handler_terminal(&terminal);
             let terminal_confirmation =
                 finalize_recorded_service_exact(&task_state, lifecycle_guard.owner(), &terminal);
@@ -835,6 +893,9 @@ pub async fn execute_service_verified(
             }
 
             terminal_confirmation?;
+            if let Some(error) = result_retention_error {
+                return Err(error);
+            }
             dispatch_result
         });
 
@@ -923,6 +984,66 @@ pub async fn execute_service_verified(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    fn digest_only_result_policy() -> ryeos_engine::history_policy::ResolvedThreadResultPolicy {
+        ryeos_engine::history_policy::ResolvedThreadResultPolicy {
+            retention: ryeos_engine::history_policy::ThreadResultRetention::DigestOnly,
+            canonical_item_ref: "service:test/sensitive".to_string(),
+            item_content_hash: "1".repeat(64),
+            item_signer_fingerprint: Some("2".repeat(64)),
+            item_trust_class: ryeos_engine::contracts::TrustClass::Trusted,
+            kind_schema_content_hash: "3".repeat(64),
+            source: ryeos_engine::history_policy::ResultPolicyProvenance::ItemAuthored {
+                composed_path: "result_retention".to_string(),
+                effective_trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
+            },
+        }
+    }
+
+    #[test]
+    fn recorded_service_terminal_applies_digest_only_to_success_and_failure() {
+        let policy = digest_only_result_policy();
+        let live_success = serde_json::json!({
+            "userCode":"SERVICE-SUCCESS-SECRET",
+            "verificationUri":"https://example.invalid"
+        });
+        let success: Result<Value> = Ok(live_success.clone());
+        let (terminal, retention_error) =
+            recorded_service_terminal_projection("thread:test", &success, &policy);
+        assert!(retention_error.is_none());
+        assert_eq!(terminal.status, "completed");
+        assert_eq!(
+            terminal.result.as_ref().unwrap()["kind"],
+            "ryeos.digest_only_result"
+        );
+        assert!(
+            !serde_json::to_string(&terminal.result)
+                .unwrap()
+                .contains("SERVICE-SUCCESS-SECRET")
+        );
+        assert_eq!(success.unwrap(), live_success, "live result is unchanged");
+
+        let failure: Result<Value> = Err(anyhow::anyhow!("SERVICE-FAILURE-SECRET"));
+        let (terminal, retention_error) =
+            recorded_service_terminal_projection("thread:test", &failure, &policy);
+        assert!(retention_error.is_none());
+        assert_eq!(terminal.status, "failed");
+        assert_eq!(
+            terminal.error.as_ref().unwrap()["kind"],
+            "ryeos.digest_only_error"
+        );
+        assert!(
+            !serde_json::to_string(&terminal.error)
+                .unwrap()
+                .contains("SERVICE-FAILURE-SECRET")
+        );
+        assert!(
+            failure
+                .unwrap_err()
+                .to_string()
+                .contains("SERVICE-FAILURE-SECRET")
+        );
+    }
 
     #[test]
     fn availability_unknown_is_error() {

@@ -1,6 +1,6 @@
 //! Owner-bound generic private credential-profile metadata and artifact homes.
 //!
-//! File names and contents remain opaque to RyeOS. A bundle adapter owns their
+//! File names and contents remain opaque to RyeOS. A signed workload profile owns their
 //! meaning and must verify them against its admitted immutable inputs.
 
 use std::sync::Arc;
@@ -205,9 +205,17 @@ async fn revoke(
     root_ids.dedup();
     let _root_operations = root_ids
         .iter()
-        .map(|root| ryeos_app::hosted_operation::begin_hosted_root_operation(root))
+        .map(|root| {
+            ryeos_app::hosted_operation::begin_hosted_root_operation_if_appendable(
+                &state.state_store,
+                root,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     let _operation_guard =
         ryeos_app::hosted_operation::acquire_credential_profile_operation(&req.profile_id)
             .await

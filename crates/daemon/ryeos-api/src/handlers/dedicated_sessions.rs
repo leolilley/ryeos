@@ -1,7 +1,7 @@
 //! Meaning-blind owner-authorized access to one attached exclusive session.
 
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -10,50 +10,40 @@ use serde_json::{Value, json};
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
+use ryeos_app::persistent_session::ExclusiveRetirementOutcome;
 use ryeos_app::state::AppState;
-use ryeos_app::state_store::NewEventRecord;
 use ryeos_executor::executor::ServiceAvailability;
 
 fn disposition_operation_lock(session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-    static LOCKS: OnceLock<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    static LOCKS: OnceLock<std::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
         OnceLock::new();
     let mut locks = LOCKS
         .get_or_init(Default::default)
         .lock()
         .expect("candidate disposition lock poisoned");
-    Arc::clone(
-        locks
-            .entry(session_id.to_owned())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-    )
-}
-
-fn root_fact_operation_lock(root_thread_id: &str) -> Arc<std::sync::Mutex<()>> {
-    static LOCKS: OnceLock<std::sync::Mutex<HashMap<String, Arc<std::sync::Mutex<()>>>>> =
-        OnceLock::new();
-    let mut locks = LOCKS
-        .get_or_init(Default::default)
-        .lock()
-        .expect("root fact lock map poisoned");
-    Arc::clone(
-        locks
-            .entry(root_thread_id.to_owned())
-            .or_insert_with(|| Arc::new(std::sync::Mutex::new(()))),
-    )
+    locks.retain(|_, lock| lock.strong_count() != 0);
+    if let Some(lock) = locks.get(session_id).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(session_id.to_owned(), Arc::downgrade(&lock));
+    lock
 }
 
 fn approval_delivery_lock(session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-    static LOCKS: OnceLock<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    static LOCKS: OnceLock<std::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
         OnceLock::new();
     let mut locks = LOCKS
         .get_or_init(Default::default)
         .lock()
         .expect("approval delivery lock map poisoned");
-    Arc::clone(
-        locks
-            .entry(session_id.to_owned())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-    )
+    locks.retain(|_, lock| lock.strong_count() != 0);
+    if let Some(lock) = locks.get(session_id).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(session_id.to_owned(), Arc::downgrade(&lock));
+    lock
 }
 
 fn find_authoritative_approval_delivery_settlement(
@@ -71,66 +61,50 @@ fn find_authoritative_approval_delivery_settlement(
         "stage":"delivery_settled",
     }))
     .map_err(internal)?;
-    let thread = state
-        .state_store
-        .get_thread(&session.root_thread_id)
-        .map_err(internal)?
-        .ok_or_else(|| internal("hosted execution root thread disappeared"))?;
-    let mut after = None;
-    let mut settlement = None;
-    loop {
-        let page = state
-            .state_store
-            .replay_events(
-                &thread.chain_root_id,
-                Some(&thread.thread_id),
-                after,
-                1024,
-                8 * 1024 * 1024,
-            )
-            .map_err(internal)?;
-        for event in &page.events {
-            let payload = &event.payload;
-            if event.event_type != "hosted_approval.delivery_settled"
-                || payload.get("operation_id").and_then(Value::as_str)
-                    != Some(operation_id.as_str())
-            {
-                continue;
-            }
-            let exact = payload.get("schema").and_then(Value::as_u64) == Some(1)
-                && payload.get("session_id").and_then(Value::as_str)
-                    == Some(session.session_id.as_str())
-                && payload.get("approval_id").and_then(Value::as_str)
-                    == Some(approval.approval_id.as_str())
-                && payload.get("worker_boot_epoch").and_then(Value::as_u64)
-                    == Some(approval.worker_boot_epoch)
-                && payload.get("request_digest").and_then(Value::as_str)
-                    == Some(approval.request_digest.as_str())
-                && payload.get("reservation_token").and_then(Value::as_str)
-                    == Some(reservation_token)
-                && payload.get("decision_digest").and_then(Value::as_str) == Some(decision_digest);
-            if !exact {
-                return Err(internal(
-                    "approval settlement operation id is bound to contradictory root testimony",
-                ));
-            }
-            let delivery_digest = payload
-                .get("delivery_digest")
-                .and_then(Value::as_str)
-                .filter(|digest| lillux::valid_hash(digest))
-                .ok_or_else(|| internal("approval settlement fact has no valid delivery digest"))?
-                .to_owned();
-            if settlement.replace(delivery_digest).is_some() {
-                return Err(internal(
-                    "approval settlement operation is duplicated in the root chain",
-                ));
-            }
-        }
-        after = page.events.last().map(|event| event.chain_seq);
-        if !page.has_more {
-            return Ok(settlement);
-        }
+    let fact = ryeos_app::authoritative_root_fact::lookup(
+        state,
+        &session.root_thread_id,
+        "hosted_approval.delivery_settled",
+        &operation_id,
+    )
+    .map_err(internal)?;
+    if fact.count > 1 {
+        return Err(internal(
+            "approval settlement operation is duplicated in the root chain",
+        ));
     }
+    let Some(payload) = fact.payload else {
+        return if fact.count == 0 {
+            Ok(None)
+        } else {
+            Err(internal(
+                "approval settlement testimony exceeds the bounded replay cache payload",
+            ))
+        };
+    };
+    let exact = payload.get("schema").and_then(Value::as_u64) == Some(1)
+        && payload.get("operation_id").and_then(Value::as_str) == Some(operation_id.as_str())
+        && payload.get("session_id").and_then(Value::as_str) == Some(session.session_id.as_str())
+        && payload.get("approval_id").and_then(Value::as_str)
+            == Some(approval.approval_id.as_str())
+        && payload.get("worker_boot_epoch").and_then(Value::as_u64)
+            == Some(approval.worker_boot_epoch)
+        && payload.get("request_digest").and_then(Value::as_str)
+            == Some(approval.request_digest.as_str())
+        && payload.get("reservation_token").and_then(Value::as_str) == Some(reservation_token)
+        && payload.get("decision_digest").and_then(Value::as_str) == Some(decision_digest);
+    if !exact {
+        return Err(internal(
+            "approval settlement operation id is bound to contradictory root testimony",
+        ));
+    }
+    payload
+        .get("delivery_digest")
+        .and_then(Value::as_str)
+        .filter(|digest| lillux::valid_hash(digest))
+        .map(str::to_owned)
+        .map(Some)
+        .ok_or_else(|| internal("approval settlement fact has no valid delivery digest"))
 }
 
 fn has_authoritative_candidate_publication_reservation(
@@ -143,68 +117,53 @@ fn has_authoritative_candidate_publication_reservation(
     principal_key: &str,
     project_hash: &str,
 ) -> Result<bool, HandlerError> {
-    let thread = state
-        .state_store
-        .get_thread(&session.root_thread_id)
-        .map_err(internal)?
-        .ok_or_else(|| internal("hosted execution root thread disappeared"))?;
-    let mut after = None;
-    let mut found = false;
-    loop {
-        let page = state
-            .state_store
-            .replay_events(
-                &thread.chain_root_id,
-                Some(&thread.thread_id),
-                after,
-                1024,
-                8 * 1024 * 1024,
-            )
-            .map_err(internal)?;
-        for event in &page.events {
-            let payload = &event.payload;
-            if event.event_type != "hosted_candidate.publication_reserved"
-                || payload.get("operation_id").and_then(Value::as_str) != Some(operation_id)
-            {
-                continue;
-            }
-            let exact = payload.get("schema").and_then(Value::as_u64) == Some(1)
-                && payload.get("origin").and_then(Value::as_str) == Some("owner_authorized")
-                && payload.get("owner_principal").and_then(Value::as_str)
-                    == Some(session.owner_principal.as_str())
-                && payload.get("session_id").and_then(Value::as_str)
-                    == Some(session.session_id.as_str())
-                && payload
-                    .get("candidate_snapshot_hash")
-                    .and_then(Value::as_str)
-                    == Some(candidate)
-                && payload
-                    .get("expected_previous_hash")
-                    .and_then(Value::as_str)
-                    == Some(expected_previous_hash)
-                && payload
-                    .get("candidate_validation_hash")
-                    .and_then(Value::as_str)
-                    == Some(validation)
-                && payload.get("principal_key").and_then(Value::as_str) == Some(principal_key)
-                && payload.get("project_hash").and_then(Value::as_str) == Some(project_hash);
-            if !exact {
-                return Err(internal(
-                    "candidate publication reservation operation is contradictory",
-                ));
-            }
-            if found {
-                return Err(internal(
-                    "candidate publication reservation is duplicated in the root chain",
-                ));
-            }
-            found = true;
-        }
-        after = page.events.last().map(|event| event.chain_seq);
-        if !page.has_more {
-            return Ok(found);
-        }
+    let fact = ryeos_app::authoritative_root_fact::lookup(
+        state,
+        &session.root_thread_id,
+        "hosted_candidate.publication_reserved",
+        operation_id,
+    )
+    .map_err(internal)?;
+    if fact.count > 1 {
+        return Err(internal(
+            "candidate publication reservation is duplicated in the root chain",
+        ));
     }
+    let Some(payload) = fact.payload else {
+        return if fact.count == 0 {
+            Ok(false)
+        } else {
+            Err(internal(
+                "candidate publication testimony exceeds the bounded replay cache payload",
+            ))
+        };
+    };
+    let exact = payload.get("schema").and_then(Value::as_u64) == Some(1)
+        && payload.get("operation_id").and_then(Value::as_str) == Some(operation_id)
+        && payload.get("origin").and_then(Value::as_str) == Some("owner_authorized")
+        && payload.get("owner_principal").and_then(Value::as_str)
+            == Some(session.owner_principal.as_str())
+        && payload.get("session_id").and_then(Value::as_str) == Some(session.session_id.as_str())
+        && payload
+            .get("candidate_snapshot_hash")
+            .and_then(Value::as_str)
+            == Some(candidate)
+        && payload
+            .get("expected_previous_hash")
+            .and_then(Value::as_str)
+            == Some(expected_previous_hash)
+        && payload
+            .get("candidate_validation_hash")
+            .and_then(Value::as_str)
+            == Some(validation)
+        && payload.get("principal_key").and_then(Value::as_str) == Some(principal_key)
+        && payload.get("project_hash").and_then(Value::as_str) == Some(project_hash);
+    if !exact {
+        return Err(internal(
+            "candidate publication reservation operation is contradictory",
+        ));
+    }
+    Ok(true)
 }
 
 fn owned_session(
@@ -424,7 +383,6 @@ fn repair_approval_outbox_for_session(
                 "decision_digest":decision_digest,
                 "decision_principal":approval.decision_principal,
                 "decision":semantic_decision,
-                "recovered_outbox":true,
             }),
         )?;
         // No worker contact was possible yet. Retain the reservation until
@@ -452,14 +410,13 @@ fn repair_approval_outbox_for_session(
                 &contacting_operation_id,
                 json!({
                     "schema":1,
-                    "origin":"daemon_observed_io",
+                    "origin":"daemon_reserved_io",
                     "session_id":session.session_id,
                     "approval_id":approval.approval_id,
                     "worker_boot_epoch":approval.worker_boot_epoch,
                     "request_digest":approval.request_digest,
                     "reservation_token":token,
                     "decision_digest":decision_digest,
-                    "recovered_outbox":true,
                 }),
             )?;
         }
@@ -495,7 +452,6 @@ fn repair_approval_outbox_for_session(
                 "request_digest":approval.request_digest,
                 "reservation_token":token,
                 "decision_digest":decision_digest,
-                "recovered_outbox":true,
             }),
         )?;
     }
@@ -511,23 +467,54 @@ pub async fn reconcile_approval_outboxes(state: Arc<AppState>) -> anyhow::Result
         let Some(session) = state.state_store.dedicated_session(&session_id)? else {
             anyhow::bail!("approval outbox references a missing dedicated session");
         };
-        let _root_operation =
-            ryeos_app::hosted_operation::begin_hosted_root_operation(&session.root_thread_id)?;
-        let _credential_operation =
-            ryeos_app::hosted_operation::acquire_credential_profile_operation(
-                &session.credential_profile_id,
+        let root_operation =
+            ryeos_app::hosted_operation::begin_hosted_root_operation_if_appendable(
+                &state.state_store,
+                &session.root_thread_id,
+            )?;
+        let _credential_operation = if root_operation.is_some() {
+            Some(
+                ryeos_app::hosted_operation::acquire_credential_profile_operation(
+                    &session.credential_profile_id,
+                )
+                .await?,
             )
-            .await?;
+        } else {
+            None
+        };
         repair_approval_outbox_for_session(&state, &session)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     }
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CandidatePublicationRecovery {
+    Published,
+    NotPublished,
+    Unknown,
+}
+
+fn classify_candidate_publication_recovery(
+    current: Option<&str>,
+    base: &str,
+    candidate: &str,
+) -> CandidatePublicationRecovery {
+    if current == Some(candidate) {
+        CandidatePublicationRecovery::Published
+    } else if current == Some(base) {
+        CandidatePublicationRecovery::NotPublished
+    } else {
+        CandidatePublicationRecovery::Unknown
+    }
+}
+
 /// Reconcile the only irreversible candidate-publication crash boundary. The
 /// project HEAD is read back under retained project authority before the root
-/// fact/projection is settled. A base or unrelated HEAD proves this operation
-/// did not publish the candidate and returns the reservation to publish-ready.
+/// fact/projection is settled. After an authorized possible contact, only the
+/// admitted base proves that this operation did not publish. The candidate
+/// proves success; a missing or different HEAD is irreducibly ambiguous and is
+/// terminalized as unknown rather than reopening an unsafe retry.
 pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::Result<()> {
     for session in state
         .state_store
@@ -536,8 +523,10 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
         let _operation_guard = disposition_operation_lock(&session.session_id)
             .lock_owned()
             .await;
-        let _root_operation =
-            ryeos_app::hosted_operation::begin_hosted_root_operation(&session.root_thread_id)?;
+        let _root_operation = ryeos_app::hosted_operation::begin_hosted_root_operation(
+            &state.state_store,
+            &session.root_thread_id,
+        )?;
         let candidate = session
             .candidate_snapshot_hash
             .as_deref()
@@ -609,38 +598,71 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
                 session.session_id
             );
         }
-        if current.as_deref() == Some(candidate) {
-            append_root_fact_once(
-                &state,
-                &session,
-                "hosted_candidate.published",
-                &operation_id,
-                json!({
-                    "schema":1,
-                    "origin":"filesystem_verified",
-                    "owner_principal":session.owner_principal,
-                    "session_id":session.session_id,
-                    "candidate_snapshot_hash":candidate,
-                    "expected_previous_hash":base_snapshot_hash,
-                    "candidate_validation_hash":validation,
-                    "principal_key":principal_key,
-                    "project_hash":project_hash,
-                    "reservation_operation_id":operation_id,
-                    "recovered_after_head_contact":true,
-                }),
-            )?;
-            state.state_store.settle_dedicated_candidate_publication(
-                &session.session_id,
-                candidate,
-                &format!("published:{candidate}"),
-            )?;
-            ryeos_app::dedicated_session_service::notify_projection_change(&session.session_id);
-        } else {
-            state
-                .state_store
-                .fail_dedicated_candidate_disposition(&session.session_id, "publishing")?;
-            ryeos_app::dedicated_session_service::notify_projection_change(&session.session_id);
+        match classify_candidate_publication_recovery(
+            current.as_deref(),
+            &base_snapshot_hash,
+            candidate,
+        ) {
+            CandidatePublicationRecovery::Published => {
+                append_root_fact_once(
+                    &state,
+                    &session,
+                    "hosted_candidate.published",
+                    &operation_id,
+                    json!({
+                        "schema":1,
+                        "origin":"filesystem_verified",
+                        "owner_principal":session.owner_principal,
+                        "session_id":session.session_id,
+                        "candidate_snapshot_hash":candidate,
+                        "expected_previous_hash":base_snapshot_hash,
+                        "candidate_validation_hash":validation,
+                        "principal_key":principal_key,
+                        "project_hash":project_hash,
+                        "reservation_operation_id":operation_id,
+                        "recovered_after_head_contact":true,
+                    }),
+                )?;
+                state.state_store.settle_dedicated_candidate_publication(
+                    &session.session_id,
+                    candidate,
+                    &format!("published:{candidate}"),
+                )?;
+            }
+            CandidatePublicationRecovery::NotPublished => {
+                state
+                    .state_store
+                    .fail_dedicated_candidate_disposition(&session.session_id, "publishing")?;
+            }
+            CandidatePublicationRecovery::Unknown => {
+                append_root_fact_once(
+                    &state,
+                    &session,
+                    "hosted_candidate.publication_unknown",
+                    &operation_id,
+                    json!({
+                        "schema":1,
+                        "origin":"filesystem_verified",
+                        "owner_principal":session.owner_principal,
+                        "session_id":session.session_id,
+                        "candidate_snapshot_hash":candidate,
+                        "expected_previous_hash":base_snapshot_hash,
+                        "candidate_validation_hash":validation,
+                        "principal_key":principal_key,
+                        "project_hash":project_hash,
+                        "observed_head":current,
+                        "reservation_operation_id":operation_id,
+                        "recovered_after_head_contact":true,
+                    }),
+                )?;
+                state.state_store.settle_dedicated_candidate_publication(
+                    &session.session_id,
+                    candidate,
+                    &format!("publication_unknown:{candidate}"),
+                )?;
+            }
         }
+        ryeos_app::dedicated_session_service::notify_projection_change(&session.session_id);
     }
     Ok(())
 }
@@ -661,11 +683,14 @@ async fn resolve_approval(
 ) -> Result<Value, HandlerError> {
     let _delivery_guard = approval_delivery_lock(&req.session_id).lock_owned().await;
     let initial_session = owned_session(&state, &ctx, &req.session_id)?;
-    let _root_operation =
-        ryeos_app::hosted_operation::begin_hosted_root_operation(&initial_session.root_thread_id)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    let _credential_guard = ryeos_app::hosted_operation::acquire_credential_profile_operation(
+    let _root_operation = ryeos_app::hosted_operation::begin_hosted_root_operation(
+        &state.state_store,
+        &initial_session.root_thread_id,
+    )
+    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let _credential_guard = ryeos_app::hosted_operation::acquire_credential_profile_causal_contact(
         &initial_session.credential_profile_id,
+        &req.session_id,
     )
     .await
     .map_err(internal)?;
@@ -695,19 +720,20 @@ async fn resolve_approval(
             != Some(true)
     {
         return Err(HandlerError::BadRequest(
-            "the admitted adapter contract does not allow accepting this authority delta".into(),
+            "the admitted structured-session contract does not allow accepting this authority delta".into(),
         ));
     }
     let request_id = approval
         .requested_authority
         .get("request_id")
         .cloned()
-        .ok_or_else(|| internal("pending approval has no adapter request id"))?;
+        .ok_or_else(|| internal("pending approval has no upstream request id"))?;
     let adapter_decision = if req.accept { "accept" } else { "decline" };
     let reservation_token = ryeos_app::thread_lifecycle::new_thread_id();
     let decision = json!({
         "kind":"approval_decision",
         "request_id":request_id,
+        "request_digest":req.request_digest,
         "decision":adapter_decision,
         "reservation_token":reservation_token,
     });
@@ -857,6 +883,97 @@ async fn resolve_approval(
             )));
         }
     };
+    let exact_expiry = delivery.as_object().is_some_and(|object| {
+        object.len() == 4
+            && object.get("resolved").and_then(Value::as_bool) == Some(false)
+            && object.get("outcome").and_then(Value::as_str) == Some("expired")
+            && object.get("request_id") == Some(&request_id)
+            && object.get("request_digest").and_then(Value::as_str)
+                == Some(req.request_digest.as_str())
+    });
+    if exact_expiry {
+        let projected = ryeos_app::dedicated_session_service::wait_for_exact_approval_state(
+            &state,
+            &req.session_id,
+            &req.approval_id,
+            approval.worker_boot_epoch,
+            &req.request_digest,
+            &reservation_token,
+            &decision_digest,
+            "expired",
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .map_err(internal)?;
+        if projected {
+            return Err(HandlerError::BadRequest(
+                "approval expired before the owner decision reached the worker".into(),
+            ));
+        }
+        let cleanup_state = match state
+            .persistent_sessions
+            .retire_exclusive(&req.session_id)
+            .map_err(internal)?
+        {
+            ExclusiveRetirementOutcome::Reaped => "reaped",
+            ExclusiveRetirementOutcome::Unproved => "unproved",
+            ExclusiveRetirementOutcome::Reserved | ExclusiveRetirementOutcome::Absent => {
+                return Err(internal(
+                    "expiry result without its authoritative observation lost worker ownership",
+                ));
+            }
+        };
+        state
+            .state_store
+            .mark_dedicated_approval_delivery_unknown(
+                &req.session_id,
+                &req.approval_id,
+                approval.worker_boot_epoch,
+                &reservation_token,
+                &decision_digest,
+            )
+            .map_err(internal)?;
+        let worker_instance_id = session
+            .worker_instance_id
+            .as_deref()
+            .ok_or_else(|| internal("approval expiry contradiction has no worker identity"))?;
+        state
+            .state_store
+            .fence_abandoned_worker_process(
+                worker_instance_id,
+                &req.session_id,
+                approval.worker_boot_epoch,
+                cleanup_state,
+            )
+            .map_err(internal)?;
+        let unknown_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
+            "schema":"ryeos.hosted_approval_delivery_fact.v1",
+            "session_id":req.session_id,
+            "approval_id":req.approval_id,
+            "reservation_token":reservation_token,
+            "stage":"delivery_unknown",
+        }))
+        .map_err(internal)?;
+        append_root_fact_once(
+            &state,
+            &session,
+            "hosted_approval.delivery_unknown",
+            &unknown_operation_id,
+            json!({
+                "schema":1,
+                "origin":"daemon_observed_io",
+                "session_id":req.session_id,
+                "approval_id":req.approval_id,
+                "worker_boot_epoch":approval.worker_boot_epoch,
+                "request_digest":req.request_digest,
+                "reservation_token":reservation_token,
+                "decision_digest":decision_digest,
+            }),
+        )?;
+        return Err(HandlerError::BadRequest(
+            "worker reported approval expiry without durable expiry testimony; the worker was retired and delivery remains unknown".into(),
+        ));
+    }
     let settled_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.hosted_approval_delivery_fact.v1",
         "session_id":req.session_id,
@@ -959,55 +1076,14 @@ fn append_root_fact_once(
     operation_id: &str,
     payload: Value,
 ) -> Result<(), HandlerError> {
-    let fact_lock = root_fact_operation_lock(&session.root_thread_id);
-    let _fact_guard = fact_lock.lock().map_err(internal)?;
-    let thread = state
-        .state_store
-        .get_thread(&session.root_thread_id)
-        .map_err(internal)?
-        .ok_or_else(|| internal("hosted execution root thread disappeared"))?;
-    let mut after = None;
-    loop {
-        let page = state
-            .state_store
-            .replay_events(
-                &thread.chain_root_id,
-                Some(&thread.thread_id),
-                after,
-                1024,
-                8 * 1024 * 1024,
-            )
-            .map_err(internal)?;
-        if page.events.iter().any(|event| {
-            event.event_type == event_type
-                && event.payload.get("operation_id").and_then(Value::as_str) == Some(operation_id)
-        }) {
-            return Ok(());
-        }
-        after = page.events.last().map(|event| event.chain_seq);
-        if !page.has_more {
-            break;
-        }
-    }
-    let mut payload = payload;
-    payload
-        .as_object_mut()
-        .ok_or_else(|| internal("hosted candidate fact payload is not an object"))?
-        .insert(
-            "operation_id".to_owned(),
-            Value::String(operation_id.to_owned()),
-        );
-    let event = NewEventRecord {
-        event_type: event_type.to_owned(),
-        storage_class: "indexed".to_owned(),
+    ryeos_app::authoritative_root_fact::append_once(
+        state,
+        &session.root_thread_id,
+        event_type,
+        operation_id,
         payload,
-    };
-    state
-        .threads
-        .append_thread_events(&thread.chain_root_id, &thread.thread_id, &[event])
-        .map_err(internal)?
-        .ok_or_else(|| internal("hosted execution root is no longer running"))?;
-    Ok(())
+    )
+    .map_err(internal)
 }
 
 async fn validate_candidate_closure_and_base(
@@ -1018,9 +1094,11 @@ async fn validate_candidate_closure_and_base(
     let operation_lock = disposition_operation_lock(&req.session_id);
     let _operation_guard = operation_lock.lock_owned().await;
     let session = owned_session(&state, &ctx, &req.session_id)?;
-    let _root_operation =
-        ryeos_app::hosted_operation::begin_hosted_root_operation(&session.root_thread_id)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let _root_operation = ryeos_app::hosted_operation::begin_hosted_root_operation(
+        &state.state_store,
+        &session.root_thread_id,
+    )
+    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     if session.state == "publish_ready"
         && session.candidate_snapshot_hash.as_deref() == Some(req.candidate_snapshot_hash.as_str())
         && session.candidate_validation_hash.as_deref()
@@ -1156,10 +1234,13 @@ async fn discard(
 ) -> Result<Value, HandlerError> {
     let operation_lock = disposition_operation_lock(&req.session_id);
     let _operation_guard = operation_lock.lock_owned().await;
+    let initial = owned_session(&state, &ctx, &req.session_id)?;
+    let root_operation = ryeos_app::hosted_operation::begin_hosted_root_operation_if_appendable(
+        &state.state_store,
+        &initial.root_thread_id,
+    )
+    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     let session = owned_session(&state, &ctx, &req.session_id)?;
-    let _root_operation =
-        ryeos_app::hosted_operation::begin_hosted_root_operation(&session.root_thread_id)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     if session.publication_result.as_deref() == Some("discarded") {
         if session.candidate_snapshot_hash.as_deref() != Some(req.candidate_snapshot_hash.as_str())
         {
@@ -1169,6 +1250,9 @@ async fn discard(
         }
         return Ok(json!({"session_id":req.session_id,"discarded":true,"idempotent":true}));
     }
+    let _root_operation = root_operation.ok_or_else(|| {
+        HandlerError::BadRequest("nonterminal discard has a terminal hosted execution root".into())
+    })?;
     let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.hosted_candidate_discard_operation.v1",
         "session_id":req.session_id,
@@ -1220,10 +1304,13 @@ async fn publish(
                 ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY
             ))
         })?;
+    let initial = owned_session(&state, &ctx, &req.session_id)?;
+    let root_operation = ryeos_app::hosted_operation::begin_hosted_root_operation_if_appendable(
+        &state.state_store,
+        &initial.root_thread_id,
+    )
+    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     let session = owned_session(&state, &ctx, &req.session_id)?;
-    let _root_operation =
-        ryeos_app::hosted_operation::begin_hosted_root_operation(&session.root_thread_id)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     if !matches!(
         session.state.as_str(),
         "publish_ready" | "publishing" | "terminal"
@@ -1309,6 +1396,11 @@ async fn publish(
             "idempotent":true,
         }));
     }
+    let _root_operation = root_operation.ok_or_else(|| {
+        HandlerError::BadRequest(
+            "unpublished candidate has a terminal hosted execution root".into(),
+        )
+    })?;
     let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.hosted_candidate_publication_operation.v1",
         "session_id":req.session_id,
@@ -1555,3 +1647,28 @@ pub const DISCARD_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::{CandidatePublicationRecovery, classify_candidate_publication_recovery};
+
+    #[test]
+    fn publication_recovery_only_retries_when_head_is_still_the_admitted_base() {
+        assert_eq!(
+            classify_candidate_publication_recovery(Some("candidate"), "base", "candidate"),
+            CandidatePublicationRecovery::Published
+        );
+        assert_eq!(
+            classify_candidate_publication_recovery(Some("base"), "base", "candidate"),
+            CandidatePublicationRecovery::NotPublished
+        );
+        assert_eq!(
+            classify_candidate_publication_recovery(Some("later"), "base", "candidate"),
+            CandidatePublicationRecovery::Unknown
+        );
+        assert_eq!(
+            classify_candidate_publication_recovery(None, "base", "candidate"),
+            CandidatePublicationRecovery::Unknown
+        );
+    }
+}

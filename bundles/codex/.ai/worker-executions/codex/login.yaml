@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-24T03:55:20Z:3800092ca892c82faaeb610f1f86f28c45593334950d9f35720fc9f501204ebb:BmozR3KXyd1YKUAHSzKaoZpdX+QfK6iyggrsLCgoRnVbQpZTifxKGrvIOgCn4EVZGGZSWmbJBHpUWvLoysQDCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-24T22:45:39Z:e398c3a61a33da5d7a94dd777c65c6daf0d49a8c7ad8990118f59b9f93c46c38:oCIZEfVKUP03MMUMm35JxPdqL/VgixFJ/u3fZO8n0HUFJ35ylfN1Y5bTi63CvSWQQlVZOYLq2epRTzVaKC8IBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: codex
 description: Open one short-lived RyeOS-owned Codex credential-enrollment execution.
@@ -15,7 +15,7 @@ config:
   require_pinned_cow: false
   required_terminal_publication: any
   max_lifetime_seconds: 1500
-  recover_remote_session: false
+  recover_upstream_session: false
 limits:
   duration_seconds: 1800
 requires:

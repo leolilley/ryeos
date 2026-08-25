@@ -128,7 +128,10 @@ pub use state_manifest::{
     MAX_STATE_MANIFEST_OBJECTS, STATE_MANIFEST_KIND, STATE_MANIFEST_SCHEMA_VERSION, StateManifest,
     StateManifestBlob,
 };
-pub use thread_event::{EventDurability, MAX_THREAD_EVENT_SERIALIZED_BYTES, ThreadEvent};
+pub use thread_event::{
+    EventDurability, MAX_HOSTED_SESSION_OBSERVATION_EVENTS, MAX_STRUCTURED_OBSERVATION_BATCH_BYTES,
+    MAX_THREAD_EVENT_SERIALIZED_BYTES, ThreadEvent,
+};
 pub use thread_snapshot::{
     CapturedEffectiveTrustClass, CapturedItemSpace, CapturedItemTrustClass,
     CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,

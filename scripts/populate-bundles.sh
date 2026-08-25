@@ -570,6 +570,8 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET
 fi
 
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
+  ryeos_term_update "validating codex authored protocol" "bundle contract tests"
+  python3 "$CODEX/test_contract.py"
   ryeos_term_update "publishing codex bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$CODEX" \
     --registry-root "$CORE" \

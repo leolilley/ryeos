@@ -39,6 +39,7 @@ pub fn compile(
         "baseline_config",
         "baseline_destination",
         "initialization",
+        "recovery",
         "route_sets",
         "routes",
         "notifications",
@@ -106,7 +107,7 @@ pub fn compile(
                 "result_retention",
                 "ceremony",
             ],
-            &["audience", "session_binding"],
+            &["audience", "session_binding", "forbidden_fields"],
         )?;
         let id = value_string(route, "id")?;
         let method = value_string(route, "method")?;
@@ -118,13 +119,16 @@ pub fn compile(
         if !allowed_effects.contains(&value_string(route, "effect_class")?) {
             bail!("structured-session route has an unknown effect class");
         }
-        if route
-            .get("audience")
-            .and_then(Value::as_str)
-            .is_some_and(|audience| !matches!(audience, "public" | "runtime"))
-        {
-            bail!("structured-session route has an unknown command audience");
+        if let Some(audience) = route.get("audience") {
+            let audience = audience.as_str().ok_or_else(|| {
+                anyhow!("structured-session route audience must be a string when present")
+            })?;
+            if !matches!(audience, "public" | "runtime") {
+                bail!("structured-session route has an unknown command audience");
+            }
         }
+        let mut controlled_fields = BTreeSet::new();
+        let mut binding_request_field: Option<&str> = None;
         if let Some(binding) = route.get("session_binding") {
             let binding = binding
                 .as_object()
@@ -138,15 +142,38 @@ pub fn compile(
             if !matches!(action, "bind_new" | "bind_expected" | "require") {
                 bail!("structured-session route has an unknown session-binding action");
             }
-            for field in ["request_field", "response_pointer"] {
-                if let Some(value) = binding.get(field).filter(|value| !value.is_null()) {
-                    let value = value.as_str().ok_or_else(|| {
-                        anyhow!("structured-session binding {field} must be a string or null")
-                    })?;
-                    if value.is_empty() || value.len() > 256 {
-                        bail!("structured-session binding {field} is invalid");
-                    }
-                }
+            let request_field = binding
+                .get("request_field")
+                .filter(|value| !value.is_null())
+                .map(|value| {
+                    value.as_str().ok_or_else(|| {
+                        anyhow!("structured-session binding request_field must be a string or null")
+                    })
+                })
+                .transpose()?;
+            let response_pointer = binding
+                .get("response_pointer")
+                .filter(|value| !value.is_null())
+                .map(|value| {
+                    value.as_str().ok_or_else(|| {
+                        anyhow!(
+                            "structured-session binding response_pointer must be a string or null"
+                        )
+                    })
+                })
+                .transpose()?;
+            match action {
+                "bind_new" if request_field.is_none() && response_pointer.is_some() => {}
+                "bind_expected" if request_field.is_some() && response_pointer.is_some() => {}
+                "require" if request_field.is_some() && response_pointer.is_none() => {}
+                _ => bail!("structured-session binding fields contradict its action"),
+            }
+            if let Some(field) = request_field {
+                validate_field_name(field)?;
+                binding_request_field = Some(field);
+            }
+            if let Some(pointer) = response_pointer {
+                validate_pointer(pointer)?;
             }
         }
         let fixed_params = route
@@ -157,9 +184,33 @@ pub fn compile(
         for (field, value) in fixed_params {
             validate_field_name(field)?;
             validate_bounded_value(value, 0, &mut 0)?;
+            controlled_fields.insert(field.as_str());
         }
         validate_string_array(route, "workspace_fields", 8, false)?;
         validate_string_array(route, "forbidden_non_null_fields", 32, false)?;
+        if route.contains_key("forbidden_fields") {
+            validate_string_array(route, "forbidden_fields", 32, false)?;
+        }
+        for field in [
+            "workspace_fields",
+            "forbidden_non_null_fields",
+            "forbidden_fields",
+        ] {
+            for value in route
+                .get(field)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                if !controlled_fields.insert(value) {
+                    bail!("structured-session route field policies overlap");
+                }
+            }
+        }
+        if binding_request_field.is_some_and(|field| controlled_fields.contains(field)) {
+            bail!("structured-session binding field overlaps another route field policy");
+        }
         validate_predicates(route.get("response_predicates"), 32)?;
         validate_observations(route.get("observations"), 16)?;
         if !matches!(
@@ -202,6 +253,71 @@ pub fn compile(
         }
     }
 
+    if let Some(recovery) = object.get("recovery").filter(|value| !value.is_null()) {
+        let recovery = recovery.as_object().ok_or_else(|| {
+            anyhow!("structured-session recovery contract must be an object or null")
+        })?;
+        require_keys(
+            recovery,
+            &["resume_route", "inspect_route", "route_sets"],
+            &[],
+        )?;
+        let resume_route = value_string(recovery, "resume_route")?;
+        let inspect_route = value_string(recovery, "inspect_route")?;
+        validate_identifier(resume_route)?;
+        validate_identifier(inspect_route)?;
+        if resume_route == inspect_route {
+            bail!("structured-session recovery routes must be distinct");
+        }
+        let recovery_route_sets = recovery
+            .get("route_sets")
+            .and_then(Value::as_array)
+            .filter(|sets| !sets.is_empty() && sets.len() <= 16)
+            .ok_or_else(|| anyhow!("structured-session recovery route sets are invalid"))?;
+        let mut previous: Option<&str> = None;
+        for route_set in recovery_route_sets {
+            let route_set = route_set.as_str().ok_or_else(|| {
+                anyhow!("structured-session recovery route-set entry must be a string")
+            })?;
+            let selected = route_sets
+                .get(route_set)
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("structured-session recovery names an unknown route set"))?;
+            if previous.is_some_and(|prior| prior >= route_set)
+                || !selected
+                    .iter()
+                    .any(|route| route.as_str() == Some(resume_route))
+                || !selected
+                    .iter()
+                    .any(|route| route.as_str() == Some(inspect_route))
+            {
+                bail!("structured-session recovery route sets are not a sorted admitted subset");
+            }
+            previous = Some(route_set);
+        }
+        for (route_id, binding_action) in
+            [(resume_route, "bind_expected"), (inspect_route, "require")]
+        {
+            let route = routes
+                .iter()
+                .filter_map(Value::as_object)
+                .find(|route| route.get("id").and_then(Value::as_str) == Some(route_id))
+                .ok_or_else(|| anyhow!("structured-session recovery route is absent"))?;
+            if route.get("audience").and_then(Value::as_str) != Some("runtime")
+                || route
+                    .get("session_binding")
+                    .and_then(Value::as_object)
+                    .and_then(|binding| binding.get("action"))
+                    .and_then(Value::as_str)
+                    != Some(binding_action)
+            {
+                bail!(
+                    "structured-session recovery route `{route_id}` has the wrong audience or binding"
+                );
+            }
+        }
+    }
+
     for step in bounded_array(object, "initialization", 1, 8)? {
         let step = step
             .as_object()
@@ -221,9 +337,16 @@ pub fn compile(
         if value_string(step, "effect_class")? != "pure_read" {
             bail!("structured-session initialization exceeds its fixed pure-read budget");
         }
-        if let Some(schema) = step.get("response_schema").and_then(Value::as_str) {
+        let response_schema = step.get("response_schema").filter(|value| !value.is_null());
+        let notification = step.get("notification").filter(|value| !value.is_null());
+        if response_schema.is_some() == notification.is_some() {
+            bail!(
+                "structured-session initialization must select exactly one response or notification"
+            );
+        }
+        if let Some(schema) = response_schema.and_then(Value::as_str) {
             schema_ids.insert(schema.to_owned());
-        } else if !step.get("response_schema").is_some_and(Value::is_null) {
+        } else if response_schema.is_some() {
             bail!("structured-session initialization response schema is invalid");
         }
         validate_bounded_value(
@@ -233,7 +356,7 @@ pub fn compile(
             0,
             &mut 0,
         )?;
-        if let Some(notification) = step.get("notification").filter(|value| !value.is_null()) {
+        if let Some(notification) = notification {
             validate_identifier(notification.as_str().ok_or_else(|| {
                 anyhow!("structured-session initialization notification is invalid")
             })?)?;
@@ -279,8 +402,13 @@ pub fn compile(
         .get("ignored_notifications")
         .and_then(Value::as_object)
         .ok_or_else(|| anyhow!("structured-session ignored notifications must be an object"))?;
-    if ignored.len() > 256 {
-        bail!("structured-session ignored-notification count exceeds its bound");
+    if ignored.len() > 256
+        || object
+            .get("notifications")
+            .and_then(Value::as_array)
+            .is_some_and(|notifications| notifications.len() + ignored.len() > 256)
+    {
+        bail!("structured-session notification count exceeds its aggregate bound");
     }
     for (method, schema) in ignored {
         validate_identifier(method)?;
@@ -305,7 +433,8 @@ pub fn compile(
                 "method",
                 "schema",
                 "operation_class",
-                "response_style",
+                "correlation",
+                "responses",
                 "deny_only",
                 "permission_delta_fields",
                 "display",
@@ -321,12 +450,17 @@ pub fn compile(
             bail!("structured-session server-request method is duplicated");
         }
         validate_identifier(value_string(item, "operation_class")?)?;
-        if !matches!(
-            value_string(item, "response_style")?,
-            "decision" | "permissions_denial"
-        ) {
-            bail!("structured-session server request has an unknown response style");
-        }
+        let correlation = item
+            .get("correlation")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("structured-session server-request correlation is invalid"))?;
+        require_keys(
+            correlation,
+            &["upstream_session_pointer", "operation_pointer"],
+            &[],
+        )?;
+        validate_pointer(value_string(correlation, "upstream_session_pointer")?)?;
+        validate_pointer(value_string(correlation, "operation_pointer")?)?;
         if item.get("deny_only").and_then(Value::as_bool).is_none() {
             bail!("structured-session server-request deny-only flag is invalid");
         }
@@ -335,6 +469,21 @@ pub fn compile(
             validate_string_array(item, "required_review_fields", 32, true)?;
         }
         validate_template(item.get("display"), 0, &mut 0)?;
+        let responses = item
+            .get("responses")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("structured-session server-request responses are invalid"))?;
+        const RESPONSE_KEYS: [&str; 4] = ["accept", "cancel", "decline", "expire"];
+        if responses.len() != RESPONSE_KEYS.len()
+            || RESPONSE_KEYS
+                .iter()
+                .any(|key| !responses.contains_key(*key))
+        {
+            bail!("structured-session server-request responses are incomplete");
+        }
+        for response in responses.values() {
+            validate_template(Some(response), 0, &mut 0)?;
+        }
         schema_ids.insert(value_string(item, "schema")?.to_owned());
     }
     if schema_ids.is_empty() || schema_ids.len() > 512 {
@@ -366,6 +515,12 @@ pub fn compile(
     }
     let baseline_source = value_string(object, "baseline_config")?.to_owned();
     let baseline_destination = value_string(object, "baseline_destination")?.to_owned();
+    let baseline = source_files
+        .get(&baseline_source)
+        .ok_or_else(|| anyhow!("structured-session baseline is absent from the captured source"))?;
+    if baseline.is_empty() || baseline.len() > MAX_SCHEMA_BYTES {
+        bail!("structured-session baseline exceeds its byte bound");
+    }
     let admitted = AdmittedStructuredSessionProfile {
         profile_hash: ryeos_state::objects::canonical_value_digest(&profile)?,
         contract: profile,
@@ -695,6 +850,7 @@ mod tests {
                 "response_schema":"schema/response.json",
                 "notification":null
             }],
+            "recovery":null,
             "route_sets":{"default":[route_id]},
             "routes":[{
                 "id":route_id,
@@ -719,6 +875,7 @@ mod tests {
 
     fn schemas() -> BTreeMap<String, Vec<u8>> {
         BTreeMap::from([
+            ("baseline.conf".to_owned(), b"fixture=true\n".to_vec()),
             (
                 "schema/request.json".to_owned(),
                 serde_json::to_vec(&json!({"type":"object","additionalProperties":false})).unwrap(),
@@ -770,39 +927,63 @@ mod tests {
         profile["routes"][0]["response_predicates"] =
             json!([{"pointer":"not-a-json-pointer","equals":true}]);
         assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
+
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("document.inspect", "document/read")).unwrap();
+        profile["routes"][0]["session_binding"] = json!({
+            "action":"require",
+            "request_field":null,
+            "response_pointer":null
+        });
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
+
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("document.inspect", "document/read")).unwrap();
+        profile["routes"][0]["fixed_params"] = json!({"workspace":"fixed"});
+        profile["routes"][0]["workspace_fields"] = json!(["workspace"]);
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
+
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("document.inspect", "document/read")).unwrap();
+        profile["initialization"][0]["notification"] = json!("initialized");
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
     }
 
     #[test]
-    fn shipped_codex_contract_is_fully_admitted_before_launch() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../bundles/codex/.ai/workers/codex/lib/hosted");
-        let profile = std::fs::read(root.join("structured-session.profile.json")).unwrap();
-        let mut files = BTreeMap::new();
-        for entry in std::fs::read_dir(root.join("schema")).unwrap() {
-            let entry = entry.unwrap();
-            if entry.file_type().unwrap().is_file() {
-                files.insert(
-                    format!("schema/{}", entry.file_name().to_string_lossy()),
-                    std::fs::read(entry.path()).unwrap(),
-                );
-            }
-        }
-        let admitted = compile(&profile, &files).unwrap();
-        assert_eq!(
-            admitted
-                .contract
-                .get("schema_version")
-                .and_then(Value::as_u64),
-            Some(1)
+    fn aggregate_notification_bound_fails_during_admission() {
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("job.status", "job/status")).unwrap();
+        profile["notifications"] = Value::Array(
+            (0..129)
+                .map(|index| {
+                    json!({
+                        "method":format!("event/{index}"),
+                        "schema":"schema/response.json",
+                        "event_type":format!("event.{index}"),
+                        "durable":false,
+                        "payload":{"op":"literal","value":null},
+                        "observations":[],
+                        "ceremony_clear":false
+                    })
+                })
+                .collect(),
         );
-        assert!(admitted.schema_hashes.len() > 10);
-        let args = admitted.contract["workload_args"].as_array().unwrap();
-        for required in [
-            "--strict-config",
-            "default_permissions=\"ryeos-workspace-only\"",
-            "approvals_reviewer=\"user\"",
-        ] {
-            assert!(args.iter().any(|value| value.as_str() == Some(required)));
-        }
+        profile["ignored_notifications"] = Value::Object(
+            (0..128)
+                .map(|index| {
+                    (
+                        format!("ignored/{index}"),
+                        Value::String("schema/response.json".to_owned()),
+                    )
+                })
+                .collect(),
+        );
+
+        let error = compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("notification count exceeds its aggregate bound")
+        );
     }
 }

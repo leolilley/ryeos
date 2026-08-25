@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-20T07:22:59Z:4e2c4ec069f0c19345fb6601ca50d6b58e323216ea8079151f040dcb8420ae17:x3/wk+J4YFB+JKmJeo9HAcPNux5B2b+pWhGeiQOQGbfb/cJkcaT7GhfdaAYapEVYLyAXtqobzq5MwwvBlbeHDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-25T02:40:34Z:fe019e5dfd4281c444eba1e6dbe77db664df7a19b1dbf389ae78d092be1a5b11:rbhvTopfqaf4fQoNyZPIrHleTR2yz+tyhRw2dFgFCiNUPo6k2oz85IQzmRpwBuz0gUCTEt3WWtj4wZdcj3XWCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "persistence-schema-evolution"
@@ -34,7 +34,7 @@ The current clean-cut execution formats include:
 - admitted launch capsule schema 14;
 - runtime launch metadata epoch 18;
 - the standalone runtime project-authority envelope epoch 3; and
-- the owned runtime SQLite operator schema epoch 9 (encoded in the RyeOS
+- the owned runtime SQLite operator schema epoch 10 (encoded in the RyeOS
   `PRAGMA application_id` family).
 
 The numbers identify independently evolving contracts. A change to a nested
@@ -59,13 +59,14 @@ the exact current envelopes stored in its JSON columns. Normal open never
 migrates or normalizes a predecessor. Any mismatch leaves the file untouched
 and requires the explicit operator-confirmed thread-history/project-head reset.
 
-Runtime epoch 9 includes the epoch-8 session-bound worker,
+Runtime epoch 10 includes the epoch-8 session-bound worker,
 credential-generation fencing, command/approval contact ledgers, observation
-frontier, candidate-disposition, and multi-epoch process-history contracts,
-then cleanly cuts the embedded execution-project authority to its exact
-retained-current-HEAD destination. No epoch-1-through-8 reader or migration
-remains. Earlier history requires the explicit retirement ceremony below;
-normal startup never rewrites it.
+frontier with a cross-epoch cumulative event ceiling, candidate-disposition,
+and multi-epoch process-history contracts, the epoch-9 exact
+retained-current-HEAD destination, and the canonical pre-contact payload for
+every unsettled accepted worker observation batch. No
+epoch-1-through-9 reader or migration remains. Earlier history requires the
+explicit retirement ceremony below; normal startup never rewrites it.
 
 `operational.sqlite3` accepts only its exact current schema today. If a deployed
 predecessor ever exists, preserving its non-reconstructable facts requires a

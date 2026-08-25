@@ -6428,8 +6428,11 @@ async fn run_claimed_thread_row_inner(
             && session.state == "freezing"
         {
             let candidate_root_operation =
-                ryeos_app::hosted_operation::begin_hosted_root_operation(&thread_id)
-                    .map_err(BuildAndLaunchError::Internal)?;
+                ryeos_app::hosted_operation::begin_hosted_root_operation(
+                    &state.state_store,
+                    &thread_id,
+                )
+                .map_err(BuildAndLaunchError::Internal)?;
             let terminal_publication = provenance
                 .project_authority()
                 .terminal_publication()

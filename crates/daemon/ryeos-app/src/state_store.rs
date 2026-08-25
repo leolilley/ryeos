@@ -4289,6 +4289,7 @@ impl StateStore {
         through_sequence: u64,
         previous_digest: Option<&str>,
         batch_digest: &str,
+        canonical_batch: &serde_json::Value,
     ) -> Result<ObservationBatchReservation> {
         let g = self.lock()?;
         g.runtime_db.reserve_dedicated_observation_batch(
@@ -4298,6 +4299,7 @@ impl StateStore {
             through_sequence,
             previous_digest,
             batch_digest,
+            canonical_batch,
         )
     }
 
@@ -4370,6 +4372,29 @@ impl StateStore {
     ) -> Result<Vec<runtime_db::DedicatedSessionApprovalRecord>> {
         let g = self.lock()?;
         g.runtime_db.pending_dedicated_session_approvals(session_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn dedicated_approval_has_exact_state(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+        request_digest: &str,
+        reservation_token: &str,
+        decision_digest: &str,
+        approval_state: &str,
+    ) -> Result<bool> {
+        let g = self.lock()?;
+        g.runtime_db.dedicated_approval_has_exact_state(
+            session_id,
+            approval_id,
+            worker_boot_epoch,
+            request_digest,
+            reservation_token,
+            decision_digest,
+            approval_state,
+        )
     }
 
     pub fn dedicated_approval_outbox_session_ids(&self) -> Result<Vec<String>> {
@@ -4521,6 +4546,22 @@ impl StateStore {
         let g = self.lock()?;
         g.runtime_db
             .expire_dedicated_session_approval(session_id, approval_id, worker_boot_epoch)
+    }
+
+    pub fn observe_dedicated_session_approval_expiry(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        worker_boot_epoch: u64,
+        request_digest: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.observe_dedicated_session_approval_expiry(
+            session_id,
+            approval_id,
+            worker_boot_epoch,
+            request_digest,
+        )
     }
 
     pub fn attach_worker_process(&self, record: &WorkerProcessRecord) -> Result<()> {

@@ -170,10 +170,47 @@ pub struct ResolvedThreadHistoryPolicy {
     pub source: PolicyProvenance,
 }
 
+/// Durable representation of a successful execution result. `Full` is the
+/// built-in default; `DigestOnly` must be selected by a trusted item through a
+/// kind-declared composed field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadResultRetention {
+    Full,
+    DigestOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ResultPolicyProvenance {
+    DefaultFull,
+    ItemAuthored {
+        composed_path: String,
+        effective_trust_class: ResolutionTrustClass,
+    },
+}
+
+/// Verified, kind-agnostic durable-result contract carried through root
+/// admission. Its identity fields make a digest-only terminal self-describing
+/// without embedding the sensitive live response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedThreadResultPolicy {
+    pub retention: ThreadResultRetention,
+    pub canonical_item_ref: String,
+    pub item_content_hash: String,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub item_signer_fingerprint: Option<String>,
+    pub item_trust_class: TrustClass,
+    pub kind_schema_content_hash: String,
+    pub source: ResultPolicyProvenance,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedLaunchPolicy {
     pub history: ResolvedThreadHistoryPolicy,
+    pub result: ResolvedThreadResultPolicy,
 }
 
 /// Input available at the normal verified-composition boundary. Callers pass
@@ -598,15 +635,73 @@ fn resolve_launch_policy_with_schema(
             Some(signer)
         }
     };
+    let result_declaration = kind_schema
+        .execution
+        .as_ref()
+        .and_then(|execution| execution.result_policy.as_ref());
+    let result_authored =
+        result_declaration.and_then(|declaration| composed_value.get(&declaration.composed_path));
+    let (result_retention, result_source) = match (result_declaration, result_authored) {
+        (Some(declaration), Some(value)) => {
+            let retention = match value.as_str() {
+                Some("full") => ThreadResultRetention::Full,
+                Some("digest_only") => ThreadResultRetention::DigestOnly,
+                _ => {
+                    return Err(EngineError::InvalidMetadata {
+                        canonical_ref: canonical_item_ref.clone(),
+                        reason: format!(
+                            "invalid authored result policy at `{}`",
+                            declaration.composed_path
+                        ),
+                    });
+                }
+            };
+            if retention == ThreadResultRetention::DigestOnly
+                && (verified_item.trust_class != TrustClass::Trusted
+                    || !matches!(
+                        effective_trust_class,
+                        ResolutionTrustClass::TrustedBundle | ResolutionTrustClass::TrustedProject
+                    ))
+            {
+                return Err(EngineError::InvalidMetadata {
+                    canonical_ref: canonical_item_ref.clone(),
+                    reason: format!(
+                        "digest-only result retention at `{}` requires an effectively trusted signed item",
+                        declaration.composed_path
+                    ),
+                });
+            }
+            (
+                retention,
+                ResultPolicyProvenance::ItemAuthored {
+                    composed_path: declaration.composed_path.clone(),
+                    effective_trust_class,
+                },
+            )
+        }
+        _ => (
+            ThreadResultRetention::Full,
+            ResultPolicyProvenance::DefaultFull,
+        ),
+    };
     Ok(ResolvedLaunchPolicy {
         history: ResolvedThreadHistoryPolicy {
             retention,
+            canonical_item_ref: canonical_item_ref.clone(),
+            item_content_hash: verified_item.resolved.content_hash.clone(),
+            item_signer_fingerprint: item_signer_fingerprint.clone(),
+            item_trust_class: verified_item.trust_class,
+            kind_schema_content_hash: kind_schema_content_hash.to_string(),
+            source,
+        },
+        result: ResolvedThreadResultPolicy {
+            retention: result_retention,
             canonical_item_ref,
             item_content_hash: verified_item.resolved.content_hash.clone(),
             item_signer_fingerprint,
             item_trust_class: verified_item.trust_class,
             kind_schema_content_hash: kind_schema_content_hash.to_string(),
-            source,
+            source: result_source,
         },
     })
 }
@@ -692,7 +787,7 @@ mod tests {
         ItemMetadata, ResolvedItem, ResolvedSourceFormat, SignatureEnvelope, SignatureHeader,
         SignerFingerprint,
     };
-    use crate::kind_registry::{ExecutionSchema, ThreadHistoryPolicyDecl};
+    use crate::kind_registry::{ExecutionSchema, ThreadHistoryPolicyDecl, ThreadResultPolicyDecl};
 
     fn node_policy(
         mode: ItemAuthoredRetentionMode,
@@ -767,6 +862,7 @@ mod tests {
                 history_policy: opted_in.then(|| ThreadHistoryPolicyDecl {
                     composed_path: "history".to_string(),
                 }),
+                result_policy: None,
                 method_dispatch: None,
                 methods: Default::default(),
                 augmentation_methods: Default::default(),
@@ -785,6 +881,14 @@ mod tests {
             inventory_schema_keys: Vec::new(),
             inventory_policy: Default::default(),
         }
+    }
+
+    fn kind_schema_with_result_policy() -> KindSchema {
+        let mut schema = kind_schema(false);
+        schema.execution.as_mut().unwrap().result_policy = Some(ThreadResultPolicyDecl {
+            composed_path: "result_retention".to_string(),
+        });
+        schema
     }
 
     fn resolve(
@@ -851,6 +955,63 @@ mod tests {
             resolved.history.source,
             PolicyProvenance::NodeDefault { .. }
         ));
+    }
+
+    #[test]
+    fn result_retention_is_kind_declared_and_defaults_to_full() {
+        let item = verified_item(TrustClass::Trusted);
+        let node = ResolvedNodeThreadHistoryPolicy::durable_without_config();
+
+        let absent = resolve(&item, &json!({}), &kind_schema_with_result_policy(), &node).unwrap();
+        assert_eq!(absent.result.retention, ThreadResultRetention::Full);
+        assert!(matches!(
+            absent.result.source,
+            ResultPolicyProvenance::DefaultFull
+        ));
+
+        let declared = resolve(
+            &item,
+            &json!({"result_retention":"digest_only"}),
+            &kind_schema_with_result_policy(),
+            &node,
+        )
+        .unwrap();
+        assert_eq!(declared.result.retention, ThreadResultRetention::DigestOnly);
+        assert_eq!(declared.result.canonical_item_ref, "service:test/example");
+        assert!(matches!(
+            declared.result.source,
+            ResultPolicyProvenance::ItemAuthored {
+                ref composed_path,
+                effective_trust_class: ResolutionTrustClass::TrustedBundle,
+            } if composed_path == "result_retention"
+        ));
+
+        let undeclared = resolve(
+            &item,
+            &json!({"result_retention":"digest_only"}),
+            &kind_schema(false),
+            &node,
+        )
+        .unwrap();
+        assert_eq!(undeclared.result.retention, ThreadResultRetention::Full);
+    }
+
+    #[test]
+    fn digest_only_result_retention_requires_effective_trust() {
+        let node = ResolvedNodeThreadHistoryPolicy::durable_without_config();
+        let unsigned = verified_item(TrustClass::Unsigned);
+        let error = resolve(
+            &unsigned,
+            &json!({"result_retention":"digest_only"}),
+            &kind_schema_with_result_policy(),
+            &node,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("effectively trusted signed item")
+        );
     }
 
     #[test]

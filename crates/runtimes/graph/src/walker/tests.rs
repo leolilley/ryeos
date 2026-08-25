@@ -4980,9 +4980,15 @@ config:
         make_recording_walker(make_graph(yaml), vec![json!({"ok": true})], None);
 
     let result = walker
-        .execute(json!({}), Some("G-authored-observation-failure".to_string()))
+        .execute(
+            json!({}),
+            Some("G-authored-observation-failure".to_string()),
+        )
         .await;
-    assert!(!result.success, "missing authored evidence must fail closed");
+    assert!(
+        !result.success,
+        "missing authored evidence must fail closed"
+    );
     assert_eq!(recorder.dispatch_count(), 1);
     assert!(
         recorder.recorded_project_observations().is_empty(),
@@ -5025,7 +5031,10 @@ config:
     let result = walker
         .execute(json!({}), Some("G-combined-observation-bound".to_string()))
         .await;
-    assert!(!result.success, "the combined list must retain one hard bound");
+    assert!(
+        !result.success,
+        "the combined list must retain one hard bound"
+    );
     assert!(
         recorder.recorded_project_observations().is_empty(),
         "the complete combined list must validate before its first append"

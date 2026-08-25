@@ -608,6 +608,46 @@ pub fn recorded_service_terminal_json_equal(
     }
 }
 
+/// Project a live successful result into its signed, kind-declared durable
+/// representation. This is deliberately generic: no kind, item, endpoint, or
+/// payload field is interpreted here.
+pub fn retained_thread_result(
+    value: &Value,
+    policy: &ryeos_engine::history_policy::ResolvedThreadResultPolicy,
+) -> Result<Value> {
+    use ryeos_engine::history_policy::ThreadResultRetention;
+
+    match policy.retention {
+        ThreadResultRetention::Full => Ok(value.clone()),
+        ThreadResultRetention::DigestOnly => Ok(json!({
+            "schema": 1,
+            "kind": "ryeos.digest_only_result",
+            "result_digest": ryeos_state::objects::canonical_value_digest(value)?,
+            "policy": policy,
+        })),
+    }
+}
+
+/// Apply the same frozen terminal-retention contract to an execution error.
+/// The live caller still receives the original error; a digest-only terminal
+/// retains no error text or structured handler body.
+pub fn retained_thread_error(
+    value: &Value,
+    policy: &ryeos_engine::history_policy::ResolvedThreadResultPolicy,
+) -> Result<Value> {
+    use ryeos_engine::history_policy::ThreadResultRetention;
+
+    match policy.retention {
+        ThreadResultRetention::Full => Ok(value.clone()),
+        ThreadResultRetention::DigestOnly => Ok(json!({
+            "schema": 1,
+            "kind": "ryeos.digest_only_error",
+            "error_digest": ryeos_state::objects::canonical_value_digest(value)?,
+            "policy": policy,
+        })),
+    }
+}
+
 /// Lifecycle-layer result of a conditional pre-launch cleanup. `Finalized` and
 /// `AlreadyTerminal` are settled outcomes; `NotCurrent` means another owner
 /// advanced or claimed the child, so the caller must not overwrite it.
@@ -1526,6 +1566,7 @@ pub struct RootExecutionAdmission {
     usage_subject_asserted_by: Option<String>,
     ref_bindings: BTreeMap<String, String>,
     resolved_history_policy: ResolvedThreadHistoryPolicy,
+    resolved_result_policy: ryeos_engine::history_policy::ResolvedThreadResultPolicy,
     captured_history_policy: ryeos_state::objects::CapturedThreadHistoryPolicy,
     project_binding: AdmittedProjectBinding,
     admitted_request_snapshot: Option<Arc<ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>>,
@@ -1554,6 +1595,12 @@ impl RootExecutionAdmission {
 
     pub fn captured_history_policy(&self) -> &ryeos_state::objects::CapturedThreadHistoryPolicy {
         &self.captured_history_policy
+    }
+
+    pub fn resolved_result_policy(
+        &self,
+    ) -> &ryeos_engine::history_policy::ResolvedThreadResultPolicy {
+        &self.resolved_result_policy
     }
 
     pub fn ref_bindings(&self) -> &BTreeMap<String, String> {
@@ -1940,6 +1987,19 @@ impl RootExecutionAdmission {
             != self.captured_history_policy
         {
             bail!("admitted root resolved and captured history policies differ");
+        }
+        let result_policy = &self.resolved_result_policy;
+        if result_policy.canonical_item_ref
+            != self.verified_subject.resolved.canonical_ref.to_string()
+            || result_policy.item_content_hash != self.verified_subject.resolved.content_hash
+            || result_policy.kind_schema_content_hash
+                != self.captured_history_policy.kind_schema_content_hash
+            || result_policy.item_signer_fingerprint
+                != self.captured_history_policy.item_signer_fingerprint
+            || capture_item_trust_class(result_policy.item_trust_class)
+                != self.captured_history_policy.item_trust_class
+        {
+            bail!("admitted root result policy identity differs from its verified subject");
         }
         if self.thread_profile.trim().is_empty()
             || self.thread_profile.trim() != self.thread_profile
@@ -6043,14 +6103,14 @@ fn admit_verified_root_execution_inner(
         resolution_closure,
         admitted_request_snapshot,
     } = validated_resolution;
-    let history = ryeos_engine::history_policy::resolve_launch_policy_from_resolution(
+    let launch_policy = ryeos_engine::history_policy::resolve_launch_policy_from_resolution(
         &verified_subject,
         resolution_closure.output(),
         &engine.kinds,
         node_history_policy,
     )
-    .map_err(|error| anyhow!("history-policy resolution failed: {error}"))?
-    .history;
+    .map_err(|error| anyhow!("launch-policy resolution failed: {error}"))?;
+    let history = launch_policy.history;
     let admission = RootExecutionAdmission {
         verified_subject,
         resolution_closure,
@@ -6061,6 +6121,7 @@ fn admit_verified_root_execution_inner(
         ref_bindings,
         captured_history_policy: capture_thread_history_policy(&history)?,
         resolved_history_policy: history,
+        resolved_result_policy: launch_policy.result,
         project_binding,
         admitted_request_snapshot,
         selected_executor_route: None,
@@ -6419,6 +6480,68 @@ mod tests {
         assert!(!recorded_service_terminal_json_equal(Some(&json!(1)), Some(&json!(1.0))).unwrap());
         assert!(
             !recorded_service_terminal_json_equal(Some(&json!(-0.0)), Some(&json!(0.0))).unwrap()
+        );
+    }
+
+    #[test]
+    fn digest_only_result_retention_keeps_only_digest_and_policy_identity() {
+        let policy = ryeos_engine::history_policy::ResolvedThreadResultPolicy {
+            retention: ryeos_engine::history_policy::ThreadResultRetention::DigestOnly,
+            canonical_item_ref: "service:test/sensitive".to_string(),
+            item_content_hash: "1".repeat(64),
+            item_signer_fingerprint: Some("2".repeat(64)),
+            item_trust_class: ryeos_engine::contracts::TrustClass::Trusted,
+            kind_schema_content_hash: "3".repeat(64),
+            source: ryeos_engine::history_policy::ResultPolicyProvenance::ItemAuthored {
+                composed_path: "result_retention".to_string(),
+                effective_trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
+            },
+        };
+        let live = json!({"userCode":"SECRET-CODE","verificationUri":"https://example.invalid"});
+        let retained = retained_thread_result(&live, &policy).unwrap();
+
+        assert_eq!(retained["kind"], "ryeos.digest_only_result");
+        assert_eq!(retained["schema"], 1);
+        assert_eq!(
+            retained["result_digest"],
+            ryeos_state::objects::canonical_value_digest(&live).unwrap()
+        );
+        assert_eq!(
+            retained["policy"]["canonical_item_ref"],
+            "service:test/sensitive"
+        );
+        assert!(
+            !serde_json::to_string(&retained)
+                .unwrap()
+                .contains("SECRET-CODE")
+        );
+
+        let mut full = policy;
+        full.retention = ryeos_engine::history_policy::ThreadResultRetention::Full;
+        assert_eq!(retained_thread_result(&live, &full).unwrap(), live);
+    }
+
+    #[test]
+    fn digest_only_error_retention_does_not_persist_secret_text() {
+        let policy = ryeos_engine::history_policy::ResolvedThreadResultPolicy {
+            retention: ryeos_engine::history_policy::ThreadResultRetention::DigestOnly,
+            canonical_item_ref: "service:test/sensitive".to_string(),
+            item_content_hash: "1".repeat(64),
+            item_signer_fingerprint: Some("2".repeat(64)),
+            item_trust_class: ryeos_engine::contracts::TrustClass::Trusted,
+            kind_schema_content_hash: "3".repeat(64),
+            source: ryeos_engine::history_policy::ResultPolicyProvenance::ItemAuthored {
+                composed_path: "result_retention".to_string(),
+                effective_trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
+            },
+        };
+        let live = json!({"error":"DEVICE-CREDENTIAL-SENTINEL"});
+        let retained = retained_thread_error(&live, &policy).unwrap();
+        assert_eq!(retained["kind"], "ryeos.digest_only_error");
+        assert!(
+            !serde_json::to_string(&retained)
+                .unwrap()
+                .contains("DEVICE-CREDENTIAL-SENTINEL")
         );
     }
 

@@ -42,9 +42,9 @@ RUN --mount=type=secret,id=publisher-key \
 FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates tini && \
+        ca-certificates python3 tini && \
     rm -rf /var/lib/apt/lists/*
-RUN test -x /usr/bin/tini
+RUN test -x /usr/bin/tini && test -x /usr/bin/python3
 
 WORKDIR /app
 
@@ -58,6 +58,12 @@ COPY --from=builder /build/bundles/central-auth /opt/ryeos/central-auth
 COPY --from=builder /build/bundles/standard    /opt/ryeos/standard
 COPY --from=builder /build/bundles/hosted-node /opt/ryeos/hosted-node
 COPY --from=builder /build/bundles/codex       /opt/ryeos/codex
+COPY --from=builder --chmod=0755 /build/bundles/codex/assemble.py \
+    /usr/share/ryeos/codex/assemble.py
+COPY --from=builder /build/bundles/codex/PINNED-CODEX.md \
+    /usr/share/doc/ryeos/codex/PINNED-CODEX.md
+RUN /usr/share/ryeos/codex/assemble.py --help >/dev/null && \
+    test -s /usr/share/doc/ryeos/codex/PINNED-CODEX.md
 
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

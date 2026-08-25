@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T16:46:45Z:b23c45b5040b3324616a463727eb84b3100fe22dcf270ae202ac2eddcd5590cf:noTBtI1C6xuuNi5cPIf+gAFcjU/JOpywDZx+obXr63iTXseYDHhcBemfR/0GeTnpJjcjSmpAaRgTfrPuiIrQBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-25T02:34:35Z:84c5a89110871b33953420a84541224d87a9137611c505dec059e6004bf825c9:KTXqdH66jJNXJiQY5hvQLr7dctJF3Oj+bDypfZord5C3DXDsaB7FtH/NaJ4/DFiEOrh+DaNHj+d4OLpkKjb/Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -29,10 +29,68 @@ knowledge bundle.
    `standard`, `hosted-node`, and `codex`. Generic worker-execution runtime/preparer
    binaries belong to `core`; the generic knowledge kind belongs to
    `standard`; bridge/profile and all Codex-specific data belong to `codex`.
-2. Import and bind the exact realization in
-   `.ai/config/codex/activation.yaml`.
-3. Configure node-owned persistent-session limits. Bundles never enable node
-   worker capacity themselves.
+2. Assemble the exact realization with the installed operator tool, choosing
+   an output that does not already exist and a cache controlled by the local
+   operator:
+
+   ```text
+   /usr/share/ryeos/codex/assemble.py \
+     --cache /absolute/codex-download-cache \
+     --output /absolute/codex-assembly
+   ```
+
+   The assembler verifies the pinned archive and every extracted executable,
+   stages beside the output, and publishes the complete directory with one
+   same-filesystem rename. The human-readable pin contract is installed at
+   `/usr/share/doc/ryeos/codex/PINNED-CODEX.md`. Then import and bind the five
+   exact files declared by `.ai/config/codex/activation.yaml`.
+3. Before starting the hosted daemon, author both node-owned policies outside
+   the live node namespace. Measure the assembled realization root with
+   `stat -c '%d %i' /absolute/codex-assembly` and replace only the path/device/
+   inode placeholders below:
+
+   ```yaml
+   schema: 1
+   roots:
+     codex-assembly:
+       path: /absolute/codex-assembly
+       containing_device: 0
+       root_inode: 0
+   limits:
+     max_depth: 8
+     max_entries: 32
+     max_file_bytes: 268435456
+     max_total_bytes: 536870912
+     store_budget_bytes: 1073741824
+     minimum_free_bytes: 1073741824
+   ```
+
+   ```yaml
+   schema: 1
+   limits:
+     max_pool_groups: 4
+     max_total_processes: 4
+     max_total_address_space_bytes: 68719476736
+     max_total_cpu_seconds: 14400
+     max_open_streams: 32
+     max_active_streams: 4
+     max_active_streams_per_subject: 1
+     max_stream_backlog_bytes: 16777216
+     max_total_backlog_bytes: 67108864
+   ```
+
+   With the daemon stopped, validate and atomically apply them through the
+   registered node-config sections:
+
+   ```text
+   ryeos node policy-apply external_content /path/to/external-content-policy.yaml
+   ryeos node policy-apply persistent_sessions /path/to/persistent-session-policy.yaml
+   ```
+
+   The resulting node-signed files are
+   `<system>/.ai/node/external_content/policy.yaml` and
+   `<system>/.ai/node/persistent_sessions/policy.yaml`. Absence of either is a
+   refusal; bundles never enable import roots or worker capacity themselves.
 4. Provision the same configured-operator identity at the operator endpoint
    and a dedicated hosted node. First admit the source node key on the target
    as `remote_node` with only
@@ -50,7 +108,9 @@ knowledge bundle.
    workflow.
 5. Open projectless login, call `credential.login.start`, finish the ephemeral
    ceremony, call `credential.account.read`, close it, and confirm the exact
-   login epoch/account digest.
+   login epoch/account digest. The attached caller receives the device code;
+   the recorded worker-command thread and any source-node `remote.run` thread
+   retain only its canonical digest under the signed generic result policy.
 6. Establish the configured operator's principal-scoped project HEAD through
    the standard local `commit` or an explicit full-project
    `service:remote/push` with `outbound_principal: configured_operator`. A
@@ -65,9 +125,10 @@ knowledge bundle.
    `session.start`, then
    `turn.start`, `turn.steer`, and `turn.interrupt`. Every turn is bound to the
    one returned remote thread; cross-thread targeting is rejected.
-7. Resolve digest-fenced pending approvals. Command approval displays bounded
-   command/cwd. File or permission expansion is deny-only without an exact
-   admitted reviewable effect.
+7. Resolve digest-fenced pending approvals. This release exposes bounded
+   command/cwd for review but makes command-execution, file, and permission
+   requests deny-only. Accepting an upstream sandbox-escalation request could
+   widen the immutable permission ceiling and is therefore not admitted.
 8. Complete work, validate the frozen candidate, then publish or discard.
 
 External-content maintenance after activation requires a quiesced class
@@ -126,7 +187,11 @@ worker closed before a credential-bearing operation is sent.
 For pinned Codex 0.147 the granular approval policy is inherited from immutable
 CLI configuration. Request-level `approvalPolicy` is intentionally omitted
 because the stable App Server rejects that granular field unless the forbidden
-`experimentalApi` capability is enabled.
+`experimentalApi` capability is enabled. Sandbox approvals are disabled in
+that immutable policy, and every retained App Server approval class is
+deny-only. Supporting accept later requires an upstream request class whose
+accepted effect is proven to remain inside the identical frozen permission
+profile.
 
 App Server inherits a cleared minimal environment and no RyeOS control FD.
 Model commands receive the signed Codex permission profile and cannot access

@@ -18,7 +18,7 @@ options=('!strip' '!lto')
 
 # SQLite is bundled (libsqlite3-sys) and TLS uses rustls. Process-confinement
 # launchers are delivered inside signed RyeOS bundles.
-depends=('gcc-libs' 'glibc')
+depends=('gcc-libs' 'glibc' 'python')
 
 # cc needed for bundled libsqlite3-sys C compilation
 makedepends=('rust' 'cargo' 'cc')
@@ -80,10 +80,21 @@ package() {
             install -Dm644 "$bundle_dir/PUBLISHER_TRUST.toml" \
                 "$pkgdir/usr/share/ryeos/$name/PUBLISHER_TRUST.toml"
         fi
+        if [[ -f "$bundle_dir/assemble.py" ]]; then
+            install -Dm755 "$bundle_dir/assemble.py" \
+                "$pkgdir/usr/share/ryeos/$name/assemble.py"
+            [[ -x "$pkgdir/usr/share/ryeos/$name/assemble.py" ]] || return 1
+        fi
         if [[ -f "$bundle_dir/README.md" ]]; then
             install -Dm644 "$bundle_dir/README.md" \
                 "$pkgdir/usr/share/doc/$pkgname/$name/README.md"
         fi
+        for pinned_contract in "$bundle_dir"/PINNED-*.md; do
+            [[ -f "$pinned_contract" ]] || continue
+            install -Dm644 "$pinned_contract" \
+                "$pkgdir/usr/share/doc/$pkgname/$name/$(basename "$pinned_contract")"
+            [[ -s "$pkgdir/usr/share/doc/$pkgname/$name/$(basename "$pinned_contract")" ]] || return 1
+        done
     done
 
     # ── License ─────────────────────────────────────────────

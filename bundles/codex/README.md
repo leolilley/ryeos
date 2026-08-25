@@ -43,19 +43,22 @@ cross-session process reuse.
 
 The exact Codex executable, same-version code-mode host, and the package's
 `bwrap`, `zsh`, and `rg` runtime resources are assembled from OpenAI's pinned
-standalone package with `assemble.py`. Import and bind all five files through
+standalone package with the installed
+`/usr/share/ryeos/codex/assemble.py` operator tool. Its exact pin contract is
+installed at `/usr/share/doc/ryeos/codex/PINNED-CODEX.md`. Import and bind all five files through
 the ordinary `external-content import`/`external-content bind` ceremony. Their
 expected manifest hashes and individual file checksums are fixed in
 the activation declaration at `.ai/config/codex/activation.yaml`, which is the
 machine-readable source of the import bounds and checksums.
 
-Persistent subprocesses are deliberately disabled when the node has no
-operator-owned policy. Before starting the daemon, install a state-space
-`.ai/node/persistent_sessions/policy.yaml` with `schema: 1` and the exact
-`persistent_session_policy` limits from the activation declaration (nested as
-`limits:`). The shipped baseline admits four dedicated workers; lower those
-values for a smaller node. A bundle never silently enables this node-wide
-capacity.
+Persistent subprocesses and external import are deliberately disabled when
+their node-owned policies are absent. Before starting the daemon, apply both
+the named `codex-assembly` external-content root and the exact
+`persistent_session_policy` limits with `ryeos node policy-apply
+external_content ...` and `ryeos node policy-apply persistent_sessions ...`.
+The complete typed YAML and path/device/inode measurement ceremony live in
+`knowledge:codex/hosted-activation`. A bundle never silently enables an import
+root or node-wide worker capacity.
 
 ## Operator flow
 
@@ -269,11 +272,12 @@ forwarding workflow. Direct target requests are intentionally rejected because
 operator-key possession alone does not prove source-node transit. No shared
 filesystem pathname is required after admission.
 
-Approval decisions require the exact pending request digest. Permission,
-network, exec-policy, session-wide, legacy patch, and legacy exec expansions
-are deny-only; an accepted operation retries under the unchanged
-`ryeos-workspace-only`
-profile. Termination is explicit and publication is a separate terminal CAS.
+Approval decisions require the exact pending request digest. All approval
+classes are deny-only in this release, including command execution: Codex's
+App Server command request can represent a sandbox escalation without exposing
+a complete reviewable permission delta. RyeOS may display the bounded request
+and send decline/cancel, but cannot accept it. Termination is explicit and
+publication is a separate terminal CAS.
 Use the same projectless remote service envelope with the signed generic
 services `worker-executions/resolve-approval`, `terminate`,
 `validate-candidate-closure-and-base`, `publish`, or `discard`; their exact
@@ -291,7 +295,9 @@ Profile homes are plaintext node-private state visible to the node operator.
 They are capped at 2 GiB and survive sessions until explicit revoke/delete.
 Sessions have a seven-day hard lifetime and one active worker per profile.
 Pushed batches, individual facts, bridge queues, and command/result ledgers are
-bounded; retained observations use the ordinary root thread-chain retention
-contract rather than a second Codex journal. RyeOS records live OpenAI inference using Codex-managed ChatGPT
+bounded. A session accepts at most 1,048,576 worker events across all worker
+epochs; SQLite keeps only one cumulative settled predecessor frontier and any
+ambiguous outbox body. Complete retained observations use the ordinary root
+thread-chain retention contract rather than a second Codex journal. RyeOS records live OpenAI inference using Codex-managed ChatGPT
 authentication; reported plan type is an observation, not proof of a
 subscription tier.

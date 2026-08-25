@@ -133,7 +133,9 @@ bundle_payload_bins() {
                 rye-parser-regex-kv \
                 rye-composer-identity \
                 ryeos-core-tools \
-                ryeos-session-exec
+                ryeos-session-exec \
+                ryeos-worker-execution-launch-preparer \
+                ryeos-worker-execution-runtime
             ;;
         standard)
             printf '%s\n' \
@@ -153,7 +155,63 @@ bundle_payload_bins() {
         browser)
             printf '%s\n' ryeos-browser-tools
             ;;
+        codex)
+            printf '%s\n' ryeos-structured-session-bridge
+            ;;
     esac
+}
+
+bundle_payload_binary_path() {
+    case "$1" in
+        ryeos-session-exec|ryeos-worker-execution-launch-preparer|ryeos-worker-execution-runtime|ryeos-structured-session-bridge)
+            printf '%s\n' "$static_target_dir/$1"
+            ;;
+        *)
+            printf '%s\n' "$target_dir/$1"
+            ;;
+    esac
+}
+
+foundational_newest_mtime() {
+    find \
+        "$repo_root/crates/engine/ryeos-runtime/src" \
+        "$repo_root/crates/state/ryeos-state/src" \
+        "$repo_root/crates/daemon/ryeos-app/src" \
+        -type f -name '*.rs' -printf '%T@\n' 2>/dev/null \
+        | sort -rn | head -n1 | cut -d. -f1
+}
+
+validate_incremental_bundle_payload_sources() {
+    local newest bin source source_mtime name
+    local -a stale=()
+    newest="$(foundational_newest_mtime)"
+    for name in "$@"; do
+        while IFS= read -r bin; do
+            [[ -n "$bin" ]] || continue
+            source="$(bundle_payload_binary_path "$bin")"
+            [[ -x "$source" ]] || die "bundle payload binary missing: $source"
+            if [[ "$bin" == "ryeos-session-exec" \
+                || "$bin" == "ryeos-worker-execution-launch-preparer" \
+                || "$bin" == "ryeos-worker-execution-runtime" \
+                || "$bin" == "ryeos-structured-session-bridge" ]] && {
+                readelf -l "$source" | grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' \
+                    || readelf -d "$source" | grep -Eq 'NEEDED'
+            }; then
+                die "refusing non-static admitted persistent-session payload: $source"
+            fi
+            if [[ "$bin" != "ryeos-session-exec" && -n "$newest" ]]; then
+                source_mtime="$(stat -c %Y "$source" 2>/dev/null || echo 0)"
+                if (( source_mtime < newest )); then
+                    stale+=("$bin")
+                fi
+            fi
+        done < <(bundle_payload_bins "$name")
+    done
+    if (( ${#stale[@]} > 0 )); then
+        ryeos_term_fail "refusing incremental install with payloads older than foundational RyeOS sources"
+        printf '    - %s\n' "${stale[@]}" >&2
+        die "rebuild the affected payloads or use --populate with the correct crate scope"
+    fi
 }
 
 publisher_fingerprint_from_trust_doc() {
@@ -327,7 +385,7 @@ refresh_installed_bundle_payload() {
     local dest="$share_dir/$name"
     local bin_dest="$dest/.ai/bin/x86_64-unknown-linux-gnu"
     local bins=()
-    local b
+    local b source
     local trust_fp operator_fp
 
     while IFS= read -r b; do
@@ -354,14 +412,18 @@ refresh_installed_bundle_payload() {
     ryeos_term_info "refreshing $name bundle payload"
     sudo mkdir -p "$bin_dest"
     for b in "${bins[@]}"; do
-        [[ -x "$target_dir/$b" ]] || die "bundle payload binary missing: $target_dir/$b"
-        if [[ "$b" == "ryeos-session-exec" ]] && {
-            readelf -l "$target_dir/$b" | grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' \
-                || readelf -d "$target_dir/$b" | grep -Eq 'NEEDED'
+        source="$(bundle_payload_binary_path "$b")"
+        [[ -x "$source" ]] || die "bundle payload binary missing: $source"
+        if [[ "$b" == "ryeos-session-exec" \
+            || "$b" == "ryeos-worker-execution-launch-preparer" \
+            || "$b" == "ryeos-worker-execution-runtime" \
+            || "$b" == "ryeos-structured-session-bridge" ]] && {
+            readelf -l "$source" | grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' \
+                || readelf -d "$source" | grep -Eq 'NEEDED'
         }; then
-            die "refusing non-static admitted persistent-session bridge: $target_dir/$b"
+            die "refusing non-static admitted persistent-session payload: $source"
         fi
-        sudo install -Dm755 "$target_dir/$b" "$bin_dest/$b"
+        sudo install -Dm755 "$source" "$bin_dest/$b"
     done
 
     case "$name" in
@@ -399,6 +461,13 @@ refresh_installed_bundle_payload() {
             sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
                 "$target_dir/ryeos-core-tools" build "$dest" \
                 --registry-root "$share_dir/core" \
+                --owner "$owner" >/dev/null
+            ;;
+        codex)
+            sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
+                "$target_dir/ryeos-core-tools" build "$dest" \
+                --registry-root "$share_dir/core" \
+                --registry-root "$share_dir/standard" \
                 --owner "$owner" >/dev/null
             ;;
     esac
@@ -599,6 +668,7 @@ bin_dir="/usr/bin"
 share_dir="/usr/share/ryeos"
 doc_dir="/usr/share/doc/ryeos"
 target_dir="$repo_root/target/release"
+static_target_dir="$repo_root/target/x86_64-unknown-linux-gnu/release"
 init_app_root="${RYEOS_APP_ROOT:-}"
 
 # Only user-facing binaries go in /usr/bin/.
@@ -684,6 +754,10 @@ fi
 # build may recreate this closed evidence.
 require_closed_source_bundle_payloads "$repo_root" "${closed_payload_bundle_names[@]}" \
     || die "selected source bundle set is incomplete"
+
+if [[ $run_populate -eq 0 ]]; then
+    validate_incremental_bundle_payload_sources "${bundle_names[@]}"
+fi
 
 daemon_was_running=0
 if [[ $restart_daemon -eq 1 ]] && command -v ryeos >/dev/null 2>&1; then
@@ -780,10 +854,25 @@ for name in "${bundle_names[@]}"; do
         sudo install -Dm644 "$bundle_dir/PUBLISHER_TRUST.toml" \
             "$share_dir/$name/PUBLISHER_TRUST.toml"
     fi
+    if [[ -f "$bundle_dir/assemble.py" ]]; then
+        command -v python3 >/dev/null 2>&1 || \
+            die "$name operator assembler requires python3"
+        sudo install -Dm755 "$bundle_dir/assemble.py" \
+            "$share_dir/$name/assemble.py"
+        [[ -x "$share_dir/$name/assemble.py" ]] || \
+            die "failed to install $name operator assembler"
+    fi
     if [[ -f "$bundle_dir/README.md" ]]; then
         sudo install -Dm644 "$bundle_dir/README.md" \
             "$doc_dir/$name/README.md"
     fi
+    for pinned_contract in "$bundle_dir"/PINNED-*.md; do
+        [[ -f "$pinned_contract" ]] || continue
+        sudo install -Dm644 "$pinned_contract" \
+            "$doc_dir/$name/$(basename "$pinned_contract")"
+        [[ -s "$doc_dir/$name/$(basename "$pinned_contract")" ]] || \
+            die "failed to install $name pinned workload contract"
+    done
 done
 for name in "${bundle_names[@]}"; do
     if [[ $run_populate -eq 0 ]]; then

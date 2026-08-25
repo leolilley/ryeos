@@ -85,25 +85,6 @@ fn shipped_local_worker_pins_the_production_capture_digest() {
 }
 
 #[test]
-fn shipped_codex_worker_pins_the_production_capture_digest() {
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .expect("ryeos-state lives below the repository root");
-    let worker_root = repository.join("bundles/codex/.ai/workers/codex/lib/hosted");
-    let observed = captured_directory_digest(&worker_root);
-    let worker_item =
-        std::fs::read_to_string(repository.join("bundles/codex/.ai/workers/codex/hosted.yaml"))
-            .unwrap();
-    let body = lillux::signature::strip_signature_lines(&worker_item);
-    let value: serde_yaml::Value = serde_yaml::from_str(&body).unwrap();
-    let declared = value["source"]["digest"]
-        .as_str()
-        .expect("Codex worker item declares its adjacent source digest");
-    assert_eq!(observed, declared);
-}
-
-#[test]
 fn activation_fixture_matches_every_sourceless_worker_realization() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()

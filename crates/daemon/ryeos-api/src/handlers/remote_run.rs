@@ -247,7 +247,7 @@ mod tests {
     fn retained_request() -> serde_json::Value {
         serde_json::json!({
             "remote": "hosted",
-            "item_ref": "worker_execution:codex/session",
+            "item_ref": "worker_execution:fixture/session",
             "ref_bindings": {},
             "project": "/project",
             "parameters": {"credential_profile_id": "personal"},

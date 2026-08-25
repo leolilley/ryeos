@@ -2371,6 +2371,15 @@ fn validate_frame_shape(
     frame: &PersistentSessionFrame,
     expected_boot_identity: Option<&str>,
 ) -> Result<()> {
+    if frame.kind == PersistentSessionFrameKind::ObservationBatch
+        && frame.body.as_ref().is_some_and(|body| {
+            serde_json::to_vec(body).is_ok_and(|encoded| {
+                encoded.len() > ryeos_state::objects::MAX_STRUCTURED_OBSERVATION_BATCH_BYTES
+            })
+        })
+    {
+        bail!("persistent-session observation batch exceeds its serialized-byte ceiling");
+    }
     let valid = match frame.kind {
         PersistentSessionFrameKind::Ready => {
             frame.request_id.is_none()
@@ -2651,6 +2660,16 @@ while True:
             if acknowledgement['kind'] != 'observation_ack':
                 raise SystemExit(2)
         send('final', frame['request_id'], {'echo':frame['body']})
+    elif frame['kind'] == 'control':
+        if frame['body'].get('force_expired'):
+            send('final', frame['request_id'], {
+                'resolved':False,
+                'outcome':'expired',
+                'request_id':frame['body']['request_id'],
+                'request_digest':frame['body']['request_digest']
+            })
+        else:
+            send('final', frame['request_id'], {'echo':frame['body']})
     elif frame['kind'] == 'cancel':
         send('error', frame['request_id'], {'message':'fixture observed cancellation'})
 "#;
@@ -2859,6 +2878,47 @@ while True:
     }
 
     #[test]
+    fn typed_control_expiry_final_keeps_the_exclusive_session_usable() {
+        let pool = PersistentSessionPool::new();
+        let mut lifecycle = test_lifecycle();
+        lifecycle.ready_timeout_ms = 2_000;
+        lifecycle.request_timeout_ms = 2_000;
+        let wire = test_wire();
+        let session_id = "x".repeat(64);
+        pool.reserve_exclusive(&session_id, &lifecycle, &wire)
+            .unwrap()
+            .bind(fake_framed_session().unwrap())
+            .unwrap();
+        let expired = pool
+            .execute_exclusive_control(
+                &session_id,
+                serde_json::json!({
+                    "force_expired":true,
+                    "request_id":"approval-one",
+                    "request_digest":"a".repeat(64),
+                }),
+            )
+            .unwrap();
+        assert_eq!(expired["outcome"], "expired");
+        assert_eq!(expired["request_digest"], "a".repeat(64));
+
+        let next = pool
+            .execute_exclusive(
+                &session_id,
+                serde_json::json!({"message":"still-live"}),
+                || false,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(next["echo"]["message"], "still-live");
+        assert!(
+            pool.take_exclusive_failure_cleanup_state(&session_id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn exclusive_retirement_never_conflates_reserved_absent_and_reaped() {
         let pool = PersistentSessionPool::new();
         let mut lifecycle = test_lifecycle();
@@ -3018,6 +3078,28 @@ while True:
         let frame = decode_frame_body(body, 4096).unwrap();
         assert!(validate_frame_shape(&frame, Some(&"a".repeat(64))).is_ok());
         assert!(validate_frame_shape(&frame, Some(&"b".repeat(64))).is_err());
+    }
+
+    #[test]
+    fn observation_frames_are_bounded_before_entering_any_queue() {
+        let admitted = PersistentSessionFrame {
+            protocol: "fixture".to_owned(),
+            version: 1,
+            kind: PersistentSessionFrameKind::ObservationBatch,
+            request_id: None,
+            body: Some(serde_json::json!({"events":[],"session_observations":[]})),
+        };
+        assert!(validate_frame_shape(&admitted, None).is_ok());
+
+        let excessive = PersistentSessionFrame {
+            body: Some(serde_json::json!({
+                "payload":"x".repeat(
+                    ryeos_state::objects::MAX_STRUCTURED_OBSERVATION_BATCH_BYTES
+                )
+            })),
+            ..admitted
+        };
+        assert!(validate_frame_shape(&excessive, None).is_err());
     }
 
     #[test]
