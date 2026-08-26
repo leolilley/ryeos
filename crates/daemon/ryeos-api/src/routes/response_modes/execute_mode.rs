@@ -245,6 +245,15 @@ fn resolve_project_authority(
         PinnedProjectRealization, PinnedTerminalPublication,
     };
 
+    // Authorization scopes are a set. Authorized-key files and composed
+    // grants need not preserve a particular ordering, while the immutable
+    // project-authority evidence intentionally requires one canonical
+    // representation. Canonicalize at that evidence boundary without
+    // changing the caller's effective authorization.
+    let mut capability_ceiling = capability_ceiling.to_vec();
+    capability_ceiling.sort();
+    capability_ceiling.dedup();
+
     let resolve_name_authority =
         |policy: &ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy| match policy {
             ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy::DeclaredRequired => {
@@ -337,7 +346,7 @@ fn resolve_project_authority(
                     isolation.mode(),
                 ),
                 environment,
-                capability_ceiling.to_vec(),
+                capability_ceiling.clone(),
             )
         }
         ProjectExecutionPolicy::Pinned { realization, .. } => {
@@ -390,7 +399,7 @@ fn resolve_project_authority(
                 snapshot_hash.to_string(),
                 realization,
                 environment,
-                capability_ceiling.to_vec(),
+                capability_ceiling,
             )
         }
     }?;
@@ -2291,6 +2300,7 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let policy = ExecutionPolicy::local_live(ExecutionResponse::Wait);
         let capability_ceiling = vec![
+            ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
             "ryeos.execute.tool.core/snapshot-create".to_string(),
             ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
         ];
@@ -2305,7 +2315,13 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(authority.capability_ceiling(), capability_ceiling);
+        assert_eq!(
+            authority.capability_ceiling(),
+            &[
+                "ryeos.execute.tool.core/snapshot-create".to_string(),
+                ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
+            ]
+        );
     }
 
     #[test]

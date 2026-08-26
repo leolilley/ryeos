@@ -173,9 +173,10 @@ fn reject_injected_project_binding(params: &Value, command: &CommandDef) -> Resu
     else {
         return Ok(());
     };
-    if params
-        .as_object()
-        .is_some_and(|object| object.contains_key(bind_parameter))
+    if bind_parameter != "project"
+        && params
+            .as_object()
+            .is_some_and(|object| object.contains_key(bind_parameter))
     {
         return Err(CliError::Local {
             detail: format!(
@@ -336,6 +337,22 @@ mod tests {
     }
 
     #[test]
+    fn offline_binding_honors_project_named_parameter() {
+        let project_path = std::env::current_dir()
+            .expect("current directory")
+            .canonicalize()
+            .expect("canonical current directory");
+        let params = bind_params_minimal(
+            &[],
+            &project_command("project"),
+            project_path.to_str().expect("UTF-8 project path"),
+        )
+        .expect("bind offline parameters");
+
+        assert_eq!(params, json!({"project": project_path.to_string_lossy()}));
+    }
+
+    #[test]
     fn offline_binding_refuses_injected_runtime_project_parameter() {
         let project_path = std::env::current_dir()
             .expect("current directory")
@@ -354,7 +371,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("--project-path is runtime-bound from the command's project selector")
+                .contains("--project-path is a runtime-bound service field")
         );
     }
 }

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T16:23:36Z:391101d150fe4cd7f1f5f0ceaad30e84b860da5535fa41007f7e7a4886e2625c:Ah5Oz21xr6x1JxWZ20sUhFG556yJrjF/dn/PAjJ6r2tZ5xAl/yxrFn2kNeYBm+fFfmf5kbyAaMeY/6p5QuqfBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-26T09:50:51Z:adbe8e8a41178b40e02f1e00a54881bf3e22ae59eea00066d68f08b703c0d851:cSaZS3Dz//fkosF1Qv3ewursrlEHpfupuEjMEMrpcjxoDm8t2Dl7OcDFIUoOhENVi9CF/m80jQM0Wd1kM8bjAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -52,7 +52,7 @@ to delegated callers.
 | `ryeos remote push` / `service:remote/push` | `ryeos.execute.service.remote/push` | `ryeos.execute.service.objects/has`, `ryeos.execute.service.objects/put`, `ryeos.execute.service.system/push-head` | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head` |
 | `ryeos remote pull` | `ryeos.execute.service.objects/get` | `ryeos.execute.service.objects/get` | `POST /objects/get` |
 | `ryeos remote execute` | `ryeos.execute.service.remote/admin` | push scopes + `ryeos.execute.service.objects/get` + caps required by the executed item | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head`, `POST /execute`, `POST /objects/get` |
-| `ryeos remote run` | `ryeos.execute.service.remote/admin` | caps required by the executed item | `POST /execute` |
+| `ryeos remote run` | `ryeos.execute.service.remote/admin` | caps required by the executed item; accepted/recoverable orchestration also needs `ryeos.execute.service.launch/status` and `ryeos.execute.service.launch/cancel` | `POST /execute`, or `POST /execute/launch` followed by exact launch status/cancel control when required |
 | `ryeos remote threads` | `ryeos.execute.service.remote/admin` | signed auth; no extra thread service cap in v1 | `GET /threads?limit=N` |
 | `ryeos remote thread-status` | `ryeos.execute.service.remote/admin` | signed auth; no extra thread service cap in v1 | `GET /threads/{thread_id}` |
 | `ryeos remote bundle-install` | `ryeos.execute.service.bundle/install` | `ryeos.execute.service.bundle/export`, `ryeos.execute.service.objects/get` | `POST /bundle/export`, `POST /objects/get` |
@@ -66,6 +66,10 @@ Notes:
   intentionally unauthenticated discovery endpoints.
 - `remote execute` must also satisfy the capabilities required by the
   executed item once the remote daemon dispatches `/execute`.
+- An accepted remote launch is not safely retryable from transport failure
+  unless its exact owner can query the caller-retained `launch_id`. Include
+  `service:launch/status` and `service:launch/cancel` in an exact remote grant
+  for every workflow that uses accepted/restart-recoverable launch semantics.
 - `remote.admin` is a **local** umbrella capability for high-impact
   remote orchestration commands. It is not automatically sent to the
   target daemon and does not replace remote authorized-key scopes.
@@ -256,17 +260,13 @@ cache is missing the handler fetches `/ingest-ignore` inline and aborts
 if that fetch fails.
 
 The ordinary command is node-owned. A durable workflow that must retain the
-configured operator across later remote control uses the explicit service
-form:
+configured operator across later remote control selects that principal
+explicitly on the same signed command:
 
 ```bash
-ryeos execute service:remote/push --input - <<'JSON'
-{
-  "remote": "prod",
-  "project": "/absolute/path/to/project",
-  "outbound_principal": "configured_operator"
-}
-JSON
+ryeos remote push prod \
+  --project /absolute/path/to/project \
+  --outbound-principal configured_operator
 ```
 
 This does not reuse a node-owned remote HEAD; it creates/advances the distinct
@@ -275,6 +275,8 @@ configured-operator principal-scoped HEAD.
 Failure modes:
 
 - project path must be absolute and canonicalizable
+- a full-project binding's destination must already be an accessible,
+  canonicalizable project root on the target node
 - missing remote ignore rules fail closed if they cannot be fetched
 - object upload or pushed-head write errors abort the push
 

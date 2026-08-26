@@ -87,7 +87,7 @@ key's hosted `local_client` grant with a target-node-signed `remote_operator`
 grant. This is a semantic class conversion, not a scope update:
 
 ```sh
-HOSTED_SCOPES='ryeos.execute.worker_execution.codex/login,ryeos.execute.worker_execution.codex/session,ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.system/push-head,ryeos.execute.service.credential-profiles/create,ryeos.execute.service.credential-profiles/get,ryeos.execute.service.credential-profiles/revoke,ryeos.execute.service.credential-profiles/confirm,ryeos.execute.service.credential-profiles/delete,ryeos.execute.service.worker-executions/status,ryeos.execute.service.worker-executions/command,ryeos.execute.service.worker-executions/approvals,ryeos.execute.service.worker-executions/resolve-approval,ryeos.execute.service.worker-executions/terminate,ryeos.execute.service.worker-executions/publish,ryeos.execute.service.worker-executions/validate-candidate-closure-and-base,ryeos.execute.service.worker-executions/discard,ryeos.write.project.live'
+HOSTED_SCOPES='ryeos.execute.worker_execution.codex/login,ryeos.execute.worker_execution.codex/session,ryeos.execute.service.launch/status,ryeos.execute.service.launch/cancel,ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.system/push-head,ryeos.execute.service.credential-profiles/create,ryeos.execute.service.credential-profiles/get,ryeos.execute.service.credential-profiles/revoke,ryeos.execute.service.credential-profiles/confirm,ryeos.execute.service.credential-profiles/delete,ryeos.execute.service.worker-executions/status,ryeos.execute.service.worker-executions/command,ryeos.execute.service.worker-executions/approvals,ryeos.execute.service.worker-executions/resolve-approval,ryeos.execute.service.worker-executions/terminate,ryeos.execute.service.worker-executions/publish,ryeos.execute.service.worker-executions/validate-candidate-closure-and-base,ryeos.execute.service.worker-executions/discard,ryeos.write.project.live'
 RYEOS_APP_ROOT=/path/to/hosted-app-root ryeos authorize-client \
   --public-key "<configured_operator_raw_ed25519_base64>" \
   --label "hosted operator forwarded from source" \
@@ -212,26 +212,27 @@ under the configured operator. Then launch through the provider-neutral
 rather than from the client path:
 
 ```sh
-# This opt-in generic push signs the destination HEAD as the configured
-# operator. Ordinary `ryeos remote push` remains node-owned.
-ryeos execute service:remote/push --input - <<'JSON'
-{
-  "remote": "hosted",
-  "project": "/local/project",
-  "outbound_principal": "configured_operator"
-}
-JSON
+# The destination path must already be a valid, canonicalizable project root
+# on the hosted node. The binding keeps host-local paths out of execution
+# authority and selects full-project snapshot transport.
+ryeos remote bind-project hosted \
+  --project /local/project \
+  --remote-project /hosted/project \
+  --sync-scope full_project
+
+# This opt-in push signs the destination HEAD as the configured operator.
+# Omitting outbound-principal preserves ordinary node-owned push semantics.
+ryeos remote push hosted \
+  --project /local/project \
+  --outbound-principal configured_operator
+
 REMOTE_LAUNCH_ID="L-$(uuidgen | tr -d '-')"
-ryeos execute service:remote/run --input - <<JSON
-{
-  "remote": "hosted",
-  "item_ref": "worker_execution:codex/session",
-  "ref_bindings": {},
-  "project": "/local/project",
-  "outbound_principal": "configured_operator",
-  "parameters": {"credential_profile_id": "personal"},
-  "launch_id": "$REMOTE_LAUNCH_ID",
-  "execution_policy": {
+ryeos remote run hosted worker_execution:codex/session \
+  --project /local/project \
+  --outbound-principal configured_operator \
+  --parameters '{"credential_profile_id":"personal"}' \
+  --launch-id "$REMOTE_LAUNCH_ID" \
+  --execution-policy '{
     "schema_version": 2,
     "ownership": "daemon_owned",
     "recovery": "restart_recoverable",
@@ -251,9 +252,7 @@ ryeos execute service:remote/run --input - <<JSON
       },
       "child_policy": {"kind": "inherit"}
     }
-  }
-}
-JSON
+  }'
 ```
 
 The same configured-operator key must exist at both operator endpoints and use

@@ -1258,6 +1258,7 @@ fn apply_project_policy(
         CliError::ProjectResolution("command parameters must be a JSON object".into())
     })?;
     if let Some(bind_parameter) = project.bind_parameter.as_ref()
+        && bind_parameter != "project"
         && obj.contains_key(bind_parameter)
     {
         return Err(CliError::ProjectResolution(format!(
@@ -2482,7 +2483,43 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("--project-path is runtime-bound from the command's project selector")
+                .contains("--project-path is a runtime-bound service field")
+        );
+    }
+
+    #[test]
+    fn project_named_binding_accepts_canonical_project_selector() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut command = command(
+            &["remote", "push"],
+            vec![vec![("remote", CommandArgumentKind::String)]],
+            CommandProjectResolution::Required,
+        );
+        command.project.as_mut().unwrap().bind_parameter = Some("project".into());
+
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&[
+                "remote",
+                "push",
+                "hosted",
+                "--project",
+                &tmp.path().to_string_lossy(),
+            ]),
+            &[command],
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.project_path, None);
+        assert_eq!(resolved.parameters["remote"], "hosted");
+        assert_eq!(
+            resolved.parameters["project"],
+            tmp.path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
         );
     }
 
