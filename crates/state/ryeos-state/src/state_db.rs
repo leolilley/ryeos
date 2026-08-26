@@ -5715,6 +5715,19 @@ impl StateDb {
             .delete_terminal_sync_jobs_before(cutoff_iso)
     }
 
+    pub fn operational_credential_profiles(
+        &self,
+    ) -> anyhow::Result<Vec<crate::OperationalCredentialProfileRecord>> {
+        self.operational()?.credential_profiles()
+    }
+
+    pub fn merge_operational_credential_profile(
+        &self,
+        profile: &crate::OperationalCredentialProfileRecord,
+    ) -> anyhow::Result<crate::OperationalCredentialProfileRecord> {
+        self.operational()?.merge_credential_profile(profile)
+    }
+
     fn operational(&self) -> anyhow::Result<&OperationalDb> {
         match &self.operational {
             OperationalAccess::Available(db) => Ok(db),

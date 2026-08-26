@@ -1,130 +1,22 @@
 //! Per-launch execution workspace layout.
 //!
-//! RyeOS owns the generation and lifecycle. The selected signed isolation
-//! adapter owns composition of `lower + upper` for the launched process.
+//! RyeOS owns the canonical project generation and lifecycle. A selected
+//! signed isolation adapter may own opaque backend state, but the executor
+//! consumes only its normalized mutation evidence.
 
-use std::path::{Path, PathBuf};
-
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use ryeos_state::objects::{ProjectFile, ProjectSnapshotPolicy, ProjectTree};
 
-pub const LOWER_DIR: &str = "project";
-pub const UPPER_DIR: &str = "upper";
-pub const WORK_DIR: &str = "work";
+pub use ryeos_engine::execution_workspace::{BACKEND_STATE_DIR, PROJECT_DIR, WorkspaceLayout};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkspaceLayout {
-    pub root: PathBuf,
-    pub lower: PathBuf,
-    pub upper: PathBuf,
-    pub work: PathBuf,
-}
-
-impl WorkspaceLayout {
-    pub fn create(execution_root: &Path, workspace_id: &str) -> Result<Self> {
-        validate_workspace_id(workspace_id)?;
-        let root = execution_root.join(workspace_id);
-        match std::fs::create_dir(&root) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let metadata = std::fs::symlink_metadata(&root)?;
-                if !metadata.file_type().is_dir() {
-                    return Err(error)
-                        .with_context(|| format!("adopt execution workspace {}", root.display()));
-                }
-            }
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("reserve execution workspace {}", root.display()));
-            }
-        }
-        let layout = Self::from_root(root);
-        for path in [&layout.lower, &layout.upper, &layout.work] {
-            match std::fs::create_dir(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if !std::fs::symlink_metadata(path)?.file_type().is_dir() {
-                        return Err(error).with_context(|| {
-                            format!("adopt workspace directory {}", path.display())
-                        });
-                    }
-                }
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("create workspace directory {}", path.display()));
-                }
-            }
-        }
-        for entry in std::fs::read_dir(&layout.root)? {
-            let name = entry?.file_name();
-            if !matches!(name.to_str(), Some(LOWER_DIR | UPPER_DIR | WORK_DIR)) {
-                anyhow::bail!(
-                    "execution workspace contains unexpected entry: {}",
-                    layout.root.join(name).display()
-                );
-            }
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&layout.root, std::fs::Permissions::from_mode(0o700))?;
-            std::fs::set_permissions(&layout.lower, std::fs::Permissions::from_mode(0o700))?;
-            std::fs::set_permissions(&layout.upper, std::fs::Permissions::from_mode(0o700))?;
-            std::fs::set_permissions(&layout.work, std::fs::Permissions::from_mode(0o700))?;
-        }
-        Ok(layout)
-    }
-
-    pub fn from_root(root: PathBuf) -> Self {
-        Self {
-            lower: root.join(LOWER_DIR),
-            upper: root.join(UPPER_DIR),
-            work: root.join(WORK_DIR),
-            root,
-        }
-    }
-
-    pub fn from_lower(lower: &Path) -> Result<Self> {
-        if lower.file_name().and_then(|name| name.to_str()) != Some(LOWER_DIR) {
-            anyhow::bail!(
-                "runtime project path is not a workspace lower: {}",
-                lower.display()
-            );
-        }
-        let root = lower
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("workspace lower has no parent"))?
-            .to_path_buf();
-        let layout = Self::from_root(root);
-        for path in [&layout.lower, &layout.upper, &layout.work] {
-            if !path.is_dir() {
-                anyhow::bail!("workspace component is missing: {}", path.display());
-            }
-        }
-        Ok(layout)
-    }
-}
-
-fn validate_workspace_id(value: &str) -> Result<()> {
-    if value.is_empty()
-        || value.len() > 160
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        anyhow::bail!("invalid execution workspace id `{value}`");
-    }
-    Ok(())
-}
-
-/// Apply the normalized native-overlay delta to an immutable project tree.
+/// Apply a normalized adapter mutation set to an immutable project tree.
 /// Only changed regular bytes are streamed into CAS; unchanged object hashes
 /// are retained verbatim.
 pub fn apply_workspace_delta(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
     staged_roots: &mut ryeos_state::StagedCasRootLease,
-    upper: &lillux::PinnedDirectory,
+    mutation_content: &lillux::PinnedDirectory,
     base_tree: &ProjectTree,
     policy: &ProjectSnapshotPolicy,
     mutations: &[ryeos_isolation_protocol::WorkspaceMutation],
@@ -161,7 +53,7 @@ pub fn apply_workspace_delta(
                     policy.sync_scope,
                     Some(&matcher),
                 )?;
-                let (parent, name) = open_mutation_parent(upper, relative)?;
+                let (parent, name) = open_mutation_parent(mutation_content, relative)?;
                 let file = parent.open_regular(name.as_ref(), false)?.ok_or_else(|| {
                     anyhow::anyhow!("workspace mutation file disappeared: {relative}")
                 })?;

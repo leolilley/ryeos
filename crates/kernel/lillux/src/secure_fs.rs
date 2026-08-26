@@ -683,6 +683,13 @@ impl DirectoryTraversalBudget {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnerPrivateTreeAction {
+    Require,
+    RequireEnclosed,
+    Tighten,
+}
+
 /// Apply an exact portable mode to one already-opened regular-file inode.
 ///
 /// Authority-sensitive callers use this after create because the process
@@ -835,6 +842,16 @@ impl PinnedDirectoryLock {
 }
 
 impl PinnedDirectory {
+    /// Adopt an already-open directory descriptor as a descriptor-relative
+    /// authority. `path` is diagnostic only; all subsequent traversal and
+    /// mutation remains rooted in `directory`.
+    pub fn from_open_directory(path: PathBuf, directory: File) -> Result<Self> {
+        if !directory.metadata()?.is_dir() {
+            anyhow::bail!("open authority is not a directory: {}", path.display());
+        }
+        Ok(Self { path, directory })
+    }
+
     pub fn identity(&self) -> Result<PinnedDirectoryIdentity> {
         let (containing_device, inode) = self.device_inode()?;
         Ok(PinnedDirectoryIdentity {
@@ -1342,6 +1359,373 @@ impl PinnedDirectory {
             anyhow::bail!("pinned directory entry changed while it was being observed");
         }
         Ok(())
+    }
+
+    /// Reassert owner-only access on this exact open directory and prove that
+    /// its original path still selects the same inode.
+    ///
+    /// This is the live-directory counterpart to the bounded tree validators
+    /// below. It intentionally does not enumerate children: a process that
+    /// owns a mutable state directory may create, replace, or remove entries
+    /// concurrently, so such a traversal cannot honestly claim a stable tree
+    /// snapshot. The pinned root remains the confidentiality boundary.
+    pub fn tighten_owner_private_directory(&self) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            anyhow::bail!("owner-private directory protection is unavailable on this platform")
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            self.set_mode(0o700)?;
+            let metadata = self.directory.metadata()?;
+            if !metadata.is_dir() || metadata.mode() & 0o7777 != 0o700 {
+                anyhow::bail!("pinned directory is not exactly owner-private and accessible");
+            }
+            self.ensure_path_binding()
+        }
+    }
+
+    /// Validate one bounded owner-private tree without following links.
+    ///
+    /// Directory and regular-file permission interpretation, device/inode
+    /// identity, and no-follow platform mechanics remain inside Lillux.
+    /// Symlinks consume the namespace budget and retain exact no-follow inode
+    /// identity, but their target and conventional mode bits are never read.
+    /// Special entries and mounted-filesystem crossings fail closed. The
+    /// returned count includes regular-file bytes only.
+    pub fn require_owner_private_tree_bounded(
+        &self,
+        budget: DirectoryTraversalBudget,
+        maximum_regular_bytes: u64,
+    ) -> Result<u64> {
+        self.owner_private_tree_bounded(
+            budget,
+            maximum_regular_bytes,
+            OwnerPrivateTreeAction::Require,
+        )
+    }
+
+    /// Validate one bounded opaque tree enclosed by an exact owner-private root.
+    ///
+    /// The opened root is the confidentiality boundary and must remain exactly
+    /// mode 0700. Descendant directories and regular files must have the same
+    /// owner as that root, but their group/other mode bits are workload state:
+    /// they grant no access through an untraversable root and are not rewritten
+    /// or treated as RyeOS credential metadata. Links remain opaque and are
+    /// never followed. Device, inode, namespace, hard-link, special-entry,
+    /// depth, entry-count, and byte limits retain the strict tree walk above.
+    pub fn require_owner_enclosed_tree_bounded(
+        &self,
+        budget: DirectoryTraversalBudget,
+        maximum_regular_bytes: u64,
+    ) -> Result<u64> {
+        self.owner_private_tree_bounded(
+            budget,
+            maximum_regular_bytes,
+            OwnerPrivateTreeAction::RequireEnclosed,
+        )
+    }
+
+    /// Tighten one bounded tree to owner-private permissions without following
+    /// links, returning its regular-file byte count.
+    ///
+    /// Directories become owner-only and owner-accessible. Regular files keep
+    /// their owner permission class while group/other and special permission
+    /// bits are removed. Symlinks remain opaque workload state. Identity,
+    /// namespace, device, depth, entry-count, and byte limits are checked with
+    /// the same guarantees as [`Self::require_owner_private_tree_bounded`].
+    pub fn tighten_owner_private_tree_bounded(
+        &self,
+        budget: DirectoryTraversalBudget,
+        maximum_regular_bytes: u64,
+    ) -> Result<u64> {
+        self.owner_private_tree_bounded(
+            budget,
+            maximum_regular_bytes,
+            OwnerPrivateTreeAction::Tighten,
+        )
+    }
+
+    fn owner_private_tree_bounded(
+        &self,
+        budget: DirectoryTraversalBudget,
+        maximum_regular_bytes: u64,
+        action: OwnerPrivateTreeAction,
+    ) -> Result<u64> {
+        #[cfg(not(unix))]
+        {
+            let _ = (budget, maximum_regular_bytes, action);
+            anyhow::bail!("owner-private tree traversal is unavailable on this platform")
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            fn same_entry_identity(
+                left: &PinnedDirectoryEntryMetadata,
+                right: &PinnedDirectoryEntryMetadata,
+            ) -> bool {
+                left.name == right.name
+                    && left.entry_type == right.entry_type
+                    && left.containing_device == right.containing_device
+                    && left.inode == right.inode
+            }
+
+            fn require_owner_accessible_directory(metadata: &std::fs::Metadata) -> Result<()> {
+                if !metadata.is_dir() || metadata.mode() & 0o700 != 0o700 {
+                    anyhow::bail!("owner-private tree directory is not owner-accessible");
+                }
+                Ok(())
+            }
+
+            fn require_owner_private_permissions(metadata: &std::fs::Metadata) -> Result<()> {
+                if metadata.mode() & 0o077 != 0 {
+                    anyhow::bail!("owner-private tree entry grants group or other permissions");
+                }
+                Ok(())
+            }
+
+            fn require_exact_owner_private_root(metadata: &std::fs::Metadata) -> Result<()> {
+                if !metadata.is_dir() || metadata.mode() & 0o7777 != 0o700 {
+                    anyhow::bail!("owner-enclosed tree root is not exactly mode 0700");
+                }
+                Ok(())
+            }
+
+            fn require_same_owner(metadata: &std::fs::Metadata, expected_owner: u32) -> Result<()> {
+                if metadata.uid() != expected_owner {
+                    anyhow::bail!("owner-enclosed tree entry has a different owner");
+                }
+                Ok(())
+            }
+
+            fn require_private_regular_identity(metadata: &std::fs::Metadata) -> Result<()> {
+                if !metadata.is_file() || metadata.nlink() != 1 {
+                    anyhow::bail!(
+                        "owner-private tree regular file is not confined to one namespace link"
+                    );
+                }
+                Ok(())
+            }
+
+            fn require_current_entry(
+                parent: &PinnedDirectory,
+                expected: &PinnedDirectoryEntryMetadata,
+            ) -> Result<PinnedDirectoryEntryMetadata> {
+                let current = parent
+                    .entry_no_follow(&expected.name)?
+                    .ok_or_else(|| anyhow::anyhow!("owner-private tree entry disappeared"))?;
+                if !same_entry_identity(expected, &current) {
+                    anyhow::bail!("owner-private tree entry changed identity");
+                }
+                Ok(current)
+            }
+
+            #[allow(clippy::too_many_arguments)]
+            fn visit(
+                directory: &PinnedDirectory,
+                root_device: u64,
+                remaining_entries: &mut usize,
+                max_depth: usize,
+                depth: usize,
+                maximum_regular_bytes: u64,
+                regular_bytes: &mut u64,
+                action: OwnerPrivateTreeAction,
+                root_owner: u32,
+            ) -> Result<()> {
+                if depth > max_depth {
+                    anyhow::bail!("owner-private tree reached its directory-depth ceiling");
+                }
+                let initial = directory.entries_no_follow_bounded(*remaining_entries)?;
+                *remaining_entries = remaining_entries
+                    .checked_sub(initial.len())
+                    .ok_or_else(|| anyhow::anyhow!("owner-private tree entry budget underflow"))?;
+
+                for entry in &initial {
+                    if entry.containing_device != root_device {
+                        anyhow::bail!("owner-private tree crosses a mounted filesystem");
+                    }
+                    match entry.entry_type {
+                        PinnedEntryType::Symlink => {
+                            directory.ensure_entry_observation(entry)?;
+                        }
+                        PinnedEntryType::Directory => {
+                            let child =
+                                directory
+                                    .open_child_directory(&entry.name)?
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!("owner-private tree directory disappeared")
+                                    })?;
+                            let identity = child.identity()?;
+                            if identity.containing_device != entry.containing_device
+                                || identity.inode != entry.inode
+                            {
+                                anyhow::bail!("owner-private tree directory changed identity");
+                            }
+                            let before = child.directory.metadata()?;
+                            require_owner_accessible_directory(&before)?;
+                            match action {
+                                OwnerPrivateTreeAction::Require => {
+                                    require_owner_private_permissions(&before)?;
+                                }
+                                OwnerPrivateTreeAction::RequireEnclosed => {
+                                    require_same_owner(&before, root_owner)?;
+                                }
+                                OwnerPrivateTreeAction::Tighten => child.set_mode(0o700)?,
+                            }
+                            let current = require_current_entry(directory, entry)?;
+                            let current_metadata = child.directory.metadata()?;
+                            match action {
+                                OwnerPrivateTreeAction::RequireEnclosed => {
+                                    require_same_owner(&current_metadata, root_owner)?;
+                                }
+                                OwnerPrivateTreeAction::Require
+                                | OwnerPrivateTreeAction::Tighten => {
+                                    require_owner_private_permissions(&current_metadata)?;
+                                    if current.mode & 0o077 != 0 {
+                                        anyhow::bail!(
+                                            "owner-private tree directory permissions changed in namespace"
+                                        );
+                                    }
+                                }
+                            }
+                            visit(
+                                &child,
+                                root_device,
+                                remaining_entries,
+                                max_depth,
+                                depth + 1,
+                                maximum_regular_bytes,
+                                regular_bytes,
+                                action,
+                                root_owner,
+                            )?;
+                            let current = require_current_entry(directory, entry)?;
+                            let after = child.directory.metadata()?;
+                            require_owner_accessible_directory(&after)?;
+                            match action {
+                                OwnerPrivateTreeAction::RequireEnclosed => {
+                                    require_same_owner(&after, root_owner)?;
+                                }
+                                OwnerPrivateTreeAction::Require
+                                | OwnerPrivateTreeAction::Tighten => {
+                                    require_owner_private_permissions(&after)?;
+                                    if current.mode & 0o077 != 0 {
+                                        anyhow::bail!(
+                                            "owner-private tree directory permissions changed in namespace"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        PinnedEntryType::Regular => {
+                            let file =
+                                directory.open_regular(&entry.name, false)?.ok_or_else(|| {
+                                    anyhow::anyhow!("owner-private tree file disappeared")
+                                })?;
+                            let before = observe_open_regular_file(&file)?;
+                            if !before.matches_directory_entry(entry) {
+                                anyhow::bail!("owner-private tree file changed identity");
+                            }
+                            let before_metadata = file.metadata()?;
+                            require_private_regular_identity(&before_metadata)?;
+                            match action {
+                                OwnerPrivateTreeAction::Require => {
+                                    require_owner_private_permissions(&before_metadata)?;
+                                }
+                                OwnerPrivateTreeAction::RequireEnclosed => {
+                                    require_same_owner(&before_metadata, root_owner)?;
+                                }
+                                OwnerPrivateTreeAction::Tighten => {
+                                    set_open_regular_file_mode(
+                                        &file,
+                                        before_metadata.mode() & 0o700,
+                                    )?;
+                                }
+                            }
+                            let after_metadata = file.metadata()?;
+                            require_private_regular_identity(&after_metadata)?;
+                            let current = require_current_entry(directory, entry)?;
+                            match action {
+                                OwnerPrivateTreeAction::RequireEnclosed => {
+                                    require_same_owner(&after_metadata, root_owner)?;
+                                }
+                                OwnerPrivateTreeAction::Require
+                                | OwnerPrivateTreeAction::Tighten => {
+                                    require_owner_private_permissions(&after_metadata)?;
+                                    if current.mode & 0o077 != 0 {
+                                        anyhow::bail!(
+                                            "owner-private tree file permissions changed in namespace"
+                                        );
+                                    }
+                                }
+                            }
+                            *regular_bytes =
+                                regular_bytes.checked_add(after_metadata.len()).ok_or_else(
+                                    || anyhow::anyhow!("owner-private tree byte count overflow"),
+                                )?;
+                            if *regular_bytes > maximum_regular_bytes {
+                                anyhow::bail!("owner-private tree reached its byte ceiling");
+                            }
+                        }
+                        _ => anyhow::bail!("owner-private tree contains a special entry"),
+                    }
+                }
+
+                let final_entries = directory.entries_no_follow_bounded(initial.len())?;
+                if final_entries.len() != initial.len()
+                    || initial
+                        .iter()
+                        .zip(&final_entries)
+                        .any(|(before, after)| !same_entry_identity(before, after))
+                {
+                    anyhow::bail!("owner-private tree namespace changed during traversal");
+                }
+                Ok(())
+            }
+
+            let metadata = self.directory.metadata()?;
+            require_owner_accessible_directory(&metadata)?;
+            match action {
+                OwnerPrivateTreeAction::Require => {
+                    require_owner_private_permissions(&metadata)?;
+                }
+                OwnerPrivateTreeAction::RequireEnclosed => {
+                    require_exact_owner_private_root(&metadata)?;
+                }
+                OwnerPrivateTreeAction::Tighten => self.set_mode(0o700)?,
+            }
+            let root_device = self.directory.metadata()?.dev();
+            let root_owner = self.directory.metadata()?.uid();
+            let mut remaining_entries = budget.max_entries;
+            let mut regular_bytes = 0;
+            visit(
+                self,
+                root_device,
+                &mut remaining_entries,
+                budget.max_depth,
+                0,
+                maximum_regular_bytes,
+                &mut regular_bytes,
+                action,
+                root_owner,
+            )?;
+            let final_root = self.directory.metadata()?;
+            require_owner_accessible_directory(&final_root)?;
+            match action {
+                OwnerPrivateTreeAction::RequireEnclosed => {
+                    require_exact_owner_private_root(&final_root)?;
+                    require_same_owner(&final_root, root_owner)?;
+                }
+                OwnerPrivateTreeAction::Require | OwnerPrivateTreeAction::Tighten => {
+                    require_owner_private_permissions(&final_root)?;
+                }
+            }
+            self.ensure_path_binding()?;
+            Ok(regular_bytes)
+        }
     }
 
     /// Read a bounded extended-attribute value from the pinned directory.
@@ -5290,5 +5674,160 @@ mod tests {
 
         std::fs::write(target_path.join("value"), b"child mutation").unwrap();
         assert_eq!(std::fs::read(source_path).unwrap(), b"admitted bytes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_private_tree_tightening_never_follows_opaque_links() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let parent = tempfile::tempdir().unwrap();
+        let home_path = parent.path().join("home");
+        let nested = home_path.join("nested");
+        let state = nested.join("state");
+        let outside = parent.path().join("outside");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(&state, b"state").unwrap();
+        std::fs::write(&outside, b"outside").unwrap();
+        std::fs::set_permissions(&home_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o644)).unwrap();
+        symlink("../outside", home_path.join("link")).unwrap();
+
+        let home = PinnedDirectory::open(&home_path).unwrap().unwrap();
+        assert_eq!(
+            home.tighten_owner_private_tree_bounded(DirectoryTraversalBudget::new(3, 1), 5,)
+                .unwrap(),
+            5
+        );
+        assert_eq!(
+            std::fs::metadata(&home_path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&nested).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&state).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert!(
+            std::fs::symlink_metadata(home_path.join("link"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            home.require_owner_private_tree_bounded(DirectoryTraversalBudget::new(3, 1), 5,)
+                .unwrap(),
+            5
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_owner_private_directory_protection_does_not_snapshot_mutable_children() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("workload-state");
+        std::fs::write(&child, b"mutable").unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let pinned = PinnedDirectory::open(root.path()).unwrap().unwrap();
+        pinned.tighten_owner_private_directory().unwrap();
+
+        assert_eq!(
+            std::fs::metadata(root.path()).unwrap().permissions().mode() & 0o7777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&child).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_private_tree_validation_rejects_non_private_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let state = root.path().join("state");
+        std::fs::write(&state, b"state").unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o604)).unwrap();
+        let pinned = PinnedDirectory::open(root.path()).unwrap().unwrap();
+        assert!(
+            pinned
+                .require_owner_private_tree_bounded(DirectoryTraversalBudget::new(1, 1), 5,)
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_enclosed_tree_accepts_opaque_descendant_modes_but_not_a_public_root() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("nested");
+        let state = nested.join("installation_id");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(&state, b"state").unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let pinned = PinnedDirectory::open(root.path()).unwrap().unwrap();
+        assert_eq!(
+            pinned
+                .require_owner_enclosed_tree_bounded(DirectoryTraversalBudget::new(2, 1), 5,)
+                .unwrap(),
+            5
+        );
+        assert_eq!(
+            std::fs::metadata(&state).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(
+            pinned
+                .require_owner_enclosed_tree_bounded(DirectoryTraversalBudget::new(2, 1), 5,)
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_private_tree_rejects_regular_hard_links() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let parent = tempfile::tempdir().unwrap();
+        let home_path = parent.path().join("home");
+        let outside = parent.path().join("outside");
+        std::fs::create_dir(&home_path).unwrap();
+        std::fs::set_permissions(&home_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(&outside, b"outside").unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::hard_link(&outside, home_path.join("linked")).unwrap();
+        let home = PinnedDirectory::open(&home_path).unwrap().unwrap();
+
+        assert!(
+            home.tighten_owner_private_tree_bounded(DirectoryTraversalBudget::new(1, 1), 7,)
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

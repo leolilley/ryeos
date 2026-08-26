@@ -16,7 +16,7 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
-pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v2";
+pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v3";
 pub const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 pub const MAX_WORKSPACE_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
@@ -156,7 +156,7 @@ impl<'de> Visitor<'de> for StrictJsonValueVisitor {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum IsolationAdapterProtocolVersion {
-    #[serde(rename = "ryeos.isolation-adapter/v2")]
+    #[serde(rename = "ryeos.isolation-adapter/v3")]
     Current,
 }
 
@@ -357,9 +357,8 @@ pub enum IsolationAuthorityPurpose {
     WritableMount,
     Executable,
     RuntimeLibraryDirectory,
-    WorkspaceLower,
-    WorkspaceUpper,
-    WorkspaceWork,
+    WorkspaceProject,
+    WorkspaceBackendState,
     TargetDuplexChannel,
 }
 
@@ -387,16 +386,16 @@ pub struct IsolationMount {
     pub layer: u32,
 }
 
-/// One verified writable project view. The lower is immutable and the upper
-/// and work authorities are launch-private. The adapter must compose these at
-/// `destination`; ordinary writable mounts may not target the same path.
+/// One verified writable project view. RyeOS owns the canonical project
+/// generation while the signed adapter exclusively interprets its opaque
+/// backend state. The adapter must compose the view at `destination`;
+/// ordinary writable mounts may not target the same path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IsolationProjectWorkspace {
     pub workspace_id: String,
-    pub lower: IsolationAuthorityId,
-    pub upper: IsolationAuthorityId,
-    pub work: IsolationAuthorityId,
+    pub project: IsolationAuthorityId,
+    pub backend_state: IsolationAuthorityId,
     pub destination: IsolationPath,
 }
 
@@ -555,9 +554,14 @@ impl IsolationPlan {
         if let Some(workspace) = &self.project_workspace {
             validate_identifier("workspace id", &workspace.workspace_id)?;
             for (authority, expected) in [
-                (&workspace.lower, IsolationAuthorityPurpose::WorkspaceLower),
-                (&workspace.upper, IsolationAuthorityPurpose::WorkspaceUpper),
-                (&workspace.work, IsolationAuthorityPurpose::WorkspaceWork),
+                (
+                    &workspace.project,
+                    IsolationAuthorityPurpose::WorkspaceProject,
+                ),
+                (
+                    &workspace.backend_state,
+                    IsolationAuthorityPurpose::WorkspaceBackendState,
+                ),
             ] {
                 if authority_ids.get(authority) != Some(&expected) {
                     return Err(ProtocolValidationError::new(
@@ -607,9 +611,7 @@ impl IsolationPlan {
                 .any(|mount| mount.source == channel.source)
                 || self.target.executable == channel.source
                 || self.project_workspace.as_ref().is_some_and(|workspace| {
-                    workspace.lower == channel.source
-                        || workspace.upper == channel.source
-                        || workspace.work == channel.source
+                    workspace.project == channel.source || workspace.backend_state == channel.source
                 })
             {
                 return Err(ProtocolValidationError::new(
@@ -807,7 +809,7 @@ pub struct AdapterWorkspaceRequest {
     /// Canonical JSON form of the RyeOS LaunchOwner. The adapter treats it as
     /// an opaque fencing identity and echoes it in the response.
     pub launch_owner: String,
-    pub lower_snapshot: String,
+    pub base_snapshot: String,
     pub authorities: Vec<IsolationAuthority>,
 }
 
@@ -815,10 +817,10 @@ impl AdapterWorkspaceRequest {
     pub fn validate(&self) -> Result<(), ProtocolValidationError> {
         validate_identifier("workspace id", &self.workspace_id)?;
         validate_string("launch owner", &self.launch_owner)?;
-        validate_sha256("lower snapshot", &self.lower_snapshot)?;
-        if self.authorities.len() != 3 {
+        validate_sha256("base snapshot", &self.base_snapshot)?;
+        if self.authorities.len() != 2 {
             return Err(ProtocolValidationError::new(
-                "workspace lifecycle requires exactly lower, upper, and work authorities",
+                "workspace lifecycle requires exactly project and backend-state authorities",
             ));
         }
         let mut purposes = BTreeSet::new();
@@ -831,13 +833,12 @@ impl AdapterWorkspaceRequest {
             }
             if !matches!(
                 authority.purpose,
-                IsolationAuthorityPurpose::WorkspaceLower
-                    | IsolationAuthorityPurpose::WorkspaceUpper
-                    | IsolationAuthorityPurpose::WorkspaceWork
+                IsolationAuthorityPurpose::WorkspaceProject
+                    | IsolationAuthorityPurpose::WorkspaceBackendState
             ) || !purposes.insert(authority.purpose)
             {
                 return Err(ProtocolValidationError::new(
-                    "workspace lifecycle authority purposes must be exactly lower, upper, and work",
+                    "workspace lifecycle authority purposes must be exactly project and backend state",
                 ));
             }
         }
@@ -909,6 +910,11 @@ pub struct AdapterWorkspaceResponse {
     pub backend_version: String,
     pub pinned_root_identities: BTreeMap<String, String>,
     pub mount_identity: String,
+    /// Adapter-declared, backend-relative root containing the bytes named by
+    /// `mutations`. Present only for `freeze_and_diff`; RyeOS resolves and pins
+    /// it below the still-open opaque backend-state authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_content_root: Option<String>,
     pub mutations: Vec<WorkspaceMutation>,
     pub destroyed: bool,
 }
@@ -930,14 +936,17 @@ impl AdapterWorkspaceResponse {
         validate_identifier("workspace backend id", &self.backend_id)?;
         validate_string("workspace backend version", &self.backend_version)?;
         validate_string("workspace mount identity", &self.mount_identity)?;
-        if self.pinned_root_identities.len() != 3
-            || !["lower", "upper", "work"]
+        if self.pinned_root_identities.len() != 2
+            || !["project", "backend_state"]
                 .iter()
                 .all(|name| self.pinned_root_identities.contains_key(*name))
         {
             return Err(ProtocolValidationError::new(
-                "workspace lifecycle response must identify lower, upper, and work roots",
+                "workspace lifecycle response must identify project and backend-state roots",
             ));
+        }
+        if let Some(root) = &self.mutation_content_root {
+            validate_relative_path("workspace mutation content root", root)?;
         }
         if self.mutations.len() > MAX_WORKSPACE_MUTATIONS {
             return Err(ProtocolValidationError::new(
@@ -971,16 +980,26 @@ impl AdapterWorkspaceResponse {
             previous_path = Some(&mutation.path);
         }
         match self.operation {
-            WorkspaceLifecycleOperation::Create if self.destroyed || !self.mutations.is_empty() => {
+            WorkspaceLifecycleOperation::Create
+                if self.destroyed
+                    || !self.mutations.is_empty()
+                    || self.mutation_content_root.is_some() =>
+            {
                 Err(ProtocolValidationError::new(
                     "workspace create response has an invalid result shape",
                 ))
             }
-            WorkspaceLifecycleOperation::FreezeAndDiff if self.destroyed => Err(
-                ProtocolValidationError::new("workspace diff cannot report destruction"),
-            ),
+            WorkspaceLifecycleOperation::FreezeAndDiff
+                if self.destroyed || self.mutation_content_root.is_none() =>
+            {
+                Err(ProtocolValidationError::new(
+                    "workspace diff must identify its mutation-content root without reporting destruction",
+                ))
+            }
             WorkspaceLifecycleOperation::Destroy
-                if !self.destroyed || !self.mutations.is_empty() =>
+                if !self.destroyed
+                    || !self.mutations.is_empty()
+                    || self.mutation_content_root.is_some() =>
             {
                 Err(ProtocolValidationError::new(
                     "workspace destroy response has an invalid result shape",
@@ -1355,8 +1374,8 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_duplicate_keys_at_every_depth() {
-        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v2","protocol":"ryeos.isolation-adapter/v2","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
-        let nested = r#"{"protocol":"ryeos.isolation-adapter/v2","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3,"launcher":4}}"#;
+        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v3","protocol":"ryeos.isolation-adapter/v3","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let nested = r#"{"protocol":"ryeos.isolation-adapter/v3","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3,"launcher":4}}"#;
         for document in [top_level, nested] {
             let error = from_json_str_strict::<AdapterInspectionRequest>(document).unwrap_err();
             assert!(error.to_string().contains("duplicate JSON object key"));
@@ -1365,7 +1384,7 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_unknown_fields_trailing_data_and_excessive_depth() {
-        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v2","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
+        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v3","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
         assert!(
             from_json_str_strict::<AdapterInspectionRequest>(unknown)
                 .unwrap_err()
@@ -1373,7 +1392,7 @@ mod tests {
                 .contains("unknown field")
         );
 
-        let valid = r#"{"protocol":"ryeos.isolation-adapter/v2","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let valid = r#"{"protocol":"ryeos.isolation-adapter/v3","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
         assert!(
             from_json_str_strict::<AdapterInspectionRequest>(&format!("{valid} true"))
                 .unwrap_err()
@@ -1723,5 +1742,73 @@ mod tests {
                 .to_string()
                 .contains("lowercase SHA-256")
         );
+    }
+
+    fn workspace_request(operation: WorkspaceLifecycleOperation) -> AdapterWorkspaceRequest {
+        AdapterWorkspaceRequest {
+            protocol: IsolationAdapterProtocolVersion::Current,
+            operation,
+            workspace_id: "workspace-one".to_string(),
+            launch_owner: "{\"attempt\":1}".to_string(),
+            base_snapshot: "a".repeat(64),
+            authorities: vec![
+                IsolationAuthority {
+                    id: IsolationAuthorityId::new("workspace-project").unwrap(),
+                    inherited_fd: 10,
+                    purpose: IsolationAuthorityPurpose::WorkspaceProject,
+                },
+                IsolationAuthority {
+                    id: IsolationAuthorityId::new("workspace-backend-state").unwrap(),
+                    inherited_fd: 11,
+                    purpose: IsolationAuthorityPurpose::WorkspaceBackendState,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn workspace_v3_exposes_only_project_and_opaque_backend_state() {
+        let request = workspace_request(WorkspaceLifecycleOperation::Create);
+        request.validate().unwrap();
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(encoded["protocol"], "ryeos.isolation-adapter/v3");
+        let purposes = encoded["authorities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|authority| authority["purpose"].as_str().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            purposes,
+            BTreeSet::from(["workspace_project", "workspace_backend_state"])
+        );
+        assert!(!encoded.to_string().contains("workspace_upper"));
+        assert!(!encoded.to_string().contains("workspace_work"));
+    }
+
+    #[test]
+    fn workspace_diff_must_name_a_safe_backend_relative_content_root() {
+        let request = workspace_request(WorkspaceLifecycleOperation::FreezeAndDiff);
+        let mut response = AdapterWorkspaceResponse {
+            protocol: IsolationAdapterProtocolVersion::Current,
+            operation: WorkspaceLifecycleOperation::FreezeAndDiff,
+            workspace_id: request.workspace_id.clone(),
+            launch_owner: request.launch_owner.clone(),
+            backend_id: "example-backend".to_string(),
+            backend_version: "1".to_string(),
+            pinned_root_identities: BTreeMap::from([
+                ("project".to_string(), "dev1-ino2".to_string()),
+                ("backend_state".to_string(), "dev1-ino3".to_string()),
+            ]),
+            mount_identity: "example-mount".to_string(),
+            mutation_content_root: Some("backend-output".to_string()),
+            mutations: Vec::new(),
+            destroyed: false,
+        };
+        response.validate_for(&request).unwrap();
+        response.mutation_content_root = Some("../upper".to_string());
+        assert!(response.validate_for(&request).is_err());
+        response.mutation_content_root = None;
+        assert!(response.validate_for(&request).is_err());
     }
 }

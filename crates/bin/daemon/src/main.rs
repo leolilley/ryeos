@@ -2148,6 +2148,56 @@ async fn drain_running_threads(state: &AppState) -> bool {
         return false;
     }
 
+    // Snapshot every root attachment before retiring independent hosted
+    // workers. Retiring a worker can make its root controller exit and
+    // compare-clear itself immediately; the shutdown coordinator must still
+    // retain the exact old identity so it can prove absence and re-arm that
+    // root's consumed restart budget.
+    let attached_ids = match state.state_store.list_attached_thread_ids() {
+        Ok(ids) => ids,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to list attached threads during shutdown");
+            return false;
+        }
+    };
+    let mut attached_snapshot_clean = true;
+    let mut attached = Vec::with_capacity(attached_ids.len());
+    for thread_id in attached_ids {
+        let thread = match state.state_store.get_thread(&thread_id) {
+            Ok(Some(thread)) => thread,
+            Ok(None) => {
+                attached_snapshot_clean = false;
+                tracing::warn!(thread_id, "attached runtime row has no thread");
+                continue;
+            }
+            Err(error) => {
+                attached_snapshot_clean = false;
+                tracing::warn!(thread_id, error = %error, "failed to load attached thread");
+                continue;
+            }
+        };
+        let Some(identity) = thread.runtime.process_identity.clone() else {
+            attached_snapshot_clean = false;
+            tracing::warn!(thread_id, "attached row lost its durable process identity");
+            continue;
+        };
+        let action = process::resolve_shutdown_action(
+            thread
+                .runtime
+                .launch_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.cancellation_mode),
+        );
+        attached.push((thread_id, thread.status, identity, action));
+    }
+
+    // Exclusive persistent-session workers are independent process groups,
+    // not descendants represented by `thread_runtime`. Retire and durably
+    // fence those exact worker epochs before draining their root controllers.
+    // This releases the workspace/profile lease only after process death is
+    // proved and leaves the session in the ordinary restart-recovery state.
+    let persistent_session_workers_drained = drain_persistent_session_workers(state).await;
+
     let drain_deadline = Instant::now()
         .checked_add(Duration::from_secs(
             process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS,
@@ -2163,45 +2213,16 @@ async fn drain_running_threads(state: &AppState) -> bool {
             return false;
         }
     };
-    let attached_ids = match state.state_store.list_attached_thread_ids() {
-        Ok(ids) => ids,
-        Err(error) => {
-            tracing::error!(error = %error, "failed to list attached threads during shutdown");
-            return false;
-        }
-    };
-    if !attached_ids.is_empty() {
+    if !attached.is_empty() {
         tracing::info!(
-            count = attached_ids.len(),
+            count = attached.len(),
             "draining attached threads concurrently"
         );
     }
 
     const HARD_KILL_PROOF_RESERVE: Duration = Duration::from_millis(250);
-    let mut pending = Vec::with_capacity(attached_ids.len());
-    for thread_id in attached_ids {
-        let thread = match state.state_store.get_thread(&thread_id) {
-            Ok(Some(thread)) => thread,
-            Ok(None) => {
-                tracing::warn!(thread_id, "attached runtime row has no thread");
-                continue;
-            }
-            Err(error) => {
-                tracing::warn!(thread_id, error = %error, "failed to load attached thread");
-                continue;
-            }
-        };
-        let Some(identity) = thread.runtime.process_identity.clone() else {
-            tracing::warn!(thread_id, "attached row lost its durable process identity");
-            continue;
-        };
-        let action = process::resolve_shutdown_action(
-            thread
-                .runtime
-                .launch_metadata
-                .as_ref()
-                .and_then(|metadata| metadata.cancellation_mode),
-        );
+    let mut pending = Vec::with_capacity(attached.len());
+    for (thread_id, status, identity, action) in attached {
         let kill_identity = identity.clone();
         let kill_task = tokio::task::spawn_blocking(move || {
             let bounded_action = match action {
@@ -2216,18 +2237,20 @@ async fn drain_running_threads(state: &AppState) -> bool {
             };
             process::kill_by_action(&kill_identity, bounded_action)
         });
-        pending.push((thread_id, thread.status, identity, kill_task));
+        pending.push((thread_id, status, identity, kill_task));
     }
 
     for (thread_id, status, identity, kill_task) in pending {
         let result = match kill_task.await {
             Ok(result) => result,
             Err(error) => {
+                attached_snapshot_clean = false;
                 tracing::warn!(thread_id, error = %error, "shutdown process-kill worker failed");
                 continue;
             }
         };
         if !result.success {
+            attached_snapshot_clean = false;
             tracing::warn!(
                 thread_id,
                 method = result.method,
@@ -2235,21 +2258,44 @@ async fn drain_running_threads(state: &AppState) -> bool {
             );
             continue;
         }
-        match state
+        let detached = match state
             .state_store
             .clear_thread_process_if_matches(&thread_id, &identity)
         {
-            Ok(true) => {}
-            Ok(false) => tracing::warn!(thread_id, "shutdown identity changed before clear"),
-            Err(error) => tracing::warn!(
-                thread_id,
-                error = %error,
-                "failed to clear shutdown process identity"
-            ),
+            Ok(true) => true,
+            Ok(false) => match state.state_store.get_thread(&thread_id) {
+                Ok(Some(current)) if current.runtime.process_identity.is_none() => true,
+                Ok(Some(_)) => {
+                    tracing::warn!(thread_id, "shutdown identity changed before clear");
+                    false
+                }
+                Ok(None) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        thread_id,
+                        error = %error,
+                        "failed to confirm concurrently cleared shutdown identity"
+                    );
+                    false
+                }
+            },
+            Err(error) => {
+                tracing::warn!(
+                    thread_id,
+                    error = %error,
+                    "failed to clear shutdown process identity"
+                );
+                false
+            }
+        };
+        if !detached {
+            attached_snapshot_clean = false;
+            continue;
         }
         if !ryeos_app::state_store::is_terminal_status(&status) {
             let reset_result = state.state_store.reset_resume_attempts(&thread_id);
             if let Err(error) = reset_result {
+                attached_snapshot_clean = false;
                 tracing::warn!(
                     thread_id,
                     error = %error,
@@ -2337,7 +2383,144 @@ async fn drain_running_threads(state: &AppState) -> bool {
             }
         }
     };
-    attached_drained && in_process_drained && in_process_authoritative_clean
+    persistent_session_workers_drained
+        && attached_snapshot_clean
+        && attached_drained
+        && in_process_drained
+        && in_process_authoritative_clean
+}
+
+async fn drain_persistent_session_workers(state: &AppState) -> bool {
+    let workers = match state.state_store.live_worker_processes() {
+        Ok(workers) => workers,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "failed to list persistent-session workers during shutdown"
+            );
+            return false;
+        }
+    };
+    if !workers.is_empty() {
+        tracing::info!(
+            count = workers.len(),
+            "draining persistent-session workers concurrently"
+        );
+    }
+
+    let mut pending = Vec::with_capacity(workers.len());
+    for worker in workers {
+        let worker_state = state.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            let cleanup = ryeos_app::dedicated_session_service::retire_worker_process(
+                &worker_state,
+                &worker.session_id,
+                &worker,
+            );
+            (worker, cleanup)
+        });
+        pending.push(task);
+    }
+
+    let mut clean = true;
+    for task in pending {
+        let (worker, cleanup) = match task.await {
+            Ok(result) => result,
+            Err(error) => {
+                clean = false;
+                tracing::error!(
+                    error = %error,
+                    "persistent-session shutdown worker panicked"
+                );
+                continue;
+            }
+        };
+        let cleanup_state = match cleanup {
+            Ok(cleanup_state) => cleanup_state,
+            Err(error) => {
+                clean = false;
+                tracing::error!(
+                    worker_instance_id = %worker.worker_instance_id,
+                    session_id = %worker.session_id,
+                    error = %error,
+                    "persistent-session worker retirement failed during shutdown"
+                );
+                continue;
+            }
+        };
+
+        let fenced = state.state_store.fence_abandoned_worker_process(
+            &worker.worker_instance_id,
+            &worker.session_id,
+            worker.boot_epoch,
+            cleanup_state,
+        );
+        if let Err(error) = fenced {
+            // A concurrent worker-I/O failure may have fenced the exact epoch
+            // after the shutdown snapshot. Accept only the matching durable
+            // dead record; every other CAS loss remains an unclean shutdown.
+            let already_fenced = state
+                .state_store
+                .worker_process(&worker.worker_instance_id)
+                .ok()
+                .flatten()
+                .is_some_and(|current| {
+                    current.session_id == worker.session_id
+                        && current.boot_epoch == worker.boot_epoch
+                        && current.state == ryeos_app::runtime_db::WorkerProcessState::Dead
+                        && current.cleanup_state == cleanup_state
+                });
+            if !already_fenced {
+                clean = false;
+                tracing::error!(
+                    worker_instance_id = %worker.worker_instance_id,
+                    session_id = %worker.session_id,
+                    cleanup_state,
+                    error = %error,
+                    "failed to persist persistent-session shutdown fence"
+                );
+                continue;
+            }
+        }
+        if cleanup_state != "reaped" {
+            clean = false;
+            tracing::error!(
+                worker_instance_id = %worker.worker_instance_id,
+                session_id = %worker.session_id,
+                cleanup_state,
+                "persistent-session worker death remains unproved after shutdown drain"
+            );
+        } else {
+            tracing::info!(
+                worker_instance_id = %worker.worker_instance_id,
+                session_id = %worker.session_id,
+                boot_epoch = worker.boot_epoch,
+                "persistent-session worker epoch durably fenced for restart"
+            );
+        }
+    }
+
+    match state.state_store.live_worker_processes() {
+        Ok(remaining) if remaining.is_empty() => clean,
+        Ok(remaining) => {
+            let worker_ids = remaining
+                .into_iter()
+                .map(|worker| worker.worker_instance_id)
+                .collect::<Vec<_>>();
+            tracing::error!(
+                remaining = ?worker_ids,
+                "shutdown drain exhausted with persistent-session workers still live or unproved"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "failed final persistent-session worker shutdown audit"
+            );
+            false
+        }
+    }
 }
 
 fn audit_ownerless_in_process_reservations(state: &AppState) -> anyhow::Result<bool> {

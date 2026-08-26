@@ -838,10 +838,8 @@ pub(crate) fn bind_owned_workspace_after_thread_birth(
                 operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create,
                 workspace_id,
                 launch_owner,
-                lower_snapshot: &record.lower_snapshot,
-                lower_path: &layout.lower,
-                upper_path: &layout.upper,
-                work_path: &layout.work,
+                base_snapshot: &record.base_snapshot,
+                project_path: &layout.project,
             })
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let pinned_root_identities =
@@ -886,10 +884,6 @@ pub(crate) fn activate_workspace_after_process_attachment(
     let Some(root) = workspace_lifeline.and_then(|guard| guard.path()) else {
         anyhow::bail!("owned execution workspace was released before process attachment");
     };
-    let layout = super::workspace::WorkspaceLayout::from_root(root.clone());
-    if !layout.lower.is_dir() {
-        anyhow::bail!("owned execution workspace has no materialized lower directory");
-    }
     let workspace_id = root
         .file_name()
         .and_then(|name| name.to_str())
@@ -1069,10 +1063,8 @@ fn close_owned_workspace_from_states(
             operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::Destroy,
             workspace_id,
             launch_owner,
-            lower_snapshot: &record.lower_snapshot,
-            lower_path: &layout.lower,
-            upper_path: &layout.upper,
-            work_path: &layout.work,
+            base_snapshot: &record.base_snapshot,
+            project_path: &layout.project,
         })
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let pinned = lillux::canonical_json(&serde_json::to_value(&destroyed.pinned_root_identities)?)?;
@@ -2319,11 +2311,11 @@ pub(crate) fn prepare_process_inputs(
         let cache = super::cache::MaterializationCache::new(
             state.config.runtime_root().cache().join("snapshots"),
         );
-        let (materialized_path, generation_lease, _) = super::checkout_project_lower(
+        let (materialized_path, generation_lease, _) = super::checkout_project_snapshot(
             &authority,
             &guard,
             snapshot_hash,
-            super::ProjectLowerMaterialization::PrivateWritableWorkspace {
+            super::ProjectMaterialization::PrivateWritableWorkspace {
                 target_dir: &path,
                 budget: budget.as_ref(),
             },
@@ -5409,7 +5401,7 @@ pub fn retained_workspace_provenance_for_native_resume(
         return Ok(None);
     };
     if workspace.thread_id.as_deref() != Some(thread_id)
-        || workspace.lower_snapshot != *snapshot_hash
+        || workspace.base_snapshot != *snapshot_hash
         || !matches!(
             workspace.state,
             WorkspaceState::Ready | WorkspaceState::Active | WorkspaceState::Freezing
@@ -5458,10 +5450,8 @@ pub fn retained_workspace_provenance_for_native_resume(
             operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create,
             workspace_id: &workspace.workspace_id,
             launch_owner: previous_launch_owner,
-            lower_snapshot: snapshot_hash,
-            lower_path: &layout.lower,
-            upper_path: &layout.upper,
-            work_path: &layout.work,
+            base_snapshot: snapshot_hash,
+            project_path: &layout.project,
         })
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let observed_roots =
@@ -5480,9 +5470,9 @@ pub fn retained_workspace_provenance_for_native_resume(
             .expect("complete retained workspace has pinned roots"),
     )
     .context("decode retained workspace root identities")?;
-    let expected_lower_identity = pinned_roots
-        .get("lower")
-        .ok_or_else(|| anyhow::anyhow!("retained workspace journal has no lower identity"))?;
+    let expected_project_identity = pinned_roots
+        .get("project")
+        .ok_or_else(|| anyhow::anyhow!("retained workspace journal has no project identity"))?;
 
     // Build the immutable project engine from a shared read-only realization;
     // mutable workspace bytes are never re-admitted as engine configuration.
@@ -5505,8 +5495,8 @@ pub fn retained_workspace_provenance_for_native_resume(
             &authority,
             &cas_guard,
             &closure,
-            &layout.lower,
-            expected_lower_identity,
+            &layout.project,
+            expected_project_identity,
         )?;
     state.state_store.rebind_execution_workspace_for_recovery(
         &workspace.workspace_id,
@@ -5516,7 +5506,7 @@ pub fn retained_workspace_provenance_for_native_resume(
         workspace.state,
         workspace.process_identity.as_deref(),
     )?;
-    let lifeline = Arc::new(TempDirGuard::new_workspace(root, layout.lower)?);
+    let lifeline = Arc::new(TempDirGuard::new_workspace(root, layout.project)?);
     let provenance = ExecutionProvenance::root_pushed_head(
         original_project_path,
         resolved.request_engine,

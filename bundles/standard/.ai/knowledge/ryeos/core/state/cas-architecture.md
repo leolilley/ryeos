@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:34:37Z:662852a4a39cc27e6dc93f2db4aa3fb8c0d6fc47f3a70c3317fe1b79cbcad74d:oYtB+AkQpTHHYSYpq0sQTpj+TxOhwZxAQi3ezdm9m/cybbVyXdhgC+UtRzNehkbp7Q6Tk2eQxEnjITOxVpQmBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-26T05:14:01Z:563cfd5d6fde63456eb1ef1d7287c100f6b6259a25762465005c82f109c03d82:Oajg6ZFu5mn//HNUKN9w4Uy/knD+2Fob1zv9W5D7ygsqqMG6CEtHvI2oZunGscVEi0GnC55MjRN2vyed9eMcAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -105,10 +105,16 @@ fully rebuilt from CAS at any time.
 
 `state/operational.sqlite3` owns records that cannot be reconstructed from
 signed chain heads: CAS-entry attribution, admission-attestation lookup rows,
-sync jobs, and sync-job attempts. It is a fixed source-of-truth store, is never
-selected through `generation.json`, and is never copied, replaced, or removed
-by projection rebuild or generation cleanup. `state/operational.initialized`
-fails closed if an established operational database later disappears.
+sync jobs and attempts, and provider-neutral credential-profile ownership,
+lifecycle, confirmed account evidence, generation, and deletion tombstones.
+Opaque provider credential bytes remain in the profile's node-private artifact
+home. RuntimeDb retains a revisioned live projection only so profile leases and
+hosted-session transitions remain one SQLite transaction; the higher monotonic
+profile revision repairs a process-crash gap between the two stores. The
+operational database is never selected through `generation.json`, copied,
+replaced, or removed by projection rebuild or generation cleanup.
+`state/operational.initialized` fails closed if an established operational
+database later disappears.
 
 ## SQLite Schema Ownership
 
@@ -139,9 +145,9 @@ database class determines recovery:
   embedded authority contract fails before row interpretation and requires the
   operator-confirmed thread-history/project-head reset; normal open never
   migrates or reinterprets it;
-- `operational.sqlite3` is retained source-of-truth state. It accepts only its
-  exact current schema today; any future deployed predecessor requires a
-  separately designed explicit atomic forward migration rather than reset;
+- `operational.sqlite3` is retained source-of-truth state. Deployed predecessor
+  schemas advance only through explicit atomic forward migrations; it is never
+  reset to activate a new schema;
 - rebuildable stores (`projection.<instance-id>.sqlite3` and
   `scheduler.sqlite3`) evolve through their explicit reset-and-rebuild paths
   from durable source material.

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-25T02:34:22Z:6706d385b3d6cab5693adb9589aab08c5d3728903329eb360f4d0ba9fbef718a:J9zAon0is9cgEhk9u/wvJOF06ctz6Z9ELUv3JHGTcrtIQOS5E2JTiXPZXOL/aJ1e8DKJb1JJa5iJt3SbY/nUAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-26T02:45:10Z:6f1a95f5b30e2964b2facb7957b3b92c3a83f164f94832dcdcf1de8695de9adb:fvwNQMBz3R8G1TeLYVVXYqn1GOpIC8VL7PjtXsRKSpXC6Guu3QcZV4m9P1nUZ+g2LWiTnxmabLKceAdXz+uOBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -169,11 +169,17 @@ metadata is testimony, not entitlement proof.
 ## Credentials and recovery
 
 RyeOS owns an opaque mode-0700 profile home and generation/operation lock.
-The structured workload inherits an owner-only creation mask. At initialization
-and every worker IPC boundary, the generic bridge traverses the home through
-pinned descriptors, rejects links, special entries, mount crossings, or
-resource-limit violations, and strips group/other bits that the pinned workload
-may have explicitly added. There are no provider-specific filename exceptions.
+Before a worker is attached, the daemon validates the stopped home as one
+bounded tree through pinned descriptors: links are counted but never followed,
+special entries, multiply-linked regular files, mount crossings, and resource
+limit violations are rejected, and every opened regular file and directory is
+owner-private. A live workload may legitimately mutate its state tree while an
+IPC request is being handled, so the bridge does not claim that concurrent tree
+is a stable snapshot. Instead it reasserts owner-only access on the exact pinned
+home root at initialization and every IPC boundary; the child also inherits an
+owner-only creation mask. RyeOS-owned paths within the home require their
+declared exact type and never accept links. There are no provider-specific
+filename exceptions.
 For immutable-argv profiles, the declared compatibility file is atomically
 reset before each process generation and is never treated as policy. An
 enforced isolation backend may additionally overlay it read-only.

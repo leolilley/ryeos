@@ -540,7 +540,7 @@ pub struct WorkspaceRecord {
     pub backend_version: Option<String>,
     pub pinned_root_identities: Option<String>,
     pub mount_identity: Option<String>,
-    pub lower_snapshot: String,
+    pub base_snapshot: String,
     /// Post-freeze snapshot bound atomically with the owning thread's
     /// ResumeContext. Present only once a `freezing` workspace has a durable
     /// generation from which recovery may continue.
@@ -876,7 +876,7 @@ CREATE TABLE IF NOT EXISTS execution_workspace (
     thread_id TEXT,
     launch_owner TEXT,
     backend_id TEXT,
-    lower_snapshot TEXT NOT NULL,
+    base_snapshot TEXT NOT NULL,
     frozen_snapshot_hash TEXT,
     root_path TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('reserved', 'constructing', 'ready', 'active', 'freezing', 'destroying', 'closing', 'closed', 'orphaned')),
@@ -1102,14 +1102,15 @@ CREATE TABLE IF NOT EXISTS credential_profile (
     owner_principal TEXT NOT NULL,
     home_id TEXT NOT NULL UNIQUE,
     credential_generation INTEGER NOT NULL CHECK (credential_generation > 0),
-    state TEXT NOT NULL CHECK (state IN ('unauthenticated', 'enrolling', 'confirming', 'active', 'revoking', 'revoked', 'deleting')),
+    state TEXT NOT NULL CHECK (state IN ('unauthenticated', 'enrolling', 'confirming', 'active', 'revoking', 'revoked', 'deleting', 'deleted')),
     active_login_id TEXT,
     login_epoch INTEGER NOT NULL CHECK (login_epoch >= 0),
     login_expires_at_ms INTEGER,
     sanitized_account_json TEXT,
     lock_owner TEXT,
     created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL
+    updated_at_ms INTEGER NOT NULL,
+    authority_revision INTEGER NOT NULL CHECK (authority_revision > 0)
 );
 
 CREATE INDEX IF NOT EXISTS idx_credential_profile_owner_state
@@ -1151,7 +1152,15 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // publication under this contract.
 // Epoch 10 retains the exact canonical observation batch before root-chain
 // contact, so startup can complete an accepted append without worker replay.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 10;
+// Epoch 11 replaces the overlay-shaped execution-workspace authority with a
+// canonical RyeOS-owned project root plus, only under enforced isolation, one
+// opaque backend-state root. Predecessor journals cannot prove either the new
+// root identity set or the v3 signed-adapter lifecycle contract.
+// Epoch 12 makes credential_profile an explicitly revisioned live projection
+// of stable operational authority. The revision permits deterministic repair
+// after a crash between runtime and operational SQLite commits, while the
+// explicit history cut extracts predecessor profile rows before replacement.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 12;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -1580,7 +1589,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         not_null: false,
                     },
                     sqlite_schema::ColumnSpec {
-                        name: "lower_snapshot",
+                        name: "base_snapshot",
                         col_type: "TEXT",
                         pk: false,
                         not_null: true,
@@ -2521,6 +2530,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         pk: false,
                         not_null: true,
                     },
+                    sqlite_schema::ColumnSpec {
+                        name: "authority_revision",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
                 ],
             },
         ],
@@ -3369,6 +3384,7 @@ pub struct CredentialProfileRecord {
     pub profile_id: String,
     pub owner_principal: String,
     pub home_id: String,
+    pub authority_revision: u64,
     pub credential_generation: u64,
     pub state: String,
     pub active_login_id: Option<String>,
@@ -4122,7 +4138,27 @@ impl RuntimeDb {
             bail!("dedicated credential generation must be positive");
         }
         let now = lillux::time::timestamp_millis() as i64;
-        let changed = self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let acquired = tx.execute(
+            "UPDATE credential_profile
+                SET lock_owner=?3, updated_at_ms=?5
+              WHERE profile_id=?1 AND owner_principal=?2
+                AND credential_generation=?4
+                AND (lock_owner IS NULL OR lock_owner=?3)
+                AND state IN ('unauthenticated','enrolling','confirming','active')",
+            params![
+                session.credential_profile_id,
+                session.owner_principal,
+                session.credential_lock_owner,
+                i64::try_from(session.credential_generation)
+                    .context("credential generation exceeds SQLite integer range")?,
+                now,
+            ],
+        )?;
+        if acquired != 1 {
+            bail!("dedicated admission could not atomically acquire its credential profile");
+        }
+        let changed = tx.execute(
             "INSERT INTO dedicated_session (
                 session_id, root_thread_id, owner_principal, admitted_capsule_hash,
                 worker_instance_id, worker_boot_epoch, workspace_id, candidate_required,
@@ -4152,7 +4188,40 @@ impl RuntimeDb {
         if changed != 1 {
             bail!("dedicated admission lost its credential generation/lock fence");
         }
+        tx.commit()?;
         Ok(())
+    }
+
+    /// Recover only profile reservations that provably never crossed the
+    /// durable worker-attachment boundary. `attach_worker_process` writes the
+    /// worker row and session identity atomically before releasing the held
+    /// child, so an owner absent from both tables has no process authority.
+    /// Any retained identity—including cleanup-unproved evidence—keeps the
+    /// credential profile fenced.
+    pub fn reconcile_unattached_credential_profile_locks(&self) -> Result<(usize, usize)> {
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let sessions_recovered = tx.execute(
+            "UPDATE dedicated_session
+                SET state='recovering', send_boundary='none', updated_at_ms=?1
+              WHERE state='admitted'
+                AND worker_instance_id IS NULL AND worker_boot_epoch IS NULL
+                AND NOT EXISTS(SELECT 1 FROM worker_process
+                      WHERE worker_process.session_id=dedicated_session.session_id)",
+            [now],
+        )?;
+        let locks_released = tx.execute(
+            "UPDATE credential_profile
+                SET lock_owner=NULL, updated_at_ms=?1
+              WHERE lock_owner IS NOT NULL
+                AND NOT EXISTS(SELECT 1 FROM worker_process
+                      WHERE worker_process.worker_instance_id=credential_profile.lock_owner)
+                AND NOT EXISTS(SELECT 1 FROM dedicated_session
+                      WHERE dedicated_session.worker_instance_id=credential_profile.lock_owner)",
+            [now],
+        )?;
+        tx.commit()?;
+        Ok((sessions_recovered, locks_released))
     }
 
     pub fn dedicated_session(&self, session_id: &str) -> Result<Option<DedicatedSessionRecord>> {
@@ -4569,8 +4638,8 @@ impl RuntimeDb {
             "INSERT INTO credential_profile (
                 profile_id, owner_principal, home_id, credential_generation, state,
                 active_login_id, login_epoch, login_expires_at_ms, sanitized_account_json,
-                lock_owner, created_at_ms, updated_at_ms
-             ) VALUES (?1, ?2, ?3, 1, 'unauthenticated', NULL, 0, NULL, NULL, NULL, ?4, ?4)",
+                lock_owner, created_at_ms, updated_at_ms, authority_revision
+             ) VALUES (?1, ?2, ?3, 1, 'unauthenticated', NULL, 0, NULL, NULL, NULL, ?4, ?4, 1)",
             params![
                 profile.profile_id,
                 profile.owner_principal,
@@ -4585,13 +4654,22 @@ impl RuntimeDb {
     }
 
     pub fn credential_profile(&self, profile_id: &str) -> Result<Option<CredentialProfileRecord>> {
+        Ok(self
+            .credential_profile_projection(profile_id)?
+            .filter(|profile| profile.state != "deleted"))
+    }
+
+    fn credential_profile_projection(
+        &self,
+        profile_id: &str,
+    ) -> Result<Option<CredentialProfileRecord>> {
         validate_bounded_runtime_text("credential profile id", profile_id, 256)?;
         let row = self
             .conn
             .query_row(
                 "SELECT profile_id, owner_principal, home_id, credential_generation, state,
                     active_login_id, login_epoch, login_expires_at_ms, sanitized_account_json,
-                    lock_owner, created_at_ms, updated_at_ms
+                    lock_owner, created_at_ms, updated_at_ms, authority_revision
                FROM credential_profile WHERE profile_id=?1",
                 [profile_id],
                 |row| {
@@ -4608,6 +4686,7 @@ impl RuntimeDb {
                         row.get::<_, Option<String>>(9)?,
                         row.get::<_, i64>(10)?,
                         row.get::<_, i64>(11)?,
+                        row.get::<_, i64>(12)?,
                     ))
                 },
             )
@@ -4622,6 +4701,8 @@ impl RuntimeDb {
                 profile_id: row.0,
                 owner_principal: row.1,
                 home_id: row.2,
+                authority_revision: u64::try_from(row.12)
+                    .context("negative credential authority revision")?,
                 credential_generation: u64::try_from(row.3)
                     .context("negative credential generation")?,
                 state: row.4,
@@ -4635,6 +4716,110 @@ impl RuntimeDb {
             })
         })
         .transpose()
+    }
+
+    pub fn credential_profile_projections(&self) -> Result<Vec<CredentialProfileRecord>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT profile_id FROM credential_profile ORDER BY profile_id")?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
+            .map(|profile_id| {
+                self.credential_profile_projection(&profile_id)?
+                    .ok_or_else(|| anyhow!("credential profile projection disappeared"))
+            })
+            .collect()
+    }
+
+    /// Reconcile the live session/lease projection with stable operational
+    /// authority. The higher monotonic authority revision wins; equal
+    /// revisions must contain the same stable facts. Runtime-only lock
+    /// ownership is retained when stable authority advances.
+    pub fn reconcile_credential_profile_projection(
+        &self,
+        stable: &ryeos_state::OperationalCredentialProfileRecord,
+    ) -> Result<CredentialProfileRecord> {
+        let existing = self.credential_profile_projection(&stable.profile_id)?;
+        if let Some(existing) = existing.as_ref() {
+            if existing.owner_principal != stable.owner_principal
+                || existing.home_id != stable.home_id
+            {
+                bail!("credential profile projection identity changed");
+            }
+            if existing.authority_revision > stable.authority_revision {
+                return Ok(existing.clone());
+            }
+            if existing.authority_revision == stable.authority_revision {
+                let projected_account = existing
+                    .sanitized_account
+                    .as_ref()
+                    .map(ryeos_state::objects::canonical_value_digest)
+                    .transpose()?;
+                let stable_account = stable
+                    .sanitized_account
+                    .as_ref()
+                    .map(ryeos_state::objects::canonical_value_digest)
+                    .transpose()?;
+                if existing.credential_generation != stable.credential_generation
+                    || existing.state != stable.state
+                    || existing.active_login_id != stable.active_login_id
+                    || existing.login_epoch != stable.login_epoch
+                    || existing.login_expires_at_ms != stable.login_expires_at_ms
+                    || projected_account != stable_account
+                    || existing.created_at_ms != stable.created_at_ms
+                {
+                    bail!(
+                        "credential profile revision {} has divergent runtime and operational content",
+                        stable.authority_revision
+                    );
+                }
+                return Ok(existing.clone());
+            }
+        }
+
+        let account_json = stable
+            .sanitized_account
+            .as_ref()
+            .map(lillux::canonical_json)
+            .transpose()?;
+        let lock_owner = existing
+            .as_ref()
+            .and_then(|profile| profile.lock_owner.clone());
+        self.conn.execute(
+            "INSERT INTO credential_profile (
+                profile_id, owner_principal, home_id, credential_generation, state,
+                active_login_id, login_epoch, login_expires_at_ms, sanitized_account_json,
+                lock_owner, created_at_ms, updated_at_ms, authority_revision
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(profile_id) DO UPDATE SET
+                credential_generation=excluded.credential_generation,
+                state=excluded.state,
+                active_login_id=excluded.active_login_id,
+                login_epoch=excluded.login_epoch,
+                login_expires_at_ms=excluded.login_expires_at_ms,
+                sanitized_account_json=excluded.sanitized_account_json,
+                updated_at_ms=excluded.updated_at_ms,
+                authority_revision=excluded.authority_revision",
+            params![
+                &stable.profile_id,
+                &stable.owner_principal,
+                &stable.home_id,
+                i64::try_from(stable.credential_generation)?,
+                &stable.state,
+                &stable.active_login_id,
+                i64::try_from(stable.login_epoch)?,
+                stable.login_expires_at_ms,
+                account_json,
+                lock_owner,
+                stable.created_at_ms,
+                stable.updated_at_ms,
+                i64::try_from(stable.authority_revision)?,
+            ],
+        )?;
+        self.credential_profile_projection(&stable.profile_id)?
+            .ok_or_else(|| anyhow!("reconciled credential profile projection disappeared"))
     }
 
     pub fn acquire_credential_profile(
@@ -4714,7 +4899,7 @@ impl RuntimeDb {
         tx.execute(
             "UPDATE credential_profile SET state='enrolling', active_login_id=?3,
                     login_epoch=?4, login_expires_at_ms=?5, sanitized_account_json=NULL,
-                    updated_at_ms=?6
+                    updated_at_ms=?6, authority_revision=authority_revision+1
               WHERE profile_id=?1 AND lock_owner=?2 AND login_epoch=?7",
             params![
                 profile_id,
@@ -4746,7 +4931,7 @@ impl RuntimeDb {
             "UPDATE credential_profile
                 SET state='active', active_login_id=NULL, login_expires_at_ms=NULL,
                     sanitized_account_json=?5, credential_generation=credential_generation+1,
-                    updated_at_ms=?6
+                    updated_at_ms=?6, authority_revision=authority_revision+1
               WHERE profile_id=?1 AND lock_owner=?2 AND active_login_id=?3
                 AND login_epoch=?4 AND state='enrolling' AND login_expires_at_ms>=?6",
             params![
@@ -4800,7 +4985,8 @@ impl RuntimeDb {
         )?;
         let profile_changed = tx.execute(
             "UPDATE credential_profile
-                SET state='confirming', sanitized_account_json=?4, updated_at_ms=?5
+                SET state='confirming', sanitized_account_json=?4, updated_at_ms=?5,
+                    authority_revision=authority_revision+1
               WHERE profile_id=?1 AND lock_owner=?2 AND active_login_id=?3
                 AND state='enrolling'",
             params![profile.0, worker_instance_id, profile.1, account_json, now],
@@ -4847,7 +5033,8 @@ impl RuntimeDb {
         let changed = tx.execute(
             "UPDATE credential_profile
                 SET state='active', active_login_id=NULL, login_expires_at_ms=NULL,
-                    credential_generation=credential_generation+1, updated_at_ms=?4
+                    credential_generation=credential_generation+1, updated_at_ms=?4,
+                    authority_revision=authority_revision+1
               WHERE profile_id=?1 AND owner_principal=?2 AND login_epoch=?3
                 AND state='confirming'",
             params![
@@ -4878,7 +5065,8 @@ impl RuntimeDb {
     ) -> Result<()> {
         let changed = self.conn.execute(
             "UPDATE credential_profile SET state='unauthenticated', active_login_id=NULL,
-                    login_expires_at_ms=NULL, updated_at_ms=?5
+                    login_expires_at_ms=NULL, updated_at_ms=?5,
+                    authority_revision=authority_revision+1
               WHERE profile_id=?1 AND lock_owner=?2 AND active_login_id=?3
                 AND login_epoch=?4 AND state='enrolling'",
             params![
@@ -4907,7 +5095,8 @@ impl RuntimeDb {
             "UPDATE credential_profile
                 SET state='revoking', credential_generation=credential_generation+1,
                     active_login_id=NULL, login_expires_at_ms=NULL,
-                    sanitized_account_json=NULL, updated_at_ms=?4
+                    sanitized_account_json=NULL, updated_at_ms=?4,
+                    authority_revision=authority_revision+1
               WHERE profile_id=?1 AND owner_principal=?2 AND credential_generation=?3
                 AND state NOT IN ('revoking','revoked','deleting')",
             params![
@@ -4931,7 +5120,8 @@ impl RuntimeDb {
     ) -> Result<()> {
         let changed = self.conn.execute(
             "UPDATE credential_profile
-                SET state='revoked', lock_owner=NULL, updated_at_ms=?4
+                SET state='revoked', lock_owner=NULL, updated_at_ms=?4,
+                    authority_revision=authority_revision+1
               WHERE profile_id=?1 AND owner_principal=?2 AND credential_generation=?3
                 AND state='revoking'",
             params![
@@ -4969,7 +5159,8 @@ impl RuntimeDb {
             "UPDATE credential_profile
                 SET state='deleting', credential_generation=credential_generation+1,
                     active_login_id=NULL, login_expires_at_ms=NULL,
-                    sanitized_account_json=NULL, lock_owner=NULL, updated_at_ms=?4
+                    sanitized_account_json=NULL, lock_owner=NULL, updated_at_ms=?4,
+                    authority_revision=authority_revision+1
               WHERE profile_id=?1 AND owner_principal=?2 AND credential_generation=?3
                 AND state IN ('unauthenticated','revoked')",
             params![
@@ -4993,14 +5184,18 @@ impl RuntimeDb {
         deleting_generation: u64,
     ) -> Result<()> {
         let changed = self.conn.execute(
-            "DELETE FROM credential_profile
+            "UPDATE credential_profile
+                SET state='deleted', active_login_id=NULL, login_expires_at_ms=NULL,
+                    sanitized_account_json=NULL, lock_owner=NULL,
+                    updated_at_ms=?4, authority_revision=authority_revision+1
               WHERE profile_id=?1 AND owner_principal=?2 AND credential_generation=?3
                 AND state='deleting'",
             params![
                 profile_id,
                 owner_principal,
                 i64::try_from(deleting_generation)
-                    .context("credential generation exceeds SQLite range")?
+                    .context("credential generation exceeds SQLite range")?,
+                lillux::time::timestamp_millis() as i64
             ],
         )?;
         if changed != 1 {
@@ -8327,6 +8522,114 @@ impl RuntimeDb {
         self.reset_required
     }
 
+    /// Extract only the independently versioned credential-profile authority
+    /// before an explicitly confirmed execution-history schema replacement.
+    /// No thread/session row is decoded or carried forward. Epochs 6–11 used
+    /// one exact profile table shape; older epochs predate credential profiles.
+    pub fn credential_profiles_for_explicit_history_reset(
+        &self,
+        path: &Path,
+    ) -> Result<Vec<CredentialProfileRecord>> {
+        if !self.reset_required {
+            return self.credential_profile_projections();
+        }
+        let epoch = runtime_operator_schema_epoch(&self.conn, path)?;
+        if epoch < 6 {
+            return Ok(Vec::new());
+        }
+        if epoch > 11 {
+            bail!("runtime epoch {epoch} has no credential-profile extraction contract");
+        }
+        let expected = BTreeSet::from([
+            "profile_id",
+            "owner_principal",
+            "home_id",
+            "credential_generation",
+            "state",
+            "active_login_id",
+            "login_epoch",
+            "login_expires_at_ms",
+            "sanitized_account_json",
+            "lock_owner",
+            "created_at_ms",
+            "updated_at_ms",
+        ])
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+        let actual = {
+            let mut statement = self.conn.prepare("PRAGMA table_info(credential_profile)")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<rusqlite::Result<BTreeSet<_>>>()?
+        };
+        if actual != expected {
+            bail!(
+                "runtime epoch {epoch} credential-profile table has an unrecognized shape; refusing authority extraction"
+            );
+        }
+        let mut statement = self.conn.prepare(
+            "SELECT profile_id, owner_principal, home_id, credential_generation, state,
+                    active_login_id, login_epoch, login_expires_at_ms,
+                    sanitized_account_json, created_at_ms, updated_at_ms
+               FROM credential_profile ORDER BY profile_id",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, i64>(10)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|row| {
+                let mut state = row.4;
+                let mut active_login_id = row.5;
+                let mut login_expires_at_ms = row.7;
+                let mut sanitized_account = row
+                    .8
+                    .map(|raw| serde_json::from_str(&raw))
+                    .transpose()
+                    .context("decode predecessor sanitized credential account")?;
+                // An enrolling ceremony depended on a worker/session that the
+                // explicit history reset retires. Preserve its monotonic epoch
+                // but invalidate the incomplete ceremony. Confirming evidence
+                // is caller-visible and independently confirmable, so it stays.
+                if state == "enrolling" {
+                    state = "unauthenticated".to_string();
+                    active_login_id = None;
+                    login_expires_at_ms = None;
+                    sanitized_account = None;
+                }
+                Ok(CredentialProfileRecord {
+                    profile_id: row.0,
+                    owner_principal: row.1,
+                    home_id: row.2,
+                    authority_revision: 1,
+                    credential_generation: u64::try_from(row.3)?,
+                    state,
+                    active_login_id,
+                    login_epoch: u64::try_from(row.6)?,
+                    login_expires_at_ms,
+                    sanitized_account,
+                    lock_owner: None,
+                    created_at_ms: row.9,
+                    updated_at_ms: row.10,
+                })
+            })
+            .collect()
+    }
+
     /// Apply the already-confirmed destructive schema cutover. Callers must
     /// publish their authoritative cross-store discard intent before invoking
     /// this method; opening the pinned handle never performs this mutation.
@@ -9752,18 +10055,18 @@ impl RuntimeDb {
     pub fn reserve_workspace(
         &self,
         workspace_id: &str,
-        lower_snapshot: &str,
+        base_snapshot: &str,
         root_path: &str,
     ) -> Result<()> {
         let now = lillux::time::timestamp_millis();
         let changed = self.conn.execute(
             "INSERT INTO execution_workspace
-                (workspace_id, lower_snapshot, root_path, state, created_at_ms, updated_at_ms)
+                (workspace_id, base_snapshot, root_path, state, created_at_ms, updated_at_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?5)
              ON CONFLICT(workspace_id) DO NOTHING",
             params![
                 workspace_id,
-                lower_snapshot,
+                base_snapshot,
                 root_path,
                 WorkspaceState::Reserved.as_str(),
                 now
@@ -9773,7 +10076,7 @@ impl RuntimeDb {
             let existing = self
                 .workspace(workspace_id)?
                 .ok_or_else(|| anyhow::anyhow!("workspace reservation disappeared"))?;
-            if existing.lower_snapshot != lower_snapshot
+            if existing.base_snapshot != base_snapshot
                 || existing.root_path != root_path
                 || !matches!(
                     existing.state,
@@ -10111,7 +10414,7 @@ impl RuntimeDb {
         if claim_owner.as_deref() != Some(launch_owner) {
             bail!("stale launch owner cannot bind frozen workspace {workspace_id}");
         }
-        let (workspace_thread, workspace_owner, state, lower_snapshot, existing_frozen): (
+        let (workspace_thread, workspace_owner, state, base_snapshot, existing_frozen): (
             Option<String>,
             Option<String>,
             WorkspaceState,
@@ -10119,7 +10422,7 @@ impl RuntimeDb {
             Option<String>,
         ) = tx
             .query_row(
-                "SELECT thread_id, launch_owner, state, lower_snapshot, frozen_snapshot_hash
+                "SELECT thread_id, launch_owner, state, base_snapshot, frozen_snapshot_hash
                    FROM execution_workspace WHERE workspace_id=?1",
                 params![workspace_id],
                 |row| {
@@ -10165,9 +10468,9 @@ impl RuntimeDb {
                 )
             })?;
         if admitted_project_authority.operational_snapshot_projection()
-            != Some(lower_snapshot.as_str())
+            != Some(base_snapshot.as_str())
         {
-            bail!("workspace lower snapshot and admitted launch authority contradict");
+            bail!("workspace base snapshot and admitted launch authority contradict");
         }
         let workspace_updated = tx.execute(
             "UPDATE execution_workspace
@@ -10195,7 +10498,7 @@ impl RuntimeDb {
         self.conn
             .query_row(
                 "SELECT workspace_id, thread_id, launch_owner, backend_id, backend_version,
-                        pinned_root_identities, mount_identity, lower_snapshot,
+                        pinned_root_identities, mount_identity, base_snapshot,
                         frozen_snapshot_hash, root_path, state, process_identity, created_at_ms, updated_at_ms
                    FROM execution_workspace WHERE workspace_id=?1",
                 params![workspace_id],
@@ -10208,7 +10511,7 @@ impl RuntimeDb {
                         backend_version: row.get(4)?,
                         pinned_root_identities: row.get(5)?,
                         mount_identity: row.get(6)?,
-                        lower_snapshot: row.get(7)?,
+                        base_snapshot: row.get(7)?,
                         frozen_snapshot_hash: row.get(8)?,
                         root_path: row.get(9)?,
                         state: row.get(10)?,
@@ -10225,7 +10528,7 @@ impl RuntimeDb {
     pub fn open_workspaces(&self) -> Result<Vec<WorkspaceRecord>> {
         let mut statement = self.conn.prepare(
             "SELECT workspace_id, thread_id, launch_owner, backend_id, backend_version,
-                    pinned_root_identities, mount_identity, lower_snapshot,
+                    pinned_root_identities, mount_identity, base_snapshot,
                     frozen_snapshot_hash, root_path, state, process_identity, created_at_ms, updated_at_ms
                FROM execution_workspace WHERE state != ?1 ORDER BY created_at_ms",
         )?;
@@ -10238,7 +10541,7 @@ impl RuntimeDb {
                 backend_version: row.get(4)?,
                 pinned_root_identities: row.get(5)?,
                 mount_identity: row.get(6)?,
-                lower_snapshot: row.get(7)?,
+                base_snapshot: row.get(7)?,
                 frozen_snapshot_hash: row.get(8)?,
                 root_path: row.get(9)?,
                 state: row.get(10)?,
@@ -11970,6 +12273,141 @@ mod tests {
     }
 
     #[test]
+    fn dedicated_admission_acquires_profile_in_the_session_transaction() {
+        let (_tmp, db) = fresh_db();
+        db.create_credential_profile(NewCredentialProfile {
+            profile_id: "P-atomic",
+            owner_principal: "fp:operator",
+            home_id: "home-P-atomic",
+        })
+        .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            session_id: "S-atomic",
+            root_thread_id: "T-atomic",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-atomic",
+            candidate_required: false,
+            credential_profile_id: "P-atomic",
+            credential_generation: 1,
+            credential_lock_owner: "worker-atomic",
+        })
+        .unwrap();
+
+        assert_eq!(
+            db.credential_profile("P-atomic")
+                .unwrap()
+                .unwrap()
+                .lock_owner
+                .as_deref(),
+            Some("worker-atomic")
+        );
+        assert_eq!(
+            db.dedicated_session("S-atomic").unwrap().unwrap().state,
+            "admitted"
+        );
+    }
+
+    #[test]
+    fn startup_releases_only_pre_attachment_credential_reservations() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-orphan", "worker-orphan");
+        create_locked_profile(&db, "P-admitted", "worker-admitted");
+        db.admit_dedicated_session(NewDedicatedSession {
+            session_id: "S-admitted",
+            root_thread_id: "T-admitted",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-admitted",
+            candidate_required: false,
+            credential_profile_id: "P-admitted",
+            credential_generation: 1,
+            credential_lock_owner: "worker-admitted",
+        })
+        .unwrap();
+
+        assert_eq!(
+            db.reconcile_unattached_credential_profile_locks().unwrap(),
+            (1, 2)
+        );
+        assert_eq!(
+            db.dedicated_session("S-admitted").unwrap().unwrap().state,
+            "recovering"
+        );
+        assert_eq!(
+            db.credential_profile("P-admitted")
+                .unwrap()
+                .unwrap()
+                .lock_owner,
+            None
+        );
+        assert_eq!(
+            db.credential_profile("P-orphan")
+                .unwrap()
+                .unwrap()
+                .lock_owner,
+            None
+        );
+    }
+
+    #[test]
+    fn startup_preserves_attached_worker_credential_fence() {
+        let (_tmp, db) = fresh_db();
+        create_locked_profile(&db, "P-fenced", "worker-fenced");
+        db.conn
+            .execute(
+                "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    base_snapshot, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES ('W-fenced', 'T-fenced', 'owner', 'backend',
+                           'a', '/tmp/workspace-fenced', 'ready', 1, 1)",
+                [],
+            )
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            session_id: "S-fenced",
+            root_thread_id: "T-fenced",
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: "W-fenced",
+            candidate_required: false,
+            credential_profile_id: "P-fenced",
+            credential_generation: 1,
+            credential_lock_owner: "worker-fenced",
+        })
+        .unwrap();
+        db.attach_worker_process(&WorkerProcessRecord {
+            worker_instance_id: "worker-fenced".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "a".repeat(64),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(155, 155),
+            control_channel_identity: "fd:fenced".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "daemon-old".to_owned(),
+            session_id: "S-fenced".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: 2,
+            updated_at_ms: 2,
+        })
+        .unwrap();
+
+        assert_eq!(
+            db.reconcile_unattached_credential_profile_locks().unwrap(),
+            (0, 0)
+        );
+        assert_eq!(
+            db.credential_profile("P-fenced")
+                .unwrap()
+                .unwrap()
+                .lock_owner
+                .as_deref(),
+            Some("worker-fenced")
+        );
+    }
+
+    #[test]
     fn dedicated_worker_attachment_atomically_owns_process_workspace_and_session() {
         let (_tmp, db) = fresh_db();
         create_locked_profile(&db, "P-one", "worker-one");
@@ -11977,7 +12415,7 @@ mod tests {
             .execute(
                 "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
-                    lower_snapshot, root_path, state, created_at_ms, updated_at_ms
+                    base_snapshot, root_path, state, created_at_ms, updated_at_ms
                  ) VALUES ('W-one', 'T-root', 'dedicated_worker_session', 'trusted-daemon',
                            'a', '/tmp/workspace-one', 'ready', 1, 1)",
                 [],
@@ -12065,7 +12503,7 @@ mod tests {
             .execute(
                 "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
-                    lower_snapshot, root_path, state, created_at_ms, updated_at_ms
+                    base_snapshot, root_path, state, created_at_ms, updated_at_ms
                  ) VALUES ('W-recover', 'T-recover', 'owner', 'backend',
                            'a', '/tmp/workspace-recover', 'ready', 1, 1)",
                 [],
@@ -12253,7 +12691,7 @@ mod tests {
             .execute(
                 "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id, backend_version,
-                    pinned_root_identities, mount_identity, lower_snapshot, root_path,
+                    pinned_root_identities, mount_identity, base_snapshot, root_path,
                     state, created_at_ms, updated_at_ms
                  ) VALUES ('W-retained', 'T-retained', 'old-owner', 'backend', 'v1',
                            '{}', 'mount', ?1, '/tmp/W-retained', 'ready', 1, 1)",
@@ -12303,7 +12741,7 @@ mod tests {
             .execute(
                 "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id, backend_version,
-                    pinned_root_identities, mount_identity, lower_snapshot,
+                    pinned_root_identities, mount_identity, base_snapshot,
                     frozen_snapshot_hash, root_path, state, created_at_ms, updated_at_ms
                  ) VALUES ('W-frozen', 'T-frozen', 'old-frozen-owner', 'backend', 'v1',
                            '{}', 'mount', ?1, ?2, '/tmp/W-frozen', 'freezing', 1, 1)",
@@ -12354,7 +12792,7 @@ mod tests {
             .execute(
                 "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
-                    lower_snapshot, root_path, state, process_identity,
+                    base_snapshot, root_path, state, process_identity,
                     created_at_ms, updated_at_ms
                  ) VALUES ('W-handoff', 'T-handoff', 'owner', 'backend',
                            'a', '/tmp/workspace-handoff', 'active', ?1, 1, 1)",
@@ -12424,7 +12862,7 @@ mod tests {
             .execute(
                 "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
-                    lower_snapshot, root_path, state, created_at_ms, updated_at_ms
+                    base_snapshot, root_path, state, created_at_ms, updated_at_ms
                  ) VALUES ('W-fence', 'T-fence', 'owner', 'backend',
                            'a', '/tmp/workspace-fence', 'ready', 1, 1)",
                 [],
@@ -12473,7 +12911,7 @@ mod tests {
             .execute(
                 "INSERT INTO execution_workspace (
                 workspace_id, thread_id, launch_owner, backend_id,
-                lower_snapshot, root_path, state, created_at_ms, updated_at_ms
+                base_snapshot, root_path, state, created_at_ms, updated_at_ms
              ) VALUES ('W-abandoned', 'T-abandoned', 'owner', 'backend',
                        'a', '/tmp/workspace-abandoned', 'ready', 1, 1)",
                 [],
@@ -12563,7 +13001,7 @@ mod tests {
             .execute(
                 "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
-                    lower_snapshot, root_path, state, created_at_ms, updated_at_ms
+                    base_snapshot, root_path, state, created_at_ms, updated_at_ms
                  ) VALUES ('W-unproved', 'T-unproved', 'owner', 'backend',
                            'a', '/tmp/workspace-unproved', 'ready', 1, 1)",
                 [],
@@ -12652,7 +13090,7 @@ mod tests {
             .execute(
                 "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
-                    lower_snapshot, root_path, state, created_at_ms, updated_at_ms
+                    base_snapshot, root_path, state, created_at_ms, updated_at_ms
                  ) VALUES ('W-start-unproved', 'T-start-unproved', 'owner', 'backend',
                            'a', '/tmp/workspace-start-unproved', 'ready', 1, 1)",
                 [],
@@ -12723,7 +13161,7 @@ mod tests {
             .execute(
                 "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
-                    lower_snapshot, root_path, state, created_at_ms, updated_at_ms
+                    base_snapshot, root_path, state, created_at_ms, updated_at_ms
                  ) VALUES ('W-ready-fail', 'T-ready-fail', 'owner', 'backend',
                            'a', '/tmp/workspace-ready-fail', 'ready', 1, 1)",
                 [],
@@ -12796,9 +13234,9 @@ mod tests {
                 "INSERT INTO credential_profile(
                     profile_id, owner_principal, home_id, credential_generation, state,
                     active_login_id, login_epoch, login_expires_at_ms, sanitized_account_json,
-                    lock_owner, created_at_ms, updated_at_ms
+                    lock_owner, created_at_ms, updated_at_ms, authority_revision
                  ) VALUES ('P-observe', 'fp:operator', 'home-observe', 1, 'active',
-                           NULL, 0, NULL, NULL, 'worker-observe', 1, 1)",
+                           NULL, 0, NULL, NULL, 'worker-observe', 1, 1, 1)",
                 [],
             )
             .unwrap();
@@ -13074,7 +13512,7 @@ mod tests {
             .execute(
                 "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
-                    lower_snapshot, root_path, state, created_at_ms, updated_at_ms
+                    base_snapshot, root_path, state, created_at_ms, updated_at_ms
                  ) VALUES ('W-ledger', 'T-ledger', 'dedicated_worker_session', 'trusted-daemon',
                            'a', '/tmp/workspace-ledger', 'ready', 1, 1)",
                 [],
@@ -13503,7 +13941,7 @@ mod tests {
             .execute(
                 "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
-                    lower_snapshot, root_path, state, created_at_ms, updated_at_ms
+                    base_snapshot, root_path, state, created_at_ms, updated_at_ms
                  ) VALUES ('W-candidate', 'S-candidate', 'owner', 'trusted-daemon',
                            'a', '/tmp/candidate', 'ready', 1, 1)",
                 [],
@@ -14342,7 +14780,7 @@ mod tests {
             db.conn
                 .execute(
                     "INSERT INTO execution_workspace
-                         (workspace_id, lower_snapshot, root_path, state,
+                         (workspace_id, base_snapshot, root_path, state,
                           created_at_ms, updated_at_ms)
                      VALUES (?1, 'snapshot', ?2, ?3, 1, 1)",
                     params![
@@ -14367,7 +14805,7 @@ mod tests {
             db.conn
                 .execute(
                     "INSERT INTO execution_workspace
-                     (workspace_id, lower_snapshot, root_path, state,
+                     (workspace_id, base_snapshot, root_path, state,
                       created_at_ms, updated_at_ms)
                  VALUES ('workspace-invalid', 'snapshot', '/tmp/workspace-invalid',
                          'invalid', 1, 1)",
@@ -15806,6 +16244,75 @@ mod tests {
     }
 
     #[test]
+    fn explicit_history_reset_extracts_only_stable_credential_authority() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.db");
+        let db = RuntimeDb::open(&path).unwrap();
+        db.create_credential_profile(NewCredentialProfile {
+            profile_id: "profile-stable",
+            owner_principal: "fp:operator",
+            home_id: "credential-stable",
+        })
+        .unwrap();
+        db.conn
+            .execute(
+                "UPDATE credential_profile
+                    SET state='active', credential_generation=4,
+                        sanitized_account_json=?1, login_epoch=3,
+                        authority_revision=7
+                  WHERE profile_id='profile-stable'",
+                [serde_json::json!({"account_id":"account-stable"}).to_string()],
+            )
+            .unwrap();
+        // Reproduce the exact epoch-11 credential table: the stable revision
+        // was introduced only by epoch 12. No session/history row is decoded.
+        db.conn
+            .execute_batch("ALTER TABLE credential_profile DROP COLUMN authority_revision")
+            .unwrap();
+        let epoch_11_app_id = (RUNTIME_OPERATOR_APP_ID_PREFIX | 11) as i32;
+        db.conn
+            .pragma_update(None, "application_id", epoch_11_app_id)
+            .unwrap();
+        drop(db);
+
+        let mut reset = RuntimeDb::open_for_explicit_history_reset(&path).unwrap();
+        let extracted = reset
+            .credential_profiles_for_explicit_history_reset(&path)
+            .unwrap();
+        assert_eq!(extracted.len(), 1);
+        let profile = &extracted[0];
+        assert_eq!(profile.profile_id, "profile-stable");
+        assert_eq!(profile.credential_generation, 4);
+        assert_eq!(profile.state, "active");
+        assert_eq!(profile.login_epoch, 3);
+        assert_eq!(profile.lock_owner, None);
+        assert_eq!(profile.authority_revision, 1);
+
+        let stable = ryeos_state::OperationalCredentialProfileRecord {
+            profile_id: profile.profile_id.clone(),
+            owner_principal: profile.owner_principal.clone(),
+            home_id: profile.home_id.clone(),
+            authority_revision: profile.authority_revision,
+            credential_generation: profile.credential_generation,
+            state: profile.state.clone(),
+            active_login_id: profile.active_login_id.clone(),
+            login_epoch: profile.login_epoch,
+            login_expires_at_ms: profile.login_expires_at_ms,
+            sanitized_account: profile.sanitized_account.clone(),
+            created_at_ms: profile.created_at_ms,
+            updated_at_ms: profile.updated_at_ms,
+        };
+        reset.apply_explicit_history_reset(&path).unwrap();
+        reset
+            .reconcile_credential_profile_projection(&stable)
+            .unwrap();
+        let restored = reset.credential_profile("profile-stable").unwrap().unwrap();
+        assert_eq!(restored.state, "active");
+        assert_eq!(restored.credential_generation, 4);
+        assert_eq!(restored.authority_revision, 1);
+    }
+
+    #[test]
     fn projection_rebuild_runtime_open_requires_existing_current_schema() {
         let tmp = TempDir::new().unwrap();
         let missing = tmp.path().join("missing-runtime.db");
@@ -15836,7 +16343,7 @@ mod tests {
                  INSERT INTO thread_launch_epoch (thread_id, last_epoch)
                      VALUES ('T-root', 1);
                  INSERT INTO execution_workspace
-                     (workspace_id, thread_id, lower_snapshot, root_path, state,
+                     (workspace_id, thread_id, base_snapshot, root_path, state,
                       created_at_ms, updated_at_ms)
                      VALUES ('workspace-1', 'T-root', 'snapshot-1', '/tmp/workspace-1',
                              'orphaned', 1, 1);

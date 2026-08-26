@@ -22,8 +22,11 @@ structured-session boundary, not a Codex kind or a Codex branch in the engine.
 Authentication is Codex's supported ChatGPT device-code flow. Codex durably manages `auth.json`
 inside one daemon-owned, mode-0700 opaque profile `CODEX_HOME`; RyeOS never
 parses or copies the token document. The common bridge applies an owner-only
-creation mask and descriptor-safely strips group/other mode bits at worker IPC
-boundaries; this is generic private-home enforcement, not knowledge of Codex
+creation mask and reasserts owner-only access on the exact pinned home root at
+worker IPC boundaries; stopped homes receive the complete bounded
+descriptor-relative validation before attachment. The exact mode-0700 pinned
+root is the privacy boundary; descendant mode bits remain opaque workload
+state. This is generic private-home enforcement, not knowledge of Codex
 filenames. The pinned `ryeos-workspace-only`
 permission profile denies the filesystem root, reopens only Codex's minimal
 runtime paths, and keeps the private CoW project writable while command

@@ -422,15 +422,15 @@ fn store_project_snapshot(
 
 /// Select how an immutable snapshot becomes visible to one execution.
 ///
-/// A shared cache and an enforced overlay lower remain read-only, so both may
-/// safely share verified content inodes. Disabled isolation executes directly
-/// in its daemon-owned workspace, making that tree writable; it must receive
-/// independent inodes materialized from CAS instead of links into the immutable
-/// cache.
+/// A shared cache and the canonical project supplied to an enforced CoW
+/// backend remain read-only, so both may safely share verified content inodes.
+/// Disabled isolation executes directly in its daemon-owned project, making
+/// that tree writable; it must receive independent inodes materialized from
+/// CAS instead of links into the immutable cache.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum ProjectLowerMaterialization<'a> {
+pub(crate) enum ProjectMaterialization<'a> {
     SharedReadOnly,
-    EnforcedOverlayLower(&'a Path),
+    EnforcedCowProject(&'a Path),
     PrivateWritableWorkspace {
         target_dir: &'a Path,
         budget: Option<&'a external_content::PrivateMaterializationBudget>,
@@ -442,11 +442,11 @@ pub(crate) enum ProjectLowerMaterialization<'a> {
 /// normalized mode. Writable private workspaces receive byte-identical but
 /// inode-independent files so one execution can never mutate another
 /// execution's snapshot authority.
-pub(crate) fn checkout_project_lower(
+pub(crate) fn checkout_project_snapshot(
     authority: &ryeos_state::PinnedStateAuthority,
     cas_mutation_guard: &ryeos_state::CasMutationGuard,
     snapshot_hash: &str,
-    materialization: ProjectLowerMaterialization<'_>,
+    materialization: ProjectMaterialization<'_>,
     cache: &MaterializationCache,
 ) -> Result<(
     PathBuf,
@@ -503,8 +503,8 @@ pub(crate) fn checkout_project_lower(
         construction?;
     }
     let realized_path = match materialization {
-        ProjectLowerMaterialization::SharedReadOnly => cache.cache_dir(snapshot_hash),
-        ProjectLowerMaterialization::EnforcedOverlayLower(target_dir) => {
+        ProjectMaterialization::SharedReadOnly => cache.cache_dir(snapshot_hash),
+        ProjectMaterialization::EnforcedCowProject(target_dir) => {
             let target_root = lillux::secure_fs::PinnedDirectory::open_or_create(target_dir)?;
             for (relative, project_file) in project_files {
                 let content = cache.ensure_content_file(&cas, project_file)?;
@@ -513,7 +513,7 @@ pub(crate) fn checkout_project_lower(
             }
             target_dir.to_path_buf()
         }
-        ProjectLowerMaterialization::PrivateWritableWorkspace { target_dir, budget } => {
+        ProjectMaterialization::PrivateWritableWorkspace { target_dir, budget } => {
             let target_root = lillux::secure_fs::PinnedDirectory::open_or_create(target_dir)?;
             let owned_budget;
             let budget = match budget {
@@ -544,7 +544,7 @@ pub(crate) fn checkout_project_lower(
         &realized_path,
     ) {
         Ok(materialization) => materialization,
-        Err(error) if matches!(materialization, ProjectLowerMaterialization::SharedReadOnly) => {
+        Err(error) if matches!(materialization, ProjectMaterialization::SharedReadOnly) => {
             // A valid marker beside a mutated generation is not authority.
             // Rebuild once beneath the still-held construction lock, then
             // mint the proof from the rebuilt descriptor tree.
@@ -676,18 +676,12 @@ pub(crate) fn fold_back_outputs(
     let policy = closure.policy();
 
     let layout = workspace::WorkspaceLayout::from_root(working_dir.to_path_buf());
-    if !layout.lower.is_dir() || !layout.upper.is_dir() || !layout.work.is_dir() {
-        anyhow::bail!(
-            "authoritative fold-back requires a verified COW workspace, got {}",
-            working_dir.display()
-        );
-    }
     let lifecycle_operation = if isolation.is_enforced() {
         ryeos_isolation_protocol::WorkspaceLifecycleOperation::FreezeAndDiff
     } else {
         // A disabled node has no mount namespace or overlay adapter. Re-run
-        // the exact native Create check to pin the same private directories,
-        // then capture the complete mutable lower tree below.
+        // the exact native Create check to pin the same private project,
+        // then capture the complete mutable project tree below.
         ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create
     };
     let lifecycle = isolation
@@ -695,44 +689,45 @@ pub(crate) fn fold_back_outputs(
             operation: lifecycle_operation,
             workspace_id,
             launch_owner,
-            lower_snapshot: base_snapshot_hash,
-            lower_path: &layout.lower,
-            upper_path: &layout.upper,
-            work_path: &layout.work,
+            base_snapshot: base_snapshot_hash,
+            project_path: &layout.project,
         })
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let pinned = lillux::canonical_json(&serde_json::to_value(
-        &lifecycle.response.pinned_root_identities,
+        &lifecycle.evidence.pinned_root_identities,
     )?)?;
     if workspace_record.workspace_id != workspace_id
-        || workspace_record.lower_snapshot != base_snapshot_hash
+        || workspace_record.base_snapshot != base_snapshot_hash
         || workspace_record.launch_owner.as_deref() != Some(launch_owner)
-        || workspace_record.backend_id.as_deref() != Some(lifecycle.response.backend_id.as_str())
+        || workspace_record.backend_id.as_deref() != Some(lifecycle.evidence.backend_id.as_str())
         || workspace_record.backend_version.as_deref()
-            != Some(lifecycle.response.backend_version.as_str())
+            != Some(lifecycle.evidence.backend_version.as_str())
         || workspace_record.pinned_root_identities.as_deref() != Some(pinned.as_str())
         || workspace_record.mount_identity.as_deref()
-            != Some(lifecycle.response.mount_identity.as_str())
+            != Some(lifecycle.evidence.mount_identity.as_str())
     {
         anyhow::bail!("workspace freeze evidence does not match the durable creation journal");
     }
     let new_tree = if isolation.is_enforced() {
+        let mutation_content = lifecycle.mutation_content.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("workspace adapter omitted its pinned mutation-content root")
+        })?;
         workspace::apply_workspace_delta(
             authority,
             cas_mutation_guard,
             &mut staged_roots,
-            &lifecycle.upper,
+            mutation_content,
             pre_tree,
             policy,
-            &lifecycle.response.mutations,
+            &lifecycle.evidence.mutations,
         )?
     } else {
-        let lower = lillux::PinnedDirectory::open(&layout.lower)?
-            .ok_or_else(|| anyhow::anyhow!("daemon-private workspace lower disappeared"))?;
+        let project = lillux::PinnedDirectory::open(&layout.project)?
+            .ok_or_else(|| anyhow::anyhow!("daemon-private workspace project disappeared"))?;
         let captured = ingest::ingest_project_tree_with_operational_exclusions(
             authority,
             cas_mutation_guard,
-            &lower,
+            &project,
             policy,
             operational_shadow_paths,
         )?;
@@ -848,7 +843,7 @@ pub(crate) fn store_foldback_snapshot(
 pub(crate) fn seal_callback_workspace_generation(
     state: &ryeos_app::state::AppState,
     thread_id: &str,
-    effective_lower: &Path,
+    effective_project: &Path,
     base_snapshot_hash: &str,
 ) -> Result<PendingProjectResult> {
     let authority = pinned_state_authority(state)?;
@@ -859,7 +854,7 @@ pub(crate) fn seal_callback_workspace_generation(
         base_snapshot_hash,
     )?
     .ok_or_else(|| anyhow::anyhow!("base project snapshot {base_snapshot_hash} is absent"))?;
-    let workspace = workspace::WorkspaceLayout::from_lower(effective_lower)?;
+    let workspace = workspace::WorkspaceLayout::from_project(effective_project)?;
     let workspace_id = workspace
         .root
         .file_name()
@@ -876,8 +871,8 @@ pub(crate) fn seal_callback_workspace_generation(
     state
         .state_store
         .assert_launch_owner(thread_id, launch_owner)?;
-    if record.lower_snapshot != base_snapshot_hash {
-        anyhow::bail!("callback workspace lower snapshot contradicts its resume base");
+    if record.base_snapshot != base_snapshot_hash {
+        anyhow::bail!("callback workspace base snapshot contradicts its resume base");
     }
     match record.state {
         WorkspaceState::Active => state.state_store.transition_execution_workspace_owned(
@@ -1067,7 +1062,7 @@ pub(crate) fn prepare_stopped_managed_runtime_terminal_project_result(
         .state_store
         .assert_execution_process_detached_owned(thread_id, launch_owner)?;
 
-    let layout = workspace::WorkspaceLayout::from_lower(provenance.effective_path())?;
+    let layout = workspace::WorkspaceLayout::from_project(provenance.effective_path())?;
     let workspace_id = layout
         .root
         .file_name()
@@ -1181,8 +1176,9 @@ fn advance_head_to_frozen_runtime_result(
 
 /// Complete a write-ahead callback freeze whose runtime owner died after the
 /// workspace entered `freezing` but before its snapshot binding committed.
-/// The dead process makes the upper layer stable; the exact captured adapter
-/// replays FreezeAndDiff against the preserved journal identity.
+/// The dead process makes the backend-owned mutation state stable; the exact
+/// captured adapter replays FreezeAndDiff against the preserved journal
+/// identity.
 pub fn recover_interrupted_workspace_freeze(
     state: &ryeos_app::state::AppState,
     record: &ryeos_app::runtime_db::WorkspaceRecord,
@@ -1206,7 +1202,7 @@ pub fn recover_interrupted_workspace_freeze(
     let cas = authority.cas_store()?;
     let base = ryeos_state::project_materialization::load_project_snapshot_bounded(
         &cas,
-        &record.lower_snapshot,
+        &record.base_snapshot,
     )?
     .ok_or_else(|| anyhow::anyhow!("freezing workspace base snapshot is absent"))?;
     let permit = state
@@ -1223,7 +1219,7 @@ pub fn recover_interrupted_workspace_freeze(
         working_dir: Path::new(&record.root_path),
         pre_tree_hash: &base.project_tree_hash,
         policy_hash: &base.effective_policy_hash,
-        base_snapshot_hash: &record.lower_snapshot,
+        base_snapshot_hash: &record.base_snapshot,
         workspace_record: record,
         operational_shadow_paths: &operational_shadow_paths,
     })?;
@@ -1232,10 +1228,10 @@ pub fn recover_interrupted_workspace_freeze(
             &authority,
             &guard,
             &tree_hash,
-            &record.lower_snapshot,
+            &record.base_snapshot,
             &mut publication,
         )?,
-        None => record.lower_snapshot.clone(),
+        None => record.base_snapshot.clone(),
     };
     drop(permit);
     state.state_store.bind_frozen_execution_workspace(
@@ -1390,11 +1386,11 @@ mod pinned_child_authority_tests {
         let cache_root = tempfile::tempdir().unwrap();
         let cache = MaterializationCache::new(cache_root.path().to_path_buf());
 
-        let (shared_path, _shared_lease, shared) = checkout_project_lower(
+        let (shared_path, _shared_lease, shared) = checkout_project_snapshot(
             &authority,
             &guard,
             &snapshot_hash,
-            ProjectLowerMaterialization::SharedReadOnly,
+            ProjectMaterialization::SharedReadOnly,
             &cache,
         )
         .unwrap();
@@ -1402,22 +1398,22 @@ mod pinned_child_authority_tests {
         let second_root = tempfile::tempdir().unwrap();
         let first_budget = external_content::PrivateMaterializationBudget::new(1024);
         let second_budget = external_content::PrivateMaterializationBudget::new(1024);
-        let (first_path, _first_lease, _first) = checkout_project_lower(
+        let (first_path, _first_lease, _first) = checkout_project_snapshot(
             &authority,
             &guard,
             &snapshot_hash,
-            ProjectLowerMaterialization::PrivateWritableWorkspace {
+            ProjectMaterialization::PrivateWritableWorkspace {
                 target_dir: first_root.path(),
                 budget: Some(&first_budget),
             },
             &cache,
         )
         .unwrap();
-        let (second_path, _second_lease, second) = checkout_project_lower(
+        let (second_path, _second_lease, second) = checkout_project_snapshot(
             &authority,
             &guard,
             &snapshot_hash,
-            ProjectLowerMaterialization::PrivateWritableWorkspace {
+            ProjectMaterialization::PrivateWritableWorkspace {
                 target_dir: second_root.path(),
                 budget: Some(&second_budget),
             },

@@ -102,6 +102,20 @@ class CodexContractTests(unittest.TestCase):
             ],
         )
 
+    def test_new_thread_is_persisted_before_ryeos_accepts_its_binding(self) -> None:
+        start = self.routes["session.start"]
+        self.assertEqual(start["post_success_routes"], ["session.persist"])
+
+        persist = self.routes["session.persist"]
+        self.assertIn("session.persist", self.profile["route_sets"]["session"])
+        self.assertEqual(persist["method"], "thread/name/set")
+        self.assertEqual(persist["audience"], "runtime")
+        self.assertEqual(persist["effect_class"], "session_mutation")
+        self.assertEqual(persist["session_binding"]["action"], "require")
+        self.assertEqual(persist["session_binding"]["request_field"], "threadId")
+        self.assertEqual(persist["observations"], [])
+        self.assertEqual(persist["result_retention"], "ephemeral")
+
     def test_approval_protocol_is_entirely_profile_authored(self) -> None:
         self.assertTrue(self.profile["server_requests"])
         immutable_args = self.profile["workload_args"]

@@ -471,32 +471,32 @@ fn resolve_pinned_snapshot_context_admitted(
                     reserved.state
                 )));
             }
-            let lower = workspace.lower;
+            let project = workspace.project;
             (
-                Some(lower.clone()),
+                Some(project.clone()),
                 Some(Arc::new(
-                    TempDirGuard::new_workspace(workspace.root, lower)
+                    TempDirGuard::new_workspace(workspace.root, project)
                         .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?,
                 )),
             )
         }
     };
-    let lower_materialization = match target_path.as_deref() {
-        None => crate::execution::ProjectLowerMaterialization::SharedReadOnly,
+    let project_materialization = match target_path.as_deref() {
+        None => crate::execution::ProjectMaterialization::SharedReadOnly,
         Some(path) if state.isolation.is_enforced() => {
-            crate::execution::ProjectLowerMaterialization::EnforcedOverlayLower(path)
+            crate::execution::ProjectMaterialization::EnforcedCowProject(path)
         }
-        Some(path) => crate::execution::ProjectLowerMaterialization::PrivateWritableWorkspace {
+        Some(path) => crate::execution::ProjectMaterialization::PrivateWritableWorkspace {
             target_dir: path,
             budget: None,
         },
     };
     let (effective_path, generation_lease, pinned_materialization) =
-        crate::execution::checkout_project_lower(
+        crate::execution::checkout_project_snapshot(
             authority,
             cas_mutation_guard,
             snapshot_hash,
-            lower_materialization,
+            project_materialization,
             &materialization_cache,
         )
         .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-25T02:40:34Z:fe019e5dfd4281c444eba1e6dbe77db664df7a19b1dbf389ae78d092be1a5b11:rbhvTopfqaf4fQoNyZPIrHleTR2yz+tyhRw2dFgFCiNUPo6k2oz85IQzmRpwBuz0gUCTEt3WWtj4wZdcj3XWCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-26T03:58:59Z:7f66e02df3aaf7763b1681c185e2f285500708a0336c20a9d8669a4d054d83f1:BffDfS+xXdIBNSgKsTTfOoFa7EbwumRl/MRrptkMabKuJKhcLYhr0OplntbTUlI9+T94/xUACIxaG0GbOV6/BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "persistence-schema-evolution"
@@ -34,7 +34,7 @@ The current clean-cut execution formats include:
 - admitted launch capsule schema 14;
 - runtime launch metadata epoch 18;
 - the standalone runtime project-authority envelope epoch 3; and
-- the owned runtime SQLite operator schema epoch 10 (encoded in the RyeOS
+- the owned runtime SQLite operator schema epoch 12 (encoded in the RyeOS
   `PRAGMA application_id` family).
 
 The numbers identify independently evolving contracts. A change to a nested
@@ -59,19 +59,27 @@ the exact current envelopes stored in its JSON columns. Normal open never
 migrates or normalizes a predecessor. Any mismatch leaves the file untouched
 and requires the explicit operator-confirmed thread-history/project-head reset.
 
-Runtime epoch 10 includes the epoch-8 session-bound worker,
+Runtime epoch 12 includes the epoch-8 session-bound worker,
 credential-generation fencing, command/approval contact ledgers, observation
 frontier with a cross-epoch cumulative event ceiling, candidate-disposition,
 and multi-epoch process-history contracts, the epoch-9 exact
 retained-current-HEAD destination, and the canonical pre-contact payload for
-every unsettled accepted worker observation batch. No
-epoch-1-through-9 reader or migration remains. Earlier history requires the
-explicit retirement ceremony below; normal startup never rewrites it.
+every unsettled accepted worker observation batch, plus the generic
+project/opaque-backend-state execution-workspace authority and isolation
+adapter protocol-v3 journal cut, plus a revisioned live projection of stable
+credential-profile lifecycle authority. No execution-history reader or
+migration for epochs 1 through 11 remains. The explicit reset may extract only
+the independently versioned, provider-neutral credential-profile table from
+epochs 6 through 11 before replacing the runtime database; it never decodes or
+carries forward session/thread rows. Earlier history requires the explicit
+retirement ceremony below; normal startup never rewrites it.
 
-`operational.sqlite3` accepts only its exact current schema today. If a deployed
-predecessor ever exists, preserving its non-reconstructable facts requires a
-separately designed, explicit, atomic forward migration. It must never be
-silently reset or archived.
+`operational.sqlite3` owns stable credential-profile ownership, lifecycle,
+confirmed account evidence, generation, and tombstones in addition to its
+other non-reconstructable records. Its explicit atomic v4-to-v5 forward
+migration creates that authority table; a monotonic profile revision repairs a
+crash gap against RuntimeDb's live session/lease projection. The store must
+never be silently reset or archived.
 
 ## Rebuildable SQLite projections
 
@@ -86,17 +94,15 @@ If the operator chooses to discard a whole local execution-history epoch, use:
 
 ```bash
 # Inspect the available retirement scope first.
-ryeos node gc \
-  --discard-thread-history \
-  --discard-project-heads \
+ryeos node reset execution-history \
+  --include-project-heads \
   --dry-run
 
 # Apply the explicitly confirmed clean cutover.
-ryeos node gc \
-  --discard-thread-history \
-  --discard-project-heads \
-  --confirm-discard-thread-history \
-  --confirm-discard-project-heads
+ryeos node reset execution-history \
+  --include-project-heads \
+  --confirm \
+  --confirm-project-heads
 ```
 
 This is separate from normal retention and GC, requires the daemon to be

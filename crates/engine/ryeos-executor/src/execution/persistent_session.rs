@@ -975,13 +975,18 @@ pub fn start_exclusive_capsule(
     let running = match held.process.release_after_attachment() {
         Ok(running) => running,
         Err(error) => {
-            let _ = state.state_store.settle_worker_process(
+            let mut error = error;
+            if let Err(settlement) = state.state_store.settle_worker_process(
                 &identity.worker_instance_id,
                 &identity.session_id,
                 identity.boot_epoch,
                 "unproved",
                 "held process release failed",
-            );
+            ) {
+                error = error.context(format!(
+                    "persist held-process release failure also failed: {settlement:#}"
+                ));
+            }
             return Err(error.context(ExclusiveWorkerCleanupUnproved));
         }
     };
@@ -1000,13 +1005,18 @@ pub fn start_exclusive_capsule(
         } else {
             "reaped"
         };
-        let _ = state.state_store.settle_worker_process(
+        let mut error = error;
+        if let Err(settlement) = state.state_store.settle_worker_process(
             &identity.worker_instance_id,
             &identity.session_id,
             identity.boot_epoch,
             cleanup_state,
             "exclusive worker readiness failed",
-        );
+        ) {
+            error = error.context(format!(
+                "persist exclusive readiness cleanup also failed: {settlement:#}"
+            ));
+        }
         return Err(if cleanup_unproved {
             error.context(ExclusiveWorkerCleanupUnproved)
         } else {
@@ -1018,19 +1028,31 @@ pub fn start_exclusive_capsule(
         &identity.session_id,
         identity.boot_epoch,
     ) {
-        let cleanup_state = ryeos_app::dedicated_session_service::retire_worker_process(
+        let mut error = error;
+        let cleanup_state = match ryeos_app::dedicated_session_service::retire_worker_process(
             state,
             &identity.session_id,
             &record,
-        )
-        .unwrap_or("unproved");
-        let _ = state.state_store.settle_worker_process(
+        ) {
+            Ok(cleanup_state) => cleanup_state,
+            Err(cleanup) => {
+                error = error.context(format!(
+                    "retire worker after durable readiness publication failure also failed: {cleanup:#}"
+                ));
+                "unproved"
+            }
+        };
+        if let Err(settlement) = state.state_store.settle_worker_process(
             &identity.worker_instance_id,
             &identity.session_id,
             identity.boot_epoch,
             cleanup_state,
             "durable readiness publication failed",
-        );
+        ) {
+            error = error.context(format!(
+                "persist durable readiness cleanup also failed: {settlement:#}"
+            ));
+        }
         return Err(if cleanup_state == "reaped" {
             error
         } else {

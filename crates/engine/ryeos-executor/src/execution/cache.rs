@@ -64,7 +64,8 @@ pub struct MaterializationPruneReport {
 }
 
 /// One content-cache inode kept open from verification through publication
-/// into a lower tree. Linking uses this descriptor, never a second path walk.
+/// into a canonical project generation. Linking uses this descriptor, never a
+/// second path walk.
 pub struct VerifiedContentFile {
     file: fs::File,
     parent: lillux::secure_fs::PinnedDirectory,

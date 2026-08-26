@@ -82,9 +82,10 @@ pub use operational::{
     AdmissionAttestationRecord, AdmissionAttestationState, CasEntriesByStateSummary,
     CasEntryAttribution, CasEntryKind, CasEntryState, FinishSyncJobAttempt,
     NewAdmissionAttestationRecord, NewCasEntryAttribution, NewSyncJob, NewSyncJobAttempt,
-    OperationalDb, ReplayIndexActivationRequired, ReplayIndexNamespace, ReplayIndexRecord,
-    ReplayLookupOutcome, ReplayPublishOutcome, ReplayRecordVerification, SyncJobAttemptRecord,
-    SyncJobAttemptState, SyncJobRecord, SyncJobState, SyncJobUpdate,
+    OperationalCredentialProfileRecord, OperationalDb, ReplayIndexActivationRequired,
+    ReplayIndexNamespace, ReplayIndexRecord, ReplayLookupOutcome, ReplayPublishOutcome,
+    ReplayRecordVerification, SyncJobAttemptRecord, SyncJobAttemptState, SyncJobRecord,
+    SyncJobState, SyncJobUpdate,
 };
 pub use pending_publication::PendingCasPublication;
 pub use project_materialization::PinnedProjectMaterialization;

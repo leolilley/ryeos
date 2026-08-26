@@ -474,9 +474,19 @@ fn restore_floor_excluded_content_open(
             let old_child = old
                 .open_child_directory(&entry.name)?
                 .ok_or_else(|| anyhow!("old publisher directory disappeared during restoration"))?;
-            let live_child = live
-                .open_child_directory(&entry.name)?
-                .ok_or_else(|| anyhow!("live publisher directory is missing during restoration"))?;
+            // Generated publisher content (most notably CAS fanout
+            // directories) is expected to differ between generations.  A
+            // directory present only in the old generation may nevertheless
+            // contain a nested floor-excluded local entry that must survive
+            // publication.  Create a descriptor-pinned scaffold while
+            // walking that subtree, then remove it again when there was
+            // nothing local to restore.  This preserves excluded descendants
+            // without copying any superseded generated content into the new
+            // generation.
+            let (live_child, created_scaffold) = match live.open_child_directory(&entry.name)? {
+                Some(child) => (child, false),
+                None => (live.create_child(&entry.name, entry.mode & 0o777)?, true),
+            };
             restore_floor_excluded_content_open(
                 &old_child,
                 &live_child,
@@ -484,6 +494,12 @@ fn restore_floor_excluded_content_open(
                 depth + 1,
                 remaining,
             )?;
+            if created_scaffold {
+                // A restored descendant keeps the scaffold non-empty.  An
+                // empty scaffold represented only obsolete generated content
+                // and must not alter the committed generation.
+                let _ = live.remove_empty_child_if_same(&entry.name, &live_child)?;
+            }
             old.ensure_entry_observation(&entry)?;
         }
     }
@@ -732,6 +748,43 @@ mod tests {
 
         assert_eq!(fs::read(bundle.join("generation")).unwrap(), b"next");
         assert!(bundle.join(".venv/bin/python").is_symlink());
+        assert!(!publisher_recovery_marker(temp.path(), "bundle").exists());
+    }
+
+    #[test]
+    fn committed_exchange_recovery_tolerates_changed_generated_directories() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = temp.path().join("bundle");
+        let staging = temp.path().join(".bundle.publish-staging");
+        fs::create_dir_all(bundle.join(".ai/objects/old/fanout")).unwrap();
+        fs::write(bundle.join(".ai/objects/old/fanout/object"), b"old").unwrap();
+        fs::create_dir_all(bundle.join("tools/.venv/bin")).unwrap();
+        symlink("/usr/bin/python", bundle.join("tools/.venv/bin/python")).unwrap();
+
+        fs::create_dir_all(staging.join(".ai/objects/new/fanout")).unwrap();
+        fs::write(staging.join(".ai/objects/new/fanout/object"), b"new").unwrap();
+        fs::create_dir(staging.join("tools")).unwrap();
+
+        let recovery = PublisherExchangeRecovery::capture(&bundle, &staging).unwrap();
+        write_recovery_marker(temp.path(), "bundle", recovery);
+        lillux::atomic_exchange_paths(&bundle, &staging).unwrap();
+
+        with_staged_bundle_generation(&bundle, |next| {
+            assert!(next.join(".ai/objects/new/fanout/object").exists());
+            assert!(!next.join(".ai/objects/old").exists());
+            assert!(
+                !next.join("tools/.venv").exists(),
+                "excluded local content must stay outside publisher authoring"
+            );
+            Ok(())
+        })
+        .expect("changed generated directories must not prevent recovery");
+
+        assert!(bundle.join(".ai/objects/new/fanout/object").exists());
+        assert!(!bundle.join(".ai/objects/old").exists());
+        assert!(bundle.join("tools/.venv/bin/python").is_symlink());
         assert!(!publisher_recovery_marker(temp.path(), "bundle").exists());
     }
 

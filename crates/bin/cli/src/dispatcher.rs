@@ -2057,6 +2057,42 @@ mod tests {
     }
 
     #[test]
+    fn declared_input_overlays_positional_identity_slots() {
+        let mut cmd = command(
+            &["worker", "command"],
+            vec![vec![
+                ("session_id", CommandArgumentKind::String),
+                ("idempotency_key", CommandArgumentKind::String),
+                ("route_id", CommandArgumentKind::String),
+            ]],
+            CommandProjectResolution::None,
+        );
+        cmd.parameter_binding = Some(ryeos_runtime::CommandParameterBinding {
+            mode: ryeos_runtime::CommandParameterBindingMode::TailObject,
+            input_flag: Some("input".into()),
+            single_json_object_arg: true,
+            flag_key_normalization: ryeos_runtime::FlagKeyNormalization::HyphenToUnderscore,
+        });
+        let tail = s(&[
+            "T-one",
+            "command-one",
+            "session.start",
+            "--input",
+            r#"{"payload":{}}"#,
+        ]);
+
+        let bound = crate::arg_bind::bind_declared_shortcuts(&tail, &cmd)
+            .expect("declared input binding")
+            .expect("declared input shortcut");
+        assert_eq!(bound["session_id"], "T-one");
+        assert_eq!(bound["idempotency_key"], "command-one");
+        assert_eq!(bound["route_id"], "session.start");
+        assert_eq!(bound["payload"], serde_json::json!({}));
+        assert!(bound.get("input").is_none());
+        assert!(bound.get("_args").is_none());
+    }
+
+    #[test]
     fn strip_project_control_flags_removes_all_forms() {
         // bare `-p`/`--project` consume their following value
         assert_eq!(

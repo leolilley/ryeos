@@ -2049,7 +2049,19 @@ pub async fn reconcile_dedicated_worker_startup(state: &AppState) -> Result<()> 
     ryeos_api::handlers::dedicated_sessions::reconcile_approval_outboxes(Arc::new(state.clone()))
         .await
         .context("reconcile hosted approvals before worker detachment")?;
-    reconcile_dedicated_workers(state)
+    reconcile_dedicated_workers(state)?;
+    let (sessions_recovered, locks_released) = state
+        .state_store
+        .reconcile_unattached_credential_profile_locks()
+        .context("reconcile hosted pre-attachment credential reservations")?;
+    if sessions_recovered != 0 || locks_released != 0 {
+        tracing::warn!(
+            sessions_recovered,
+            locks_released,
+            "recovered hosted credential reservations that never attached a worker"
+        );
+    }
+    Ok(())
 }
 
 /// Repair the crash boundary after a running hosted root's workspace durably
@@ -2523,7 +2535,7 @@ fn reconcile_execution_workspaces(
                         }
                         tracing::error!(
                             workspace_id = %workspace.workspace_id,
-                            "interrupted callback freeze owner could not be quiesced; preserving upper layer"
+                            "interrupted callback freeze owner could not be quiesced; preserving backend mutation state"
                         );
                         continue;
                     };
@@ -2534,7 +2546,7 @@ fn reconcile_execution_workspaces(
                     }
                     tracing::error!(
                         workspace_id = %workspace.workspace_id,
-                        "interrupted callback freeze liveness is unavailable; preserving upper layer"
+                        "interrupted callback freeze liveness is unavailable; preserving backend mutation state"
                     );
                     continue;
                 }
@@ -2561,7 +2573,7 @@ fn reconcile_execution_workspaces(
                         tracing::error!(
                             workspace_id = %workspace.workspace_id,
                             %error,
-                            "interrupted callback freeze could not be recovered; preserving upper layer"
+                            "interrupted callback freeze could not be recovered; preserving backend mutation state"
                         );
                     }
                 }
@@ -2679,7 +2691,7 @@ fn should_retain_workspace_for_native_resume(
     else {
         return Ok(false);
     };
-    Ok(workspace.lower_snapshot == *snapshot_hash
+    Ok(workspace.base_snapshot == *snapshot_hash
         && workspace.launch_owner.is_some()
         && workspace.backend_id.is_some()
         && workspace.backend_version.is_some()
@@ -2762,8 +2774,8 @@ fn cleanup_dead_execution_workspace(
     // A daemon can die after the backend selection is durable but before the
     // Create response is journaled. Create is deliberately idempotent for an
     // exact owner and pinned roots, so recovery re-drives it to recover the
-    // identities required to prove a safe Destroy. No abandoned upper is ever
-    // folded back.
+    // identities required to prove a safe Destroy. Backend-private state is
+    // never folded back during abandoned-workspace reconciliation.
     let recovered_create =
         if workspace.pinned_root_identities.is_none() || workspace.mount_identity.is_none() {
             if workspace.state != WorkspaceState::Constructing {
@@ -2776,10 +2788,8 @@ fn cleanup_dead_execution_workspace(
                         operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create,
                         workspace_id: &workspace.workspace_id,
                         launch_owner,
-                        lower_snapshot: &workspace.lower_snapshot,
-                        lower_path: &layout.lower,
-                        upper_path: &layout.upper,
-                        work_path: &layout.work,
+                        base_snapshot: &workspace.base_snapshot,
+                        project_path: &layout.project,
                     })
                     .map_err(|error| anyhow::anyhow!(error.to_string()))?,
             )
@@ -2792,10 +2802,8 @@ fn cleanup_dead_execution_workspace(
             operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::Destroy,
             workspace_id: &workspace.workspace_id,
             launch_owner,
-            lower_snapshot: &workspace.lower_snapshot,
-            lower_path: &layout.lower,
-            upper_path: &layout.upper,
-            work_path: &layout.work,
+            base_snapshot: &workspace.base_snapshot,
+            project_path: &layout.project,
         })
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let pinned = lillux::canonical_json(&serde_json::to_value(&response.pinned_root_identities)?)?;

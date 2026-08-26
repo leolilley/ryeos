@@ -283,6 +283,39 @@ fn run_execution_history_reset_inner(
         });
     }
 
+    // Credential-profile lifecycle authority is stable node state, not
+    // execution history. Capture only its independently versioned table before
+    // replacing a predecessor RuntimeDb, fold it into operational.sqlite3,
+    // then rebuild the empty live projection from that stable authority.
+    let runtime_profiles = runtime_db
+        .credential_profiles_for_explicit_history_reset(&config.db_path)
+        .context("extract stable credential profiles before history retirement")?;
+    let operational_db =
+        ryeos_state::OperationalDb::open_existing_current_with_namespace_authority(
+            &runtime_directory,
+            runtime_directory_lock.clone(),
+            false,
+        )
+        .context("open stable operational authority for credential preservation")?;
+    for profile in runtime_profiles {
+        operational_db
+            .merge_credential_profile(&ryeos_state::OperationalCredentialProfileRecord {
+                profile_id: profile.profile_id,
+                owner_principal: profile.owner_principal,
+                home_id: profile.home_id,
+                authority_revision: profile.authority_revision,
+                credential_generation: profile.credential_generation,
+                state: profile.state,
+                active_login_id: profile.active_login_id,
+                login_epoch: profile.login_epoch,
+                login_expires_at_ms: profile.login_expires_at_ms,
+                sanitized_account: profile.sanitized_account,
+                created_at_ms: profile.created_at_ms,
+                updated_at_ms: profile.updated_at_ms,
+            })
+            .context("preserve stable credential profile")?;
+    }
+
     publish_progress(
         &mut observer,
         ExecutionHistoryResetPhase::PublishingIntent,
@@ -294,6 +327,11 @@ fn run_execution_history_reset_inner(
     runtime_db
         .apply_explicit_history_reset(&config.db_path)
         .context("apply runtime schema cutover after durable discard intent")?;
+    for profile in operational_db.credential_profiles()? {
+        runtime_db
+            .reconcile_credential_profile_projection(&profile)
+            .context("restore credential-profile runtime projection")?;
+    }
 
     let authoritative = {
         let mut authoritative_progress = |progress| match progress {

@@ -97,26 +97,62 @@ fn workspace(request_fd: RawFd) -> Result<AdapterWorkspaceResponse, String> {
             .map(|authority| authority.inherited_fd as RawFd)
             .ok_or_else(|| "workspace request is missing an authority".to_string())
     };
-    let lower = fd_for(IsolationAuthorityPurpose::WorkspaceLower)?;
-    let upper = fd_for(IsolationAuthorityPurpose::WorkspaceUpper)?;
-    let work = fd_for(IsolationAuthorityPurpose::WorkspaceWork)?;
-    for (fd, label) in [(lower, "lower"), (upper, "upper"), (work, "work")] {
-        validate_directory_fd(fd, label)?;
+    let project_fd = fd_for(IsolationAuthorityPurpose::WorkspaceProject)?;
+    let backend_state_fd = fd_for(IsolationAuthorityPurpose::WorkspaceBackendState)?;
+    let _project = pin_directory_fd(project_fd, "project")?;
+    let backend_state = pin_directory_fd(backend_state_fd, "backend state")?;
+    let upper = match request.operation {
+        WorkspaceLifecycleOperation::Create => backend_state
+            .open_or_create_child(std::ffi::OsStr::new("upper"), 0o700)
+            .map_err(|error| format!("create backend-private upper directory: {error}"))?,
+        WorkspaceLifecycleOperation::FreezeAndDiff | WorkspaceLifecycleOperation::Destroy => {
+            backend_state
+                .open_child_directory(std::ffi::OsStr::new("upper"))
+                .map_err(|error| format!("open backend-private upper directory: {error}"))?
+                .ok_or_else(|| "backend-private upper directory is missing".to_string())?
+        }
+    };
+    let _work = match request.operation {
+        WorkspaceLifecycleOperation::Create => backend_state
+            .open_or_create_child(std::ffi::OsStr::new("work"), 0o700)
+            .map_err(|error| format!("create backend-private work directory: {error}"))?,
+        WorkspaceLifecycleOperation::FreezeAndDiff | WorkspaceLifecycleOperation::Destroy => {
+            backend_state
+                .open_child_directory(std::ffi::OsStr::new("work"))
+                .map_err(|error| format!("open backend-private work directory: {error}"))?
+                .ok_or_else(|| "backend-private work directory is missing".to_string())?
+        }
+    };
+    let entries = backend_state
+        .entries_no_follow_bounded(3)
+        .map_err(|error| format!("inventory backend-private workspace state: {error}"))?;
+    if entries.len() != 2
+        || entries.iter().any(|entry| {
+            entry.entry_type != lillux::PinnedEntryType::Directory
+                || !matches!(entry.name.to_str(), Some("upper" | "work"))
+        })
+    {
+        return Err("backend-private workspace state has an invalid layout".to_string());
     }
     let pinned_root_identities = BTreeMap::from([
-        ("lower".to_string(), directory_identity(lower)?),
-        ("upper".to_string(), directory_identity(upper)?),
-        ("work".to_string(), directory_identity(work)?),
+        ("project".to_string(), directory_identity(project_fd)?),
+        (
+            "backend_state".to_string(),
+            directory_identity(backend_state_fd)?,
+        ),
     ]);
     let mount_identity = format!(
-        "native-overlay:{}:{}:{}",
-        pinned_root_identities["lower"],
-        pinned_root_identities["upper"],
-        pinned_root_identities["work"]
+        "native-overlay:{}:{}",
+        pinned_root_identities["project"], pinned_root_identities["backend_state"]
     );
     let mutations = match request.operation {
         WorkspaceLifecycleOperation::Create | WorkspaceLifecycleOperation::Destroy => Vec::new(),
-        WorkspaceLifecycleOperation::FreezeAndDiff => scan_workspace_upper(upper)?,
+        WorkspaceLifecycleOperation::FreezeAndDiff => {
+            let upper = upper
+                .try_clone_descriptor()
+                .map_err(|error| format!("clone backend-private upper directory: {error}"))?;
+            scan_workspace_upper(upper.as_raw_fd())?
+        }
     };
     let response = AdapterWorkspaceResponse {
         protocol: IsolationAdapterProtocolVersion::Current,
@@ -127,6 +163,8 @@ fn workspace(request_fd: RawFd) -> Result<AdapterWorkspaceResponse, String> {
         backend_version: ADAPTER_BUILD.to_string(),
         pinned_root_identities,
         mount_identity,
+        mutation_content_root: (request.operation == WorkspaceLifecycleOperation::FreezeAndDiff)
+            .then(|| "upper".to_string()),
         mutations,
         destroyed: request.operation == WorkspaceLifecycleOperation::Destroy,
     };
@@ -134,6 +172,23 @@ fn workspace(request_fd: RawFd) -> Result<AdapterWorkspaceResponse, String> {
         .validate_for(&request)
         .map_err(|error| format!("invalid workspace response: {error}"))?;
     Ok(response)
+}
+
+fn pin_directory_fd(fd: RawFd, label: &str) -> Result<lillux::PinnedDirectory, String> {
+    validate_directory_fd(fd, label)?;
+    let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+    if duplicate < 0 {
+        return Err(format!(
+            "duplicate workspace {label} authority: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let file = unsafe { File::from_raw_fd(duplicate) };
+    lillux::PinnedDirectory::from_open_directory(
+        std::path::PathBuf::from(format!("<workspace-{label}>")),
+        file,
+    )
+    .map_err(|error| format!("pin workspace {label} authority: {error}"))
 }
 
 fn validate_directory_fd(fd: RawFd, label: &str) -> Result<(), String> {
@@ -781,23 +836,42 @@ fn prepare_launch(request: &AdapterLaunchRequest) -> Result<PreparedLaunch, Stri
         );
     }
     if let Some(workspace) = &request.plan.project_workspace {
-        let lower = authority_by_id
-            .get(&workspace.lower)
-            .ok_or_else(|| "workspace lower authority disappeared after validation".to_string())?;
-        let upper = authority_by_id
-            .get(&workspace.upper)
-            .ok_or_else(|| "workspace upper authority disappeared after validation".to_string())?;
-        let work = authority_by_id
-            .get(&workspace.work)
-            .ok_or_else(|| "workspace work authority disappeared after validation".to_string())?;
+        let project = authority_by_id.get(&workspace.project).ok_or_else(|| {
+            "workspace project authority disappeared after validation".to_string()
+        })?;
+        let backend_state_authority =
+            authority_by_id
+                .get(&workspace.backend_state)
+                .ok_or_else(|| {
+                    "workspace backend-state authority disappeared after validation".to_string()
+                })?;
+        let backend_state = pin_directory_fd(
+            backend_state_authority.inherited_fd as RawFd,
+            "backend state",
+        )?;
+        let upper = backend_state
+            .open_child_directory(std::ffi::OsStr::new("upper"))
+            .map_err(|error| format!("open backend-private upper directory: {error}"))?
+            .ok_or_else(|| "backend-private upper directory is missing".to_string())?;
+        let work = backend_state
+            .open_child_directory(std::ffi::OsStr::new("work"))
+            .map_err(|error| format!("open backend-private work directory: {error}"))?
+            .ok_or_else(|| "backend-private work directory is missing".to_string())?;
+        let upper = upper
+            .try_clone_descriptor()
+            .map_err(|error| format!("clone backend-private upper directory: {error}"))?;
+        let work = work
+            .try_clone_descriptor()
+            .map_err(|error| format!("clone backend-private work directory: {error}"))?;
         arguments.extend([
             "--overlay-src".to_string(),
-            format!("/proc/self/fd/{}", lower.inherited_fd),
+            format!("/proc/self/fd/{}", project.inherited_fd),
             "--overlay".to_string(),
-            format!("/proc/self/fd/{}", upper.inherited_fd),
-            format!("/proc/self/fd/{}", work.inherited_fd),
+            format!("/proc/self/fd/{}", upper.as_raw_fd()),
+            format!("/proc/self/fd/{}", work.as_raw_fd()),
             workspace.destination.as_str().to_string(),
         ]);
+        retained_files.extend([upper, work]);
     }
     for mount in &request.plan.mounts {
         let authority = authority_by_id
@@ -828,19 +902,14 @@ fn prepare_launch(request: &AdapterLaunchRequest) -> Result<PreparedLaunch, Stri
         .collect::<Vec<_>>();
     let mut next_internal_fd = first_internal_descriptor(request)?;
     let target_argv_file = relocate_internal_file(
-        create_sealed_memfd(
-            c"ryeos-target-argv",
-            &encode_nul_arguments(&target_argv)?,
-        )?,
+        create_sealed_memfd(c"ryeos-target-argv", &encode_nul_arguments(&target_argv)?)?,
         &mut next_internal_fd,
         "target argv",
     )?;
     let target_argv_fd = target_argv_file.as_raw_fd();
     retained_files.push(target_argv_file);
-    let bridge = capture_current_adapter_bridge(
-        request.adapter_fd as RawFd,
-        &mut next_internal_fd,
-    )?;
+    let bridge =
+        capture_current_adapter_bridge(request.adapter_fd as RawFd, &mut next_internal_fd)?;
     validate_inherited_fd(bridge.as_raw_fd(), "target argv bridge")?;
     let bridge_fd = bridge.as_raw_fd();
     retained_files.push(bridge);
@@ -869,6 +938,14 @@ fn prepare_launch(request: &AdapterLaunchRequest) -> Result<PreparedLaunch, Stri
         .chain([launcher_fd, request.status_fd as RawFd])
         .chain(retained_files.iter().map(|file| file.as_raw_fd()))
         .collect();
+    if let Some(workspace) = &request.plan.project_workspace {
+        let backend_state = authority_by_id
+            .get(&workspace.backend_state)
+            .ok_or_else(|| {
+                "workspace backend-state authority disappeared after validation".to_string()
+            })?;
+        inherited_fds.remove(&(backend_state.inherited_fd as RawFd));
+    }
     if let AdapterLaunchLifecycle::AwaitAttachment {
         release_fd,
         release_keepalive_fd,
@@ -912,12 +989,8 @@ fn exec_launcher(mut prepared: PreparedLaunch) -> Result<std::convert::Infallibl
     relocate_target_channel(&mut prepared)?;
     seal_descriptor_boundary(prepared.launcher_fd, &prepared.inherited_fds)?;
 
-    let error = exact_launcher_command(
-        prepared.launcher_fd,
-        argument_fd,
-        &prepared.target_command,
-    )
-    .exec();
+    let error =
+        exact_launcher_command(prepared.launcher_fd, argument_fd, &prepared.target_command).exec();
     // `CommandExt::exec` borrows no descriptor owners. Make their lifetime
     // explicit across that call: Bubblewrap resolves every fd-backed mount
     // (including the sandbox-side argv bridge) after the exec boundary.
@@ -1157,21 +1230,13 @@ fn first_internal_descriptor(request: &AdapterLaunchRequest) -> Result<RawFd, St
         .map_err(|_| "request descriptors exceed the adapter descriptor range".to_owned())
 }
 
-fn relocate_internal_file(
-    file: File,
-    next: &mut RawFd,
-    label: &str,
-) -> Result<File, String> {
+fn relocate_internal_file(file: File, next: &mut RawFd, label: &str) -> Result<File, String> {
     let duplicate = duplicate_internal_fd(file.as_raw_fd(), next, label)?;
     drop(file);
     Ok(duplicate)
 }
 
-fn duplicate_internal_fd(
-    source_fd: RawFd,
-    next: &mut RawFd,
-    label: &str,
-) -> Result<File, String> {
+fn duplicate_internal_fd(source_fd: RawFd, next: &mut RawFd, label: &str) -> Result<File, String> {
     let fd = unsafe { libc::fcntl(source_fd, libc::F_DUPFD_CLOEXEC, *next) };
     if fd <= libc::STDERR_FILENO {
         if fd >= 0 {
@@ -1203,7 +1268,9 @@ fn validate_current_adapter(fd: RawFd) -> Result<(), String> {
     let current = std::fs::metadata("/proc/self/exe")
         .map_err(|error| format!("inspect current adapter executable: {error}"))?;
     if retained.st_dev != current.dev() || retained.st_ino != current.ino() {
-        return Err("retained adapter bridge does not identify the current adapter image".to_owned());
+        return Err(
+            "retained adapter bridge does not identify the current adapter image".to_owned(),
+        );
     }
     Ok(())
 }
@@ -1572,6 +1639,73 @@ mod tests {
         }
     }
 
+    #[test]
+    fn workspace_backend_owns_its_overlay_layout_and_declares_diff_content() {
+        let root = tempfile::tempdir().unwrap();
+        let project_path = root.path().join("project");
+        let backend_state_path = root.path().join("backend-state");
+        std::fs::create_dir(&project_path).unwrap();
+        std::fs::create_dir(&backend_state_path).unwrap();
+        let project = File::open(&project_path).unwrap();
+        let backend_state = File::open(&backend_state_path).unwrap();
+        let invoke = |operation| {
+            let request = AdapterWorkspaceRequest {
+                protocol: IsolationAdapterProtocolVersion::Current,
+                operation,
+                workspace_id: "workspace-one".to_string(),
+                launch_owner: "{\"attempt\":1}".to_string(),
+                base_snapshot: "a".repeat(64),
+                authorities: vec![
+                    IsolationAuthority {
+                        id: IsolationAuthorityId::new("workspace-project").unwrap(),
+                        inherited_fd: project.as_raw_fd() as u32,
+                        purpose: IsolationAuthorityPurpose::WorkspaceProject,
+                    },
+                    IsolationAuthority {
+                        id: IsolationAuthorityId::new("workspace-backend-state").unwrap(),
+                        inherited_fd: backend_state.as_raw_fd() as u32,
+                        purpose: IsolationAuthorityPurpose::WorkspaceBackendState,
+                    },
+                ],
+            };
+            let request = create_sealed_memfd(
+                c"adapter-workspace-test",
+                &serde_json::to_vec(&request).unwrap(),
+            )
+            .unwrap();
+            workspace(request.into_raw_fd()).unwrap()
+        };
+
+        let created = invoke(WorkspaceLifecycleOperation::Create);
+        assert_eq!(
+            created
+                .pinned_root_identities
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["backend_state".to_string(), "project".to_string()]
+        );
+        assert!(created.mutation_content_root.is_none());
+        assert!(!root.path().join("upper").exists());
+        assert!(!root.path().join("work").exists());
+        assert!(backend_state_path.join("upper").is_dir());
+        assert!(backend_state_path.join("work").is_dir());
+
+        std::fs::write(backend_state_path.join("upper/change.txt"), b"changed").unwrap();
+        let frozen = invoke(WorkspaceLifecycleOperation::FreezeAndDiff);
+        assert_eq!(frozen.mutation_content_root.as_deref(), Some("upper"));
+        assert_eq!(frozen.mutations.len(), 1);
+        assert_eq!(frozen.mutations[0].path, "change.txt");
+        assert_eq!(
+            frozen.pinned_root_identities,
+            created.pinned_root_identities
+        );
+
+        let destroyed = invoke(WorkspaceLifecycleOperation::Destroy);
+        assert!(destroyed.destroyed);
+        assert!(destroyed.mutation_content_root.is_none());
+    }
+
     fn valid_launch_request() -> (AdapterLaunchRequest, Vec<File>) {
         let adapter = File::open("/proc/self/exe").unwrap();
         let launcher = File::open("/dev/null").unwrap();
@@ -1831,14 +1965,17 @@ mod tests {
         let bridge_fd = prepared
             .arguments
             .windows(3)
-            .find(|values| {
-                values[0] == "--ro-bind-data" && values[2] == TARGET_ARGV_BRIDGE_PATH
-            })
+            .find(|values| values[0] == "--ro-bind-data" && values[2] == TARGET_ARGV_BRIDGE_PATH)
             .unwrap()[1]
             .parse::<RawFd>()
             .unwrap();
         assert!(bridge_fd > request_maximum);
-        assert!(!prepared.target_command.iter().any(|value| value == "secret-value"));
+        assert!(
+            !prepared
+                .target_command
+                .iter()
+                .any(|value| value == "secret-value")
+        );
     }
 
     #[test]
@@ -1904,9 +2041,7 @@ mod tests {
                 && source_stat.st_dev == target_stat.st_dev
                 && source_stat.st_ino == target_stat.st_ino;
             let source_closed = unsafe { libc::fcntl(source_fd, libc::F_GETFD) } < 0;
-            unsafe {
-                libc::_exit(i32::from(!(source_ok && ok && target_ok && source_closed)))
-            };
+            unsafe { libc::_exit(i32::from(!(source_ok && ok && target_ok && source_closed))) };
         }
         handles.clear();
         drop(worker);
@@ -1993,11 +2128,8 @@ mod tests {
         let expected_length = adapter.metadata().unwrap().len();
         let mut next_internal_fd = 64;
 
-        let bridge = capture_current_adapter_bridge(
-            adapter.as_raw_fd(),
-            &mut next_internal_fd,
-        )
-        .unwrap();
+        let bridge =
+            capture_current_adapter_bridge(adapter.as_raw_fd(), &mut next_internal_fd).unwrap();
 
         assert_eq!(adapter.stream_position().unwrap(), original_offset);
         assert_eq!(bridge.metadata().unwrap().len(), expected_length);
@@ -2014,9 +2146,8 @@ mod tests {
         let adapter_path = payload.join("ryeos-bubblewrap-adapter");
         let adapter_bridge = File::open(&adapter_path).unwrap();
         let launcher = File::open(payload.join("bwrap")).unwrap();
-        let target_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../core/.ai/bin/x86_64-unknown-linux-gnu/rye-parser-yaml-header-document",
-        );
+        let target_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../core/.ai/bin/x86_64-unknown-linux-gnu/rye-parser-yaml-header-document");
         let target = File::open(&target_path).unwrap();
         let project = File::open("/").unwrap();
         let workspace = File::open("/tmp").unwrap();
@@ -2027,15 +2158,15 @@ mod tests {
             "ryeos-adapter-overlay-fixture-{}",
             std::process::id()
         ));
-        let lower_path = overlay_root.join("lower");
-        let upper_path = overlay_root.join("upper");
-        let work_path = overlay_root.join("work");
-        std::fs::create_dir_all(&lower_path).unwrap();
+        let workspace_project_path = overlay_root.join("project");
+        let backend_state_path = overlay_root.join("backend-state");
+        let upper_path = backend_state_path.join("upper");
+        let work_path = backend_state_path.join("work");
+        std::fs::create_dir_all(&workspace_project_path).unwrap();
         std::fs::create_dir_all(&upper_path).unwrap();
         std::fs::create_dir_all(&work_path).unwrap();
-        let lower = File::open(&lower_path).unwrap();
-        let upper = File::open(&upper_path).unwrap();
-        let work = File::open(&work_path).unwrap();
+        let workspace_project = File::open(&workspace_project_path).unwrap();
+        let backend_state = File::open(&backend_state_path).unwrap();
         let status = lillux::supervised_launcher_status_pipe().unwrap();
 
         let target_id = IsolationAuthorityId::new("target").unwrap();
@@ -2044,9 +2175,8 @@ mod tests {
         let system_lib_id = IsolationAuthorityId::new("system-lib").unwrap();
         let system_lib64_id = IsolationAuthorityId::new("system-lib64").unwrap();
         let system_usr_lib_id = IsolationAuthorityId::new("system-usr-lib").unwrap();
-        let lower_id = IsolationAuthorityId::new("workspace-lower").unwrap();
-        let upper_id = IsolationAuthorityId::new("workspace-upper").unwrap();
-        let work_id = IsolationAuthorityId::new("workspace-work").unwrap();
+        let workspace_project_id = IsolationAuthorityId::new("workspace-project").unwrap();
+        let backend_state_id = IsolationAuthorityId::new("workspace-backend-state").unwrap();
         let request = AdapterLaunchRequest {
             protocol: IsolationAdapterProtocolVersion::Current,
             plan: IsolationPlan {
@@ -2096,9 +2226,8 @@ mod tests {
                 ],
                 project_workspace: Some(IsolationProjectWorkspace {
                     workspace_id: "fixture-workspace".to_owned(),
-                    lower: lower_id.clone(),
-                    upper: upper_id.clone(),
-                    work: work_id.clone(),
+                    project: workspace_project_id.clone(),
+                    backend_state: backend_state_id.clone(),
                     destination: IsolationPath::new("/workspace").unwrap(),
                 }),
                 target_channel: None,
@@ -2128,19 +2257,14 @@ mod tests {
                     purpose: IsolationAuthorityPurpose::WritableMount,
                 },
                 IsolationAuthority {
-                    id: lower_id,
-                    inherited_fd: lower.as_raw_fd() as u32,
-                    purpose: IsolationAuthorityPurpose::WorkspaceLower,
+                    id: workspace_project_id,
+                    inherited_fd: workspace_project.as_raw_fd() as u32,
+                    purpose: IsolationAuthorityPurpose::WorkspaceProject,
                 },
                 IsolationAuthority {
-                    id: upper_id,
-                    inherited_fd: upper.as_raw_fd() as u32,
-                    purpose: IsolationAuthorityPurpose::WorkspaceUpper,
-                },
-                IsolationAuthority {
-                    id: work_id,
-                    inherited_fd: work.as_raw_fd() as u32,
-                    purpose: IsolationAuthorityPurpose::WorkspaceWork,
+                    id: backend_state_id,
+                    inherited_fd: backend_state.as_raw_fd() as u32,
+                    purpose: IsolationAuthorityPurpose::WorkspaceBackendState,
                 },
                 IsolationAuthority {
                     id: system_lib_id,
@@ -2198,9 +2322,8 @@ mod tests {
                 std::sync::Arc::new(system_lib),
                 std::sync::Arc::new(system_lib64),
                 std::sync::Arc::new(system_usr_lib),
-                std::sync::Arc::new(lower),
-                std::sync::Arc::new(upper),
-                std::sync::Arc::new(work),
+                std::sync::Arc::new(workspace_project),
+                std::sync::Arc::new(backend_state),
                 status.writer,
                 std::sync::Arc::new(request_handle),
             ],
@@ -2324,7 +2447,7 @@ mod tests {
                 .contains("not sealed")
         );
 
-        let duplicate = br#"{"protocol":"ryeos.isolation-adapter/v2","target":"x86_64-unknown-linux-gnu","backend_id":"linux-bubblewrap","backend_id":"linux-bubblewrap","artifacts":{"launcher":3}}"#;
+        let duplicate = br#"{"protocol":"ryeos.isolation-adapter/v3","target":"x86_64-unknown-linux-gnu","backend_id":"linux-bubblewrap","backend_id":"linux-bubblewrap","artifacts":{"launcher":3}}"#;
         let sealed_duplicate = create_sealed_memfd(c"adapter-test-duplicate", duplicate).unwrap();
         assert!(
             read_sealed_request::<AdapterInspectionRequest>(sealed_duplicate.into_raw_fd())

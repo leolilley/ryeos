@@ -15,7 +15,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, Transactio
 use crate::sqlite_schema;
 
 const OPERATIONAL_APP_ID: i32 = 0x5259_4f50; // "RYOP"
-const OPERATIONAL_SCHEMA_VERSION: i32 = 4;
+const OPERATIONAL_SCHEMA_VERSION: i32 = 5;
 const REPLAY_INDEX_EPOCH: i32 = 4;
 pub const OPERATIONAL_DB_FILENAME: &str = "operational.sqlite3";
 pub(crate) const OPERATIONAL_INITIALIZED_FILENAME: &str = "operational.initialized";
@@ -24,7 +24,7 @@ const OPERATIONAL_INITIALIZED_CONTENT: &[u8] = b"ryeos-operational-v1\n";
 const SCHEMA_SQL: &str = r#"
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
-PRAGMA user_version=4;
+PRAGMA user_version=5;
 
 CREATE TABLE cas_entries (
     hash TEXT NOT NULL,
@@ -125,6 +125,55 @@ CREATE TABLE replay_index_epoch (
 );
 
 INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 4);
+
+CREATE TABLE credential_profiles (
+    profile_id TEXT PRIMARY KEY,
+    owner_principal TEXT NOT NULL,
+    home_id TEXT NOT NULL UNIQUE,
+    authority_revision INTEGER NOT NULL CHECK (authority_revision > 0),
+    credential_generation INTEGER NOT NULL CHECK (credential_generation > 0),
+    state TEXT NOT NULL CHECK (state IN (
+        'unauthenticated', 'enrolling', 'confirming', 'active',
+        'revoking', 'revoked', 'deleting', 'deleted'
+    )),
+    active_login_id TEXT,
+    login_epoch INTEGER NOT NULL CHECK (login_epoch >= 0),
+    login_expires_at_ms INTEGER,
+    sanitized_account_json TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX idx_credential_profiles_owner_state
+    ON credential_profiles(owner_principal, state);
+"#;
+
+/// Schema-v5 addition: credential-profile lifecycle authority is stable node
+/// state, not disposable execution history. RuntimeDb retains only the live
+/// projection needed for session/lease transactions. A monotonically
+/// increasing revision makes a crash between the two SQLite commits
+/// recoverable without guessing from timestamps or provider-owned files.
+const CREDENTIAL_PROFILES_DDL: &str = r#"
+CREATE TABLE credential_profiles (
+    profile_id TEXT PRIMARY KEY,
+    owner_principal TEXT NOT NULL,
+    home_id TEXT NOT NULL UNIQUE,
+    authority_revision INTEGER NOT NULL CHECK (authority_revision > 0),
+    credential_generation INTEGER NOT NULL CHECK (credential_generation > 0),
+    state TEXT NOT NULL CHECK (state IN (
+        'unauthenticated', 'enrolling', 'confirming', 'active',
+        'revoking', 'revoked', 'deleting', 'deleted'
+    )),
+    active_login_id TEXT,
+    login_epoch INTEGER NOT NULL CHECK (login_epoch >= 0),
+    login_expires_at_ms INTEGER,
+    sanitized_account_json TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX idx_credential_profiles_owner_state
+    ON credential_profiles(owner_principal, state);
 "#;
 
 /// Schema-v2 additions, applied verbatim by the v1→v2 forward migration. A
@@ -560,6 +609,83 @@ fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "credential_profiles",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "profile_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner_principal",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "home_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "authority_revision",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "credential_generation",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "active_login_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "login_epoch",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "login_expires_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "sanitized_account_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -658,6 +784,12 @@ fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
                 columns: &["record_hash"],
                 unique: false,
             },
+            sqlite_schema::IndexSpec {
+                name: "idx_credential_profiles_owner_state",
+                table: "credential_profiles",
+                columns: &["owner_principal", "state"],
+                unique: false,
+            },
         ],
     }
 }
@@ -673,6 +805,122 @@ pub struct OperationalDb {
     _wal_file: Option<File>,
     _shm_file: Option<File>,
     _initialization_marker: Option<File>,
+}
+
+/// Stable, provider-neutral credential-profile lifecycle authority.
+///
+/// Opaque credential bytes stay in the daemon-owned private artifact home.
+/// This record carries only RyeOS ownership, fencing, and sanitized account
+/// evidence. `authority_revision` orders the stable record against the live
+/// RuntimeDb projection after a crash between their commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationalCredentialProfileRecord {
+    pub profile_id: String,
+    pub owner_principal: String,
+    pub home_id: String,
+    pub authority_revision: u64,
+    pub credential_generation: u64,
+    pub state: String,
+    pub active_login_id: Option<String>,
+    pub login_epoch: u64,
+    pub login_expires_at_ms: Option<i64>,
+    pub sanitized_account: Option<serde_json::Value>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+impl OperationalCredentialProfileRecord {
+    pub fn is_deleted(&self) -> bool {
+        self.state == "deleted"
+    }
+}
+
+fn validate_operational_credential_profile(
+    profile: &OperationalCredentialProfileRecord,
+) -> Result<()> {
+    for (label, value) in [
+        ("credential profile id", profile.profile_id.as_str()),
+        ("credential profile owner", profile.owner_principal.as_str()),
+        ("credential profile home id", profile.home_id.as_str()),
+    ] {
+        if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+            anyhow::bail!("{label} is invalid");
+        }
+    }
+    if profile.authority_revision == 0 || profile.credential_generation == 0 {
+        anyhow::bail!("credential profile revisions and generations must be positive");
+    }
+    if !matches!(
+        profile.state.as_str(),
+        "unauthenticated"
+            | "enrolling"
+            | "confirming"
+            | "active"
+            | "revoking"
+            | "revoked"
+            | "deleting"
+            | "deleted"
+    ) {
+        anyhow::bail!("credential profile state is invalid: {}", profile.state);
+    }
+    if let Some(login_id) = profile.active_login_id.as_deref()
+        && (login_id.is_empty() || login_id.len() > 256 || login_id.chars().any(char::is_control))
+    {
+        anyhow::bail!("credential active login id is invalid");
+    }
+    if let Some(account) = profile.sanitized_account.as_ref() {
+        let encoded = lillux::canonical_json(account)?;
+        if encoded.len() > 16 * 1024 {
+            anyhow::bail!("sanitized credential account exceeds 16384 bytes");
+        }
+    }
+    if profile.created_at_ms < 0 || profile.updated_at_ms < 0 {
+        anyhow::bail!("credential profile timestamps must be non-negative");
+    }
+    if profile.state == "deleted"
+        && (profile.active_login_id.is_some()
+            || profile.login_expires_at_ms.is_some()
+            || profile.sanitized_account.is_some())
+    {
+        anyhow::bail!("deleted credential profile retains live lifecycle evidence");
+    }
+    Ok(())
+}
+
+fn operational_credential_profile_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<OperationalCredentialProfileRecord> {
+    let account_json = row.get::<_, Option<String>>(9)?;
+    let sanitized_account = account_json
+        .map(|raw| serde_json::from_str(&raw))
+        .transpose()
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                9,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+    let authority_revision = u64::try_from(row.get::<_, i64>(3)?)
+        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, -1))?;
+    let credential_generation = u64::try_from(row.get::<_, i64>(4)?)
+        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, -1))?;
+    let login_epoch = u64::try_from(row.get::<_, i64>(7)?)
+        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(7, -1))?;
+    Ok(OperationalCredentialProfileRecord {
+        profile_id: row.get(0)?,
+        owner_principal: row.get(1)?,
+        home_id: row.get(2)?,
+        authority_revision,
+        credential_generation,
+        state: row.get(5)?,
+        active_login_id: row.get(6)?,
+        login_epoch,
+        login_expires_at_ms: row.get(8)?,
+        sanitized_account,
+        created_at_ms: row.get(10)?,
+        updated_at_ms: row.get(11)?,
+    })
 }
 
 /// Opaque owner-chosen replay namespace. State validates and stores this key
@@ -1162,6 +1410,140 @@ impl OperationalDb {
     }
 }
 
+impl OperationalDb {
+    pub fn credential_profile(
+        &self,
+        profile_id: &str,
+    ) -> Result<Option<OperationalCredentialProfileRecord>> {
+        if profile_id.is_empty() || profile_id.len() > 256 {
+            anyhow::bail!("credential profile id is invalid");
+        }
+        let profile = self
+            .conn
+            .query_row(
+                "SELECT profile_id, owner_principal, home_id, authority_revision,
+                        credential_generation, state, active_login_id, login_epoch,
+                        login_expires_at_ms, sanitized_account_json, created_at_ms,
+                        updated_at_ms
+                   FROM credential_profiles WHERE profile_id=?1",
+                [profile_id],
+                operational_credential_profile_from_row,
+            )
+            .optional()
+            .context("read stable credential profile")?;
+        if let Some(profile) = profile.as_ref() {
+            validate_operational_credential_profile(profile)?;
+        }
+        Ok(profile)
+    }
+
+    pub fn credential_profiles(&self) -> Result<Vec<OperationalCredentialProfileRecord>> {
+        let mut statement = self.conn.prepare(
+            "SELECT profile_id, owner_principal, home_id, authority_revision,
+                    credential_generation, state, active_login_id, login_epoch,
+                    login_expires_at_ms, sanitized_account_json, created_at_ms,
+                    updated_at_ms
+               FROM credential_profiles ORDER BY profile_id",
+        )?;
+        let profiles = statement
+            .query_map([], operational_credential_profile_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for profile in &profiles {
+            validate_operational_credential_profile(profile)?;
+        }
+        Ok(profiles)
+    }
+
+    /// Fold a RuntimeDb projection into stable authority after a committed
+    /// lifecycle transition, or during startup recovery after a crash between
+    /// the runtime and operational commits.
+    pub fn merge_credential_profile(
+        &self,
+        candidate: &OperationalCredentialProfileRecord,
+    ) -> Result<OperationalCredentialProfileRecord> {
+        validate_operational_credential_profile(candidate)?;
+        let account_json = candidate
+            .sanitized_account
+            .as_ref()
+            .map(lillux::canonical_json)
+            .transpose()?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+            .context("begin stable credential-profile merge")?;
+        let existing = tx
+            .query_row(
+                "SELECT profile_id, owner_principal, home_id, authority_revision,
+                        credential_generation, state, active_login_id, login_epoch,
+                        login_expires_at_ms, sanitized_account_json, created_at_ms,
+                        updated_at_ms
+                   FROM credential_profiles WHERE profile_id=?1",
+                [&candidate.profile_id],
+                operational_credential_profile_from_row,
+            )
+            .optional()?;
+        if let Some(existing) = existing.as_ref() {
+            if existing.owner_principal != candidate.owner_principal
+                || existing.home_id != candidate.home_id
+            {
+                anyhow::bail!("credential profile stable identity changed");
+            }
+            if existing.authority_revision > candidate.authority_revision {
+                tx.commit()?;
+                return Ok(existing.clone());
+            }
+            if existing.authority_revision == candidate.authority_revision {
+                let mut normalized_existing = existing.clone();
+                let mut normalized_candidate = candidate.clone();
+                // Runtime lock acquisition updates this presentation timestamp
+                // without advancing stable lifecycle authority.
+                normalized_existing.updated_at_ms = 0;
+                normalized_candidate.updated_at_ms = 0;
+                if normalized_existing != normalized_candidate {
+                    anyhow::bail!(
+                        "credential profile revision {} has divergent stable content",
+                        candidate.authority_revision
+                    );
+                }
+                tx.commit()?;
+                return Ok(existing.clone());
+            }
+        }
+        tx.execute(
+            "INSERT INTO credential_profiles (
+                profile_id, owner_principal, home_id, authority_revision,
+                credential_generation, state, active_login_id, login_epoch,
+                login_expires_at_ms, sanitized_account_json, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(profile_id) DO UPDATE SET
+                authority_revision=excluded.authority_revision,
+                credential_generation=excluded.credential_generation,
+                state=excluded.state,
+                active_login_id=excluded.active_login_id,
+                login_epoch=excluded.login_epoch,
+                login_expires_at_ms=excluded.login_expires_at_ms,
+                sanitized_account_json=excluded.sanitized_account_json,
+                updated_at_ms=excluded.updated_at_ms",
+            rusqlite::params![
+                &candidate.profile_id,
+                &candidate.owner_principal,
+                &candidate.home_id,
+                i64::try_from(candidate.authority_revision)?,
+                i64::try_from(candidate.credential_generation)?,
+                &candidate.state,
+                &candidate.active_login_id,
+                i64::try_from(candidate.login_epoch)?,
+                candidate.login_expires_at_ms,
+                account_json,
+                candidate.created_at_ms,
+                candidate.updated_at_ms,
+            ],
+        )?;
+        tx.commit()
+            .context("commit stable credential-profile merge")?;
+        self.credential_profile(&candidate.profile_id)?
+            .ok_or_else(|| anyhow::anyhow!("merged credential profile disappeared"))
+    }
+}
+
 fn configure_connection(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "foreign_keys", "ON")
         .context("enable operational foreign keys")?;
@@ -1536,13 +1918,28 @@ fn migrate_forward_if_owned(conn: &Connection, path: &Path) -> Result<()> {
                     .context("begin operational schema-4 replay epoch marker migration")?;
                 tx.execute_batch(REPLAY_INDEX_EPOCH_MARKER_DDL)
                     .context("install predecessor replay-index epoch marker")?;
-                tx.pragma_update(None, "user_version", OPERATIONAL_SCHEMA_VERSION)
+                tx.pragma_update(None, "user_version", 4)
                     .context("stamp operational schema 4")?;
                 tx.commit()
                     .context("commit operational schema-4 replay epoch marker migration")?;
                 tracing::warn!(
                     path = %path.display(),
                     "operational replay indexes require explicit clean-cut activation"
+                );
+            }
+            4 => {
+                let tx = conn
+                    .unchecked_transaction()
+                    .context("begin operational v4→v5 credential authority migration")?;
+                tx.execute_batch(CREDENTIAL_PROFILES_DDL)
+                    .context("install stable credential-profile authority")?;
+                tx.pragma_update(None, "user_version", OPERATIONAL_SCHEMA_VERSION)
+                    .context("stamp operational schema v5")?;
+                tx.commit()
+                    .context("commit operational v4→v5 credential authority migration")?;
+                tracing::info!(
+                    path = %path.display(),
+                    "operational schema migrated v4 → v5 (credential-profile authority)"
                 );
             }
             other => {
@@ -3106,7 +3503,7 @@ mod tests {
         assert_eq!(version, OPERATIONAL_SCHEMA_VERSION);
         assert_eq!(synchronous, 2, "SQLite FULL synchronous mode");
         assert_eq!(tables, 7);
-        assert_eq!(indexes, 16);
+        assert_eq!(indexes, 17);
         assert_eq!(replay_index_epoch(&db.conn).unwrap(), REPLAY_INDEX_EPOCH);
     }
 
@@ -3267,6 +3664,57 @@ mod tests {
     }
 
     #[test]
+    fn credential_profile_authority_folds_by_monotonic_revision() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let db = OperationalDb::open(&tempdir.path().join(OPERATIONAL_DB_FILENAME)).unwrap();
+        let mut profile = OperationalCredentialProfileRecord {
+            profile_id: "profile-one".to_string(),
+            owner_principal: "fp:operator".to_string(),
+            home_id: "credential-one".to_string(),
+            authority_revision: 1,
+            credential_generation: 1,
+            state: "unauthenticated".to_string(),
+            active_login_id: None,
+            login_epoch: 0,
+            login_expires_at_ms: None,
+            sanitized_account: None,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        assert_eq!(db.merge_credential_profile(&profile).unwrap(), profile);
+
+        // A runtime-only lock changes its presentation timestamp but not the
+        // stable revision or content, so an equal-revision fold is idempotent.
+        profile.updated_at_ms = 2;
+        assert_eq!(
+            db.merge_credential_profile(&profile)
+                .unwrap()
+                .authority_revision,
+            1
+        );
+
+        profile.authority_revision = 2;
+        profile.credential_generation = 2;
+        profile.state = "active".to_string();
+        profile.sanitized_account = Some(serde_json::json!({"account_id":"one"}));
+        assert_eq!(
+            db.merge_credential_profile(&profile).unwrap().state,
+            "active"
+        );
+
+        let mut stale = profile.clone();
+        stale.authority_revision = 1;
+        stale.state = "revoked".to_string();
+        let retained = db.merge_credential_profile(&stale).unwrap();
+        assert_eq!(retained.authority_revision, 2);
+        assert_eq!(retained.state, "active");
+
+        let mut divergent = profile.clone();
+        divergent.state = "revoked".to_string();
+        assert!(db.merge_credential_profile(&divergent).is_err());
+    }
+
+    #[test]
     fn predecessor_store_refuses_until_only_replay_indexes_are_reset() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
@@ -3288,7 +3736,9 @@ mod tests {
             .unwrap();
             db.conn
                 .execute_batch(
-                    "DROP INDEX idx_replay_records_retention;
+                    "DROP INDEX idx_credential_profiles_owner_state;
+                     DROP TABLE credential_profiles;
+                     DROP INDEX idx_replay_records_retention;
                      DROP INDEX idx_replay_records_record_hash;
                      DROP TABLE replay_records;
                      DROP TABLE replay_index_epoch;
@@ -3334,7 +3784,9 @@ mod tests {
             let db = OperationalDb::open(&path).unwrap();
             db.conn
                 .execute_batch(
-                    "DROP INDEX idx_replay_records_retention;
+                    "DROP INDEX idx_credential_profiles_owner_state;
+                     DROP TABLE credential_profiles;
+                     DROP INDEX idx_replay_records_retention;
                      DROP INDEX idx_replay_records_record_hash;
                      DROP TABLE replay_records;
                      DROP TABLE replay_index_epoch;

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-18T22:04:50Z:74bbf2f2633e5ded04c5c5de3f7981e645f4ff6a6153d30e768a7cda61959baf:7iPPfYe4+xsW4fILHJ8THPaoX0q5AmBAUAufBc+W1Kb5V0AJEZaTJKYsBXCej2QjX8aPr9THgpX0reYG9XliBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-26T03:58:59Z:bfdd561936175a716bfc29b938712278dec736a92736a58aa70b153366a288b5:wEm4hSCSucVgeNpScxRx5ASNQDw7ESNcz3FwwmcJGVQX4gdAUBgwDX0VYVWb49JVC3HP26fPZ0TDnuLYcVP4Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -20,6 +20,24 @@ The engine resolves typed isolation requirements against signed backend
 declarations and live inspected capabilities. It emits a strict backend-neutral
 plan; the selected adapter owns backend-specific inspection and launch
 compilation. RyeOS does not ship or select an isolation backend by default.
+
+Durable execution workspaces use the isolation-adapter v3 contract. RyeOS owns
+one canonical private `project/` generation. Disabled/native execution creates
+no other workspace directory and uses Lillux descriptor-relative filesystem
+mechanics directly. Enforced execution additionally grants the selected signed
+adapter one `backend-state/` directory as an opaque authority. Names and
+representation below that directory—including any platform-specific overlay
+layers—belong exclusively to the adapter and never enter the engine, executor,
+workspace journal, or generic launch plan.
+
+On freeze, an adapter may return normalized mutation facts plus a canonical
+relative content-root name below its still-pinned opaque state authority. RyeOS
+opens that returned root without following links and verifies each regular
+file's mode, size, and content digest before admitting bytes to CAS. Thus
+publication remains backend-neutral without granting the adapter CAS or project
+HEAD authority. The v3/root-identity cut is runtime database epoch 11; older
+workspace journals require the explicit runtime-history retirement ceremony and
+are never reinterpreted.
 
 The engine also keeps node trust separate from project/request trust. The
 `node_trust_store` is loaded only from persistent node configuration and is the

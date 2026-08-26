@@ -82,6 +82,19 @@ async fn create(
             home_id: &home_id,
         })
     {
+        // RuntimeDb commits the revisioned live projection before folding it
+        // into stable operational authority. If that second commit fails, the
+        // next startup repairs it from the higher revision. The profile home
+        // must remain with the committed projection; deleting it here would
+        // turn a recoverable metadata commit gap into credential loss.
+        if state
+            .state_store
+            .credential_profile(&req.profile_id)
+            .map_err(internal)?
+            .is_some()
+        {
+            return Err(internal(error));
+        }
         let cleanup = ryeos_app::private_artifact_home::remove(&state_dir, &home_id);
         return Err(internal(match cleanup {
             Ok(_) => error,

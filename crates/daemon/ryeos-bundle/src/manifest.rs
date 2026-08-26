@@ -1395,7 +1395,7 @@ name: isolation
 version: "1.0"
 isolation_backends:
   - id: linux
-    protocol: ryeos.isolation-adapter/v2
+    protocol: ryeos.isolation-adapter/v3
     targets: [x86_64-unknown-linux-gnu]
     adapter: adapter
     artifacts: { launcher: launcher }

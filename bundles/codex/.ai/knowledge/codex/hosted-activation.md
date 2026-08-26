@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-26T01:18:46Z:0f2743af5075999ab2a4efc3434448cdfe14d9ca28a369fa365805d62b3f9b42:kTXy5zR59o7MLlSHQCRRVFcMfqN4mXFTJuyDWXlnQmss5yOGiLwJQtodTuLmie2d+oUnumLZyMXwY2Gzv9olCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-26T05:49:11Z:6653e529418cae0af890e3cf6a52a48e7399a183e36d18a2b17fd48c1ed0b6df:Mx2HlfcEJNoxzhyzciMwprT4Qa9XCyeipOCIZ5bInlNiEHWH4381QBaXqCcaR/Tq7Za60JnpqAfNL1AEMFh+Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -179,10 +179,17 @@ sandbox policy.
 
 The child workload also inherits an owner-only creation mask. Codex can
 explicitly restore broader bits on non-secret state such as its installation
-identifier, so the provider-neutral bridge descriptor-traverses and tightens
-the complete private home after initialization and at every IPC boundary. Any
-link, special entry, mount crossing, or bounded-resource violation fails the
-worker closed before a credential-bearing operation is sent.
+identifier, but those nested modes remain behind the mode-0700 profile root.
+Before attachment, the daemon strictly descriptor-traverses the stopped home,
+counts but never follows Codex-owned links, and rejects special entries, mount
+crossings, multiply-linked regular files, entries owned outside the pinned
+home's owner, and bounded-resource violations. Descendant mode bits remain
+opaque workload state behind the exact mode-0700 root. While App Server is live its rollout and database
+namespaces are legitimately concurrent; the provider-neutral bridge therefore
+reasserts owner-only access on the exact pinned root at every IPC boundary
+instead of claiming a stable subtree snapshot. RyeOS-owned paths such as the
+compatibility seed still require exact non-link types and atomic reset before a
+credential-bearing process generation is released.
 
 For pinned Codex 0.147 the granular approval policy is inherited from immutable
 CLI configuration. Request-level `approvalPolicy` is intentionally omitted

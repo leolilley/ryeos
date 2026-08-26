@@ -760,6 +760,7 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
                     "hosted_command.contacting",
                     record.command_sequence,
                     &record.request_digest,
+                    record.worker_boot_epoch,
                 )?;
                 if record.state == "dispatched" {
                     state.state_store.mark_dedicated_command_outcome_unknown(
@@ -796,6 +797,7 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
                     event_type,
                     record.command_sequence,
                     &record.request_digest,
+                    record.worker_boot_epoch,
                 )?
             {
                 bail!(
@@ -861,12 +863,13 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
                         &canonical_batch,
                         observation_limit,
                     )?;
-                    append_command_fact_once(
+                    append_recovered_command_fact_once(
                         state,
                         &session,
                         "hosted_command.settled",
                         record.command_sequence,
                         &record.request_digest,
+                        record.worker_boot_epoch,
                         json!({
                             "schema":1,
                             "origin":"daemon_observed_io",
@@ -889,12 +892,13 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
                     notify_projection_change(&record.session_id);
                     continue;
                 }
-                append_command_fact_once(
+                append_recovered_command_fact_once(
                     state,
                     &session,
                     "hosted_command.contacting",
                     record.command_sequence,
                     &record.request_digest,
+                    record.worker_boot_epoch,
                     json!({
                         "schema":1,
                         "origin":"daemon_observed_io",
@@ -909,12 +913,13 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
                         record.worker_boot_epoch,
                     )?;
                 }
-                append_command_fact_once(
+                append_recovered_command_fact_once(
                     state,
                     &session,
                     "hosted_command.outcome_unknown",
                     record.command_sequence,
                     &record.request_digest,
+                    record.worker_boot_epoch,
                     json!({
                         "schema":1,
                         "origin":"daemon_observed_io",
@@ -932,12 +937,13 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
                     .filter(|digest| lillux::valid_hash(digest))
                     .map(ToOwned::to_owned)
                     .unwrap_or(ryeos_state::objects::canonical_value_digest(result)?);
-                append_command_fact_once(
+                append_recovered_command_fact_once(
                     state,
                     &session,
                     "hosted_command.settled",
                     record.command_sequence,
                     &record.request_digest,
+                    record.worker_boot_epoch,
                     json!({
                         "schema":1,
                         "origin":"daemon_observed_io",
@@ -953,12 +959,13 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
                     result.get("retryable_uncontacted").and_then(Value::as_bool) == Some(true)
                 }) =>
             {
-                append_command_fact_once(
+                append_recovered_command_fact_once(
                     state,
                     &session,
                     "hosted_command.failed_uncontacted",
                     record.command_sequence,
                     &record.request_digest,
+                    record.worker_boot_epoch,
                     json!({
                         "schema":1,
                         "origin":"daemon_verified_process",
@@ -970,12 +977,13 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
             }
             "failed" => {
                 let result = record.result.as_ref().unwrap_or(&Value::Null);
-                append_command_fact_once(
+                append_recovered_command_fact_once(
                     state,
                     &session,
                     "hosted_command.settled",
                     record.command_sequence,
                     &record.request_digest,
+                    record.worker_boot_epoch,
                     json!({
                         "schema":1,
                         "origin":"daemon_observed_io",
@@ -1497,12 +1505,46 @@ fn append_command_fact_once(
     )
 }
 
+/// Startup recovery completes a missing fact but never rewrites testimony that
+/// already crossed the authoritative root boundary. The live and recovered
+/// payloads may legitimately differ in diagnostic recovery fields; the stable
+/// operation identity, command digest, and worker epoch remain exact.
+fn append_recovered_command_fact_once(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    event_type: &str,
+    command_sequence: u64,
+    request_digest: &str,
+    worker_boot_epoch: u64,
+    payload: Value,
+) -> Result<()> {
+    if command_fact_exists(
+        state,
+        session,
+        event_type,
+        command_sequence,
+        request_digest,
+        worker_boot_epoch,
+    )? {
+        return Ok(());
+    }
+    append_command_fact_once(
+        state,
+        session,
+        event_type,
+        command_sequence,
+        request_digest,
+        payload,
+    )
+}
+
 fn command_fact_exists(
     state: &AppState,
     session: &DedicatedSessionRecord,
     event_type: &str,
     command_sequence: u64,
     request_digest: &str,
+    worker_boot_epoch: u64,
 ) -> Result<bool> {
     let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.hosted_command_fact.v1",
@@ -1526,7 +1568,8 @@ fn command_fact_exists(
             && payload.get("session_id").and_then(Value::as_str)
                 == Some(session.session_id.as_str())
             && payload.get("command_sequence").and_then(Value::as_u64) == Some(command_sequence)
-            && payload.get("request_digest").and_then(Value::as_str) == Some(request_digest);
+            && payload.get("request_digest").and_then(Value::as_str) == Some(request_digest)
+            && payload.get("worker_boot_epoch").and_then(Value::as_u64) == Some(worker_boot_epoch);
         if !exact {
             bail!("hosted command operation id is bound to contradictory root testimony");
         }
@@ -1546,6 +1589,7 @@ fn committed_command_fact_exists(
         "hosted_command.committed",
         record.command_sequence,
         &record.request_digest,
+        record.worker_boot_epoch,
     )? {
         return Ok(false);
     }
@@ -1917,8 +1961,8 @@ pub fn finish_terminal_credential_cleanup(
     Ok(())
 }
 
-/// Node-owned cancellation fallback used by the root execution guard. It does
-/// not depend on the cooperative controller still being alive.
+/// Node-owned owner-drop cancellation path used by the root execution guard.
+/// It does not depend on the cooperative controller still being alive.
 pub fn abort_session_for_root_stop(state: &AppState, root_thread_id: &str) -> Result<()> {
     let Some(session) = state.state_store.dedicated_session(root_thread_id)? else {
         return Ok(());
@@ -2032,6 +2076,7 @@ fn close_session_workspace(state: &AppState, session: &DedicatedSessionRecord) -
         phase = WorkspaceState::Destroying;
     }
     let root = PathBuf::from(&record.root_path);
+    let layout = ryeos_engine::execution_workspace::WorkspaceLayout::from_root(root.clone());
     if phase == WorkspaceState::Destroying {
         let destroyed = state
             .isolation
@@ -2039,10 +2084,8 @@ fn close_session_workspace(state: &AppState, session: &DedicatedSessionRecord) -
                 operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::Destroy,
                 workspace_id: &record.workspace_id,
                 launch_owner,
-                lower_snapshot: &record.lower_snapshot,
-                lower_path: &root.join("lower"),
-                upper_path: &root.join("upper"),
-                work_path: &root.join("work"),
+                base_snapshot: &record.base_snapshot,
+                project_path: &layout.project,
             })
             .map_err(|error| anyhow!(error.to_string()))?;
         let pinned =
@@ -2063,7 +2106,7 @@ fn close_session_workspace(state: &AppState, session: &DedicatedSessionRecord) -
             None,
         )?;
     }
-    crate::temp_dir_guard::TempDirGuard::new_workspace(root.clone(), root.join("project"))?
+    crate::temp_dir_guard::TempDirGuard::new_workspace(root.clone(), layout.project)?
         .remove_now()?;
     state.state_store.transition_execution_workspace_owned(
         &record.workspace_id,

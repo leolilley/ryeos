@@ -178,126 +178,13 @@ pub fn require_within_default_limit(runtime_state_dir: &Path, home_id: &str) -> 
     measure_directory_bounded(&home, HOME_TRAVERSAL_BUDGET, DEFAULT_MAX_HOME_BYTES)
 }
 
-fn require_same_home_device(
-    root_device: u64,
-    entry: &lillux::PinnedDirectoryEntryMetadata,
-) -> Result<()> {
-    if entry.containing_device != root_device {
-        bail!("private artifact home crosses a mounted filesystem");
-    }
-    Ok(())
-}
-
 fn measure_directory_bounded(
     root: &lillux::PinnedDirectory,
     budget: lillux::DirectoryTraversalBudget,
     maximum_bytes: u64,
 ) -> Result<u64> {
-    #[cfg(not(unix))]
-    {
-        let _ = (root, budget, maximum_bytes);
-        bail!("private artifact home traversal is unavailable on this platform");
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-
-        fn visit(
-            directory: &lillux::PinnedDirectory,
-            root_device: u64,
-            remaining_entries: &mut usize,
-            max_depth: usize,
-            depth: usize,
-            maximum_bytes: u64,
-            bytes: &mut u64,
-        ) -> Result<()> {
-            if depth > max_depth {
-                bail!("private artifact home reached its directory-depth ceiling");
-            }
-            let observed = directory
-                .entries_no_follow_bounded(*remaining_entries)
-                .context("enumerate private artifact home within its entry ceiling")?;
-            *remaining_entries = remaining_entries
-                .checked_sub(observed.len())
-                .context("private artifact entry budget underflow")?;
-            for entry in observed {
-                require_same_home_device(root_device, &entry)?;
-                if entry.mode & 0o077 != 0 {
-                    bail!("private artifact entry grants group or other permissions");
-                }
-                let opened = directory
-                    .open_entry(&entry.name, false)
-                    .context("open private artifact entry without following links")?
-                    .ok_or_else(|| anyhow::anyhow!("private artifact entry disappeared"))?;
-                match opened {
-                    lillux::PinnedDirectoryEntry::Directory(child) => {
-                        if entry.entry_type != lillux::PinnedEntryType::Directory
-                            || entry.mode & 0o700 != 0o700
-                        {
-                            bail!("private artifact directory identity or mode changed");
-                        }
-                        let (device, inode) = child.device_inode()?;
-                        if device != root_device
-                            || device != entry.containing_device
-                            || inode != entry.inode
-                        {
-                            bail!("private artifact directory identity changed");
-                        }
-                        visit(
-                            &child,
-                            root_device,
-                            remaining_entries,
-                            max_depth,
-                            depth + 1,
-                            maximum_bytes,
-                            bytes,
-                        )?;
-                    }
-                    lillux::PinnedDirectoryEntry::Regular(file) => {
-                        if entry.entry_type != lillux::PinnedEntryType::Regular {
-                            bail!("private artifact file identity changed");
-                        }
-                        let metadata = file.metadata()?;
-                        if !metadata.is_file()
-                            || metadata.dev() != root_device
-                            || metadata.dev() != entry.containing_device
-                            || metadata.ino() != entry.inode
-                            || metadata.mode() & 0o077 != 0
-                        {
-                            bail!("private artifact file identity or mode changed");
-                        }
-                        *bytes = bytes
-                            .checked_add(metadata.len())
-                            .context("private artifact byte count overflow")?;
-                        if *bytes > maximum_bytes {
-                            bail!("private artifact home reached its byte ceiling");
-                        }
-                    }
-                }
-                directory.ensure_entry_observation(&entry)?;
-            }
-            Ok(())
-        }
-
-        let metadata = root.try_clone_descriptor()?.metadata()?;
-        if metadata.mode() & 0o077 != 0 || metadata.mode() & 0o700 != 0o700 {
-            bail!("private artifact home root is not owner-private and accessible");
-        }
-        let root_device = metadata.dev();
-        let mut remaining_entries = budget.max_entries;
-        let mut bytes = 0;
-        visit(
-            root,
-            root_device,
-            &mut remaining_entries,
-            budget.max_depth,
-            0,
-            maximum_bytes,
-            &mut bytes,
-        )?;
-        root.ensure_path_binding()?;
-        Ok(bytes)
-    }
+    root.require_owner_enclosed_tree_bounded(budget, maximum_bytes)
+        .context("validate private artifact home through Lillux")
 }
 
 #[cfg(test)]
@@ -361,12 +248,33 @@ mod tests {
         std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o700)).unwrap();
         let state = nested.join("state");
         std::fs::write(&state, b"state").unwrap();
-        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // Nested workload modes are opaque. The exact 0700 home root is the
+        // privacy boundary; a non-secret workload file may legitimately be
+        // world-readable inside that untraversable root.
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(
             require_within_default_limit(tmp.path(), "home-one").unwrap(),
             12
         );
-        std::os::unix::fs::symlink("fixture.conf", path.join("link")).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::write(&outside, b"outside-is-not-counted").unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::os::unix::fs::symlink("../outside", path.join("link")).unwrap();
+        assert_eq!(
+            require_within_default_limit(tmp.path(), "home-one").unwrap(),
+            12
+        );
+        assert_eq!(
+            std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
+    #[test]
+    fn rejects_a_home_root_that_is_not_exactly_owner_private() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = create(tmp.path(), "home-one", &BTreeMap::new()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o750)).unwrap();
         assert!(require_within_default_limit(tmp.path(), "home-one").is_err());
     }
 
@@ -419,19 +327,5 @@ mod tests {
         }
         assert!(remove(tmp.path(), "home-one").is_err());
         assert!(path.exists());
-    }
-
-    #[test]
-    fn bounded_home_walk_rejects_a_mount_device_observation() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = create(tmp.path(), "home-one", &BTreeMap::new()).unwrap();
-        let file = path.join("credential");
-        std::fs::write(&file, b"opaque").unwrap();
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let home = lillux::PinnedDirectory::open(&path).unwrap().unwrap();
-        let (root_device, _) = home.device_inode().unwrap();
-        let mut entry = home.entries_no_follow_bounded(1).unwrap().remove(0);
-        entry.containing_device = root_device.wrapping_add(1);
-        assert!(require_same_home_device(root_device, &entry).is_err());
     }
 }

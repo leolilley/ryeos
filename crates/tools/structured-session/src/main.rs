@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{FromRawFd, RawFd};
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -25,8 +24,6 @@ const APPROVAL_TTL: Duration = Duration::from_secs(15 * 60);
 // enough for that request to expire and send its fail-closed upstream reply.
 // The enclosing persistent-session contract admits a one-hour request bound.
 const ROUTE_CALL_TIMEOUT: Duration = Duration::from_secs(16 * 60);
-const MAX_PROFILE_HOME_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const MAX_PROFILE_HOME_ENTRIES: usize = 100_000;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -186,6 +183,8 @@ struct RouteRule {
     ceremony: Option<CeremonyAction>,
     #[serde(default)]
     session_binding: Option<SessionBindingRule>,
+    #[serde(default)]
+    post_success_routes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -410,6 +409,7 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
             || route.forbidden_non_null_fields.len() > 32
             || route.forbidden_fields.len() > 32
             || route.observations.len() > 16
+            || route.post_success_routes.len() > 8
         {
             bail!("structured-session route exceeds a mapping bound");
         }
@@ -423,6 +423,45 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
                 .any(|route| !route_ids.contains(route.as_str()))
         {
             bail!("structured-session route set contains an unknown or invalid route");
+        }
+    }
+    for route in &profile.routes {
+        let mut post_routes = HashSet::new();
+        for post_route_id in &route.post_success_routes {
+            identifier("structured-session post-success route", post_route_id)?;
+            if post_route_id == &route.id || !post_routes.insert(post_route_id.as_str()) {
+                bail!("structured-session post-success route graph is not acyclic and unique");
+            }
+            let post_route = profile
+                .routes
+                .iter()
+                .find(|candidate| &candidate.id == post_route_id)
+                .ok_or_else(|| anyhow!("structured-session post-success route is absent"))?;
+            if post_route.audience != RouteAudience::Runtime
+                || post_route
+                    .session_binding
+                    .as_ref()
+                    .map(|binding| binding.action)
+                    != Some(SessionBindingAction::Require)
+                || !post_route.post_success_routes.is_empty()
+                || !post_route.observations.is_empty()
+                || post_route.ceremony.is_some()
+                || !matches!(post_route.result_retention, ResultRetention::Ephemeral)
+            {
+                bail!(
+                    "structured-session post-success route is not an inert runtime-only binding operation"
+                );
+            }
+        }
+        for routes in profile.route_sets.values() {
+            if routes.contains(&route.id)
+                && route
+                    .post_success_routes
+                    .iter()
+                    .any(|post_route| !routes.contains(post_route))
+            {
+                bail!("structured-session post-success route escapes its source route set");
+            }
         }
     }
     if let Some(recovery) = &profile.recovery {
@@ -961,43 +1000,14 @@ fn reset_compatibility_baseline_config(
     if admitted.is_empty() || admitted.len() > 64 * 1024 {
         bail!("admitted structured-session baseline config is empty or exceeds its bound");
     }
-    let destination = workload_home.join(destination_name);
-    match std::fs::symlink_metadata(&destination) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_file() => {
-            bail!("profile workload compatibility seed is not a regular file");
-        }
-        Ok(metadata)
-            if metadata.permissions().mode() & 0o777 == 0o400
-                && std::fs::read(&destination)? == admitted =>
-        {
-            return Ok(());
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error).context("inspect profile compatibility seed"),
-    }
-    let temporary = workload_home.join(".ryeos-baseline.pending");
-    if temporary.exists() {
-        let metadata = std::fs::symlink_metadata(&temporary)
-            .context("inspect incomplete compatibility seed")?;
-        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-            bail!("incomplete compatibility seed is not a regular file");
-        }
-        std::fs::remove_file(&temporary).context("remove incomplete compatibility seed")?;
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true).mode(0o400);
-    let mut file = options
-        .open(&temporary)
-        .context("create compatibility seed staging file")?;
-    file.write_all(&admitted)
-        .context("write admitted compatibility seed")?;
-    file.sync_all()
-        .context("sync admitted compatibility seed")?;
-    std::fs::rename(&temporary, &destination).context("publish compatibility seed")?;
-    let directory = std::fs::File::open(workload_home).context("open workload home for sync")?;
-    directory.sync_all().context("sync workload home")?;
-    Ok(())
+    let home = lillux::PinnedDirectory::open(workload_home)?
+        .ok_or_else(|| anyhow!("profile workload home is missing"))?;
+    let destination_name = std::ffi::OsStr::new(destination_name);
+    let incumbent = home
+        .open_regular(destination_name, false)
+        .context("open compatibility seed through Lillux")?;
+    home.atomic_write_if_same(destination_name, incumbent.as_ref(), &admitted, 0o400)
+        .context("reset compatibility seed through Lillux")
 }
 
 fn resolve_pinned_executable(
@@ -1068,76 +1078,11 @@ fn resolve_pinned_executable(
     Ok(path)
 }
 
-fn protect_profile_home(root: &std::path::Path) -> Result<u64> {
-    const MAX_PROFILE_HOME_DEPTH: usize = 64;
-
-    fn visit(
-        directory: &lillux::PinnedDirectory,
-        root_device: u64,
-        depth: usize,
-        entries: &mut usize,
-        bytes: &mut u64,
-    ) -> Result<()> {
-        if depth > MAX_PROFILE_HOME_DEPTH {
-            bail!("profile workload home reached its directory-depth ceiling");
-        }
-        let remaining = MAX_PROFILE_HOME_ENTRIES
-            .checked_sub(*entries)
-            .ok_or_else(|| anyhow!("profile-home entry count underflow"))?;
-        for observed in directory
-            .entries_no_follow_bounded(remaining)
-            .context("enumerate profile home without following links")?
-        {
-            *entries = entries
-                .checked_add(1)
-                .ok_or_else(|| anyhow!("profile-home entry count overflow"))?;
-            if observed.containing_device != root_device {
-                bail!("profile workload home crosses a mounted filesystem");
-            }
-            let opened = directory
-                .open_entry(&observed.name, false)
-                .context("open profile-home entry without following links")?
-                .ok_or_else(|| anyhow!("profile-home entry disappeared during protection"))?;
-            match opened {
-                lillux::PinnedDirectoryEntry::Directory(child) => {
-                    if observed.entry_type != lillux::PinnedEntryType::Directory {
-                        bail!("profile-home entry identity changed during protection");
-                    }
-                    if observed.mode & 0o700 != 0o700 {
-                        bail!("profile workload home directory is not owner-accessible");
-                    }
-                    child.set_mode(0o700)?;
-                    visit(&child, root_device, depth + 1, entries, bytes)?;
-                }
-                lillux::PinnedDirectoryEntry::Regular(file) => {
-                    if observed.entry_type != lillux::PinnedEntryType::Regular {
-                        bail!("profile-home entry identity changed during protection");
-                    }
-                    let metadata = file.metadata().context("inspect open profile-home file")?;
-                    if !metadata.is_file() {
-                        bail!("profile workload home contains a special entry");
-                    }
-                    *bytes = bytes
-                        .checked_add(metadata.len())
-                        .ok_or_else(|| anyhow!("profile-home byte count overflow"))?;
-                    if *bytes > MAX_PROFILE_HOME_BYTES {
-                        bail!("profile workload home reached its byte ceiling");
-                    }
-                    lillux::set_open_regular_file_mode(&file, observed.mode & 0o700)?;
-                }
-            }
-        }
-        Ok(())
-    }
-
+fn protect_profile_home(root: &std::path::Path) -> Result<()> {
     let home = lillux::PinnedDirectory::open(root)?
         .ok_or_else(|| anyhow!("profile workload home is missing"))?;
-    let (root_device, _) = home.device_inode()?;
-    home.set_mode(0o700)?;
-    let mut entries = 0usize;
-    let mut bytes = 0u64;
-    visit(&home, root_device, 0, &mut entries, &mut bytes)?;
-    Ok(bytes)
+    home.tighten_owner_private_directory()
+        .context("protect live profile-home root through Lillux")
 }
 
 fn set_close_on_exec(stream: &UnixStream) -> Result<()> {
@@ -1522,6 +1467,11 @@ impl StructuredWorkload {
                 Some(CeremonyAction::Start) => self.ceremony_active = true,
                 Some(CeremonyAction::Clear) => self.ceremony_active = false,
                 _ => {}
+            }
+            for post_route in &route.post_success_routes {
+                let post_result =
+                    self.handle_route(post_route, json!({}), workspace, RouteAudience::Runtime)?;
+                require_successful_internal_route(&post_result, "post-success")?;
             }
         }
         // structured workload responses are returned to the attached caller but are not
@@ -2399,6 +2349,7 @@ fn write_error(stream: &mut UnixStream, request_id: &str, message: &str) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
 
     #[test]
     fn forbidden_fields_reject_presence_including_null() {
@@ -2821,6 +2772,19 @@ mod tests {
     }
 
     #[test]
+    fn compatibility_baseline_rejects_a_link_without_touching_its_target() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("admitted.conf");
+        let target = root.path().join("workload.conf");
+        std::fs::write(&source, b"policy = \"fixed\"\n").unwrap();
+        std::fs::write(&target, b"workload = \"state\"\n").unwrap();
+        std::os::unix::fs::symlink("workload.conf", root.path().join("runtime.conf")).unwrap();
+
+        assert!(reset_compatibility_baseline_config(root.path(), &source, "runtime.conf").is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"workload = \"state\"\n");
+    }
+
+    #[test]
     fn structured_workload_creates_owner_only_files_and_directories() {
         let root = tempfile::tempdir().unwrap();
         let mut command = Command::new("/bin/sh");
@@ -2857,7 +2821,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_home_protection_tightens_only_group_and_other_permissions() {
+    fn live_profile_home_protection_uses_the_pinned_root_as_the_boundary() {
         let root = tempfile::tempdir().unwrap();
         let child = root.path().join("child");
         std::fs::create_dir(&child).unwrap();
@@ -2870,30 +2834,46 @@ mod tests {
         std::fs::set_permissions(&writable, std::fs::Permissions::from_mode(0o644)).unwrap();
         std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o444)).unwrap();
 
-        assert_eq!(protect_profile_home(root.path()).unwrap(), 13);
+        protect_profile_home(root.path()).unwrap();
         assert_eq!(
             std::fs::metadata(root.path()).unwrap().permissions().mode() & 0o777,
             0o700
         );
         assert_eq!(
             std::fs::metadata(&child).unwrap().permissions().mode() & 0o777,
-            0o700
+            0o755
         );
         assert_eq!(
             std::fs::metadata(&writable).unwrap().permissions().mode() & 0o777,
-            0o600
+            0o644
         );
         assert_eq!(
             std::fs::metadata(&read_only).unwrap().permissions().mode() & 0o777,
-            0o400
+            0o444
         );
     }
 
     #[test]
-    fn profile_home_protection_rejects_links() {
-        let root = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink("missing", root.path().join("link")).unwrap();
-        assert!(protect_profile_home(root.path()).is_err());
+    fn live_profile_home_protection_never_follows_links() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("home");
+        let target = parent.path().join("target");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(&target, b"outside").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::os::unix::fs::symlink("../target", root.join("link")).unwrap();
+
+        protect_profile_home(&root).unwrap();
+        assert!(
+            std::fs::symlink_metadata(root.join("link"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
     }
 
     #[test]

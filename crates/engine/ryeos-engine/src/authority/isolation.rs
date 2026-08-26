@@ -116,27 +116,43 @@ pub struct IsolationRuntime {
     generation_registered_bundle_roots: Option<Vec<crate::item_resolution::RegisteredBundleRoot>>,
 }
 
-/// Adapter evidence paired with the exact upper-directory descriptor the
-/// adapter inspected. Fold-back consumes this value directly so it cannot
-/// reopen a path after the freeze boundary.
+/// Kind-neutral evidence for one daemon-owned workspace lifecycle transition.
+///
+/// Enforced execution derives this only from a fully validated signed-adapter
+/// response. Native execution produces the same engine contract directly and
+/// therefore never fabricates an adapter-protocol value whose invariants do
+/// not apply to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceLifecycleEvidence {
+    pub operation: WorkspaceLifecycleOperation,
+    pub workspace_id: String,
+    pub launch_owner: String,
+    pub backend_id: String,
+    pub backend_version: String,
+    pub pinned_root_identities: BTreeMap<String, String>,
+    pub mount_identity: String,
+    pub mutations: Vec<ryeos_isolation_protocol::WorkspaceMutation>,
+    pub destroyed: bool,
+}
+
+/// Lifecycle evidence paired with the exact adapter-declared content
+/// directory inspected during freeze. Fold-back consumes this value directly
+/// so it cannot reopen backend-private state after the freeze boundary.
 pub struct PinnedWorkspaceLifecycleResult {
-    pub response: AdapterWorkspaceResponse,
-    pub upper: lillux::PinnedDirectory,
+    pub evidence: WorkspaceLifecycleEvidence,
+    pub mutation_content: Option<lillux::PinnedDirectory>,
 }
 
 /// One descriptor-relative workspace adapter invocation. Keeping the durable
-/// identity and its three host-side roots in one value prevents lifecycle call
-/// sites from accidentally reordering otherwise homogeneous string/path
-/// arguments.
+/// identity and canonical project in one value prevents lifecycle call sites
+/// from manufacturing isolation-backend paths.
 #[derive(Debug, Clone, Copy)]
 pub struct WorkspaceLifecycleInvocation<'a> {
     pub operation: WorkspaceLifecycleOperation,
     pub workspace_id: &'a str,
     pub launch_owner: &'a str,
-    pub lower_snapshot: &'a str,
-    pub lower_path: &'a Path,
-    pub upper_path: &'a Path,
-    pub work_path: &'a Path,
+    pub base_snapshot: &'a str,
+    pub project_path: &'a Path,
 }
 
 impl std::fmt::Debug for IsolationRuntime {
@@ -807,18 +823,31 @@ struct WritableMountValidation<'a> {
 
 struct PreparedProjectWorkspace {
     workspace_id: String,
-    lower: Arc<std::fs::File>,
-    upper: Arc<std::fs::File>,
-    work: Arc<std::fs::File>,
+    project: Arc<std::fs::File>,
+    backend_state: Arc<std::fs::File>,
+}
+
+fn open_backend_relative_directory(
+    root: &lillux::PinnedDirectory,
+    relative: &str,
+) -> anyhow::Result<lillux::PinnedDirectory> {
+    let mut current = root.try_clone()?;
+    for component in relative.split('/') {
+        current = current
+            .open_child_directory(std::ffi::OsStr::new(component))?
+            .ok_or_else(|| {
+                anyhow::anyhow!("adapter-declared backend directory disappeared: {relative}")
+            })?;
+    }
+    Ok(current)
 }
 
 impl IsolationRuntime {
     fn verify_runtime_workspace_layout(
         &self,
         workspace_id: &str,
-        lower: &lillux::PinnedDirectory,
-        upper: &lillux::PinnedDirectory,
-        work: &lillux::PinnedDirectory,
+        project: &lillux::PinnedDirectory,
+        backend_state: Option<&lillux::PinnedDirectory>,
     ) -> Result<(), EngineError> {
         let workspaces = self.runtime_workspaces.as_deref().ok_or_else(|| {
             refused("runtime workspace root authority is unavailable".to_string())
@@ -827,27 +856,75 @@ impl IsolationRuntime {
             .open_child_directory(std::ffi::OsStr::new(workspace_id))
             .map_err(|error| refused(format!("runtime workspace cannot be opened: {error}")))?
             .ok_or_else(|| refused("runtime workspace disappeared".to_string()))?;
-        for (label, name, observed) in [
-            ("lower", "project", lower),
-            ("upper", "upper", upper),
-            ("work", "work", work),
-        ] {
+        let expected_names = if backend_state.is_some() {
+            [
+                crate::execution_workspace::PROJECT_DIR,
+                crate::execution_workspace::BACKEND_STATE_DIR,
+            ]
+            .as_slice()
+        } else {
+            [crate::execution_workspace::PROJECT_DIR].as_slice()
+        };
+        let entries = workspace
+            .entries_no_follow_bounded(3)
+            .map_err(|error| refused(format!("inventory runtime workspace: {error}")))?;
+        if entries.len() != expected_names.len()
+            || entries.iter().any(|entry| {
+                entry.entry_type != lillux::PinnedEntryType::Directory
+                    || !expected_names
+                        .iter()
+                        .any(|expected| entry.name == std::ffi::OsStr::new(expected))
+            })
+        {
+            return Err(refused(
+                "runtime workspace contains entries outside its admitted generic layout"
+                    .to_string(),
+            ));
+        }
+        let expected_project = workspace
+            .open_child_directory(std::ffi::OsStr::new(
+                crate::execution_workspace::PROJECT_DIR,
+            ))
+            .map_err(|error| {
+                refused(format!(
+                    "runtime workspace project cannot be opened: {error}"
+                ))
+            })?
+            .ok_or_else(|| refused("runtime workspace project disappeared".to_string()))?;
+        if !expected_project
+            .is_same_directory(project)
+            .map_err(|error| {
+                refused(format!(
+                    "runtime workspace project identity cannot be compared: {error}"
+                ))
+            })?
+        {
+            return Err(refused(
+                "runtime workspace project does not match its daemon-owned authority".to_string(),
+            ));
+        }
+        if let Some(observed) = backend_state {
             let expected = workspace
-                .open_child_directory(std::ffi::OsStr::new(name))
+                .open_child_directory(std::ffi::OsStr::new(
+                    crate::execution_workspace::BACKEND_STATE_DIR,
+                ))
                 .map_err(|error| {
                     refused(format!(
-                        "runtime workspace {label} cannot be opened: {error}"
+                        "runtime workspace backend state cannot be opened: {error}"
                     ))
                 })?
-                .ok_or_else(|| refused(format!("runtime workspace {label} disappeared")))?;
+                .ok_or_else(|| {
+                    refused("runtime workspace backend state disappeared".to_string())
+                })?;
             if !expected.is_same_directory(observed).map_err(|error| {
                 refused(format!(
-                    "runtime workspace {label} identity cannot be compared: {error}"
+                    "runtime workspace backend-state identity cannot be compared: {error}"
                 ))
             })? {
-                return Err(refused(format!(
-                    "runtime workspace {label} does not match its daemon-owned authority"
-                )));
+                return Err(refused(
+                    "runtime workspace backend state does not match its daemon-owned authority"
+                        .to_string(),
+                ));
             }
         }
         Ok(())
@@ -875,14 +952,14 @@ impl IsolationRuntime {
     pub fn workspace_lifecycle(
         &self,
         invocation: WorkspaceLifecycleInvocation<'_>,
-    ) -> Result<AdapterWorkspaceResponse, EngineError> {
+    ) -> Result<WorkspaceLifecycleEvidence, EngineError> {
         self.workspace_lifecycle_pinned(invocation)
-            .map(|result| result.response)
+            .map(|result| result.evidence)
     }
 
-    /// Invoke the workspace adapter and retain the exact upper root it saw.
-    /// This is mandatory for FreezeAndDiff consumers that ingest returned
-    /// mutation evidence.
+    /// Invoke the workspace adapter and retain its exact declared mutation
+    /// content root. This is mandatory for FreezeAndDiff consumers that ingest
+    /// returned mutation evidence without interpreting backend-private layout.
     pub fn workspace_lifecycle_pinned(
         &self,
         invocation: WorkspaceLifecycleInvocation<'_>,
@@ -891,10 +968,8 @@ impl IsolationRuntime {
             operation,
             workspace_id,
             launch_owner,
-            lower_snapshot,
-            lower_path,
-            upper_path,
-            work_path,
+            base_snapshot,
+            project_path,
         } = invocation;
         #[cfg(not(unix))]
         {
@@ -902,10 +977,8 @@ impl IsolationRuntime {
                 operation,
                 workspace_id,
                 launch_owner,
-                lower_snapshot,
-                lower_path,
-                upper_path,
-                work_path,
+                base_snapshot,
+                project_path,
             );
             return Err(refused(
                 "workspace lifecycle requires inherited Unix descriptors".to_string(),
@@ -922,21 +995,10 @@ impl IsolationRuntime {
                             .to_string(),
                     ));
                 }
-                let lower_root = lillux::PinnedDirectory::open(lower_path)
-                    .map_err(|error| refused(format!("pin workspace lower: {error}")))?
-                    .ok_or_else(|| refused("workspace lower is missing".to_string()))?;
-                let upper_root = lillux::PinnedDirectory::open(upper_path)
-                    .map_err(|error| refused(format!("pin workspace upper: {error}")))?
-                    .ok_or_else(|| refused("workspace upper is missing".to_string()))?;
-                let work_root = lillux::PinnedDirectory::open(work_path)
-                    .map_err(|error| refused(format!("pin workspace work: {error}")))?
-                    .ok_or_else(|| refused("workspace work is missing".to_string()))?;
-                self.verify_runtime_workspace_layout(
-                    workspace_id,
-                    &lower_root,
-                    &upper_root,
-                    &work_root,
-                )?;
+                let project_root = lillux::PinnedDirectory::open(project_path)
+                    .map_err(|error| refused(format!("pin workspace project: {error}")))?
+                    .ok_or_else(|| refused("workspace project is missing".to_string()))?;
+                self.verify_runtime_workspace_layout(workspace_id, &project_root, None)?;
                 let root_identity =
                     |label: &str, root: &lillux::PinnedDirectory| -> Result<String, EngineError> {
                         let (device, inode) = root.device_inode().map_err(|error| {
@@ -944,28 +1006,15 @@ impl IsolationRuntime {
                         })?;
                         Ok(format!("dev{device}-ino{inode}"))
                     };
-                let pinned_root_identities = BTreeMap::from([
-                    ("lower".to_string(), root_identity("lower", &lower_root)?),
-                    ("upper".to_string(), root_identity("upper", &upper_root)?),
-                    ("work".to_string(), root_identity("work", &work_root)?),
-                ]);
+                let pinned_root_identities = BTreeMap::from([(
+                    "project".to_string(),
+                    root_identity("project", &project_root)?,
+                )]);
                 let mount_identity = format!(
-                    "daemon-private-copy:{}:{}:{}",
-                    pinned_root_identities["lower"],
-                    pinned_root_identities["upper"],
-                    pinned_root_identities["work"]
+                    "daemon-private-project:{}",
+                    pinned_root_identities["project"]
                 );
-                let lower_descriptor = lower_root.try_clone_descriptor().map_err(|error| {
-                    refused(format!("clone workspace lower descriptor: {error}"))
-                })?;
-                let upper_descriptor = upper_root.try_clone_descriptor().map_err(|error| {
-                    refused(format!("clone workspace upper descriptor: {error}"))
-                })?;
-                let work_descriptor = work_root.try_clone_descriptor().map_err(|error| {
-                    refused(format!("clone workspace work descriptor: {error}"))
-                })?;
-                let response = AdapterWorkspaceResponse {
-                    protocol: IsolationAdapterProtocolVersion::Current,
+                let evidence = WorkspaceLifecycleEvidence {
                     operation,
                     workspace_id: workspace_id.to_string(),
                     launch_owner: launch_owner.to_string(),
@@ -976,42 +1025,9 @@ impl IsolationRuntime {
                     mutations: Vec::new(),
                     destroyed: operation == WorkspaceLifecycleOperation::Destroy,
                 };
-                let request = AdapterWorkspaceRequest {
-                    protocol: IsolationAdapterProtocolVersion::Current,
-                    operation,
-                    workspace_id: workspace_id.to_string(),
-                    launch_owner: launch_owner.to_string(),
-                    lower_snapshot: lower_snapshot.to_string(),
-                    authorities: vec![
-                        IsolationAuthority {
-                            id: IsolationAuthorityId::new("workspace-lower")
-                                .map_err(|error| refused(error.to_string()))?,
-                            inherited_fd: lower_descriptor.as_raw_fd() as u32,
-                            purpose: IsolationAuthorityPurpose::WorkspaceLower,
-                        },
-                        IsolationAuthority {
-                            id: IsolationAuthorityId::new("workspace-upper")
-                                .map_err(|error| refused(error.to_string()))?,
-                            inherited_fd: upper_descriptor.as_raw_fd() as u32,
-                            purpose: IsolationAuthorityPurpose::WorkspaceUpper,
-                        },
-                        IsolationAuthority {
-                            id: IsolationAuthorityId::new("workspace-work")
-                                .map_err(|error| refused(error.to_string()))?,
-                            inherited_fd: work_descriptor.as_raw_fd() as u32,
-                            purpose: IsolationAuthorityPurpose::WorkspaceWork,
-                        },
-                    ],
-                };
-                request
-                    .validate()
-                    .map_err(|error| refused(format!("invalid workspace request: {error}")))?;
-                response
-                    .validate_for(&request)
-                    .map_err(|error| refused(format!("invalid workspace response: {error}")))?;
                 return Ok(PinnedWorkspaceLifecycleResult {
-                    response,
-                    upper: upper_root,
+                    evidence,
+                    mutation_content: None,
                 });
             }
 
@@ -1030,42 +1046,60 @@ impl IsolationRuntime {
                     )));
                 }
             }
-            let lower_root = lillux::PinnedDirectory::open(lower_path)
-                .map_err(|error| refused(format!("pin workspace lower: {error}")))?
-                .ok_or_else(|| refused("workspace lower is missing".to_string()))?;
-            let lower = lower_root
+            let project_root = lillux::PinnedDirectory::open(project_path)
+                .map_err(|error| refused(format!("pin workspace project: {error}")))?
+                .ok_or_else(|| refused("workspace project is missing".to_string()))?;
+            let workspace_root = self
+                .runtime_workspaces
+                .as_deref()
+                .ok_or_else(|| {
+                    refused("runtime workspace root authority is unavailable".to_string())
+                })?
+                .open_child_directory(std::ffi::OsStr::new(workspace_id))
+                .map_err(|error| refused(format!("runtime workspace cannot be opened: {error}")))?
+                .ok_or_else(|| refused("runtime workspace disappeared".to_string()))?;
+            let backend_state_root = if operation == WorkspaceLifecycleOperation::Create {
+                workspace_root
+                    .open_or_create_child(
+                        std::ffi::OsStr::new(crate::execution_workspace::BACKEND_STATE_DIR),
+                        0o700,
+                    )
+                    .map_err(|error| {
+                        refused(format!("create opaque workspace backend state: {error}"))
+                    })?
+            } else {
+                workspace_root
+                    .open_child_directory(std::ffi::OsStr::new(
+                        crate::execution_workspace::BACKEND_STATE_DIR,
+                    ))
+                    .map_err(|error| {
+                        refused(format!("open opaque workspace backend state: {error}"))
+                    })?
+                    .ok_or_else(|| refused("workspace backend state is missing".to_string()))?
+            };
+            self.verify_runtime_workspace_layout(
+                workspace_id,
+                &project_root,
+                Some(&backend_state_root),
+            )?;
+            let project = project_root
                 .try_clone_descriptor()
-                .map_err(|error| refused(format!("clone workspace lower: {error}")))?;
-            let upper_root = lillux::PinnedDirectory::open(upper_path)
-                .map_err(|error| refused(format!("pin workspace upper: {error}")))?
-                .ok_or_else(|| refused("workspace upper is missing".to_string()))?;
-            let upper = upper_root
+                .map_err(|error| refused(format!("clone workspace project: {error}")))?;
+            let backend_state = backend_state_root
                 .try_clone_descriptor()
-                .map_err(|error| refused(format!("clone workspace upper: {error}")))?;
-            let work_root = lillux::PinnedDirectory::open(work_path)
-                .map_err(|error| refused(format!("pin workspace work: {error}")))?
-                .ok_or_else(|| refused("workspace work is missing".to_string()))?;
-            let work = work_root
-                .try_clone_descriptor()
-                .map_err(|error| refused(format!("clone workspace work: {error}")))?;
+                .map_err(|error| refused(format!("clone workspace backend state: {error}")))?;
             let authorities = vec![
                 IsolationAuthority {
-                    id: IsolationAuthorityId::new("workspace-lower")
+                    id: IsolationAuthorityId::new("workspace-project")
                         .map_err(|error| refused(error.to_string()))?,
-                    inherited_fd: lower.as_raw_fd() as u32,
-                    purpose: IsolationAuthorityPurpose::WorkspaceLower,
+                    inherited_fd: project.as_raw_fd() as u32,
+                    purpose: IsolationAuthorityPurpose::WorkspaceProject,
                 },
                 IsolationAuthority {
-                    id: IsolationAuthorityId::new("workspace-upper")
+                    id: IsolationAuthorityId::new("workspace-backend-state")
                         .map_err(|error| refused(error.to_string()))?,
-                    inherited_fd: upper.as_raw_fd() as u32,
-                    purpose: IsolationAuthorityPurpose::WorkspaceUpper,
-                },
-                IsolationAuthority {
-                    id: IsolationAuthorityId::new("workspace-work")
-                        .map_err(|error| refused(error.to_string()))?,
-                    inherited_fd: work.as_raw_fd() as u32,
-                    purpose: IsolationAuthorityPurpose::WorkspaceWork,
+                    inherited_fd: backend_state.as_raw_fd() as u32,
+                    purpose: IsolationAuthorityPurpose::WorkspaceBackendState,
                 },
             ];
             let request = AdapterWorkspaceRequest {
@@ -1073,7 +1107,7 @@ impl IsolationRuntime {
                 operation,
                 workspace_id: workspace_id.to_string(),
                 launch_owner: launch_owner.to_string(),
-                lower_snapshot: lower_snapshot.to_string(),
+                base_snapshot: base_snapshot.to_string(),
                 authorities,
             };
             request
@@ -1110,9 +1144,8 @@ impl IsolationRuntime {
                 }),
                 inherited_fds: vec![
                     backend.adapter_handle.clone(),
-                    Arc::new(lower),
-                    Arc::new(upper),
-                    Arc::new(work),
+                    Arc::new(project),
+                    Arc::new(backend_state),
                     request_handle,
                 ],
                 supervised_status: None,
@@ -1137,13 +1170,56 @@ impl IsolationRuntime {
                         .to_string(),
                 ));
             }
-            // Keep all three authority roots alive through response
-            // validation. The upper descriptor then crosses into fold-back.
-            drop(lower_root);
-            drop(work_root);
+            let root_identity =
+                |label: &str, root: &lillux::PinnedDirectory| -> Result<String, EngineError> {
+                    let (device, inode) = root.device_inode().map_err(|error| {
+                        refused(format!("inspect workspace {label} identity: {error}"))
+                    })?;
+                    Ok(format!("dev{device}-ino{inode}"))
+                };
+            let observed_roots = BTreeMap::from([
+                (
+                    "project".to_string(),
+                    root_identity("project", &project_root)?,
+                ),
+                (
+                    "backend_state".to_string(),
+                    root_identity("backend state", &backend_state_root)?,
+                ),
+            ]);
+            if response.pinned_root_identities != observed_roots {
+                return Err(refused(
+                    "workspace adapter changed or misstated its pinned root identities".to_string(),
+                ));
+            }
+            let mutation_content = response
+                .mutation_content_root
+                .as_deref()
+                .map(|relative| {
+                    open_backend_relative_directory(&backend_state_root, relative).map_err(
+                        |error| {
+                            refused(format!(
+                                "pin adapter-declared mutation content root: {error}"
+                            ))
+                        },
+                    )
+                })
+                .transpose()?;
+            let evidence = WorkspaceLifecycleEvidence {
+                operation: response.operation,
+                workspace_id: response.workspace_id,
+                launch_owner: response.launch_owner,
+                backend_id: response.backend_id,
+                backend_version: response.backend_version,
+                pinned_root_identities: response.pinned_root_identities,
+                mount_identity: response.mount_identity,
+                mutations: response.mutations,
+                destroyed: response.destroyed,
+            };
+            drop(project_root);
             Ok(PinnedWorkspaceLifecycleResult {
-                response,
-                upper: upper_root,
+                evidence,
+                mutation_content,
             })
         }
     }
@@ -1870,11 +1946,11 @@ impl IsolationRuntime {
                 }
             }
             if context.project_authority == IsolationProjectAuthority::RuntimeWorkspace {
-                let lower = lillux::PinnedDirectory::open(context.project_path)
-                    .map_err(|error| refused(format!("pin runtime workspace lower: {error}")))?
-                    .ok_or_else(|| refused("runtime workspace lower is missing".to_string()))?;
+                let project = lillux::PinnedDirectory::open(context.project_path)
+                    .map_err(|error| refused(format!("pin runtime workspace project: {error}")))?
+                    .ok_or_else(|| refused("runtime workspace project is missing".to_string()))?;
                 let workspace_root = context.project_path.parent().ok_or_else(|| {
-                    refused("runtime workspace lower has no workspace root".to_string())
+                    refused("runtime workspace project has no workspace root".to_string())
                 })?;
                 let workspace_id = workspace_root
                     .file_name()
@@ -1886,19 +1962,13 @@ impl IsolationRuntime {
                     .project_path
                     .file_name()
                     .and_then(|name| name.to_str())
-                    != Some("project")
+                    != Some(crate::execution_workspace::PROJECT_DIR)
                 {
                     return Err(refused(
-                        "runtime workspace lower is not the canonical project child".to_string(),
+                        "runtime workspace project is not the canonical project child".to_string(),
                     ));
                 }
-                let upper = lillux::PinnedDirectory::open(&workspace_root.join("upper"))
-                    .map_err(|error| refused(format!("pin runtime workspace upper: {error}")))?
-                    .ok_or_else(|| refused("runtime workspace upper is missing".to_string()))?;
-                let work = lillux::PinnedDirectory::open(&workspace_root.join("work"))
-                    .map_err(|error| refused(format!("pin runtime workspace work: {error}")))?
-                    .ok_or_else(|| refused("runtime workspace work is missing".to_string()))?;
-                self.verify_runtime_workspace_layout(workspace_id, &lower, &upper, &work)?;
+                self.verify_runtime_workspace_layout(workspace_id, &project, None)?;
             }
             if request
                 .envs
@@ -2236,7 +2306,8 @@ impl IsolationRuntime {
                 refused("runtime workspace project has no workspace root".to_string())
             })?;
             if workspace_root.parent() != Some(workspaces.path())
-                || canonical_project.file_name().and_then(|name| name.to_str()) != Some("project")
+                || canonical_project.file_name().and_then(|name| name.to_str())
+                    != Some(crate::execution_workspace::PROJECT_DIR)
             {
                 return Err(refused(format!(
                     "runtime workspace project {} is not a canonical <workspace>/project child of {}",
@@ -2255,11 +2326,15 @@ impl IsolationRuntime {
                 .map_err(|error| refused(format!("runtime workspace cannot be opened: {error}")))?
                 .ok_or_else(|| refused("runtime workspace disappeared".to_string()))?;
             let expected = expected_root
-                .open_child_directory(std::ffi::OsStr::new("project"))
+                .open_child_directory(std::ffi::OsStr::new(
+                    crate::execution_workspace::PROJECT_DIR,
+                ))
                 .map_err(|error| {
-                    refused(format!("runtime workspace lower cannot be opened: {error}"))
+                    refused(format!(
+                        "runtime workspace project cannot be opened: {error}"
+                    ))
                 })?
-                .ok_or_else(|| refused("runtime workspace lower disappeared".to_string()))?;
+                .ok_or_else(|| refused("runtime workspace project disappeared".to_string()))?;
             let requested = lillux::PinnedDirectory::open(&canonical_project)
                 .map_err(|error| {
                     refused(format!(
@@ -2281,21 +2356,17 @@ impl IsolationRuntime {
                     "runtime workspace authority cannot be cloned: {error}"
                 ))
             })?);
-            let upper = expected_root
-                .open_child_directory(std::ffi::OsStr::new("upper"))
-                .map_err(|error| {
-                    refused(format!("runtime workspace upper cannot be opened: {error}"))
-                })?
-                .ok_or_else(|| refused("runtime workspace upper disappeared".to_string()))?;
-            let work = expected_root
-                .open_child_directory(std::ffi::OsStr::new("work"))
+            let backend_state = expected_root
+                .open_child_directory(std::ffi::OsStr::new(
+                    crate::execution_workspace::BACKEND_STATE_DIR,
+                ))
                 .map_err(|error| {
                     refused(format!(
-                        "runtime workspace work directory cannot be opened: {error}"
+                        "runtime workspace backend state cannot be opened: {error}"
                     ))
                 })?
                 .ok_or_else(|| {
-                    refused("runtime workspace work directory disappeared".to_string())
+                    refused("runtime workspace backend state disappeared".to_string())
                 })?;
             let workspace_id = workspace_name
                 .to_str()
@@ -2306,13 +2377,14 @@ impl IsolationRuntime {
                 Some(handle.clone()),
                 Some(PreparedProjectWorkspace {
                     workspace_id,
-                    lower: handle,
-                    upper: Arc::new(upper.try_clone_descriptor().map_err(|error| {
-                        refused(format!("runtime workspace upper cannot be cloned: {error}"))
-                    })?),
-                    work: Arc::new(work.try_clone_descriptor().map_err(|error| {
-                        refused(format!("runtime workspace work cannot be cloned: {error}"))
-                    })?),
+                    project: handle,
+                    backend_state: Arc::new(backend_state.try_clone_descriptor().map_err(
+                        |error| {
+                            refused(format!(
+                                "runtime workspace backend state cannot be cloned: {error}"
+                            ))
+                        },
+                    )?),
                 }),
             )
         } else if context.project_authority == IsolationProjectAuthority::EphemeralScratch {
@@ -3145,27 +3217,20 @@ impl IsolationRuntime {
         };
 
         let project_workspace_plan = if let Some(workspace) = project_workspace {
-            let lower = IsolationAuthorityId::new("workspace-lower")
+            let project = IsolationAuthorityId::new("workspace-project")
                 .map_err(|error| refused(error.to_string()))?;
-            let upper = IsolationAuthorityId::new("workspace-upper")
-                .map_err(|error| refused(error.to_string()))?;
-            let work = IsolationAuthorityId::new("workspace-work")
+            let backend_state = IsolationAuthorityId::new("workspace-backend-state")
                 .map_err(|error| refused(error.to_string()))?;
             for (id, handle, purpose) in [
                 (
-                    lower.clone(),
-                    workspace.lower,
-                    IsolationAuthorityPurpose::WorkspaceLower,
+                    project.clone(),
+                    workspace.project,
+                    IsolationAuthorityPurpose::WorkspaceProject,
                 ),
                 (
-                    upper.clone(),
-                    workspace.upper,
-                    IsolationAuthorityPurpose::WorkspaceUpper,
-                ),
-                (
-                    work.clone(),
-                    workspace.work,
-                    IsolationAuthorityPurpose::WorkspaceWork,
+                    backend_state.clone(),
+                    workspace.backend_state,
+                    IsolationAuthorityPurpose::WorkspaceBackendState,
                 ),
             ] {
                 let inherited_fd = mount_fd_arg(&handle)
@@ -3180,9 +3245,8 @@ impl IsolationRuntime {
             }
             Some(IsolationProjectWorkspace {
                 workspace_id: workspace.workspace_id,
-                lower,
-                upper,
-                work,
+                project,
+                backend_state,
                 destination: IsolationPath::new(project_destination.to_string_lossy().into_owned())
                     .map_err(|error| refused(error.to_string()))?,
             })
@@ -6231,28 +6295,36 @@ mod tests {
         let workspace = workspaces
             .open_or_create_child(std::ffi::OsStr::new("native-cow"), 0o700)
             .unwrap();
-        for name in ["project", "upper", "work"] {
-            workspace
-                .open_or_create_child(std::ffi::OsStr::new(name), 0o700)
-                .unwrap();
-        }
-        let lower = workspace.path().join("project");
-        let upper = workspace.path().join("upper");
-        let work = workspace.path().join("work");
-        let lower_snapshot = "a".repeat(64);
+        workspace
+            .open_or_create_child(
+                std::ffi::OsStr::new(crate::execution_workspace::PROJECT_DIR),
+                0o700,
+            )
+            .unwrap();
+        let project = workspace
+            .path()
+            .join(crate::execution_workspace::PROJECT_DIR);
+        let base_snapshot = "a".repeat(64);
         let invocation = |operation| WorkspaceLifecycleInvocation {
             operation,
             workspace_id: "native-cow",
             launch_owner: "{\"attempt\":1}",
-            lower_snapshot: &lower_snapshot,
-            lower_path: &lower,
-            upper_path: &upper,
-            work_path: &work,
+            base_snapshot: &base_snapshot,
+            project_path: &project,
         };
         let created = runtime
             .workspace_lifecycle(invocation(WorkspaceLifecycleOperation::Create))
             .unwrap();
         assert_eq!(created.backend_id, DAEMON_PRIVATE_WORKSPACE_BACKEND_ID);
+        assert_eq!(
+            created
+                .pinned_root_identities
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["project".to_string()]
+        );
+        assert!(!workspace.path().join("backend-state").exists());
         assert!(!created.destroyed);
         assert!(
             runtime
@@ -6268,7 +6340,7 @@ mod tests {
                     cmd: "/bin/true".to_string(),
                     argv0: None,
                     args: Vec::new(),
-                    cwd: Some(lower.to_string_lossy().into_owned()),
+                    cwd: Some(project.to_string_lossy().into_owned()),
                     envs: Vec::new(),
                     stdin_data: None,
                     timeout: 1.0,
@@ -6277,7 +6349,7 @@ mod tests {
                     supervised_status: None,
                 },
                 IsolationLaunchContext {
-                    project_path: &lower,
+                    project_path: &project,
                     project_authority: IsolationProjectAuthority::RuntimeWorkspace,
                     filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
@@ -6298,7 +6370,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             compiled.cwd.as_deref(),
-            Some(lower.to_string_lossy().as_ref())
+            Some(project.to_string_lossy().as_ref())
         );
         assert!(lillux::run(compiled).success);
 

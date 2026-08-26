@@ -1199,7 +1199,7 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
     let worker_id = "worker-hosted-root-replay";
     let profile_id = "P-hosted-root-replay";
     let capsule_hash = "a".repeat(64);
-    let lower_snapshot = "b".repeat(64);
+    let base_snapshot = "b".repeat(64);
     let request_digest = "c".repeat(64);
     let observation_digest = "d".repeat(64);
 
@@ -1222,7 +1222,7 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
         .state_store
         .reserve_execution_workspace(
             workspace_id,
-            &lower_snapshot,
+            &base_snapshot,
             workspace_root.to_str().unwrap(),
         )
         .unwrap();

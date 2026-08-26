@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:29Z:e7acddc6cafb3edad95b7044339ac4b9258ee9024b89a382a2ec498ee5727775:Mzf4/wOnRGC0fOAAPIzGzHCHzHuXDC2scZMKVxJzAw3R1yjHGp8LmKvwlKnBmJ/HgLuj14nQd91rJN2HFgHWAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-26T05:13:58Z:fe39bd5dc156a1e13e02c89685d4c0d7303ad7cf8391c170f98f2abb28c8d683:Hn0X/TCgcsjNFDENA+ImSQn7gW/iXsmbbS9INXCC3tmy+MAmm8bXgQZEHFewjMO3EigRC45bco6rQKai06ZYCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, state, cas, sqlite, vault, locks, ownership]
@@ -51,7 +51,12 @@ The daemon must not write user trust docs or regenerate the node key.
 - `.ai/node/vault/` — vault key material.
 - `.ai/node/bundles/` — signed bundle registrations.
 - `.ai/node/ingest/ignore.yaml` — ingest-ignore rules.
-- `.ai/state/runtime.sqlite3` — thread, event, and projection database.
+- `.ai/state/runtime.sqlite3` — exact-current execution/session state and the
+  live credential-profile lease projection.
+- `.ai/state/operational.sqlite3` — retained source-of-truth operational state,
+  including provider-neutral credential-profile lifecycle authority.
+- `.ai/state/private-artifact-homes/` — daemon-owned opaque workload homes;
+  credential bytes remain here and are never copied into profile metadata.
 - `.ai/state/scheduler.sqlite3` — scheduler database.
 - `.ai/state/objects/` and `.ai/state/refs/` — CAS.
 - `.ai/state/cache/executions/` — request-owned pushed-head and no-project

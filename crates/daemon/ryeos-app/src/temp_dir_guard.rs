@@ -5,7 +5,7 @@
 //!
 //! | Owner | What it holds |
 //! |---|---|
-//! | Engine user-overlay cache | `Arc<TempDirGuard>` for its shared overlay |
+//! | Engine derived-project cache | `Arc<TempDirGuard>` for its shared generation |
 //! | Admitted request binding | `Arc<TempDirGuard>` for its active checkout |
 //! | Request runner | `Arc<TempDirGuard>` for project checkout |
 //! | Callback token lifeline | `Arc<TempDirGuard>` (callback workstream) |
@@ -19,6 +19,7 @@
 //! the dir. Disarm is rare; the common path is just Drop.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 struct PinnedRemoval {
@@ -33,8 +34,8 @@ pub struct TempDirGuard {
     inner: Mutex<Option<PathBuf>>,
     effective_path: PathBuf,
     leases: Mutex<Vec<std::fs::File>>,
-    explicit_cleanup: bool,
-    remove_on_drop: bool,
+    explicit_cleanup: AtomicBool,
+    remove_on_drop: AtomicBool,
     owns_removal: bool,
     pinned_removal: Option<PinnedRemoval>,
 }
@@ -45,8 +46,8 @@ impl TempDirGuard {
             inner: Mutex::new(Some(path.clone())),
             effective_path: path,
             leases: Mutex::new(Vec::new()),
-            explicit_cleanup: false,
-            remove_on_drop: true,
+            explicit_cleanup: AtomicBool::new(false),
+            remove_on_drop: AtomicBool::new(true),
             owns_removal: true,
             pinned_removal: None,
         }
@@ -66,8 +67,8 @@ impl TempDirGuard {
             inner: Mutex::new(Some(path)),
             effective_path,
             leases: Mutex::new(Vec::new()),
-            explicit_cleanup: true,
-            remove_on_drop: false,
+            explicit_cleanup: AtomicBool::new(true),
+            remove_on_drop: AtomicBool::new(false),
             owns_removal: true,
             pinned_removal: None,
         })
@@ -81,8 +82,8 @@ impl TempDirGuard {
             inner: Mutex::new(Some(path.clone())),
             effective_path: path,
             leases: Mutex::new(Vec::new()),
-            explicit_cleanup: false,
-            remove_on_drop: false,
+            explicit_cleanup: AtomicBool::new(false),
+            remove_on_drop: AtomicBool::new(false),
             owns_removal: false,
             pinned_removal: None,
         }
@@ -98,8 +99,8 @@ impl TempDirGuard {
             inner: Mutex::new(Some(path.clone())),
             effective_path: path,
             leases: Mutex::new(Vec::new()),
-            explicit_cleanup: false,
-            remove_on_drop: true,
+            explicit_cleanup: AtomicBool::new(false),
+            remove_on_drop: AtomicBool::new(true),
             owns_removal: true,
             pinned_removal: Some(PinnedRemoval { parent, name, root }),
         }
@@ -108,6 +109,15 @@ impl TempDirGuard {
     /// Retain an exact-generation cache lease for the lifetime of this guard.
     pub fn retain_lease(&self, lease: std::fs::File) {
         self.leases.lock().unwrap().push(lease);
+    }
+
+    /// A durable journal now owns recovery. From this point, Drop preserves
+    /// the directory and only the explicit owner-fenced lifecycle may remove
+    /// it. Before this transition the guard remains an automatic rollback for
+    /// filesystem creation that never reached durable reservation.
+    pub fn preserve_for_explicit_cleanup(&self) {
+        self.explicit_cleanup.store(true, Ordering::Release);
+        self.remove_on_drop.store(false, Ordering::Release);
     }
 
     /// The guarded path, if not yet disarmed.
@@ -174,12 +184,12 @@ impl TempDirGuard {
 impl Drop for TempDirGuard {
     fn drop(&mut self) {
         if let Some(p) = self.inner.lock().unwrap().take() {
-            if self.explicit_cleanup {
+            if self.explicit_cleanup.load(Ordering::Acquire) {
                 tracing::error!(
                     path = %p.display(),
                     "backend workspace guard dropped while still armed; preserving for journal reconciliation"
                 );
-            } else if self.remove_on_drop {
+            } else if self.remove_on_drop.load(Ordering::Acquire) {
                 let removal = if let Some(pinned) = &self.pinned_removal {
                     pinned.root.remove_contents_recursive().and_then(|()| {
                         pinned
@@ -310,11 +320,14 @@ pub fn create_runtime_workspace(
     execution_root.set_mode(0o700)?;
     let name = std::ffi::OsString::from(workspace_name);
     let workspace = execution_root.create_child(&name, 0o700)?;
-    for child in ["project", "upper", "work"] {
-        workspace.create_child(std::ffi::OsStr::new(child), 0o700)?;
-    }
+    workspace.create_child(
+        std::ffi::OsStr::new(ryeos_engine::execution_workspace::PROJECT_DIR),
+        0o700,
+    )?;
     workspace.sync()?;
-    let project = workspace.path().join("project");
+    let project = workspace
+        .path()
+        .join(ryeos_engine::execution_workspace::PROJECT_DIR);
     let guard = Arc::new(TempDirGuard::new_pinned(execution_root, name, workspace));
     Ok((project, guard))
 }
@@ -359,10 +372,27 @@ mod tests {
         let (project, guard) = create_runtime_workspace(tmp.path(), "runtime-one").unwrap();
         let root = project.parent().unwrap();
         assert_eq!(root.parent().unwrap(), tmp.path().join("executions"));
-        for child in ["project", "upper", "work"] {
-            assert!(root.join(child).is_dir());
-        }
+        assert!(root.join("project").is_dir());
+        assert!(!root.join("backend-state").exists());
+        assert!(!root.join("upper").exists());
+        assert!(!root.join("work").exists());
         drop(guard);
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn durable_reservation_transfers_drop_to_explicit_reconciliation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (project, guard) = create_runtime_workspace(tmp.path(), "runtime-durable").unwrap();
+        let root = project.parent().unwrap().to_path_buf();
+        guard.preserve_for_explicit_cleanup();
+        drop(guard);
+        assert!(root.is_dir());
+
+        TempDirGuard::new_workspace(root.clone(), project)
+            .unwrap()
+            .remove_now()
+            .unwrap();
         assert!(!root.exists());
     }
 
@@ -370,7 +400,7 @@ mod tests {
     fn workspace_guard_carries_exact_effective_path_authority() {
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("workspace");
-        let effective = root.join("lower");
+        let effective = root.join("project");
         std::fs::create_dir_all(&effective).unwrap();
         let guard = TempDirGuard::new_workspace(root.clone(), effective.clone()).unwrap();
 

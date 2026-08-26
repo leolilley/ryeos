@@ -1180,6 +1180,64 @@ struct Inner {
     signer: Arc<dyn Signer>,
 }
 
+fn operational_credential_profile(
+    profile: &runtime_db::CredentialProfileRecord,
+) -> ryeos_state::OperationalCredentialProfileRecord {
+    ryeos_state::OperationalCredentialProfileRecord {
+        profile_id: profile.profile_id.clone(),
+        owner_principal: profile.owner_principal.clone(),
+        home_id: profile.home_id.clone(),
+        authority_revision: profile.authority_revision,
+        credential_generation: profile.credential_generation,
+        state: profile.state.clone(),
+        active_login_id: profile.active_login_id.clone(),
+        login_epoch: profile.login_epoch,
+        login_expires_at_ms: profile.login_expires_at_ms,
+        sanitized_account: profile.sanitized_account.clone(),
+        created_at_ms: profile.created_at_ms,
+        updated_at_ms: profile.updated_at_ms,
+    }
+}
+
+fn reconcile_credential_profile_authority(
+    state_db: &StateDb,
+    runtime_db: &runtime_db::RuntimeDb,
+) -> Result<()> {
+    let runtime_profiles = runtime_db.credential_profile_projections()?;
+    let mut seen = BTreeSet::new();
+    for runtime_profile in runtime_profiles {
+        seen.insert(runtime_profile.profile_id.clone());
+        let stable = state_db.merge_operational_credential_profile(
+            &operational_credential_profile(&runtime_profile),
+        )?;
+        runtime_db.reconcile_credential_profile_projection(&stable)?;
+    }
+    for stable in state_db.operational_credential_profiles()? {
+        if seen.insert(stable.profile_id.clone()) {
+            runtime_db.reconcile_credential_profile_projection(&stable)?;
+        }
+    }
+    Ok(())
+}
+
+fn persist_credential_profile_authority_locked(inner: &Inner, profile_id: &str) -> Result<()> {
+    let profile = inner
+        .runtime_db
+        .credential_profile_projections()?
+        .into_iter()
+        .find(|profile| profile.profile_id == profile_id)
+        .ok_or_else(|| anyhow!("credential profile projection disappeared before persistence"))?;
+    let stable = inner
+        .state_db
+        .merge_operational_credential_profile(&operational_credential_profile(&profile))?;
+    if stable.authority_revision != profile.authority_revision {
+        anyhow::bail!(
+            "stable credential authority advanced beyond the committed runtime transition"
+        );
+    }
+    Ok(())
+}
+
 /// StateStore guard paired with Lillux's fork-sensitive descriptor lease.
 ///
 /// Authoritative state operations may acquire per-chain flocks beneath the
@@ -3490,6 +3548,8 @@ impl StateStore {
             }
         }
         .map_err(with_execution_schema_cutover_hint)?;
+        reconcile_credential_profile_authority(&state_db, &runtime_db)
+            .context("reconcile stable credential-profile authority")?;
         ensure_current_external_content_bindings(&state_db)?;
         projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
         let state_authority = state_db.pinned_authority()?;
@@ -3914,6 +3974,11 @@ impl StateStore {
         g.runtime_db.dedicated_sessions_in_state(state)
     }
 
+    pub fn reconcile_unattached_credential_profile_locks(&self) -> Result<(usize, usize)> {
+        let g = self.lock()?;
+        g.runtime_db.reconcile_unattached_credential_profile_locks()
+    }
+
     pub fn terminalize_unattached_dedicated_session(
         &self,
         session_id: &str,
@@ -4038,7 +4103,9 @@ impl StateStore {
 
     pub fn create_credential_profile(&self, profile: NewCredentialProfile<'_>) -> Result<()> {
         let g = self.lock()?;
-        g.runtime_db.create_credential_profile(profile)
+        let profile_id = profile.profile_id.to_owned();
+        g.runtime_db.create_credential_profile(profile)?;
+        persist_credential_profile_authority_locked(&g, &profile_id)
     }
 
     pub fn credential_profile(&self, profile_id: &str) -> Result<Option<CredentialProfileRecord>> {
@@ -4071,8 +4138,14 @@ impl StateStore {
         expires_at_ms: i64,
     ) -> Result<u64> {
         let g = self.lock()?;
-        g.runtime_db
-            .begin_credential_enrollment(profile_id, lock_owner, login_id, expires_at_ms)
+        let epoch = g.runtime_db.begin_credential_enrollment(
+            profile_id,
+            lock_owner,
+            login_id,
+            expires_at_ms,
+        )?;
+        persist_credential_profile_authority_locked(&g, profile_id)?;
+        Ok(epoch)
     }
 
     pub fn complete_credential_enrollment(
@@ -4084,13 +4157,15 @@ impl StateStore {
         sanitized_account: &Value,
     ) -> Result<u64> {
         let g = self.lock()?;
-        g.runtime_db.complete_credential_enrollment(
+        let generation = g.runtime_db.complete_credential_enrollment(
             profile_id,
             lock_owner,
             login_id,
             login_epoch,
             sanitized_account,
-        )
+        )?;
+        persist_credential_profile_authority_locked(&g, profile_id)?;
+        Ok(generation)
     }
 
     pub fn observe_session_credential_enrollment(
@@ -4101,12 +4176,19 @@ impl StateStore {
         sanitized_account: &Value,
     ) -> Result<u64> {
         let g = self.lock()?;
-        g.runtime_db.observe_session_credential_enrollment(
+        let login_epoch = g.runtime_db.observe_session_credential_enrollment(
             session_id,
             worker_instance_id,
             worker_boot_epoch,
             sanitized_account,
-        )
+        )?;
+        let profile_id = g
+            .runtime_db
+            .dedicated_session(session_id)?
+            .ok_or_else(|| anyhow!("credential login session disappeared"))?
+            .credential_profile_id;
+        persist_credential_profile_authority_locked(&g, &profile_id)?;
+        Ok(login_epoch)
     }
 
     pub fn confirm_credential_enrollment(
@@ -4117,12 +4199,14 @@ impl StateStore {
         expected_account_digest: &str,
     ) -> Result<u64> {
         let g = self.lock()?;
-        g.runtime_db.confirm_credential_enrollment(
+        let generation = g.runtime_db.confirm_credential_enrollment(
             profile_id,
             owner_principal,
             login_epoch,
             expected_account_digest,
-        )
+        )?;
+        persist_credential_profile_authority_locked(&g, profile_id)?;
+        Ok(generation)
     }
 
     pub fn cancel_credential_enrollment(
@@ -4134,7 +4218,8 @@ impl StateStore {
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db
-            .cancel_credential_enrollment(profile_id, lock_owner, login_id, login_epoch)
+            .cancel_credential_enrollment(profile_id, lock_owner, login_id, login_epoch)?;
+        persist_credential_profile_authority_locked(&g, profile_id)
     }
 
     pub fn revoke_credential_profile(
@@ -4144,8 +4229,13 @@ impl StateStore {
         expected_generation: u64,
     ) -> Result<u64> {
         let g = self.lock()?;
-        g.runtime_db
-            .revoke_credential_profile(profile_id, owner_principal, expected_generation)
+        let generation = g.runtime_db.revoke_credential_profile(
+            profile_id,
+            owner_principal,
+            expected_generation,
+        )?;
+        persist_credential_profile_authority_locked(&g, profile_id)?;
+        Ok(generation)
     }
 
     pub fn finish_credential_profile_revocation(
@@ -4159,7 +4249,8 @@ impl StateStore {
             profile_id,
             owner_principal,
             revoking_generation,
-        )
+        )?;
+        persist_credential_profile_authority_locked(&g, profile_id)
     }
 
     pub fn begin_credential_profile_deletion(
@@ -4169,11 +4260,13 @@ impl StateStore {
         expected_generation: u64,
     ) -> Result<u64> {
         let g = self.lock()?;
-        g.runtime_db.begin_credential_profile_deletion(
+        let generation = g.runtime_db.begin_credential_profile_deletion(
             profile_id,
             owner_principal,
             expected_generation,
-        )
+        )?;
+        persist_credential_profile_authority_locked(&g, profile_id)?;
+        Ok(generation)
     }
 
     pub fn finish_credential_profile_deletion(
@@ -4187,7 +4280,8 @@ impl StateStore {
             profile_id,
             owner_principal,
             deleting_generation,
-        )
+        )?;
+        persist_credential_profile_authority_locked(&g, profile_id)
     }
 
     pub fn reserve_dedicated_session_command(
@@ -9774,7 +9868,7 @@ impl StateStore {
         // every non-closed journal generation as an operational GC root until
         // verified backend cleanup closes the record.
         for workspace in g.runtime_db.open_workspaces()? {
-            roots.insert(workspace.lower_snapshot);
+            roots.insert(workspace.base_snapshot);
             if let Some(frozen) = workspace.frozen_snapshot_hash {
                 roots.insert(frozen);
             }
@@ -10639,13 +10733,13 @@ impl StateStore {
     pub fn reserve_execution_workspace(
         &self,
         workspace_id: &str,
-        lower_snapshot: &str,
+        base_snapshot: &str,
         root_path: &str,
     ) -> Result<()> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         g.runtime_db
-            .reserve_workspace(workspace_id, lower_snapshot, root_path)
+            .reserve_workspace(workspace_id, base_snapshot, root_path)
     }
 
     pub fn bind_execution_workspace(
@@ -12398,6 +12492,70 @@ mod tests {
             Arc::new(head_trust),
         )
         .expect("state store")
+    }
+
+    #[test]
+    fn credential_authority_reconciles_a_runtime_commit_gap_on_reopen() {
+        let tmp = tempdir().expect("tempdir").keep();
+        let runtime_state_dir = tmp.join(".ai/state");
+        let identity = crate::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+            .expect("test node identity");
+        let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
+        let mut trust = ryeos_state::refs::TrustStore::new();
+        trust.insert(
+            identity.fingerprint().to_string(),
+            *identity.verifying_key(),
+        );
+        let trust = Arc::new(trust);
+        let open = || {
+            StateStore::new_with_head_trust(
+                tmp.clone(),
+                runtime_state_dir.clone(),
+                runtime_state_dir.join("runtime.sqlite3"),
+                Arc::clone(&signer),
+                WriteBarrier::new(),
+                Arc::clone(&trust),
+            )
+            .expect("state store")
+        };
+
+        let store = open();
+        store
+            .create_credential_profile(NewCredentialProfile {
+                profile_id: "profile-gap",
+                owner_principal: "fp:operator",
+                home_id: "credential-gap",
+            })
+            .unwrap();
+        store
+            .acquire_credential_profile("profile-gap", "fp:operator", "login-gap")
+            .unwrap();
+        {
+            // Deliberately stop after RuntimeDb's durable transition, before
+            // StateStore folds the higher revision into OperationalDb.
+            let guard = store.lock().unwrap();
+            guard
+                .runtime_db
+                .begin_credential_enrollment(
+                    "profile-gap",
+                    "login-gap",
+                    "ceremony-gap",
+                    lillux::time::timestamp_millis() as i64 + 60_000,
+                )
+                .unwrap();
+        }
+        drop(store);
+
+        let reopened = open();
+        let profile = reopened.credential_profile("profile-gap").unwrap().unwrap();
+        assert_eq!(profile.state, "enrolling");
+        assert_eq!(profile.authority_revision, 2);
+        let stable = reopened
+            .with_state_db(|db| db.operational_credential_profiles())
+            .unwrap();
+        assert_eq!(stable.len(), 1);
+        assert_eq!(stable[0].authority_revision, 2);
+        assert_eq!(stable[0].state, "enrolling");
     }
 
     #[test]

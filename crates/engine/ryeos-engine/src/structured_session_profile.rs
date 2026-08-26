@@ -107,7 +107,12 @@ pub fn compile(
                 "result_retention",
                 "ceremony",
             ],
-            &["audience", "session_binding", "forbidden_fields"],
+            &[
+                "audience",
+                "session_binding",
+                "forbidden_fields",
+                "post_success_routes",
+            ],
         )?;
         let id = value_string(route, "id")?;
         let method = value_string(route, "method")?;
@@ -191,6 +196,9 @@ pub fn compile(
         if route.contains_key("forbidden_fields") {
             validate_string_array(route, "forbidden_fields", 32, false)?;
         }
+        if route.contains_key("post_success_routes") {
+            validate_string_array(route, "post_success_routes", 8, false)?;
+        }
         for field in [
             "workspace_fields",
             "forbidden_non_null_fields",
@@ -250,6 +258,71 @@ pub fn compile(
                 bail!("structured-session route set is not a sorted admitted subset");
             }
             previous = Some(route);
+        }
+    }
+    for route in routes {
+        let route = route
+            .as_object()
+            .expect("route objects were validated above");
+        let route_id = value_string(route, "id")?;
+        let post_routes = route
+            .get("post_success_routes")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|value| {
+                value.as_str().ok_or_else(|| {
+                    anyhow!("structured-session post-success route must be a string")
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for post_route_id in &post_routes {
+            if *post_route_id == route_id {
+                bail!("structured-session post-success route graph contains a self-cycle");
+            }
+            let post_route = routes
+                .iter()
+                .filter_map(Value::as_object)
+                .find(|candidate| {
+                    candidate.get("id").and_then(Value::as_str) == Some(*post_route_id)
+                })
+                .ok_or_else(|| anyhow!("structured-session post-success route is absent"))?;
+            let post_binding = post_route.get("session_binding").and_then(Value::as_object);
+            if post_route.get("audience").and_then(Value::as_str) != Some("runtime")
+                || post_binding
+                    .and_then(|binding| binding.get("action"))
+                    .and_then(Value::as_str)
+                    != Some("require")
+                || post_route
+                    .get("post_success_routes")
+                    .and_then(Value::as_array)
+                    .is_some_and(|routes| !routes.is_empty())
+                || post_route
+                    .get("observations")
+                    .and_then(Value::as_array)
+                    .is_none_or(|observations| !observations.is_empty())
+                || post_route
+                    .get("ceremony")
+                    .is_some_and(|value| !value.is_null())
+                || post_route.get("result_retention").and_then(Value::as_str) != Some("ephemeral")
+            {
+                bail!(
+                    "structured-session post-success route is not an inert runtime-only binding operation"
+                );
+            }
+        }
+        for selected in route_sets.values().filter_map(Value::as_array) {
+            if selected
+                .iter()
+                .any(|candidate| candidate.as_str() == Some(route_id))
+                && post_routes.iter().any(|post_route| {
+                    !selected
+                        .iter()
+                        .any(|candidate| candidate.as_str() == Some(*post_route))
+                })
+            {
+                bail!("structured-session post-success route escapes its source route set");
+            }
         }
     }
 
@@ -947,6 +1020,35 @@ mod tests {
             serde_json::from_slice(&fixture_profile("document.inspect", "document/read")).unwrap();
         profile["initialization"][0]["notification"] = json!("initialized");
         assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
+    }
+
+    #[test]
+    fn post_success_route_is_frozen_as_inert_runtime_policy() {
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("session.start", "thread/start")).unwrap();
+        let mut persist = profile["routes"][0].clone();
+        persist["id"] = json!("session.persist");
+        persist["method"] = json!("thread/name/set");
+        persist["audience"] = json!("runtime");
+        persist["session_binding"] = json!({
+            "action":"require",
+            "request_field":"threadId",
+            "response_pointer":null
+        });
+        profile["routes"][0]["post_success_routes"] = json!(["session.persist"]);
+        profile["routes"].as_array_mut().unwrap().push(persist);
+        profile["route_sets"]["default"] = json!(["session.persist", "session.start"]);
+
+        compile(&serde_json::to_vec(&profile).unwrap(), &schemas())
+            .expect("an inert runtime-only post-success route must be admitted");
+
+        profile["routes"][1]["audience"] = json!("public");
+        let error = compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("post-success route is not an inert runtime-only binding operation")
+        );
     }
 
     #[test]

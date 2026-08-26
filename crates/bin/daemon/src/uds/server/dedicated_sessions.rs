@@ -40,6 +40,122 @@ fn bounded_worker_failure_reason(prefix: &str, detail: &str) -> String {
     format!("{prefix}{detail}").trim().to_owned()
 }
 
+/// Complete the explicit failed-start state machine without replacing the
+/// initiating worker error. Any secondary failure leaves cleanup unproved and
+/// therefore keeps the credential fence in place.
+fn settle_failed_dedicated_worker_start(
+    state: &AppState,
+    session_id: &str,
+    worker_instance_id: &str,
+    boot_epoch: u64,
+    reason: &str,
+    cleanup_was_proved_before_attachment: bool,
+) -> Result<()> {
+    let mut failures = Vec::new();
+    let mut cleanup_proved = cleanup_was_proved_before_attachment;
+    match state.state_store.worker_process(worker_instance_id) {
+        Ok(Some(worker)) => {
+            match ryeos_app::dedicated_session_service::retire_worker_process(
+                state, session_id, &worker,
+            ) {
+                Ok(cleanup_state) => {
+                    cleanup_proved = cleanup_state == "reaped";
+                    if let Err(error) = state.state_store.settle_worker_process(
+                        worker_instance_id,
+                        session_id,
+                        boot_epoch,
+                        cleanup_state,
+                        reason,
+                    ) {
+                        cleanup_proved = false;
+                        failures.push(format!("persist worker cleanup: {error:#}"));
+                    }
+                }
+                Err(error) => {
+                    cleanup_proved = false;
+                    failures.push(format!("retire failed worker: {error:#}"));
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            cleanup_proved = false;
+            failures.push(format!("read failed-worker identity: {error:#}"));
+        }
+    }
+    if let Err(error) = state.state_store.fail_dedicated_session_start(
+        session_id,
+        worker_instance_id,
+        reason,
+        cleanup_proved,
+    ) {
+        failures.push(format!(
+            "persist dedicated-session start failure: {error:#}"
+        ));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!("{}", failures.join("; "))
+    }
+}
+
+fn settle_observation_sink_install_failure(
+    state: &AppState,
+    session_id: &str,
+    worker_instance_id: &str,
+    boot_epoch: u64,
+    reason: &str,
+) -> Result<()> {
+    let worker = state
+        .state_store
+        .worker_process(worker_instance_id)?
+        .ok_or_else(|| anyhow!("observation-sink failure lost its worker identity"))?;
+    let cleanup_state =
+        ryeos_app::dedicated_session_service::retire_worker_process(state, session_id, &worker)?;
+    if cleanup_state == "reaped" {
+        state.state_store.settle_worker_process(
+            worker_instance_id,
+            session_id,
+            boot_epoch,
+            cleanup_state,
+            reason,
+        )?;
+        state.state_store.terminalize_dedicated_session(
+            session_id,
+            worker_instance_id,
+            boot_epoch,
+            "cancelled",
+        )?;
+        Ok(())
+    } else {
+        state.state_store.fence_abandoned_worker_process(
+            worker_instance_id,
+            session_id,
+            boot_epoch,
+            cleanup_state,
+        )?;
+        bail!("worker cleanup remains {cleanup_state}; credential profile is fenced")
+    }
+}
+
+fn release_credential_after_unadmitted_start(
+    state: &AppState,
+    profile_id: &str,
+    worker_instance_id: &str,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    match state
+        .state_store
+        .release_credential_profile(profile_id, worker_instance_id)
+    {
+        Ok(()) => error,
+        Err(release) => error.context(format!(
+            "release credential profile after failed worker admission also failed: {release:#}"
+        )),
+    }
+}
+
 fn require_start_authority(state: &AppState, cap: &CallbackCapability) -> Result<()> {
     state
         .authorizer
@@ -247,7 +363,7 @@ fn create_dedicated_runtime_workspace(
     thread_id: &str,
     launch_owner: &str,
 ) -> Result<WorkspaceRecord> {
-    let lower_snapshot = lillux::cas::sha256_hex(&[]);
+    let base_snapshot = lillux::cas::sha256_hex(&[]);
     let (project, guard) = ryeos_app::temp_dir_guard::create_runtime_workspace(
         &state.config.runtime_root().cache(),
         workspace_id,
@@ -259,10 +375,11 @@ fn create_dedicated_runtime_workspace(
         ryeos_executor::execution::workspace::WorkspaceLayout::from_root(root.to_path_buf());
     state.state_store.reserve_execution_workspace(
         workspace_id,
-        &lower_snapshot,
+        &base_snapshot,
         root.to_str()
             .ok_or_else(|| anyhow!("runtime workspace path is not UTF-8"))?,
     )?;
+    guard.preserve_for_explicit_cleanup();
     state.state_store.transition_execution_workspace(
         workspace_id,
         &[WorkspaceState::Reserved],
@@ -291,10 +408,8 @@ fn create_dedicated_runtime_workspace(
             operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create,
             workspace_id,
             launch_owner,
-            lower_snapshot: &lower_snapshot,
-            lower_path: &layout.lower,
-            upper_path: &layout.upper,
-            work_path: &layout.work,
+            base_snapshot: &base_snapshot,
+            project_path: &layout.project,
         })
         .map_err(|error| anyhow!(error.to_string()))?;
     let pinned = lillux::canonical_json(&serde_json::to_value(&created.pinned_root_identities)?)?;
@@ -568,7 +683,7 @@ pub(super) async fn start(
     }
     let workspace_root = PathBuf::from(&workspace.root_path);
     let workspace_path =
-        ryeos_executor::execution::workspace::WorkspaceLayout::from_root(workspace_root).lower;
+        ryeos_executor::execution::workspace::WorkspaceLayout::from_root(workspace_root).project;
     if !workspace_path.is_absolute() {
         bail!("dedicated-session workspace path is not absolute");
     }
@@ -582,17 +697,22 @@ pub(super) async fn start(
         request.recover_upstream_session,
     )?;
     let worker_instance_id = ryeos_app::thread_lifecycle::new_thread_id();
-    let credential_generation = state.state_store.acquire_credential_profile(
-        &request.credential_profile_id,
-        owner,
-        &worker_instance_id,
-    )?;
+    let credential_generation = profile.credential_generation;
+    if recovering {
+        state.state_store.acquire_credential_profile(
+            &request.credential_profile_id,
+            owner,
+            &worker_instance_id,
+        )?;
+    }
     if recovering && profile.state == "enrolling" {
         let Some(login_id) = profile.active_login_id.as_deref() else {
-            let _ = state
-                .state_store
-                .release_credential_profile(&request.credential_profile_id, &worker_instance_id);
-            bail!("recovering enrollment has no active login identity");
+            return Err(release_credential_after_unadmitted_start(
+                state,
+                &request.credential_profile_id,
+                &worker_instance_id,
+                anyhow!("recovering enrollment has no active login identity"),
+            ));
         };
         if let Err(error) = state.state_store.cancel_credential_enrollment(
             &request.credential_profile_id,
@@ -600,10 +720,12 @@ pub(super) async fn start(
             login_id,
             profile.login_epoch,
         ) {
-            let _ = state
-                .state_store
-                .release_credential_profile(&request.credential_profile_id, &worker_instance_id);
-            return Err(error.context("abandon enrollment bound to the dead worker epoch"));
+            return Err(release_credential_after_unadmitted_start(
+                state,
+                &request.credential_profile_id,
+                &worker_instance_id,
+                error.context("abandon enrollment bound to the dead worker epoch"),
+            ));
         }
     }
     let profile_home = ryeos_app::private_artifact_home::home_path(
@@ -640,11 +762,17 @@ pub(super) async fn start(
     };
     let boot_epoch = match admitted_epoch {
         Ok(epoch) => epoch,
+        // Fresh admission acquires the credential lock in the same SQLite
+        // transaction as the session row, so a failed transaction leaves no
+        // lock for this path to release.
+        Err(error) if !recovering => return Err(error),
         Err(error) => {
-            let _ = state
-                .state_store
-                .release_credential_profile(&request.credential_profile_id, &worker_instance_id);
-            return Err(error);
+            return Err(release_credential_after_unadmitted_start(
+                state,
+                &request.credential_profile_id,
+                &worker_instance_id,
+                error,
+            ));
         }
     };
 
@@ -706,33 +834,25 @@ pub(super) async fn start(
     if let Err(error) = started {
         let detail = format!("{error:#}");
         let reason = bounded_worker_failure_reason("dedicated worker start failed: ", &detail);
-        let mut cleanup_proved = error
+        let cleanup_was_proved_before_attachment = error
             .downcast_ref::<
                 ryeos_executor::execution::persistent_session::ExclusiveWorkerCleanupUnproved,
             >()
             .is_none();
-        if let Some(worker) = state.state_store.worker_process(&worker_instance_id)? {
-            let cleanup_state = ryeos_app::dedicated_session_service::retire_worker_process(
-                state,
-                &request.thread_id,
-                &worker,
-            )?;
-            cleanup_proved = cleanup_state == "reaped";
-            state.state_store.settle_worker_process(
-                &worker_instance_id,
-                &request.thread_id,
-                boot_epoch,
-                cleanup_state,
-                &reason,
-            )?;
-        }
-        state.state_store.fail_dedicated_session_start(
+        let settlement = settle_failed_dedicated_worker_start(
+            state,
             &request.thread_id,
             &worker_instance_id,
+            boot_epoch,
             &reason,
-            cleanup_proved,
-        )?;
-        return Err(anyhow!(reason));
+            cleanup_was_proved_before_attachment,
+        );
+        return match settlement {
+            Ok(()) => Err(anyhow!(reason)),
+            Err(settlement) => Err(anyhow!(
+                "{reason}; explicit failed-start settlement also failed: {settlement:#}"
+            )),
+        };
     }
     let observation_state = state.clone();
     let observation_session_id = request.thread_id.clone();
@@ -747,46 +867,21 @@ pub(super) async fn start(
             )
         })
     {
-        let worker = state
-            .state_store
-            .worker_process(&worker_instance_id)?
-            .ok_or_else(|| anyhow!("observation-sink failure lost its worker identity"))?;
-        let cleanup_state = ryeos_app::dedicated_session_service::retire_worker_process(
-            state,
-            &request.thread_id,
-            &worker,
-        )?;
         let detail = format!("{error:#}");
         let reason = bounded_worker_failure_reason("install worker observation sink: ", &detail);
-        match cleanup_state {
-            "reaped" => {
-                state.state_store.settle_worker_process(
-                    &worker_instance_id,
-                    &request.thread_id,
-                    boot_epoch,
-                    "reaped",
-                    &reason,
-                )?;
-                state.state_store.terminalize_dedicated_session(
-                    &request.thread_id,
-                    &worker_instance_id,
-                    boot_epoch,
-                    "cancelled",
-                )?;
-            }
-            _ => {
-                state.state_store.fence_abandoned_worker_process(
-                    &worker_instance_id,
-                    &request.thread_id,
-                    boot_epoch,
-                    "unproved",
-                )?;
-                return Err(anyhow!(
-                    "{reason}; worker cleanup could not be proved and the credential profile remains fenced"
-                ));
-            }
-        }
-        return Err(anyhow!(reason));
+        let settlement = settle_observation_sink_install_failure(
+            state,
+            &request.thread_id,
+            &worker_instance_id,
+            boot_epoch,
+            &reason,
+        );
+        return match settlement {
+            Ok(()) => Err(anyhow!(reason)),
+            Err(settlement) => Err(anyhow!(
+                "{reason}; explicit observation-sink failure settlement also failed: {settlement:#}"
+            )),
+        };
     }
     let session = state
         .state_store

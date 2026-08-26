@@ -6383,6 +6383,15 @@ async fn run_claimed_thread_row_inner(
 
     if !state.state_store.process_attachment_admission_is_open() {
         let _ = state.state_store.reset_resume_attempts(&thread_id);
+        // Clean shutdown deliberately retains the exact unpublished managed
+        // workspace for claim-fenced recovery.  The runtime wait has already
+        // compare-cleared its process attachment, so disarm the in-memory
+        // deletion alarm before returning ownership to the durable workspace
+        // journal.  Leaving it armed reports an expected handoff as a leaked
+        // guard even though deletion would be incorrect here.
+        if let Some(workspace) = provenance.workspace_lifeline().as_ref() {
+            workspace.disarm();
+        }
         return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
             "managed runtime interrupted by daemon shutdown; row preserved for recovery"
         )));
@@ -8204,6 +8213,7 @@ pub fn prepare_and_spawn_existing_native_resume_recovery(
         if !ryeos_app::recovery_execution_gate::wait_if_armed().await {
             return;
         }
+        let launch_state = state.clone();
         match launch_existing_native_resume_with_claim(state, &thread_id, Some(claim)).await {
             Ok(SuccessorLaunchOutcome::Launched(_)) => {}
             Ok(SuccessorLaunchOutcome::Skipped(reason)) => tracing::debug!(
@@ -8211,6 +8221,17 @@ pub fn prepare_and_spawn_existing_native_resume_recovery(
                 reason,
                 "prepared managed native resume skipped"
             ),
+            Err(error)
+                if !launch_state
+                    .state_store
+                    .process_attachment_admission_is_open() =>
+            {
+                tracing::info!(
+                    thread_id = %thread_id,
+                    error = %error,
+                    "prepared managed native resume interrupted by daemon shutdown; row retained"
+                )
+            }
             Err(error) => tracing::error!(
                 thread_id = %thread_id,
                 error = %error,

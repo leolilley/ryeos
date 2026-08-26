@@ -7,6 +7,7 @@ pub mod dispatch;
 pub mod effective_validators;
 pub mod engine;
 pub mod error;
+pub mod execution_workspace;
 pub mod handlers;
 pub mod history_policy;
 pub mod hooks;
