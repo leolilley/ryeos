@@ -235,7 +235,11 @@ pub async fn import_admitted_root(
     let closure = client
         .objects_closure_get(std::slice::from_ref(&req.subject_hash), req.closure_options)
         .await?;
-    let mut payload = closure_response_to_payload(&req.subject_hash, &closure.entries)?;
+    let mut payload = closure_response_to_export_payload(
+        &format!("remote-admission:{}", req.subject_hash),
+        &req.subject_hash,
+        &closure.entries,
+    )?;
     if !payload
         .entries
         .iter()
@@ -394,10 +398,24 @@ pub fn verify_remote_attestation_record(
     Ok(attestation)
 }
 
-fn closure_response_to_payload(
-    subject_hash: &str,
+/// Convert one already shape-validated remote closure response into RyeOS's
+/// ordinary sync payload while retaining the caller's exact chain coordinate.
+///
+/// This helper is deliberately authority-neutral: it verifies every encoded
+/// entry digest, but it does not publish a head or decide whether the named
+/// root is an admission subject, an execution chain, or another typed object.
+/// The importing authority performs that decision after staging.
+pub fn closure_response_to_export_payload(
+    chain_root_id: &str,
+    chain_head_hash: &str,
     entries: &[crate::remote::client::CasEntry],
 ) -> Result<ExportPayload> {
+    if chain_root_id.trim().is_empty() {
+        anyhow::bail!("remote closure sync payload requires a chain root id");
+    }
+    if !is_canonical_hash(chain_head_hash) {
+        anyhow::bail!("remote closure sync payload has an invalid chain head hash");
+    }
     let mut sync_entries = Vec::with_capacity(entries.len());
     let mut total_bytes = 0usize;
     for entry in entries {
@@ -452,8 +470,8 @@ fn closure_response_to_payload(
         }
     }
     Ok(ExportPayload {
-        chain_root_id: format!("remote-admission:{subject_hash}"),
-        chain_head_hash: subject_hash.to_string(),
+        chain_root_id: chain_root_id.to_owned(),
+        chain_head_hash: chain_head_hash.to_owned(),
         entries: sync_entries,
         total_bytes,
     })
@@ -615,5 +633,53 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn remote_closure_conversion_retains_exact_chain_coordinate() {
+        let value = serde_json::json!({"kind":"fixture","schema":1});
+        let object_bytes = lillux::canonical_json(&value).unwrap().into_bytes();
+        let object_hash = lillux::sha256_hex(&object_bytes);
+        let blob = b"portable-placement-ledger";
+        let blob_hash = lillux::sha256_hex(blob);
+        let payload = closure_response_to_export_payload(
+            "T-chain-root",
+            &object_hash,
+            &[
+                crate::remote::client::CasEntry {
+                    hash: object_hash.clone(),
+                    kind: "object".to_owned(),
+                    data: None,
+                    value: Some(value),
+                },
+                crate::remote::client::CasEntry {
+                    hash: blob_hash.clone(),
+                    kind: "blob".to_owned(),
+                    data: Some(base64::engine::general_purpose::STANDARD.encode(blob)),
+                    value: None,
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(payload.chain_root_id, "T-chain-root");
+        assert_eq!(payload.chain_head_hash, object_hash);
+        assert_eq!(payload.entries.len(), 2);
+        assert_eq!(payload.total_bytes, object_bytes.len() + blob.len());
+    }
+
+    #[test]
+    fn remote_closure_conversion_refuses_corrupt_entries() {
+        let error = closure_response_to_export_payload(
+            "T-chain-root",
+            &"1".repeat(64),
+            &[crate::remote::client::CasEntry {
+                hash: "2".repeat(64),
+                kind: "blob".to_owned(),
+                data: Some(base64::engine::general_purpose::STANDARD.encode(b"wrong")),
+                value: None,
+            }],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("hash mismatch"));
     }
 }

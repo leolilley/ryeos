@@ -248,6 +248,176 @@ pub fn admit_root(
     })
 }
 
+/// Publish a caller-constructed, node-signed admission attestation after
+/// verifying the exact local subject closure. This is the data-driven seam for
+/// policies whose evidence has a typed contract outside the state crate: the
+/// generic admission index stores and exposes the signed object without
+/// interpreting that evidence.
+///
+/// Retrying an identical claim reuses the existing head even if the caller
+/// regenerated `issued_at`; contradictory evidence for the same
+/// subject/policy coordinate is refused.
+pub fn publish_admission_attestation(
+    db: &StateDb,
+    attestation: &Attestation,
+    limits: ObjectClosureLimits,
+    signer: &dyn Signer,
+    cas_mutation_guard: &crate::CasMutationGuard,
+) -> Result<AdmissionResult> {
+    db.ensure_cas_mutation_guard(cas_mutation_guard)?;
+    let cas = db.pinned_cas()?;
+    validate_admission_label("admission policy", &attestation.policy)?;
+    validate_admission_label("admission claim", &attestation.claim)?;
+    if !lillux::valid_hash(&attestation.subject_hash)
+        || attestation
+            .subject_hash
+            .bytes()
+            .any(|byte| byte.is_ascii_uppercase())
+    {
+        anyhow::bail!(
+            "invalid admission subject hash: {}",
+            attestation.subject_hash
+        );
+    }
+    let issuer_key = signer.verifying_key();
+    attestation.verify_with_key(&issuer_key)?;
+    if attestation.issuer_fingerprint()? != signer.fingerprint() {
+        anyhow::bail!("admission attestation was not signed by the publishing node");
+    }
+
+    if let Some(existing) = db.read_generic_head_ref(
+        &format!("admissions/{}", attestation.policy),
+        &attestation.subject_hash,
+    )? {
+        let existing_attestation = read_attestation(&cas, &existing.target_hash)?;
+        existing_attestation.verify_with_key(&issuer_key)?;
+        if existing_attestation.subject_hash != attestation.subject_hash
+            || existing_attestation.policy != attestation.policy
+            || existing_attestation.claim != attestation.claim
+            || existing_attestation.issuer != attestation.issuer
+            || existing_attestation.expires_at != attestation.expires_at
+            || existing_attestation.evidence != attestation.evidence
+        {
+            anyhow::bail!(
+                "existing admission head {} contradicts the requested signed evidence",
+                existing.target_hash
+            );
+        }
+        db.record_admission_attestation(&NewAdmissionAttestationRecord {
+            attestation_hash: existing.target_hash.clone(),
+            subject_hash: existing_attestation.subject_hash.clone(),
+            policy: existing_attestation.policy.clone(),
+            claim: existing_attestation.claim.clone(),
+            issuer: existing_attestation.issuer.clone(),
+            issued_at: existing_attestation.issued_at.clone(),
+            expires_at: existing_attestation.expires_at.clone(),
+            head_ref_path: Some(existing.ref_path.clone()),
+            state: AdmissionAttestationState::Accepted,
+        })?;
+        return Ok(AdmissionResult {
+            subject_hash: attestation.subject_hash.clone(),
+            policy: attestation.policy.clone(),
+            claim: attestation.claim.clone(),
+            attestation_hash: existing.target_hash,
+            reused_existing: true,
+        });
+    }
+
+    let closure = collect_object_closure_with_cas_and_limits(
+        &cas,
+        [attestation.subject_hash.clone()],
+        limits,
+    )
+    .context("failed to collect typed admission closure")?;
+    if !closure.is_complete() {
+        anyhow::bail!(
+            "typed admission closure incomplete: missing_objects={}, missing_blobs={}, malformed_objects={}, unsupported_objects={}",
+            closure.missing_objects.len(),
+            closure.missing_blobs.len(),
+            closure.malformed_objects.len(),
+            closure.unsupported_objects.len()
+        );
+    }
+    verify_closure_content_hashes(&cas, &closure)?;
+
+    let attestation_value = attestation.to_value();
+    let canonical = lillux::canonical_json(&attestation_value)
+        .context("failed to canonicalize typed admission attestation")?;
+    let attestation_hash = lillux::sha256_hex(canonical.as_bytes());
+    let stored = cas.put_object(&attestation_value)?;
+    if stored.hash != attestation_hash {
+        anyhow::bail!("typed admission attestation CAS digest changed");
+    }
+    let source_principal = Some(format!("fp:{}", signer.fingerprint()));
+    for hash in &closure.object_hashes {
+        let object = cas
+            .get_object(hash)?
+            .ok_or_else(|| anyhow::anyhow!("admitted object {hash} is missing"))?;
+        db.record_cas_entry(&NewCasEntryAttribution {
+            hash: hash.clone(),
+            entry_kind: CasEntryKind::Object,
+            bytes: u64::try_from(lillux::canonical_json(&object)?.len())?,
+            source_principal: source_principal.clone(),
+            source_peer: None,
+            job_id: None,
+            state: CasEntryState::Accepted,
+        })?;
+    }
+    for hash in &closure.blob_hashes {
+        let blob = cas
+            .get_blob(hash)?
+            .ok_or_else(|| anyhow::anyhow!("admitted blob {hash} is missing"))?;
+        db.record_cas_entry(&NewCasEntryAttribution {
+            hash: hash.clone(),
+            entry_kind: CasEntryKind::Blob,
+            bytes: u64::try_from(blob.len())?,
+            source_principal: source_principal.clone(),
+            source_peer: None,
+            job_id: None,
+            state: CasEntryState::Accepted,
+        })?;
+    }
+    db.record_cas_entry(&NewCasEntryAttribution {
+        hash: attestation_hash.clone(),
+        entry_kind: CasEntryKind::Object,
+        bytes: u64::try_from(canonical.len())?,
+        source_principal,
+        source_peer: None,
+        job_id: None,
+        state: CasEntryState::Local,
+    })?;
+    db.advance_generic_head_ref(
+        &format!("admissions/{}", attestation.policy),
+        &attestation.subject_hash,
+        &attestation_hash,
+        None,
+        signer,
+        cas_mutation_guard,
+    )?;
+    db.record_admission_attestation(&NewAdmissionAttestationRecord {
+        attestation_hash: attestation_hash.clone(),
+        subject_hash: attestation.subject_hash.clone(),
+        policy: attestation.policy.clone(),
+        claim: attestation.claim.clone(),
+        issuer: attestation.issuer.clone(),
+        issued_at: attestation.issued_at.clone(),
+        expires_at: attestation.expires_at.clone(),
+        head_ref_path: Some(format!(
+            "admissions/{}/{}/head",
+            attestation.policy, attestation.subject_hash
+        )),
+        state: AdmissionAttestationState::Accepted,
+    })?;
+
+    Ok(AdmissionResult {
+        subject_hash: attestation.subject_hash.clone(),
+        policy: attestation.policy.clone(),
+        claim: attestation.claim.clone(),
+        attestation_hash,
+        reused_existing: false,
+    })
+}
+
 fn validate_admission_label(field: &str, value: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > 128
@@ -444,5 +614,62 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn typed_attestation_publication_reuses_exact_evidence_and_refuses_conflict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = StateDb::open(tmp.path(), test_trust_store()).unwrap();
+        let guard = db
+            .pinned_authority()
+            .unwrap()
+            .acquire_shared_guard()
+            .unwrap();
+        let signer = TestSigner::default();
+        let subject_hash = write_object(
+            &db,
+            &json!({"kind": "source_manifest", "item_source_hashes": {}}),
+        );
+        let build = |issued_at: &str, evidence: serde_json::Value| {
+            Attestation::unsigned(
+                subject_hash.clone(),
+                "admitted".to_owned(),
+                "worker-placement-v1".to_owned(),
+                issued_at.to_owned(),
+                None,
+                evidence,
+            )
+            .sign(&signer)
+            .unwrap()
+        };
+        let first = publish_admission_attestation(
+            &db,
+            &build("2026-08-27T00:00:00Z", json!({"operation_id":"op"})),
+            ObjectClosureLimits::default(),
+            &signer,
+            &guard,
+        )
+        .unwrap();
+        assert!(!first.reused_existing);
+        let retry = publish_admission_attestation(
+            &db,
+            &build("2026-08-27T00:00:01Z", json!({"operation_id":"op"})),
+            ObjectClosureLimits::default(),
+            &signer,
+            &guard,
+        )
+        .unwrap();
+        assert!(retry.reused_existing);
+        assert_eq!(retry.attestation_hash, first.attestation_hash);
+
+        let conflict = publish_admission_attestation(
+            &db,
+            &build("2026-08-27T00:00:02Z", json!({"operation_id":"different"})),
+            ObjectClosureLimits::default(),
+            &signer,
+            &guard,
+        )
+        .unwrap_err();
+        assert!(conflict.to_string().contains("contradicts"));
     }
 }

@@ -5456,6 +5456,70 @@ impl StateStore {
         g.state_db.create_sync_job(job)
     }
 
+    /// Import one digest-verified sync payload as staged CAS data and create
+    /// the job that roots it before releasing the shared mutation guard. This
+    /// is the generic crash-safe boundary used by remote workflows that must
+    /// inspect a closure before deciding whether it may become authority.
+    pub fn stage_sync_payload_and_create_job(
+        &self,
+        payload: &ryeos_state::sync::ExportPayload,
+        attribution: &ryeos_state::sync::ImportAttribution,
+        job: &ryeos_state::NewSyncJob,
+    ) -> Result<(ryeos_state::sync::ImportResult, ryeos_state::SyncJobRecord)> {
+        if !job
+            .roots
+            .iter()
+            .all(|root| payload.entries.iter().any(|entry| &entry.hash == root))
+        {
+            bail!("sync job roots are not all present in its staged transfer payload");
+        }
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        if let Some(existing) = g.state_db.get_sync_job(&job.job_id)? {
+            if existing.operation_type != job.operation_type
+                || existing.operation != job.operation
+                || existing.roots != job.roots
+                || existing.heads != job.heads
+            {
+                bail!("staged sync job identity is already bound to another operation");
+            }
+            return Ok((ryeos_state::sync::ImportResult::default(), existing));
+        }
+        let import = ryeos_state::sync::import_objects_staged(
+            &g.state_db,
+            payload,
+            attribution,
+            permit.cas_guard(),
+        )?;
+        if import.hash_mismatches != 0 {
+            bail!(
+                "staged sync payload contained {} digest mismatch(es)",
+                import.hash_mismatches
+            );
+        }
+        let job = g.state_db.create_sync_job(job)?;
+        Ok((import, job))
+    }
+
+    /// Publish a prebuilt node-signed admission object through the generic
+    /// admission index while holding the StateStore mutation hierarchy. The
+    /// state layer remains blind to the evidence schema.
+    pub fn publish_admission_attestation(
+        &self,
+        attestation: &ryeos_state::objects::Attestation,
+        limits: ryeos_state::object_closure::ObjectClosureLimits,
+    ) -> Result<ryeos_state::admission::AdmissionResult> {
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        ryeos_state::admission::publish_admission_attestation(
+            &g.state_db,
+            attestation,
+            limits,
+            g.signer.as_ref(),
+            permit.cas_guard(),
+        )
+    }
+
     /// Adopt an exact cross-site continuation head through the ordinary staged
     /// import path, then idempotently materialize its target-local runtime seed.
     /// The head is authoritative; SQLite installation is recoverable and never
