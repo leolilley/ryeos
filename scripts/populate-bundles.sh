@@ -331,6 +331,9 @@ ryeos_term_resume "release build complete"
 # applying `crt-static` to the implicit host graph makes GNU proc-macro dylibs
 # impossible to produce.
 STATIC_RELEASE="$TARGET/$TRIPLE/release"
+ryeos_term_update "building static worker binaries" \
+  "ryeos-session-exec ryeos-structured-session"
+ryeos_term_suspend
 RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
   "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-session-exec
 if readelf -l "$STATIC_RELEASE/ryeos-session-exec" | grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' \
@@ -357,6 +360,7 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET
     fi
   done
 fi
+ryeos_term_resume "static worker build complete"
 
 # ── Guard: no stale sibling binaries under --crates ──────────────────
 # With --crates only the named crates are rebuilt, but staging copies EVERY
