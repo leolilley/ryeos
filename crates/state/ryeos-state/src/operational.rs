@@ -185,6 +185,63 @@ const SYNC_JOB_OPERATION_DDL: &str = r#"
 ALTER TABLE sync_jobs ADD COLUMN operation_json BLOB NOT NULL DEFAULT X'7B7D';
 "#;
 
+// Exact sync-job fragments used to prove and atomically rebuild the one
+// non-additive part of the v5→v6 migration. `ALTER TABLE ADD COLUMN` appends
+// the new column, while fresh v6 stores place the immutable operation beside
+// its type. The migration therefore admits only the exact v5 fragment (or the
+// exact appended-column intermediate produced by the original v6 migrator),
+// then rebuilds the table into the same SQL and column order as `SCHEMA_SQL`.
+const SYNC_JOBS_V5_DDL: &str = r#"
+CREATE TABLE sync_jobs (
+    job_id TEXT PRIMARY KEY,
+    operation_type TEXT NOT NULL,
+    peer TEXT,
+    state TEXT NOT NULL CHECK (state IN ('planned', 'running', 'completed', 'failed', 'retryable', 'cancelled')),
+    phase TEXT NOT NULL,
+    roots_json BLOB NOT NULL,
+    heads_json BLOB NOT NULL,
+    uploaded_hashes_json BLOB NOT NULL,
+    fetched_hashes_json BLOB NOT NULL,
+    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+    max_attempts INTEGER NOT NULL CHECK (max_attempts >= 0),
+    last_error TEXT,
+    result_json BLOB,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT
+);
+
+CREATE INDEX idx_sync_jobs_state ON sync_jobs(state);
+CREATE INDEX idx_sync_jobs_operation_type ON sync_jobs(operation_type);
+CREATE INDEX idx_sync_jobs_peer ON sync_jobs(peer);
+"#;
+
+const SYNC_JOBS_V6_DDL: &str = r#"
+CREATE TABLE sync_jobs (
+    job_id TEXT PRIMARY KEY,
+    operation_type TEXT NOT NULL,
+    operation_json BLOB NOT NULL DEFAULT X'7B7D',
+    peer TEXT,
+    state TEXT NOT NULL CHECK (state IN ('planned', 'running', 'completed', 'failed', 'retryable', 'cancelled')),
+    phase TEXT NOT NULL,
+    roots_json BLOB NOT NULL,
+    heads_json BLOB NOT NULL,
+    uploaded_hashes_json BLOB NOT NULL,
+    fetched_hashes_json BLOB NOT NULL,
+    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+    max_attempts INTEGER NOT NULL CHECK (max_attempts >= 0),
+    last_error TEXT,
+    result_json BLOB,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT
+);
+
+CREATE INDEX idx_sync_jobs_state ON sync_jobs(state);
+CREATE INDEX idx_sync_jobs_operation_type ON sync_jobs(operation_type);
+CREATE INDEX idx_sync_jobs_peer ON sync_jobs(peer);
+"#;
+
 /// Schema-v2 additions, applied verbatim by the v1→v2 forward migration. A
 /// test asserts this block appears verbatim inside `SCHEMA_SQL`, so a
 /// migrated store and a fresh store cannot drift apart.
@@ -1879,6 +1936,152 @@ fn assert_integrity(conn: &Connection, path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct SyncJobSchemaEntry {
+    object_type: String,
+    name: String,
+    table_name: String,
+    sql: Option<String>,
+}
+
+fn sync_job_schema_entries(conn: &Connection) -> Result<Vec<SyncJobSchemaEntry>> {
+    let mut statement = conn.prepare(
+        "SELECT type, name, tbl_name, sql
+           FROM sqlite_master
+          WHERE tbl_name='sync_jobs'
+          ORDER BY type, name",
+    )?;
+    statement
+        .query_map([], |row| {
+            Ok(SyncJobSchemaEntry {
+                object_type: row.get(0)?,
+                name: row.get(1)?,
+                table_name: row.get(2)?,
+                sql: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("read sync-job schema fragment")
+}
+
+fn sync_job_schema_matches(conn: &Connection, reference_ddl: &str) -> Result<bool> {
+    let reference = Connection::open_in_memory().context("open sync-job schema reference")?;
+    reference
+        .execute_batch(reference_ddl)
+        .context("build sync-job schema reference")?;
+    Ok(sync_job_schema_entries(conn)? == sync_job_schema_entries(&reference)?)
+}
+
+fn appended_sync_job_v6_ddl() -> String {
+    format!("{SYNC_JOBS_V5_DDL}\n{SYNC_JOB_OPERATION_DDL}")
+}
+
+fn backfill_legacy_sync_job_operations(conn: &Connection) -> Result<()> {
+    let legacy_jobs = {
+        let mut statement = conn
+            .prepare(
+                "SELECT job_id, operation_type, peer FROM sync_jobs WHERE operation_json = X'7B7D'",
+            )
+            .context("prepare legacy sync-job operation migration")?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (job_id, operation_type, peer) in legacy_jobs {
+        let operation = serde_json::to_vec(&serde_json::json!({
+            "schema": 1,
+            "operation_type": operation_type,
+            "legacy_recovery": true,
+            "peer": peer,
+        }))?;
+        conn.execute(
+            "UPDATE sync_jobs SET operation_json = ? WHERE job_id = ? AND operation_json = X'7B7D'",
+            rusqlite::params![operation, job_id],
+        )
+        .context("retain canonical legacy sync-job operation")?;
+    }
+    Ok(())
+}
+
+/// Convert the exact v5 sync-job fragment, or the exact appended-column
+/// intermediate committed by the original v6 migrator, into the canonical v6
+/// table. Every row is retained. Pre-v6 jobs receive a typed, explicitly
+/// legacy operation envelope; the intermediate repair preserves the envelope
+/// it already wrote. No unknown schema is modified.
+fn migrate_sync_jobs_to_v6(
+    conn: &Connection,
+    path: &Path,
+    appended_column_present: bool,
+) -> Result<()> {
+    let expected = if appended_column_present {
+        appended_sync_job_v6_ddl()
+    } else {
+        SYNC_JOBS_V5_DDL.to_owned()
+    };
+    if !sync_job_schema_matches(conn, &expected)? {
+        anyhow::bail!(
+            "operational sync-job schema is not the exact recognized {} contract in {}; refusing forward migration",
+            if appended_column_present {
+                "v6 appended-column intermediate"
+            } else {
+                "v5 predecessor"
+            },
+            path.display()
+        );
+    }
+
+    let tx = conn
+        .unchecked_transaction()
+        .context("begin operational v5→v6 sync-operation migration")?;
+    if !appended_column_present {
+        tx.execute_batch(SYNC_JOB_OPERATION_DDL)
+            .context("install durable sync-job operation payload")?;
+    }
+
+    // v5 rows predate immutable operation retention. Preserve their exact
+    // existing type and peer as explicitly marked legacy recovery evidence;
+    // never leave an untyped `{}` that a later reconciler could reinterpret as
+    // caller authority. The predicate makes repair of the committed
+    // appended-column intermediate idempotent.
+    backfill_legacy_sync_job_operations(&tx)?;
+
+    tx.execute_batch(
+        "DROP INDEX idx_sync_jobs_state;
+         DROP INDEX idx_sync_jobs_operation_type;
+         DROP INDEX idx_sync_jobs_peer;
+         ALTER TABLE sync_jobs RENAME TO sync_jobs_v6_predecessor;",
+    )
+    .context("retire predecessor sync-job table inside migration transaction")?;
+    tx.execute_batch(SYNC_JOBS_V6_DDL)
+        .context("create canonical durable sync-job table")?;
+    tx.execute_batch(
+        "INSERT INTO sync_jobs (
+             job_id, operation_type, operation_json, peer, state, phase,
+             roots_json, heads_json, uploaded_hashes_json, fetched_hashes_json,
+             attempt_count, max_attempts, last_error, result_json,
+             created_at, updated_at, finished_at
+         )
+         SELECT job_id, operation_type, operation_json, peer, state, phase,
+                roots_json, heads_json, uploaded_hashes_json, fetched_hashes_json,
+                attempt_count, max_attempts, last_error, result_json,
+                created_at, updated_at, finished_at
+           FROM sync_jobs_v6_predecessor;
+         DROP TABLE sync_jobs_v6_predecessor;",
+    )
+    .context("copy predecessor sync jobs into canonical table")?;
+    tx.pragma_update(None, "user_version", OPERATIONAL_SCHEMA_VERSION)
+        .context("stamp operational schema v6")?;
+    tx.commit()
+        .context("commit operational v5→v6 sync-operation migration")?;
+    Ok(())
+}
+
 /// Explicit atomic forward migration for the versioned operational store,
 /// per this store's charter: never reset, never archived, one transaction
 /// per schema step, using the same DDL fresh initialization uses. A store
@@ -1897,7 +2100,17 @@ fn migrate_forward_if_owned(conn: &Connection, path: &Path) -> Result<()> {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .context("read operational schema version before migration")?;
         match stored {
-            v if v >= OPERATIONAL_SCHEMA_VERSION => return Ok(()),
+            v if v > OPERATIONAL_SCHEMA_VERSION => return Ok(()),
+            OPERATIONAL_SCHEMA_VERSION => {
+                if sync_job_schema_matches(conn, &appended_sync_job_v6_ddl())? {
+                    migrate_sync_jobs_to_v6(conn, path, true)?;
+                    tracing::warn!(
+                        path = %path.display(),
+                        "repaired exact operational v6 appended-column intermediate"
+                    );
+                }
+                return Ok(());
+            }
             0 => return Ok(()),
             1 => {
                 let tx = conn
@@ -1958,57 +2171,22 @@ fn migrate_forward_if_owned(conn: &Connection, path: &Path) -> Result<()> {
                 );
             }
             5 => {
-                let tx = conn
-                    .unchecked_transaction()
-                    .context("begin operational v5→v6 sync-operation migration")?;
-                let already_present: i64 = tx
-                    .query_row(
-                        "SELECT COUNT(*) FROM pragma_table_info('sync_jobs') WHERE name = 'operation_json'",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .context("inspect durable sync-job operation column")?;
-                if already_present == 0 {
-                    tx.execute_batch(SYNC_JOB_OPERATION_DDL)
-                        .context("install durable sync-job operation payload")?;
+                if sync_job_schema_matches(conn, SYNC_JOBS_V6_DDL)? {
+                    // A partially staged forward migration may already have
+                    // installed the exact canonical fragment before stamping
+                    // the global version. Complete only its typed legacy-row
+                    // backfill and stamp; unknown variants still fail closed.
+                    let tx = conn
+                        .unchecked_transaction()
+                        .context("finish staged operational v6 sync-operation migration")?;
+                    backfill_legacy_sync_job_operations(&tx)?;
+                    tx.pragma_update(None, "user_version", OPERATIONAL_SCHEMA_VERSION)
+                        .context("stamp operational schema v6")?;
+                    tx.commit()
+                        .context("commit staged operational v6 sync-operation migration")?;
+                } else {
+                    migrate_sync_jobs_to_v6(conn, path, false)?;
                 }
-                // v5 rows predate immutable operation retention. Preserve
-                // their exact existing type and peer as explicitly marked
-                // legacy recovery evidence; never leave an untyped `{}` that
-                // a later reconciler could reinterpret as caller authority.
-                let legacy_jobs = {
-                    let mut statement = tx
-                        .prepare(
-                            "SELECT job_id, operation_type, peer FROM sync_jobs WHERE operation_json = X'7B7D'",
-                        )
-                        .context("prepare legacy sync-job operation migration")?;
-                    statement
-                        .query_map([], |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, String>(1)?,
-                                row.get::<_, Option<String>>(2)?,
-                            ))
-                        })?
-                        .collect::<rusqlite::Result<Vec<_>>>()?
-                };
-                for (job_id, operation_type, peer) in legacy_jobs {
-                    let operation = serde_json::to_vec(&serde_json::json!({
-                        "schema": 1,
-                        "operation_type": operation_type,
-                        "legacy_recovery": true,
-                        "peer": peer,
-                    }))?;
-                    tx.execute(
-                        "UPDATE sync_jobs SET operation_json = ? WHERE job_id = ? AND operation_json = X'7B7D'",
-                        rusqlite::params![operation, job_id],
-                    )
-                    .context("retain canonical legacy sync-job operation")?;
-                }
-                tx.pragma_update(None, "user_version", OPERATIONAL_SCHEMA_VERSION)
-                    .context("stamp operational schema v6")?;
-                tx.commit()
-                    .context("commit operational v5→v6 sync-operation migration")?;
                 tracing::info!(
                     path = %path.display(),
                     "operational schema migrated v5 → v6 (durable sync operations)"
@@ -3678,6 +3856,119 @@ mod tests {
 
     fn namespace(value: &str) -> ReplayIndexNamespace {
         ReplayIndexNamespace::new(value).unwrap()
+    }
+
+    fn rewrite_current_sync_jobs_as_v5(db: &OperationalDb) {
+        let tx = db.conn.unchecked_transaction().unwrap();
+        tx.execute_batch(
+            "DROP INDEX idx_sync_jobs_state;
+             DROP INDEX idx_sync_jobs_operation_type;
+             DROP INDEX idx_sync_jobs_peer;
+             ALTER TABLE sync_jobs RENAME TO sync_jobs_current;",
+        )
+        .unwrap();
+        tx.execute_batch(SYNC_JOBS_V5_DDL).unwrap();
+        tx.execute_batch(
+            "INSERT INTO sync_jobs (
+                 job_id, operation_type, peer, state, phase, roots_json,
+                 heads_json, uploaded_hashes_json, fetched_hashes_json,
+                 attempt_count, max_attempts, last_error, result_json,
+                 created_at, updated_at, finished_at
+             )
+             SELECT job_id, operation_type, peer, state, phase, roots_json,
+                    heads_json, uploaded_hashes_json, fetched_hashes_json,
+                    attempt_count, max_attempts, last_error, result_json,
+                    created_at, updated_at, finished_at
+               FROM sync_jobs_current;
+             DROP TABLE sync_jobs_current;
+             PRAGMA user_version=5;",
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
+    fn create_migration_fixture(db: &OperationalDb) {
+        db.create_sync_job(&NewSyncJob {
+            job_id: "job:predecessor".to_owned(),
+            operation_type: "mirror_pull".to_owned(),
+            operation: serde_json::json!({
+                "schema": 1,
+                "operation_type": "mirror_pull",
+                "modern_only": true,
+            }),
+            peer: Some("node-predecessor".to_owned()),
+            roots: vec!["1".repeat(64)],
+            heads: vec!["2".repeat(64)],
+            max_attempts: 3,
+        })
+        .unwrap();
+        db.merge_credential_profile(&OperationalCredentialProfileRecord {
+            profile_id: "profile-preserved".to_owned(),
+            owner_principal: "fp:operator".to_owned(),
+            home_id: "credential-preserved".to_owned(),
+            authority_revision: 4,
+            credential_generation: 2,
+            state: "active".to_owned(),
+            active_login_id: None,
+            login_epoch: 1,
+            login_expires_at_ms: None,
+            sanitized_account: Some(serde_json::json!({"account_id":"preserved"})),
+            created_at_ms: 1,
+            updated_at_ms: 2,
+        })
+        .unwrap();
+    }
+
+    fn assert_migrated_fixture(db: &OperationalDb) {
+        assert_current(&db.conn, db.path()).unwrap();
+        let job = db.get_sync_job("job:predecessor").unwrap().unwrap();
+        assert_eq!(
+            job.operation,
+            serde_json::json!({
+                "schema": 1,
+                "operation_type": "mirror_pull",
+                "legacy_recovery": true,
+                "peer": "node-predecessor",
+            })
+        );
+        let profile = db.credential_profile("profile-preserved").unwrap().unwrap();
+        assert_eq!(profile.authority_revision, 4);
+        assert_eq!(profile.credential_generation, 2);
+        assert_eq!(profile.state, "active");
+    }
+
+    #[test]
+    fn v5_forward_migration_rebuilds_exact_sync_job_schema_and_preserves_authority() {
+        assert!(SCHEMA_SQL.contains(SYNC_JOBS_V6_DDL));
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        {
+            let db = OperationalDb::open(&path).unwrap();
+            create_migration_fixture(&db);
+            rewrite_current_sync_jobs_as_v5(&db);
+        }
+
+        let db = OperationalDb::open(&path).unwrap();
+        assert_migrated_fixture(&db);
+    }
+
+    #[test]
+    fn v6_appended_column_intermediate_repairs_exactly_and_preserves_authority() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
+        {
+            let db = OperationalDb::open(&path).unwrap();
+            create_migration_fixture(&db);
+            rewrite_current_sync_jobs_as_v5(&db);
+            db.conn.execute_batch(SYNC_JOB_OPERATION_DDL).unwrap();
+            db.conn
+                .pragma_update(None, "user_version", OPERATIONAL_SCHEMA_VERSION)
+                .unwrap();
+            assert!(sync_job_schema_matches(&db.conn, &appended_sync_job_v6_ddl()).unwrap());
+        }
+
+        let db = OperationalDb::open(&path).unwrap();
+        assert_migrated_fixture(&db);
     }
 
     fn publish_verified(

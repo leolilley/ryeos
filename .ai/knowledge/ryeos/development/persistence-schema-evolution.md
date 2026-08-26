@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-08-26T10:41:54Z:decbf3a87f853111eae2283bfe7f5724c70dd75c04c23877073f5929959c863a:YJKX/kJQzZY8Kp/5mdKBoyjHvQbuLAKJVrC4Y8aXLgT/FU72LdX2gvH7rzfElbZXWuSRtAlk/DcDC3h30qqZDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-26T17:18:48Z:a199805f237cebc8df6dc8b68d621d0c15b8c87004a8e2389314dbedeb0b0570:dtk82I6j/wpFQ0LRCTpDnrjKdMIhm4/w6BkWLPFXxB7GU58SFsXfzSWYhT5t9TH3/QL19QXuyvYO+4ZpBw4xAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "persistence-schema-evolution"
 title: "Persistence Schema Evolution"
 description: "Rules for immutable CAS wire identities, retained SQLite migrations, rebuildable projections, and explicit history retirement"
 entry_type: reference
-version: "1.5.0"
+version: "1.6.0"
 ```
 
 # Persistence Schema Evolution
@@ -80,17 +80,29 @@ keeps an unconsumed reservation fenced instead of confusing it with an
 abandoned worker lock. No execution-history reader or migration for epochs 1
 through 14 remains. The
 explicit reset may extract only the provider-neutral credential-profile table
-from epochs 6 through 11; from epoch 12 onward the operational database is the
-stable profile authority and the runtime table is repaired from it. Reset never
-decodes or carries forward execution/thread rows. Earlier history requires the explicit
-retirement ceremony below; normal startup never rewrites it.
+from epochs 6 through 11. From epoch 12 onward OperationalDb is the stable
+profile authority, but the exact revisioned runtime projection is folded into
+it before replacement because a crash between the runtime commit and stable
+commit can leave that projection one authority revision ahead. Only the known
+credential table shape is decoded; reset never decodes or carries forward an
+execution/thread row. A surviving `enrolling` state is invalidated after the
+revision fold because its ceremony history is being retired, and that
+invalidation advances stable authority monotonically. The empty current
+runtime projection is then rebuilt from the validated stable records. Earlier
+history requires the explicit retirement ceremony below; normal startup never
+rewrites it.
 
 `operational.sqlite3` owns stable credential-profile ownership, lifecycle,
 confirmed account evidence, generation, and tombstones in addition to its
 other non-reconstructable records. Its explicit atomic v4-to-v5 forward
 migration creates that authority table; a monotonic profile revision repairs a
 crash gap against RuntimeDb's live session/lease projection. The store must
-never be silently reset or archived.
+never be silently reset or archived. Schema v6 retains each remote sync job's
+immutable typed operation. Its v5-to-v6 migration proves the exact predecessor
+table, gives legacy jobs an explicit non-authoritative recovery envelope, and
+atomically rebuilds the table into the same column order and SQL as a fresh v6
+store. The exact appended-column intermediate produced by the original v6
+migrator is also recognized and repaired; no unknown layout is modified.
 
 ## Rebuildable SQLite projections
 

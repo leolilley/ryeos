@@ -9188,7 +9188,11 @@ impl RuntimeDb {
     /// Extract only the independently versioned credential-profile authority
     /// before an explicitly confirmed execution-history schema replacement.
     /// No thread/placement row is decoded or carried forward. Epochs 6–11 used
-    /// one exact profile table shape; older epochs predate credential profiles.
+    /// the original profile shape. Epochs 12 onward made the table a revisioned
+    /// projection of OperationalDb authority, but that projection must still be
+    /// folded before reset: it can be one committed revision ahead after a
+    /// crash between the runtime and operational commits. Older epochs predate
+    /// credential profiles.
     pub fn credential_profiles_for_explicit_history_reset(
         &self,
         path: &Path,
@@ -9200,10 +9204,13 @@ impl RuntimeDb {
         if epoch < 6 {
             return Ok(Vec::new());
         }
-        if epoch > 11 {
-            bail!("runtime epoch {epoch} has no credential-profile extraction contract");
+        if epoch >= RUNTIME_OPERATOR_SCHEMA_EPOCH {
+            bail!(
+                "runtime epoch {epoch} is not a predecessor of the current credential-profile contract"
+            );
         }
-        let expected = BTreeSet::from([
+        let revisioned = epoch >= 12;
+        let mut expected = BTreeSet::from([
             "profile_id",
             "owner_principal",
             "home_id",
@@ -9220,6 +9227,9 @@ impl RuntimeDb {
         .into_iter()
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
+        if revisioned {
+            expected.insert("authority_revision".to_owned());
+        }
         let actual = {
             let mut statement = self.conn.prepare("PRAGMA table_info(credential_profile)")?;
             statement
@@ -9231,12 +9241,18 @@ impl RuntimeDb {
                 "runtime epoch {epoch} credential-profile table has an unrecognized shape; refusing authority extraction"
             );
         }
-        let mut statement = self.conn.prepare(
+        let authority_revision = if revisioned {
+            "authority_revision"
+        } else {
+            "1"
+        };
+        let mut statement = self.conn.prepare(&format!(
             "SELECT profile_id, owner_principal, home_id, credential_generation, state,
                     active_login_id, login_epoch, login_expires_at_ms,
-                    sanitized_account_json, created_at_ms, updated_at_ms
-               FROM credential_profile ORDER BY profile_id",
-        )?;
+                    sanitized_account_json, created_at_ms, updated_at_ms,
+                    {authority_revision}
+               FROM credential_profile ORDER BY profile_id"
+        ))?;
         let rows = statement
             .query_map([], |row| {
                 Ok((
@@ -9251,6 +9267,7 @@ impl RuntimeDb {
                     row.get::<_, Option<String>>(8)?,
                     row.get::<_, i64>(9)?,
                     row.get::<_, i64>(10)?,
+                    row.get::<_, i64>(11)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -9268,7 +9285,7 @@ impl RuntimeDb {
                 // explicit history reset retires. Preserve its monotonic epoch
                 // but invalidate the incomplete ceremony. Confirming evidence
                 // is caller-visible and independently confirmable, so it stays.
-                if state == "enrolling" {
+                if !revisioned && state == "enrolling" {
                     state = "unauthenticated".to_string();
                     active_login_id = None;
                     login_expires_at_ms = None;
@@ -9278,7 +9295,8 @@ impl RuntimeDb {
                     profile_id: row.0,
                     owner_principal: row.1,
                     home_id: row.2,
-                    authority_revision: 1,
+                    authority_revision: u64::try_from(row.11)
+                        .context("negative predecessor credential authority revision")?,
                     credential_generation: u64::try_from(row.3)?,
                     state,
                     active_login_id,
@@ -17165,6 +17183,49 @@ mod tests {
         assert_eq!(restored.state, "active");
         assert_eq!(restored.credential_generation, 4);
         assert_eq!(restored.authority_revision, 1);
+    }
+
+    #[test]
+    fn explicit_history_reset_extracts_revisioned_predecessor_projection() {
+        for epoch in 12..RUNTIME_OPERATOR_SCHEMA_EPOCH {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join(format!("runtime-{epoch}.db"));
+            let db = RuntimeDb::open(&path).unwrap();
+            db.create_credential_profile(NewCredentialProfile {
+                profile_id: "profile-revisioned",
+                owner_principal: "fp:operator",
+                home_id: "credential-revisioned",
+            })
+            .unwrap();
+            db.conn
+                .execute(
+                    "UPDATE credential_profile
+                        SET state='active', credential_generation=4,
+                            sanitized_account_json=?1, login_epoch=3,
+                            authority_revision=7
+                      WHERE profile_id='profile-revisioned'",
+                    [serde_json::json!({"account_id":"account-revisioned"}).to_string()],
+                )
+                .unwrap();
+            let predecessor_app_id = (RUNTIME_OPERATOR_APP_ID_PREFIX | epoch) as i32;
+            db.conn
+                .pragma_update(None, "application_id", predecessor_app_id)
+                .unwrap();
+            drop(db);
+
+            let reset = RuntimeDb::open_for_explicit_history_reset(&path).unwrap();
+            let extracted = reset
+                .credential_profiles_for_explicit_history_reset(&path)
+                .unwrap();
+            assert_eq!(extracted.len(), 1, "epoch {epoch}");
+            let profile = &extracted[0];
+            assert_eq!(profile.profile_id, "profile-revisioned", "epoch {epoch}");
+            assert_eq!(profile.credential_generation, 4, "epoch {epoch}");
+            assert_eq!(profile.state, "active", "epoch {epoch}");
+            assert_eq!(profile.login_epoch, 3, "epoch {epoch}");
+            assert_eq!(profile.lock_owner, None, "epoch {epoch}");
+            assert_eq!(profile.authority_revision, 7, "epoch {epoch}");
+        }
     }
 
     #[test]
