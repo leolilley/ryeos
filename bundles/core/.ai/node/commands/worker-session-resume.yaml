@@ -1,0 +1,11 @@
+# ryeos:signed:2026-08-26T11:48:47Z:5c1dd49d35354878085a87c30e7789ba1daecc6752285c356710fec5ee9d45ef:AUxGxBAJEe+x/i7nChgBTX6haMdoEe88GmYK7aPrejB5BwCR14e58U2/3n1R1ujFkJT3ZvrR8+LDo+cW3ZM7CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [worker, session, resume]
+description: "Resume one frozen portable worker session from a checkpoint"
+forms:
+  - slots:
+      - field: chain_root_id
+      - field: manifest_ref
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/resume
+  availability: daemon

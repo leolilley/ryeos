@@ -38,6 +38,8 @@ pub fn compile(
         "workload_home_env",
         "baseline_config",
         "baseline_destination",
+        "portable_state",
+        "credential_subject",
         "initialization",
         "recovery",
         "route_sets",
@@ -65,6 +67,24 @@ pub fn compile(
     validate_file_name(value_string(object, "baseline_destination")?)?;
     crate::protocol_vocabulary::validate_env_name(value_string(object, "workload_home_env")?)
         .map_err(|error| anyhow!(error))?;
+    if let Some(portable_state) = object
+        .get("portable_state")
+        .filter(|value| !value.is_null())
+    {
+        let contract: ryeos_state::objects::PortableSessionStateContract =
+            serde_json::from_value(portable_state.clone())
+                .context("decode structured-session portable-state contract")?;
+        contract.validate()?;
+    }
+    if let Some(credential_subject) = object
+        .get("credential_subject")
+        .filter(|value| !value.is_null())
+    {
+        let contract: ryeos_state::objects::CredentialSubjectProjectionContract =
+            serde_json::from_value(credential_subject.clone())
+                .context("decode structured-session credential-subject contract")?;
+        contract.validate()?;
+    }
     let workload_args = bounded_array(object, "workload_args", 0, 64)?;
     for argument in workload_args {
         let argument = argument
@@ -915,6 +935,8 @@ mod tests {
             "workload_home_env":"FIXTURE_HOME",
             "baseline_config":"baseline.conf",
             "baseline_destination":"runtime.conf",
+            "portable_state":null,
+            "credential_subject":null,
             "configuration_authority":"immutable_argv",
             "initialization":[{
                 "method":"initialize",

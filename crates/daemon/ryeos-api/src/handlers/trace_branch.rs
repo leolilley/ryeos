@@ -261,24 +261,27 @@ mod tests {
             json!({
                 "kind": "state_anchor",
                 "payload": {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "label": "arc.sim_state",
                     "state_digest": format!("sha256:{}", "a".repeat(64)),
                     "manifest_ref": format!("cas:{}", "a".repeat(64)),
                     "runtime": {},
                     "metadata": {}
                 },
-                "graph_run_id": "G-test",
-                "definition_ref": "graph:test/solve",
-                "effective_definition_digest": "d".repeat(64),
-                "node": "solve",
-                "step": 3
+                "subject": {
+                    "kind": "graph",
+                    "graph_run_id": "G-test",
+                    "definition_ref": "graph:test/solve",
+                    "effective_definition_digest": "d".repeat(64),
+                    "node": "solve",
+                    "step": 3
+                }
             }),
         );
         assert!(is_state_anchor(&anchor));
 
         let mut predecessor = anchor.clone();
-        predecessor.payload["payload"]["schema_version"] = json!(1);
+        predecessor.payload["payload"]["schema_version"] = json!(2);
         assert!(!is_state_anchor(&predecessor));
 
         let milestone = persisted_event("milestone", json!({"kind": "other", "payload": {}}));

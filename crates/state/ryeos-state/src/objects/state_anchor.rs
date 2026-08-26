@@ -1,14 +1,14 @@
 //! Durable state-anchor milestone contract.
 //!
 //! State anchors are daemon-authored indexed events, not generic domain
-//! payloads. This module is the single current writer/reader contract used by event
-//! publication, trace, closure discovery, and execution-field projection.
+//! payloads. Graph and execution checkpoints share one envelope and manifest
+//! edge while retaining typed, independently validated subjects.
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const STATE_ANCHOR_SCHEMA_VERSION: u32 = 2;
+pub const STATE_ANCHOR_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -21,16 +21,80 @@ pub struct StateAnchorPayload {
     pub metadata: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StateAnchorSubject {
+    Graph {
+        graph_run_id: String,
+        definition_ref: String,
+        effective_definition_digest: String,
+        node: String,
+        step: u32,
+    },
+    Execution {
+        chain_root_id: String,
+        placement_thread_id: String,
+        item_ref: String,
+        exact_program_hash: String,
+        launch_capsule_hash: String,
+        source_chain_seq: u64,
+        source_event_hash: String,
+    },
+}
+
+impl StateAnchorSubject {
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::Graph {
+                graph_run_id,
+                definition_ref,
+                effective_definition_digest,
+                node,
+                ..
+            } => {
+                for (label, value) in [
+                    ("graph_run_id", graph_run_id.as_str()),
+                    ("definition_ref", definition_ref.as_str()),
+                    ("node", node.as_str()),
+                ] {
+                    validate_string(label, value)?;
+                }
+                validate_lower_sha256("effective_definition_digest", effective_definition_digest)?;
+            }
+            Self::Execution {
+                chain_root_id,
+                placement_thread_id,
+                item_ref,
+                exact_program_hash,
+                launch_capsule_hash,
+                source_chain_seq,
+                source_event_hash,
+            } => {
+                for (label, value) in [
+                    ("chain_root_id", chain_root_id.as_str()),
+                    ("placement_thread_id", placement_thread_id.as_str()),
+                    ("item_ref", item_ref.as_str()),
+                ] {
+                    validate_string(label, value)?;
+                }
+                if *source_chain_seq == 0 {
+                    bail!("state-anchor execution source_chain_seq must be nonzero");
+                }
+                validate_lower_sha256("exact_program_hash", exact_program_hash)?;
+                validate_lower_sha256("launch_capsule_hash", launch_capsule_hash)?;
+                validate_lower_sha256("source_event_hash", source_event_hash)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StateAnchorMilestone {
     pub kind: String,
     pub payload: StateAnchorPayload,
-    pub graph_run_id: String,
-    pub definition_ref: String,
-    pub effective_definition_digest: String,
-    pub node: String,
-    pub step: u32,
+    pub subject: StateAnchorSubject,
 }
 
 impl StateAnchorMilestone {
@@ -55,24 +119,8 @@ impl StateAnchorMilestone {
                 self.payload.schema_version
             );
         }
-        for (label, value) in [
-            ("label", self.payload.label.as_str()),
-            ("graph_run_id", self.graph_run_id.as_str()),
-            ("definition_ref", self.definition_ref.as_str()),
-            ("node", self.node.as_str()),
-        ] {
-            if value.is_empty()
-                || value.trim() != value
-                || value.chars().any(char::is_control)
-                || value.len() > 4 * 1024
-            {
-                bail!("state-anchor {label} must be a bounded, trimmed, control-free string");
-            }
-        }
-        validate_lower_sha256(
-            "effective_definition_digest",
-            &self.effective_definition_digest,
-        )?;
+        validate_string("label", &self.payload.label)?;
+        self.subject.validate()?;
         let manifest_hash = self
             .payload
             .manifest_ref
@@ -90,6 +138,17 @@ impl StateAnchorMilestone {
         }
         Ok(())
     }
+}
+
+fn validate_string(label: &str, value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+        || value.len() > 4 * 1024
+    {
+        bail!("state-anchor {label} must be a bounded, trimmed, control-free string");
+    }
+    Ok(())
 }
 
 fn validate_lower_sha256(label: &str, value: &str) -> Result<()> {
@@ -119,18 +178,21 @@ mod tests {
                 "runtime": {"kind": "tool", "item_ref": "tool:test/restore"},
                 "metadata": {},
             },
-            "graph_run_id": "G-test",
-            "definition_ref": "graph:test/solve",
-            "effective_definition_digest": "b".repeat(64),
-            "node": "solve",
-            "step": 4,
+            "subject": {
+                "kind": "graph",
+                "graph_run_id": "G-test",
+                "definition_ref": "graph:test/solve",
+                "effective_definition_digest": "b".repeat(64),
+                "node": "solve",
+                "step": 4,
+            }
         })
     }
 
     #[test]
     fn current_contract_round_trips_and_predecessor_is_rejected() {
         let parsed = StateAnchorMilestone::from_value(anchor(STATE_ANCHOR_SCHEMA_VERSION))
-            .expect("v2 anchor");
+            .expect("v3 anchor");
         assert_eq!(
             StateAnchorMilestone::from_value(parsed.to_value().unwrap()).unwrap(),
             parsed
@@ -144,9 +206,27 @@ mod tests {
     }
 
     #[test]
+    fn execution_subject_requires_exact_position_and_program() {
+        let mut value = anchor(STATE_ANCHOR_SCHEMA_VERSION);
+        value["subject"] = json!({
+            "kind": "execution",
+            "chain_root_id": "T-root",
+            "placement_thread_id": "T-placement",
+            "item_ref": "worker_execution:test/session",
+            "exact_program_hash": "c".repeat(64),
+            "launch_capsule_hash": "d".repeat(64),
+            "source_chain_seq": 8,
+            "source_event_hash": "e".repeat(64),
+        });
+        StateAnchorMilestone::from_value(value.clone()).unwrap();
+        value["subject"]["source_chain_seq"] = json!(0);
+        assert!(StateAnchorMilestone::from_value(value).is_err());
+    }
+
+    #[test]
     fn identity_and_manifest_commitment_are_required() {
         let mut value = anchor(STATE_ANCHOR_SCHEMA_VERSION);
-        value["effective_definition_digest"] = json!("not-a-digest");
+        value["subject"]["effective_definition_digest"] = json!("not-a-digest");
         assert!(StateAnchorMilestone::from_value(value).is_err());
 
         let mut value = anchor(STATE_ANCHOR_SCHEMA_VERSION);

@@ -5524,6 +5524,20 @@ impl StateDb {
         queries::get_thread(&self.projection, thread_id)
     }
 
+    pub fn latest_state_anchor_event(
+        &self,
+        thread_id: &str,
+    ) -> anyhow::Result<Option<queries::EventRow>> {
+        queries::latest_state_anchor_event(&self.projection, thread_id)
+    }
+
+    pub fn latest_chain_state_anchor_event(
+        &self,
+        chain_root_id: &str,
+    ) -> anyhow::Result<Option<queries::EventRow>> {
+        queries::latest_chain_state_anchor_event(&self.projection, chain_root_id)
+    }
+
     pub fn list_threads_by_chain(
         &self,
         chain_root_id: &str,

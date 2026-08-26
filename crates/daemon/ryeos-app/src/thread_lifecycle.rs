@@ -4921,6 +4921,66 @@ impl ThreadLifecycleService {
         })
     }
 
+    pub fn request_continuation_with_project_generation(
+        &self,
+        params: &ThreadContinuationParams,
+        successor_thread_id: &str,
+        expected_resume_context: &crate::launch_metadata::ResumeContext,
+        successor_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        source_result_snapshot_hash: Option<&str>,
+        initial_events: Vec<NewEventRecord>,
+    ) -> Result<ThreadContinuationResult> {
+        validate_thread_id_format(successor_thread_id)?;
+        validate_continued_completion(&params.completion)?;
+        let source = self
+            .get_thread(&params.thread_id)?
+            .ok_or_else(|| anyhow!("source thread not found: {}", params.thread_id))?;
+        let profile = self.kind_profiles().get(&source.kind);
+        if !profile.is_some_and(|profile| profile.supports_continuation) {
+            bail!("continuation is not supported for kind '{}'", source.kind);
+        }
+        let successor_record = NewThreadRecord {
+            thread_id: successor_thread_id.to_string(),
+            chain_root_id: source.chain_root_id.clone(),
+            kind: source.kind.clone(),
+            item_ref: source.item_ref.clone(),
+            executor_ref: source.executor_ref.clone(),
+            launch_mode: source.launch_mode.clone(),
+            current_site_id: source.current_site_id.clone(),
+            origin_site_id: source.origin_site_id.clone(),
+            upstream_thread_id: Some(source.thread_id.clone()),
+            requested_by: source.requested_by.clone(),
+            project_root: source.project_root.as_ref().map(PathBuf::from),
+            base_project_snapshot_hash: expected_resume_context
+                .project_authority
+                .operational_snapshot_projection()
+                .map(str::to_owned),
+            project_authority: expected_resume_context.project_authority.clone(),
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+            captured_history_policy: None,
+        };
+        let (persisted, successor) = self
+            .state_store
+            .create_machine_continuation_with_project_generation(
+                &successor_record,
+                &source.thread_id,
+                &source.chain_root_id,
+                params.reason.as_deref(),
+                expected_resume_context,
+                successor_launch_metadata,
+                source_result_snapshot_hash,
+                initial_events,
+            )?;
+        self.publish_records(&persisted);
+        Ok(ThreadContinuationResult {
+            source_thread_id: source.thread_id,
+            successor_thread_id: successor.thread_id.clone(),
+            chain_root_id: source.chain_root_id,
+            successor,
+        })
+    }
+
     /// Create a parent's follow-resume successor (created, NOT launched) and
     /// settle the parent `continued` in one atomic op, then publish the resulting
     /// events. The daemon follow keystone calls this to suspend the parent; the

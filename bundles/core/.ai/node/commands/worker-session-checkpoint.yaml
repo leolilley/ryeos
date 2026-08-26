@@ -1,0 +1,10 @@
+# ryeos:signed:2026-08-26T11:48:46Z:c8e2515fb5619d5a11659297146539585cc7eb73377f06f516211720358fc8c7:rg6Or01rASImVg+WkyKwHVgn3gMTzEv0ShFp4DE+YWgUU/cC9oCe+QsU/Pjp3k4YuCwWkoy6zoJKGinxgcVwAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [worker, session, checkpoint]
+description: "Checkpoint one frozen portable worker session"
+forms:
+  - slots:
+      - field: chain_root_id
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/checkpoint
+  availability: daemon

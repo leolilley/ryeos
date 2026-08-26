@@ -3237,6 +3237,30 @@ impl PinnedDirectory {
         }
     }
 
+    /// Recover an interrupted conditional byte replacement for one exact child
+    /// name without beginning another mutation. Higher-level durable jobs call
+    /// this before strict namespace classification so the Lillux-owned recovery
+    /// marker is never mistaken for workload state after a process or power
+    /// loss.
+    pub fn recover_conditional_byte_replacement_atomic(
+        &self,
+        target_name: &OsStr,
+    ) -> crate::atomic_fs::AtomicMutationResult<()> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = target_name;
+            Err(crate::atomic_fs::AtomicMutationError::before(
+                anyhow::anyhow!("conditional byte replacement requires Linux renameat2"),
+            ))
+        }
+        #[cfg(target_os = "linux")]
+        {
+            validate_child_name(target_name)
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            self.recover_conditional_byte_replacement(target_name)
+        }
+    }
+
     #[cfg(target_os = "linux")]
     fn conditional_byte_recovery_name(name: &OsStr) -> OsString {
         use std::os::unix::ffi::OsStrExt as _;
@@ -4926,7 +4950,7 @@ mod tests {
         std::fs::rename(root.path().join("value"), root.path().join("quarantine")).unwrap();
 
         directory
-            .recover_conditional_byte_replacement(OsStr::new("value"))
+            .recover_conditional_byte_replacement_atomic(OsStr::new("value"))
             .unwrap();
         assert_eq!(std::fs::read(root.path().join("value")).unwrap(), b"old");
         assert!(!root.path().join("stage").exists());
@@ -4968,7 +4992,7 @@ mod tests {
         std::fs::rename(root.path().join("stage"), root.path().join("value")).unwrap();
 
         directory
-            .recover_conditional_byte_replacement(OsStr::new("value"))
+            .recover_conditional_byte_replacement_atomic(OsStr::new("value"))
             .unwrap();
         assert_eq!(std::fs::read(root.path().join("value")).unwrap(), b"new");
         assert!(!root.path().join("quarantine").exists());

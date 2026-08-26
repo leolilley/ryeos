@@ -2464,11 +2464,14 @@ mod tests {
             json!({
                 "kind": "state_anchor",
                 "payload": payload,
-                "graph_run_id": "G-test",
-                "definition_ref": "graph:test/solve",
-                "effective_definition_digest": "d".repeat(64),
-                "node": "solve",
-                "step": 3,
+                "subject": {
+                    "kind": "graph",
+                    "graph_run_id": "G-test",
+                    "definition_ref": "graph:test/solve",
+                    "effective_definition_digest": "d".repeat(64),
+                    "node": "solve",
+                    "step": 3,
+                },
             }),
         )
     }
@@ -2755,7 +2758,7 @@ mod tests {
                 state_anchor_event(
                     1,
                     json!({
-                        "schema_version": 2,
+                        "schema_version": 3,
                         "label": "state",
                         "state_digest": format!("sha256:{}", "a".repeat(64)),
                         "manifest_ref": format!("cas:{}", "a".repeat(64)),
@@ -2784,7 +2787,7 @@ mod tests {
         let mut predecessor = state_anchor_event(
             1,
             json!({
-                "schema_version": 2,
+                "schema_version": 3,
                 "label": "state",
                 "state_digest": format!("sha256:{}", "a".repeat(64)),
                 "manifest_ref": format!("cas:{}", "a".repeat(64)),
@@ -2792,7 +2795,7 @@ mod tests {
                 "metadata": {}
             }),
         );
-        predecessor.payload["payload"]["schema_version"] = json!(1);
+        predecessor.payload["payload"]["schema_version"] = json!(2);
         assert_eq!(
             anchor_status(predecessor.payload),
             (
@@ -2830,7 +2833,7 @@ mod tests {
         .unwrap();
         let manifest_hash = cas.store_object(&manifest.to_value()).unwrap();
         let payload = json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "label": "state",
             "state_digest": format!("sha256:{manifest_hash}"),
             "manifest_ref": format!("cas:{manifest_hash}"),
@@ -2879,7 +2882,7 @@ mod tests {
         .unwrap();
         let manifest_hash = cas.store_object(&manifest.to_value()).unwrap();
         let payload = json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "label": "state",
             "state_digest": format!("sha256:{manifest_hash}"),
             "manifest_ref": format!("cas:{manifest_hash}"),
@@ -2903,7 +2906,7 @@ mod tests {
         for index in 0..=MAX_MANIFEST_VERIFICATIONS {
             let digest = format!("{index:064x}");
             let payload = json!({
-                "schema_version": 2,
+                "schema_version": 3,
                 "label": "state",
                 "state_digest": format!("sha256:{digest}"),
                 "manifest_ref": format!("cas:{digest}"),

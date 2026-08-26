@@ -132,17 +132,17 @@ impl Walker {
             let object = request
                 .as_object_mut()
                 .ok_or_else(|| anyhow::anyhow!("state_anchors entries must be objects"))?;
-            object.insert("graph_run_id".to_string(), json!(graph_run_id));
             object.insert(
-                "definition_ref".to_string(),
-                json!(&self.graph.definition_ref),
+                "subject".to_string(),
+                json!({
+                    "kind": "graph",
+                    "graph_run_id": graph_run_id,
+                    "definition_ref": &self.graph.definition_ref,
+                    "effective_definition_digest": &self.graph.effective_definition_digest,
+                    "node": node,
+                    "step": step,
+                }),
             );
-            object.insert(
-                "effective_definition_digest".to_string(),
-                json!(&self.graph.effective_definition_digest),
-            );
-            object.insert("node".to_string(), json!(node));
-            object.insert("step".to_string(), json!(step));
             self.client
                 .publish_state_anchor(request)
                 .await

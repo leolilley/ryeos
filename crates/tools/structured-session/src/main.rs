@@ -115,6 +115,8 @@ struct StructuredSessionProfile {
     workload_home_env: String,
     baseline_config: String,
     baseline_destination: String,
+    portable_state: Option<ryeos_state::objects::PortableSessionStateContract>,
+    credential_subject: Option<ryeos_state::objects::CredentialSubjectProjectionContract>,
     initialization: Vec<InitializationStep>,
     recovery: Option<RecoveryRule>,
     route_sets: BTreeMap<String, Vec<String>>,
@@ -375,6 +377,12 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
         .map_err(|error| anyhow!(error))?;
     if profile.configuration_authority != ConfigurationAuthority::ImmutableArgv {
         bail!("structured-session configuration authority is not immutable argv");
+    }
+    if let Some(contract) = &profile.portable_state {
+        contract.validate()?;
+    }
+    if let Some(contract) = &profile.credential_subject {
+        contract.validate()?;
     }
     file_name(
         "structured-session baseline destination",
@@ -2415,6 +2423,8 @@ mod tests {
             "workload_home_env":"TEST_WORKLOAD_HOME",
             "baseline_config":"baseline.conf",
             "baseline_destination":"config.toml",
+            "portable_state":null,
+            "credential_subject":null,
             "initialization":[],
             "recovery":null,
             "route_sets":{"session":["operation.run"]},

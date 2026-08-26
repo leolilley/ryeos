@@ -7516,6 +7516,28 @@ pub async fn launch_prepared_machine_successor(
     .await
 }
 
+/// Launch a machine successor while exposing the same attachment-before-
+/// release handoff used by fresh and operator launches.  Portable worker
+/// restore waits for this boundary; the execution task itself remains
+/// detached and may run indefinitely after the initiating client leaves.
+pub async fn launch_prepared_machine_successor_with_handoff(
+    state: AppState,
+    successor_id: &str,
+    mut prepared: PreparedMachineSuccessorLaunch,
+    launch_handoff: &LaunchHandoff,
+) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
+    let prepared_claim = prepared.prepared.launch_claim.take();
+    launch_successor_inner_with_claim(
+        state,
+        successor_id,
+        SuccessorMode::Machine,
+        Some(launch_handoff),
+        Some(prepared.prepared),
+        prepared_claim,
+    )
+    .await
+}
+
 /// Persist ownership of a stranded MACHINE successor and enqueue its terminal
 /// launch work. Unlike [`launch_successor`], this recovery boundary returns as
 /// soon as the owned claim has been transferred into the detached task.

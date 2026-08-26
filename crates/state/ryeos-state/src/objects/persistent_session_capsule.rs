@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 use super::{
     AdmittedExecutionClosure, AdmittedLaunchArtifactIdentity, DirectExecutableIdentity,
@@ -26,6 +27,209 @@ where
     Option::<T>::deserialize(deserializer)
 }
 pub const MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialSubjectProjectionContract {
+    pub schema: u32,
+    pub contract: String,
+    pub json_pointers: Vec<String>,
+}
+
+impl CredentialSubjectProjectionContract {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != 1 || self.contract.is_empty() || self.contract.len() > 256 {
+            anyhow::bail!("credential-subject projection has an invalid wire identity");
+        }
+        validate_trimmed_control_free(
+            "credential-subject projection contract",
+            &self.contract,
+            false,
+        )?;
+        if self.json_pointers.is_empty() || self.json_pointers.len() > 32 {
+            anyhow::bail!("credential-subject projection has an invalid pointer count");
+        }
+        let mut prior: Option<&str> = None;
+        for pointer in &self.json_pointers {
+            if pointer.len() > 1024
+                || !pointer.starts_with('/')
+                || pointer.chars().any(char::is_control)
+                || prior.is_some_and(|prior| prior >= pointer.as_str())
+            {
+                anyhow::bail!("credential-subject pointers are not canonical and ordered");
+            }
+            let mut decoded = pointer.split('/').skip(1);
+            if decoded.clone().any(|segment| {
+                segment.is_empty()
+                    || segment
+                        .as_bytes()
+                        .windows(2)
+                        .any(|pair| pair[0] == b'~' && !matches!(pair[1], b'0' | b'1'))
+                    || (segment.ends_with('~')
+                        && !segment.ends_with("~0")
+                        && !segment.ends_with("~1"))
+            }) {
+                anyhow::bail!("credential-subject projection contains an invalid JSON pointer");
+            }
+            let _ = decoded.next();
+            prior = Some(pointer);
+        }
+        Ok(())
+    }
+
+    pub fn contract_digest(&self) -> anyhow::Result<String> {
+        self.validate()?;
+        Ok(lillux::sha256_hex(
+            lillux::canonical_json(&serde_json::to_value(self)?)?.as_bytes(),
+        ))
+    }
+
+    pub fn derive_subject_digest(&self, sanitized_account: &Value) -> anyhow::Result<String> {
+        self.validate()?;
+        if !sanitized_account.is_object() {
+            anyhow::bail!("credential subject requires a sanitized account object");
+        }
+        let fields = self
+            .json_pointers
+            .iter()
+            .map(|pointer| {
+                let value = sanitized_account.pointer(pointer).cloned().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "sanitized account is missing stable credential-subject field {pointer}"
+                    )
+                })?;
+                Ok(serde_json::json!({"pointer": pointer, "value": value}))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let projection = serde_json::json!({
+            "schema": 1,
+            "domain": "ryeos.credential_subject.v1",
+            "contract": self.contract,
+            "projection_contract_digest": self.contract_digest()?,
+            "fields": fields,
+        });
+        let canonical = lillux::canonical_json(&projection)?;
+        Ok(lillux::sha256_hex(
+            &[
+                b"ryeos.credential_subject.v1\0".as_slice(),
+                canonical.as_bytes(),
+            ]
+            .concat(),
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum PortableSessionStateClass {
+    PortableSessionState,
+    NodePrivateCredentialState,
+    RebuildableCache,
+    ForbiddenOrUnknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableSessionStateSelector {
+    /// Canonical profile-home-relative pattern. `*` matches bytes inside one
+    /// path segment, an entire `**` segment matches zero or more segments, and
+    /// `{session_id}` is replaced by the exact upstream session identity and
+    /// never acts as a glob.
+    pub pattern: String,
+    pub class: PortableSessionStateClass,
+    pub max_matches: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableSessionStateContract {
+    pub schema: u32,
+    pub restore_contract: String,
+    pub max_depth: u16,
+    pub max_entries: u32,
+    pub max_file_bytes: u64,
+    pub max_total_bytes: u64,
+    pub selectors: Vec<PortableSessionStateSelector>,
+}
+
+impl PortableSessionStateContract {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != 1
+            || self.restore_contract != "ryeos.worker_session.restore.v1"
+            || self.max_depth == 0
+            || self.max_depth > 64
+            || self.max_entries == 0
+            || self.max_entries > 100_000
+            || self.max_file_bytes == 0
+            || self.max_file_bytes > 16 * 1024 * 1024
+            || self.max_total_bytes == 0
+            || self.max_total_bytes > 16 * 1024 * 1024
+            || self.max_file_bytes > self.max_total_bytes
+            || self.selectors.is_empty()
+            || self.selectors.len() > 64
+        {
+            anyhow::bail!("portable-session state contract is outside substrate bounds");
+        }
+        let mut patterns = BTreeSet::new();
+        let mut prior: Option<&str> = None;
+        let mut portable = 0usize;
+        for selector in &self.selectors {
+            validate_portable_state_pattern(&selector.pattern)?;
+            if !patterns.insert(selector.pattern.as_str())
+                || prior.is_some_and(|value| value >= selector.pattern.as_str())
+                || selector.max_matches == 0
+                || selector.max_matches > self.max_entries
+            {
+                anyhow::bail!("portable-session state selectors are not canonical and bounded");
+            }
+            prior = Some(&selector.pattern);
+            let placeholder_count = selector.pattern.matches("{session_id}").count();
+            if selector.class == PortableSessionStateClass::PortableSessionState {
+                portable += 1;
+                if placeholder_count != 1
+                    || selector.max_matches != 1
+                    || selector.pattern.split('/').any(|segment| segment == "**")
+                {
+                    anyhow::bail!(
+                        "portable session selector must bind one exact session and one file"
+                    );
+                }
+            } else if placeholder_count != 0 {
+                anyhow::bail!("non-portable state classifiers cannot depend on a session identity");
+            }
+        }
+        if portable == 0 {
+            anyhow::bail!("portable-session contract has no portable state selector");
+        }
+        Ok(())
+    }
+}
+
+fn validate_portable_state_pattern(pattern: &str) -> anyhow::Result<()> {
+    if pattern.is_empty()
+        || pattern.len() > 1024
+        || pattern.starts_with('/')
+        || pattern.ends_with('/')
+        || pattern.chars().any(char::is_control)
+    {
+        anyhow::bail!("portable-session state pattern is not a bounded relative path");
+    }
+    for segment in pattern.split('/') {
+        if segment.is_empty()
+            || matches!(segment, "." | "..")
+            || (segment.contains("**") && segment != "**")
+            || segment.contains('{') != segment.contains("{session_id}")
+            || segment.replace("{session_id}", "").contains(['{', '}'])
+            || segment.bytes().any(|byte| {
+                !(byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'.' | b'_' | b'-' | b'*' | b'{' | b'}'))
+            })
+        {
+            anyhow::bail!("portable-session state pattern contains an unsafe segment");
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -317,6 +521,12 @@ impl AdmittedStructuredSessionProfile {
         if contract.is_empty() {
             anyhow::bail!("structured-session contract is empty");
         }
+        self.portable_state_contract()?
+            .map(|contract| contract.validate())
+            .transpose()?;
+        self.credential_subject_contract()?
+            .map(|contract| contract.validate())
+            .transpose()?;
         let canonical = lillux::canonical_json(&self.contract)?;
         if canonical.len() > 64 * 1024
             || lillux::sha256_hex(canonical.as_bytes()) != self.profile_hash
@@ -359,6 +569,40 @@ impl AdmittedStructuredSessionProfile {
         }
         Ok(())
     }
+
+    pub fn portable_state_contract(&self) -> anyhow::Result<Option<PortableSessionStateContract>> {
+        self.contract
+            .get("portable_state")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .map(|value| {
+                serde_json::from_value(value)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|contract: PortableSessionStateContract| {
+                        contract.validate()?;
+                        Ok(contract)
+                    })
+            })
+            .transpose()
+    }
+
+    pub fn credential_subject_contract(
+        &self,
+    ) -> anyhow::Result<Option<CredentialSubjectProjectionContract>> {
+        self.contract
+            .get("credential_subject")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .map(|value| {
+                serde_json::from_value(value)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|contract: CredentialSubjectProjectionContract| {
+                        contract.validate()?;
+                        Ok(contract)
+                    })
+            })
+            .transpose()
+    }
 }
 
 #[cfg(test)]
@@ -388,5 +632,38 @@ mod tests {
         });
         let error = AdmittedPersistentSessionCapsule::from_current_value(&value).unwrap_err();
         assert!(error.to_string().contains("schema"), "got: {error:#}");
+    }
+
+    #[test]
+    fn credential_subject_projection_excludes_unselected_mutable_fields() {
+        let contract = CredentialSubjectProjectionContract {
+            schema: 1,
+            contract: "example.account.v1".to_string(),
+            json_pointers: vec!["/email".to_string(), "/type".to_string()],
+        };
+        let first = contract
+            .derive_subject_digest(&serde_json::json!({
+                "email": "owner@example.test",
+                "type": "subscription",
+                "plan_type": "one"
+            }))
+            .unwrap();
+        let changed_plan = contract
+            .derive_subject_digest(&serde_json::json!({
+                "email": "owner@example.test",
+                "type": "subscription",
+                "plan_type": "two"
+            }))
+            .unwrap();
+        assert_eq!(first, changed_plan);
+        assert_ne!(
+            first,
+            contract
+                .derive_subject_digest(&serde_json::json!({
+                    "email": "another@example.test",
+                    "type": "subscription"
+                }))
+                .unwrap()
+        );
     }
 }

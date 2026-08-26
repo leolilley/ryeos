@@ -4138,6 +4138,14 @@ impl RuntimeDb {
     }
 
     pub fn admit_dedicated_session(&self, session: NewDedicatedSession<'_>) -> Result<()> {
+        self.admit_dedicated_session_with_remote(session, None)
+    }
+
+    pub fn admit_dedicated_session_with_remote(
+        &self,
+        session: NewDedicatedSession<'_>,
+        remote_thread_id: Option<&str>,
+    ) -> Result<()> {
         for (label, value) in [
             ("dedicated placement thread id", session.placement_thread_id),
             ("dedicated root thread id", session.chain_root_id),
@@ -4153,6 +4161,9 @@ impl RuntimeDb {
         }
         if session.credential_generation == 0 {
             bail!("dedicated credential generation must be positive");
+        }
+        if let Some(remote_thread_id) = remote_thread_id {
+            validate_bounded_runtime_text("dedicated remote thread id", remote_thread_id, 256)?;
         }
         let now = lillux::time::timestamp_millis() as i64;
         let tx = self.conn.unchecked_transaction()?;
@@ -4183,7 +4194,7 @@ impl RuntimeDb {
                 current_turn_id, state, send_boundary, candidate_snapshot_hash,
                 candidate_validation_hash, publication_result, terminal_reason,
                 created_at_ms, updated_at_ms
-             ) SELECT ?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6, ?7, ?8, NULL, NULL,
+             ) SELECT ?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6, ?7, ?8, ?11, NULL,
                        'admitted', 'none', NULL, NULL, NULL, NULL, ?10, ?10
                WHERE EXISTS(SELECT 1 FROM credential_profile
                  WHERE profile_id=?7 AND owner_principal=?3 AND credential_generation=?8
@@ -4200,6 +4211,7 @@ impl RuntimeDb {
                     .context("credential generation exceeds SQLite integer range")?,
                 session.credential_lock_owner,
                 now,
+                remote_thread_id,
             ],
         )?;
         if changed != 1 {
@@ -5337,6 +5349,142 @@ impl RuntimeDb {
         .ok_or_else(|| anyhow!("committed command disappeared"))?;
         tx.commit()?;
         Ok(record)
+    }
+
+    /// Prove every workload-contact outbox owned by one placement is settled
+    /// and return a canonical digest of the complete retained frontier. The
+    /// caller separately proves process death and provider-attempt settlement.
+    pub fn dedicated_session_checkpoint_settlement_digest(
+        &self,
+        placement_thread_id: &str,
+    ) -> Result<String> {
+        validate_bounded_runtime_text("checkpoint placement thread id", placement_thread_id, 256)?;
+        let session = self
+            .dedicated_session(placement_thread_id)?
+            .ok_or_else(|| anyhow::anyhow!("checkpoint dedicated session is missing"))?;
+        if session.state != "frozen"
+            || session.current_turn_id.is_some()
+            || session.send_boundary != "settled"
+        {
+            bail!("checkpoint requires a frozen session with a settled contact boundary");
+        }
+
+        let mut commands = self.conn.prepare(
+            "SELECT command_sequence, worker_boot_epoch, command_kind, request_digest, state,
+                    result_json
+               FROM dedicated_session_command
+              WHERE placement_thread_id=?1
+              ORDER BY command_sequence",
+        )?;
+        let commands = commands
+            .query_map([placement_thread_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })?
+            .map(|row| {
+                let (sequence, epoch, kind, request_digest, state, result) = row?;
+                if matches!(
+                    state.as_str(),
+                    "committed" | "dispatched" | "outcome_unknown"
+                ) {
+                    bail!("checkpoint has an unresolved possible-contact command");
+                }
+                let result = result
+                    .map(|value| serde_json::from_str::<serde_json::Value>(&value))
+                    .transpose()?;
+                Ok(serde_json::json!({
+                    "sequence": sequence,
+                    "worker_boot_epoch": epoch,
+                    "command_kind": kind,
+                    "request_digest": request_digest,
+                    "state": state,
+                    "result_digest": result.as_ref()
+                        .map(ryeos_state::objects::canonical_value_digest)
+                        .transpose()?,
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut approvals = self.conn.prepare(
+            "SELECT approval_id, worker_boot_epoch, request_digest, state, decision_digest
+               FROM dedicated_session_approval
+              WHERE placement_thread_id=?1
+              ORDER BY approval_id",
+        )?;
+        let approvals = approvals
+            .query_map([placement_thread_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })?
+            .map(|row| {
+                let (approval_id, epoch, request_digest, state, decision_digest) = row?;
+                if matches!(
+                    state.as_str(),
+                    "pending" | "decision_reserved" | "delivery_contacting" | "delivery_unknown"
+                ) {
+                    bail!("checkpoint has an unresolved possible-contact approval");
+                }
+                Ok(serde_json::json!({
+                    "approval_id": approval_id,
+                    "worker_boot_epoch": epoch,
+                    "request_digest": request_digest,
+                    "state": state,
+                    "decision_digest": decision_digest,
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut observations = self.conn.prepare(
+            "SELECT worker_boot_epoch, through_sequence, batch_digest, cumulative_event_count,
+                    state
+               FROM dedicated_session_observation_batch
+              WHERE placement_thread_id=?1
+              ORDER BY worker_boot_epoch, through_sequence",
+        )?;
+        let observations = observations
+            .query_map([placement_thread_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?
+            .map(|row| {
+                let (epoch, through, digest, count, state) = row?;
+                if state != "settled" {
+                    bail!("checkpoint has an unacknowledged observation batch");
+                }
+                Ok(serde_json::json!({
+                    "worker_boot_epoch": epoch,
+                    "through_sequence": through,
+                    "batch_digest": digest,
+                    "cumulative_event_count": count,
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let frontier = serde_json::json!({
+            "schema": "ryeos.worker_session.contact_settlement.v1",
+            "placement_thread_id": placement_thread_id,
+            "commands": commands,
+            "approvals": approvals,
+            "observations": observations,
+        });
+        Ok(lillux::sha256_hex(
+            lillux::canonical_json(&frontier)?.as_bytes(),
+        ))
     }
 
     /// Durable command-outbox rows whose canonical root testimony may need to

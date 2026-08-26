@@ -229,18 +229,21 @@ mod tests {
             json!({
                 "kind": "state_anchor",
                 "payload": {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "label": "arc.sim_state",
                     "state_digest": format!("sha256:{}", "b".repeat(64)),
                     "manifest_ref": format!("cas:{}", "b".repeat(64)),
                     "runtime": {"kind": "tool", "item_ref": "tool:test/restore"},
                     "metadata": {}
                 },
-                "graph_run_id": "G-test",
-                "definition_ref": "graph:test/solve",
-                "effective_definition_digest": "d".repeat(64),
-                "node": "n1",
-                "step": 3
+                "subject": {
+                    "kind": "graph",
+                    "graph_run_id": "G-test",
+                    "definition_ref": "graph:test/solve",
+                    "effective_definition_digest": "d".repeat(64),
+                    "node": "n1",
+                    "step": 3
+                }
             }),
         );
 
@@ -265,11 +268,14 @@ mod tests {
                     "runtime": {},
                     "metadata": {}
                 },
-                "graph_run_id": "G-test",
-                "definition_ref": "graph:test/solve",
-                "effective_definition_digest": "d".repeat(64),
-                "node": "n1",
-                "step": 3
+                "subject": {
+                    "kind": "graph",
+                    "graph_run_id": "G-test",
+                    "definition_ref": "graph:test/solve",
+                    "effective_definition_digest": "d".repeat(64),
+                    "node": "n1",
+                    "step": 3
+                }
             }),
         );
         assert!(

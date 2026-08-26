@@ -3481,6 +3481,26 @@ impl AccountingDb {
         Ok((count as u64, oldest))
     }
 
+    /// Unpublished financial testimony for provider attempts owned by one
+    /// placement.  Checkpointing uses this exact fence instead of blocking on
+    /// unrelated node-wide accounting activity.
+    pub fn unpublished_outbox_for_thread(&self, thread_id: &str) -> Result<u64> {
+        let conn = self.lock_conn()?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM accounting_audit_outbox AS outbox
+                 JOIN provider_attempt_reservation AS attempt
+                   ON attempt.attempt_id = outbox.attempt_id
+                 WHERE outbox.published_chain_seq IS NULL
+                   AND attempt.thread_id = ?1",
+                [thread_id],
+                |row| row.get(0),
+            )
+            .context("read placement accounting outbox state")?;
+        u64::try_from(count).context("placement accounting outbox count is negative")
+    }
+
     /// Live unresolved count and logical held amount from the authoritative
     /// ledger. This intentionally does not sum execution + directive debit
     /// rows, which would double-count the same reservation.

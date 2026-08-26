@@ -1794,6 +1794,58 @@ pub fn latest_thread_events(
     Ok(events)
 }
 
+/// Return the newest generic state-anchor milestone on one placement thread.
+///
+/// This uses the ordinary durable event projection and its
+/// `(thread_id, event_type, thread_seq)` index.  The JSON predicate is applied
+/// only to that thread's milestone rows; no chain replay or parallel
+/// checkpoint registry is involved.
+pub fn latest_state_anchor_event(
+    db: &ProjectionDb,
+    thread_id: &str,
+) -> anyhow::Result<Option<EventRow>> {
+    db.connection()
+        .query_row(
+            "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
+                    event_type, durability, ts, prev_chain_event_hash, \
+                    prev_thread_event_hash, payload \
+             FROM events \
+             WHERE thread_id = ?1 \
+               AND event_type = 'milestone' \
+               AND json_extract(CAST(payload AS TEXT), '$.kind') = 'state_anchor' \
+             ORDER BY thread_seq DESC \
+             LIMIT 1",
+            [thread_id],
+            EventRow::from_row,
+        )
+        .optional()
+        .context("query latest_state_anchor_event")
+}
+
+/// Newest generic state anchor across all continuation placements of one
+/// stable execution chain.
+pub fn latest_chain_state_anchor_event(
+    db: &ProjectionDb,
+    chain_root_id: &str,
+) -> anyhow::Result<Option<EventRow>> {
+    db.connection()
+        .query_row(
+            "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
+                    event_type, durability, ts, prev_chain_event_hash, \
+                    prev_thread_event_hash, payload \
+             FROM events \
+             WHERE chain_root_id = ?1 \
+               AND event_type = 'milestone' \
+               AND json_extract(CAST(payload AS TEXT), '$.kind') = 'state_anchor' \
+             ORDER BY chain_seq DESC \
+             LIMIT 1",
+            [chain_root_id],
+            EventRow::from_row,
+        )
+        .optional()
+        .context("query latest_chain_state_anchor_event")
+}
+
 /// Latest durable events across every thread on the node — the node-wide
 /// activity feed. Append order (`event_id` is the autoincrement insert
 /// order), returned oldest-first after the reverse so feeds read
@@ -3495,6 +3547,48 @@ mod tests {
         assert_eq!(latest.len(), 2);
         assert_eq!(latest[0].chain_seq, 3);
         assert_eq!(latest[1].chain_seq, 4);
+    }
+
+    #[test]
+    fn latest_state_anchor_uses_the_existing_milestone_event_index() {
+        let db = test_db();
+        let conn = db.connection();
+        for (seq, kind) in [
+            (1_i64, "state_anchor"),
+            (2, "ordinary_milestone"),
+            (3, "state_anchor"),
+        ] {
+            let event_hash = format!("{seq:064x}");
+            let payload = serde_json::to_vec(&serde_json::json!({"kind":kind})).unwrap();
+            conn.execute(
+                "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
+                 VALUES (?, 'chain-A', ?, 'T-1', ?, 'milestone', 'durable', '2026-01-01T00:00:00Z', ?)",
+                rusqlite::params![event_hash, seq, seq, payload],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
+             VALUES (?, 'chain-A', 4, 'T-2', 1, 'milestone', 'durable', '2026-01-01T00:00:00Z', ?)",
+            rusqlite::params!["f".repeat(64), serde_json::to_vec(&serde_json::json!({"kind":"state_anchor"})).unwrap()],
+        )
+        .unwrap();
+
+        let latest = latest_state_anchor_event(&db, "T-1")
+            .unwrap()
+            .expect("latest anchor");
+        assert_eq!(latest.chain_seq, 3);
+        assert_eq!(latest.event_hash, format!("{:064x}", 3));
+        assert!(
+            latest_state_anchor_event(&db, "T-missing")
+                .unwrap()
+                .is_none()
+        );
+        let chain_latest = latest_chain_state_anchor_event(&db, "chain-A")
+            .unwrap()
+            .expect("chain anchor");
+        assert_eq!(chain_latest.thread_id, "T-2");
+        assert_eq!(chain_latest.chain_seq, 4);
     }
 
     #[test]

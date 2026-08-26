@@ -75,8 +75,11 @@ const MAX_THREAD_RESULT_RESPONSE_BYTES: usize =
     ryeos_state::objects::MAX_THREAD_RESULT_CONTENT_BYTES + 64 * 1024;
 const MAX_TERMINAL_EVENT_INLINE_ERROR_BYTES: usize = 64 * 1024;
 const MAX_STATE_RESTORE_BYTES: usize = 256 * 1024;
-const MAX_STATE_MANIFEST_INPUT_BYTES: usize = 1024 * 1024;
-const MAX_STATE_MANIFEST_TOTAL_INPUT_BYTES: usize = 4 * 1024 * 1024;
+// A portable-state tree stores file bytes as canonical base64.  The signed
+// selector contract currently permits at most 16 MiB of raw selected state,
+// so retain enough room for base64 expansion plus bounded tree metadata.
+const MAX_STATE_MANIFEST_INPUT_BYTES: usize = 24 * 1024 * 1024;
+const MAX_STATE_MANIFEST_TOTAL_INPUT_BYTES: usize = 24 * 1024 * 1024;
 const MAX_STATE_ANCHOR_METADATA_BYTES: usize = 192 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -302,11 +305,7 @@ pub struct StateAnchorDraft {
 #[serde(deny_unknown_fields)]
 pub struct StateAnchorPublishParams {
     pub thread_id: String,
-    pub graph_run_id: String,
-    pub definition_ref: String,
-    pub effective_definition_digest: String,
-    pub node: String,
-    pub step: u32,
+    pub subject: ryeos_state::objects::StateAnchorSubject,
     pub contract: String,
     pub restore: Value,
     pub restore_digest: String,
@@ -2793,9 +2792,6 @@ fn ensure_artifact_projection_capacity(
 fn validate_state_anchor_request(params: &StateAnchorPublishParams) -> Result<()> {
     for (label, value) in [
         ("thread_id", params.thread_id.as_str()),
-        ("graph_run_id", params.graph_run_id.as_str()),
-        ("definition_ref", params.definition_ref.as_str()),
-        ("node", params.node.as_str()),
         ("contract", params.contract.as_str()),
         ("anchor label", params.anchor.label.as_str()),
     ] {
@@ -2807,14 +2803,7 @@ fn validate_state_anchor_request(params: &StateAnchorPublishParams) -> Result<()
             bail!("state-anchor {label} must be a bounded, trimmed, control-free string");
         }
     }
-    if !lillux::valid_hash(&params.effective_definition_digest)
-        || params
-            .effective_definition_digest
-            .bytes()
-            .any(|byte| byte.is_ascii_uppercase())
-    {
-        bail!("state-anchor effective_definition_digest must be a canonical SHA-256 hash");
-    }
+    params.subject.validate()?;
     if !params.restore.is_object() {
         bail!("state-anchor restore contract must be an object");
     }
@@ -2863,6 +2852,37 @@ fn validate_state_anchor_request(params: &StateAnchorPublishParams) -> Result<()
         validate_prefixed_digest("state manifest object digest", &input.digest)?;
     }
     validate_prefixed_digest("restore_digest", &params.restore_digest)
+}
+
+fn persisted_event_from_authoritative(
+    event_hash: String,
+    event: ryeos_state::objects::ThreadEvent,
+) -> Result<PersistedEventRecord> {
+    let chain_seq = i64::try_from(event.chain_seq)
+        .context("authoritative event chain_seq exceeds SQLite range")?;
+    let thread_seq = i64::try_from(event.thread_seq)
+        .context("authoritative event thread_seq exceeds SQLite range")?;
+    let storage_class = match event.durability {
+        ryeos_state::objects::EventDurability::Durable => "indexed",
+        ryeos_state::objects::EventDurability::Journal => "journal",
+        ryeos_state::objects::EventDurability::Ephemeral => {
+            bail!("authoritative snapshot cannot reference an ephemeral event")
+        }
+    };
+    Ok(PersistedEventRecord {
+        event_id: chain_seq,
+        event_hash: Some(event_hash),
+        chain_root_id: event.chain_root_id,
+        chain_seq,
+        thread_id: event.thread_id,
+        thread_seq,
+        event_type: event.event_type,
+        storage_class: storage_class.to_string(),
+        ts: event.ts,
+        prev_chain_event_hash: event.prev_chain_event_hash,
+        prev_thread_event_hash: event.prev_thread_event_hash,
+        payload: event.payload,
+    })
 }
 
 fn validate_prefixed_digest(label: &str, value: &str) -> Result<()> {
@@ -3779,37 +3799,101 @@ impl StateStore {
             return Ok(None);
         };
         let snapshot = readback.snapshot;
-        let last_event = readback.last_event;
-        let last_event = last_event
-            .map(|(event_hash, event)| {
-                let chain_seq = i64::try_from(event.chain_seq)
-                    .context("authoritative event chain_seq exceeds SQLite range")?;
-                let thread_seq = i64::try_from(event.thread_seq)
-                    .context("authoritative event thread_seq exceeds SQLite range")?;
-                let storage_class = match event.durability {
-                    ryeos_state::objects::EventDurability::Durable => "indexed",
-                    ryeos_state::objects::EventDurability::Journal => "journal",
-                    ryeos_state::objects::EventDurability::Ephemeral => {
-                        bail!("authoritative snapshot cannot reference an ephemeral event")
-                    }
-                };
-                Ok(PersistedEventRecord {
-                    event_id: chain_seq,
-                    event_hash: Some(event_hash),
-                    chain_root_id: event.chain_root_id,
-                    chain_seq,
-                    thread_id: event.thread_id,
-                    thread_seq,
-                    event_type: event.event_type,
-                    storage_class: storage_class.to_string(),
-                    ts: event.ts,
-                    prev_chain_event_hash: event.prev_chain_event_hash,
-                    prev_thread_event_hash: event.prev_thread_event_hash,
-                    payload: event.payload,
-                })
-            })
+        let last_event = readback
+            .last_event
+            .map(|(event_hash, event)| persisted_event_from_authoritative(event_hash, event))
             .transpose()?;
         Ok(Some((snapshot, last_event)))
+    }
+
+    /// Read any placement member at an exact authoritative chain position.
+    /// Callers must already know both the stable chain and placement identity;
+    /// this never treats a rebuildable projection row as continuation
+    /// authority.
+    pub fn get_authoritative_thread_snapshot_with_last_event(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+    ) -> Result<Option<(ThreadSnapshot, Option<PersistedEventRecord>)>> {
+        let g = self.lock()?;
+        let Some(readback) = g
+            .state_db
+            .read_authoritative_thread_snapshot_with_last_event(chain_root_id, thread_id)?
+        else {
+            return Ok(None);
+        };
+        let snapshot = readback.snapshot;
+        let last_event = readback
+            .last_event
+            .map(|(event_hash, event)| persisted_event_from_authoritative(event_hash, event))
+            .transpose()?;
+        Ok(Some((snapshot, last_event)))
+    }
+
+    /// Resolve the latest state-anchor through the ordinary event projection,
+    /// then verify the exact event object from CAS before exposing it as
+    /// checkpoint authority.
+    pub fn latest_verified_state_anchor(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<(String, ryeos_state::objects::StateAnchorMilestone)>> {
+        let g = self.lock()?;
+        let Some(row) = g.state_db.latest_state_anchor_event(thread_id)? else {
+            return Ok(None);
+        };
+        let value = self
+            .state_authority
+            .cas_store()?
+            .get_object(&row.event_hash)?
+            .ok_or_else(|| anyhow!("projected state-anchor event is missing from CAS"))?;
+        let event: ryeos_state::objects::ThreadEvent = serde_json::from_value(value)?;
+        event.validate()?;
+        if event.thread_id != row.thread_id
+            || event.chain_root_id != row.chain_root_id
+            || event.chain_seq != u64::try_from(row.chain_seq)?
+            || event.thread_seq != u64::try_from(row.thread_seq)?
+            || event.event_type != ryeos_state::event_types::MILESTONE
+            || event.durability != ryeos_state::objects::EventDurability::Durable
+            || lillux::sha256_hex(lillux::canonical_json(&event.to_value())?.as_bytes())
+                != row.event_hash
+        {
+            bail!("projected state-anchor row contradicts its authoritative CAS event");
+        }
+        let anchor = ryeos_state::objects::StateAnchorMilestone::from_value(event.payload)?;
+        Ok(Some((row.event_hash, anchor)))
+    }
+
+    pub fn latest_verified_chain_state_anchor(
+        &self,
+        chain_root_id: &str,
+    ) -> Result<Option<(String, ryeos_state::objects::StateAnchorMilestone)>> {
+        let g = self.lock()?;
+        let Some(row) = g.state_db.latest_chain_state_anchor_event(chain_root_id)? else {
+            return Ok(None);
+        };
+        if row.chain_root_id != chain_root_id {
+            bail!("projected chain state anchor escaped its requested chain");
+        }
+        let value = self
+            .state_authority
+            .cas_store()?
+            .get_object(&row.event_hash)?
+            .ok_or_else(|| anyhow!("projected chain state-anchor event is missing from CAS"))?;
+        let event: ryeos_state::objects::ThreadEvent = serde_json::from_value(value)?;
+        event.validate()?;
+        if event.thread_id != row.thread_id
+            || event.chain_root_id != row.chain_root_id
+            || event.chain_seq != u64::try_from(row.chain_seq)?
+            || event.thread_seq != u64::try_from(row.thread_seq)?
+            || event.event_type != ryeos_state::event_types::MILESTONE
+            || event.durability != ryeos_state::objects::EventDurability::Durable
+            || lillux::sha256_hex(lillux::canonical_json(&event.to_value())?.as_bytes())
+                != row.event_hash
+        {
+            bail!("projected chain state-anchor row contradicts its authoritative CAS event");
+        }
+        let anchor = ryeos_state::objects::StateAnchorMilestone::from_value(event.payload)?;
+        Ok(Some((row.event_hash, anchor)))
     }
 
     pub fn is_launch_owner_active(&self, launch_owner: &str) -> bool {
@@ -3950,6 +4034,16 @@ impl StateStore {
     pub fn admit_dedicated_session(&self, session: NewDedicatedSession<'_>) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.admit_dedicated_session(session)
+    }
+
+    pub fn admit_dedicated_session_with_remote(
+        &self,
+        session: NewDedicatedSession<'_>,
+        remote_thread_id: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .admit_dedicated_session_with_remote(session, Some(remote_thread_id))
     }
 
     pub fn dedicated_session(
@@ -4296,6 +4390,15 @@ impl StateStore {
     ) -> Result<DedicatedSessionCommandRecord> {
         let g = self.lock()?;
         g.runtime_db.reserve_dedicated_session_command(command)
+    }
+
+    pub fn dedicated_session_checkpoint_settlement_digest(
+        &self,
+        placement_thread_id: &str,
+    ) -> Result<String> {
+        let g = self.lock()?;
+        g.runtime_db
+            .dedicated_session_checkpoint_settlement_digest(placement_thread_id)
     }
 
     pub fn dedicated_command_outbox_records(&self) -> Result<Vec<DedicatedSessionCommandRecord>> {
@@ -6809,6 +6912,37 @@ impl StateStore {
         .map(|publication| (publication.persisted, publication.successor))
     }
 
+    /// Daemon-owned machine continuation that advances an exact frozen pinned
+    /// CoW generation.  The ordinary runtime callback cannot select this
+    /// value; checkpoint/handoff code supplies the CAS-proved candidate and
+    /// the shared continuation transaction verifies the typed authority
+    /// transition before publishing either side.
+    pub fn create_machine_continuation_with_project_generation(
+        &self,
+        successor: &NewThreadRecord,
+        source_thread_id: &str,
+        chain_root_id: &str,
+        reason: Option<&str>,
+        expected_resume_context: &crate::launch_metadata::ResumeContext,
+        successor_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        source_result_snapshot_hash: Option<&str>,
+        initial_events: Vec<NewEventRecord>,
+    ) -> Result<(Vec<PersistedEventRecord>, ThreadDetail)> {
+        let sanitized_reason =
+            reason.filter(|reason| !queries::ContinuationReasonMarker::is_reserved_str(reason));
+        self.create_running_continuation_successor(
+            successor,
+            source_thread_id,
+            chain_root_id,
+            RunningContinuationKind::Machine { sanitized_reason },
+            Some(expected_resume_context),
+            Some(successor_launch_metadata),
+            source_result_snapshot_hash,
+            initial_events,
+        )
+        .map(|publication| (publication.persisted, publication.successor))
+    }
+
     /// Create the parent's follow-resume successor: a running-source continuation
     /// marked `graph_follow_resume`. Created and seeded only — NOT launched (the
     /// resume path launches it later, once the child's result is available) and
@@ -8652,6 +8786,48 @@ impl StateStore {
                 params.thread_id
             );
         }
+        match &params.subject {
+            ryeos_state::objects::StateAnchorSubject::Graph { .. } => {}
+            ryeos_state::objects::StateAnchorSubject::Execution {
+                chain_root_id,
+                placement_thread_id,
+                item_ref,
+                exact_program_hash,
+                launch_capsule_hash,
+                source_chain_seq,
+                source_event_hash,
+            } => {
+                if chain_root_id != &thread.chain_root_id
+                    || placement_thread_id != &params.thread_id
+                    || item_ref != &thread.item_ref
+                    || thread.admitted_launch_capsule_hash.as_deref()
+                        != Some(launch_capsule_hash.as_str())
+                {
+                    bail!("state-anchor execution subject contradicts its authoritative thread");
+                }
+                let capsule =
+                    load_admitted_launch_capsule(&self.state_authority, launch_capsule_hash)?;
+                if &capsule.exact_program_hash != exact_program_hash {
+                    bail!("state-anchor execution subject contradicts its admitted program");
+                }
+                let authoritative = g
+                    .state_db
+                    .read_authoritative_thread_snapshot_with_last_event(
+                        &thread.chain_root_id,
+                        &params.thread_id,
+                    )?
+                    .ok_or_else(|| anyhow!("state-anchor authoritative thread is missing"))?;
+                let (observed_hash, observed_event) = authoritative
+                    .last_event
+                    .ok_or_else(|| anyhow!("execution state anchor requires a source event"))?;
+                if observed_event.thread_id != params.thread_id
+                    || observed_event.chain_seq != *source_chain_seq
+                    || observed_hash != *source_event_hash
+                {
+                    bail!("state-anchor execution checkpoint position is no longer current");
+                }
+            }
+        }
         if !self.projection_health.is_current() {
             bail!("state-anchor admission requires a current thread projection");
         }
@@ -8712,11 +8888,7 @@ impl StateStore {
                 runtime: params.anchor.runtime.clone(),
                 metadata: params.anchor.metadata.clone(),
             },
-            graph_run_id: params.graph_run_id.clone(),
-            definition_ref: params.definition_ref.clone(),
-            effective_definition_digest: params.effective_definition_digest.clone(),
-            node: params.node.clone(),
-            step: params.step,
+            subject: params.subject.clone(),
         }
         .to_value()
         .context("encode current state-anchor milestone")?;
@@ -12456,14 +12628,17 @@ mod tests {
     }
 
     #[test]
-    fn state_anchor_publish_wire_contract_requires_effective_definition_digest() {
+    fn state_anchor_publish_wire_contract_requires_typed_subject() {
         let mut request = json!({
             "thread_id": "T-root",
-            "graph_run_id": "G-test",
-            "definition_ref": "graph:test/solve",
-            "effective_definition_digest": "d".repeat(64),
-            "node": "solve",
-            "step": 3,
+            "subject": {
+                "kind": "graph",
+                "graph_run_id": "G-test",
+                "definition_ref": "graph:test/solve",
+                "effective_definition_digest": "d".repeat(64),
+                "node": "solve",
+                "step": 3
+            },
             "contract": "domain.restore.v1",
             "restore": {"contract": "domain.restore.v1"},
             "restore_digest": format!("sha256:{}", "a".repeat(64)),
@@ -12476,13 +12651,13 @@ mod tests {
         });
         let parsed: StateAnchorPublishParams =
             serde_json::from_value(request.clone()).expect("current state-anchor request");
-        assert_eq!(parsed.effective_definition_digest, "d".repeat(64));
+        assert!(matches!(
+            parsed.subject,
+            ryeos_state::objects::StateAnchorSubject::Graph { .. }
+        ));
 
-        request
-            .as_object_mut()
-            .unwrap()
-            .remove("effective_definition_digest");
-        request["definition_hash"] = json!("d".repeat(64));
+        request.as_object_mut().unwrap().remove("subject");
+        request["graph_run_id"] = json!("G-test");
         assert!(serde_json::from_value::<StateAnchorPublishParams>(request).is_err());
     }
 

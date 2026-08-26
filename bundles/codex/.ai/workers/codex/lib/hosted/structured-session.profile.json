@@ -24,6 +24,44 @@
   "workload_home_env": "CODEX_HOME",
   "baseline_config": "baseline.config.toml",
   "baseline_destination": "config.toml",
+  "portable_state": {
+    "schema": 1,
+    "restore_contract": "ryeos.worker_session.restore.v1",
+    "max_depth": 64,
+    "max_entries": 100000,
+    "max_file_bytes": 8388608,
+    "max_total_bytes": 16777216,
+    "selectors": [
+      {"pattern": ".personality_migration", "class": "rebuildable_cache", "max_matches": 1},
+      {"pattern": ".sandbox_migration", "class": "rebuildable_cache", "max_matches": 1},
+      {"pattern": ".tmp/**", "class": "rebuildable_cache", "max_matches": 100000},
+      {"pattern": "auth.json", "class": "node_private_credential_state", "max_matches": 1},
+      {"pattern": "config.toml", "class": "forbidden_or_unknown", "max_matches": 1},
+      {"pattern": "goals_1.sqlite*", "class": "forbidden_or_unknown", "max_matches": 3},
+      {"pattern": "history.jsonl", "class": "forbidden_or_unknown", "max_matches": 1},
+      {"pattern": "installation_id", "class": "forbidden_or_unknown", "max_matches": 1},
+      {"pattern": "log/**", "class": "rebuildable_cache", "max_matches": 100000},
+      {"pattern": "logs_2.sqlite*", "class": "forbidden_or_unknown", "max_matches": 3},
+      {"pattern": "memories_1.sqlite*", "class": "forbidden_or_unknown", "max_matches": 3},
+      {"pattern": "models_cache.json", "class": "rebuildable_cache", "max_matches": 1},
+      {"pattern": "plugins/**", "class": "rebuildable_cache", "max_matches": 100000},
+      {"pattern": "prompts/**", "class": "forbidden_or_unknown", "max_matches": 100000},
+      {"pattern": "queue_1.sqlite*", "class": "forbidden_or_unknown", "max_matches": 3},
+      {"pattern": "rules/**", "class": "forbidden_or_unknown", "max_matches": 100000},
+      {"pattern": "sessions/**", "class": "forbidden_or_unknown", "max_matches": 100000},
+      {"pattern": "sessions/*/*/*/rollout-*-{session_id}.jsonl", "class": "portable_session_state", "max_matches": 1},
+      {"pattern": "shell_snapshots/**", "class": "rebuildable_cache", "max_matches": 100000},
+      {"pattern": "skills/**", "class": "rebuildable_cache", "max_matches": 100000},
+      {"pattern": "state_5.sqlite*", "class": "forbidden_or_unknown", "max_matches": 3},
+      {"pattern": "thread-writer-locks/**", "class": "rebuildable_cache", "max_matches": 100000},
+      {"pattern": "version.json", "class": "rebuildable_cache", "max_matches": 1}
+    ]
+  },
+  "credential_subject": {
+    "schema": 1,
+    "contract": "codex.account.v1",
+    "json_pointers": ["/email", "/type"]
+  },
   "initialization": [
     {
       "method": "initialize",

@@ -1470,18 +1470,21 @@ mod tests {
             "payload": {
                 "kind": "state_anchor",
                 "payload": {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "label": "checkpoint",
                     "state_digest": format!("sha256:{manifest_hash}"),
                     "manifest_ref": format!("cas:{manifest_hash}"),
                     "runtime": {},
                     "metadata": {}
                 },
-                "graph_run_id": "G-test",
-                "definition_ref": "graph:test/solve",
-                "effective_definition_digest": h("de"),
-                "node": "solve",
-                "step": 3
+                "subject": {
+                    "kind": "graph",
+                    "graph_run_id": "G-test",
+                    "definition_ref": "graph:test/solve",
+                    "effective_definition_digest": h("de"),
+                    "node": "solve",
+                    "step": 3
+                }
             }
         });
         let edges = typed_object_edges(&event).unwrap();

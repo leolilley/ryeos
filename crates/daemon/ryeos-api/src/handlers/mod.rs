@@ -175,6 +175,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     credential_profiles::REVOKE_DESCRIPTOR,
     credential_profiles::DELETE_DESCRIPTOR,
     dedicated_sessions::STATUS_DESCRIPTOR,
+    dedicated_sessions::CHECKPOINT_DESCRIPTOR,
+    dedicated_sessions::RESUME_DESCRIPTOR,
     dedicated_sessions::COMMAND_DESCRIPTOR,
     dedicated_sessions::APPROVALS_DESCRIPTOR,
     dedicated_sessions::RESOLVE_APPROVAL_DESCRIPTOR,

@@ -27,6 +27,7 @@ pub mod external_large_content_manifest;
 pub mod item_source;
 pub mod live_input;
 pub mod persistent_session_capsule;
+pub mod portable_state_tree;
 pub mod project_file;
 pub mod project_snapshot;
 pub mod project_snapshot_policy;
@@ -37,6 +38,7 @@ pub mod state_anchor;
 pub mod state_manifest;
 pub mod thread_event;
 pub mod thread_snapshot;
+pub mod worker_session_restore;
 
 pub use admitted_launch_capsule::{
     ADMITTED_DIRECT_COMMAND_ROOT, ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION, AdmittedAccountingScope,
@@ -104,9 +106,15 @@ pub use item_source::ItemSource;
 pub use live_input::{LiveInput, LiveInputIntent};
 pub use persistent_session_capsule::{
     AdmittedPersistentSessionCapsule, AdmittedStructuredSessionProfile,
-    MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES, PERSISTENT_SESSION_CAPSULE_KIND,
-    PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION, PersistentSessionAuthority,
-    PersistentSessionLifecycleContract, PersistentSessionWireContract,
+    CredentialSubjectProjectionContract, MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES,
+    PERSISTENT_SESSION_CAPSULE_KIND, PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
+    PersistentSessionAuthority, PersistentSessionLifecycleContract, PersistentSessionWireContract,
+    PortableSessionStateClass, PortableSessionStateContract, PortableSessionStateSelector,
+};
+pub use portable_state_tree::{
+    PORTABLE_STATE_TREE_KIND, PORTABLE_STATE_TREE_MEDIA_TYPE, PORTABLE_STATE_TREE_SCHEMA,
+    PortableStateTree, PortableStateTreeFile, classify_portable_state_path,
+    selector_matches as portable_state_selector_matches,
 };
 pub use project_file::ProjectFile;
 pub use project_snapshot::ProjectSnapshot;
@@ -123,7 +131,9 @@ pub use source_closure::{
     SourceRootIdentity, SourceSpaceIdentity, SourceTestimonyProof,
 };
 pub use source_manifest::SourceManifest;
-pub use state_anchor::{STATE_ANCHOR_SCHEMA_VERSION, StateAnchorMilestone, StateAnchorPayload};
+pub use state_anchor::{
+    STATE_ANCHOR_SCHEMA_VERSION, StateAnchorMilestone, StateAnchorPayload, StateAnchorSubject,
+};
 pub use state_manifest::{
     MAX_STATE_MANIFEST_OBJECTS, STATE_MANIFEST_KIND, STATE_MANIFEST_SCHEMA_VERSION, StateManifest,
     StateManifestBlob,
@@ -140,6 +150,11 @@ pub use thread_snapshot::{
     THREAD_SNAPSHOT_SCHEMA_VERSION, ThreadHistoryRetention, ThreadSnapshot, ThreadSnapshotBuilder,
     ThreadStatus, ThreadUsage, UsageSubject, parse_canonical_timestamp,
     validate_thread_result_content,
+};
+pub use worker_session_restore::{
+    WORKER_SESSION_RESTORE_CONTRACT, WORKER_SESSION_RESTORE_KIND, WORKER_SESSION_RESTORE_SCHEMA,
+    WorkerSessionCheckpointPosition, WorkerSessionDependencyRestore,
+    WorkerSessionPortableStateRestore, WorkerSessionRestore,
 };
 
 /// Schema version shared across all CAS object types.
