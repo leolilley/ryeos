@@ -495,6 +495,10 @@ pub struct StaleLaunchClaimCleared {
     pub thread_id: String,
     pub claim_id: String,
     pub dead_generation: String,
+    /// The dead owner had reserved a native-resume attempt but never reached
+    /// durable process attachment. Clearing that uncontacted reservation also
+    /// re-arms the retry counter atomically.
+    pub resume_budget_rearmed: bool,
 }
 
 /// A live launch claim, as read back for reconcile/inspection.
@@ -1193,7 +1197,9 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // exact successor dedicated session atomically consumes them. A predecessor
 // lock_owner alone cannot distinguish a crashed handoff reservation from an
 // abandoned pre-attachment worker start.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 15;
+// Epoch 16 admits launch-metadata epoch 20, including the exact durable
+// runtime-state bootstrap for every machine continuation.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 16;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -10192,6 +10198,7 @@ impl RuntimeDb {
             process_identity,
             launch_metadata,
             false,
+            false,
         )
     }
 
@@ -10214,6 +10221,30 @@ impl RuntimeDb {
             process_identity,
             launch_metadata,
             true,
+            false,
+        )
+    }
+
+    /// Attach a newly held process and atomically re-arm the thread's
+    /// same-thread resume budget. Machine continuation admission consumes a
+    /// retry before spawn; once the exact successor process is durably
+    /// attached, that launch-window budget has completed its purpose.
+    pub fn attach_new_process_rearming_resume_budget(
+        &self,
+        thread_id: &str,
+        pid: i64,
+        pgid: i64,
+        process_identity: &ExecutionProcessIdentity,
+        launch_metadata: &RuntimeLaunchMetadata,
+    ) -> Result<()> {
+        self.attach_process_with_mode(
+            thread_id,
+            pid,
+            pgid,
+            process_identity,
+            launch_metadata,
+            true,
+            true,
         )
     }
 
@@ -10225,7 +10256,11 @@ impl RuntimeDb {
         process_identity: &ExecutionProcessIdentity,
         launch_metadata: &RuntimeLaunchMetadata,
         require_empty: bool,
+        rearm_resume_budget: bool,
     ) -> Result<()> {
+        if rearm_resume_budget && !require_empty {
+            bail!("resume budget can be re-armed only by a new process attachment");
+        }
         if launch_metadata.launch_driver
             == Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
         {
@@ -10333,11 +10368,12 @@ impl RuntimeDb {
         let Some(merged_launch_metadata) = merged_launch_metadata else {
             let updated = self.conn.execute(
                 "UPDATE thread_runtime
-                    SET pid = ?2, pgid = ?3, process_identity = ?4
+                    SET pid = ?2, pgid = ?3, process_identity = ?4,
+                        resume_attempts = CASE WHEN ?5 THEN 0 ELSE resume_attempts END
                   WHERE thread_id = ?1
                     AND pid IS NULL AND pgid IS NULL AND process_identity IS NULL
                     AND stop_requested_at_ms IS NULL",
-                params![thread_id, pid, pgid, identity_json],
+                params![thread_id, pid, pgid, identity_json, rearm_resume_budget],
             )?;
             if updated == 0 {
                 bail!("thread_runtime row missing for thread_id: {thread_id}");
@@ -10348,11 +10384,19 @@ impl RuntimeDb {
             .context("failed to encode launch_metadata")?;
         let updated = self.conn.execute(
             "UPDATE thread_runtime
-                SET pid = ?2, pgid = ?3, launch_metadata = ?4, process_identity = ?5
+                SET pid = ?2, pgid = ?3, launch_metadata = ?4, process_identity = ?5,
+                    resume_attempts = CASE WHEN ?6 THEN 0 ELSE resume_attempts END
               WHERE thread_id = ?1
                 AND pid IS NULL AND pgid IS NULL AND process_identity IS NULL
                 AND stop_requested_at_ms IS NULL",
-            params![thread_id, pid, pgid, lm_json, identity_json],
+            params![
+                thread_id,
+                pid,
+                pgid,
+                lm_json,
+                identity_json,
+                rearm_resume_budget
+            ],
         )?;
         if updated == 0 {
             bail!("thread_runtime row missing for thread_id: {thread_id}");
@@ -10710,11 +10754,11 @@ impl RuntimeDb {
         &self,
         current_daemon_generation_id: &str,
     ) -> Result<Vec<StaleLaunchClaimCleared>> {
+        let tx = self.conn.unchecked_transaction()?;
         let mut rows: Vec<(String, String, String)> = Vec::new();
         {
-            let mut statement = self
-                .conn
-                .prepare("SELECT thread_id, claim_id, claimed_by FROM thread_launch_claim")?;
+            let mut statement =
+                tx.prepare("SELECT thread_id, claim_id, claimed_by FROM thread_launch_claim")?;
             let mapped =
                 statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
             for row in mapped {
@@ -10723,25 +10767,59 @@ impl RuntimeDb {
         }
         let mut cleared = Vec::new();
         for (thread_id, claim_id, claimed_by) in rows {
-            let dead_generation = match serde_json::from_str::<LaunchOwner>(&claimed_by) {
+            let parsed_owner = match serde_json::from_str::<LaunchOwner>(&claimed_by) {
                 Ok(owner) if owner.daemon_generation_id == current_daemon_generation_id => {
                     continue;
                 }
-                Ok(owner) => owner.daemon_generation_id,
-                Err(_) => "<malformed owner>".to_string(),
+                Ok(owner) => Some(owner),
+                Err(_) => None,
             };
-            let removed = self.conn.execute(
+            let dead_generation = parsed_owner
+                .as_ref()
+                .map(|owner| owner.daemon_generation_id.clone())
+                .unwrap_or_else(|| "<malformed owner>".to_string());
+            // A process identity is written only after the claim owner has
+            // spawned and durably attached the exact held process. All three
+            // attachment columns being empty is therefore positive proof that
+            // a well-formed dead-generation claim died before that boundary.
+            // Malformed owners and partial attachment residue fail closed and
+            // retain the consumed retry budget.
+            let proved_unattached = if parsed_owner.is_some() {
+                tx.query_row(
+                    "SELECT pid, pgid, process_identity
+                       FROM thread_runtime WHERE thread_id = ?1",
+                    params![thread_id],
+                    |row| {
+                        Ok(row.get::<_, Option<i64>>(0)?.is_none()
+                            && row.get::<_, Option<i64>>(1)?.is_none()
+                            && row.get::<_, Option<String>>(2)?.is_none())
+                    },
+                )
+                .optional()?
+                .unwrap_or(false)
+            } else {
+                false
+            };
+            let removed = tx.execute(
                 "DELETE FROM thread_launch_claim WHERE thread_id = ?1 AND claim_id = ?2",
                 params![thread_id, claim_id],
             )?;
             if removed > 0 {
+                let resume_budget_rearmed = proved_unattached
+                    && tx.execute(
+                        "UPDATE thread_runtime SET resume_attempts = 0
+                           WHERE thread_id = ?1 AND resume_attempts != 0",
+                        params![thread_id],
+                    )? != 0;
                 cleared.push(StaleLaunchClaimCleared {
                     thread_id,
                     claim_id,
                     dead_generation,
+                    resume_budget_rearmed,
                 });
             }
         }
+        tx.commit()?;
         Ok(cleared)
     }
 
@@ -17674,6 +17752,7 @@ mod tests {
         assert_eq!(cleared.len(), 1);
         assert_eq!(cleared[0].thread_id, "t-dead");
         assert_eq!(cleared[0].dead_generation, "daemon-old");
+        assert!(!cleared[0].resume_budget_rearmed);
 
         // The live claim survives; the dead thread is claimable again and its
         // epoch fencing still advances monotonically.
@@ -17709,11 +17788,77 @@ mod tests {
         let cleared = db.clear_stale_launch_claims("daemon-current").unwrap();
         assert_eq!(cleared.len(), 1);
         assert_eq!(cleared[0].dead_generation, "<malformed owner>");
+        assert!(!cleared[0].resume_budget_rearmed);
         assert_eq!(
             db.claim_thread_launch("t-junk", "c-new", "daemon-current")
                 .unwrap(),
             LaunchClaimOutcome::Claimed
         );
+    }
+
+    #[test]
+    fn startup_sweep_rearms_retry_reserved_before_process_attachment() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        assert_eq!(db.bump_resume_attempts("t1").unwrap(), 1);
+        assert_eq!(
+            db.claim_thread_launch("t1", "claim-old", "daemon-old")
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
+        );
+
+        let cleared = db.clear_stale_launch_claims("daemon-current").unwrap();
+        assert_eq!(cleared.len(), 1);
+        assert!(cleared[0].resume_budget_rearmed);
+        assert_eq!(db.get_resume_attempts("t1").unwrap(), 0);
+        assert!(db.get_launch_claim("t1").unwrap().is_none());
+    }
+
+    #[test]
+    fn new_process_attachment_atomically_rearms_machine_launch_budget() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        assert_eq!(db.bump_resume_attempts("t1").unwrap(), 1);
+        let identity = fake_process_identity(201, 202);
+
+        db.attach_new_process_rearming_resume_budget(
+            "t1",
+            201,
+            202,
+            &identity,
+            &RuntimeLaunchMetadata::default(),
+        )
+        .unwrap();
+
+        let runtime = db.get_runtime_info("t1").unwrap().unwrap();
+        assert_eq!(runtime.process_identity.as_ref(), Some(&identity));
+        assert_eq!(db.get_resume_attempts("t1").unwrap(), 0);
+    }
+
+    #[test]
+    fn startup_sweep_retains_retry_consumed_by_an_attached_process() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        assert_eq!(db.bump_resume_attempts("t1").unwrap(), 1);
+        assert_eq!(
+            db.claim_thread_launch("t1", "claim-old", "daemon-old")
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
+        );
+        db.attach_new_process(
+            "t1",
+            201,
+            202,
+            &fake_process_identity(201, 202),
+            &RuntimeLaunchMetadata::default(),
+        )
+        .unwrap();
+
+        let cleared = db.clear_stale_launch_claims("daemon-current").unwrap();
+        assert_eq!(cleared.len(), 1);
+        assert!(!cleared[0].resume_budget_rearmed);
+        assert_eq!(db.get_resume_attempts("t1").unwrap(), 1);
+        assert!(db.get_launch_claim("t1").unwrap().is_none());
     }
 
     #[test]

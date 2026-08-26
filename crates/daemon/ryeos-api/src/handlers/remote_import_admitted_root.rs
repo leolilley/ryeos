@@ -103,6 +103,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 max_response_bytes: req.max_response_bytes,
                 max_links_per_object: req.max_links_per_object,
                 allow_incomplete: false,
+                allow_untransported_large_objects: false,
             },
         },
     )

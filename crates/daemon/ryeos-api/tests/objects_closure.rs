@@ -18,6 +18,7 @@ fn request(root: String, max_objects: usize) -> objects_closure_describe::Reques
         max_response_bytes: 8192,
         max_links_per_object: 16,
         allow_incomplete: false,
+        allow_untransported_large_objects: false,
     }
 }
 
@@ -148,6 +149,8 @@ async fn closure_get_refuses_large_object_edges_instead_of_returning_a_partial_t
             "schema": ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA,
             "entries": [{
                 "path": "model.safetensors",
+                "kind": "file",
+                "mode": 420,
                 "file_sha256": large_hash,
                 "size": 5,
                 "chunk_size": ryeos_state::objects::MIN_LARGE_CONTENT_CHUNK_BYTES,
@@ -164,13 +167,27 @@ async fn closure_get_refuses_large_object_edges_instead_of_returning_a_partial_t
             .unwrap();
     assert_eq!(described["large_object_hashes"], json!([large_hash]));
 
-    let error = objects_closure_get::handle(request(manifest_hash, 16), state)
+    let error = objects_closure_get::handle(request(manifest_hash.clone(), 16), Arc::clone(&state))
         .await
         .unwrap_err();
     assert!(
         error
             .to_string()
             .contains("cannot transport 1 referenced large objects")
+    );
+
+    let mut requirements_only = request(manifest_hash, 16);
+    requirements_only.allow_untransported_large_objects = true;
+    let value = objects_closure_get::handle(requirements_only, state)
+        .await
+        .unwrap();
+    assert_eq!(value["closure"]["large_object_hashes"], json!([large_hash]));
+    assert!(
+        value["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["kind"] == "object")
     );
 }
 

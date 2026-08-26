@@ -506,6 +506,7 @@ mod integration_tests {
             Some("P")
         );
         assert!(first_metadata.checkpoint_dir.is_none());
+        assert!(first_metadata.continuation_runtime_bootstrap.is_none());
 
         // Model the first resumed segment reaching its second follow callback.
         // Its authoritative seed must itself satisfy the same follow-resume
@@ -530,6 +531,7 @@ mod integration_tests {
             Some("S1")
         );
         assert!(second_metadata.checkpoint_dir.is_none());
+        assert!(second_metadata.continuation_runtime_bootstrap.is_none());
     }
 
     #[test]
@@ -1344,6 +1346,16 @@ mod integration_tests {
             .expect("read successor")
             .expect("successor was published");
         assert_eq!(successor.status, "created");
+        let launch_metadata = successor
+            .runtime
+            .launch_metadata
+            .expect("machine successor launch metadata");
+        assert_eq!(
+            launch_metadata.continuation_runtime_bootstrap,
+            Some(
+                ryeos_app::launch_metadata::ContinuationRuntimeBootstrap::PredecessorNativeCheckpoint
+            )
+        );
         let claim = store
             .get_launch_claim(successor_id)
             .expect("read successor claim")

@@ -1105,6 +1105,7 @@ async fn reconcile_active_threads_inner(
             tracing::warn!(
                 thread_id = %claim.thread_id,
                 dead_generation = %claim.dead_generation,
+                resume_budget_rearmed = claim.resume_budget_rearmed,
                 "cleared launch claim left by a dead daemon generation — thread is \
                  recoverable again"
             );

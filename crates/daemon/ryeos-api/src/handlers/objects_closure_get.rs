@@ -23,7 +23,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     if !req.allow_incomplete && !report.is_complete() {
         bail!("object closure is incomplete");
     }
-    if !report.large_object_hashes.is_empty() {
+    if !report.large_object_hashes.is_empty() && !req.allow_untransported_large_objects {
         bail!(
             "objects/closure/get cannot transport {} referenced large objects; use a large-object-aware transport",
             report.large_object_hashes.len()

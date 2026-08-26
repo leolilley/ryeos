@@ -5,6 +5,7 @@
 //! closure, stage every entry with attribution, then promote the verified set
 //! to `mirrored`.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -50,6 +51,40 @@ pub struct VerifiedRemoteImportJobResult {
     pub job_id: String,
     pub attempt_id: String,
     pub import: VerifiedRemoteImportResult,
+}
+
+/// Require every large-object dependency advertised by a CAS closure to be
+/// present under this node's own pinned large-object authority.
+///
+/// CAS/object sync deliberately does not copy this distinct storage tier.
+/// Worker placement uses the returned hashes as local realization
+/// requirements, then normal capsule admission checks each sidecar against
+/// the signed external-content manifest before any process can run.
+pub fn require_local_large_object_dependencies(state: &AppState, hashes: &[String]) -> Result<()> {
+    let unique = hashes.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    state.state_store.with_state_db(|db| {
+        let authority = db.pinned_authority()?;
+        let store = authority.large_object_store()?;
+        for hash in unique {
+            let size = store.object_size(hash)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "required large-object realization {hash} is not resident on this node"
+                )
+            })?;
+            let sidecar = store.sidecar(hash)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "required large-object realization {hash} has no integrity sidecar"
+                )
+            })?;
+            if sidecar.size != size {
+                anyhow::bail!(
+                    "required large-object realization {hash} size contradicts its integrity sidecar"
+                );
+            }
+            store.verify_resident_object(hash, size)?;
+        }
+        Ok(())
+    })
 }
 
 pub async fn import_admitted_root_with_job(

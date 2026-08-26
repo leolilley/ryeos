@@ -112,10 +112,16 @@ async fn deliver_locked(
                 max_response_bytes: Some(48 * 1024 * 1024),
                 max_links_per_object: Some(65_536),
                 allow_incomplete: false,
+                allow_untransported_large_objects: true,
             },
         )
         .await
-        .map_err(|error| internal(format!("fetch remote follow terminal closure: {error:#}")))?;
+        .map_err(|error| {
+            crate::remote::client::map_remote_call_error(
+                error,
+                "fetch remote follow terminal closure",
+            )
+        })?;
     let terminal_value = closure
         .entries
         .iter()

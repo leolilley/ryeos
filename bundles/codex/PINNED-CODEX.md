@@ -28,7 +28,10 @@ Codex's own model-command sandbox resource, not RyeOS's optional isolation
 backend and not a prerequisite imposed on the RyeOS host installation.
 
 Codex 0.147 rejects a request-level granular `approvalPolicy` without the
-experimental capability. RyeOS therefore supplies the granular policy only in
-the immutable CLI configuration and omits that field from `thread/start`,
-`thread/resume`, and `turn/start`. The admitted response predicates still
-require `ryeos-workspace-only`, user review, and disabled command networking.
+experimental capability, and its exec boundary rejects an explicit sandbox
+escalation when the immutable policy itself uses the granular variant. RyeOS
+therefore pins `on-request` in immutable CLI configuration and omits the field
+from `thread/start`, `thread/resume`, and `turn/start`. The admitted response
+predicates require that exact policy, `ryeos-workspace-only`, user review, and
+disabled command networking. Every mapped request remains deny-only at the
+RyeOS boundary.

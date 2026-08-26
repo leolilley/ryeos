@@ -163,6 +163,68 @@ pub fn run_effective_item_pipeline(
     trust_store: &TrustStore,
     composers: &ComposerRegistry,
 ) -> Result<ResolutionOutput, ResolutionError> {
+    run_effective_item_pipeline_with_probes(item, kinds, parsers, roots, trust_store, composers)
+        .map(|(output, _probes)| output)
+}
+
+/// As [`run_effective_item_pipeline`], but also returns the negative
+/// dependencies used by admitted resolution caches.
+pub fn run_effective_item_pipeline_with_probes(
+    item: &CanonicalRef,
+    kinds: &KindRegistry,
+    parsers: &ParserDispatcher,
+    roots: &ResolutionRoots,
+    trust_store: &TrustStore,
+    composers: &ComposerRegistry,
+) -> Result<(ResolutionOutput, Vec<crate::contracts::ProbedAbsence>), ResolutionError> {
+    run_effective_item_pipeline_with_probes_from_authority(
+        item,
+        kinds,
+        parsers,
+        roots,
+        trust_store,
+        composers,
+        None,
+    )
+}
+
+/// Resolve and compose an executable or data item exclusively beneath one
+/// admitted project-content authority.
+#[allow(clippy::too_many_arguments)]
+pub fn run_effective_item_pipeline_with_probes_under_project_authority(
+    item: &CanonicalRef,
+    kinds: &KindRegistry,
+    parsers: &ParserDispatcher,
+    roots: &ResolutionRoots,
+    trust_store: &TrustStore,
+    composers: &ComposerRegistry,
+    project_root: &std::path::Path,
+    project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+) -> Result<(ResolutionOutput, Vec<crate::contracts::ProbedAbsence>), ResolutionError> {
+    run_effective_item_pipeline_with_probes_from_authority(
+        item,
+        kinds,
+        parsers,
+        roots,
+        trust_store,
+        composers,
+        Some((project_root, project_content)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_effective_item_pipeline_with_probes_from_authority(
+    item: &CanonicalRef,
+    kinds: &KindRegistry,
+    parsers: &ParserDispatcher,
+    roots: &ResolutionRoots,
+    trust_store: &TrustStore,
+    composers: &ComposerRegistry,
+    project_authority: Option<(
+        &std::path::Path,
+        &dyn crate::project_content::AuthoritativeProjectContent,
+    )>,
+) -> Result<(ResolutionOutput, Vec<crate::contracts::ProbedAbsence>), ResolutionError> {
     let kind_schema = kinds
         .get(&item.kind)
         .ok_or_else(|| ResolutionError::StepFailed {
@@ -187,9 +249,8 @@ pub fn run_effective_item_pipeline(
         roots,
         trust_store,
         composers,
-        None,
+        project_authority,
     )
-    .map(|(output, _probes)| output)
 }
 
 // The tail is one resolution environment (registries + roots + trust);

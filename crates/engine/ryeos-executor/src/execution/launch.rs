@@ -3184,6 +3184,10 @@ pub enum CheckpointResumeMode {
     /// Same-thread crash recovery: resume from this thread's OWN checkpoint
     /// (already in its dir — no copy), then inject `RYEOS_RESUME=1`.
     SameThread,
+    /// Machine continuation whose state was restored by an authoritative layer
+    /// above the managed runtime. Cold-start the runtime without copying its
+    /// predecessor checkpoint or injecting `RYEOS_RESUME=1`.
+    ExternallyRestoredContinuation,
 }
 
 impl CheckpointResumeMode {
@@ -3193,6 +3197,23 @@ impl CheckpointResumeMode {
 
     fn copies_predecessor_checkpoint(self) -> bool {
         matches!(self, Self::MachineContinuation)
+    }
+}
+
+fn machine_continuation_checkpoint_resume_mode(
+    metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    successor_thread_id: &str,
+) -> Result<CheckpointResumeMode, BuildAndLaunchError> {
+    match metadata.continuation_runtime_bootstrap {
+        Some(
+            ryeos_app::launch_metadata::ContinuationRuntimeBootstrap::PredecessorNativeCheckpoint,
+        ) => Ok(CheckpointResumeMode::MachineContinuation),
+        Some(ryeos_app::launch_metadata::ContinuationRuntimeBootstrap::ExternallyRestoredState) => {
+            Ok(CheckpointResumeMode::ExternallyRestoredContinuation)
+        }
+        None => Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "machine continuation {successor_thread_id} has no durable runtime-state bootstrap"
+        ))),
     }
 }
 
@@ -3393,6 +3414,14 @@ pub struct BuildAndLaunchParams<'a> {
     /// [`CheckpointResumeMode`]. Drives `RYEOS_RESUME=1` injection and predecessor
     /// copy-forward, and only for replay-aware (`native_resume`) kinds.
     pub checkpoint_resume_mode: CheckpointResumeMode,
+    /// A machine continuation uses `resume_attempts` to bound the pre-attach
+    /// auto-launch window. Once its new process is durably attached, that
+    /// budget has completed its job and must be cleared before the successor's
+    /// independent same-thread crash-recovery policy takes ownership.
+    ///
+    /// This is launch-protocol state, not item-kind behavior. Fresh roots,
+    /// operator/follow launches, and same-thread native resumes leave it false.
+    pub rearm_native_resume_budget_after_attach: bool,
     /// Optional acknowledgement seam for launch surfaces that must not expose
     /// a thread ID until the frozen authority has crossed into a successfully
     /// scheduled spawn task. Synchronous and reconcile paths leave this absent.
@@ -5338,6 +5367,7 @@ async fn run_claimed_thread_row_inner(
         suppress_stimulus,
         capability_policy: _,
         checkpoint_resume_mode: _,
+        rearm_native_resume_budget_after_attach,
         launch_handoff,
     } = params;
     let PreparedManagedLaunchAuthority {
@@ -6308,6 +6338,7 @@ async fn run_claimed_thread_row_inner(
             // predecessor's copied-forward checkpoint; a fresh launch writes a
             // cold one.
             is_resume,
+            rearm_native_resume_budget_after_attach,
         });
         drop(spawn_work_timer);
         drop(spawn_worker_total_timer);
@@ -7141,6 +7172,7 @@ async fn prepare_follow_child_launch_inner(
                 )?,
             },
             checkpoint_resume_mode: CheckpointResumeMode::None,
+            rearm_native_resume_budget_after_attach: false,
             launch_handoff: None,
         },
         thread_id,
@@ -7280,7 +7312,14 @@ async fn prepare_successor_launch(
         SuccessorMode::Machine => (
             true,
             CapabilityPolicy::ExactPinned(resume.effective_caps.as_slice()),
-            CheckpointResumeMode::MachineContinuation,
+            machine_continuation_checkpoint_resume_mode(
+                metadata_template.ok_or_else(|| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "machine continuation {successor_thread_id} has no launch metadata"
+                    ))
+                })?,
+                successor_thread_id,
+            )?,
         ),
         SuccessorMode::Operator => (
             false,
@@ -7293,7 +7332,7 @@ async fn prepare_successor_launch(
             )));
         }
     };
-    let authority = prepare_managed_launch_authority(
+    let mut authority = prepare_managed_launch_authority(
         &BuildAndLaunchParams {
             state,
             lifecycle_authority: resume.lifecycle_authority,
@@ -7311,17 +7350,41 @@ async fn prepare_successor_launch(
             suppress_stimulus,
             capability_policy,
             checkpoint_resume_mode,
+            rearm_native_resume_budget_after_attach: false,
             launch_handoff: None,
         },
         successor_thread_id,
         metadata_template,
     )
     .await?;
-    let launch_metadata = authority
+    let mut launch_metadata = authority
         .launch_metadata
         .as_ref()
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("successor authority produced no launch metadata"))?;
+    if let Some(source_thread_id) = previous_thread_id {
+        let source_metadata = state
+            .state_store
+            .get_launch_metadata(source_thread_id)?
+            .ok_or_else(|| {
+                anyhow::anyhow!("continuation source {source_thread_id} has no launch metadata")
+            })?;
+        let realization = super::execution_realization::transition_continuation_project_authority(
+            state,
+            &source_metadata,
+            &launch_metadata,
+        )?;
+        if authority.pending_external_realization.is_some() && realization.publication.is_some() {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "continuation preparation produced two independent execution-realization publications"
+            )));
+        }
+        if authority.pending_external_realization.is_none() {
+            authority.pending_external_realization = realization.publication;
+        }
+        launch_metadata = launch_metadata.with_execution_realization_hash(realization.hash);
+        authority.launch_metadata = Some(launch_metadata.clone());
+    }
     let prepared_resume = launch_metadata
         .resume_context
         .as_ref()
@@ -7437,6 +7500,43 @@ pub async fn prepare_machine_successor_launch(
     resume: &ryeos_app::launch_metadata::ResumeContext,
     source_thread_id: &str,
 ) -> Result<PreparedMachineSuccessorLaunch, BuildAndLaunchError> {
+    prepare_machine_successor_launch_with_bootstrap(
+        state,
+        successor_thread_id,
+        resume,
+        source_thread_id,
+        ryeos_app::launch_metadata::ContinuationRuntimeBootstrap::PredecessorNativeCheckpoint,
+    )
+    .await
+}
+
+/// Prepare a machine successor after a higher-level authority has already
+/// restored its exact state. This remains a normal chain-folding machine
+/// continuation, but the managed runtime itself must cold-start rather than
+/// consuming its own predecessor checkpoint.
+pub async fn prepare_externally_restored_machine_successor_launch(
+    state: &AppState,
+    successor_thread_id: &str,
+    resume: &ryeos_app::launch_metadata::ResumeContext,
+    source_thread_id: &str,
+) -> Result<PreparedMachineSuccessorLaunch, BuildAndLaunchError> {
+    prepare_machine_successor_launch_with_bootstrap(
+        state,
+        successor_thread_id,
+        resume,
+        source_thread_id,
+        ryeos_app::launch_metadata::ContinuationRuntimeBootstrap::ExternallyRestoredState,
+    )
+    .await
+}
+
+async fn prepare_machine_successor_launch_with_bootstrap(
+    state: &AppState,
+    successor_thread_id: &str,
+    resume: &ryeos_app::launch_metadata::ResumeContext,
+    source_thread_id: &str,
+    bootstrap: ryeos_app::launch_metadata::ContinuationRuntimeBootstrap,
+) -> Result<PreparedMachineSuccessorLaunch, BuildAndLaunchError> {
     let source_metadata = state
         .state_store
         .get_launch_metadata(source_thread_id)?
@@ -7449,6 +7549,7 @@ pub async fn prepare_machine_successor_launch(
     let successor_metadata = source_metadata
         .continuation_successor_seed(resume.clone())
         .with_continuation_source(source_thread_id)
+        .with_continuation_runtime_bootstrap(bootstrap)
         .with_sealed_root_request(sealed);
     let mut prepared = prepare_successor_launch(
         state,
@@ -7506,6 +7607,9 @@ pub async fn prepare_remote_machine_successor_launch(
     let mut template = source_launch_metadata
         .continuation_successor_seed(target_resume.clone())
         .with_continuation_source(source_thread_id)
+        .with_continuation_runtime_bootstrap(
+            ryeos_app::launch_metadata::ContinuationRuntimeBootstrap::ExternallyRestoredState,
+        )
         .with_sealed_root_request(target_sealed);
     template.accounting_scope = target_accounting_scope;
     let mut prepared = prepare_successor_launch(
@@ -7957,13 +8061,20 @@ async fn launch_claimed_successor(
         suppress_stimulus,
         capability_policy,
         checkpoint_resume_mode: match mode {
-            SuccessorMode::Machine => CheckpointResumeMode::MachineContinuation,
+            SuccessorMode::Machine => {
+                machine_continuation_checkpoint_resume_mode(&launch_metadata, &successor_id)?
+            }
             SuccessorMode::Operator => CheckpointResumeMode::None,
             // The follow-resume launcher already copied the predecessor's
             // checkpoint into this successor's dir and spliced the child
             // result, so resume from its OWN dir — do NOT re-copy.
             SuccessorMode::Follow => CheckpointResumeMode::SameThread,
         },
+        // The machine-launch counter bounds only the created-successor
+        // pre-attachment window. After attachment, native resume owns its own
+        // same-thread crash budget. Operator/follow launches did not consume
+        // the machine counter.
+        rearm_native_resume_budget_after_attach: mode == SuccessorMode::Machine,
         launch_handoff,
     };
     match prepared_authority {
@@ -8252,6 +8363,7 @@ async fn launch_claimed_native_resume(
             // Pin the captured authority verbatim (same as a machine relaunch).
             capability_policy: CapabilityPolicy::ExactPinned(resume.effective_caps.as_slice()),
             checkpoint_resume_mode: CheckpointResumeMode::SameThread,
+            rearm_native_resume_budget_after_attach: false,
             launch_handoff: None,
         },
         thread,
@@ -8488,6 +8600,7 @@ async fn launch_admitted_root_with_claim(
             suppress_stimulus: false,
             capability_policy: CapabilityPolicy::ExactPinned(resume.effective_caps.as_slice()),
             checkpoint_resume_mode: CheckpointResumeMode::None,
+            rearm_native_resume_budget_after_attach: false,
             launch_handoff: None,
         },
         thread,
@@ -8713,6 +8826,7 @@ async fn launch_claimed_follow_child(
         },
         // Fresh launch, not a checkpoint resume.
         checkpoint_resume_mode: CheckpointResumeMode::None,
+        rearm_native_resume_budget_after_attach: false,
         // Clamp the child to the parent's hard limits + launch at parent depth
         // + 1 on the hot path; reconcile reconstructs the persisted parent
         // execution context below rather than silently granting root limits.
@@ -9742,6 +9856,44 @@ fn prompt_inputs_from_parameters(parameters: &Value) -> Value {
 mod tests {
     use super::*;
     use crate::execution::limits::{LimitCaps, LimitValues};
+
+    #[test]
+    fn machine_continuation_uses_its_durable_runtime_state_bootstrap() {
+        let predecessor = ryeos_app::launch_metadata::RuntimeLaunchMetadata::default()
+            .with_continuation_source("T-source")
+            .with_continuation_runtime_bootstrap(
+                ryeos_app::launch_metadata::ContinuationRuntimeBootstrap::PredecessorNativeCheckpoint,
+            );
+        assert_eq!(
+            machine_continuation_checkpoint_resume_mode(&predecessor, "T-successor").unwrap(),
+            CheckpointResumeMode::MachineContinuation
+        );
+
+        let restored = ryeos_app::launch_metadata::RuntimeLaunchMetadata::default()
+            .with_continuation_source("T-source")
+            .with_continuation_runtime_bootstrap(
+                ryeos_app::launch_metadata::ContinuationRuntimeBootstrap::ExternallyRestoredState,
+            );
+        let restored_mode =
+            machine_continuation_checkpoint_resume_mode(&restored, "T-successor").unwrap();
+        assert_eq!(
+            restored_mode,
+            CheckpointResumeMode::ExternallyRestoredContinuation
+        );
+        assert!(!restored_mode.injects_resume_env());
+        assert!(!restored_mode.copies_predecessor_checkpoint());
+
+        let error = machine_continuation_checkpoint_resume_mode(
+            &ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
+            "T-successor",
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("no durable runtime-state bootstrap")
+        );
+    }
 
     fn executor_verification_probe(label: &str) -> ExecutorVerificationProbe {
         ExecutorVerificationProbe {

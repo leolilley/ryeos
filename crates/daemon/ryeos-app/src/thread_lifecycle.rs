@@ -617,15 +617,18 @@ pub fn retained_thread_result(
 ) -> Result<Value> {
     use ryeos_engine::history_policy::ThreadResultRetention;
 
-    match policy.retention {
-        ThreadResultRetention::Full => Ok(value.clone()),
-        ThreadResultRetention::DigestOnly => Ok(json!({
+    let retained = match policy.retention {
+        ThreadResultRetention::Full => value.clone(),
+        ThreadResultRetention::DigestOnly => json!({
             "schema": 1,
             "kind": "ryeos.digest_only_result",
             "result_digest": ryeos_state::objects::canonical_value_digest(value)?,
             "policy": policy,
-        })),
-    }
+        }),
+    };
+    ryeos_state::objects::validate_thread_result_content(Some(&retained), None)
+        .context("validate retained thread result")?;
+    Ok(retained)
 }
 
 /// Apply the same frozen terminal-retention contract to an execution error.
@@ -637,15 +640,18 @@ pub fn retained_thread_error(
 ) -> Result<Value> {
     use ryeos_engine::history_policy::ThreadResultRetention;
 
-    match policy.retention {
-        ThreadResultRetention::Full => Ok(value.clone()),
-        ThreadResultRetention::DigestOnly => Ok(json!({
+    let retained = match policy.retention {
+        ThreadResultRetention::Full => value.clone(),
+        ThreadResultRetention::DigestOnly => json!({
             "schema": 1,
             "kind": "ryeos.digest_only_error",
             "error_digest": ryeos_state::objects::canonical_value_digest(value)?,
             "policy": policy,
-        })),
-    }
+        }),
+    };
+    ryeos_state::objects::validate_thread_result_content(None, Some(&retained))
+        .context("validate retained thread error")?;
+    Ok(retained)
 }
 
 /// Lifecycle-layer result of a conditional pre-launch cleanup. `Finalized` and
@@ -3556,7 +3562,7 @@ impl ThreadLifecycleService {
     /// repeats are rejected because target code cannot legitimately have
     /// self-attached while still awaiting release.
     pub fn attach_new_process(&self, params: &ThreadAttachProcessParams) -> Result<ThreadDetail> {
-        self.attach_new_process_with_owner(params, None)
+        self.attach_new_process_with_owner(params, None, false)
     }
 
     pub fn attach_new_process_owned(
@@ -3564,7 +3570,15 @@ impl ThreadLifecycleService {
         params: &ThreadAttachProcessParams,
         launch_owner: &str,
     ) -> Result<ThreadDetail> {
-        self.attach_new_process_with_owner(params, Some(launch_owner))
+        self.attach_new_process_with_owner(params, Some(launch_owner), false)
+    }
+
+    pub fn attach_new_process_owned_rearming_resume_budget(
+        &self,
+        params: &ThreadAttachProcessParams,
+        launch_owner: &str,
+    ) -> Result<ThreadDetail> {
+        self.attach_new_process_with_owner(params, Some(launch_owner), true)
     }
 
     fn attach_process_with_owner(
@@ -3599,6 +3613,7 @@ impl ThreadLifecycleService {
         &self,
         params: &ThreadAttachProcessParams,
         launch_owner: Option<&str>,
+        rearm_resume_budget: bool,
     ) -> Result<ThreadDetail> {
         let process_identity = params.process_identity.as_ref().ok_or_else(|| {
             anyhow!(
@@ -3607,14 +3622,26 @@ impl ThreadLifecycleService {
                 params.pgid
             )
         })?;
-        self.state_store.attach_new_thread_process(
-            &params.thread_id,
-            params.pid,
-            params.pgid,
-            process_identity,
-            &params.launch_metadata,
-            launch_owner,
-        )?;
+        if rearm_resume_budget {
+            self.state_store
+                .attach_new_thread_process_rearming_resume_budget(
+                    &params.thread_id,
+                    params.pid,
+                    params.pgid,
+                    process_identity,
+                    &params.launch_metadata,
+                    launch_owner,
+                )?;
+        } else {
+            self.state_store.attach_new_thread_process(
+                &params.thread_id,
+                params.pid,
+                params.pgid,
+                process_identity,
+                &params.launch_metadata,
+                launch_owner,
+            )?;
+        }
         self.get_thread(&params.thread_id)?.ok_or_else(|| {
             anyhow!(
                 "thread not found after pre-release process attachment: {}",
@@ -4367,6 +4394,28 @@ impl ThreadLifecycleService {
                 return;
             }
         }
+        let has_remote_waiter = if has_local_waiter {
+            false
+        } else {
+            match self
+                .state_store
+                .has_remote_follow_delivery_reservation(chain_root_id)
+            {
+                Ok(value) => value,
+                Err(e) => {
+                    tracing::warn!(
+                        thread_id,
+                        chain_root_id,
+                        error = %e,
+                        "failed to look up remote follow reservation; terminal delivery deferred",
+                    );
+                    return;
+                }
+            }
+        };
+        if !has_local_waiter && !has_remote_waiter {
+            return;
+        }
         // Prefer the canonical envelope carried through finalization (preserves
         // outputs/warnings/raw cost). When none is present, this is a cancel /
         // reconcile / pre-run finalize or an old runtime — the stored result
@@ -4384,7 +4433,7 @@ impl ThreadLifecycleService {
                 degraded_follow_envelope(thread_id, terminal_status, result, error, final_cost)
             }
         };
-        if !has_local_waiter {
+        if has_remote_waiter {
             match self.state_store.reserve_remote_follow_terminal_delivery(
                 chain_root_id,
                 thread_id,
@@ -6665,6 +6714,67 @@ mod tests {
                 .unwrap()
                 .contains("DEVICE-CREDENTIAL-SENTINEL")
         );
+    }
+
+    fn test_result_policy(
+        retention: ryeos_engine::history_policy::ThreadResultRetention,
+    ) -> ryeos_engine::history_policy::ResolvedThreadResultPolicy {
+        ryeos_engine::history_policy::ResolvedThreadResultPolicy {
+            retention,
+            canonical_item_ref: "service:test/large-result".to_string(),
+            item_content_hash: "1".repeat(64),
+            item_signer_fingerprint: Some("2".repeat(64)),
+            item_trust_class: ryeos_engine::contracts::TrustClass::Trusted,
+            kind_schema_content_hash: "3".repeat(64),
+            source: ryeos_engine::history_policy::ResultPolicyProvenance::DefaultFull,
+        }
+    }
+
+    #[test]
+    fn full_result_retention_rejects_oversized_content_before_finalization() {
+        let live = json!({
+            "payload": "x".repeat(ryeos_state::objects::MAX_THREAD_RESULT_CONTENT_BYTES)
+        });
+
+        let error = retained_thread_result(
+            &live,
+            &test_result_policy(ryeos_engine::history_policy::ThreadResultRetention::Full),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("validate retained thread result")
+        );
+    }
+
+    #[test]
+    fn full_error_retention_rejects_oversized_content_before_finalization() {
+        let live = json!({
+            "error": "x".repeat(ryeos_state::objects::MAX_THREAD_RESULT_CONTENT_BYTES)
+        });
+
+        let error = retained_thread_error(
+            &live,
+            &test_result_policy(ryeos_engine::history_policy::ThreadResultRetention::Full),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("validate retained thread error"));
+    }
+
+    #[test]
+    fn digest_only_retention_accepts_an_oversized_live_result() {
+        let live = json!({
+            "payload": "x".repeat(ryeos_state::objects::MAX_THREAD_RESULT_CONTENT_BYTES)
+        });
+
+        let retained = retained_thread_result(
+            &live,
+            &test_result_policy(ryeos_engine::history_policy::ThreadResultRetention::DigestOnly),
+        )
+        .unwrap();
+        assert_eq!(retained["kind"], "ryeos.digest_only_result");
+        ryeos_state::objects::validate_thread_result_content(Some(&retained), None).unwrap();
     }
 
     fn empty_test_engine() -> Arc<Engine> {

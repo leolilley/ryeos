@@ -1753,7 +1753,12 @@ struct CreateChainWithEventsRequest<'a> {
 
 #[derive(Debug, Clone)]
 pub struct AuthoritativeThreadSnapshotWithLastEventReadback {
+    /// Exact verified signed-head target from which both values were read.
+    pub chain_head_hash: String,
     pub snapshot: ThreadSnapshot,
+    /// Exact event selected by the current `ChainThreadEntry`. This can be
+    /// newer than `snapshot.last_event_hash` when appends leave lifecycle
+    /// state unchanged.
     pub last_event: Option<(String, ThreadEvent)>,
 }
 
@@ -4390,8 +4395,9 @@ impl StateDb {
         )
     }
 
-    /// Read one current snapshot and its exact last event under the same
-    /// trust-verified chain authority without consulting the projection.
+    /// Read one current snapshot, its exact thread-entry tip, and their signed
+    /// head under the same trust-verified chain authority without consulting
+    /// the projection.
     pub fn read_authoritative_thread_snapshot_with_last_event(
         &self,
         chain_root_id: &str,
@@ -4403,9 +4409,9 @@ impl StateDb {
             &self.recovery,
             chain_root_id,
         )?;
-        let snapshot = {
+        let readback = {
             let mut head_cache = self.head_cache.lock().expect("head_cache lock");
-            chain::read_thread_snapshot_with_trust(
+            chain::read_thread_snapshot_with_entry_last_event_with_trust(
                 &self.cas_root,
                 &self.refs_root,
                 &chain_lock,
@@ -4415,12 +4421,11 @@ impl StateDb {
                 &mut head_cache,
             )?
         };
-        let Some(snapshot) = snapshot else {
+        let Some((chain_head_hash, snapshot, last_event)) = readback else {
             return Ok(None);
         };
-        let last_event =
-            chain::read_snapshot_last_event_object(&self.cas_root, Some(&chain_lock), &snapshot)?;
         Ok(Some(AuthoritativeThreadSnapshotWithLastEventReadback {
+            chain_head_hash,
             snapshot,
             last_event,
         }))
@@ -6892,6 +6897,41 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn authoritative_snapshot_last_event_uses_the_thread_entry_tip() {
+        let signer = TestSigner::default();
+        let (_dir, db) = open_temp_trusted(&signer);
+        let snapshot = test_root_snapshot("directive:system/test");
+        assert!(snapshot.last_event_hash.is_none());
+        db.create_chain("T-root", snapshot, &signer).unwrap();
+
+        let event = crate::objects::thread_event::NewEvent::new(
+            "T-root",
+            "T-root",
+            "observation_without_snapshot_transition",
+        )
+        .payload(serde_json::json!({"observed": true}))
+        .build();
+        let appended = db
+            .append_events("T-root", "T-root", vec![event], vec![], &signer)
+            .unwrap();
+        let committed_event = appended.value.events.last().unwrap();
+
+        let readback = db
+            .read_authoritative_thread_snapshot_with_last_event("T-root", "T-root")
+            .unwrap()
+            .expect("authoritative root");
+        assert!(readback.snapshot.last_event_hash.is_none());
+        assert_eq!(readback.chain_head_hash, appended.value.chain_state_hash);
+        let (event_hash, event) = readback.last_event.expect("thread-entry tip");
+        assert_eq!(
+            event_hash,
+            crate::objects::canonical_value_digest(&committed_event.to_value()).unwrap()
+        );
+        assert_eq!(event.event_type, "observation_without_snapshot_transition");
+        assert_eq!(event.thread_seq, 1);
     }
 
     #[test]

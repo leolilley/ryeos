@@ -65,7 +65,11 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
 // v18 carries the retained-current-HEAD principal/project/base destination.
 // v19 carries the path-free outer exact-program projection and its exact
 // resolved ref-binding identities through the embedded sealed invocation.
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 19;
+// v20 carries the exact runtime-state bootstrap selected for a machine
+// continuation, so live launch and crash recovery cannot disagree about
+// whether the managed runtime consumes a predecessor checkpoint or cold-starts
+// after an authority above the runtime has restored its state.
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 20;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -103,6 +107,25 @@ pub const CHECKPOINTS_SUBDIR: &str = "checkpoints";
 /// of the same location are how state roots silently diverge.
 pub fn daemon_checkpoint_dir(app_root: &std::path::Path, thread_id: &str) -> std::path::PathBuf {
     daemon_thread_state_dir(app_root, thread_id).join(CHECKPOINTS_SUBDIR)
+}
+
+/// Durable runtime-state bootstrap for a machine continuation.
+///
+/// This is deliberately generic execution metadata. It describes which layer
+/// supplied the successor's state; it does not identify a worker kind, a state
+/// format, or a provider. The higher-level authority that selects
+/// `ExternallyRestoredState` must durably prove and install that state before
+/// the continuation row becomes observable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationRuntimeBootstrap {
+    /// The managed runtime copies the predecessor's native checkpoint into the
+    /// successor checkpoint directory and launches with `RYEOS_RESUME=1`.
+    PredecessorNativeCheckpoint,
+    /// An authoritative caller has already restored the successor's state at
+    /// its admitted non-runtime boundary. The managed runtime cold-starts: it
+    /// neither copies a predecessor checkpoint nor receives `RYEOS_RESUME=1`.
+    ExternallyRestoredState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,6 +181,13 @@ pub struct RuntimeLaunchMetadata {
     /// startup reconciliation to reject thread-id collisions.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub continuation_source_thread_id: Option<String>,
+
+    /// Exact state-bootstrap mode for a machine continuation. Required for a
+    /// machine successor, absent for roots, operator follow-ups, and structural
+    /// follow-resume successors. Persisting this choice closes the crash gap
+    /// between higher-level state installation and subprocess attachment.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub continuation_runtime_bootstrap: Option<ContinuationRuntimeBootstrap>,
 
     /// Complete sealed fresh-root request used only while a created child has
     /// not crossed its first-launch boundary. Recovery consumes this exact
@@ -246,6 +276,7 @@ impl Default for RuntimeLaunchMetadata {
             checkpoint_dir: None,
             resume_context: None,
             continuation_source_thread_id: None,
+            continuation_runtime_bootstrap: None,
             sealed_root_request: None,
             admitted_project_authority: None,
             admitted_artifact_identity: None,
@@ -737,6 +768,11 @@ impl RuntimeLaunchMetadata {
                 &self.continuation_source_thread_id,
                 &attempt.continuation_source_thread_id,
             )?,
+            continuation_runtime_bootstrap: exact(
+                "continuation runtime bootstrap",
+                &self.continuation_runtime_bootstrap,
+                &attempt.continuation_runtime_bootstrap,
+            )?,
             sealed_root_request: exact(
                 "sealed admitted request",
                 &self.sealed_root_request,
@@ -814,6 +850,7 @@ impl RuntimeLaunchMetadata {
                 || self.checkpoint_dir.is_some()
                 || self.resume_context.is_some()
                 || self.continuation_source_thread_id.is_some()
+                || self.continuation_runtime_bootstrap.is_some()
                 || self.sealed_root_request.is_some()
                 || self.admitted_project_authority.is_some()
                 || self.admitted_artifact_identity.is_some()
@@ -909,6 +946,11 @@ impl RuntimeLaunchMetadata {
         if self.continuation_source_thread_id.is_some() && self.resume_context.is_none() {
             anyhow::bail!("continuation launch metadata has no resume authority");
         }
+        if self.continuation_runtime_bootstrap.is_some()
+            && self.continuation_source_thread_id.is_none()
+        {
+            anyhow::bail!("continuation runtime bootstrap has no continuation source");
+        }
         if self.sealed_root_request.is_some() {
             self.admitted_launch_capsule()?;
         }
@@ -943,6 +985,7 @@ impl RuntimeLaunchMetadata {
             checkpoint_dir: None,
             resume_context: None,
             continuation_source_thread_id: None,
+            continuation_runtime_bootstrap: None,
             sealed_root_request: None,
             admitted_project_authority: None,
             admitted_artifact_identity: None,
@@ -968,6 +1011,7 @@ impl RuntimeLaunchMetadata {
             && self.checkpoint_dir.is_none()
             && self.resume_context.is_none()
             && self.continuation_source_thread_id.is_none()
+            && self.continuation_runtime_bootstrap.is_none()
             && self.sealed_root_request.is_none()
             && self.admitted_project_authority.is_none()
             && self.admitted_artifact_identity.is_none()
@@ -1161,6 +1205,14 @@ impl RuntimeLaunchMetadata {
         self
     }
 
+    pub fn with_continuation_runtime_bootstrap(
+        mut self,
+        bootstrap: ContinuationRuntimeBootstrap,
+    ) -> Self {
+        self.continuation_runtime_bootstrap = Some(bootstrap);
+        self
+    }
+
     /// Derive the durable launch seed for a continuation successor. Runtime
     /// policy and the exact admitted program survive the handoff. A
     /// replay-aware successor gets its own checkpoint directory rather than
@@ -1184,6 +1236,7 @@ impl RuntimeLaunchMetadata {
             checkpoint_dir: self.native_resume.as_ref().map(|_| checkpoint_dir),
             resume_context: self.resume_context.clone(),
             continuation_source_thread_id: Some(source_thread_id.to_string()),
+            continuation_runtime_bootstrap: None,
             sealed_root_request: self.sealed_root_request.clone(),
             admitted_project_authority,
             admitted_artifact_identity: self.admitted_artifact_identity.clone(),
@@ -1349,6 +1402,7 @@ mod tests {
             "launch_driver",
             "in_process_lifecycle_authority",
             "admitted_launch_capsule_schema",
+            "continuation_runtime_bootstrap",
         ] {
             let mut value = serde_json::to_value(RuntimeLaunchMetadata::default()).unwrap();
             value
@@ -1549,6 +1603,7 @@ mod tests {
             checkpoint_dir: Some(PathBuf::from("/tmp/ckpt")),
             resume_context: None,
             continuation_source_thread_id: None,
+            continuation_runtime_bootstrap: None,
             sealed_root_request: None,
             admitted_project_authority: None,
             admitted_artifact_identity: None,
@@ -1651,6 +1706,7 @@ mod tests {
         assert_eq!(successor.resume_context, Some(successor_resume));
         assert!(successor.checkpoint_dir.is_none());
         assert!(successor.continuation_source_thread_id.is_none());
+        assert!(successor.continuation_runtime_bootstrap.is_none());
         assert!(successor.sealed_root_request.is_none());
         assert!(
             successor.admitted_project_authority.is_none(),
@@ -1670,6 +1726,31 @@ mod tests {
             "continuation must carry the accounting scope forward"
         );
         assert!(successor.accounting_scope.is_some());
+    }
+
+    #[test]
+    fn continuation_runtime_bootstrap_requires_a_source_and_roundtrips_exactly() {
+        let bootstrap = ContinuationRuntimeBootstrap::ExternallyRestoredState;
+        let without_source =
+            RuntimeLaunchMetadata::default().with_continuation_runtime_bootstrap(bootstrap);
+        assert!(
+            without_source
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("has no continuation source")
+        );
+
+        let metadata = RuntimeLaunchMetadata::default()
+            .with_continuation_source("T-source")
+            .with_continuation_runtime_bootstrap(bootstrap);
+        let value = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(
+            value["continuation_runtime_bootstrap"],
+            serde_json::json!("externally_restored_state")
+        );
+        let decoded: RuntimeLaunchMetadata = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.continuation_runtime_bootstrap, Some(bootstrap));
     }
 
     #[test]

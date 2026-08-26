@@ -182,7 +182,10 @@ pub async fn handle(
                     )
                 })
                 .unwrap_or_default();
-            HandlerError::Internal(format!("remote run failed: {error:#}{coordinate}"))
+            crate::remote::client::map_remote_call_error(
+                error,
+                format!("remote run failed{coordinate}"),
+            )
         })?;
 
     Ok(serde_json::json!({

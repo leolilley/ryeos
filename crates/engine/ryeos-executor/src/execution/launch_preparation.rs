@@ -1192,7 +1192,7 @@ fn resolve_binding_closure(
             }
         }
         let (output, probed_absent) =
-            ryeos_engine::resolution::run_resolution_pipeline_with_probes(
+            ryeos_engine::resolution::run_effective_item_pipeline_with_probes(
                 canonical,
                 &request.engine.kinds,
                 request.parsers,
@@ -1274,7 +1274,7 @@ fn resolve_binding_closure(
             })?;
         let resolution = match project_content {
             Some((project_root, content)) => {
-                ryeos_engine::resolution::run_resolution_pipeline_with_probes_under_project_authority(
+                ryeos_engine::resolution::run_effective_item_pipeline_with_probes_under_project_authority(
                     canonical,
                     &request.engine.kinds,
                     request.parsers,
@@ -1285,7 +1285,7 @@ fn resolve_binding_closure(
                     content,
                 )
             }
-            None => ryeos_engine::resolution::run_resolution_pipeline_with_probes(
+            None => ryeos_engine::resolution::run_effective_item_pipeline_with_probes(
                 canonical,
                 &request.engine.kinds,
                 request.parsers,

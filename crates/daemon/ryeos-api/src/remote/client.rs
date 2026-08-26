@@ -44,6 +44,40 @@ impl std::fmt::Display for RemoteHttpError {
 
 impl std::error::Error for RemoteHttpError {}
 
+/// Preserve an authenticated remote node's bounded HTTP failure at the local
+/// service boundary. A remote 4xx is not a local 500, and callers need the
+/// exact status to distinguish an admission refusal from an uncertain
+/// transport failure. Non-HTTP failures remain internal because no remote
+/// application decision was received.
+pub fn map_remote_call_error(
+    error: anyhow::Error,
+    context: impl Into<String>,
+) -> crate::handler_error::HandlerError {
+    let context = context.into();
+    let Some(http) = error.downcast_ref::<RemoteHttpError>() else {
+        return crate::handler_error::HandlerError::Internal(format!("{context}: {error:#}"));
+    };
+    let status = http.status.as_u16();
+    let remote_body = serde_json::from_str::<Value>(&http.body)
+        .unwrap_or_else(|_| Value::String(http.body.clone()));
+    crate::handler_error::HandlerError::Structured {
+        code: "remote_http_error".to_owned(),
+        status,
+        body: serde_json::json!({
+            "code":"remote_http_error",
+            "error":format!("{context}: remote node returned HTTP {status}"),
+            "remote":{
+                "method":http.method,
+                "url":http.url,
+                "status":status,
+                "body":remote_body,
+            },
+            "retryable":http.status.is_server_error()
+                || http.status == reqwest::StatusCode::TOO_MANY_REQUESTS,
+        }),
+    }
+}
+
 /// Cap on the response-body excerpt carried in a [`RemoteHttpError`]. A
 /// wrong-host / proxy / CDN error can return an arbitrarily large HTML page;
 /// keep enough to diagnose without bloating logs and error chains.
@@ -746,7 +780,7 @@ impl RemoteClient {
         let resp = self.signed_post("/objects/closure/get", &body).await?;
         let response: ObjectsClosureGetResponse =
             serde_json::from_value(resp).context("failed to parse objects/closure/get response")?;
-        response.validate_against_request(roots)?;
+        response.validate_against_request(roots, options.allow_untransported_large_objects)?;
         Ok(response)
     }
 
@@ -1863,7 +1897,11 @@ pub struct ObjectsClosureGetResponse {
 }
 
 impl ObjectsClosureGetResponse {
-    pub fn validate_against_request(&self, requested_roots: &[String]) -> Result<()> {
+    pub fn validate_against_request(
+        &self,
+        requested_roots: &[String],
+        allow_untransported_large_objects: bool,
+    ) -> Result<()> {
         validate_closure_summary_against_request(&self.closure, requested_roots)?;
         if !self.closure.complete {
             anyhow::bail!("remote returned incomplete object closure");
@@ -1877,7 +1915,7 @@ impl ObjectsClosureGetResponse {
                 "remote returned complete closure with missing/malformed/unsupported entries"
             );
         }
-        if !self.closure.large_object_hashes.is_empty() {
+        if !self.closure.large_object_hashes.is_empty() && !allow_untransported_large_objects {
             anyhow::bail!(
                 "remote CAS closure contains large-object edges that this transport cannot fetch"
             );
@@ -2057,6 +2095,7 @@ pub struct ObjectsClosureRequestOptions {
     pub max_response_bytes: Option<u64>,
     pub max_links_per_object: Option<usize>,
     pub allow_incomplete: bool,
+    pub allow_untransported_large_objects: bool,
 }
 
 fn closure_request_body(roots: &[String], options: &ObjectsClosureRequestOptions) -> Value {
@@ -2087,6 +2126,9 @@ fn closure_request_body(roots: &[String], options: &ObjectsClosureRequestOptions
     }
     if options.allow_incomplete {
         body["allow_incomplete"] = serde_json::json!(true);
+    }
+    if options.allow_untransported_large_objects {
+        body["allow_untransported_large_objects"] = serde_json::json!(true);
     }
     body
 }
@@ -3317,5 +3359,30 @@ mod tests {
         .unwrap();
 
         assert!(response.validate(Some("running")).is_err());
+    }
+
+    #[test]
+    fn authenticated_remote_http_status_is_preserved_at_handler_boundary() {
+        let error = anyhow::Error::new(RemoteHttpError {
+            method: "POST",
+            url: "https://target.invalid/execute".to_owned(),
+            status: reqwest::StatusCode::BAD_REQUEST,
+            body: serde_json::json!({
+                "code":"bad_request",
+                "error":"target admission refused",
+                "retryable":false,
+            })
+            .to_string(),
+        });
+        match map_remote_call_error(error, "target preflight") {
+            crate::handler_error::HandlerError::Structured { code, status, body } => {
+                assert_eq!(code, "remote_http_error");
+                assert_eq!(status, 400);
+                assert_eq!(body["remote"]["status"], 400);
+                assert_eq!(body["remote"]["body"]["code"], "bad_request");
+                assert_eq!(body["retryable"], false);
+            }
+            other => panic!("unexpected mapped error: {other:?}"),
+        }
     }
 }

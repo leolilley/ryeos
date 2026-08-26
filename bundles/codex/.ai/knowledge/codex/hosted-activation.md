@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-26T16:27:42Z:bb532338d2c23bcc5ec5bc94d477bf118efaa24d4b96f30f6de02e3d832bef46:jCl515x2953YDNaO2i97v0fxoQLEBsP0LvFzwS8NeFNeYA3C7c4TM+S8l1nJcUasCilGV+V4riOUQD2b4ENtCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-26T23:06:53Z:cf766bb4c976319e5c395761e8aa395ef9254c5b6a897b9345333c1690bd8c82:YCDMTqEXn/cur0T/MD9b+NJclP7D1ayabQ8JJHdweiba5493wsGZ3lWTafkPUlK3c38g/7x/GCfEPVbs9BJDBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -43,7 +43,10 @@ knowledge bundle.
    stages beside the output, and publishes the complete directory with one
    same-filesystem rename. The human-readable pin contract is installed at
    `/usr/share/doc/ryeos/codex/PINNED-CODEX.md`. Then import and bind the five
-   exact files declared by `.ai/config/codex/activation.yaml`.
+   exact files declared by `.ai/config/codex/activation.yaml`. Repeat that
+   assembly/import/bind activation independently on every node that may become
+   a placement target. Paths and node-signed realization capsules are local;
+   the verified file content and portable exact-program identity must agree.
 3. Before starting the hosted daemon, author both node-owned policies outside
    the live node namespace. Measure the assembled realization root with
    `stat -c '%d %i' /absolute/codex-assembly` and replace only the path/device/
@@ -115,11 +118,15 @@ knowledge bundle.
    chain, placement, continuation, and follow testimony. This lets the original
    local operator endpoint receive a return handoff without changing its key's
    semantic class.
-5. Open projectless login, call `credential.login.start`, finish the ephemeral
+5. On every node that may host the session, independently open projectless
+   login, call `credential.login.start`, finish the ephemeral
    ceremony, call `credential.account.read`, close it, and confirm the exact
    login epoch/account digest. The attached caller receives the device code;
    the recorded worker-command thread and any source-node `remote.run` thread
    retain only its canonical digest under the signed generic result policy.
+   Never copy `auth.json`, tokens, or the remaining private profile home between
+   nodes. Handoff proves only that each target-local confirmed account derives
+   the same signed credential-subject digest.
 6. Establish the configured operator's principal-scoped project HEAD through
    the standard local `commit` or an explicit full-project
    `service:remote/push` with `outbound_principal: configured_operator`. A
@@ -130,19 +137,29 @@ knowledge bundle.
    durable accepted thread ID. Drive projectless credential and session
    services through wait-mode `service:remote/run` with
    `outbound_principal: configured_operator`; do not connect an operator-key
-   client directly to the hosted daemon. Call
-   Start the worker with the signed
+   client directly to the hosted daemon. Start the worker with the signed
    `config:codex/environments/default` environment (the local CLI spelling is
    `codex session start <profile> --environment
    config:codex/environments/default --async --current-head`; a typed remote
    request carries the same `environment` ref binding). Call `session.start`, then
    `turn.start`, `turn.steer`, and `turn.interrupt`. Every turn is bound to the
    one returned remote thread; cross-thread targeting is rejected.
+   Before cross-site handoff, the destination's configured-operator project
+   HEAD must already be the source placement's exact base snapshot. Preserve
+   that origin HEAD or reconcile it through ordinary full-project
+   synchronization while no handoff is in progress. Handoff deliberately
+   refuses a missing or divergent destination HEAD instead of overwriting it.
 7. Resolve digest-fenced pending approvals. This release exposes bounded
    command/cwd for review but makes command-execution, file, and permission
    requests deny-only. Accepting an upstream sandbox-escalation request could
    widen the immutable permission ceiling and is therefore not admitted.
 8. Complete work, validate the frozen candidate, then publish or discard.
+   `terminate` accepts only `reason: completed` or `reason: cancelled`.
+   `completed` freezes a project session and exposes its candidate;
+   `cancelled` terminalizes without a checkpointable placement. A portable
+   checkpoint is therefore captured only after `completed`, and `resume`
+   conditionally restores that manifest into a fresh placement before its
+   worker is released.
 
 External-content maintenance after activation requires a quiesced class
 transition, not another identity. Finish or terminate hosted executions, stop
@@ -204,14 +221,18 @@ instead of claiming a stable subtree snapshot. RyeOS-owned paths such as the
 compatibility seed still require exact non-link types and atomic reset before a
 credential-bearing process generation is released.
 
-For pinned Codex 0.147 the granular approval policy is inherited from immutable
-CLI configuration. Request-level `approvalPolicy` is intentionally omitted
-because the stable App Server rejects that granular field unless the forbidden
-`experimentalApi` capability is enabled. Sandbox approvals are disabled in
-that immutable policy, and every retained App Server approval class is
-deny-only. Supporting accept later requires an upstream request class whose
-accepted effect is proven to remain inside the identical frozen permission
-profile.
+For pinned Codex 0.147 the `on-request` approval policy is inherited from
+immutable CLI configuration. Request-level `approvalPolicy` is intentionally
+omitted because the stable App Server rejects a granular field unless the
+forbidden `experimentalApi` capability is enabled, while the pinned exec
+boundary rejects explicit sandbox escalation when the immutable policy itself
+uses the granular variant. Supported approval requests can therefore become a
+durable RyeOS approval request. Every retained App Server approval class is
+nevertheless `deny_only`:
+RyeOS can deliver decline/cancel, but an accept decision is refused before
+upstream contact. Supporting accept later requires an upstream request class
+whose accepted effect is proven to remain inside the identical frozen
+permission profile.
 
 App Server inherits a cleared minimal environment and no RyeOS control FD.
 Model commands receive the signed Codex permission profile and cannot access

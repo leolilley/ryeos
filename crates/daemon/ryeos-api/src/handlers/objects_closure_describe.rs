@@ -49,6 +49,14 @@ pub struct Request {
     pub max_links_per_object: usize,
     #[serde(default)]
     pub allow_incomplete: bool,
+    /// Permit `objects/closure/get` to return the complete CAS/object closure
+    /// while leaving references into the distinct large-object store as
+    /// requirements only. No large-object bytes are carried by this API.
+    /// Callers that need to execute the retained realization must separately
+    /// prove those exact objects are resident under the destination's local
+    /// large-object authority.
+    #[serde(default)]
+    pub allow_untransported_large_objects: bool,
 }
 
 fn default_max_objects() -> usize {

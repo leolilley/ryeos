@@ -3,7 +3,7 @@ cli_auth_credentials_store = "file"
 model_provider = "openai"
 mcp_servers = {}
 check_for_update_on_startup = false
-approval_policy = { granular = { sandbox_approval = true, rules = false, mcp_elicitations = false, request_permissions = false, skill_approval = false } }
+approval_policy = "on-request"
 approvals_reviewer = "user"
 # Pinned Codex 0.147.0 split-filesystem profile. Permission profiles do not
 # compose with legacy sandbox_mode settings, so none are present here.

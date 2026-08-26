@@ -614,6 +614,15 @@ fn capture_portable_state_directory(
                 });
             }
             lillux::PinnedEntryType::Symlink
+                if selector.class == PortableSessionStateClass::RebuildableCache =>
+            {
+                // Rebuildable namespaces are deliberately absent from the
+                // portable checkpoint. A workload may use local symlinks in
+                // such a cache; observe the link identity without following
+                // it and discard it from the transfer contract.
+                directory.ensure_entry_observation(&entry)?;
+            }
+            lillux::PinnedEntryType::Symlink
             | lillux::PinnedEntryType::CharacterDevice
             | lillux::PinnedEntryType::BlockDevice
             | lillux::PinnedEntryType::Fifo
@@ -653,6 +662,11 @@ mod tests {
                     pattern: "auth.json".to_string(),
                     class: PortableSessionStateClass::NodePrivateCredentialState,
                     max_matches: 1,
+                },
+                ryeos_state::objects::PortableSessionStateSelector {
+                    pattern: "cache/**".to_string(),
+                    class: PortableSessionStateClass::RebuildableCache,
+                    max_matches: 32,
                 },
                 ryeos_state::objects::PortableSessionStateSelector {
                     pattern: "config.toml".to_string(),
@@ -717,6 +731,12 @@ mod tests {
             b"unrelated",
         )
         .unwrap();
+        std::fs::create_dir(home.join("cache")).unwrap();
+        std::os::unix::fs::symlink(
+            tmp.path().join("outside-cache-target"),
+            home.join("cache/workload-link"),
+        )
+        .unwrap();
 
         let tree = capture_portable_state(
             tmp.path(),
@@ -737,6 +757,22 @@ mod tests {
                 .windows(6)
                 .any(|part| part == b"secret")
         );
+
+        std::os::unix::fs::symlink(
+            tmp.path().join("outside-state-target"),
+            home.join("sessions/day/unselected-link"),
+        )
+        .unwrap();
+        assert!(
+            capture_portable_state(
+                tmp.path(),
+                "portable-home",
+                &portable_contract(),
+                "session-one"
+            )
+            .is_err()
+        );
+        std::fs::remove_file(home.join("sessions/day/unselected-link")).unwrap();
 
         std::fs::write(home.join("unknown"), b"not classified").unwrap();
         assert!(

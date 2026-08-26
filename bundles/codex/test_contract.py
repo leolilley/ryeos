@@ -120,9 +120,19 @@ class CodexContractTests(unittest.TestCase):
         self.assertTrue(self.profile["server_requests"])
         immutable_args = self.profile["workload_args"]
         self.assertIn(
-            "approval_policy={ granular={ sandbox_approval=false, rules=false, mcp_elicitations=false, request_permissions=false, skill_approval=false } }",
+            'approval_policy="on-request"',
             immutable_args,
         )
+        baseline = (SOURCE / self.profile["baseline_config"]).read_text()
+        self.assertIn('approval_policy = "on-request"', baseline)
+        for route_id in ("session.start", "session.resume"):
+            self.assertIn(
+                {
+                    "pointer": "/response/result/approvalPolicy",
+                    "equals": "on-request",
+                },
+                self.routes[route_id]["response_predicates"],
+            )
         for request in self.profile["server_requests"]:
             self.assertNotIn("response_style", request)
             self.assertEqual(
@@ -136,6 +146,31 @@ class CodexContractTests(unittest.TestCase):
                 request["deny_only"],
                 f"{request['method']} must not widen the immutable permission ceiling",
             )
+
+    def test_portable_state_classifies_rebuildable_global_state(self) -> None:
+        selectors = {
+            selector["pattern"]: selector
+            for selector in self.profile["portable_state"]["selectors"]
+        }
+        patterns = [
+            selector["pattern"]
+            for selector in self.profile["portable_state"]["selectors"]
+        ]
+        self.assertEqual(patterns, sorted(patterns))
+        self.assertEqual(
+            selectors["session_index.jsonl"],
+            {
+                "pattern": "session_index.jsonl",
+                "class": "rebuildable_cache",
+                "max_matches": 1,
+            },
+        )
+        self.assertEqual(
+            selectors["sessions/*/*/*/rollout-*-{session_id}.jsonl"]["class"],
+            "portable_session_state",
+        )
+        self.assertEqual(selectors[".tmp/**"]["class"], "rebuildable_cache")
+        self.assertEqual(selectors["tmp/**"]["class"], "rebuildable_cache")
 
     def test_worker_source_digest_covers_the_complete_profile_closure(self) -> None:
         worker = WORKER_PATH.read_text(encoding="utf-8")

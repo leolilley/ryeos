@@ -602,7 +602,7 @@ async fn checkpoint(
         }
     }
 
-    let (source_snapshot, source_event) = state
+    let (source_snapshot, source_event, _) = state
         .state_store
         .get_authoritative_thread_snapshot_with_last_event(
             &session.chain_root_id,
@@ -841,7 +841,7 @@ async fn resume(
             "checkpoint project candidate differs from the frozen source".into(),
         ));
     }
-    let (source_snapshot, _) = state
+    let (source_snapshot, _, _) = state
         .state_store
         .get_authoritative_thread_snapshot_with_last_event(&source.chain_root_id, &source_thread_id)
         .map_err(internal)?
@@ -1000,14 +1000,15 @@ async fn resume(
         resume_context.original_pushed_head_ref = None;
     }
     let successor_id = ryeos_app::thread_lifecycle::new_thread_id();
-    let prepared = ryeos_executor::execution::launch::prepare_machine_successor_launch(
-        &state,
-        &successor_id,
-        &resume_context,
-        &source_thread_id,
-    )
-    .await
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let prepared =
+        ryeos_executor::execution::launch::prepare_externally_restored_machine_successor_launch(
+            &state,
+            &successor_id,
+            &resume_context,
+            &source_thread_id,
+        )
+        .await
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     let mut initial_events = prepared
         .initial_audit_events()
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
@@ -1179,7 +1180,7 @@ async fn handoff_preflight(
         .derive_subject_digest(sanitized_account)
         .map_err(internal)?;
 
-    let (source_snapshot, source_event) = state
+    let (source_snapshot, source_event, source_chain_head_hash) = state
         .state_store
         .get_authoritative_thread_snapshot_with_last_event(&source.chain_root_id, &source_thread_id)
         .map_err(internal)?
@@ -1194,6 +1195,11 @@ async fn handoff_preflight(
         .ok_or_else(|| internal("preflight source has no signed chain head"))?;
     if source_head.signer != state.identity.fingerprint() {
         return Err(internal("preflight source head is not owned by this node"));
+    }
+    if source_head.target_hash != source_chain_head_hash {
+        return Err(HandlerError::BadRequest(
+            "worker placement changed during handoff preflight".into(),
+        ));
     }
     let source_launch_capsule_hash = source_snapshot
         .admitted_launch_capsule_hash
@@ -1328,7 +1334,9 @@ async fn handoff_preflight(
             None,
         )
         .await
-        .map_err(|error| internal(format!("target placement preflight: {error:#}")))?;
+        .map_err(|error| {
+            crate::remote::client::map_remote_call_error(error, "target placement preflight")
+        })?;
     let response: ryeos_app::worker_handoff::WorkerPlacementPreflightResponse =
         serde_json::from_value(target_value)
             .map_err(|error| internal(format!("decode target preflight response: {error}")))?;
@@ -1354,10 +1362,18 @@ async fn handoff_preflight(
                 max_response_bytes: Some(64 * 1024 * 1024),
                 max_links_per_object: Some(65_536),
                 allow_incomplete: false,
+                allow_untransported_large_objects: true,
             },
         )
         .await
-        .map_err(|error| internal(format!("fetch target preflight receipt: {error:#}")))?;
+        .map_err(|error| {
+            crate::remote::client::map_remote_call_error(error, "fetch target preflight receipt")
+        })?;
+    crate::remote::import::require_local_large_object_dependencies(
+        &state,
+        &target_closure.closure.large_object_hashes,
+    )
+    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     let mut payload = crate::remote::import::closure_response_to_export_payload(
         &format!("worker-preflight:{preflight_id}"),
         &response.preflight_attestation_hash,
@@ -1546,7 +1562,7 @@ async fn handoff(
             "handoff checkpoint candidate differs from the frozen source".into(),
         ));
     }
-    let (source_snapshot, source_event) = state
+    let (source_snapshot, source_event, source_chain_head_hash) = state
         .state_store
         .get_authoritative_thread_snapshot_with_last_event(&source.chain_root_id, &source_thread_id)
         .map_err(internal)?
@@ -1566,6 +1582,11 @@ async fn handoff(
         .ok_or_else(|| internal("handoff source has no signed chain head"))?;
     if source_head.signer != state.identity.fingerprint() {
         return Err(internal("handoff source head is not owned by this node"));
+    }
+    if source_head.target_hash != source_chain_head_hash {
+        return Err(HandlerError::BadRequest(
+            "worker placement changed during handoff".into(),
+        ));
     }
     let source_metadata = state
         .state_store
@@ -1833,7 +1854,9 @@ async fn handoff(
                 None,
             )
             .await
-            .map_err(|error| internal(format!("target placement preparation: {error:#}")))?;
+            .map_err(|error| {
+                crate::remote::client::map_remote_call_error(error, "target placement preparation")
+            })?;
         let prepared: ryeos_app::worker_handoff::WorkerPlacementPrepareResponse =
             serde_json::from_value(target_value)
                 .map_err(|error| internal(format!("decode target placement response: {error}")))?;
@@ -1860,10 +1883,21 @@ async fn handoff(
                     max_response_bytes: Some(64 * 1024 * 1024),
                     max_links_per_object: Some(65_536),
                     allow_incomplete: false,
+                    allow_untransported_large_objects: true,
                 },
             )
             .await
-            .map_err(|error| internal(format!("fetch target placement closure: {error:#}")))?;
+            .map_err(|error| {
+                crate::remote::client::map_remote_call_error(
+                    error,
+                    "fetch target placement closure",
+                )
+            })?;
+        crate::remote::import::require_local_large_object_dependencies(
+            &state,
+            &target_closure.closure.large_object_hashes,
+        )
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
         let target_payload = crate::remote::import::closure_response_to_export_payload(
             &format!("worker-placement:{operation_id}"),
             &prepared.placement_attestation_hash,
@@ -2089,7 +2123,9 @@ async fn handoff(
                 None,
             )
             .await
-            .map_err(|error| internal(format!("target placement adoption: {error:#}")))?;
+            .map_err(|error| {
+                crate::remote::client::map_remote_call_error(error, "target placement adoption")
+            })?;
         let adopted: ryeos_app::worker_handoff::WorkerPlacementAdoptResponse =
             serde_json::from_value(adopted_value)
                 .map_err(|error| internal(format!("decode target adoption response: {error}")))?;
@@ -2271,7 +2307,9 @@ async fn resume_committed_handoff(
             None,
         )
         .await
-        .map_err(|error| internal(format!("retry target placement adoption: {error:#}")))?;
+        .map_err(|error| {
+            crate::remote::client::map_remote_call_error(error, "retry target placement adoption")
+        })?;
     let adopted: ryeos_app::worker_handoff::WorkerPlacementAdoptResponse =
         serde_json::from_value(value).map_err(internal)?;
     if adopted.operation_id != operation.operation_id
@@ -2619,13 +2657,16 @@ async fn recover_pre_cut_source_handoff_abort(
             }
             expected
         } else if current_head.target_hash == operation.source_chain_head_hash {
-            let (_, event) = state
+            let (_, event, observed_head_hash) = state
                 .state_store
                 .get_authoritative_thread_snapshot_with_last_event(
                     &operation.chain_root_id,
                     &operation.source_placement_thread_id,
                 )?
                 .ok_or_else(|| anyhow::anyhow!("pre-cut handoff source disappeared"))?;
+            if observed_head_hash != operation.source_chain_head_hash {
+                anyhow::bail!("pre-cut handoff source head changed before abort");
+            }
             if event.and_then(|event| event.event_hash).as_deref()
                 != Some(operation.source_last_event_hash.as_str())
             {

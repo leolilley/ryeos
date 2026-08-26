@@ -1159,19 +1159,34 @@ pub enum StopIfAdmissionOpenOutcome {
 
 #[derive(Clone, Copy)]
 enum ProcessAttachmentMode<'a> {
-    Idempotent { launch_owner: Option<&'a str> },
-    New { launch_owner: Option<&'a str> },
+    Idempotent {
+        launch_owner: Option<&'a str>,
+    },
+    New {
+        launch_owner: Option<&'a str>,
+        rearm_resume_budget: bool,
+    },
 }
 
 impl<'a> ProcessAttachmentMode<'a> {
     fn launch_owner(self) -> Option<&'a str> {
         match self {
-            Self::Idempotent { launch_owner } | Self::New { launch_owner } => launch_owner,
+            Self::Idempotent { launch_owner } | Self::New { launch_owner, .. } => launch_owner,
         }
     }
 
     fn requires_empty(self) -> bool {
         matches!(self, Self::New { .. })
+    }
+
+    fn rearms_resume_budget(self) -> bool {
+        matches!(
+            self,
+            Self::New {
+                rearm_resume_budget: true,
+                ..
+            }
+        )
     }
 }
 
@@ -4267,7 +4282,7 @@ impl StateStore {
         &self,
         chain_root_id: &str,
         thread_id: &str,
-    ) -> Result<Option<(ThreadSnapshot, Option<PersistedEventRecord>)>> {
+    ) -> Result<Option<(ThreadSnapshot, Option<PersistedEventRecord>, String)>> {
         let g = self.lock()?;
         let Some(readback) = g
             .state_db
@@ -4280,7 +4295,7 @@ impl StateStore {
             .last_event
             .map(|(event_hash, event)| persisted_event_from_authoritative(event_hash, event))
             .transpose()?;
-        Ok(Some((snapshot, last_event)))
+        Ok(Some((snapshot, last_event, readback.chain_head_hash)))
     }
 
     /// Resolve the latest state-anchor through the ordinary event projection,
@@ -8408,9 +8423,19 @@ impl StateStore {
                 }
                 metadata
             }
-            _ => successor_launch_metadata.cloned().unwrap_or_else(|| {
-                source_launch_metadata.continuation_successor_seed(source_resume_context.clone())
-            }),
+            _ => {
+                let prepared = successor_launch_metadata.cloned();
+                let mut metadata = prepared.clone().unwrap_or_else(|| {
+                    source_launch_metadata
+                        .continuation_successor_seed(source_resume_context.clone())
+                });
+                if prepared.is_none() && matches!(&kind, RunningContinuationKind::Machine { .. }) {
+                    metadata.continuation_runtime_bootstrap = Some(
+                        crate::launch_metadata::ContinuationRuntimeBootstrap::PredecessorNativeCheckpoint,
+                    );
+                }
+                metadata
+            }
         };
         let successor_resume_context =
             successor_meta
@@ -8450,6 +8475,27 @@ impl StateStore {
             bail!("prepared successor names a different continuation source");
         }
         successor_meta.continuation_source_thread_id = Some(source_thread_id.to_string());
+        match &kind {
+            RunningContinuationKind::Machine { .. } => {
+                if successor_meta.continuation_runtime_bootstrap.is_none() {
+                    bail!("machine successor has no durable runtime-state bootstrap");
+                }
+            }
+            RunningContinuationKind::RemoteAdoption { .. } => {
+                if successor_meta.continuation_runtime_bootstrap
+                    != Some(
+                        crate::launch_metadata::ContinuationRuntimeBootstrap::ExternallyRestoredState,
+                    )
+                {
+                    bail!("remote adoption must cold-start from externally restored state");
+                }
+            }
+            RunningContinuationKind::GraphFollowResume => {
+                if successor_meta.continuation_runtime_bootstrap.is_some() {
+                    bail!("follow-resume successor carries machine runtime-state bootstrap");
+                }
+            }
+        }
         let successor_runtime = RuntimeInfo {
             launch_metadata: Some(successor_meta.clone()),
             ..RuntimeInfo::default()
@@ -11581,6 +11627,32 @@ impl StateStore {
             launch_metadata,
             ProcessAttachmentMode::New {
                 launch_owner: expected_launch_owner,
+                rearm_resume_budget: false,
+            },
+        )
+    }
+
+    /// Persist a held continuation process and atomically transfer recovery
+    /// ownership from its predecessor-to-successor launch budget to its own
+    /// same-thread resume budget.
+    pub fn attach_new_thread_process_rearming_resume_budget(
+        &self,
+        thread_id: &str,
+        pid: i64,
+        pgid: i64,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+        launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        expected_launch_owner: Option<&str>,
+    ) -> Result<()> {
+        self.attach_thread_process_with_mode(
+            thread_id,
+            pid,
+            pgid,
+            process_identity,
+            launch_metadata,
+            ProcessAttachmentMode::New {
+                launch_owner: expected_launch_owner,
+                rearm_resume_budget: true,
             },
         )
     }
@@ -11654,8 +11726,23 @@ impl StateStore {
         }
         let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
         if mode.requires_empty() {
-            g.runtime_db
-                .attach_new_process(thread_id, pid, pgid, process_identity, launch_metadata)
+            if mode.rearms_resume_budget() {
+                g.runtime_db.attach_new_process_rearming_resume_budget(
+                    thread_id,
+                    pid,
+                    pgid,
+                    process_identity,
+                    launch_metadata,
+                )
+            } else {
+                g.runtime_db.attach_new_process(
+                    thread_id,
+                    pid,
+                    pgid,
+                    process_identity,
+                    launch_metadata,
+                )
+            }
         } else {
             g.runtime_db
                 .attach_process(thread_id, pid, pgid, process_identity, launch_metadata)
@@ -13114,6 +13201,21 @@ impl StateStore {
             bail!("stored follow reservation digest changed");
         }
         Ok(Some((hash, attestation)))
+    }
+
+    /// Whether this chain carries an imported source-signed remote follow
+    /// reservation. Direct roots and ordinary service threads have neither a
+    /// local waiter nor this retained coordinate and therefore need no follow
+    /// terminal envelope at all.
+    pub fn has_remote_follow_delivery_reservation(
+        &self,
+        child_chain_root_id: &str,
+    ) -> Result<bool> {
+        let g = self.lock()?;
+        Ok(
+            retained_remote_follow_reservation(&self.state_authority, &g, child_chain_root_id)?
+                .is_some(),
+        )
     }
 
     /// Retain one target-signed terminal receipt and a durable delivery job

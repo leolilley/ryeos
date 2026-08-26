@@ -135,10 +135,15 @@ pub async fn preflight(
                 max_response_bytes: Some(64 * 1024 * 1024),
                 max_links_per_object: Some(65_536),
                 allow_incomplete: false,
+                allow_untransported_large_objects: true,
             },
         )
         .await
-        .map_err(|error| internal(format!("fetch source preflight closure: {error:#}")))?;
+        .map_err(|error| {
+            crate::remote::client::map_remote_call_error(error, "fetch source preflight closure")
+        })?;
+    import::require_local_large_object_dependencies(&state, &closure.closure.large_object_hashes)
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     if let Some(hash) = &req.follow_delivery_reservation_attestation_hash {
         let value = closure
             .entries
@@ -459,10 +464,15 @@ pub async fn prepare(
                 max_response_bytes: Some(64 * 1024 * 1024),
                 max_links_per_object: Some(65_536),
                 allow_incomplete: false,
+                allow_untransported_large_objects: true,
             },
         )
         .await
-        .map_err(|error| internal(format!("fetch source placement closure: {error:#}")))?;
+        .map_err(|error| {
+            crate::remote::client::map_remote_call_error(error, "fetch source placement closure")
+        })?;
+    import::require_local_large_object_dependencies(&state, &closure.closure.large_object_hashes)
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     let payload = import::closure_response_to_export_payload(
         &req.chain_root_id,
         &req.source_chain_head_hash,
@@ -712,10 +722,15 @@ pub async fn abort(
                 max_response_bytes: Some(64 * 1024 * 1024),
                 max_links_per_object: Some(65_536),
                 allow_incomplete: false,
+                allow_untransported_large_objects: true,
             },
         )
         .await
-        .map_err(|error| internal(format!("fetch source handoff-abort chain: {error:#}")))?;
+        .map_err(|error| {
+            crate::remote::client::map_remote_call_error(error, "fetch source handoff-abort chain")
+        })?;
+    import::require_local_large_object_dependencies(&state, &closure.closure.large_object_hashes)
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     let payload = import::closure_response_to_export_payload(
         &req.chain_root_id,
         &req.abort_chain_head_hash,
@@ -906,13 +921,16 @@ async fn adopt_authorized(
             .pinned_state_authority()
             .map_err(internal)?;
         let guard = authority.acquire_shared_guard().map_err(internal)?;
-        let payload = ryeos_state::sync::export_exact_chain_head_pinned(
-            &authority,
-            &req.chain_root_id,
-            &req.target_chain_head_hash,
-            &guard,
-        )
-        .map_err(internal)?;
+        let (payload, large_object_requirements) =
+            ryeos_state::sync::export_exact_chain_head_cas_payload_pinned(
+                &authority,
+                &req.chain_root_id,
+                &req.target_chain_head_hash,
+                &guard,
+            )
+            .map_err(internal)?;
+        import::require_local_large_object_dependencies(&state, &large_object_requirements)
+            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
         if u64::try_from(payload.total_bytes).map_err(internal)? > 64 * 1024 * 1024 {
             return Err(internal(
                 "staged worker chain exceeds the admitted recovery payload ceiling",
@@ -934,10 +952,18 @@ async fn adopt_authorized(
                     max_response_bytes: Some(64 * 1024 * 1024),
                     max_links_per_object: Some(65_536),
                     allow_incomplete: false,
+                    allow_untransported_large_objects: true,
                 },
             )
             .await
-            .map_err(|error| internal(format!("fetch committed worker chain: {error:#}")))?;
+            .map_err(|error| {
+                crate::remote::client::map_remote_call_error(error, "fetch committed worker chain")
+            })?;
+        import::require_local_large_object_dependencies(
+            &state,
+            &closure.closure.large_object_hashes,
+        )
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
         import::closure_response_to_export_payload(
             &req.chain_root_id,
             &req.target_chain_head_hash,

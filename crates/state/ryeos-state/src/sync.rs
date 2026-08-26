@@ -213,16 +213,40 @@ pub fn export_exact_chain_head_pinned(
     head_hash: &str,
     guard: &crate::CasMutationGuard,
 ) -> Result<ExportPayload> {
+    let (payload, large_object_requirements) =
+        export_exact_chain_head_cas_payload_pinned(authority, chain_root_id, head_hash, guard)?;
+    if !large_object_requirements.is_empty() {
+        anyhow::bail!(
+            "staged chain closure contains {} large-object edge(s), but the CAS sync payload has no large-object transport",
+            large_object_requirements.len()
+        );
+    }
+    Ok(payload)
+}
+
+/// Reconstruct the CAS/object portion of one exact chain closure while
+/// returning its distinct large-object requirements separately.
+///
+/// This is for protocols such as worker placement that explicitly require the
+/// destination to possess and re-admit public external realizations locally.
+/// It never claims to transfer those bytes: callers must validate every
+/// returned requirement against the destination's pinned large-object store
+/// before making the chain runnable.
+pub fn export_exact_chain_head_cas_payload_pinned(
+    authority: &crate::PinnedStateAuthority,
+    chain_root_id: &str,
+    head_hash: &str,
+    guard: &crate::CasMutationGuard,
+) -> Result<(ExportPayload, Vec<String>)> {
     authority.ensure_guard(guard)?;
     let cas = authority.cas_store()?;
     let reachable =
         crate::rebuild::verified_repair_closure_with_cas(&cas, chain_root_id, head_hash, true)?;
-    if !reachable.large_object_hashes.is_empty() {
-        anyhow::bail!(
-            "staged chain closure contains {} large-object edge(s), but the CAS sync payload has no large-object transport",
-            reachable.large_object_hashes.len()
-        );
-    }
+    let mut large_object_requirements = reachable
+        .large_object_hashes
+        .into_iter()
+        .collect::<Vec<_>>();
+    large_object_requirements.sort();
     let mut entries =
         Vec::with_capacity(reachable.object_hashes.len() + reachable.blob_hashes.len());
     let mut total_bytes = 0usize;
@@ -261,12 +285,15 @@ pub fn export_exact_chain_head_pinned(
             data,
         });
     }
-    Ok(ExportPayload {
-        chain_root_id: chain_root_id.to_owned(),
-        chain_head_hash: head_hash.to_owned(),
-        entries,
-        total_bytes,
-    })
+    Ok((
+        ExportPayload {
+            chain_root_id: chain_root_id.to_owned(),
+            chain_head_hash: head_hash.to_owned(),
+            entries,
+            total_bytes,
+        },
+        large_object_requirements,
+    ))
 }
 
 /// Verify a complete exact chain closure and require one known ancestor

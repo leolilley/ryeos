@@ -87,7 +87,7 @@ key's hosted `local_client` grant with a target-node-signed `remote_operator`
 grant. This is a semantic class conversion, not a scope update:
 
 ```sh
-HOSTED_SCOPES='ryeos.execute.worker_execution.codex/login,ryeos.execute.worker_execution.codex/session,ryeos.execute.service.launch/status,ryeos.execute.service.launch/cancel,ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.system/push-head,ryeos.execute.service.credential-profiles/create,ryeos.execute.service.credential-profiles/get,ryeos.execute.service.credential-profiles/revoke,ryeos.execute.service.credential-profiles/confirm,ryeos.execute.service.credential-profiles/delete,ryeos.execute.service.worker-executions/status,ryeos.execute.service.worker-executions/command,ryeos.execute.service.worker-executions/approvals,ryeos.execute.service.worker-executions/resolve-approval,ryeos.execute.service.worker-executions/terminate,ryeos.execute.service.worker-executions/checkpoint,ryeos.execute.service.worker-executions/resume,ryeos.execute.service.worker-executions/handoff-preflight,ryeos.execute.service.worker-executions/handoff,ryeos.execute.service.worker-executions/publish,ryeos.execute.service.worker-executions/validate-candidate-closure-and-base,ryeos.execute.service.worker-executions/discard,ryeos.write.project.live'
+HOSTED_SCOPES='ryeos.execute.config.codex/environments/default,ryeos.execute.worker_execution.codex/login,ryeos.execute.worker_execution.codex/session,ryeos.execute.service.events/chain_replay,ryeos.execute.service.launch/status,ryeos.execute.service.launch/cancel,ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.system/push-head,ryeos.execute.service.threads/tail,ryeos.execute.service.credential-profiles/create,ryeos.execute.service.credential-profiles/get,ryeos.execute.service.credential-profiles/revoke,ryeos.execute.service.credential-profiles/confirm,ryeos.execute.service.credential-profiles/delete,ryeos.execute.service.worker-executions/status,ryeos.execute.service.worker-executions/command,ryeos.execute.service.worker-executions/approvals,ryeos.execute.service.worker-executions/resolve-approval,ryeos.execute.service.worker-executions/terminate,ryeos.execute.service.worker-executions/checkpoint,ryeos.execute.service.worker-executions/resume,ryeos.execute.service.worker-executions/handoff-preflight,ryeos.execute.service.worker-executions/handoff,ryeos.execute.service.worker-executions/publish,ryeos.execute.service.worker-executions/validate-candidate-closure-and-base,ryeos.execute.service.worker-executions/discard,ryeos.write.project.live'
 RYEOS_APP_ROOT=/path/to/hosted-app-root ryeos authorize-client \
   --public-key "<configured_operator_raw_ed25519_base64>" \
   --label "hosted operator forwarded from source" \
@@ -241,6 +241,7 @@ ryeos remote run hosted worker_execution:codex/session \
   --project /local/project \
   --outbound-principal configured_operator \
   --parameters '{"credential_profile_id":"personal"}' \
+  --ref-bindings '{"environment":"config:codex/environments/default"}' \
   --launch-id "$REMOTE_LAUNCH_ID" \
   --execution-policy '{
     "schema_version": 2,
@@ -288,18 +289,29 @@ Approval decisions require the exact pending request digest. All approval
 classes are deny-only in this release, including command execution: Codex's
 App Server command request can represent a sandbox escalation without exposing
 a complete reviewable permission delta. RyeOS may display the bounded request
-and send decline/cancel, but cannot accept it. Termination is explicit and
-publication is a separate terminal CAS.
+and send decline/cancel, but cannot accept it. The immutable `on-request`
+policy lets supported approval requests reach the RyeOS ledger; the profile's
+`deny_only` contract
+rejects an accept decision before upstream contact. Termination is explicit
+and publication is a separate terminal CAS.
 Use the same projectless remote service envelope with the signed generic
 services `worker-executions/resolve-approval`, `terminate`,
 `validate-candidate-closure-and-base`, `publish`, or `discard`; their exact
 parameters and digest fences are declared by their signed service items.
 
+`terminate` accepts exactly `completed` or `cancelled`. A completed project
+session freezes its candidate and can then be checkpointed; cancellation is a
+direct terminal disposition and cannot be checkpointed. `resume` consumes the
+exact frozen `manifest_ref` and creates a fresh placement under the stable
+chain root.
+
 The remote operator grant must carry only the exact execution and service
-scopes for the Codex worker-execution item, credential-profile endpoints,
-worker-execution endpoints, object upload, project HEAD publication, and live
-project publication. External-content services are local-only and must not be
-present. The separate source-node `remote_node` grant needs only
+scopes for the Codex worker-execution item, its declared environment config,
+credential-profile endpoints, worker-execution endpoints, chain-event replay
+and tail attach, object upload, project HEAD publication, and live project
+publication.
+External-content services are local-only and must not be present. The separate
+source-node `remote_node` grant needs only
 `ryeos.attest.request.forwarded-operator`. The hosted-node policy rejects
 wildcard grants; the feature does not broaden a client's authority.
 

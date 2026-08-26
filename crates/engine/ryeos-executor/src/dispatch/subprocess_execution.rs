@@ -396,6 +396,7 @@ async fn dispatch_managed_subprocess(
         capability_policy: crate::execution::launch::CapabilityPolicy::AdmissionDefault,
         // Fresh launch: cold start, no checkpoint resume.
         checkpoint_resume_mode: crate::execution::launch::CheckpointResumeMode::None,
+        rearm_native_resume_budget_after_attach: false,
         launch_handoff,
     })
     .await

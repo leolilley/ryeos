@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-26T16:27:42Z:a2abcdad2a8129b3768000e249aa340610828375a7dd7bf0febb855431cd9345:zTCE8NQhiMJOlHTlzfo8Rb6cwNgrtQOzgLSzaB1DekJxNqWZcouOqEAu/r8ZudKHEquBsme5kKObIbCdLCrCBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-26T23:06:47Z:6509318e8b642b71a4c65969f71749924508311343e33192c6863ab768ad905a:iedIOIPY3CySlt9+eUqWb39pYFIxv/sxKM/isJZs5OjtxtRSj+iysCQLneV9DgYrDeXckPZYePfDIBmTpzqVCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -129,6 +129,20 @@ the stable `chain_root_id`, source placement and event, outer exact program,
 named persistent dependencies, project candidate authority, settlement digest,
 credential-subject projection, and source site.
 
+The public lifecycle makes that boundary explicit. `terminate` accepts only
+`completed` or `cancelled`: completion freezes a project placement and permits
+candidate disposition and checkpoint capture, while cancellation terminalizes
+without a resumable checkpoint. Same-node `resume` conditionally installs the
+exact manifest into a fresh placement under the stable chain root; it never
+releases a successor worker against mutable or unclassified predecessor state.
+The successor launch metadata durably records that this is externally restored
+state. The outer managed runtime therefore cold-starts without copying a native
+predecessor checkpoint or receiving `RYEOS_RESUME=1`; restart recovery consumes
+the same recorded bootstrap mode. Ordinary machine continuations that delegate
+state recovery to their managed runtime instead record predecessor-native
+checkpoint bootstrap. This is a generic execution distinction, not a worker- or
+provider-kind branch.
+
 Workload-owned portable state is selected by the closed contract frozen in the
 persistent-session capsule. RyeOS captures only matching files into a canonical
 portable-state tree. Credential files and values, unrelated workload sessions,
@@ -149,6 +163,16 @@ releasing a process. The source atomically terminalizes its placement and
 creates one remote continuation under the same `chain_root_id`; only then may
 the target adopt that chain head, conditionally install state, attach its held
 process identities, and release the new placement.
+
+Every possible target must independently activate the exact non-secret worker
+realization before preflight; equal program identity does not make source-local
+realization paths portable. The owner principal's target project HEAD must
+already equal the source placement's immutable base generation. Ordinarily the
+origin retains that base; otherwise an operator reconciles it through standard
+project synchronization before attempting handoff. Placement preflight never
+overwrites or silently rebases a divergent target HEAD. Each target also
+selects an independently authenticated node-local credential profile. Only the
+signed subject digest crosses sites.
 
 The continuation event binds `origin_site_id`, source and target sites, source
 and successor placement threads, both signed chain heads, checkpoint and

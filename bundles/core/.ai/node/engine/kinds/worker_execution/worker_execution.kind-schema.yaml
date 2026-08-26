@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-19T04:03:52Z:02cbe548d099888d46301c9fa830baa57f7a837f8106dc8c72b5fd0339482dca:xTdG01WUhF611sTW1nu9d9mOKMqunDTtBS8K80a6KocvDaZ9MmywWQ1IEGvZUxvfiOx+HvQzXFXJ+eBh30l6Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-26T23:06:47Z:cf00cd4af697e358b66a20b7d545016e2e2481b4bf52e43d79f7428f22094cab:+r/TtqNbZTbypVy3QL2+qsR9XlfXBLySG0p8mIX06J84SeFk1GJ6A9Lc2rdGdoAoFa0xlXsjZTmT9law0zYpBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/worker_execution"
 version: "1.0.0"
 location:
@@ -13,7 +13,7 @@ execution:
     name: worker_execution
     root_executable: true
     supports_interrupt: false
-    supports_continuation: false
+    supports_continuation: true
     supports_operator_followup: false
   hooks:
     authored_path: [hooks]

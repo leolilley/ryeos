@@ -45,6 +45,10 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub checkpoint_dir: Option<&'a Path>,
     /// Whether the replay-aware runtime should load that checkpoint.
     pub is_resume: bool,
+    /// Clear the predecessor-to-successor auto-launch counter only after the
+    /// successor process has crossed the durable attachment boundary. Its
+    /// later same-thread restart budget is a distinct recovery coordinate.
+    pub rearm_native_resume_budget_after_attach: bool,
 }
 
 pub(super) struct SpawnedRuntime {
@@ -158,6 +162,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         cas_root,
         checkpoint_dir,
         is_resume,
+        rearm_native_resume_budget_after_attach,
     } = params;
     let secret_map: BTreeMap<String, String> = vault_bindings.iter().cloned().collect();
     let callback_socket_requested = descriptor.env_injections.iter().any(|injection| {
@@ -364,19 +369,26 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
     };
     // The runtime cannot self-attach before release. An existing identity at
     // this boundary is therefore an invariant violation, not an adoption race.
-    if let Err(error) = state.threads.attach_new_process_owned(
-        &ryeos_app::thread_lifecycle::ThreadAttachProcessParams {
-            thread_id: thread_id.to_string(),
-            pid: spawned.pid() as i64,
-            pgid: spawned.pgid(),
-            process_identity: Some(process_identity.clone()),
-            metadata: None,
-            // Spawn metadata was seeded before launch. An empty self-attach
-            // preserves it while establishing the immutable process identity.
-            launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
-        },
-        launch_owner,
-    ) {
+    let attach_params = ryeos_app::thread_lifecycle::ThreadAttachProcessParams {
+        thread_id: thread_id.to_string(),
+        pid: spawned.pid() as i64,
+        pgid: spawned.pgid(),
+        process_identity: Some(process_identity.clone()),
+        metadata: None,
+        // Spawn metadata was seeded before launch. An empty self-attach
+        // preserves it while establishing the immutable process identity.
+        launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
+    };
+    let attach_result = if rearm_native_resume_budget_after_attach {
+        state
+            .threads
+            .attach_new_process_owned_rearming_resume_budget(&attach_params, launch_owner)
+    } else {
+        state
+            .threads
+            .attach_new_process_owned(&attach_params, launch_owner)
+    };
+    if let Err(error) = attach_result {
         let cleanup = spawned.abort_and_reap().err();
         drop(workspace_lifeline);
         drop(source_closure);
