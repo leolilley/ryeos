@@ -215,6 +215,68 @@ while IFS= read -r _bundle_name; do
   BUNDLE_DIRS+=("$ROOT/bundles/$_bundle_name")
 done < <(ryeos_bundle_set_bin_managed_names "$BUNDLE_SET")
 
+# Release binaries this set stages that link at least one foundational crate,
+# one per line. Web/browser tool payloads are independent executables; making
+# their mtimes answer for RyeOS library source changes creates a false skew
+# refusal without protecting any linked contract.
+staged_foundational_release_bins_for_set() {
+  printf '%s\n' \
+    rye-parser-yaml-document rye-parser-yaml-header-document rye-parser-regex-kv \
+    rye-composer-identity ryeos-core-tools
+  case "$BUNDLE_SET" in
+    full|full-sandbox|central-host|standard|hosted-workflow)
+      printf '%s\n' ryeos-directive-runtime ryeos-graph-runtime \
+        ryeos-knowledge-runtime ryeos-directive-launch-preparer \
+        rye-composer-extends-chain ryeos-graph-effective-validator
+      ;;
+  esac
+  case "$BUNDLE_SET" in
+    full|full-sandbox) printf '%s\n' ryeos-tui web ;;
+  esac
+  case "$BUNDLE_SET" in
+    full|full-sandbox|hosted-workflow) printf '%s\n' ryeos-structured-session-bridge ;;
+  esac
+  printf '%s\n' ryeos-worker-execution-launch-preparer ryeos-worker-execution-runtime
+}
+
+# Newest mtime (integer epoch) across the foundational library crate sources.
+foundational_newest_mtime() {
+  find \
+    "$ROOT/crates/engine/ryeos-runtime/src" \
+    "$ROOT/crates/state/ryeos-state/src" \
+    "$ROOT/crates/daemon/ryeos-app/src" \
+    -type f -name '*.rs' -printf '%T@\n' 2>/dev/null \
+    | sort -rn | head -1 | cut -d. -f1
+}
+
+# This refusal must happen before the generated bundle trees are removed.
+# A rejected incremental populate is a read-only preflight, not a destructive
+# half-publication that leaves every managed source bundle without bin/refs.
+if [[ -n "$CRATES_OVERRIDE" ]]; then
+  _newest_foundational="$(foundational_newest_mtime)"
+  if [[ -n "$_newest_foundational" ]]; then
+    _stale=()
+    while IFS= read -r _bin; do
+      [[ -n "$_bin" ]] || continue
+      _bin_path="$TARGET/release/$_bin"
+      [[ -f "$_bin_path" ]] || continue
+      _bin_mtime="$(stat -c %Y "$_bin_path" 2>/dev/null || echo 0)"
+      if (( _bin_mtime < _newest_foundational )); then
+        _stale+=("$_bin")
+      fi
+    done < <(staged_foundational_release_bins_for_set)
+    if (( ${#_stale[@]} > 0 )); then
+      {
+        ryeos_term_fail "refusing to stage binaries older than the foundational libraries"
+        ryeos_term_info "ryeos-runtime / ryeos-state / ryeos-app have newer source than these binaries:"
+        printf '    - %s\n' "${_stale[@]}"
+        ryeos_term_info "rebuild '$BUNDLE_SET' with --all"
+      } >&2
+      exit 2
+    fi
+  fi
+fi
+
 # ── Clean derived state from all bundles ────────────────────────────
 # Wipe everything that will be regenerated so stale artifacts (old
 # binaries, old manifests, old trust docs) don't leak through.
@@ -362,76 +424,11 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET
 fi
 ryeos_term_resume "static worker build complete"
 
-# ── Guard: no stale sibling binaries under --crates ──────────────────
-# With --crates only the named crates are rebuilt, but staging copies EVERY
-# bundle binary from target/release. A sibling built before a foundational lib
-# (ryeos-runtime / ryeos-state / ryeos-app) changed would stage linked against
-# the old lib and silently drift. Fail loudly, naming the stale binaries.
-
-# Release binaries this set stages that link at least one foundational crate,
-# one per line. Web/browser tool payloads are independent executables; making
-# their mtimes answer for RyeOS library source changes creates a false skew
-# refusal without protecting any linked contract.
-staged_foundational_release_bins_for_set() {
-  printf '%s\n' \
-    rye-parser-yaml-document rye-parser-yaml-header-document rye-parser-regex-kv \
-    rye-composer-identity ryeos-core-tools
-  case "$BUNDLE_SET" in
-    full|full-sandbox|central-host|standard|hosted-workflow)
-      printf '%s\n' ryeos-directive-runtime ryeos-graph-runtime \
-        ryeos-knowledge-runtime ryeos-directive-launch-preparer \
-        rye-composer-extends-chain ryeos-graph-effective-validator
-      ;;
-  esac
-  case "$BUNDLE_SET" in
-    full|full-sandbox) printf '%s\n' ryeos-tui web ;;
-  esac
-  case "$BUNDLE_SET" in
-    full|full-sandbox|hosted-workflow) printf '%s\n' ryeos-structured-session-bridge ;;
-  esac
-  printf '%s\n' ryeos-worker-execution-launch-preparer ryeos-worker-execution-runtime
-}
-
 # `ryeos-session-exec` is intentionally absent from the skew set above. It is
 # a standalone static exec bridge with no RyeOS crate dependencies; comparing
 # its mtime to ryeos-runtime/state/app sources would invent a linkage that does
 # not exist. Its own dedicated build and PT_INTERP/DT_NEEDED checks above are
 # the complete freshness and closure boundary for that payload.
-
-# Newest mtime (integer epoch) across the foundational library crate sources.
-foundational_newest_mtime() {
-  find \
-    "$ROOT/crates/engine/ryeos-runtime/src" \
-    "$ROOT/crates/state/ryeos-state/src" \
-    "$ROOT/crates/daemon/ryeos-app/src" \
-    -type f -name '*.rs' -printf '%T@\n' 2>/dev/null \
-    | sort -rn | head -1 | cut -d. -f1
-}
-
-if [[ -n "$CRATES_OVERRIDE" ]]; then
-  _newest_foundational="$(foundational_newest_mtime)"
-  if [[ -n "$_newest_foundational" ]]; then
-    _stale=()
-    while IFS= read -r _bin; do
-      [[ -n "$_bin" ]] || continue
-      _bin_path="$TARGET/release/$_bin"
-      [[ -f "$_bin_path" ]] || continue
-      _bin_mtime="$(stat -c %Y "$_bin_path" 2>/dev/null || echo 0)"
-      if (( _bin_mtime < _newest_foundational )); then
-        _stale+=("$_bin")
-      fi
-    done < <(staged_foundational_release_bins_for_set)
-    if (( ${#_stale[@]} > 0 )); then
-      {
-        ryeos_term_fail "refusing to stage binaries older than the foundational libraries"
-        ryeos_term_info "ryeos-runtime / ryeos-state / ryeos-app have newer source than these binaries:"
-        printf '    - %s\n' "${_stale[@]}"
-        ryeos_term_info "rebuild '$BUNDLE_SET' with --all"
-      } >&2
-      exit 2
-    fi
-  fi
-fi
 
 # ── Stage binaries (only what each bundle owns) ──────────────────────
 
