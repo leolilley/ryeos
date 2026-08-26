@@ -1,0 +1,11 @@
+# ryeos:signed:2026-08-26T14:44:07Z:38b4f6bd2ad8136093a77f603b6d43ac49d308f9f23dae9ad9564b8a73ad35a1:aAl/CwwSX5wdKWHYtZeA2Fet32sCNITaGXsQXJ2pb5yYnE3droX76jjaRHoKW75xqCBZVPqr/lp9WivEEKLPDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: worker-placements.adopt
+required_caps: ["ryeos.execute.service.worker-placements/adopt"]
+schema:
+  operation_id: string
+  chain_root_id: string
+  target_chain_head_hash: string
+  placement_attestation_hash: string
+  writer_grant_hash: string
+description: Adopt and attach one source-authorized configured-operator worker placement.

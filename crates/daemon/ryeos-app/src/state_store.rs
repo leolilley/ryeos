@@ -3124,6 +3124,10 @@ pub struct RemoteAdoptionContinuationAuthority {
     /// Exact source-ledger readback captured after worker quiescence. Required
     /// iff the admitted launch carries financial accounting authority.
     pub source_accounting_frontier: Option<crate::accounting_db::AccountingHandoffFrontier>,
+    /// Exact target key pinned by the configured remote used for this
+    /// placement. It is an in-memory verification operand, not chain authority
+    /// and never widens the node's local head trust store.
+    pub target_node_verifying_key: lillux::crypto::VerifyingKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3152,7 +3156,7 @@ fn validate_remote_adoption_runtime_seed(
         .get_object(&evidence.placement_attestation_hash)?
         .ok_or_else(|| anyhow!("remote adoption placement attestation is absent"))?;
     let placement_attestation = ryeos_state::objects::Attestation::from_value(&placement_value)?;
-    placement_attestation.verify_with_trust_store(state_authority.trust_store())?;
+    placement_attestation.verify_with_key(&transition.target_node_verifying_key)?;
     if placement_attestation.is_expired_at(&lillux::time::iso8601_now())? {
         bail!("remote adoption placement attestation is expired");
     }
@@ -3172,7 +3176,7 @@ fn validate_remote_adoption_runtime_seed(
         .get_object(&transition.writer_grant_hash)?
         .ok_or_else(|| anyhow!("remote adoption writer grant is absent"))?;
     let writer = ryeos_state::objects::Attestation::from_value(&writer_value)?;
-    writer.verify_with_trust_store(state_authority.trust_store())?;
+    writer.verify_with_key(&transition.source_node_verifying_key)?;
     if ryeos_state::objects::ChainWriterTransitionEvidence::from_attestation(&writer)? != *evidence
     {
         bail!("remote adoption writer grant differs from its admitted transition");
@@ -5456,6 +5460,13 @@ impl StateStore {
         g.state_db.create_sync_job(job)
     }
 
+    /// Settle process-local sync attempts before daemon recovery creates any
+    /// replacement attempt. Jobs remain durable and retryable.
+    pub fn reconcile_interrupted_sync_job_attempts(&self) -> Result<usize> {
+        let g = self.lock()?;
+        g.state_db.reconcile_interrupted_sync_job_attempts()
+    }
+
     /// Import one digest-verified sync payload as staged CAS data and create
     /// the job that roots it before releasing the shared mutation guard. This
     /// is the generic crash-safe boundary used by remote workflows that must
@@ -5501,6 +5512,62 @@ impl StateStore {
         Ok((import, job))
     }
 
+    pub fn stage_sync_payload_for_existing_job(
+        &self,
+        payload: &ryeos_state::sync::ExportPayload,
+        attribution: &ryeos_state::sync::ImportAttribution,
+        job_id: &str,
+        phase: &str,
+        additional_roots: &[String],
+        progress: Option<Value>,
+    ) -> Result<ryeos_state::sync::ImportResult> {
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let job = g
+            .state_db
+            .get_sync_job(job_id)?
+            .ok_or_else(|| anyhow!("sync job does not exist"))?;
+        if !additional_roots.iter().all(|root| {
+            job.roots.iter().any(|existing| existing == root)
+                || payload.entries.iter().any(|entry| &entry.hash == root)
+        }) {
+            bail!(
+                "existing sync job additional roots are absent from its durable roots and payload"
+            );
+        }
+        let import = ryeos_state::sync::import_objects_staged(
+            &g.state_db,
+            payload,
+            attribution,
+            permit.cas_guard(),
+        )?;
+        if import.hash_mismatches != 0 {
+            bail!("existing sync job import contained digest mismatches");
+        }
+        let mut roots = job.roots;
+        roots.extend(additional_roots.iter().cloned());
+        roots.sort();
+        roots.dedup();
+        g.state_db.update_sync_job(
+            job_id,
+            &ryeos_state::SyncJobUpdate {
+                state: ryeos_state::SyncJobState::Running,
+                phase: phase.to_owned(),
+                roots: Some(roots),
+                heads: None,
+                uploaded_hashes: Vec::new(),
+                fetched_hashes: additional_roots
+                    .iter()
+                    .filter(|root| payload.entries.iter().any(|entry| &entry.hash == *root))
+                    .cloned()
+                    .collect(),
+                last_error: None,
+                result: progress,
+            },
+        )?;
+        Ok(import)
+    }
+
     /// Publish a prebuilt node-signed admission object through the generic
     /// admission index while holding the StateStore mutation hierarchy. The
     /// state layer remains blind to the evidence schema.
@@ -5518,6 +5585,85 @@ impl StateStore {
             g.signer.as_ref(),
             permit.cas_guard(),
         )
+    }
+
+    /// Atomically make one prepared target placement fetchable and record its
+    /// durable job phase. The capsule and recovery seed become CAS roots before
+    /// the signed placement admission/head is exposed; the returned hash is
+    /// therefore never a promise about collectable or absent bytes.
+    pub fn publish_worker_placement_preparation(
+        &self,
+        job_id: &str,
+        transfer_manifest_hash: &str,
+        target_capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+        prepared_seed: &crate::worker_handoff::PreparedPlacementRuntimeSeed,
+        attestation: &ryeos_state::objects::Attestation,
+        progress: &crate::worker_handoff::WorkerSessionHandoffProgress,
+    ) -> Result<ryeos_state::admission::AdmissionResult> {
+        target_capsule.validate()?;
+        prepared_seed.object.validate()?;
+        progress.validate()?;
+        let capsule_hash = target_capsule.content_hash()?;
+        let seed_hash = prepared_seed.object_hash()?;
+        if attestation.subject_hash != capsule_hash
+            || progress.placement_attestation_hash.is_none()
+            || progress.target_runtime_seed_hash.as_deref() != Some(seed_hash.as_str())
+        {
+            bail!("target placement publication operands contradict one another");
+        }
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let job = g
+            .state_db
+            .get_sync_job(job_id)?
+            .ok_or_else(|| anyhow!("target worker handoff job does not exist"))?;
+        if job.operation_type != crate::worker_handoff::WORKER_SESSION_HANDOFF_OPERATION
+            || !job.roots.iter().any(|hash| hash == transfer_manifest_hash)
+        {
+            bail!("target worker handoff job is not rooted in its transfer manifest");
+        }
+        self.state_authority.ensure_guard(permit.cas_guard())?;
+        let cas = self.state_authority.cas_store()?;
+        if cas.put_object(&target_capsule.to_value())?.hash != capsule_hash {
+            bail!("stored target placement capsule digest changed");
+        }
+        if cas.put_blob(&prepared_seed.launch_metadata_bytes)?.hash
+            != prepared_seed.object.launch_metadata_blob_hash
+        {
+            bail!("stored target placement runtime metadata digest changed");
+        }
+        if cas.put_object(&prepared_seed.object.to_value()?)?.hash != seed_hash {
+            bail!("stored target placement runtime seed digest changed");
+        }
+        let admission = ryeos_state::admission::publish_admission_attestation(
+            &g.state_db,
+            attestation,
+            ryeos_state::object_closure::ObjectClosureLimits::default(),
+            g.signer.as_ref(),
+            permit.cas_guard(),
+        )?;
+        let mut stored_progress = progress.clone();
+        stored_progress.placement_attestation_hash = Some(admission.attestation_hash.clone());
+        stored_progress.validate()?;
+        g.state_db.update_sync_job(
+            job_id,
+            &ryeos_state::SyncJobUpdate {
+                state: ryeos_state::SyncJobState::Running,
+                phase: progress.phase.as_str().to_owned(),
+                roots: Some(vec![
+                    transfer_manifest_hash.to_owned(),
+                    capsule_hash,
+                    seed_hash,
+                    admission.attestation_hash.clone(),
+                ]),
+                heads: None,
+                uploaded_hashes: Vec::new(),
+                fetched_hashes: job.roots,
+                last_error: None,
+                result: Some(stored_progress.to_value()?),
+            },
+        )?;
+        Ok(admission)
     }
 
     /// Adopt an exact cross-site continuation head through the ordinary staged
@@ -7892,7 +8038,7 @@ impl StateStore {
                 .ok_or_else(|| anyhow!("remote adoption placement attestation is absent"))?;
             let placement_attestation =
                 ryeos_state::objects::Attestation::from_value(&placement_value)?;
-            placement_attestation.verify_with_trust_store(self.state_authority.trust_store())?;
+            placement_attestation.verify_with_key(&authority.target_node_verifying_key)?;
             if placement_attestation.is_expired_at(&lillux::time::iso8601_now())? {
                 bail!("remote adoption placement attestation is expired");
             }
@@ -7985,23 +8131,55 @@ impl StateStore {
                 {
                     bail!("remote adoption target capsule carries a different sealed invocation");
                 }
-                let mut metadata = source_launch_metadata
-                    .continuation_successor_seed(authority.target_resume_context.clone());
-                metadata.launch_driver = Some(target_capsule.launch_driver);
-                metadata.sealed_root_request = Some(target_sealed);
-                metadata.admitted_project_authority =
-                    Some(target_capsule.project_authority.clone());
-                metadata.admitted_artifact_identity =
-                    Some(target_capsule.artifact_identity.clone());
-                metadata.admitted_launch_capsule_schema = Some(target_capsule.schema);
-                metadata.admitted_execution_closure =
-                    Some(target_capsule.execution_closure.clone());
-                metadata.execution_realization_hash =
-                    Some(target_capsule.execution_realization_hash.clone());
-                metadata.accounting_scope = target_capsule.accounting_scope.clone();
+                let cas = self.state_authority.cas_store()?;
+                let seed_value = cas
+                    .get_object(&authority.placement.target_runtime_seed_hash)?
+                    .ok_or_else(|| anyhow!("remote adoption target runtime seed is absent"))?;
+                let seed =
+                    ryeos_state::objects::PlacementRuntimeSeed::from_current_value(seed_value)?;
+                if seed.content_hash()? != authority.placement.target_runtime_seed_hash
+                    || seed.operation_id != authority.placement.operation_id
+                    || seed.chain_root_id != chain_root_id
+                    || seed.source_placement_thread_id != source_thread_id
+                    || seed.successor_placement_thread_id != successor.thread_id
+                    || seed.target_site_id != authority.placement.target_site_id
+                    || seed.owner_principal != authority.placement.owner_principal
+                    || seed.target_launch_capsule_hash
+                        != authority.placement.target_launch_capsule_hash
+                {
+                    bail!("remote adoption runtime seed contradicts placement authority");
+                }
+                let metadata_bytes = cas
+                    .get_blob(&seed.launch_metadata_blob_hash)?
+                    .ok_or_else(|| anyhow!("remote adoption runtime metadata is absent"))?;
+                if u64::try_from(metadata_bytes.len())? != seed.launch_metadata_size_bytes
+                    || lillux::sha256_hex(&metadata_bytes) != seed.launch_metadata_blob_hash
+                {
+                    bail!("remote adoption runtime metadata size or digest changed");
+                }
+                let metadata_value: Value = serde_json::from_slice(&metadata_bytes)
+                    .context("decode target-authored runtime seed")?;
+                if lillux::canonical_json(&metadata_value)?.as_bytes() != metadata_bytes {
+                    bail!("remote adoption runtime metadata is not canonical JSON");
+                }
+                let metadata: crate::launch_metadata::RuntimeLaunchMetadata =
+                    serde_json::from_value(metadata_value)
+                        .context("decode target-authored launch metadata")?;
                 metadata
                     .validate()
                     .context("validate remote adoption target launch metadata")?;
+                let seed_sealed_matches = metadata
+                    .sealed_root_request
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()?
+                    == Some(serde_json::to_value(&target_sealed)?);
+                if metadata.resume_context.as_ref() != Some(&authority.target_resume_context)
+                    || metadata.continuation_source_thread_id.as_deref() != Some(source_thread_id)
+                    || !seed_sealed_matches
+                {
+                    bail!("target-authored runtime seed changed its resume or source authority");
+                }
                 if metadata.admitted_launch_capsule()?.as_ref() != Some(&target_capsule) {
                     bail!(
                         "remote adoption target metadata does not reproduce its admitted capsule"
@@ -8139,27 +8317,15 @@ impl StateStore {
                 let grant = grant_evidence.sign_attestation(g.signer.as_ref())?;
                 self.state_authority.ensure_guard(permit.cas_guard())?;
                 let cas = self.state_authority.cas_store()?;
-                let prepared_seed = crate::worker_handoff::prepare_placement_runtime_seed(
-                    &placement.operation_id,
-                    chain_root_id,
-                    source_thread_id,
-                    &successor.thread_id,
-                    &placement.target_site_id,
-                    &placement.owner_principal,
-                    &placement.target_launch_capsule_hash,
-                    &successor_meta,
-                )?;
-                let expected_seed_hash = prepared_seed.object_hash()?;
-                if expected_seed_hash != placement.target_runtime_seed_hash {
-                    bail!("target placement attestation binds another runtime recovery seed");
-                }
-                let stored_metadata = cas.put_blob(&prepared_seed.launch_metadata_bytes)?;
-                if stored_metadata.hash != prepared_seed.object.launch_metadata_blob_hash {
-                    bail!("stored placement runtime metadata digest changed");
-                }
-                let stored_seed_hash = cas.store_object(&prepared_seed.object.to_value()?)?;
-                if stored_seed_hash != expected_seed_hash {
-                    bail!("stored placement runtime seed digest changed");
+                let seed_value = cas
+                    .get_object(&placement.target_runtime_seed_hash)?
+                    .ok_or_else(|| anyhow!("target placement runtime seed is absent at cut"))?;
+                let seed =
+                    ryeos_state::objects::PlacementRuntimeSeed::from_current_value(seed_value)?;
+                if seed.content_hash()? != placement.target_runtime_seed_hash
+                    || seed.target_launch_capsule_hash != placement.target_launch_capsule_hash
+                {
+                    bail!("target placement runtime seed changed before source cut");
                 }
                 let writer_grant_hash = cas
                     .store_object(&grant.to_value())
@@ -8173,7 +8339,7 @@ impl StateStore {
                     target_placement_attestation_hash: authority.placement_attestation_hash.clone(),
                     chain_writer_grant_hash: writer_grant_hash,
                     target_launch_capsule_hash: placement.target_launch_capsule_hash.clone(),
-                    target_runtime_seed_hash: stored_seed_hash,
+                    target_runtime_seed_hash: placement.target_runtime_seed_hash.clone(),
                     source_site_id: placement.source_site_id.clone(),
                     target_site_id: placement.target_site_id.clone(),
                     target_node_signer_fingerprint: target_signer_fingerprint.clone(),

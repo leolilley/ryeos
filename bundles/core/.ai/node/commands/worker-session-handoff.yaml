@@ -1,0 +1,13 @@
+# ryeos:signed:2026-08-26T14:44:07Z:7f8d26d78ad47caab5fdb81ef53945f125a3672cff3aff956599b999f43b347a:7xcSR1/VKjnYBpbadg7GujSmZECmzaRbxQqkhQs0Ug4FQ0rs8ej9ncnnBvUAqy3XnujhKpvK5PAnDQPhuq3CAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [worker, session, handoff]
+description: "Move one frozen portable worker session to a configured remote node"
+forms:
+  - slots:
+      - field: chain_root_id
+      - field: manifest_ref
+      - field: remote
+      - field: target_credential_profile_id
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/handoff
+  availability: daemon

@@ -1899,6 +1899,32 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
     if !ryeos_app::recovery_execution_gate::wait_if_armed().await {
         return Ok(());
     }
+    let interrupted_sync_attempts = state
+        .state_store
+        .reconcile_interrupted_sync_job_attempts()
+        .context("reconcile interrupted sync-job attempts")?;
+    if interrupted_sync_attempts != 0 {
+        tracing::warn!(
+            interrupted_sync_attempts,
+            "settled sync-job attempts interrupted by the previous daemon process"
+        );
+    }
+    if let Err(error) =
+        ryeos_api::handlers::dedicated_sessions::recover_durable_source_handoffs(&state).await
+    {
+        tracing::error!(
+            error = %error,
+            "initial source worker-handoff recovery failed; durable jobs remain retryable"
+        );
+    }
+    if let Err(error) =
+        ryeos_api::handlers::worker_placements::recover_durable_target_handoffs(&state).await
+    {
+        tracing::error!(
+            error = %error,
+            "initial target worker-handoff recovery failed; durable jobs remain retryable"
+        );
+    }
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     let period = Duration::from_secs(120);
@@ -1940,6 +1966,26 @@ async fn run_cache_metric_flush_loop() -> Result<()> {
 }
 
 async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
+    let recovered_source_handoffs =
+        ryeos_api::handlers::dedicated_sessions::recover_durable_source_handoffs(state)
+            .await
+            .context("periodic source worker-handoff recovery")?;
+    if recovered_source_handoffs != 0 {
+        tracing::info!(
+            recovered_source_handoffs,
+            "periodic recovery completed source worker handoffs"
+        );
+    }
+    let recovered_handoffs =
+        ryeos_api::handlers::worker_placements::recover_durable_target_handoffs(state)
+            .await
+            .context("periodic target worker-handoff recovery")?;
+    if recovered_handoffs != 0 {
+        tracing::info!(
+            recovered_handoffs,
+            "periodic recovery completed target worker handoffs"
+        );
+    }
     ryeos_app::cascade::repair_cancelled_window_members(state)
         .context("periodic cancelled launch-window repair")?;
 

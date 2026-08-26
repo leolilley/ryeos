@@ -19,10 +19,75 @@ use crate::launch_metadata::{OriginalPushedHeadRef, ResumeContext, StableProject
 pub const WORKER_PLACEMENT_POLICY: &str = "worker-placement-v1";
 pub const WORKER_PLACEMENT_CLAIM: &str = "admitted";
 pub const WORKER_SESSION_HANDOFF_OPERATION: &str = "worker_session_handoff";
+pub const WORKER_PLACEMENT_PREPARE_SERVICE: &str = "service:worker-placements/prepare";
+pub const WORKER_PLACEMENT_ADOPT_SERVICE: &str = "service:worker-placements/adopt";
+pub const WORKER_PLACEMENT_ABORT_SERVICE: &str = "service:worker-placements/abort";
 
 const PLACEMENT_EVIDENCE_SCHEMA: &str = "ryeos.worker_placement_admission.v1";
 const HANDOFF_JOB_SCHEMA: &str = "ryeos.worker_session_handoff_job.v1";
 const HANDOFF_PROGRESS_SCHEMA: &str = "ryeos.worker_session_handoff_progress.v1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementPrepareRequest {
+    pub operation_id: String,
+    pub chain_root_id: String,
+    pub source_site_id: String,
+    pub target_site_id: String,
+    pub source_chain_head_hash: String,
+    pub transfer_manifest_hash: String,
+    pub target_project_path: String,
+    pub project_route_digest: String,
+    pub target_credential_profile_id: String,
+    pub source_accounting_frontier: Option<crate::accounting_db::AccountingHandoffFrontier>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementPrepareResponse {
+    pub operation_id: String,
+    pub placement_attestation_hash: String,
+    pub target_runtime_seed_hash: String,
+    pub target_launch_capsule_hash: String,
+    pub credential_reservation: CredentialGenerationReservation,
+    pub placement: WorkerPlacementAdmissionEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementAdoptRequest {
+    pub operation_id: String,
+    pub chain_root_id: String,
+    pub target_chain_head_hash: String,
+    pub placement_attestation_hash: String,
+    pub writer_grant_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementAdoptResponse {
+    pub operation_id: String,
+    pub chain_root_id: String,
+    pub placement_thread_id: String,
+    pub target_chain_head_hash: String,
+    pub delivery: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementAbortRequest {
+    pub operation_id: String,
+    pub chain_root_id: String,
+    pub abort_chain_head_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementAbortResponse {
+    pub operation_id: String,
+    pub chain_root_id: String,
+    pub disposition: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -37,6 +102,7 @@ pub enum WorkerHandoffPhase {
     Planned,
     SourceExported,
     TargetPrepared,
+    AbortAuthorized,
     SourceCommitted,
     TargetAdopted,
     StateInstalled,
@@ -50,6 +116,7 @@ impl WorkerHandoffPhase {
             Self::Planned => "planned",
             Self::SourceExported => "source_exported",
             Self::TargetPrepared => "target_prepared",
+            Self::AbortAuthorized => "abort_authorized",
             Self::SourceCommitted => "source_committed",
             Self::TargetAdopted => "target_adopted",
             Self::StateInstalled => "state_installed",
@@ -202,6 +269,7 @@ pub struct WorkerSessionHandoffProgress {
     pub writer_grant_hash: Option<String>,
     pub target_chain_head_hash: Option<String>,
     pub credential_reservation_id: Option<String>,
+    pub abort_chain_head_hash: Option<String>,
 }
 
 impl WorkerSessionHandoffProgress {
@@ -215,6 +283,7 @@ impl WorkerSessionHandoffProgress {
             writer_grant_hash: None,
             target_chain_head_hash: None,
             credential_reservation_id: None,
+            abort_chain_head_hash: None,
         };
         progress.validate()?;
         Ok(progress)
@@ -236,6 +305,7 @@ impl WorkerSessionHandoffProgress {
             ),
             ("writer grant", self.writer_grant_hash.as_deref()),
             ("target chain head", self.target_chain_head_hash.as_deref()),
+            ("abort chain head", self.abort_chain_head_hash.as_deref()),
         ] {
             if let Some(value) = value {
                 hash(label, value)?;
@@ -244,7 +314,8 @@ impl WorkerSessionHandoffProgress {
         if let Some(reservation) = &self.credential_reservation_id {
             label_value("credential reservation", reservation)?;
         }
-        if self.phase >= WorkerHandoffPhase::TargetPrepared
+        if (self.phase == WorkerHandoffPhase::TargetPrepared
+            || self.phase >= WorkerHandoffPhase::SourceCommitted)
             && (self.placement_attestation_hash.is_none()
                 || self.target_runtime_seed_hash.is_none()
                 || self.credential_reservation_id.is_none())
@@ -255,6 +326,14 @@ impl WorkerSessionHandoffProgress {
             && (self.writer_grant_hash.is_none() || self.target_chain_head_hash.is_none())
         {
             bail!("source-committed handoff progress is incomplete");
+        }
+        if self.phase == WorkerHandoffPhase::AbortAuthorized && self.abort_chain_head_hash.is_none()
+        {
+            bail!("abort-authorized handoff progress has no source abort head");
+        }
+        if self.phase != WorkerHandoffPhase::AbortAuthorized && self.abort_chain_head_hash.is_some()
+        {
+            bail!("non-abort handoff progress carries abort authority");
         }
         Ok(())
     }
@@ -268,6 +347,183 @@ impl WorkerSessionHandoffProgress {
         let progress: Self = serde_json::from_value(value)?;
         progress.validate()?;
         Ok(progress)
+    }
+}
+
+impl WorkerPlacementPrepareRequest {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for (label, value) in [
+            ("operation", self.operation_id.as_str()),
+            ("source chain head", self.source_chain_head_hash.as_str()),
+            ("transfer manifest", self.transfer_manifest_hash.as_str()),
+            ("project route", self.project_route_digest.as_str()),
+        ] {
+            hash(label, value)?;
+        }
+        for (label, value) in [
+            ("chain root", self.chain_root_id.as_str()),
+            ("source site", self.source_site_id.as_str()),
+            ("target site", self.target_site_id.as_str()),
+            ("target project path", self.target_project_path.as_str()),
+            (
+                "target credential profile",
+                self.target_credential_profile_id.as_str(),
+            ),
+        ] {
+            label_value(label, value)?;
+        }
+        if self.source_site_id == self.target_site_id
+            || !std::path::Path::new(&self.target_project_path).is_absolute()
+        {
+            bail!("placement preparation is not an exact cross-site project request");
+        }
+        if let Some(frontier) = &self.source_accounting_frontier {
+            frontier.source_scope.validate()?;
+            if frontier.source_scope.budget_authority_site_id != self.source_site_id {
+                bail!("source accounting frontier belongs to another site");
+            }
+        }
+        Ok(())
+    }
+}
+
+impl WorkerPlacementAbortRequest {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        hash("handoff abort operation", &self.operation_id)?;
+        hash("handoff abort chain head", &self.abort_chain_head_hash)?;
+        label_value("handoff abort chain root", &self.chain_root_id)
+    }
+}
+
+impl WorkerPlacementAbortResponse {
+    pub fn validate_against(&self, request: &WorkerPlacementAbortRequest) -> anyhow::Result<()> {
+        if self.operation_id != request.operation_id
+            || self.chain_root_id != request.chain_root_id
+            || !matches!(
+                self.disposition.as_str(),
+                "reservation_released" | "already_released" | "target_absent"
+            )
+        {
+            bail!("worker placement abort response changed its authority coordinates");
+        }
+        Ok(())
+    }
+}
+
+/// Verify the source-signed, immediate abort successor that permanently makes
+/// one pre-cut handoff operation ineligible for a writer transfer. The target
+/// may release its reserved credential generation only after this evidence is
+/// present in the exact source chain closure.
+pub fn validate_handoff_abort_authority(
+    cas: &lillux::CasStore,
+    operation: &WorkerSessionHandoffJobOperation,
+    abort_chain_head_hash: &str,
+) -> anyhow::Result<()> {
+    use ryeos_state::objects::{ChainState, ThreadEvent, ThreadStatus};
+
+    operation.validate()?;
+    hash("handoff abort chain head", abort_chain_head_hash)?;
+    ryeos_state::sync::verify_chain_closure_anchored_pinned(
+        cas,
+        &operation.chain_root_id,
+        abort_chain_head_hash,
+        &operation.source_chain_head_hash,
+    )?;
+    let head_value = cas
+        .get_object(abort_chain_head_hash)?
+        .context("handoff abort chain head is absent")?;
+    let head: ChainState = serde_json::from_value(head_value)?;
+    head.validate()?;
+    if head.chain_root_id != operation.chain_root_id
+        || head.prev_chain_state_hash.as_deref() != Some(operation.source_chain_head_hash.as_str())
+    {
+        bail!("handoff abort is not the immediate source-head successor");
+    }
+    let source = head
+        .threads
+        .get(&operation.source_placement_thread_id)
+        .context("handoff abort source placement is absent")?;
+    if source.status == ThreadStatus::Continued {
+        bail!("handoff abort cannot follow a committed continuation");
+    }
+    let event_hash = source
+        .last_event_hash
+        .as_deref()
+        .context("handoff abort source has no terminal event")?;
+    let event_value = cas
+        .get_object(event_hash)?
+        .context("handoff abort event is absent")?;
+    let event: ThreadEvent = serde_json::from_value(event_value)?;
+    event.validate()?;
+    if event.event_type != "worker_session.handoff_aborted"
+        || event.chain_root_id != operation.chain_root_id
+        || event.thread_id != operation.source_placement_thread_id
+        || event.prev_thread_event_hash.as_deref()
+            != Some(operation.source_last_event_hash.as_str())
+    {
+        bail!("handoff abort event is not the immediate source-placement edge");
+    }
+    let expected = serde_json::json!({
+        "schema":"ryeos.worker_session_handoff_abort.v1",
+        "operation_id":operation.operation_id,
+        "chain_root_id":operation.chain_root_id,
+        "source_placement_thread_id":operation.source_placement_thread_id,
+        "source_site_id":operation.source_site_id,
+        "target_site_id":operation.target_site_id,
+        "source_chain_head_hash":operation.source_chain_head_hash,
+        "source_last_event_hash":operation.source_last_event_hash,
+    });
+    if ryeos_state::objects::canonical_value_digest(&event.payload)?
+        != ryeos_state::objects::canonical_value_digest(&expected)?
+    {
+        bail!("handoff abort event differs from its durable operation");
+    }
+    Ok(())
+}
+
+impl WorkerPlacementPrepareResponse {
+    pub fn validate_against(&self, request: &WorkerPlacementPrepareRequest) -> anyhow::Result<()> {
+        if self.operation_id != request.operation_id {
+            bail!("placement preparation response changed its operation id");
+        }
+        self.placement.validate()?;
+        self.credential_reservation.validate()?;
+        if self.placement.operation_id != request.operation_id
+            || self.placement.chain_root_id != request.chain_root_id
+            || self.placement.source_site_id != request.source_site_id
+            || self.placement.target_site_id != request.target_site_id
+            || self.placement.source_chain_head_hash != request.source_chain_head_hash
+            || self.placement.project_rebind.route_digest != request.project_route_digest
+            || self.placement_attestation_hash.len() != 64
+            || self.target_runtime_seed_hash != self.placement.target_runtime_seed_hash
+            || self.target_launch_capsule_hash != self.placement.target_launch_capsule_hash
+            || self.credential_reservation != self.placement.credential_reservation
+        {
+            bail!("placement preparation response contradicts its request or signed evidence");
+        }
+        hash("placement attestation", &self.placement_attestation_hash)?;
+        Ok(())
+    }
+}
+
+impl WorkerPlacementAdoptRequest {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        label_value("adopt chain root", &self.chain_root_id)?;
+        for (label, value) in [
+            ("adopt operation", self.operation_id.as_str()),
+            (
+                "adopt target chain head",
+                self.target_chain_head_hash.as_str(),
+            ),
+            (
+                "adopt placement attestation",
+                self.placement_attestation_hash.as_str(),
+            ),
+            ("adopt writer grant", self.writer_grant_hash.as_str()),
+        ] {
+            hash(label, value)?;
+        }
+        Ok(())
     }
 }
 
@@ -979,6 +1235,152 @@ fn equivalent_remote_environment(
     }
 }
 
+/// Derive the exact target-local pinned-COW authority from one admitted source
+/// authority and a configured directional project endpoint. Paths and
+/// environment-overlay identities are rebuilt for the target; immutable base,
+/// capabilities, and child policy are copied exactly.
+#[allow(clippy::too_many_arguments)]
+pub fn build_remote_project_rebind(
+    source: &ExecutionProjectAuthority,
+    target_project_path: &std::path::Path,
+    target_site_id: &str,
+    owner_principal: &str,
+    source_candidate_snapshot_hash: &str,
+    target_expected_head_hash: &str,
+    target_project_hash: &str,
+    route_digest: &str,
+) -> anyhow::Result<(
+    ProjectAuthorityRebind,
+    StableProjectIdentity,
+    Option<PathBuf>,
+)> {
+    use ryeos_state::objects::{
+        EnvironmentAuthority, PinnedProjectRealization, PinnedTerminalPublication,
+    };
+    source.validate()?;
+    hash("source candidate snapshot", source_candidate_snapshot_hash)?;
+    hash("target expected project head", target_expected_head_hash)?;
+    hash("target project hash", target_project_hash)?;
+    hash("project route", route_digest)?;
+    let ExecutionProjectAuthority::PinnedGeneration {
+        stable_project_identity: source_identity,
+        base_snapshot_hash,
+        realization: PinnedProjectRealization::Cow { .. },
+        environment,
+        capability_ceiling,
+        child_policy,
+        ..
+    } = source
+    else {
+        bail!("remote worker handoff requires a pinned COW source project");
+    };
+    if target_expected_head_hash != base_snapshot_hash {
+        bail!("target project HEAD is not the source base generation");
+    }
+    let target_identity = StableProjectIdentity::from_path(target_project_path, target_site_id)?;
+    let (target_environment, target_overlay_root) = match environment {
+        EnvironmentAuthority::ProjectOverlay {
+            include_operator_vault,
+            name_authority,
+            ..
+        } => (
+            EnvironmentAuthority::ProjectOverlay {
+                project_authority_id: lillux::sha256_hex(
+                    format!(
+                        "live-project\0{}\0{}",
+                        target_identity.normalized_logical_key,
+                        target_project_path.display()
+                    )
+                    .as_bytes(),
+                ),
+                source_identity: format!("dotenv:{}", target_project_path.join(".env").display()),
+                include_operator_vault: *include_operator_vault,
+                name_authority: name_authority.clone(),
+            },
+            Some(target_project_path.to_path_buf()),
+        ),
+        other => (other.clone(), None),
+    };
+    let target_authority = ExecutionProjectAuthority::PinnedGeneration {
+        stable_project_identity: target_identity.normalized_logical_key.clone(),
+        display_path: Some(target_project_path.to_path_buf()),
+        base_snapshot_hash: base_snapshot_hash.clone(),
+        snapshot_hash: source_candidate_snapshot_hash.to_owned(),
+        realization: PinnedProjectRealization::Cow {
+            terminal_publication: PinnedTerminalPublication::RetainCurrentHead {
+                principal_key: ryeos_state::refs::principal_storage_key(owner_principal)?
+                    .to_owned(),
+                project_hash: target_project_hash.to_owned(),
+                expected_hash: target_expected_head_hash.to_owned(),
+            },
+        },
+        environment: target_environment,
+        capability_ceiling: capability_ceiling.clone(),
+        child_policy: child_policy.clone(),
+    };
+    let rebind = ProjectAuthorityRebind {
+        route_digest: route_digest.to_owned(),
+        source_stable_project_identity: source_identity.clone(),
+        target_stable_project_identity: target_identity.normalized_logical_key.clone(),
+        source_candidate_snapshot_hash: source_candidate_snapshot_hash.to_owned(),
+        source_base_snapshot_hash: base_snapshot_hash.clone(),
+        target_expected_head_hash: Some(target_expected_head_hash.to_owned()),
+        target_authority,
+    };
+    rebind.validate_capsule_transition(source)?;
+    Ok((rebind, target_identity, target_overlay_root))
+}
+
+pub fn build_target_accounting_conservation(
+    source: Option<&crate::accounting_db::AccountingHandoffFrontier>,
+    target_site_id: &str,
+    target_ledger_epoch: Option<u64>,
+    operation_id: &str,
+) -> anyhow::Result<AccountingConservation> {
+    hash("accounting handoff operation", operation_id)?;
+    let Some(source) = source else {
+        if target_ledger_epoch.is_some() {
+            bail!("accounting-free placement unexpectedly selected a target ledger");
+        }
+        return Ok(AccountingConservation {
+            source_scope: None,
+            target_scope: None,
+            source_financial_high_water: 0,
+            source_charged_usd_nanos: 0,
+            source_remaining_cap_usd_nanos: None,
+            target_cap_usd_nanos: None,
+            source_remaining_directive_cap_usd_nanos: None,
+            target_directive_cap_usd_nanos: None,
+        });
+    };
+    let epoch = target_ledger_epoch
+        .filter(|epoch| *epoch > 0)
+        .ok_or_else(|| anyhow::anyhow!("accounted placement has no target accounting ledger"))?;
+    let target_scope = AdmittedAccountingScope {
+        budget_authority_site_id: target_site_id.to_owned(),
+        ledger_epoch: epoch,
+        execution_budget_id: format!("worker-handoff:{operation_id}"),
+        directive_budget_id: source
+            .source_scope
+            .directive_budget_id
+            .as_ref()
+            .map(|_| format!("worker-handoff-directive:{operation_id}")),
+    };
+    target_scope.validate()?;
+    let conservation = AccountingConservation {
+        source_scope: Some(source.source_scope.clone()),
+        target_scope: Some(target_scope),
+        source_financial_high_water: source.financial_high_water,
+        source_charged_usd_nanos: source.charged_usd_nanos,
+        source_remaining_cap_usd_nanos: source.remaining_cap_usd_nanos,
+        target_cap_usd_nanos: source.remaining_cap_usd_nanos,
+        source_remaining_directive_cap_usd_nanos: source.remaining_directive_cap_usd_nanos,
+        target_directive_cap_usd_nanos: source.remaining_directive_cap_usd_nanos,
+    };
+    conservation.validate()?;
+    Ok(conservation)
+}
+
 impl AccountingConservation {
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.source_scope.is_some() != self.target_scope.is_some() {
@@ -1166,6 +1568,47 @@ mod tests {
         assert!(reservation.validate().is_ok());
         reservation.generation = 0;
         assert!(reservation.validate().is_err());
+    }
+
+    #[test]
+    fn abort_progress_is_terminally_distinct_from_source_commit() {
+        let mut progress = WorkerSessionHandoffProgress::planned("1".repeat(64)).unwrap();
+        progress.phase = WorkerHandoffPhase::AbortAuthorized;
+        assert!(progress.validate().is_err());
+        progress.abort_chain_head_hash = Some("2".repeat(64));
+        progress.validate().unwrap();
+
+        progress.phase = WorkerHandoffPhase::SourceCommitted;
+        progress.placement_attestation_hash = Some("3".repeat(64));
+        progress.target_runtime_seed_hash = Some("4".repeat(64));
+        progress.writer_grant_hash = Some("5".repeat(64));
+        progress.target_chain_head_hash = Some("6".repeat(64));
+        progress.credential_reservation_id = Some("reservation".into());
+        assert!(
+            progress
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("non-abort")
+        );
+    }
+
+    #[test]
+    fn abort_response_is_bound_to_one_operation_and_chain() {
+        let request = WorkerPlacementAbortRequest {
+            operation_id: "1".repeat(64),
+            chain_root_id: "T-root".into(),
+            abort_chain_head_hash: "2".repeat(64),
+        };
+        request.validate().unwrap();
+        let mut response = WorkerPlacementAbortResponse {
+            operation_id: request.operation_id.clone(),
+            chain_root_id: request.chain_root_id.clone(),
+            disposition: "reservation_released".into(),
+        };
+        response.validate_against(&request).unwrap();
+        response.disposition = "released_without_chain_evidence".into();
+        assert!(response.validate_against(&request).is_err());
     }
 
     fn pinned_authority(

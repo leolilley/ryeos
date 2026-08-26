@@ -5137,12 +5137,7 @@ impl StateDb {
         let current = chain_lock.read_verified_head(self.trust_store.as_ref())?;
         let current_hash = current.as_ref().map(|head| head.target_hash.as_str());
         let required_anchor = if let Some(transition) = writer_transition {
-            verify_chain_writer_transition_adoption(
-                &cas,
-                self.trust_store.as_ref(),
-                transition,
-                signer.fingerprint(),
-            )?;
+            verify_chain_writer_transition_adoption(&cas, transition, signer.fingerprint())?;
             if chain_root_id != transition.evidence.chain_root_id
                 || target_hash != transition.target_chain_head_hash
             {
@@ -5154,8 +5149,19 @@ impl StateDb {
                 Some(head)
                     if head.target_hash == transition.target_chain_head_hash
                         && head.signer == transition.evidence.target_node_signer_fingerprint => {}
-                Some(_) => {
-                    anyhow::bail!("local chain head is not the writer grant source or exact target")
+                Some(head) => {
+                    // A returning placement may have a locally signed mirror
+                    // from an earlier visit. It may advance only if that exact
+                    // local head is an ancestor of the newly granted source
+                    // frontier; the scoped grant still authorizes only the
+                    // immediate source->target successor.
+                    crate::rebuild::verify_repair_closure_anchored_with_cas(
+                        &cas,
+                        chain_root_id,
+                        &transition.evidence.source_chain_head_hash,
+                        true,
+                        Some(&head.target_hash),
+                    )?;
                 }
             }
             Some(transition.evidence.source_chain_head_hash.as_str())
@@ -5715,6 +5721,11 @@ impl StateDb {
         self.operational()?.update_sync_job(job_id, update)
     }
 
+    pub fn reconcile_interrupted_sync_job_attempts(&self) -> anyhow::Result<usize> {
+        self.operational()?
+            .reconcile_interrupted_sync_job_attempts()
+    }
+
     pub fn create_sync_job_attempt(
         &self,
         attempt: &NewSyncJobAttempt,
@@ -5768,6 +5779,15 @@ impl StateDb {
         self.operational()?.list_sync_jobs_by_state(state, limit)
     }
 
+    pub fn list_active_sync_jobs_by_operation_type(
+        &self,
+        operation_type: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SyncJobRecord>> {
+        self.operational()?
+            .list_active_sync_jobs_by_operation_type(operation_type, limit)
+    }
+
     pub fn count_active_sync_jobs(&self) -> anyhow::Result<u64> {
         self.operational()?.count_active_sync_jobs()
     }
@@ -5807,7 +5827,6 @@ impl StateDb {
 
 fn verify_chain_writer_transition_adoption(
     cas: &lillux::CasStore,
-    trust: &TrustStore,
     transition: &crate::sync::AdmittedChainWriterTransition,
     publishing_signer: &str,
 ) -> anyhow::Result<()> {
@@ -5827,7 +5846,7 @@ fn verify_chain_writer_transition_adoption(
         .get_object(&transition.writer_grant_hash)?
         .ok_or_else(|| anyhow::anyhow!("chain writer grant is absent"))?;
     let writer_attestation = Attestation::from_value(&writer_value)?;
-    writer_attestation.verify_with_trust_store(trust)?;
+    writer_attestation.verify_with_key(&transition.source_node_verifying_key)?;
     let observed_writer = ChainWriterTransitionEvidence::from_attestation(&writer_attestation)?;
     if &observed_writer != evidence {
         anyhow::bail!("chain writer grant differs from admitted transition operands");
@@ -5837,7 +5856,7 @@ fn verify_chain_writer_transition_adoption(
         .get_object(&evidence.placement_attestation_hash)?
         .ok_or_else(|| anyhow::anyhow!("target placement attestation is absent"))?;
     let placement = Attestation::from_value(&placement_value)?;
-    placement.verify_with_trust_store(trust)?;
+    placement.verify_with_key(&transition.target_node_verifying_key)?;
     if placement.issuer_fingerprint()? != evidence.target_node_signer_fingerprint
         || placement.subject_hash != evidence.transition_subject_hash
     {

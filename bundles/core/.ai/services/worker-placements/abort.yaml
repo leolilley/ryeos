@@ -1,0 +1,9 @@
+# ryeos:signed:2026-08-26T14:44:07Z:922b612e8add727be5444000f9adc1d40b25648db3878a84df9e2ba9649d3f89:MlF6IS5KLl54iHmsRlfb9t8w6Qa//o2E+8oNERqs2CY9vkcneVCAIZ12HucBW1oTztZkUuXqcSZOiM1AahtdAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: worker-placements.abort
+required_caps: ["ryeos.execute.service.worker-placements/abort"]
+schema:
+  operation_id: string
+  chain_root_id: string
+  abort_chain_head_hash: string
+description: Release a pre-cut target placement only after verifying its source-signed abort successor.

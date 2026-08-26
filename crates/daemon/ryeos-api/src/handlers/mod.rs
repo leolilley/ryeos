@@ -107,6 +107,7 @@ pub mod usage_summary;
 pub mod vault_delete;
 pub mod vault_list;
 pub mod vault_set;
+pub mod worker_placements;
 
 pub(crate) fn default_list_limit() -> usize {
     50
@@ -177,6 +178,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     dedicated_sessions::STATUS_DESCRIPTOR,
     dedicated_sessions::CHECKPOINT_DESCRIPTOR,
     dedicated_sessions::RESUME_DESCRIPTOR,
+    dedicated_sessions::HANDOFF_DESCRIPTOR,
     dedicated_sessions::COMMAND_DESCRIPTOR,
     dedicated_sessions::APPROVALS_DESCRIPTOR,
     dedicated_sessions::RESOLVE_APPROVAL_DESCRIPTOR,
@@ -184,6 +186,9 @@ pub const ALL: &[ServiceDescriptor] = &[
     dedicated_sessions::VALIDATE_CANDIDATE_DESCRIPTOR,
     dedicated_sessions::PUBLISH_DESCRIPTOR,
     dedicated_sessions::DISCARD_DESCRIPTOR,
+    worker_placements::PREPARE_DESCRIPTOR,
+    worker_placements::ADOPT_DESCRIPTOR,
+    worker_placements::ABORT_DESCRIPTOR,
     bundle_install::DESCRIPTOR,
     bundle_export::DESCRIPTOR,
     bundle_list::DESCRIPTOR,

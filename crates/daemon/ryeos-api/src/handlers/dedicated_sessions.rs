@@ -1,6 +1,7 @@
 //! Meaning-blind owner-authorized access to one attached exclusive session.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock, Weak};
 
 use anyhow::Result;
@@ -1090,6 +1091,1304 @@ async fn resume(
         "manifest_ref":req.manifest_ref,
         "delivery":"launched",
     }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandoffRequest {
+    chain_root_id: String,
+    manifest_ref: String,
+    remote: String,
+    target_credential_profile_id: String,
+}
+
+async fn handoff(
+    req: HandoffRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value, HandlerError> {
+    if let Some(recovered) = resume_committed_handoff(&req, &ctx, &state).await? {
+        return Ok(recovered);
+    }
+    let initial = owned_session(&state, &ctx, &req.chain_root_id)?;
+    let source_thread_id = initial.placement_thread_id.clone();
+    let _disposition = disposition_operation_lock(&source_thread_id)
+        .lock_owned()
+        .await;
+    let source = owned_session(&state, &ctx, &req.chain_root_id)?;
+    if source.placement_thread_id != source_thread_id {
+        return Err(HandlerError::BadRequest(
+            "worker placement changed while handoff was reserved".into(),
+        ));
+    }
+    let _root_operation = ryeos_app::hosted_operation::begin_hosted_root_operation(
+        &state.state_store,
+        &source_thread_id,
+    )
+    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let _profile_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
+        &source.credential_profile_id,
+    )
+    .await
+    .map_err(internal)?;
+    let source = state
+        .state_store
+        .dedicated_session(&source_thread_id)
+        .map_err(internal)?
+        .ok_or_else(|| internal("worker handoff source disappeared"))?;
+    if source.state != "frozen"
+        || source.current_turn_id.is_some()
+        || source.send_boundary != "settled"
+    {
+        return Err(HandlerError::BadRequest(
+            "handoff requires an exact frozen, settled checkpoint source".into(),
+        ));
+    }
+    let worker_instance_id = source
+        .worker_instance_id
+        .as_deref()
+        .ok_or_else(|| internal("handoff source has no retained worker identity"))?;
+    let worker = state
+        .state_store
+        .worker_process(worker_instance_id)
+        .map_err(internal)?
+        .ok_or_else(|| internal("handoff source worker projection disappeared"))?;
+    if worker.placement_thread_id != source_thread_id
+        || worker.state != ryeos_app::runtime_db::WorkerProcessState::Dead
+        || worker.cleanup_state != "reaped"
+    {
+        return Err(HandlerError::BadRequest(
+            "handoff requires proof that the exact source worker was reaped".into(),
+        ));
+    }
+    let checkpoint = load_worker_checkpoint(&state, &source.chain_root_id, &req.manifest_ref)
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    if checkpoint.restore.project_candidate_snapshot_hash != source.candidate_snapshot_hash {
+        return Err(HandlerError::BadRequest(
+            "handoff checkpoint candidate differs from the frozen source".into(),
+        ));
+    }
+    let (source_snapshot, source_event) = state
+        .state_store
+        .get_authoritative_thread_snapshot_with_last_event(&source.chain_root_id, &source_thread_id)
+        .map_err(internal)?
+        .ok_or_else(|| internal("authoritative handoff source disappeared"))?;
+    let source_event_hash = source_event
+        .and_then(|event| event.event_hash)
+        .ok_or_else(|| internal("handoff source has no authoritative last event"))?;
+    let source_head = state
+        .state_store
+        .with_state_db(|db| db.read_generic_head_ref("chains", &source.chain_root_id))
+        .map_err(internal)?
+        .ok_or_else(|| internal("handoff source has no signed chain head"))?;
+    if source_head.signer != state.identity.fingerprint() {
+        return Err(internal("handoff source head is not owned by this node"));
+    }
+    let source_metadata = state
+        .state_store
+        .get_launch_metadata(&source_thread_id)
+        .map_err(internal)?
+        .ok_or_else(|| internal("handoff source has no launch metadata"))?;
+    let source_resume = source_metadata
+        .resume_context
+        .as_ref()
+        .ok_or_else(|| internal("handoff source has no ResumeContext"))?;
+    let source_project_path = source_resume
+        .stable_project_identity
+        .as_ref()
+        .map(|identity| identity.display_path.clone())
+        .ok_or_else(|| {
+            HandlerError::BadRequest("handoff source has no stable project endpoint".into())
+        })?;
+    let report = crate::remote::config::load_remotes_layered_report(
+        &state.config.app_root,
+        Some(&source_project_path),
+    )
+    .map_err(internal)?;
+    let loaded_remote = crate::remote::config::get_loaded_remote(&report.remotes, &req.remote)
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let binding =
+        crate::remote::config::resolve_loaded_project_binding(&loaded_remote, &source_project_path)
+            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    if binding.sync_scope != crate::remote::config::ProjectSyncScope::FullProject {
+        return Err(HandlerError::BadRequest(
+            "worker handoff requires a configured full_project route".into(),
+        ));
+    }
+    let target_site_id = loaded_remote.config.site_id.clone();
+    if target_site_id == state.threads.site_id() {
+        return Err(HandlerError::BadRequest(
+            "cross-site handoff target is the current site".into(),
+        ));
+    }
+    let route_digest = ryeos_state::objects::canonical_value_digest(&json!({
+        "schema":"ryeos.worker_project_route.v1",
+        "remote":loaded_remote.config.name,
+        "source_site_id":state.threads.site_id(),
+        "target_site_id":target_site_id,
+        "source_project_path":binding.local_project_path,
+        "target_project_path":binding.remote_project_path,
+        "sync_scope":"full_project",
+    }))
+    .map_err(internal)?;
+    let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
+        "schema":"ryeos.worker_session_handoff_operation.v1",
+        "owner_principal":source.owner_principal,
+        "chain_root_id":source.chain_root_id,
+        "source_site_id":state.threads.site_id(),
+        "target_site_id":target_site_id,
+        "source_placement_thread_id":source_thread_id,
+        "source_chain_head_hash":source_head.target_hash,
+        "source_last_event_hash":source_event_hash,
+        "checkpoint_manifest_hash":checkpoint.manifest_hash,
+        "project_route_digest":route_digest,
+        "target_credential_profile_id":req.target_credential_profile_id,
+    }))
+    .map_err(internal)?;
+    let successor_thread_id = format!("T-handoff-{}", &operation_id[..32]);
+    let source_accounting_frontier = match (
+        state.accounting.as_ref(),
+        source_metadata.accounting_scope.as_ref(),
+    ) {
+        (Some(accounting), Some(scope)) => Some(
+            accounting
+                .handoff_frontier(&source_thread_id, scope)
+                .map_err(|error| HandlerError::BadRequest(error.to_string()))?,
+        ),
+        (None, Some(_)) => {
+            return Err(internal(
+                "accounted handoff source has no available accounting ledger",
+            ));
+        }
+        (_, None) => None,
+    };
+    let launch_capsule_hash = source_snapshot
+        .admitted_launch_capsule_hash
+        .as_deref()
+        .ok_or_else(|| internal("handoff source has no launch capsule"))?;
+    let prepared_transfer = ryeos_app::worker_handoff::prepare_placement_transfer_manifest(
+        &operation_id,
+        &source.owner_principal,
+        &source.chain_root_id,
+        &source_snapshot.origin_site_id,
+        state.threads.site_id(),
+        &target_site_id,
+        &source_thread_id,
+        &successor_thread_id,
+        &source_head.target_hash,
+        &source_event_hash,
+        &checkpoint.manifest_hash,
+        launch_capsule_hash,
+        &source_metadata,
+    )
+    .map_err(internal)?;
+    let transfer_manifest_hash = prepared_transfer.object_hash().map_err(internal)?;
+    let operation = ryeos_app::worker_handoff::WorkerSessionHandoffJobOperation::new(
+        ryeos_app::worker_handoff::WorkerHandoffJobRole::Source,
+        operation_id.clone(),
+        source.owner_principal.clone(),
+        source.chain_root_id.clone(),
+        source_snapshot.origin_site_id.clone(),
+        state.threads.site_id().to_owned(),
+        target_site_id.clone(),
+        source_thread_id.clone(),
+        successor_thread_id.clone(),
+        source_head.target_hash.clone(),
+        source_event_hash.clone(),
+        checkpoint.manifest_hash.clone(),
+        transfer_manifest_hash.clone(),
+        req.remote.clone(),
+        binding.local_project_path.display().to_string(),
+        binding.remote_project_path.clone(),
+        route_digest.clone(),
+        req.target_credential_profile_id.clone(),
+    )
+    .map_err(internal)?;
+    let job_id = format!("worker-handoff-source:{operation_id}");
+    state
+        .state_store
+        .create_worker_handoff_source_job(
+            &prepared_transfer,
+            &ryeos_state::NewSyncJob {
+                job_id: job_id.clone(),
+                operation_type: ryeos_app::worker_handoff::WORKER_SESSION_HANDOFF_OPERATION
+                    .to_owned(),
+                operation: operation.to_value().map_err(internal)?,
+                peer: Some(req.remote.clone()),
+                roots: vec![transfer_manifest_hash.clone()],
+                heads: vec![source_head.target_hash.clone()],
+                max_attempts: 16,
+            },
+        )
+        .map_err(internal)?;
+
+    let prepare_request = ryeos_app::worker_handoff::WorkerPlacementPrepareRequest {
+        operation_id: operation_id.clone(),
+        chain_root_id: source.chain_root_id.clone(),
+        source_site_id: state.threads.site_id().to_owned(),
+        target_site_id: target_site_id.clone(),
+        source_chain_head_hash: source_head.target_hash.clone(),
+        transfer_manifest_hash: transfer_manifest_hash.clone(),
+        target_project_path: binding.remote_project_path.clone(),
+        project_route_digest: route_digest,
+        target_credential_profile_id: req.target_credential_profile_id.clone(),
+        source_accounting_frontier: source_accounting_frontier.clone(),
+    };
+    let target_client =
+        crate::remote::client::RemoteClient::from_remote_cfg_as_configured_operator(
+            &state,
+            &loaded_remote.config,
+            &ctx,
+        )
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    let prepare_attempt =
+        begin_worker_handoff_attempt(&state, &job_id, "target_prepare", "source-handoff")?;
+    let prepared_result: Result<
+        ryeos_app::worker_handoff::WorkerPlacementPrepareResponse,
+        HandlerError,
+    > = async {
+        let target_value = target_client
+            .execute(
+                ryeos_app::worker_handoff::WORKER_PLACEMENT_PREPARE_SERVICE,
+                &BTreeMap::new(),
+                None,
+                &serde_json::to_value(&prepare_request).map_err(internal)?,
+                &ryeos_app::execution_policy::ExecutionPolicy::projectless(
+                    ryeos_app::execution_policy::ExecutionResponse::Wait,
+                ),
+                None,
+            )
+            .await
+            .map_err(|error| internal(format!("target placement preparation: {error:#}")))?;
+        let prepared: ryeos_app::worker_handoff::WorkerPlacementPrepareResponse =
+            serde_json::from_value(target_value)
+                .map_err(|error| internal(format!("decode target placement response: {error}")))?;
+        prepared
+            .validate_against(&prepare_request)
+            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+
+        let target_node_client =
+            crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config);
+        let target_roots = vec![
+            prepared.placement_attestation_hash.clone(),
+            prepared.target_runtime_seed_hash.clone(),
+        ];
+        let target_closure = target_node_client
+            .objects_closure_get(
+                &target_roots,
+                crate::remote::client::ObjectsClosureRequestOptions {
+                    max_objects: Some(4096),
+                    max_blobs: Some(4096),
+                    max_object_bytes: Some(2 * 1024 * 1024),
+                    max_total_object_bytes: Some(16 * 1024 * 1024),
+                    max_blob_bytes: Some(48 * 1024 * 1024),
+                    max_total_blob_bytes: Some(48 * 1024 * 1024),
+                    max_response_bytes: Some(64 * 1024 * 1024),
+                    max_links_per_object: Some(65_536),
+                    allow_incomplete: false,
+                },
+            )
+            .await
+            .map_err(|error| internal(format!("fetch target placement closure: {error:#}")))?;
+        let target_payload = crate::remote::import::closure_response_to_export_payload(
+            &format!("worker-placement:{operation_id}"),
+            &prepared.placement_attestation_hash,
+            &target_closure.entries,
+        )
+        .map_err(internal)?;
+        let progress = ryeos_app::worker_handoff::WorkerSessionHandoffProgress {
+            schema: "ryeos.worker_session_handoff_progress.v1".to_owned(),
+            operation_id: operation_id.clone(),
+            phase: ryeos_app::worker_handoff::WorkerHandoffPhase::TargetPrepared,
+            placement_attestation_hash: Some(prepared.placement_attestation_hash.clone()),
+            target_runtime_seed_hash: Some(prepared.target_runtime_seed_hash.clone()),
+            writer_grant_hash: None,
+            target_chain_head_hash: None,
+            credential_reservation_id: Some(prepared.credential_reservation.reservation_id.clone()),
+            abort_chain_head_hash: None,
+        };
+        state
+            .state_store
+            .stage_sync_payload_for_existing_job(
+                &target_payload,
+                &ryeos_state::sync::ImportAttribution {
+                    source_principal: Some(loaded_remote.config.principal_id.clone()),
+                    source_peer: Some(req.remote.clone()),
+                    job_id: Some(job_id.clone()),
+                },
+                &job_id,
+                progress.phase.as_str(),
+                &target_roots,
+                Some(progress.to_value().map_err(internal)?),
+            )
+            .map_err(internal)?;
+        verify_target_placement_attestation(&state, &loaded_remote.config, &prepared)
+            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        Ok(prepared)
+    }
+    .await;
+    let prepared = match prepared_result {
+        Ok(prepared) => {
+            settle_worker_handoff_attempt(
+                &state,
+                &job_id,
+                &prepare_attempt,
+                ryeos_state::SyncJobAttemptState::Completed,
+                ryeos_state::SyncJobState::Running,
+                "target_prepared",
+                None,
+                None,
+            )?;
+            prepared
+        }
+        Err(error) => {
+            let detail = bounded_handoff_recovery_error(&error.to_string());
+            settle_worker_handoff_attempt(
+                &state,
+                &job_id,
+                &prepare_attempt,
+                ryeos_state::SyncJobAttemptState::Failed,
+                ryeos_state::SyncJobState::Retryable,
+                "target_prepare_failed",
+                Some(detail),
+                None,
+            )?;
+            return Err(error);
+        }
+    };
+
+    let target_authority = &prepared.placement.project_rebind.target_authority;
+    let target_overlay_root = matches!(
+        target_authority.environment(),
+        ryeos_state::objects::EnvironmentAuthority::ProjectOverlay { .. }
+    )
+    .then(|| PathBuf::from(&binding.remote_project_path));
+    let target_identity = ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+        PathBuf::from(&binding.remote_project_path).as_path(),
+        &target_site_id,
+    )
+    .map_err(internal)?;
+    let resume_rebind = ryeos_app::worker_handoff::RemoteResumeContextRebind {
+        source_site_id: state.threads.site_id().to_owned(),
+        target_site_id: target_site_id.clone(),
+        target_project_context: ryeos_engine::contracts::ProjectContext::SnapshotHash {
+            hash: prepared
+                .placement
+                .project_rebind
+                .source_candidate_snapshot_hash
+                .clone(),
+        },
+        target_project_authority: target_authority.clone(),
+        target_stable_project_identity: Some(target_identity),
+        target_local_overlay_root: target_overlay_root,
+        target_original_snapshot_hash: Some(
+            prepared
+                .placement
+                .project_rebind
+                .source_candidate_snapshot_hash
+                .clone(),
+        ),
+        target_original_pushed_head_ref: None,
+        target_state_root: None,
+        source_credential_profile_id: source.credential_profile_id.clone(),
+        credential_reservation: prepared.credential_reservation.clone(),
+    };
+    let target_resume = source_resume
+        .for_remote_worker_adoption(&resume_rebind)
+        .map_err(internal)?;
+    let final_frontier = match (
+        state.accounting.as_ref(),
+        source_metadata.accounting_scope.as_ref(),
+    ) {
+        (Some(accounting), Some(scope)) => Some(
+            accounting
+                .handoff_frontier(&source_thread_id, scope)
+                .map_err(|error| HandlerError::BadRequest(error.to_string()))?,
+        ),
+        (_, None) => None,
+        (None, Some(_)) => return Err(internal("source accounting ledger disappeared")),
+    };
+    if final_frontier != source_accounting_frontier {
+        return Err(HandlerError::BadRequest(
+            "source accounting frontier changed during target preparation".into(),
+        ));
+    }
+    let successor = ryeos_app::state_store::NewThreadRecord {
+        thread_id: successor_thread_id.clone(),
+        chain_root_id: source.chain_root_id.clone(),
+        kind: source_snapshot.kind_name.clone(),
+        item_ref: source_snapshot.item_ref.clone(),
+        executor_ref: source_snapshot.executor_ref.clone(),
+        launch_mode: source_snapshot.launch_mode.clone(),
+        current_site_id: target_site_id.clone(),
+        origin_site_id: source_snapshot.origin_site_id.clone(),
+        upstream_thread_id: Some(source_thread_id.clone()),
+        requested_by: Some(source.owner_principal.clone()),
+        project_root: None,
+        project_authority: target_authority.clone(),
+        base_project_snapshot_hash: Some(
+            prepared
+                .placement
+                .project_rebind
+                .source_base_snapshot_hash
+                .clone(),
+        ),
+        usage_subject: None,
+        usage_subject_asserted_by: None,
+        captured_history_policy: None,
+    };
+    let publication = state
+        .state_store
+        .create_remote_adoption_successor(
+            &successor,
+            &source_thread_id,
+            &source.chain_root_id,
+            &ryeos_app::state_store::RemoteAdoptionContinuationAuthority {
+                placement_attestation_hash: prepared.placement_attestation_hash.clone(),
+                placement: prepared.placement.clone(),
+                resume_rebind,
+                target_resume_context: target_resume,
+                source_accounting_frontier: final_frontier,
+                target_node_verifying_key: loaded_remote
+                    .config
+                    .pinned_signing_key()
+                    .map_err(internal)?,
+            },
+        )
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let target_chain_head = state
+        .state_store
+        .with_state_db(|db| db.read_generic_head_ref("chains", &source.chain_root_id))
+        .map_err(internal)?
+        .ok_or_else(|| internal("remote continuation committed without a chain head"))?;
+    let committed_progress = ryeos_app::worker_handoff::WorkerSessionHandoffProgress {
+        schema: "ryeos.worker_session_handoff_progress.v1".to_owned(),
+        operation_id: operation_id.clone(),
+        phase: ryeos_app::worker_handoff::WorkerHandoffPhase::SourceCommitted,
+        placement_attestation_hash: Some(prepared.placement_attestation_hash.clone()),
+        target_runtime_seed_hash: Some(prepared.target_runtime_seed_hash.clone()),
+        writer_grant_hash: Some(publication.writer_grant_hash.clone()),
+        target_chain_head_hash: Some(target_chain_head.target_hash.clone()),
+        credential_reservation_id: Some(prepared.credential_reservation.reservation_id.clone()),
+        abort_chain_head_hash: None,
+    };
+    state
+        .state_store
+        .with_state_db(|db| {
+            db.update_sync_job(
+                &job_id,
+                &ryeos_state::SyncJobUpdate {
+                    state: ryeos_state::SyncJobState::Running,
+                    phase: committed_progress.phase.as_str().to_owned(),
+                    roots: None,
+                    heads: Some(vec![target_chain_head.target_hash.clone()]),
+                    uploaded_hashes: vec![target_chain_head.target_hash.clone()],
+                    fetched_hashes: Vec::new(),
+                    last_error: None,
+                    result: Some(committed_progress.to_value()?),
+                },
+            )
+        })
+        .map_err(internal)?;
+    let adopt_request = ryeos_app::worker_handoff::WorkerPlacementAdoptRequest {
+        operation_id: operation_id.clone(),
+        chain_root_id: source.chain_root_id.clone(),
+        target_chain_head_hash: target_chain_head.target_hash.clone(),
+        placement_attestation_hash: prepared.placement_attestation_hash.clone(),
+        writer_grant_hash: publication.writer_grant_hash,
+    };
+    let adopt_attempt =
+        begin_worker_handoff_attempt(&state, &job_id, "target_adopt", "source-handoff")?;
+    let adopted_result: Result<
+        ryeos_app::worker_handoff::WorkerPlacementAdoptResponse,
+        HandlerError,
+    > = async {
+        let adopted_value = target_client
+            .execute(
+                ryeos_app::worker_handoff::WORKER_PLACEMENT_ADOPT_SERVICE,
+                &BTreeMap::new(),
+                None,
+                &serde_json::to_value(&adopt_request).map_err(internal)?,
+                &ryeos_app::execution_policy::ExecutionPolicy::projectless(
+                    ryeos_app::execution_policy::ExecutionResponse::Wait,
+                ),
+                None,
+            )
+            .await
+            .map_err(|error| internal(format!("target placement adoption: {error:#}")))?;
+        let adopted: ryeos_app::worker_handoff::WorkerPlacementAdoptResponse =
+            serde_json::from_value(adopted_value)
+                .map_err(|error| internal(format!("decode target adoption response: {error}")))?;
+        if adopted.operation_id != operation_id
+            || adopted.chain_root_id != source.chain_root_id
+            || adopted.placement_thread_id != successor_thread_id
+            || adopted.target_chain_head_hash != target_chain_head.target_hash
+        {
+            return Err(internal(
+                "target adoption response changed its authority coordinates",
+            ));
+        }
+        Ok(adopted)
+    }
+    .await;
+    let adopted = match adopted_result {
+        Ok(adopted) => {
+            settle_worker_handoff_attempt(
+                &state,
+                &job_id,
+                &adopt_attempt,
+                ryeos_state::SyncJobAttemptState::Completed,
+                ryeos_state::SyncJobState::Completed,
+                "completed",
+                None,
+                Some(serde_json::to_value(&adopted).map_err(internal)?),
+            )?;
+            adopted
+        }
+        Err(error) => {
+            let detail = bounded_handoff_recovery_error(&error.to_string());
+            settle_worker_handoff_attempt(
+                &state,
+                &job_id,
+                &adopt_attempt,
+                ryeos_state::SyncJobAttemptState::Failed,
+                ryeos_state::SyncJobState::Retryable,
+                "target_adopt_failed",
+                Some(detail),
+                Some(committed_progress.to_value().map_err(internal)?),
+            )?;
+            return Err(error);
+        }
+    };
+    Ok(json!({
+        "operation_id":operation_id,
+        "chain_root_id":source.chain_root_id,
+        "source_placement_thread_id":source_thread_id,
+        "placement_thread_id":successor_thread_id,
+        "current_site_id":target_site_id,
+        "target_chain_head_hash":target_chain_head.target_hash,
+        "delivery":adopted.delivery,
+    }))
+}
+
+async fn resume_committed_handoff(
+    req: &HandoffRequest,
+    ctx: &HandlerContext,
+    state: &Arc<AppState>,
+) -> Result<Option<Value>, HandlerError> {
+    ryeos_app::operator_external_content::require_configured_operator(state, ctx)
+        .map_err(|_| HandlerError::Forbidden("configured operator required".into()))?;
+    let Some(placement_thread_id) = state
+        .state_store
+        .current_chain_placement_thread_id(&req.chain_root_id)
+        .map_err(internal)?
+    else {
+        return Ok(None);
+    };
+    if state
+        .state_store
+        .dedicated_session(&placement_thread_id)
+        .map_err(internal)?
+        .is_some()
+    {
+        return Ok(None);
+    }
+    let Some(remote_authority) = state
+        .state_store
+        .remote_continuation_authority(&req.chain_root_id, &placement_thread_id)
+        .map_err(internal)?
+    else {
+        return Ok(None);
+    };
+    let job_id = format!("worker-handoff-source:{}", remote_authority.operation_id);
+    let job = state
+        .state_store
+        .with_state_db(|db| db.get_sync_job(&job_id))
+        .map_err(internal)?
+        .ok_or_else(|| internal("committed remote continuation has no source handoff job"))?;
+    let operation = ryeos_app::worker_handoff::WorkerSessionHandoffJobOperation::from_value(
+        job.operation.clone(),
+    )
+    .map_err(internal)?;
+    if operation.role != ryeos_app::worker_handoff::WorkerHandoffJobRole::Source
+        || operation.operation_id != remote_authority.operation_id
+        || operation.chain_root_id != req.chain_root_id
+        || operation.successor_placement_thread_id != placement_thread_id
+        || operation.peer_remote_name != req.remote
+        || operation.target_credential_profile_id != req.target_credential_profile_id
+        || format!("cas:{}", operation.checkpoint_manifest_hash) != req.manifest_ref
+    {
+        return Err(HandlerError::BadRequest(
+            "handoff retry differs from the committed source operation".into(),
+        ));
+    }
+    ctx.require_owner(Some(&operation.owner_principal))?;
+    if job.state == ryeos_state::SyncJobState::Completed {
+        let adopted: ryeos_app::worker_handoff::WorkerPlacementAdoptResponse =
+            serde_json::from_value(
+                job.result
+                    .ok_or_else(|| internal("completed handoff job has no result"))?,
+            )
+            .map_err(internal)?;
+        return Ok(Some(handoff_response(&operation, &adopted)?));
+    }
+    let progress = job
+        .result
+        .map(ryeos_app::worker_handoff::WorkerSessionHandoffProgress::from_value)
+        .transpose()
+        .map_err(internal)?
+        .ok_or_else(|| internal("committed handoff job has no durable progress"))?;
+    if progress.phase < ryeos_app::worker_handoff::WorkerHandoffPhase::SourceCommitted
+        || progress.operation_id != operation.operation_id
+        || progress.placement_attestation_hash.as_deref()
+            != Some(remote_authority.target_placement_attestation_hash.as_str())
+        || progress.writer_grant_hash.as_deref()
+            != Some(remote_authority.chain_writer_grant_hash.as_str())
+    {
+        return Err(internal(
+            "committed remote continuation contradicts source handoff progress",
+        ));
+    }
+    let report = crate::remote::config::load_remotes_layered_report(
+        &state.config.app_root,
+        Some(std::path::Path::new(&operation.source_project_path)),
+    )
+    .map_err(internal)?;
+    let loaded_remote =
+        crate::remote::config::get_loaded_remote(&report.remotes, &operation.peer_remote_name)
+            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    if loaded_remote.config.site_id != operation.target_site_id {
+        return Err(HandlerError::BadRequest(
+            "configured target site changed after source commit".into(),
+        ));
+    }
+    let target_client =
+        crate::remote::client::RemoteClient::from_remote_cfg_as_configured_operator(
+            state,
+            &loaded_remote.config,
+            ctx,
+        )
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    let adopt_request = ryeos_app::worker_handoff::WorkerPlacementAdoptRequest {
+        operation_id: operation.operation_id.clone(),
+        chain_root_id: operation.chain_root_id.clone(),
+        target_chain_head_hash: progress
+            .target_chain_head_hash
+            .clone()
+            .ok_or_else(|| internal("committed handoff progress has no target chain head"))?,
+        placement_attestation_hash: progress
+            .placement_attestation_hash
+            .clone()
+            .ok_or_else(|| internal("committed handoff progress has no target placement"))?,
+        writer_grant_hash: progress
+            .writer_grant_hash
+            .clone()
+            .ok_or_else(|| internal("committed handoff progress has no writer grant"))?,
+    };
+    let value = target_client
+        .execute(
+            ryeos_app::worker_handoff::WORKER_PLACEMENT_ADOPT_SERVICE,
+            &BTreeMap::new(),
+            None,
+            &serde_json::to_value(&adopt_request).map_err(internal)?,
+            &ryeos_app::execution_policy::ExecutionPolicy::projectless(
+                ryeos_app::execution_policy::ExecutionResponse::Wait,
+            ),
+            None,
+        )
+        .await
+        .map_err(|error| internal(format!("retry target placement adoption: {error:#}")))?;
+    let adopted: ryeos_app::worker_handoff::WorkerPlacementAdoptResponse =
+        serde_json::from_value(value).map_err(internal)?;
+    if adopted.operation_id != operation.operation_id
+        || adopted.chain_root_id != operation.chain_root_id
+        || adopted.placement_thread_id != operation.successor_placement_thread_id
+        || adopted.target_chain_head_hash != adopt_request.target_chain_head_hash
+    {
+        return Err(internal(
+            "retried target adoption changed its authority coordinates",
+        ));
+    }
+    state
+        .state_store
+        .with_state_db(|db| {
+            db.update_sync_job(
+                &job_id,
+                &ryeos_state::SyncJobUpdate {
+                    state: ryeos_state::SyncJobState::Completed,
+                    phase: "completed".to_owned(),
+                    roots: None,
+                    heads: None,
+                    uploaded_hashes: vec![adopt_request.target_chain_head_hash.clone()],
+                    fetched_hashes: Vec::new(),
+                    last_error: None,
+                    result: Some(serde_json::to_value(&adopted)?),
+                },
+            )
+        })
+        .map_err(internal)?;
+    Ok(Some(handoff_response(&operation, &adopted)?))
+}
+
+fn handoff_response(
+    operation: &ryeos_app::worker_handoff::WorkerSessionHandoffJobOperation,
+    adopted: &ryeos_app::worker_handoff::WorkerPlacementAdoptResponse,
+) -> Result<Value, HandlerError> {
+    Ok(json!({
+        "operation_id":operation.operation_id,
+        "chain_root_id":operation.chain_root_id,
+        "source_placement_thread_id":operation.source_placement_thread_id,
+        "placement_thread_id":operation.successor_placement_thread_id,
+        "current_site_id":operation.target_site_id,
+        "target_chain_head_hash":adopted.target_chain_head_hash,
+        "delivery":adopted.delivery,
+    }))
+}
+
+/// Recover both safe terminal branches of a durable source handoff. A pre-cut
+/// operation first publishes an authoritative source abort successor and only
+/// then asks the target to release its reservation. A post-cut operation
+/// re-verifies the one-shot writer grant before redriving target adoption.
+pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> {
+    let jobs = state.state_store.with_state_db(|db| {
+        db.list_active_sync_jobs_by_operation_type(
+            ryeos_app::worker_handoff::WORKER_SESSION_HANDOFF_OPERATION,
+            64,
+        )
+    })?;
+    let mut recovered = 0usize;
+    for job in jobs {
+        let operation =
+            match ryeos_app::worker_handoff::WorkerSessionHandoffJobOperation::from_value(
+                job.operation.clone(),
+            ) {
+                Ok(operation)
+                    if operation.role
+                        == ryeos_app::worker_handoff::WorkerHandoffJobRole::Source =>
+                {
+                    operation
+                }
+                Ok(_) => continue,
+                Err(error) => {
+                    tracing::error!(job_id = %job.job_id, error = %error, "invalid source worker handoff job retained for operator inspection");
+                    continue;
+                }
+            };
+        let _operation_guard = disposition_operation_lock(&operation.source_placement_thread_id)
+            .lock_owned()
+            .await;
+        let latest_job = state
+            .state_store
+            .with_state_db(|db| db.get_sync_job(&job.job_id))?
+            .ok_or_else(|| anyhow::anyhow!("source worker handoff job disappeared"))?;
+        if matches!(
+            latest_job.state,
+            ryeos_state::SyncJobState::Completed
+                | ryeos_state::SyncJobState::Failed
+                | ryeos_state::SyncJobState::Cancelled
+        ) {
+            continue;
+        }
+        if latest_job.operation != job.operation {
+            anyhow::bail!("source worker handoff job operation changed during recovery");
+        }
+        let mut progress = latest_job
+            .result
+            .clone()
+            .map(ryeos_app::worker_handoff::WorkerSessionHandoffProgress::from_value)
+            .transpose()?
+            .unwrap_or(
+                ryeos_app::worker_handoff::WorkerSessionHandoffProgress::planned(
+                    operation.operation_id.clone(),
+                )?,
+            );
+        let current_placement = state
+            .state_store
+            .current_chain_placement_thread_id(&operation.chain_root_id)?;
+        if progress.phase < ryeos_app::worker_handoff::WorkerHandoffPhase::SourceCommitted
+            && current_placement.as_deref()
+                == Some(operation.successor_placement_thread_id.as_str())
+        {
+            let remote = state
+                .state_store
+                .remote_continuation_authority(
+                    &operation.chain_root_id,
+                    &operation.successor_placement_thread_id,
+                )?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("authoritative successor has no remote-continuation authority")
+                })?;
+            let head = state
+                .state_store
+                .with_state_db(|db| db.read_generic_head_ref("chains", &operation.chain_root_id))?
+                .ok_or_else(|| anyhow::anyhow!("source handoff chain head disappeared"))?;
+            if remote.operation_id != operation.operation_id
+                || remote.source_chain_head_hash != operation.source_chain_head_hash
+                || remote.source_last_event_hash != operation.source_last_event_hash
+                || remote.checkpoint_manifest_hash != operation.checkpoint_manifest_hash
+                || remote.successor_thread_id != operation.successor_placement_thread_id
+                || remote.source_site_id != operation.source_site_id
+                || remote.target_site_id != operation.target_site_id
+                || progress.placement_attestation_hash.as_deref()
+                    != Some(remote.target_placement_attestation_hash.as_str())
+                || progress.target_runtime_seed_hash.as_deref()
+                    != Some(remote.target_runtime_seed_hash.as_str())
+                || progress.credential_reservation_id.is_none()
+                || head.signer != state.identity.fingerprint()
+            {
+                anyhow::bail!(
+                    "source handoff crash recovery contradicts signed continuation authority"
+                );
+            }
+            progress.phase = ryeos_app::worker_handoff::WorkerHandoffPhase::SourceCommitted;
+            progress.writer_grant_hash = Some(remote.chain_writer_grant_hash);
+            progress.target_chain_head_hash = Some(head.target_hash.clone());
+            progress.validate()?;
+            state.state_store.with_state_db(|db| {
+                db.update_sync_job(
+                    &job.job_id,
+                    &ryeos_state::SyncJobUpdate {
+                        state: ryeos_state::SyncJobState::Running,
+                        phase: progress.phase.as_str().to_owned(),
+                        roots: None,
+                        heads: Some(vec![head.target_hash]),
+                        uploaded_hashes: Vec::new(),
+                        fetched_hashes: Vec::new(),
+                        last_error: None,
+                        result: Some(progress.to_value()?),
+                    },
+                )
+            })?;
+        }
+        if progress.phase < ryeos_app::worker_handoff::WorkerHandoffPhase::SourceCommitted {
+            if recover_pre_cut_source_handoff_abort(state, &latest_job, &operation, &progress)
+                .await?
+            {
+                recovered += 1;
+            }
+            continue;
+        }
+        let (Some(placement_hash), Some(writer_hash), Some(target_head_hash)) = (
+            progress.placement_attestation_hash.clone(),
+            progress.writer_grant_hash.clone(),
+            progress.target_chain_head_hash.clone(),
+        ) else {
+            continue;
+        };
+        let current = state
+            .state_store
+            .current_chain_placement_thread_id(&operation.chain_root_id)?;
+        if current.as_deref() != Some(operation.successor_placement_thread_id.as_str()) {
+            tracing::error!(
+                job_id = %job.job_id,
+                "source worker handoff recovery found another authoritative chain placement"
+            );
+            continue;
+        }
+        let Some(remote) = state.state_store.remote_continuation_authority(
+            &operation.chain_root_id,
+            &operation.successor_placement_thread_id,
+        )?
+        else {
+            tracing::error!(job_id = %job.job_id, "source handoff successor has no remote authority");
+            continue;
+        };
+        let head = state
+            .state_store
+            .with_state_db(|db| db.read_generic_head_ref("chains", &operation.chain_root_id))?
+            .ok_or_else(|| anyhow::anyhow!("source handoff chain head disappeared"))?;
+        if remote.operation_id != operation.operation_id
+            || remote.target_placement_attestation_hash != placement_hash
+            || remote.chain_writer_grant_hash != writer_hash
+            || remote.successor_thread_id != operation.successor_placement_thread_id
+            || head.target_hash != target_head_hash
+            || head.signer != state.identity.fingerprint()
+        {
+            tracing::error!(job_id = %job.job_id, "source handoff durable progress contradicts signed chain authority");
+            continue;
+        }
+        let report = crate::remote::config::load_remotes_layered_report(
+            &state.config.app_root,
+            Some(std::path::Path::new(&operation.source_project_path)),
+        )?;
+        let loaded_remote =
+            crate::remote::config::get_loaded_remote(&report.remotes, &operation.peer_remote_name)?;
+        if loaded_remote.config.site_id != operation.target_site_id {
+            tracing::error!(job_id = %job.job_id, "source handoff configured target site changed");
+            continue;
+        }
+        let client =
+            crate::remote::client::RemoteClient::from_remote_cfg_for_admitted_operator_job(
+                state,
+                &loaded_remote.config,
+                &operation.owner_principal,
+                &operation.source_site_id,
+            )?;
+        let request = ryeos_app::worker_handoff::WorkerPlacementAdoptRequest {
+            operation_id: operation.operation_id.clone(),
+            chain_root_id: operation.chain_root_id.clone(),
+            target_chain_head_hash: target_head_hash,
+            placement_attestation_hash: placement_hash,
+            writer_grant_hash: writer_hash,
+        };
+        let attempt_id = begin_worker_handoff_attempt(
+            state,
+            &job.job_id,
+            "target_adopt_recovery",
+            "source-handoff-recovery",
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let result = client
+            .execute(
+                ryeos_app::worker_handoff::WORKER_PLACEMENT_ADOPT_SERVICE,
+                &BTreeMap::new(),
+                None,
+                &serde_json::to_value(&request)?,
+                &ryeos_app::execution_policy::ExecutionPolicy::projectless(
+                    ryeos_app::execution_policy::ExecutionResponse::Wait,
+                ),
+                None,
+            )
+            .await;
+        match result {
+            Ok(value) => {
+                let adopted: ryeos_app::worker_handoff::WorkerPlacementAdoptResponse =
+                    serde_json::from_value(value)?;
+                if adopted.operation_id != operation.operation_id
+                    || adopted.chain_root_id != operation.chain_root_id
+                    || adopted.placement_thread_id != operation.successor_placement_thread_id
+                    || adopted.target_chain_head_hash != request.target_chain_head_hash
+                {
+                    anyhow::bail!("recovered target adoption changed its authority coordinates");
+                }
+                settle_worker_handoff_attempt(
+                    state,
+                    &job.job_id,
+                    &attempt_id,
+                    ryeos_state::SyncJobAttemptState::Completed,
+                    ryeos_state::SyncJobState::Completed,
+                    "completed",
+                    None,
+                    Some(serde_json::to_value(&adopted)?),
+                )
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                recovered += 1;
+            }
+            Err(error) => {
+                let latest = state
+                    .state_store
+                    .with_state_db(|db| db.get_sync_job(&job.job_id))?
+                    .ok_or_else(|| anyhow::anyhow!("source handoff job disappeared"))?;
+                if matches!(
+                    latest.state,
+                    ryeos_state::SyncJobState::Completed
+                        | ryeos_state::SyncJobState::Failed
+                        | ryeos_state::SyncJobState::Cancelled
+                ) {
+                    continue;
+                }
+                settle_worker_handoff_attempt(
+                    state,
+                    &job.job_id,
+                    &attempt_id,
+                    ryeos_state::SyncJobAttemptState::Failed,
+                    ryeos_state::SyncJobState::Retryable,
+                    &latest.phase,
+                    Some(bounded_handoff_recovery_error(&error.to_string())),
+                    latest.result,
+                )
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            }
+        }
+    }
+    Ok(recovered)
+}
+
+async fn recover_pre_cut_source_handoff_abort(
+    state: &AppState,
+    job: &ryeos_state::SyncJobRecord,
+    operation: &ryeos_app::worker_handoff::WorkerSessionHandoffJobOperation,
+    progress: &ryeos_app::worker_handoff::WorkerSessionHandoffProgress,
+) -> Result<bool> {
+    let current_placement = state
+        .state_store
+        .current_chain_placement_thread_id(&operation.chain_root_id)?;
+    if current_placement.as_deref() != Some(operation.source_placement_thread_id.as_str()) {
+        tracing::error!(
+            job_id = %job.job_id,
+            "pre-cut worker handoff recovery found another authoritative placement"
+        );
+        return Ok(false);
+    }
+    let _root_operation = ryeos_app::hosted_operation::begin_hosted_root_operation(
+        &state.state_store,
+        &operation.source_placement_thread_id,
+    )?;
+    let current_head = state
+        .state_store
+        .with_state_db(|db| db.read_generic_head_ref("chains", &operation.chain_root_id))?
+        .ok_or_else(|| anyhow::anyhow!("pre-cut handoff source head disappeared"))?;
+    if current_head.signer != state.identity.fingerprint() {
+        anyhow::bail!("pre-cut handoff source head is not locally owned");
+    }
+    let abort_head_hash =
+        if progress.phase == ryeos_app::worker_handoff::WorkerHandoffPhase::AbortAuthorized {
+            let expected = progress
+                .abort_chain_head_hash
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("abort-authorized handoff has no abort head"))?;
+            if current_head.target_hash != expected {
+                anyhow::bail!("source handoff advanced after its abort authority");
+            }
+            expected
+        } else if current_head.target_hash == operation.source_chain_head_hash {
+            let (_, event) = state
+                .state_store
+                .get_authoritative_thread_snapshot_with_last_event(
+                    &operation.chain_root_id,
+                    &operation.source_placement_thread_id,
+                )?
+                .ok_or_else(|| anyhow::anyhow!("pre-cut handoff source disappeared"))?;
+            if event.and_then(|event| event.event_hash).as_deref()
+                != Some(operation.source_last_event_hash.as_str())
+            {
+                anyhow::bail!("pre-cut handoff source event changed before abort");
+            }
+            ryeos_app::authoritative_root_fact::append_once(
+                state,
+                &operation.source_placement_thread_id,
+                "worker_session.handoff_aborted",
+                &operation.operation_id,
+                serde_json::json!({
+                    "schema":"ryeos.worker_session_handoff_abort.v1",
+                    "operation_id":operation.operation_id,
+                    "chain_root_id":operation.chain_root_id,
+                    "source_placement_thread_id":operation.source_placement_thread_id,
+                    "source_site_id":operation.source_site_id,
+                    "target_site_id":operation.target_site_id,
+                    "source_chain_head_hash":operation.source_chain_head_hash,
+                    "source_last_event_hash":operation.source_last_event_hash,
+                }),
+            )?;
+            state
+                .state_store
+                .with_state_db(|db| db.read_generic_head_ref("chains", &operation.chain_root_id))?
+                .ok_or_else(|| anyhow::anyhow!("source abort append produced no chain head"))?
+                .target_hash
+        } else {
+            // Cover the crash gap after append and before job-progress update. The
+            // exact current head must itself be the immediate abort successor.
+            current_head.target_hash.clone()
+        };
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    ryeos_app::worker_handoff::validate_handoff_abort_authority(
+        &authority.cas_store()?,
+        operation,
+        &abort_head_hash,
+    )?;
+    drop(guard);
+    let mut abort_progress = progress.clone();
+    abort_progress.phase = ryeos_app::worker_handoff::WorkerHandoffPhase::AbortAuthorized;
+    abort_progress.abort_chain_head_hash = Some(abort_head_hash.clone());
+    abort_progress.validate()?;
+    state.state_store.with_state_db(|db| {
+        db.update_sync_job(
+            &job.job_id,
+            &ryeos_state::SyncJobUpdate {
+                state: ryeos_state::SyncJobState::Running,
+                phase: abort_progress.phase.as_str().to_owned(),
+                roots: None,
+                heads: Some(vec![abort_head_hash.clone()]),
+                uploaded_hashes: Vec::new(),
+                fetched_hashes: Vec::new(),
+                last_error: None,
+                result: Some(abort_progress.to_value()?),
+            },
+        )
+    })?;
+
+    let report = crate::remote::config::load_remotes_layered_report(
+        &state.config.app_root,
+        Some(std::path::Path::new(&operation.source_project_path)),
+    )?;
+    let loaded_remote =
+        crate::remote::config::get_loaded_remote(&report.remotes, &operation.peer_remote_name)?;
+    if loaded_remote.config.site_id != operation.target_site_id {
+        anyhow::bail!("source handoff configured target site changed before abort");
+    }
+    let client = crate::remote::client::RemoteClient::from_remote_cfg_for_admitted_operator_job(
+        state,
+        &loaded_remote.config,
+        &operation.owner_principal,
+        &operation.source_site_id,
+    )?;
+    let request = ryeos_app::worker_handoff::WorkerPlacementAbortRequest {
+        operation_id: operation.operation_id.clone(),
+        chain_root_id: operation.chain_root_id.clone(),
+        abort_chain_head_hash: abort_head_hash.clone(),
+    };
+    let attempt_id = begin_worker_handoff_attempt(
+        state,
+        &job.job_id,
+        "target_abort",
+        "source-handoff-recovery",
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    match client
+        .execute(
+            ryeos_app::worker_handoff::WORKER_PLACEMENT_ABORT_SERVICE,
+            &BTreeMap::new(),
+            None,
+            &serde_json::to_value(&request)?,
+            &ryeos_app::execution_policy::ExecutionPolicy::projectless(
+                ryeos_app::execution_policy::ExecutionResponse::Wait,
+            ),
+            None,
+        )
+        .await
+    {
+        Ok(value) => {
+            let response: ryeos_app::worker_handoff::WorkerPlacementAbortResponse =
+                serde_json::from_value(value)?;
+            response.validate_against(&request)?;
+            settle_worker_handoff_attempt(
+                state,
+                &job.job_id,
+                &attempt_id,
+                ryeos_state::SyncJobAttemptState::Cancelled,
+                ryeos_state::SyncJobState::Cancelled,
+                "aborted",
+                None,
+                Some(serde_json::to_value(response)?),
+            )
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            Ok(true)
+        }
+        Err(error) => {
+            settle_worker_handoff_attempt(
+                state,
+                &job.job_id,
+                &attempt_id,
+                ryeos_state::SyncJobAttemptState::Failed,
+                ryeos_state::SyncJobState::Retryable,
+                abort_progress.phase.as_str(),
+                Some(bounded_handoff_recovery_error(&error.to_string())),
+                Some(abort_progress.to_value()?),
+            )
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            Ok(false)
+        }
+    }
+}
+
+fn bounded_handoff_recovery_error(value: &str) -> String {
+    let mut output = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    while output.len() > 2_048 {
+        output.pop();
+    }
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        "worker handoff recovery failed".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn begin_worker_handoff_attempt(
+    state: &AppState,
+    job_id: &str,
+    phase: &str,
+    worker_id: &str,
+) -> Result<String, HandlerError> {
+    let attempt_id = format!("worker-handoff-attempt:{}", uuid::Uuid::new_v4());
+    state
+        .state_store
+        .with_state_db(|db| {
+            db.create_sync_job_attempt(&ryeos_state::NewSyncJobAttempt {
+                attempt_id: attempt_id.clone(),
+                job_id: job_id.to_owned(),
+                worker_id: Some(worker_id.to_owned()),
+                phase: phase.to_owned(),
+            })?;
+            Ok(())
+        })
+        .map_err(internal)?;
+    Ok(attempt_id)
+}
+
+fn settle_worker_handoff_attempt(
+    state: &AppState,
+    job_id: &str,
+    attempt_id: &str,
+    attempt_state: ryeos_state::SyncJobAttemptState,
+    job_state: ryeos_state::SyncJobState,
+    phase: &str,
+    error: Option<String>,
+    result: Option<Value>,
+) -> Result<(), HandlerError> {
+    state
+        .state_store
+        .with_state_db(|db| {
+            let latest = db
+                .get_sync_job(job_id)?
+                .ok_or_else(|| anyhow::anyhow!("worker handoff job disappeared"))?;
+            db.finish_sync_job_attempt_and_update_job(
+                attempt_id,
+                &ryeos_state::FinishSyncJobAttempt {
+                    state: attempt_state,
+                    phase: phase.to_owned(),
+                    error: error.clone(),
+                    result: result.clone(),
+                },
+                job_id,
+                &ryeos_state::SyncJobUpdate {
+                    state: job_state,
+                    phase: phase.to_owned(),
+                    roots: None,
+                    heads: None,
+                    uploaded_hashes: latest.uploaded_hashes,
+                    fetched_hashes: latest.fetched_hashes,
+                    last_error: error,
+                    result: result.or(latest.result),
+                },
+            )
+        })
+        .map_err(internal)
+}
+
+fn verify_target_placement_attestation(
+    state: &AppState,
+    remote: &crate::remote::config::RemoteConfig,
+    prepared: &ryeos_app::worker_handoff::WorkerPlacementPrepareResponse,
+) -> Result<()> {
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    let value = authority
+        .cas_store()?
+        .get_object(&prepared.placement_attestation_hash)?
+        .ok_or_else(|| anyhow::anyhow!("target placement attestation is absent"))?;
+    let attestation = ryeos_state::objects::Attestation::from_value(&value)?;
+    attestation.verify_with_key(&remote.pinned_signing_key()?)?;
+    if attestation.issuer != remote.principal_id
+        || attestation.is_expired_at(&lillux::time::iso8601_now())?
+        || ryeos_app::worker_handoff::WorkerPlacementAdmissionEvidence::from_attestation(
+            &attestation,
+        )? != prepared.placement
+    {
+        anyhow::bail!("target placement attestation is not the exact current remote evidence");
+    }
+    drop(guard);
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -2569,6 +3868,19 @@ pub const RESUME_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         Box::pin(async move {
             let req: ResumeRequest = crate::handler_error::parse_request(params)?;
             resume(req, ctx, state).await.map_err(Into::into)
+        })
+    },
+};
+
+pub const HANDOFF_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:worker-executions/handoff",
+    endpoint: "worker-executions.handoff",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.worker-executions/handoff"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            let req: HandoffRequest = crate::handler_error::parse_request(params)?;
+            handoff(req, ctx, state).await.map_err(Into::into)
         })
     },
 };

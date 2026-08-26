@@ -1,0 +1,10 @@
+# ryeos:signed:2026-08-26T14:44:07Z:4fc2e69a1f58de8ebf27e88a110b1ca45c4bff4f1050342d8f487a90a7d8aedb:0Qdsm2eBbUE5LULWW/87/wrlIZHL40qrg0xByoC3kW/dE6f8OjFisyl1v7kTUDssu3RPyN+IIBAXuL4jV2V/CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: worker-executions.handoff
+required_caps: ["ryeos.execute.service.worker-executions/handoff"]
+schema:
+  chain_root_id: string
+  manifest_ref: string
+  remote: string
+  target_credential_profile_id: string
+description: Transfer one frozen portable worker execution to an admitted configured remote placement.

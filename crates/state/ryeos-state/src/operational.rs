@@ -2921,6 +2921,42 @@ impl OperationalDb {
 }
 
 impl OperationalDb {
+    /// Settle attempts whose owning daemon process ended before recording a
+    /// terminal attempt result. This is called once at daemon startup, before
+    /// any recovery worker creates a new attempt. The durable job remains
+    /// retryable; no remote phase or effect is inferred from process death.
+    pub fn reconcile_interrupted_sync_job_attempts(&self) -> Result<usize> {
+        self.immediate_transaction("reconcile interrupted sync job attempts", || {
+            let now = lillux::time::iso8601_now();
+            let interrupted = self
+                .conn
+                .execute(
+                    "UPDATE sync_job_attempts SET
+                        state = 'failed', updated_at = ?1, finished_at = ?1,
+                        error = 'daemon restarted before this attempt settled'
+                     WHERE state = 'running'",
+                    [&now],
+                )
+                .context("failed to settle interrupted sync job attempts")?;
+            self.conn
+                .execute(
+                    "UPDATE sync_jobs SET
+                        state = 'retryable', updated_at = ?1, finished_at = NULL,
+                        last_error = 'daemon restarted before the active attempt settled'
+                     WHERE state IN ('planned', 'running', 'retryable')
+                       AND EXISTS (
+                         SELECT 1 FROM sync_job_attempts
+                          WHERE sync_job_attempts.job_id = sync_jobs.job_id
+                            AND sync_job_attempts.finished_at = ?1
+                            AND sync_job_attempts.error = 'daemon restarted before this attempt settled'
+                       )",
+                    [&now],
+                )
+                .context("failed to make interrupted sync jobs retryable")?;
+            Ok(interrupted)
+        })
+    }
+
     pub fn create_sync_job(&self, job: &NewSyncJob) -> Result<SyncJobRecord> {
         validate_sync_job_id(&job.job_id)?;
         validate_non_empty_label("operation_type", &job.operation_type)?;
@@ -3354,6 +3390,37 @@ impl OperationalDb {
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         Ok(rows)
+    }
+
+    /// Oldest-first bounded recovery scan for one durable operation family.
+    /// Terminal rows are excluded; repeating the scan after completing a page
+    /// eventually reaches every active job without loading historical jobs.
+    pub fn list_active_sync_jobs_by_operation_type(
+        &self,
+        operation_type: &str,
+        limit: usize,
+    ) -> Result<Vec<SyncJobRecord>> {
+        validate_non_empty_label("operation_type", operation_type)?;
+        let limit = limit.clamp(1, 500);
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+                    uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
+                    last_error, result_json, created_at, updated_at, finished_at
+                 FROM sync_jobs
+                 WHERE operation_type = ?1 AND state IN ('planned','running','retryable')
+                 ORDER BY created_at ASC, job_id ASC LIMIT ?2",
+            )
+            .context("failed to prepare active sync operation recovery query")?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![operation_type, i64::try_from(limit)?],
+                sync_job_from_row,
+            )
+            .context("failed to query active sync operation jobs")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect active sync operation jobs")
     }
 
     pub fn count_active_sync_jobs(&self) -> Result<u64> {
@@ -4932,6 +4999,54 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["attempt:one".to_string(), "attempt:two".to_string()]
         );
+    }
+
+    #[test]
+    fn daemon_restart_settles_running_attempt_and_preserves_retryable_job() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("operational.sqlite3");
+        let db = OperationalDb::open(&path).unwrap();
+        db.create_sync_job(&NewSyncJob {
+            job_id: "job:interrupted".to_owned(),
+            operation_type: "worker_session_handoff".to_owned(),
+            operation: serde_json::json!({
+                "schema":1,
+                "operation_type":"worker_session_handoff"
+            }),
+            peer: Some("node-b".to_owned()),
+            roots: vec![],
+            heads: vec![],
+            max_attempts: 3,
+        })
+        .unwrap();
+        db.create_sync_job_attempt(&NewSyncJobAttempt {
+            attempt_id: "attempt:interrupted".to_owned(),
+            job_id: "job:interrupted".to_owned(),
+            worker_id: None,
+            phase: "target_prepare".to_owned(),
+        })
+        .unwrap();
+
+        assert_eq!(db.reconcile_interrupted_sync_job_attempts().unwrap(), 1);
+        assert_eq!(db.reconcile_interrupted_sync_job_attempts().unwrap(), 0);
+        let attempt = db
+            .get_sync_job_attempt("attempt:interrupted")
+            .unwrap()
+            .unwrap();
+        assert_eq!(attempt.state, SyncJobAttemptState::Failed);
+        assert!(attempt.finished_at.is_some());
+        assert!(attempt.error.unwrap().contains("daemon restarted"));
+        let job = db.get_sync_job("job:interrupted").unwrap().unwrap();
+        assert_eq!(job.state, SyncJobState::Retryable);
+        assert_eq!(job.phase, "target_prepare");
+        assert_eq!(job.attempt_count, 1);
+        db.create_sync_job_attempt(&NewSyncJobAttempt {
+            attempt_id: "attempt:replacement".to_owned(),
+            job_id: "job:interrupted".to_owned(),
+            worker_id: None,
+            phase: "target_prepare".to_owned(),
+        })
+        .unwrap();
     }
 
     #[test]

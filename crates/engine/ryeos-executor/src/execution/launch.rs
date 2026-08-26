@@ -7399,6 +7399,38 @@ pub async fn prepare_existing_operator_successor_launch(
     })
 }
 
+/// Reprepare an already-authoritative MACHINE successor using its imported
+/// target-local runtime seed. Cross-site adoption installs that seed only
+/// after the one-successor writer grant has been verified and the transferred
+/// head has been published locally; launch therefore must not derive anything
+/// from a source-node runtime row.
+pub async fn prepare_existing_machine_successor_launch(
+    state: &AppState,
+    successor_thread_id: &str,
+    launch_metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+) -> Result<PreparedMachineSuccessorLaunch, BuildAndLaunchError> {
+    let resume = launch_metadata.resume_context.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("machine successor {successor_thread_id} has no persisted ResumeContext")
+    })?;
+    let mut prepared = prepare_successor_launch(
+        state,
+        successor_thread_id,
+        resume,
+        SuccessorMode::Machine,
+        None,
+        Some(launch_metadata),
+    )
+    .await?;
+    prepared.resume_context = resume.clone();
+    prepared.launch_metadata = launch_metadata.clone();
+    prepared.authority.launch_metadata = Some(launch_metadata.clone());
+    prepared.launch_claim = Some(
+        ThreadLaunchClaim::acquire_fresh(state, successor_thread_id)
+            .map_err(BuildAndLaunchError::Internal)?,
+    );
+    Ok(PreparedMachineSuccessorLaunch { prepared })
+}
+
 pub async fn prepare_machine_successor_launch(
     state: &AppState,
     successor_thread_id: &str,
@@ -7458,6 +7490,7 @@ pub async fn prepare_remote_machine_successor_launch(
     source_resume: &ryeos_app::launch_metadata::ResumeContext,
     target_resume: &ryeos_app::launch_metadata::ResumeContext,
     resume_rebind: &ryeos_app::worker_handoff::RemoteResumeContextRebind,
+    target_accounting_scope: Option<ryeos_state::objects::AdmittedAccountingScope>,
 ) -> Result<PreparedMachineSuccessorLaunch, BuildAndLaunchError> {
     source_launch_metadata.validate()?;
     target_resume
@@ -7470,10 +7503,11 @@ pub async fn prepare_remote_machine_successor_launch(
     let target_sealed = source_sealed
         .for_remote_worker_adoption_invocation(source_resume, target_resume, resume_rebind)
         .map_err(BuildAndLaunchError::Internal)?;
-    let template = source_launch_metadata
+    let mut template = source_launch_metadata
         .continuation_successor_seed(target_resume.clone())
         .with_continuation_source(source_thread_id)
         .with_sealed_root_request(target_sealed);
+    template.accounting_scope = target_accounting_scope;
     let mut prepared = prepare_successor_launch(
         state,
         successor_thread_id,

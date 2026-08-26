@@ -23,6 +23,11 @@ pub struct AdmittedChainWriterTransition {
     pub evidence: crate::objects::ChainWriterTransitionEvidence,
     pub writer_grant_hash: String,
     pub target_chain_head_hash: String,
+    /// Exact currently configured source-node key. This is transport/admission
+    /// evidence, not a new trust-store member and not durable chain authority.
+    pub source_node_verifying_key: lillux::crypto::VerifyingKey,
+    /// Exact local target-node key that must match the publishing signer.
+    pub target_node_verifying_key: lillux::crypto::VerifyingKey,
 }
 
 impl AdmittedChainWriterTransition {
@@ -36,6 +41,13 @@ impl AdmittedChainWriterTransition {
             "transferred chain head",
             &self.target_chain_head_hash,
         )?;
+        if lillux::crypto::fingerprint(&self.source_node_verifying_key)
+            != self.evidence.source_node_signer_fingerprint
+            || lillux::crypto::fingerprint(&self.target_node_verifying_key)
+                != self.evidence.target_node_signer_fingerprint
+        {
+            anyhow::bail!("chain writer transition verification keys differ from its signers");
+        }
         Ok(())
     }
 }
@@ -189,6 +201,90 @@ pub fn export_chain_pinned(
         entries,
         total_bytes,
     })
+}
+
+/// Reconstruct the complete payload for one already-staged exact chain head
+/// without consulting or publishing a mutable ref. This is a recovery data
+/// operation, not writer admission: callers must still verify and consume the
+/// scoped writer transition before making `head_hash` authoritative.
+pub fn export_exact_chain_head_pinned(
+    authority: &crate::PinnedStateAuthority,
+    chain_root_id: &str,
+    head_hash: &str,
+    guard: &crate::CasMutationGuard,
+) -> Result<ExportPayload> {
+    authority.ensure_guard(guard)?;
+    let cas = authority.cas_store()?;
+    let reachable =
+        crate::rebuild::verified_repair_closure_with_cas(&cas, chain_root_id, head_hash, true)?;
+    if !reachable.large_object_hashes.is_empty() {
+        anyhow::bail!(
+            "staged chain closure contains {} large-object edge(s), but the CAS sync payload has no large-object transport",
+            reachable.large_object_hashes.len()
+        );
+    }
+    let mut entries =
+        Vec::with_capacity(reachable.object_hashes.len() + reachable.blob_hashes.len());
+    let mut total_bytes = 0usize;
+    let mut object_hashes = reachable.object_hashes.into_iter().collect::<Vec<_>>();
+    object_hashes.sort();
+    for hash in object_hashes {
+        let value = cas
+            .get_object(&hash)
+            .with_context(|| format!("read staged chain object {hash}"))?
+            .ok_or_else(|| anyhow::anyhow!("staged chain object {hash} disappeared"))?;
+        let data = lillux::canonical_json(&value)
+            .with_context(|| format!("canonicalize staged chain object {hash}"))?
+            .into_bytes();
+        total_bytes = total_bytes
+            .checked_add(data.len())
+            .context("staged chain payload size overflow")?;
+        entries.push(SyncEntry {
+            hash,
+            is_blob: false,
+            data,
+        });
+    }
+    let mut blob_hashes = reachable.blob_hashes.into_iter().collect::<Vec<_>>();
+    blob_hashes.sort();
+    for hash in blob_hashes {
+        let data = cas
+            .get_blob(&hash)
+            .with_context(|| format!("read staged chain blob {hash}"))?
+            .ok_or_else(|| anyhow::anyhow!("staged chain blob {hash} disappeared"))?;
+        total_bytes = total_bytes
+            .checked_add(data.len())
+            .context("staged chain payload size overflow")?;
+        entries.push(SyncEntry {
+            hash,
+            is_blob: true,
+            data,
+        });
+    }
+    Ok(ExportPayload {
+        chain_root_id: chain_root_id.to_owned(),
+        chain_head_hash: head_hash.to_owned(),
+        entries,
+        total_bytes,
+    })
+}
+
+/// Verify a complete exact chain closure and require one known ancestor
+/// without publishing either head. This is a data/admission primitive for
+/// remote protocols; writer authority is still a separate contract.
+pub fn verify_chain_closure_anchored_pinned(
+    cas: &lillux::CasStore,
+    chain_root_id: &str,
+    head_hash: &str,
+    expected_ancestor: &str,
+) -> Result<()> {
+    crate::rebuild::verify_repair_closure_anchored_with_cas(
+        cas,
+        chain_root_id,
+        head_hash,
+        true,
+        Some(expected_ancestor),
+    )
 }
 
 /// Standalone reconciled export rooted in one runtime-state authority.
@@ -718,6 +814,74 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::sync::Arc;
+
+    fn admitted_writer_transition() -> (
+        AdmittedChainWriterTransition,
+        lillux::crypto::SigningKey,
+        lillux::crypto::SigningKey,
+    ) {
+        let source = lillux::crypto::SigningKey::from_bytes(&[1_u8; 32]);
+        let target = lillux::crypto::SigningKey::from_bytes(&[2_u8; 32]);
+        let evidence = crate::objects::ChainWriterTransitionEvidence {
+            schema: crate::objects::CHAIN_WRITER_TRANSITION_SCHEMA,
+            operation_id: "1".repeat(64),
+            owner_principal: "owner".into(),
+            chain_root_id: "T-root".into(),
+            origin_site_id: "site:a".into(),
+            source_site_id: "site:a".into(),
+            target_site_id: "site:b".into(),
+            source_chain_head_hash: "2".repeat(64),
+            source_node_signer_fingerprint: lillux::crypto::fingerprint(&source.verifying_key()),
+            source_placement_thread_id: "T-source".into(),
+            source_last_event_hash: "3".repeat(64),
+            successor_placement_thread_id: "T-target".into(),
+            placement_attestation_hash: "4".repeat(64),
+            transition_subject_hash: "5".repeat(64),
+            target_node_signer_fingerprint: lillux::crypto::fingerprint(&target.verifying_key()),
+        };
+        (
+            AdmittedChainWriterTransition {
+                evidence,
+                writer_grant_hash: "6".repeat(64),
+                target_chain_head_hash: "7".repeat(64),
+                source_node_verifying_key: source.verifying_key(),
+                target_node_verifying_key: target.verifying_key(),
+            },
+            source,
+            target,
+        )
+    }
+
+    #[test]
+    fn writer_transition_binds_exact_source_and_target_keys() {
+        let (transition, source, target) = admitted_writer_transition();
+        transition.validate().unwrap();
+
+        let unrelated = lillux::crypto::SigningKey::from_bytes(&[3_u8; 32]);
+        let mut wrong_source = transition.clone();
+        wrong_source.source_node_verifying_key = unrelated.verifying_key();
+        assert!(
+            wrong_source
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("verification keys differ")
+        );
+
+        let mut wrong_target = transition;
+        wrong_target.target_node_verifying_key = unrelated.verifying_key();
+        assert!(
+            wrong_target
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("verification keys differ")
+        );
+        assert_ne!(
+            lillux::crypto::fingerprint(&source.verifying_key()),
+            lillux::crypto::fingerprint(&target.verifying_key())
+        );
+    }
 
     fn projectless_authority_json() -> serde_json::Value {
         serde_json::json!({ "kind": "projectless", "environment": { "kind": "none" } })

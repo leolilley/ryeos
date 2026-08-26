@@ -277,6 +277,34 @@ impl RemoteClient {
         Ok(client)
     }
 
+    /// Recreate configured-operator transport only for a previously admitted
+    /// durable daemon job. Callers must first verify the job's immutable owner,
+    /// local source site, and signed authority transition; unlike the live
+    /// constructor there is deliberately no synthetic `HandlerContext` seam.
+    pub(crate) fn from_remote_cfg_for_admitted_operator_job(
+        state: &AppState,
+        remote: &super::config::RemoteConfig,
+        admitted_owner_principal: &str,
+        admitted_source_site_id: &str,
+    ) -> Result<Self> {
+        if admitted_source_site_id != state.threads.site_id() {
+            anyhow::bail!("durable operator job belongs to another source site");
+        }
+        let identity = Arc::new(
+            NodeIdentity::load(&state.config.operator_signing_key_path)
+                .context("load configured operator identity for durable remote job")?,
+        );
+        if identity.principal_id() != admitted_owner_principal {
+            anyhow::bail!("durable remote job owner is not the current configured operator");
+        }
+        let mut client = Self::new(&remote.url, &remote.principal_id, identity);
+        let site_id = state.threads.site_id().to_owned();
+        client.origin_site_id = Some(site_id.clone());
+        client.required_forwarding_origin_site_id = Some(site_id);
+        client.forwarding_identity = Some(state.identity.clone());
+        Ok(client)
+    }
+
     /// GET /public-key (no auth required).
     pub async fn get_public_key(&self) -> Result<PublicKeyResponse> {
         let url = format!("{}/public-key", self.base_url);
