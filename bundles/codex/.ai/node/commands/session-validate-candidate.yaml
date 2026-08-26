@@ -1,9 +1,9 @@
-# ryeos:signed:2026-08-24T03:55:20Z:17752542ef71c72cc20f5549c03bf916d8548b35561a5ce0aa1405b913accce5:jElSTDXPJQuWIG0QhoNPz+csQsSH0UO2nkAVIJiS7R+ZGY7nXxqo2Jj5UiIOPnu9eLw19VoERNNpnj4kYcMiCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-26T10:09:18Z:ff073bc6c1f55abf8de66b598d16d66245463198731eb8db80a39b0089970080:c7PfUJIq5Mbsfz3q9ZiAP3xSnYqatfhR6UJdq1/8AzRsTh+AzoYVEqC1vHia9WiSUVThE8yzEySOts8ghrk1Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [codex, session, validate, candidate]
 description: "Validate closure and base ancestry for one exact frozen Codex workspace candidate"
 forms:
   - slots:
-      - field: session_id
+      - field: chain_root_id
       - field: candidate_snapshot_hash
       - field: candidate_validation_hash
 dispatch:

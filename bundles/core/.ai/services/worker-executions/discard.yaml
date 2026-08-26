@@ -1,6 +1,6 @@
-# ryeos:signed:2026-08-19T02:50:30Z:1b0ad6feea7a65dd8bf37b0689375654a8c0ec46316e044f5bbb2d07732f1692:iTDIDj+Nqz+J2B989pc3fASWAd9WloAi4ePLtH7l9lA2unEEdBvryfMUi2VwLmxMbZ4Xa9prTh8J+nh72GBxAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-26T10:09:18Z:39ba9d228fd802e989e9e7a4ed4d5ddc31d42f71f3f2e3998561d78a3f33fa38:Me5fLUrpmgWwDSPdqfkBUFpdqXH9HRgGreuscaDOjh2PLkcQJbus1RqsMyE9ZH8mfU2kdZjGTbNPxVK2/8owCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: worker-executions.discard
 required_caps: ["ryeos.execute.service.worker-executions/discard"]
-schema: {session_id: string, candidate_snapshot_hash: string}
+schema: {chain_root_id: string, candidate_snapshot_hash: string}
 description: Terminally discard one retained execution candidate.

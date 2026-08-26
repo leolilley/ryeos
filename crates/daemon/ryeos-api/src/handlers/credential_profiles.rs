@@ -207,16 +207,16 @@ async fn revoke(
         .map_err(internal)?
         .ok_or(HandlerError::NotFound)?;
     ctx.require_owner(Some(&initial_profile.owner_principal))?;
-    let mut root_ids = state
+    let mut placement_thread_ids = state
         .state_store
         .dedicated_sessions_for_credential_profile(&req.profile_id)
         .map_err(internal)?
         .into_iter()
-        .map(|session| session.root_thread_id)
+        .map(|session| session.placement_thread_id)
         .collect::<Vec<_>>();
-    root_ids.sort();
-    root_ids.dedup();
-    let _root_operations = root_ids
+    placement_thread_ids.sort();
+    placement_thread_ids.dedup();
+    let _root_operations = placement_thread_ids
         .iter()
         .map(|root| {
             ryeos_app::hosted_operation::begin_hosted_root_operation_if_appendable(
@@ -280,7 +280,7 @@ async fn revoke(
                     let cleanup_state =
                         ryeos_app::dedicated_session_service::retire_worker_process(
                             &state,
-                            &session.session_id,
+                            &session.placement_thread_id,
                             &worker,
                         )
                         .map_err(internal)?;
@@ -290,7 +290,7 @@ async fn revoke(
                                 .state_store
                                 .fence_abandoned_worker_process(
                                     worker_instance_id,
-                                    &session.session_id,
+                                    &session.placement_thread_id,
                                     worker_boot_epoch,
                                     "unproved",
                                 )
@@ -305,7 +305,7 @@ async fn revoke(
                         .state_store
                         .settle_worker_process(
                             worker_instance_id,
-                            &session.session_id,
+                            &session.placement_thread_id,
                             worker_boot_epoch,
                             "reaped",
                             "credential_revoked",
@@ -326,14 +326,14 @@ async fn revoke(
                 }
                 let refreshed = state
                     .state_store
-                    .dedicated_session(&session.session_id)
+                    .dedicated_session(&session.placement_thread_id)
                     .map_err(internal)?
                     .ok_or_else(|| internal("credential session disappeared during revoke"))?;
                 if refreshed.state == "recovering" {
                     state
                         .state_store
                         .terminalize_dedicated_session(
-                            &session.session_id,
+                            &session.placement_thread_id,
                             worker_instance_id,
                             worker_boot_epoch,
                             "credential_revoked",
@@ -342,7 +342,7 @@ async fn revoke(
                 }
                 let refreshed = state
                     .state_store
-                    .dedicated_session(&session.session_id)
+                    .dedicated_session(&session.placement_thread_id)
                     .map_err(internal)?
                     .ok_or_else(|| internal("credential session disappeared after revoke"))?;
                 if refreshed.state == "terminal" {
@@ -368,7 +368,7 @@ async fn revoke(
                 state
                     .state_store
                     .terminalize_unattached_dedicated_session(
-                        &session.session_id,
+                        &session.placement_thread_id,
                         "credential_revoked",
                     )
                     .map_err(internal)?;

@@ -187,7 +187,7 @@ like the first example, changing only `item_ref` and `parameters`:
 {
   "item_ref": "service:worker-executions/command",
   "parameters": {
-    "session_id": "LOGIN_SESSION",
+    "chain_root_id": "LOGIN_SESSION",
     "idempotency_key": "login-1",
     "route_id": "credential.login.start",
     "payload": {}

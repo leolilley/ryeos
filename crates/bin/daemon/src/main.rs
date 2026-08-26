@@ -2414,7 +2414,7 @@ async fn drain_persistent_session_workers(state: &AppState) -> bool {
         let task = tokio::task::spawn_blocking(move || {
             let cleanup = ryeos_app::dedicated_session_service::retire_worker_process(
                 &worker_state,
-                &worker.session_id,
+                &worker.placement_thread_id,
                 &worker,
             );
             (worker, cleanup)
@@ -2441,7 +2441,7 @@ async fn drain_persistent_session_workers(state: &AppState) -> bool {
                 clean = false;
                 tracing::error!(
                     worker_instance_id = %worker.worker_instance_id,
-                    session_id = %worker.session_id,
+                    placement_thread_id = %worker.placement_thread_id,
                     error = %error,
                     "persistent-session worker retirement failed during shutdown"
                 );
@@ -2451,7 +2451,7 @@ async fn drain_persistent_session_workers(state: &AppState) -> bool {
 
         let fenced = state.state_store.fence_abandoned_worker_process(
             &worker.worker_instance_id,
-            &worker.session_id,
+            &worker.placement_thread_id,
             worker.boot_epoch,
             cleanup_state,
         );
@@ -2465,7 +2465,7 @@ async fn drain_persistent_session_workers(state: &AppState) -> bool {
                 .ok()
                 .flatten()
                 .is_some_and(|current| {
-                    current.session_id == worker.session_id
+                    current.placement_thread_id == worker.placement_thread_id
                         && current.boot_epoch == worker.boot_epoch
                         && current.state == ryeos_app::runtime_db::WorkerProcessState::Dead
                         && current.cleanup_state == cleanup_state
@@ -2474,7 +2474,7 @@ async fn drain_persistent_session_workers(state: &AppState) -> bool {
                 clean = false;
                 tracing::error!(
                     worker_instance_id = %worker.worker_instance_id,
-                    session_id = %worker.session_id,
+                    placement_thread_id = %worker.placement_thread_id,
                     cleanup_state,
                     error = %error,
                     "failed to persist persistent-session shutdown fence"
@@ -2486,14 +2486,14 @@ async fn drain_persistent_session_workers(state: &AppState) -> bool {
             clean = false;
             tracing::error!(
                 worker_instance_id = %worker.worker_instance_id,
-                session_id = %worker.session_id,
+                placement_thread_id = %worker.placement_thread_id,
                 cleanup_state,
                 "persistent-session worker death remains unproved after shutdown drain"
             );
         } else {
             tracing::info!(
                 worker_instance_id = %worker.worker_instance_id,
-                session_id = %worker.session_id,
+                placement_thread_id = %worker.placement_thread_id,
                 boot_epoch = worker.boot_epoch,
                 "persistent-session worker epoch durably fenced for restart"
             );

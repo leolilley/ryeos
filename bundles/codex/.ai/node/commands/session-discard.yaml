@@ -1,9 +1,9 @@
-# ryeos:signed:2026-08-24T03:55:19Z:9eaea22f5353750cc17dc0b6c75e27218061cf14aa87d9af393e54dd1421aa36:HHqrV5T31vJ2uWu/kn986ihSjidKsS1/Srs4Tfrypqyxsi/LErusb5AYb7OX6cypwO7KAyWx86L5otT/fQkuBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-26T10:09:18Z:c911ce6d475de1ed8cfbe6e03d8e489b80240f46fe0c121ae1865812810337f2:n6CllXWyjeB5q+jwoKhry1T4vX5pbyp8z0viRmzieLYPRQ6vQ7bgj18xrfI37FUlHfnqobaEnGj/uEXHHQZWCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [codex, session, discard]
 description: "Discard one retained Codex workspace candidate"
 forms:
   - slots:
-      - field: session_id
+      - field: chain_root_id
       - field: candidate_snapshot_hash
 dispatch:
   kind: execute_ref

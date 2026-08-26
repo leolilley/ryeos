@@ -45,7 +45,7 @@ fn bounded_worker_failure_reason(prefix: &str, detail: &str) -> String {
 /// therefore keeps the credential fence in place.
 fn settle_failed_dedicated_worker_start(
     state: &AppState,
-    session_id: &str,
+    placement_thread_id: &str,
     worker_instance_id: &str,
     boot_epoch: u64,
     reason: &str,
@@ -56,13 +56,15 @@ fn settle_failed_dedicated_worker_start(
     match state.state_store.worker_process(worker_instance_id) {
         Ok(Some(worker)) => {
             match ryeos_app::dedicated_session_service::retire_worker_process(
-                state, session_id, &worker,
+                state,
+                placement_thread_id,
+                &worker,
             ) {
                 Ok(cleanup_state) => {
                     cleanup_proved = cleanup_state == "reaped";
                     if let Err(error) = state.state_store.settle_worker_process(
                         worker_instance_id,
-                        session_id,
+                        placement_thread_id,
                         boot_epoch,
                         cleanup_state,
                         reason,
@@ -84,7 +86,7 @@ fn settle_failed_dedicated_worker_start(
         }
     }
     if let Err(error) = state.state_store.fail_dedicated_session_start(
-        session_id,
+        placement_thread_id,
         worker_instance_id,
         reason,
         cleanup_proved,
@@ -102,7 +104,7 @@ fn settle_failed_dedicated_worker_start(
 
 fn settle_observation_sink_install_failure(
     state: &AppState,
-    session_id: &str,
+    placement_thread_id: &str,
     worker_instance_id: &str,
     boot_epoch: u64,
     reason: &str,
@@ -111,18 +113,21 @@ fn settle_observation_sink_install_failure(
         .state_store
         .worker_process(worker_instance_id)?
         .ok_or_else(|| anyhow!("observation-sink failure lost its worker identity"))?;
-    let cleanup_state =
-        ryeos_app::dedicated_session_service::retire_worker_process(state, session_id, &worker)?;
+    let cleanup_state = ryeos_app::dedicated_session_service::retire_worker_process(
+        state,
+        placement_thread_id,
+        &worker,
+    )?;
     if cleanup_state == "reaped" {
         state.state_store.settle_worker_process(
             worker_instance_id,
-            session_id,
+            placement_thread_id,
             boot_epoch,
             cleanup_state,
             reason,
         )?;
         state.state_store.terminalize_dedicated_session(
-            session_id,
+            placement_thread_id,
             worker_instance_id,
             boot_epoch,
             "cancelled",
@@ -131,7 +136,7 @@ fn settle_observation_sink_install_failure(
     } else {
         state.state_store.fence_abandoned_worker_process(
             worker_instance_id,
-            session_id,
+            placement_thread_id,
             boot_epoch,
             cleanup_state,
         )?;
@@ -748,8 +753,8 @@ pub(super) async fn start(
         state
             .state_store
             .admit_dedicated_session(NewDedicatedSession {
-                session_id: &request.thread_id,
-                root_thread_id: &request.thread_id,
+                placement_thread_id: &request.thread_id,
+                chain_root_id: &request.thread_id,
                 owner_principal: owner,
                 admitted_capsule_hash: &capsule_hash,
                 workspace_id: &workspace.workspace_id,
@@ -763,7 +768,7 @@ pub(super) async fn start(
     let boot_epoch = match admitted_epoch {
         Ok(epoch) => epoch,
         // Fresh admission acquires the credential lock in the same SQLite
-        // transaction as the session row, so a failed transaction leaves no
+        // transaction as the placement row, so a failed transaction leaves no
         // lock for this path to release.
         Err(error) if !recovering => return Err(error),
         Err(error) => {
@@ -779,7 +784,7 @@ pub(super) async fn start(
     let control_channel_identity = ryeos_app::thread_lifecycle::new_thread_id();
     let boot_identity_hash = lillux::cas::sha256_hex(
         lillux::canonical_json(&json!({
-            "session_id": request.thread_id,
+            "placement_thread_id": request.thread_id,
             "worker_instance_id": worker_instance_id,
             "capsule_hash": capsule_hash,
             "credential_generation": credential_generation,
@@ -789,7 +794,7 @@ pub(super) async fn start(
         .as_bytes(),
     );
     let identity = ExclusivePersistentSessionIdentity {
-        session_id: request.thread_id.clone(),
+        placement_thread_id: request.thread_id.clone(),
         worker_instance_id: worker_instance_id.clone(),
         boot_identity_hash,
         boot_epoch,

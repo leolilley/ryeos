@@ -2081,11 +2081,11 @@ fn reconcile_dedicated_candidate_bindings(state: &AppState) -> Result<usize> {
         {
             continue;
         }
-        let Some(thread) = state.state_store.get_thread(&session.root_thread_id)? else {
+        let Some(thread) = state.state_store.get_thread(&session.placement_thread_id)? else {
             anyhow::bail!(
                 "freezing dedicated session {} has no authoritative root thread {}",
-                session.session_id,
-                session.root_thread_id
+                session.placement_thread_id,
+                session.placement_thread_id
             );
         };
         if thread.status != "running" {
@@ -2093,7 +2093,7 @@ fn reconcile_dedicated_candidate_bindings(state: &AppState) -> Result<usize> {
         }
         let candidate_root_operation = ryeos_app::hosted_operation::begin_hosted_root_operation(
             &state.state_store,
-            &session.root_thread_id,
+            &session.placement_thread_id,
         )?;
         let mut workspace = state
             .state_store
@@ -2101,14 +2101,14 @@ fn reconcile_dedicated_candidate_bindings(state: &AppState) -> Result<usize> {
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "freezing dedicated session {} lost workspace {}",
-                    session.session_id,
+                    session.placement_thread_id,
                     session.workspace_id
                 )
             })?;
-        if workspace.thread_id.as_deref() != Some(session.root_thread_id.as_str()) {
+        if workspace.thread_id.as_deref() != Some(session.placement_thread_id.as_str()) {
             anyhow::bail!(
                 "dedicated session {} workspace {} is bound to a different root thread",
-                session.session_id,
+                session.placement_thread_id,
                 session.workspace_id
             );
         }
@@ -2129,7 +2129,7 @@ fn reconcile_dedicated_candidate_bindings(state: &AppState) -> Result<usize> {
             .with_context(|| {
                 format!(
                     "verify retained candidate closure for dedicated session {}",
-                    session.session_id
+                    session.placement_thread_id
                 )
             })?;
         if workspace.state == WorkspaceState::Freezing {
@@ -2150,21 +2150,21 @@ fn reconcile_dedicated_candidate_bindings(state: &AppState) -> Result<usize> {
                 {
                     anyhow::bail!(
                         "dedicated session {} candidate workspace owner is not proved dead",
-                        session.session_id
+                        session.placement_thread_id
                     );
                 }
             }
             let launch_owner = workspace.launch_owner.as_deref().ok_or_else(|| {
                 anyhow::anyhow!(
                     "dedicated session {} candidate workspace has no launch owner",
-                    session.session_id
+                    session.placement_thread_id
                 )
             })?;
             state
                 .state_store
                 .transition_abandoned_execution_workspace_owned(
                     &workspace.workspace_id,
-                    &session.root_thread_id,
+                    &session.placement_thread_id,
                     launch_owner,
                     &[WorkspaceState::Freezing],
                     WorkspaceState::Orphaned,
@@ -2175,13 +2175,13 @@ fn reconcile_dedicated_candidate_bindings(state: &AppState) -> Result<usize> {
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "dedicated session {} candidate workspace disappeared before close",
-                        session.session_id
+                        session.placement_thread_id
                     )
                 })?;
             cleanup_dead_execution_workspace(state, &workspace).with_context(|| {
                 format!(
                     "close retained candidate workspace for dedicated session {}",
-                    session.session_id
+                    session.placement_thread_id
                 )
             })?;
             workspace = state
@@ -2190,35 +2190,35 @@ fn reconcile_dedicated_candidate_bindings(state: &AppState) -> Result<usize> {
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "dedicated session {} candidate workspace disappeared after close",
-                        session.session_id
+                        session.placement_thread_id
                     )
                 })?;
         }
         if workspace.state != WorkspaceState::Closed {
             anyhow::bail!(
                 "dedicated session {} candidate workspace did not reach closed state",
-                session.session_id
+                session.placement_thread_id
             );
         }
         ryeos_app::dedicated_session_service::append_candidate_capture_fact_under_lease(
             state,
-            &session.session_id,
+            &session.placement_thread_id,
             &snapshot_hash,
             &candidate_root_operation,
         )
         .with_context(|| {
             format!(
                 "repair retained candidate root fact for dedicated session {}",
-                session.session_id
+                session.placement_thread_id
             )
         })?;
         if !state
             .state_store
-            .bind_dedicated_session_candidate(&session.root_thread_id, &snapshot_hash)?
+            .bind_dedicated_session_candidate(&session.placement_thread_id, &snapshot_hash)?
         {
             anyhow::bail!(
                 "dedicated session {} candidate repair lost its exact freezing-state CAS",
-                session.session_id
+                session.placement_thread_id
             );
         }
         drop(candidate_root_operation);
@@ -2258,7 +2258,7 @@ fn reconcile_dedicated_workers(state: &AppState) -> Result<()> {
             if cleanup_state == "reaped" {
                 state.state_store.settle_worker_process(
                     &worker.worker_instance_id,
-                    &worker.session_id,
+                    &worker.placement_thread_id,
                     worker.boot_epoch,
                     "reaped",
                     "abandoned worker cleanup proved during startup",
@@ -2267,14 +2267,14 @@ fn reconcile_dedicated_workers(state: &AppState) -> Result<()> {
         } else {
             state.state_store.fence_abandoned_worker_process(
                 &worker.worker_instance_id,
-                &worker.session_id,
+                &worker.placement_thread_id,
                 worker.boot_epoch,
                 cleanup_state,
             )?;
         }
         tracing::warn!(
             worker_instance_id = %worker.worker_instance_id,
-            session_id = %worker.session_id,
+            placement_thread_id = %worker.placement_thread_id,
             dead_daemon_generation = %worker.daemon_generation_id,
             cleanup_state,
             "fenced a dedicated worker retained from a previous daemon generation"
@@ -2303,7 +2303,7 @@ fn quiesce_dedicated_workers(state: &AppState) -> Result<()> {
             if !killed.success {
                 tracing::warn!(
                     worker_instance_id = %worker.worker_instance_id,
-                    session_id = %worker.session_id,
+                    placement_thread_id = %worker.placement_thread_id,
                     "old dedicated worker could not be proved quiescent before root replay"
                 );
             }

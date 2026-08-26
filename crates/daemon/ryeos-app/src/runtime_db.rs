@@ -1000,7 +1000,7 @@ CREATE TABLE IF NOT EXISTS worker_process (
     control_channel_identity TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('starting', 'attached', 'live', 'draining', 'dead')),
     daemon_generation_id TEXT NOT NULL,
-    session_id TEXT NOT NULL,
+    placement_thread_id TEXT NOT NULL,
     cleanup_state TEXT NOT NULL CHECK (cleanup_state IN ('owned', 'draining', 'reaped', 'unproved')),
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL
@@ -1009,12 +1009,12 @@ CREATE TABLE IF NOT EXISTS worker_process (
 CREATE INDEX IF NOT EXISTS idx_worker_process_daemon_state
     ON worker_process(daemon_generation_id, state);
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_process_session_epoch
-    ON worker_process(session_id, boot_epoch);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_process_placement_epoch
+    ON worker_process(placement_thread_id, boot_epoch);
 
 CREATE TABLE IF NOT EXISTS dedicated_session (
-    session_id TEXT PRIMARY KEY,
-    root_thread_id TEXT NOT NULL UNIQUE,
+    placement_thread_id TEXT PRIMARY KEY,
+    chain_root_id TEXT NOT NULL,
     owner_principal TEXT NOT NULL,
     admitted_capsule_hash TEXT NOT NULL,
     worker_instance_id TEXT,
@@ -1039,8 +1039,11 @@ CREATE TABLE IF NOT EXISTS dedicated_session (
 CREATE INDEX IF NOT EXISTS idx_dedicated_session_owner_state
     ON dedicated_session(owner_principal, state);
 
+CREATE INDEX IF NOT EXISTS idx_dedicated_session_chain
+    ON dedicated_session(chain_root_id, placement_thread_id);
+
 CREATE TABLE IF NOT EXISTS dedicated_session_command (
-    session_id TEXT NOT NULL,
+    placement_thread_id TEXT NOT NULL,
     command_sequence INTEGER NOT NULL CHECK (command_sequence > 0),
     idempotency_key TEXT NOT NULL,
     worker_boot_epoch INTEGER NOT NULL CHECK (worker_boot_epoch > 0),
@@ -1051,15 +1054,15 @@ CREATE TABLE IF NOT EXISTS dedicated_session_command (
     result_json TEXT,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (session_id, command_sequence),
-    UNIQUE (session_id, idempotency_key)
+    PRIMARY KEY (placement_thread_id, command_sequence),
+    UNIQUE (placement_thread_id, idempotency_key)
 );
 
 CREATE INDEX IF NOT EXISTS idx_dedicated_session_command_state
-    ON dedicated_session_command(session_id, state);
+    ON dedicated_session_command(placement_thread_id, state);
 
 CREATE TABLE IF NOT EXISTS dedicated_session_observation_batch (
-    session_id TEXT NOT NULL,
+    placement_thread_id TEXT NOT NULL,
     worker_boot_epoch INTEGER NOT NULL CHECK (worker_boot_epoch > 0),
     first_sequence INTEGER NOT NULL CHECK (first_sequence > 0),
     through_sequence INTEGER NOT NULL CHECK (through_sequence >= first_sequence),
@@ -1070,11 +1073,11 @@ CREATE TABLE IF NOT EXISTS dedicated_session_observation_batch (
     state TEXT NOT NULL CHECK (state IN ('append_contacting', 'settled', 'append_unknown')),
     created_at_ms INTEGER NOT NULL,
     settled_at_ms INTEGER,
-    PRIMARY KEY (session_id, worker_boot_epoch, first_sequence)
+    PRIMARY KEY (placement_thread_id, worker_boot_epoch, first_sequence)
 );
 
 CREATE TABLE IF NOT EXISTS dedicated_session_approval (
-    session_id TEXT NOT NULL,
+    placement_thread_id TEXT NOT NULL,
     approval_id TEXT NOT NULL,
     worker_instance_id TEXT NOT NULL,
     worker_boot_epoch INTEGER NOT NULL CHECK (worker_boot_epoch > 0),
@@ -1091,11 +1094,11 @@ CREATE TABLE IF NOT EXISTS dedicated_session_approval (
     resolved_at_ms INTEGER,
     delivery_contacted_at_ms INTEGER,
     delivery_settled_at_ms INTEGER,
-    PRIMARY KEY (session_id, approval_id)
+    PRIMARY KEY (placement_thread_id, approval_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_dedicated_session_approval_pending
-    ON dedicated_session_approval(session_id, state, expires_at_ms);
+    ON dedicated_session_approval(placement_thread_id, state, expires_at_ms);
 
 CREATE TABLE IF NOT EXISTS credential_profile (
     profile_id TEXT PRIMARY KEY,
@@ -1160,7 +1163,7 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // of stable operational authority. The revision permits deterministic repair
 // after a crash between runtime and operational SQLite commits, while the
 // explicit history cut extracts predecessor profile rows before replacement.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 12;
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 13;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -2050,7 +2053,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         not_null: true,
                     },
                     sqlite_schema::ColumnSpec {
-                        name: "session_id",
+                        name: "placement_thread_id",
                         col_type: "TEXT",
                         pk: false,
                         not_null: true,
@@ -2079,13 +2082,13 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "dedicated_session",
                 columns: &[
                     sqlite_schema::ColumnSpec {
-                        name: "session_id",
+                        name: "placement_thread_id",
                         col_type: "TEXT",
                         pk: true,
                         not_null: true,
                     },
                     sqlite_schema::ColumnSpec {
-                        name: "root_thread_id",
+                        name: "chain_root_id",
                         col_type: "TEXT",
                         pk: false,
                         not_null: true,
@@ -2210,7 +2213,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "dedicated_session_command",
                 columns: &[
                     sqlite_schema::ColumnSpec {
-                        name: "session_id",
+                        name: "placement_thread_id",
                         col_type: "TEXT",
                         pk: true,
                         not_null: true,
@@ -2281,7 +2284,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "dedicated_session_approval",
                 columns: &[
                     sqlite_schema::ColumnSpec {
-                        name: "session_id",
+                        name: "placement_thread_id",
                         col_type: "TEXT",
                         pk: true,
                         not_null: true,
@@ -2388,7 +2391,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "dedicated_session_observation_batch",
                 columns: &[
                     sqlite_schema::ColumnSpec {
-                        name: "session_id",
+                        name: "placement_thread_id",
                         col_type: "TEXT",
                         pk: true,
                         not_null: true,
@@ -2619,9 +2622,9 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 unique: false,
             },
             sqlite_schema::IndexSpec {
-                name: "idx_worker_process_session_epoch",
+                name: "idx_worker_process_placement_epoch",
                 table: "worker_process",
-                columns: &["session_id", "boot_epoch"],
+                columns: &["placement_thread_id", "boot_epoch"],
                 unique: true,
             },
             sqlite_schema::IndexSpec {
@@ -2631,15 +2634,21 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 unique: false,
             },
             sqlite_schema::IndexSpec {
+                name: "idx_dedicated_session_chain",
+                table: "dedicated_session",
+                columns: &["chain_root_id", "placement_thread_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
                 name: "idx_dedicated_session_command_state",
                 table: "dedicated_session_command",
-                columns: &["session_id", "state"],
+                columns: &["placement_thread_id", "state"],
                 unique: false,
             },
             sqlite_schema::IndexSpec {
                 name: "idx_dedicated_session_approval_pending",
                 table: "dedicated_session_approval",
-                columns: &["session_id", "state", "expires_at_ms"],
+                columns: &["placement_thread_id", "state", "expires_at_ms"],
                 unique: false,
             },
             sqlite_schema::IndexSpec {
@@ -3327,7 +3336,7 @@ pub struct WorkerProcessRecord {
     pub control_channel_identity: String,
     pub state: WorkerProcessState,
     pub daemon_generation_id: String,
-    pub session_id: String,
+    pub placement_thread_id: String,
     pub cleanup_state: String,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
@@ -3335,8 +3344,8 @@ pub struct WorkerProcessRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewDedicatedSession<'a> {
-    pub session_id: &'a str,
-    pub root_thread_id: &'a str,
+    pub placement_thread_id: &'a str,
+    pub chain_root_id: &'a str,
     pub owner_principal: &'a str,
     pub admitted_capsule_hash: &'a str,
     pub workspace_id: &'a str,
@@ -3349,8 +3358,8 @@ pub struct NewDedicatedSession<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DedicatedSessionRecord {
-    pub session_id: String,
-    pub root_thread_id: String,
+    pub placement_thread_id: String,
+    pub chain_root_id: String,
     pub owner_principal: String,
     pub admitted_capsule_hash: String,
     pub worker_instance_id: Option<String>,
@@ -3398,7 +3407,7 @@ pub struct CredentialProfileRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewDedicatedSessionCommand<'a> {
-    pub session_id: &'a str,
+    pub placement_thread_id: &'a str,
     pub idempotency_key: &'a str,
     pub worker_boot_epoch: u64,
     pub command_kind: &'a str,
@@ -3409,7 +3418,7 @@ pub struct NewDedicatedSessionCommand<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DedicatedSessionCommandRecord {
-    pub session_id: String,
+    pub placement_thread_id: String,
     pub command_sequence: u64,
     pub idempotency_key: String,
     pub worker_boot_epoch: u64,
@@ -3431,7 +3440,7 @@ pub enum ObservationBatchReservation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DedicatedObservationBatchRecord {
-    pub session_id: String,
+    pub placement_thread_id: String,
     pub worker_boot_epoch: u64,
     pub first_sequence: u64,
     pub through_sequence: u64,
@@ -3442,7 +3451,7 @@ pub struct DedicatedObservationBatchRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewDedicatedSessionApproval<'a> {
-    pub session_id: &'a str,
+    pub placement_thread_id: &'a str,
     pub approval_id: &'a str,
     pub worker_instance_id: &'a str,
     pub worker_boot_epoch: u64,
@@ -3455,7 +3464,7 @@ pub struct NewDedicatedSessionApproval<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DedicatedSessionApprovalRecord {
-    pub session_id: String,
+    pub placement_thread_id: String,
     pub approval_id: String,
     pub worker_instance_id: String,
     pub worker_boot_epoch: u64,
@@ -3501,7 +3510,11 @@ fn validate_worker_process_record(record: &WorkerProcessRecord) -> Result<()> {
             record.daemon_generation_id.as_str(),
             256,
         ),
-        ("worker session id", record.session_id.as_str(), 256),
+        (
+            "worker placement thread id",
+            record.placement_thread_id.as_str(),
+            256,
+        ),
         ("worker cleanup state", record.cleanup_state.as_str(), 32),
     ] {
         validate_bounded_runtime_text(label, value, max)?;
@@ -4051,17 +4064,17 @@ fn prune_launch_planning(conn: &Connection, now_ms: i64) -> Result<()> {
 
 fn read_dedicated_command_by_key(
     conn: &Connection,
-    session_id: &str,
+    placement_thread_id: &str,
     idempotency_key: &str,
 ) -> Result<Option<DedicatedSessionCommandRecord>> {
     let row = conn
         .query_row(
-            "SELECT session_id, command_sequence, idempotency_key, worker_boot_epoch,
+            "SELECT placement_thread_id, command_sequence, idempotency_key, worker_boot_epoch,
                 command_kind, request_digest, payload_json, state, result_json,
                 created_at_ms, updated_at_ms
            FROM dedicated_session_command
-          WHERE session_id=?1 AND idempotency_key=?2",
-            params![session_id, idempotency_key],
+          WHERE placement_thread_id=?1 AND idempotency_key=?2",
+            params![placement_thread_id, idempotency_key],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -4081,7 +4094,7 @@ fn read_dedicated_command_by_key(
         .optional()?;
     row.map(|row| {
         Ok(DedicatedSessionCommandRecord {
-            session_id: row.0,
+            placement_thread_id: row.0,
             command_sequence: u64::try_from(row.1).context("negative command sequence")?,
             idempotency_key: row.2,
             worker_boot_epoch: u64::try_from(row.3).context("negative command worker epoch")?,
@@ -4122,8 +4135,8 @@ impl RuntimeDb {
 
     pub fn admit_dedicated_session(&self, session: NewDedicatedSession<'_>) -> Result<()> {
         for (label, value) in [
-            ("dedicated session id", session.session_id),
-            ("dedicated root thread id", session.root_thread_id),
+            ("dedicated placement thread id", session.placement_thread_id),
+            ("dedicated root thread id", session.chain_root_id),
             ("dedicated owner principal", session.owner_principal),
             ("dedicated admitted capsule", session.admitted_capsule_hash),
             ("dedicated workspace id", session.workspace_id),
@@ -4160,7 +4173,7 @@ impl RuntimeDb {
         }
         let changed = tx.execute(
             "INSERT INTO dedicated_session (
-                session_id, root_thread_id, owner_principal, admitted_capsule_hash,
+                placement_thread_id, chain_root_id, owner_principal, admitted_capsule_hash,
                 worker_instance_id, worker_boot_epoch, workspace_id, candidate_required,
                 credential_profile_id, credential_generation, remote_thread_id,
                 current_turn_id, state, send_boundary, candidate_snapshot_hash,
@@ -4172,8 +4185,8 @@ impl RuntimeDb {
                  WHERE profile_id=?7 AND owner_principal=?3 AND credential_generation=?8
                    AND lock_owner=?9 AND state IN ('unauthenticated','enrolling','confirming','active'))",
             params![
-                session.session_id,
-                session.root_thread_id,
+                session.placement_thread_id,
+                session.chain_root_id,
                 session.owner_principal,
                 session.admitted_capsule_hash,
                 session.workspace_id,
@@ -4194,7 +4207,7 @@ impl RuntimeDb {
 
     /// Recover only profile reservations that provably never crossed the
     /// durable worker-attachment boundary. `attach_worker_process` writes the
-    /// worker row and session identity atomically before releasing the held
+    /// worker row and placement identity atomically before releasing the held
     /// child, so an owner absent from both tables has no process authority.
     /// Any retained identity—including cleanup-unproved evidence—keeps the
     /// credential profile fenced.
@@ -4207,7 +4220,7 @@ impl RuntimeDb {
               WHERE state='admitted'
                 AND worker_instance_id IS NULL AND worker_boot_epoch IS NULL
                 AND NOT EXISTS(SELECT 1 FROM worker_process
-                      WHERE worker_process.session_id=dedicated_session.session_id)",
+                      WHERE worker_process.placement_thread_id=dedicated_session.placement_thread_id)",
             [now],
         )?;
         let locks_released = tx.execute(
@@ -4224,19 +4237,22 @@ impl RuntimeDb {
         Ok((sessions_recovered, locks_released))
     }
 
-    pub fn dedicated_session(&self, session_id: &str) -> Result<Option<DedicatedSessionRecord>> {
-        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+    pub fn dedicated_session(
+        &self,
+        placement_thread_id: &str,
+    ) -> Result<Option<DedicatedSessionRecord>> {
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
         let row = self
             .conn
             .query_row(
-                "SELECT session_id, root_thread_id, owner_principal, admitted_capsule_hash,
+                "SELECT placement_thread_id, chain_root_id, owner_principal, admitted_capsule_hash,
                     worker_instance_id, worker_boot_epoch, workspace_id, candidate_required,
                     credential_profile_id, credential_generation, remote_thread_id,
                     current_turn_id, state, send_boundary, candidate_snapshot_hash,
                     candidate_validation_hash, publication_result, terminal_reason,
                     created_at_ms, updated_at_ms
-               FROM dedicated_session WHERE session_id=?1",
-                [session_id],
+               FROM dedicated_session WHERE placement_thread_id=?1",
+                [placement_thread_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -4265,8 +4281,8 @@ impl RuntimeDb {
             .optional()?;
         row.map(|row| {
             Ok(DedicatedSessionRecord {
-                session_id: row.0,
-                root_thread_id: row.1,
+                placement_thread_id: row.0,
+                chain_root_id: row.1,
                 owner_principal: row.2,
                 admitted_capsule_hash: row.3,
                 worker_instance_id: row.4,
@@ -4301,16 +4317,16 @@ impl RuntimeDb {
     ) -> Result<Vec<DedicatedSessionRecord>> {
         validate_bounded_runtime_text("credential profile id", profile_id, 256)?;
         let mut statement = self.conn.prepare(
-            "SELECT session_id FROM dedicated_session
+            "SELECT placement_thread_id FROM dedicated_session
               WHERE credential_profile_id=?1
-              ORDER BY session_id",
+              ORDER BY placement_thread_id",
         )?;
         let ids = statement
             .query_map([profile_id], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         ids.into_iter()
-            .map(|session_id| {
-                self.dedicated_session(&session_id)?
+            .map(|placement_thread_id| {
+                self.dedicated_session(&placement_thread_id)?
                     .ok_or_else(|| anyhow!("listed dedicated session disappeared"))
             })
             .collect()
@@ -4319,14 +4335,14 @@ impl RuntimeDb {
     pub fn dedicated_sessions_in_state(&self, state: &str) -> Result<Vec<DedicatedSessionRecord>> {
         validate_bounded_runtime_text("dedicated session state", state, 32)?;
         let mut statement = self.conn.prepare(
-            "SELECT session_id FROM dedicated_session WHERE state=?1 ORDER BY session_id",
+            "SELECT placement_thread_id FROM dedicated_session WHERE state=?1 ORDER BY placement_thread_id",
         )?;
         let ids = statement
             .query_map([state], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         ids.into_iter()
-            .map(|session_id| {
-                self.dedicated_session(&session_id)?
+            .map(|placement_thread_id| {
+                self.dedicated_session(&placement_thread_id)?
                     .ok_or_else(|| anyhow!("listed dedicated session disappeared"))
             })
             .collect()
@@ -4334,32 +4350,32 @@ impl RuntimeDb {
 
     pub fn terminalize_unattached_dedicated_session(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         reason: &str,
     ) -> Result<()> {
-        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
         validate_bounded_runtime_text("dedicated terminal reason", reason, 2048)?;
         let now = lillux::time::timestamp_millis() as i64;
         let tx = self.conn.unchecked_transaction()?;
         let changed = tx.execute(
             "UPDATE dedicated_session SET state='terminal', terminal_reason=?2,
                     current_turn_id=NULL, send_boundary='none', updated_at_ms=?3
-              WHERE session_id=?1 AND worker_instance_id IS NULL AND worker_boot_epoch IS NULL
+              WHERE placement_thread_id=?1 AND worker_instance_id IS NULL AND worker_boot_epoch IS NULL
                 AND state IN ('admitted','recovering','outcome_unknown')",
-            params![session_id, reason, now],
+            params![placement_thread_id, reason, now],
         )?;
         if changed != 1 {
             bail!("unattached dedicated terminal settlement lost its session CAS");
         }
         tx.execute(
             "UPDATE dedicated_session_approval SET state='delivery_unknown', resolved_at_ms=?2
-              WHERE session_id=?1 AND state='delivery_contacting'",
-            params![session_id, now],
+              WHERE placement_thread_id=?1 AND state='delivery_contacting'",
+            params![placement_thread_id, now],
         )?;
         tx.execute(
             "UPDATE dedicated_session_approval SET state='stale_epoch', resolved_at_ms=?2
-              WHERE session_id=?1 AND state IN ('pending', 'decision_reserved')",
-            params![session_id, now],
+              WHERE placement_thread_id=?1 AND state IN ('pending', 'decision_reserved')",
+            params![placement_thread_id, now],
         )?;
         tx.commit()?;
         Ok(())
@@ -4367,12 +4383,12 @@ impl RuntimeDb {
 
     pub fn fail_dedicated_session_start(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_instance_id: &str,
         reason: &str,
         cleanup_proved: bool,
     ) -> Result<()> {
-        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
         validate_bounded_runtime_text("worker instance id", worker_instance_id, 256)?;
         validate_bounded_runtime_text("dedicated terminal reason", reason, 4096)?;
         let now = lillux::time::timestamp_millis() as i64;
@@ -4387,8 +4403,8 @@ impl RuntimeDb {
                 SET state=?5, terminal_reason=?3,
                     send_boundary=CASE WHEN ?5='outcome_unknown' THEN 'outcome_unknown' ELSE send_boundary END,
                     updated_at_ms=?4
-              WHERE session_id=?1 AND state IN ('admitted','binding','recovering')",
-            params![session_id, worker_instance_id, reason, now, next_state],
+              WHERE placement_thread_id=?1 AND state IN ('admitted','binding','recovering')",
+            params![placement_thread_id, worker_instance_id, reason, now, next_state],
         )?;
         if changed != 1 {
             bail!("dedicated start failure lost its session-state CAS");
@@ -4397,12 +4413,12 @@ impl RuntimeDb {
             tx.execute(
                 "UPDATE credential_profile SET lock_owner=NULL, updated_at_ms=?3
               WHERE profile_id=(SELECT credential_profile_id FROM dedicated_session
-                                  WHERE session_id=?1)
+                                  WHERE placement_thread_id=?1)
                 AND lock_owner=?2
                 AND (NOT EXISTS(SELECT 1 FROM worker_process WHERE worker_instance_id=?2)
                      OR EXISTS(SELECT 1 FROM worker_process
                          WHERE worker_instance_id=?2 AND cleanup_state='reaped'))",
-                params![session_id, worker_instance_id, now],
+                params![placement_thread_id, worker_instance_id, now],
             )?;
         }
         tx.commit()?;
@@ -4411,13 +4427,13 @@ impl RuntimeDb {
 
     pub fn bind_dedicated_remote_thread(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_instance_id: &str,
         worker_boot_epoch: u64,
         remote_thread_id: &str,
     ) -> Result<()> {
         for (label, value) in [
-            ("dedicated session id", session_id),
+            ("dedicated placement thread id", placement_thread_id),
             ("worker instance id", worker_instance_id),
             ("remote thread id", remote_thread_id),
         ] {
@@ -4425,10 +4441,10 @@ impl RuntimeDb {
         }
         let changed = self.conn.execute(
             "UPDATE dedicated_session SET remote_thread_id=?4, updated_at_ms=?5
-              WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+              WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
                 AND state='idle' AND remote_thread_id IS NULL",
             params![
-                session_id,
+                placement_thread_id,
                 worker_instance_id,
                 i64::try_from(worker_boot_epoch)
                     .context("worker boot epoch exceeds SQLite range")?,
@@ -4439,10 +4455,10 @@ impl RuntimeDb {
         if changed != 1 {
             let matched: bool = self.conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM dedicated_session
-                  WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                  WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
                     AND remote_thread_id=?4)",
                 params![
-                    session_id,
+                    placement_thread_id,
                     worker_instance_id,
                     i64::try_from(worker_boot_epoch)?,
                     remote_thread_id
@@ -4458,18 +4474,18 @@ impl RuntimeDb {
 
     pub fn observe_dedicated_remote_reattach(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_boot_epoch: u64,
         remote_thread_id: &str,
     ) -> Result<()> {
-        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
         validate_bounded_runtime_text("remote thread id", remote_thread_id, 256)?;
         let matched: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM dedicated_session
-              WHERE session_id=?1 AND worker_boot_epoch=?2 AND remote_thread_id=?3
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND remote_thread_id=?3
                 AND state IN ('recovering','idle','outcome_unknown'))",
             params![
-                session_id,
+                placement_thread_id,
                 i64::try_from(worker_boot_epoch)?,
                 remote_thread_id
             ],
@@ -4483,7 +4499,7 @@ impl RuntimeDb {
 
     pub fn settle_dedicated_remote_recovery_status(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_boot_epoch: u64,
         remote_thread_id: &str,
         recovery_outcome: &str,
@@ -4498,10 +4514,10 @@ impl RuntimeDb {
         };
         let changed = self.conn.execute(
             "UPDATE dedicated_session SET state=?4, updated_at_ms=?5
-              WHERE session_id=?1 AND worker_boot_epoch=?2 AND remote_thread_id=?3
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND remote_thread_id=?3
                 AND state='recovering'",
             params![
-                session_id,
+                placement_thread_id,
                 i64::try_from(worker_boot_epoch)?,
                 remote_thread_id,
                 next,
@@ -4511,10 +4527,10 @@ impl RuntimeDb {
         if changed != 1 {
             let matched: bool = self.conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM dedicated_session
-                  WHERE session_id=?1 AND worker_boot_epoch=?2 AND remote_thread_id=?3
+                  WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND remote_thread_id=?3
                     AND state=?4)",
                 params![
-                    session_id,
+                    placement_thread_id,
                     i64::try_from(worker_boot_epoch)?,
                     remote_thread_id,
                     next
@@ -4530,19 +4546,19 @@ impl RuntimeDb {
 
     pub fn prepare_dedicated_session_recovery(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         credential_generation: u64,
         credential_lock_owner: &str,
     ) -> Result<u64> {
         let next_epoch: i64 = self.conn.query_row(
-            "SELECT COALESCE(MAX(boot_epoch), 0) + 1 FROM worker_process WHERE session_id=?1",
-            [session_id],
+            "SELECT COALESCE(MAX(boot_epoch), 0) + 1 FROM worker_process WHERE placement_thread_id=?1",
+            [placement_thread_id],
             |row| row.get(0),
         )?;
         let changed = self.conn.execute(
             "UPDATE dedicated_session
                 SET state='admitted', credential_generation=?2, updated_at_ms=?3
-              WHERE session_id=?1 AND state='recovering'
+              WHERE placement_thread_id=?1 AND state='recovering'
                 AND worker_instance_id IS NULL AND worker_boot_epoch IS NULL
                 AND send_boundary='none'
                 AND EXISTS(SELECT 1 FROM credential_profile
@@ -4551,7 +4567,7 @@ impl RuntimeDb {
                     AND credential_generation=?2 AND lock_owner=?4
                     AND state IN ('unauthenticated','enrolling','confirming','active'))",
             params![
-                session_id,
+                placement_thread_id,
                 i64::try_from(credential_generation)?,
                 lillux::time::timestamp_millis() as i64,
                 credential_lock_owner
@@ -4565,7 +4581,7 @@ impl RuntimeDb {
 
     pub fn observe_dedicated_session_state(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_boot_epoch: u64,
         expected: &str,
         next: &str,
@@ -4593,10 +4609,10 @@ impl RuntimeDb {
         }
         let changed = self.conn.execute(
             "UPDATE dedicated_session SET state=?4, current_turn_id=?6, updated_at_ms=?7
-              WHERE session_id=?1 AND worker_boot_epoch=?2 AND state=?3
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND state=?3
                 AND ((?5 IS NULL AND current_turn_id IS NULL) OR current_turn_id=?5)",
             params![
-                session_id,
+                placement_thread_id,
                 i64::try_from(worker_boot_epoch)?,
                 expected,
                 next,
@@ -4608,10 +4624,10 @@ impl RuntimeDb {
         if changed != 1 {
             let matched: bool = self.conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM dedicated_session
-                  WHERE session_id=?1 AND worker_boot_epoch=?2 AND state=?3
+                  WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND state=?3
                     AND ((?4 IS NULL AND current_turn_id IS NULL) OR current_turn_id=?4))",
                 params![
-                    session_id,
+                    placement_thread_id,
                     i64::try_from(worker_boot_epoch)?,
                     next,
                     next_turn_id
@@ -4958,7 +4974,7 @@ impl RuntimeDb {
 
     pub fn observe_session_credential_enrollment(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_instance_id: &str,
         worker_boot_epoch: u64,
         sanitized_account: &serde_json::Value,
@@ -4971,12 +4987,12 @@ impl RuntimeDb {
             "SELECT credential_profile_id, active_login_id, login_epoch
                FROM dedicated_session JOIN credential_profile
                  ON profile_id=credential_profile_id
-              WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+              WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
                 AND credential_profile.lock_owner=?2
                 AND credential_profile.state='enrolling'
                 AND credential_profile.login_expires_at_ms>=?4",
             params![
-                session_id,
+                placement_thread_id,
                 worker_instance_id,
                 i64::try_from(worker_boot_epoch)?,
                 now
@@ -5209,7 +5225,7 @@ impl RuntimeDb {
         command: NewDedicatedSessionCommand<'_>,
     ) -> Result<DedicatedSessionCommandRecord> {
         for (label, value, max) in [
-            ("command session id", command.session_id, 256),
+            ("command session id", command.placement_thread_id, 256),
             ("command idempotency key", command.idempotency_key, 256),
             ("command kind", command.command_kind, 128),
             ("command request digest", command.request_digest, 128),
@@ -5221,9 +5237,11 @@ impl RuntimeDb {
         let epoch = i64::try_from(command.worker_boot_epoch)
             .context("worker boot epoch exceeds SQLite range")?;
         let tx = self.conn.unchecked_transaction()?;
-        if let Some(existing) =
-            read_dedicated_command_by_key(&tx, command.session_id, command.idempotency_key)?
-        {
+        if let Some(existing) = read_dedicated_command_by_key(
+            &tx,
+            command.placement_thread_id,
+            command.idempotency_key,
+        )? {
             if existing.command_kind != command.command_kind
                 || existing.request_digest != command.request_digest
                 || existing.payload != *command.payload
@@ -5244,16 +5262,16 @@ impl RuntimeDb {
             return Ok(existing);
         }
         let next: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(command_sequence), 0) + 1 FROM dedicated_session_command WHERE session_id=?1",
-            [command.session_id], |row| row.get(0),
+            "SELECT COALESCE(MAX(command_sequence), 0) + 1 FROM dedicated_session_command WHERE placement_thread_id=?1",
+            [command.placement_thread_id], |row| row.get(0),
         )?;
         if next > MAX_DEDICATED_SESSION_COMMANDS {
             bail!("dedicated session command ledger reached its count ceiling");
         }
         let spool_bytes: i64 = tx.query_row(
             "SELECT COALESCE(SUM(length(payload_json) + COALESCE(length(result_json), 0)), 0)
-               FROM dedicated_session_command WHERE session_id=?1",
-            [command.session_id],
+               FROM dedicated_session_command WHERE placement_thread_id=?1",
+            [command.placement_thread_id],
             |row| row.get(0),
         )?;
         let reserved_bytes = i64::try_from(payload_json.len())?
@@ -5268,8 +5286,8 @@ impl RuntimeDb {
         let now = lillux::time::timestamp_millis() as i64;
         let active_commands: i64 = tx.query_row(
             "SELECT COUNT(*) FROM dedicated_session_command
-              WHERE session_id=?1 AND state IN ('committed','dispatched')",
-            [command.session_id],
+              WHERE placement_thread_id=?1 AND state IN ('committed','dispatched')",
+            [command.placement_thread_id],
             |row| row.get(0),
         )?;
         if active_commands != 0 {
@@ -5277,7 +5295,7 @@ impl RuntimeDb {
         }
         let session_changed = tx.execute(
             "UPDATE dedicated_session SET send_boundary='committed', updated_at_ms=?3
-              WHERE session_id=?1 AND worker_boot_epoch=?2
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2
                 AND state IN ('idle','turn_running','awaiting_approval','recovering')
                 AND send_boundary IN ('none','settled')
                 AND EXISTS(SELECT 1 FROM credential_profile
@@ -5285,19 +5303,19 @@ impl RuntimeDb {
                       AND credential_generation=dedicated_session.credential_generation
                       AND lock_owner=dedicated_session.worker_instance_id
                       AND state IN ('unauthenticated','enrolling','confirming','active'))",
-            params![command.session_id, epoch, now],
+            params![command.placement_thread_id, epoch, now],
         )?;
         if session_changed != 1 {
             bail!("command admission lost its idle worker-epoch CAS");
         }
         tx.execute(
             "INSERT INTO dedicated_session_command (
-                session_id, command_sequence, idempotency_key, worker_boot_epoch,
+                placement_thread_id, command_sequence, idempotency_key, worker_boot_epoch,
                 command_kind, request_digest, payload_json, state, result_json,
                 created_at_ms, updated_at_ms
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'committed', NULL, ?8, ?8)",
             params![
-                command.session_id,
+                command.placement_thread_id,
                 next,
                 command.idempotency_key,
                 epoch,
@@ -5307,9 +5325,12 @@ impl RuntimeDb {
                 now
             ],
         )?;
-        let record =
-            read_dedicated_command_by_key(&tx, command.session_id, command.idempotency_key)?
-                .ok_or_else(|| anyhow!("committed command disappeared"))?;
+        let record = read_dedicated_command_by_key(
+            &tx,
+            command.placement_thread_id,
+            command.idempotency_key,
+        )?
+        .ok_or_else(|| anyhow!("committed command disappeared"))?;
         tx.commit()?;
         Ok(record)
     }
@@ -5319,10 +5340,10 @@ impl RuntimeDb {
     /// these rows only retain enough exact material to idempotently finish it.
     pub fn dedicated_command_outbox_records(&self) -> Result<Vec<DedicatedSessionCommandRecord>> {
         let mut statement = self.conn.prepare(
-            "SELECT session_id, idempotency_key
+            "SELECT placement_thread_id, idempotency_key
                FROM dedicated_session_command
               WHERE state IN ('committed','dispatched','outcome_unknown','failed')
-              ORDER BY session_id, command_sequence",
+              ORDER BY placement_thread_id, command_sequence",
         )?;
         let identities = statement
             .query_map([], |row| {
@@ -5331,8 +5352,8 @@ impl RuntimeDb {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         identities
             .into_iter()
-            .map(|(session_id, idempotency_key)| {
-                read_dedicated_command_by_key(&self.conn, &session_id, &idempotency_key)?
+            .map(|(placement_thread_id, idempotency_key)| {
+                read_dedicated_command_by_key(&self.conn, &placement_thread_id, &idempotency_key)?
                     .ok_or_else(|| anyhow!("listed dedicated command outbox row disappeared"))
             })
             .collect()
@@ -5340,7 +5361,7 @@ impl RuntimeDb {
 
     pub fn mark_dedicated_command_contacted(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         command_sequence: u64,
         worker_boot_epoch: u64,
     ) -> Result<()> {
@@ -5348,12 +5369,12 @@ impl RuntimeDb {
         let tx = self.conn.unchecked_transaction()?;
         let changed = tx.execute(
             "UPDATE dedicated_session_command SET state='dispatched', updated_at_ms=?4
-              WHERE session_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3 AND state='committed'",
-            params![session_id, i64::try_from(command_sequence)?, i64::try_from(worker_boot_epoch)?, now],
+              WHERE placement_thread_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3 AND state='committed'",
+            params![placement_thread_id, i64::try_from(command_sequence)?, i64::try_from(worker_boot_epoch)?, now],
         )?;
         let session_changed = tx.execute(
             "UPDATE dedicated_session SET send_boundary='contacted', updated_at_ms=?3
-              WHERE session_id=?1 AND worker_boot_epoch=?2
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2
                 AND state IN ('idle','turn_running','awaiting_approval','recovering')
                 AND send_boundary='committed'
                 AND EXISTS(SELECT 1 FROM credential_profile
@@ -5361,7 +5382,7 @@ impl RuntimeDb {
                       AND credential_generation=dedicated_session.credential_generation
                       AND lock_owner=dedicated_session.worker_instance_id
                       AND state IN ('unauthenticated','enrolling','confirming','active'))",
-            params![session_id, i64::try_from(worker_boot_epoch)?, now],
+            params![placement_thread_id, i64::try_from(worker_boot_epoch)?, now],
         )?;
         if changed != 1 || session_changed != 1 {
             bail!("command contact lost its command/session CAS");
@@ -5372,7 +5393,7 @@ impl RuntimeDb {
 
     pub fn settle_dedicated_command(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         command_sequence: u64,
         worker_boot_epoch: u64,
         succeeded: bool,
@@ -5385,15 +5406,15 @@ impl RuntimeDb {
         let state = if succeeded { "completed" } else { "failed" };
         let changed = tx.execute(
             "UPDATE dedicated_session_command SET state=?4, result_json=?5, updated_at_ms=?6
-              WHERE session_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3 AND state='dispatched'",
-            params![session_id, i64::try_from(command_sequence)?, i64::try_from(worker_boot_epoch)?, state, result_json, now],
+              WHERE placement_thread_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3 AND state='dispatched'",
+            params![placement_thread_id, i64::try_from(command_sequence)?, i64::try_from(worker_boot_epoch)?, state, result_json, now],
         )?;
         let session_changed = tx.execute(
             "UPDATE dedicated_session SET send_boundary='settled', updated_at_ms=?3
-              WHERE session_id=?1 AND worker_boot_epoch=?2
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2
                 AND state IN ('idle','turn_running','awaiting_approval','recovering')
                 AND send_boundary='contacted'",
-            params![session_id, i64::try_from(worker_boot_epoch)?, now],
+            params![placement_thread_id, i64::try_from(worker_boot_epoch)?, now],
         )?;
         if changed != 1 || session_changed != 1 {
             bail!("command settlement lost its command/session CAS");
@@ -5408,7 +5429,7 @@ impl RuntimeDb {
     /// projected back into the outbox.
     pub fn settle_recovered_dedicated_command(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         command_sequence: u64,
         worker_boot_epoch: u64,
         result: &serde_json::Value,
@@ -5419,18 +5440,18 @@ impl RuntimeDb {
         let tx = self.conn.unchecked_transaction()?;
         let changed = tx.execute(
             "UPDATE dedicated_session_command SET state='completed', result_json=?4, updated_at_ms=?5
-              WHERE session_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3
+              WHERE placement_thread_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3
                 AND state IN ('dispatched','outcome_unknown')",
-            params![session_id, i64::try_from(command_sequence)?, i64::try_from(worker_boot_epoch)?, result_json, now],
+            params![placement_thread_id, i64::try_from(command_sequence)?, i64::try_from(worker_boot_epoch)?, result_json, now],
         )?;
         let session_changed = tx.execute(
             "UPDATE dedicated_session SET send_boundary='settled',
                     state=CASE WHEN state='outcome_unknown' THEN 'idle' ELSE state END,
                     updated_at_ms=?3
-              WHERE session_id=?1 AND worker_boot_epoch=?2
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2
                 AND state IN ('idle','turn_running','awaiting_approval','recovering','outcome_unknown')
                 AND send_boundary IN ('contacted','outcome_unknown')",
-            params![session_id, i64::try_from(worker_boot_epoch)?, now],
+            params![placement_thread_id, i64::try_from(worker_boot_epoch)?, now],
         )?;
         if changed != 1 || session_changed != 1 {
             bail!("recovered command settlement lost its command/session CAS");
@@ -5446,7 +5467,7 @@ impl RuntimeDb {
     /// rewritten while repairing the exact command row.
     pub fn settle_terminal_recovered_dedicated_command(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         command_sequence: u64,
         worker_boot_epoch: u64,
         result: &serde_json::Value,
@@ -5456,11 +5477,11 @@ impl RuntimeDb {
         let changed = self.conn.execute(
             "UPDATE dedicated_session_command
                 SET state='completed', result_json=?4, updated_at_ms=?5
-              WHERE session_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3
+              WHERE placement_thread_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3
                 AND state IN ('dispatched','outcome_unknown')
-                AND EXISTS(SELECT 1 FROM dedicated_session WHERE session_id=?1)",
+                AND EXISTS(SELECT 1 FROM dedicated_session WHERE placement_thread_id=?1)",
             params![
-                session_id,
+                placement_thread_id,
                 i64::try_from(command_sequence)?,
                 i64::try_from(worker_boot_epoch)?,
                 result_json,
@@ -5475,7 +5496,7 @@ impl RuntimeDb {
 
     pub fn mark_dedicated_command_outcome_unknown(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         command_sequence: u64,
         worker_boot_epoch: u64,
     ) -> Result<()> {
@@ -5483,13 +5504,13 @@ impl RuntimeDb {
         let tx = self.conn.unchecked_transaction()?;
         let changed = tx.execute(
             "UPDATE dedicated_session_command SET state='outcome_unknown', updated_at_ms=?4
-              WHERE session_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3 AND state='dispatched'",
-            params![session_id, i64::try_from(command_sequence)?, i64::try_from(worker_boot_epoch)?, now],
+              WHERE placement_thread_id=?1 AND command_sequence=?2 AND worker_boot_epoch=?3 AND state='dispatched'",
+            params![placement_thread_id, i64::try_from(command_sequence)?, i64::try_from(worker_boot_epoch)?, now],
         )?;
         let session_changed = tx.execute(
             "UPDATE dedicated_session SET state='outcome_unknown', send_boundary='outcome_unknown', updated_at_ms=?3
-              WHERE session_id=?1 AND worker_boot_epoch=?2 AND send_boundary='contacted'",
-            params![session_id, i64::try_from(worker_boot_epoch)?, now],
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND send_boundary='contacted'",
+            params![placement_thread_id, i64::try_from(worker_boot_epoch)?, now],
         )?;
         if changed != 1 || session_changed != 1 {
             bail!("ambiguous command reconciliation lost its CAS");
@@ -5504,7 +5525,7 @@ impl RuntimeDb {
     /// root testimony and safely append or rebuild the missing projection.
     pub fn reserve_dedicated_observation_batch(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_boot_epoch: u64,
         first_sequence: u64,
         through_sequence: u64,
@@ -5512,7 +5533,7 @@ impl RuntimeDb {
         batch_digest: &str,
         canonical_batch: &serde_json::Value,
     ) -> Result<ObservationBatchReservation> {
-        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
         validate_bounded_runtime_text("observation batch digest", batch_digest, 128)?;
         if let Some(previous) = previous_digest {
             validate_bounded_runtime_text("previous observation digest", previous, 128)?;
@@ -5539,11 +5560,11 @@ impl RuntimeDb {
                   FROM dedicated_session
                   JOIN worker_process
                     ON worker_process.worker_instance_id=dedicated_session.worker_instance_id
-                   AND worker_process.session_id=dedicated_session.session_id
+                   AND worker_process.placement_thread_id=dedicated_session.placement_thread_id
                    AND worker_process.boot_epoch=dedicated_session.worker_boot_epoch
                   JOIN credential_profile
                     ON credential_profile.profile_id=dedicated_session.credential_profile_id
-                 WHERE dedicated_session.session_id=?1
+                 WHERE dedicated_session.placement_thread_id=?1
                    AND dedicated_session.worker_boot_epoch=?2
                    AND dedicated_session.state IN ('idle','turn_running','awaiting_approval','recovering')
                    AND worker_process.state='live'
@@ -5552,7 +5573,7 @@ impl RuntimeDb {
                    AND credential_profile.lock_owner=dedicated_session.worker_instance_id
                    AND credential_profile.state IN ('unauthenticated','enrolling','confirming','active')
             )",
-            params![session_id, epoch],
+            params![placement_thread_id, epoch],
             |row| row.get(0),
         )?;
         if !attached {
@@ -5563,8 +5584,8 @@ impl RuntimeDb {
                 "SELECT through_sequence, previous_digest, batch_digest, cumulative_event_count,
                         canonical_batch_json, state
                    FROM dedicated_session_observation_batch
-                  WHERE session_id=?1 AND worker_boot_epoch=?2 AND first_sequence=?3",
-                params![session_id, epoch, first],
+                  WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND first_sequence=?3",
+                params![placement_thread_id, epoch, first],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
@@ -5609,9 +5630,9 @@ impl RuntimeDb {
             .query_row(
                 "SELECT through_sequence, batch_digest, state
                    FROM dedicated_session_observation_batch
-                  WHERE session_id=?1 AND worker_boot_epoch=?2
+                  WHERE placement_thread_id=?1 AND worker_boot_epoch=?2
                   ORDER BY through_sequence DESC LIMIT 1",
-                params![session_id, epoch],
+                params![placement_thread_id, epoch],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
@@ -5636,10 +5657,10 @@ impl RuntimeDb {
             .query_row(
                 "SELECT cumulative_event_count
                    FROM dedicated_session_observation_batch
-                  WHERE session_id=?1 AND state='settled'
+                  WHERE placement_thread_id=?1 AND state='settled'
                   ORDER BY settled_at_ms DESC, worker_boot_epoch DESC, through_sequence DESC
                   LIMIT 1",
-                [session_id],
+                [placement_thread_id],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?
@@ -5659,12 +5680,12 @@ impl RuntimeDb {
         let now = lillux::time::timestamp_millis() as i64;
         tx.execute(
             "INSERT INTO dedicated_session_observation_batch(
-                session_id, worker_boot_epoch, first_sequence, through_sequence,
+                placement_thread_id, worker_boot_epoch, first_sequence, through_sequence,
                 previous_digest, batch_digest, cumulative_event_count, canonical_batch_json,
                 state, created_at_ms, settled_at_ms
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'append_contacting', ?9, NULL)",
             params![
-                session_id,
+                placement_thread_id,
                 epoch,
                 first,
                 through,
@@ -5681,7 +5702,7 @@ impl RuntimeDb {
 
     pub fn settle_dedicated_observation_batch(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_boot_epoch: u64,
         first_sequence: u64,
         batch_digest: &str,
@@ -5692,10 +5713,10 @@ impl RuntimeDb {
         let changed = tx.execute(
             "UPDATE dedicated_session_observation_batch
                 SET state='settled', canonical_batch_json=NULL, settled_at_ms=?5
-              WHERE session_id=?1 AND worker_boot_epoch=?2 AND first_sequence=?3
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND first_sequence=?3
                 AND batch_digest=?4 AND state IN ('append_contacting','append_unknown')",
             params![
-                session_id,
+                placement_thread_id,
                 epoch,
                 first,
                 batch_digest,
@@ -5711,9 +5732,9 @@ impl RuntimeDb {
         // a second unbounded journal.
         tx.execute(
             "DELETE FROM dedicated_session_observation_batch
-              WHERE session_id=?1 AND state='settled'
+              WHERE placement_thread_id=?1 AND state='settled'
                 AND NOT (worker_boot_epoch=?2 AND first_sequence=?3)",
-            params![session_id, epoch, first],
+            params![placement_thread_id, epoch, first],
         )?;
         tx.commit()?;
         Ok(())
@@ -5727,11 +5748,11 @@ impl RuntimeDb {
         &self,
     ) -> Result<Vec<DedicatedObservationBatchRecord>> {
         let mut statement = self.conn.prepare(
-            "SELECT session_id, worker_boot_epoch, first_sequence,
+            "SELECT placement_thread_id, worker_boot_epoch, first_sequence,
                     through_sequence, batch_digest, canonical_batch_json, state
                FROM dedicated_session_observation_batch
               WHERE state IN ('append_contacting','append_unknown')
-              ORDER BY session_id, worker_boot_epoch, first_sequence",
+              ORDER BY placement_thread_id, worker_boot_epoch, first_sequence",
         )?;
         statement
             .query_map([], |row| {
@@ -5748,7 +5769,7 @@ impl RuntimeDb {
             .map(|row| {
                 let row = row?;
                 Ok(DedicatedObservationBatchRecord {
-                    session_id: row.0,
+                    placement_thread_id: row.0,
                     worker_boot_epoch: u64::try_from(row.1)?,
                     first_sequence: u64::try_from(row.2)?,
                     through_sequence: u64::try_from(row.3)?,
@@ -5772,17 +5793,17 @@ impl RuntimeDb {
     /// itself is rebuildable and may be discarded.
     pub fn discard_unappended_dedicated_observation_batch(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_boot_epoch: u64,
         first_sequence: u64,
         batch_digest: &str,
     ) -> Result<()> {
         let changed = self.conn.execute(
             "DELETE FROM dedicated_session_observation_batch
-              WHERE session_id=?1 AND worker_boot_epoch=?2 AND first_sequence=?3
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND first_sequence=?3
                 AND batch_digest=?4 AND state IN ('append_contacting','append_unknown')",
             params![
-                session_id,
+                placement_thread_id,
                 i64::try_from(worker_boot_epoch)?,
                 i64::try_from(first_sequence)?,
                 batch_digest,
@@ -5796,17 +5817,17 @@ impl RuntimeDb {
 
     pub fn mark_dedicated_observation_batch_unknown(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_boot_epoch: u64,
         first_sequence: u64,
         batch_digest: &str,
     ) -> Result<()> {
         self.conn.execute(
             "UPDATE dedicated_session_observation_batch SET state='append_unknown'
-              WHERE session_id=?1 AND worker_boot_epoch=?2 AND first_sequence=?3
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND first_sequence=?3
                 AND batch_digest=?4 AND state='append_contacting'",
             params![
-                session_id,
+                placement_thread_id,
                 i64::try_from(worker_boot_epoch)?,
                 i64::try_from(first_sequence)?,
                 batch_digest
@@ -5829,8 +5850,8 @@ impl RuntimeDb {
         let existing: Option<(String, String, String, i64)> = tx
             .query_row(
                 "SELECT request_digest, operation_class, requested_authority_json, worker_boot_epoch
-                   FROM dedicated_session_approval WHERE session_id=?1 AND approval_id=?2",
-                params![approval.session_id, approval.approval_id],
+                   FROM dedicated_session_approval WHERE placement_thread_id=?1 AND approval_id=?2",
+                params![approval.placement_thread_id, approval.approval_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?;
@@ -5846,10 +5867,10 @@ impl RuntimeDb {
         }
         let session_live: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM dedicated_session
-              WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+              WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
                 AND state='turn_running')",
             params![
-                approval.session_id,
+                approval.placement_thread_id,
                 approval.worker_instance_id,
                 i64::try_from(approval.worker_boot_epoch)?,
             ],
@@ -5860,7 +5881,7 @@ impl RuntimeDb {
         }
         tx.execute(
             "INSERT INTO dedicated_session_approval (
-                session_id, approval_id, worker_instance_id, worker_boot_epoch,
+                placement_thread_id, approval_id, worker_instance_id, worker_boot_epoch,
                 request_digest, operation_class, requested_authority_json, state,
                 decision_principal, decision_json, decision_digest, reservation_token,
                 expires_at_ms, created_at_ms, resolved_at_ms,
@@ -5868,7 +5889,7 @@ impl RuntimeDb {
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending',
                        NULL, NULL, NULL, NULL, ?8, ?9, NULL, NULL, NULL)",
             params![
-                approval.session_id,
+                approval.placement_thread_id,
                 approval.approval_id,
                 approval.worker_instance_id,
                 i64::try_from(approval.worker_boot_epoch)?,
@@ -5885,21 +5906,21 @@ impl RuntimeDb {
 
     pub fn pending_dedicated_session_approvals(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
     ) -> Result<Vec<DedicatedSessionApprovalRecord>> {
-        validate_bounded_runtime_text("approval session id", session_id, 256)?;
+        validate_bounded_runtime_text("approval session id", placement_thread_id, 256)?;
         let mut statement = self.conn.prepare(
-            "SELECT session_id, approval_id, worker_instance_id, worker_boot_epoch,
+            "SELECT placement_thread_id, approval_id, worker_instance_id, worker_boot_epoch,
                     request_digest, operation_class, requested_authority_json, state,
                     decision_principal, decision_json, decision_digest, reservation_token,
                     expires_at_ms, created_at_ms, resolved_at_ms,
                     delivery_contacted_at_ms, delivery_settled_at_ms
                FROM dedicated_session_approval
-              WHERE session_id=?1
+              WHERE placement_thread_id=?1
                 AND state IN ('pending','decision_reserved','delivery_contacting','delivery_unknown')
               ORDER BY created_at_ms, approval_id",
         )?;
-        let rows = statement.query_map([session_id], |row| {
+        let rows = statement.query_map([placement_thread_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -5923,7 +5944,7 @@ impl RuntimeDb {
         rows.map(|row| {
             let row = row?;
             Ok(DedicatedSessionApprovalRecord {
-                session_id: row.0,
+                placement_thread_id: row.0,
                 approval_id: row.1,
                 worker_instance_id: row.2,
                 worker_boot_epoch: u64::try_from(row.3)?,
@@ -5950,7 +5971,7 @@ impl RuntimeDb {
 
     pub fn dedicated_approval_has_exact_state(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         approval_id: &str,
         worker_boot_epoch: u64,
         request_digest: &str,
@@ -5958,7 +5979,7 @@ impl RuntimeDb {
         decision_digest: &str,
         state: &str,
     ) -> Result<bool> {
-        validate_bounded_runtime_text("approval session id", session_id, 256)?;
+        validate_bounded_runtime_text("approval session id", placement_thread_id, 256)?;
         validate_bounded_runtime_text("approval id", approval_id, 256)?;
         validate_sha256("approval request digest", request_digest)?;
         validate_bounded_runtime_text("approval reservation token", reservation_token, 256)?;
@@ -5969,11 +5990,11 @@ impl RuntimeDb {
         self.conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM dedicated_session_approval
-                  WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                  WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
                     AND request_digest=?4 AND reservation_token=?5
                     AND decision_digest=?6 AND state=?7)",
                 params![
-                    session_id,
+                    placement_thread_id,
                     approval_id,
                     i64::try_from(worker_boot_epoch)?,
                     request_digest,
@@ -5988,17 +6009,17 @@ impl RuntimeDb {
 
     pub fn reconcile_dedicated_approval_delivery_unknown(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         approval_id: &str,
         worker_boot_epoch: u64,
     ) -> Result<()> {
         let changed = self.conn.execute(
             "UPDATE dedicated_session_approval
                 SET state='delivery_unknown', resolved_at_ms=?4
-              WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+              WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
                 AND state IN ('decision_reserved','delivery_contacting')",
             params![
-                session_id,
+                placement_thread_id,
                 approval_id,
                 i64::try_from(worker_boot_epoch)?,
                 lillux::time::timestamp_millis() as i64
@@ -6007,9 +6028,13 @@ impl RuntimeDb {
         if changed != 1 {
             let retry: bool = self.conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM dedicated_session_approval
-                  WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                  WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
                     AND state='delivery_unknown')",
-                params![session_id, approval_id, i64::try_from(worker_boot_epoch)?],
+                params![
+                    placement_thread_id,
+                    approval_id,
+                    i64::try_from(worker_boot_epoch)?
+                ],
                 |row| row.get(0),
             )?;
             if !retry {
@@ -6025,17 +6050,17 @@ impl RuntimeDb {
     /// delivery facts for the historical epoch.
     pub fn reconcile_dedicated_approval_stale_epoch(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         approval_id: &str,
         worker_boot_epoch: u64,
     ) -> Result<()> {
         let changed = self.conn.execute(
             "UPDATE dedicated_session_approval
                 SET state='stale_epoch', resolved_at_ms=?4
-              WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+              WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
                 AND state='decision_reserved'",
             params![
-                session_id,
+                placement_thread_id,
                 approval_id,
                 i64::try_from(worker_boot_epoch)?,
                 lillux::time::timestamp_millis() as i64
@@ -6044,9 +6069,13 @@ impl RuntimeDb {
         if changed != 1 {
             let retry: bool = self.conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM dedicated_session_approval
-                  WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                  WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
                     AND state='stale_epoch')",
-                params![session_id, approval_id, i64::try_from(worker_boot_epoch)?],
+                params![
+                    placement_thread_id,
+                    approval_id,
+                    i64::try_from(worker_boot_epoch)?
+                ],
                 |row| row.get(0),
             )?;
             if !retry {
@@ -6060,7 +6089,7 @@ impl RuntimeDb {
     /// A retained draining reservation is safe to retry after a crash.
     pub fn reserve_dedicated_session_completion(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_boot_epoch: u64,
     ) -> Result<()> {
         let epoch = i64::try_from(worker_boot_epoch)?;
@@ -6068,23 +6097,23 @@ impl RuntimeDb {
         let tx = self.conn.unchecked_transaction()?;
         let changed = tx.execute(
             "UPDATE dedicated_session SET state='draining', updated_at_ms=?3
-              WHERE session_id=?1 AND worker_boot_epoch=?2 AND state='idle'
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND state='idle'
                 AND current_turn_id IS NULL
                 AND NOT EXISTS(SELECT 1 FROM dedicated_session_command
-                    WHERE session_id=?1 AND worker_boot_epoch=?2
+                    WHERE placement_thread_id=?1 AND worker_boot_epoch=?2
                       AND state IN ('committed','dispatched','outcome_unknown'))
                 AND NOT EXISTS(SELECT 1 FROM dedicated_session_approval
-                    WHERE session_id=?1 AND worker_boot_epoch=?2
+                    WHERE placement_thread_id=?1 AND worker_boot_epoch=?2
                       AND state IN ('pending','decision_reserved','delivery_contacting','delivery_unknown'))
                 AND NOT EXISTS(SELECT 1 FROM dedicated_session_observation_batch
-                    WHERE session_id=?1 AND worker_boot_epoch=?2 AND state!='settled')",
-            params![session_id, epoch, now],
+                    WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND state!='settled')",
+            params![placement_thread_id, epoch, now],
         )?;
         if changed == 0 {
             let retry: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM dedicated_session
-                  WHERE session_id=?1 AND worker_boot_epoch=?2 AND state='draining')",
-                params![session_id, epoch],
+                  WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND state='draining')",
+                params![placement_thread_id, epoch],
                 |row| row.get(0),
             )?;
             if !retry {
@@ -6093,15 +6122,15 @@ impl RuntimeDb {
         }
         let worker_changed = tx.execute(
             "UPDATE worker_process SET state='draining', cleanup_state='draining', updated_at_ms=?3
-              WHERE session_id=?1 AND boot_epoch=?2 AND state='live' AND cleanup_state='owned'",
-            params![session_id, epoch, now],
+              WHERE placement_thread_id=?1 AND boot_epoch=?2 AND state='live' AND cleanup_state='owned'",
+            params![placement_thread_id, epoch, now],
         )?;
         if worker_changed == 0 {
             let retry: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM worker_process
-                  WHERE session_id=?1 AND boot_epoch=?2 AND state='draining'
+                  WHERE placement_thread_id=?1 AND boot_epoch=?2 AND state='draining'
                     AND cleanup_state='draining')",
-                params![session_id, epoch],
+                params![placement_thread_id, epoch],
                 |row| row.get(0),
             )?;
             if !retry {
@@ -6115,7 +6144,7 @@ impl RuntimeDb {
     #[allow(clippy::too_many_arguments)]
     pub fn reserve_dedicated_session_approval_decision(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         approval_id: &str,
         worker_boot_epoch: u64,
         request_digest: &str,
@@ -6134,10 +6163,10 @@ impl RuntimeDb {
                 SET state='decision_reserved', decision_principal=?5,
                     decision_json=?6, decision_digest=?7, reservation_token=?8,
                     resolved_at_ms=?9
-              WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+              WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
                 AND request_digest=?4 AND state='pending' AND expires_at_ms>=?9",
             params![
-                session_id,
+                placement_thread_id,
                 approval_id,
                 i64::try_from(worker_boot_epoch)?,
                 request_digest,
@@ -6156,7 +6185,7 @@ impl RuntimeDb {
 
     pub fn mark_dedicated_approval_delivery_contacting(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         approval_id: &str,
         worker_boot_epoch: u64,
         reservation_token: &str,
@@ -6165,12 +6194,12 @@ impl RuntimeDb {
         let changed = self.conn.execute(
             "UPDATE dedicated_session_approval
                 SET state='delivery_contacting', delivery_contacted_at_ms=?6
-              WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+              WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
                 AND reservation_token=?4 AND decision_digest=?5
                 AND state='decision_reserved'
                 AND EXISTS(SELECT 1 FROM dedicated_session
                   JOIN credential_profile ON profile_id=credential_profile_id
-                  WHERE dedicated_session.session_id=?1
+                  WHERE dedicated_session.placement_thread_id=?1
                     AND dedicated_session.worker_boot_epoch=?3
                     AND dedicated_session.worker_instance_id=dedicated_session_approval.worker_instance_id
                     AND dedicated_session.state IN ('turn_running','awaiting_approval')
@@ -6178,7 +6207,7 @@ impl RuntimeDb {
                     AND credential_profile.credential_generation=dedicated_session.credential_generation
                     AND credential_profile.lock_owner=dedicated_session.worker_instance_id)",
             params![
-                session_id,
+                placement_thread_id,
                 approval_id,
                 i64::try_from(worker_boot_epoch)?,
                 reservation_token,
@@ -6194,7 +6223,7 @@ impl RuntimeDb {
 
     pub fn settle_dedicated_approval_delivery(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         approval_id: &str,
         worker_boot_epoch: u64,
         reservation_token: &str,
@@ -6203,11 +6232,11 @@ impl RuntimeDb {
         let changed = self.conn.execute(
             "UPDATE dedicated_session_approval
                 SET state='delivery_settled', delivery_settled_at_ms=?6
-              WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+              WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
                 AND reservation_token=?4 AND decision_digest=?5
                 AND state='delivery_contacting'",
             params![
-                session_id,
+                placement_thread_id,
                 approval_id,
                 i64::try_from(worker_boot_epoch)?,
                 reservation_token,
@@ -6226,7 +6255,7 @@ impl RuntimeDb {
     /// its historical worker epoch, so this repairs only the approval row.
     pub fn settle_recovered_dedicated_approval_delivery(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         approval_id: &str,
         worker_boot_epoch: u64,
         reservation_token: &str,
@@ -6237,11 +6266,11 @@ impl RuntimeDb {
         let changed = self.conn.execute(
             "UPDATE dedicated_session_approval
                 SET state='delivery_settled', delivery_settled_at_ms=?6
-              WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+              WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
                 AND reservation_token=?4 AND decision_digest=?5
                 AND state IN ('decision_reserved','delivery_contacting','delivery_unknown')",
             params![
-                session_id,
+                placement_thread_id,
                 approval_id,
                 epoch,
                 reservation_token,
@@ -6254,11 +6283,11 @@ impl RuntimeDb {
         }
         let settled: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM dedicated_session_approval
-              WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+              WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
                 AND reservation_token=?4 AND decision_digest=?5
                 AND state='delivery_settled')",
             params![
-                session_id,
+                placement_thread_id,
                 approval_id,
                 epoch,
                 reservation_token,
@@ -6274,7 +6303,7 @@ impl RuntimeDb {
 
     pub fn mark_dedicated_approval_delivery_unknown(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         approval_id: &str,
         worker_boot_epoch: u64,
         reservation_token: &str,
@@ -6282,11 +6311,11 @@ impl RuntimeDb {
     ) -> Result<()> {
         let changed = self.conn.execute(
             "UPDATE dedicated_session_approval SET state='delivery_unknown'
-              WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+              WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
                 AND reservation_token=?4 AND decision_digest=?5
                 AND state='delivery_contacting'",
             params![
-                session_id,
+                placement_thread_id,
                 approval_id,
                 i64::try_from(worker_boot_epoch)?,
                 reservation_token,
@@ -6296,10 +6325,10 @@ impl RuntimeDb {
         if changed != 1 {
             let expiry_won: bool = self.conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM dedicated_session_approval
-                  WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                  WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
                     AND reservation_token=?4 AND decision_digest=?5 AND state='expired')",
                 params![
-                    session_id,
+                    placement_thread_id,
                     approval_id,
                     i64::try_from(worker_boot_epoch)?,
                     reservation_token,
@@ -6321,12 +6350,12 @@ impl RuntimeDb {
     /// never against a delivery already proven settled.
     pub fn observe_dedicated_session_approval_expiry(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         approval_id: &str,
         worker_boot_epoch: u64,
         request_digest: &str,
     ) -> Result<()> {
-        validate_bounded_runtime_text("approval session id", session_id, 256)?;
+        validate_bounded_runtime_text("approval session id", placement_thread_id, 256)?;
         validate_bounded_runtime_text("approval id", approval_id, 256)?;
         validate_sha256("approval request digest", request_digest)?;
         let epoch = i64::try_from(worker_boot_epoch)?;
@@ -6334,10 +6363,10 @@ impl RuntimeDb {
         let changed = self.conn.execute(
             "UPDATE dedicated_session_approval
                 SET state='expired', resolved_at_ms=?5
-              WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+              WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
                 AND request_digest=?4
                 AND state IN ('pending','decision_reserved','delivery_contacting','delivery_unknown')",
-            params![session_id, approval_id, epoch, request_digest, now],
+            params![placement_thread_id, approval_id, epoch, request_digest, now],
         )?;
         if changed == 1 {
             return Ok(());
@@ -6346,9 +6375,9 @@ impl RuntimeDb {
             .conn
             .query_row(
                 "SELECT state FROM dedicated_session_approval
-                  WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                  WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
                     AND request_digest=?4",
-                params![session_id, approval_id, epoch, request_digest],
+                params![placement_thread_id, approval_id, epoch, request_digest],
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
@@ -6363,20 +6392,20 @@ impl RuntimeDb {
 
     pub fn expire_dedicated_session_approval(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         approval_id: &str,
         worker_boot_epoch: u64,
     ) -> Result<()> {
-        validate_bounded_runtime_text("approval session id", session_id, 256)?;
+        validate_bounded_runtime_text("approval session id", placement_thread_id, 256)?;
         validate_bounded_runtime_text("approval id", approval_id, 256)?;
         let now = lillux::time::timestamp_millis() as i64;
         let approval_changed = self.conn.execute(
             "UPDATE dedicated_session_approval
                 SET state='expired', resolved_at_ms=?4
-              WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+              WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
                 AND state='pending' AND expires_at_ms<=?4",
             params![
-                session_id,
+                placement_thread_id,
                 approval_id,
                 i64::try_from(worker_boot_epoch)?,
                 now
@@ -6385,9 +6414,13 @@ impl RuntimeDb {
         if approval_changed != 1 {
             let expired: bool = self.conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM dedicated_session_approval
-                  WHERE session_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
+                  WHERE placement_thread_id=?1 AND approval_id=?2 AND worker_boot_epoch=?3
                     AND state='expired')",
-                params![session_id, approval_id, i64::try_from(worker_boot_epoch)?],
+                params![
+                    placement_thread_id,
+                    approval_id,
+                    i64::try_from(worker_boot_epoch)?
+                ],
                 |row| row.get(0),
             )?;
             if !expired {
@@ -6406,12 +6439,12 @@ impl RuntimeDb {
             bail!("new worker process must enter as attached and owned");
         }
         let tx = self.conn.unchecked_transaction()?;
-        let session: Option<(String, String, String, String, String, i64)> = tx
+        let session: Option<(String, String, String, String, i64)> = tx
             .query_row(
-                "SELECT admitted_capsule_hash, workspace_id, root_thread_id, state,
+                "SELECT admitted_capsule_hash, workspace_id, state,
                         credential_profile_id, credential_generation
-                 FROM dedicated_session WHERE session_id = ?1",
-                [&record.session_id],
+                 FROM dedicated_session WHERE placement_thread_id = ?1",
+                [&record.placement_thread_id],
                 |row| {
                     Ok((
                         row.get(0)?,
@@ -6419,19 +6452,11 @@ impl RuntimeDb {
                         row.get(2)?,
                         row.get(3)?,
                         row.get(4)?,
-                        row.get(5)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((
-            capsule_hash,
-            workspace_id,
-            root_thread_id,
-            session_state,
-            profile_id,
-            generation,
-        )) = session
+        let Some((capsule_hash, workspace_id, session_state, profile_id, generation)) = session
         else {
             bail!("worker process references an unknown dedicated session");
         };
@@ -6456,7 +6481,7 @@ impl RuntimeDb {
                    FROM execution_workspace
                    LEFT JOIN thread_runtime ON thread_runtime.thread_id = ?2
                   WHERE workspace_id = ?1 AND execution_workspace.thread_id = ?2",
-                params![workspace_id, root_thread_id],
+                params![workspace_id, record.placement_thread_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
@@ -6478,7 +6503,7 @@ impl RuntimeDb {
                 worker_instance_id, boot_identity_hash, session_capsule_hash,
                 boot_epoch, lifecycle_generation, process_identity,
                 control_channel_identity, state, daemon_generation_id,
-                session_id, cleanup_state, created_at_ms, updated_at_ms
+                placement_thread_id, cleanup_state, created_at_ms, updated_at_ms
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 record.worker_instance_id,
@@ -6492,7 +6517,7 @@ impl RuntimeDb {
                 record.control_channel_identity,
                 record.state.as_str(),
                 record.daemon_generation_id,
-                record.session_id,
+                record.placement_thread_id,
                 record.cleanup_state,
                 record.created_at_ms,
                 record.updated_at_ms,
@@ -6516,7 +6541,7 @@ impl RuntimeDb {
                     process_identity,
                     record.updated_at_ms,
                     root_identity,
-                    root_thread_id,
+                    record.placement_thread_id,
                 ],
             )?,
         };
@@ -6524,9 +6549,9 @@ impl RuntimeDb {
             "UPDATE dedicated_session
              SET worker_instance_id = ?2, worker_boot_epoch = ?3,
                  state = 'binding', updated_at_ms = ?4
-             WHERE session_id = ?1 AND state = 'admitted' AND worker_instance_id IS NULL",
+             WHERE placement_thread_id = ?1 AND state = 'admitted' AND worker_instance_id IS NULL",
             params![
-                record.session_id,
+                record.placement_thread_id,
                 record.worker_instance_id,
                 i64::try_from(record.boot_epoch)
                     .context("worker boot epoch exceeds SQLite range")?,
@@ -6559,7 +6584,7 @@ impl RuntimeDb {
                 worker_instance_id, boot_identity_hash, session_capsule_hash,
                 boot_epoch, lifecycle_generation, process_identity,
                 control_channel_identity, state, daemon_generation_id,
-                session_id, cleanup_state, created_at_ms, updated_at_ms
+                placement_thread_id, cleanup_state, created_at_ms, updated_at_ms
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'dead', ?8, ?9, 'unproved', ?10, ?10)
              ON CONFLICT(worker_instance_id) DO NOTHING",
             params![
@@ -6571,17 +6596,17 @@ impl RuntimeDb {
                 process_identity,
                 record.control_channel_identity,
                 record.daemon_generation_id,
-                record.session_id,
+                record.placement_thread_id,
                 now,
             ],
         )?;
         let exact: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM worker_process
-              WHERE worker_instance_id=?1 AND session_id=?2 AND boot_epoch=?3
+              WHERE worker_instance_id=?1 AND placement_thread_id=?2 AND boot_epoch=?3
                 AND process_identity=?4 AND state='dead' AND cleanup_state='unproved')",
             params![
                 record.worker_instance_id,
-                record.session_id,
+                record.placement_thread_id,
                 epoch,
                 serde_json::to_string(&record.process_identity)?,
             ],
@@ -6595,12 +6620,12 @@ impl RuntimeDb {
                 SET worker_instance_id=?2, worker_boot_epoch=?3,
                     state='outcome_unknown', send_boundary='outcome_unknown',
                     terminal_reason=?4, updated_at_ms=?5
-              WHERE session_id=?1
+              WHERE placement_thread_id=?1
                 AND (worker_instance_id IS NULL OR worker_instance_id=?2)
                 AND (worker_boot_epoch IS NULL OR worker_boot_epoch=?3)
                 AND state IN ('admitted','binding','recovering','outcome_unknown')",
             params![
-                record.session_id,
+                record.placement_thread_id,
                 record.worker_instance_id,
                 epoch,
                 reason,
@@ -6608,7 +6633,7 @@ impl RuntimeDb {
             ],
         )?;
         if changed != 1 {
-            bail!("unproved worker start fence lost its session identity CAS");
+            bail!("unproved worker start fence lost its placement identity CAS");
         }
         tx.commit()?;
         Ok(())
@@ -6621,7 +6646,7 @@ impl RuntimeDb {
                 "SELECT worker_instance_id, boot_identity_hash, session_capsule_hash,
                         boot_epoch, lifecycle_generation, process_identity,
                         control_channel_identity, state, daemon_generation_id,
-                        session_id, cleanup_state, created_at_ms, updated_at_ms
+                        placement_thread_id, cleanup_state, created_at_ms, updated_at_ms
                  FROM worker_process WHERE worker_instance_id = ?1",
                 [worker_instance_id],
                 |row| {
@@ -6653,7 +6678,7 @@ impl RuntimeDb {
             control_channel,
             state,
             daemon_generation,
-            session_id,
+            placement_thread_id,
             cleanup_state,
             created_at_ms,
             updated_at_ms,
@@ -6673,7 +6698,7 @@ impl RuntimeDb {
             control_channel_identity: control_channel,
             state: WorkerProcessState::parse(&state)?,
             daemon_generation_id: daemon_generation,
-            session_id,
+            placement_thread_id,
             cleanup_state,
             created_at_ms,
             updated_at_ms,
@@ -6707,7 +6732,7 @@ impl RuntimeDb {
     pub fn fence_abandoned_worker_process(
         &self,
         worker_instance_id: &str,
-        session_id: &str,
+        placement_thread_id: &str,
         boot_epoch: u64,
         cleanup_state: &str,
     ) -> Result<()> {
@@ -6719,23 +6744,29 @@ impl RuntimeDb {
         let tx = self.conn.unchecked_transaction()?;
         let changed = tx.execute(
             "UPDATE worker_process SET state='dead', cleanup_state=?4, updated_at_ms=?5
-              WHERE worker_instance_id=?1 AND session_id=?2 AND boot_epoch=?3
+              WHERE worker_instance_id=?1 AND placement_thread_id=?2 AND boot_epoch=?3
                 AND state IN ('starting','attached','live','draining')",
-            params![worker_instance_id, session_id, epoch, cleanup_state, now],
+            params![
+                worker_instance_id,
+                placement_thread_id,
+                epoch,
+                cleanup_state,
+                now
+            ],
         )?;
         if changed != 1 {
             bail!("abandoned worker fence lost its process-identity CAS");
         }
         tx.execute(
             "UPDATE dedicated_session_approval SET state='delivery_unknown', resolved_at_ms=?3
-              WHERE session_id=?1 AND worker_boot_epoch=?2 AND state='delivery_contacting'",
-            params![session_id, epoch, now],
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND state='delivery_contacting'",
+            params![placement_thread_id, epoch, now],
         )?;
         tx.execute(
             "UPDATE dedicated_session_approval SET state='stale_epoch', resolved_at_ms=?3
-              WHERE session_id=?1 AND worker_boot_epoch=?2
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2
                 AND state IN ('pending', 'decision_reserved')",
-            params![session_id, epoch, now],
+            params![placement_thread_id, epoch, now],
         )?;
         // `committed` is mechanically before possible worker contact: the
         // contacting transition is durable before the socket write. Retire
@@ -6744,9 +6775,9 @@ impl RuntimeDb {
         tx.execute(
             "UPDATE dedicated_session_command
                 SET state='failed', result_json=?3, updated_at_ms=?4
-              WHERE session_id=?1 AND worker_boot_epoch=?2 AND state='committed'",
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND state='committed'",
             params![
-                session_id,
+                placement_thread_id,
                 epoch,
                 serde_json::to_string(&serde_json::json!({
                     "error":"worker epoch ended before contact",
@@ -6757,8 +6788,8 @@ impl RuntimeDb {
         )?;
         let contacted = tx.execute(
             "UPDATE dedicated_session_command SET state='outcome_unknown', updated_at_ms=?3
-              WHERE session_id=?1 AND worker_boot_epoch=?2 AND state='dispatched'",
-            params![session_id, epoch, now],
+              WHERE placement_thread_id=?1 AND worker_boot_epoch=?2 AND state='dispatched'",
+            params![placement_thread_id, epoch, now],
         )?;
         let next_state = if contacted > 0 || cleanup_state == "unproved" {
             "outcome_unknown"
@@ -6775,10 +6806,10 @@ impl RuntimeDb {
                 "UPDATE dedicated_session
                     SET worker_instance_id=NULL, worker_boot_epoch=NULL, state=?4,
                         send_boundary=?5, current_turn_id=NULL, updated_at_ms=?6
-                  WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                  WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
                     AND state NOT IN ('terminal','frozen','publish_ready')",
                 params![
-                    session_id,
+                    placement_thread_id,
                     worker_instance_id,
                     epoch,
                     next_state,
@@ -6793,9 +6824,9 @@ impl RuntimeDb {
             tx.execute(
                 "UPDATE dedicated_session
                     SET state='outcome_unknown', send_boundary='outcome_unknown', updated_at_ms=?4
-                  WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                  WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
                     AND state NOT IN ('terminal','frozen','publish_ready')",
-                params![session_id, worker_instance_id, epoch, now],
+                params![placement_thread_id, worker_instance_id, epoch, now],
             )?
         };
         if session_changed != 1 {
@@ -6804,16 +6835,16 @@ impl RuntimeDb {
         if cleanup_state == "reaped" {
             tx.execute(
                 "UPDATE execution_workspace SET state='ready', process_identity=NULL, updated_at_ms=?2
-                  WHERE workspace_id=(SELECT workspace_id FROM dedicated_session WHERE session_id=?1)
+                  WHERE workspace_id=(SELECT workspace_id FROM dedicated_session WHERE placement_thread_id=?1)
                     AND state='active'",
-                params![session_id, now],
+                params![placement_thread_id, now],
             )?;
             tx.execute(
                 "UPDATE credential_profile SET lock_owner=NULL, updated_at_ms=?3
                   WHERE profile_id=(SELECT credential_profile_id FROM dedicated_session
-                                      WHERE session_id=?1)
+                                      WHERE placement_thread_id=?1)
                     AND lock_owner=?2",
-                params![session_id, worker_instance_id, now],
+                params![placement_thread_id, worker_instance_id, now],
             )?;
         }
         tx.commit()?;
@@ -6826,11 +6857,11 @@ impl RuntimeDb {
     pub fn complete_worker_binding(
         &self,
         worker_instance_id: &str,
-        session_id: &str,
+        placement_thread_id: &str,
         boot_epoch: u64,
     ) -> Result<()> {
         validate_bounded_runtime_text("worker instance id", worker_instance_id, 256)?;
-        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
         if boot_epoch == 0 {
             bail!("worker boot epoch must be positive");
         }
@@ -6839,31 +6870,31 @@ impl RuntimeDb {
         let tx = self.conn.unchecked_transaction()?;
         let worker_changed = tx.execute(
             "UPDATE worker_process SET state = 'live', updated_at_ms = ?4
-             WHERE worker_instance_id = ?1 AND session_id = ?2 AND boot_epoch = ?3
+             WHERE worker_instance_id = ?1 AND placement_thread_id = ?2 AND boot_epoch = ?3
                AND state = 'attached' AND cleanup_state = 'owned'
                AND EXISTS(SELECT 1 FROM dedicated_session
                  JOIN credential_profile ON credential_profile.profile_id=dedicated_session.credential_profile_id
-                 WHERE dedicated_session.session_id=?2
+                 WHERE dedicated_session.placement_thread_id=?2
                    AND dedicated_session.worker_instance_id=?1
                    AND dedicated_session.worker_boot_epoch=?3
                    AND credential_profile.credential_generation=dedicated_session.credential_generation
                    AND credential_profile.lock_owner=?1
                    AND credential_profile.state IN ('unauthenticated','enrolling','confirming','active'))",
-            params![worker_instance_id, session_id, epoch, now],
+            params![worker_instance_id, placement_thread_id, epoch, now],
         )?;
         let session_changed = tx.execute(
             "UPDATE dedicated_session
                 SET state = CASE WHEN remote_thread_id IS NULL THEN 'idle' ELSE 'recovering' END,
                     send_boundary = 'none',
                     updated_at_ms = ?4
-             WHERE session_id = ?1 AND worker_instance_id = ?2
+             WHERE placement_thread_id = ?1 AND worker_instance_id = ?2
                AND worker_boot_epoch = ?3 AND state = 'binding'
                AND EXISTS(SELECT 1 FROM credential_profile
                  WHERE profile_id=dedicated_session.credential_profile_id
                    AND credential_generation=dedicated_session.credential_generation
                    AND lock_owner=?2
                    AND state IN ('unauthenticated','enrolling','confirming','active'))",
-            params![session_id, worker_instance_id, epoch, now],
+            params![placement_thread_id, worker_instance_id, epoch, now],
         )?;
         if worker_changed != 1 || session_changed != 1 {
             bail!("worker readiness lost its attached process/session epoch");
@@ -6876,13 +6907,13 @@ impl RuntimeDb {
     pub fn settle_worker_process(
         &self,
         worker_instance_id: &str,
-        session_id: &str,
+        placement_thread_id: &str,
         boot_epoch: u64,
         cleanup_state: &str,
         terminal_reason: &str,
     ) -> Result<()> {
         validate_bounded_runtime_text("worker instance id", worker_instance_id, 256)?;
-        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
         validate_bounded_runtime_text("worker cleanup state", cleanup_state, 32)?;
         validate_bounded_runtime_text("worker terminal reason", terminal_reason, 2048)?;
         if !matches!(cleanup_state, "reaped" | "unproved") || boot_epoch == 0 {
@@ -6894,26 +6925,43 @@ impl RuntimeDb {
         let worker_changed = tx.execute(
             "UPDATE worker_process SET state = 'dead', cleanup_state = ?4,
                     updated_at_ms = ?5
-             WHERE worker_instance_id = ?1 AND session_id = ?2 AND boot_epoch = ?3
+             WHERE worker_instance_id = ?1 AND placement_thread_id = ?2 AND boot_epoch = ?3
                AND (state IN ('attached', 'live', 'draining')
                     OR (state='dead' AND cleanup_state='unproved' AND ?4='reaped'))",
-            params![worker_instance_id, session_id, epoch, cleanup_state, now],
+            params![
+                worker_instance_id,
+                placement_thread_id,
+                epoch,
+                cleanup_state,
+                now
+            ],
         )?;
         let session_changed = tx.execute(
             "UPDATE dedicated_session SET state = 'recovering', terminal_reason = ?4,
                     updated_at_ms = ?5
-             WHERE session_id = ?1 AND worker_instance_id = ?2
+             WHERE placement_thread_id = ?1 AND worker_instance_id = ?2
                AND worker_boot_epoch = ?3
                AND state IN ('admitted','binding','idle','turn_running','awaiting_approval',
                              'recovering','outcome_unknown','draining')",
-            params![session_id, worker_instance_id, epoch, terminal_reason, now],
+            params![
+                placement_thread_id,
+                worker_instance_id,
+                epoch,
+                terminal_reason,
+                now
+            ],
         )?;
         if worker_changed != 1 {
             let retry: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM worker_process
-                  WHERE worker_instance_id=?1 AND session_id=?2 AND boot_epoch=?3
+                  WHERE worker_instance_id=?1 AND placement_thread_id=?2 AND boot_epoch=?3
                     AND state='dead' AND cleanup_state=?4)",
-                params![worker_instance_id, session_id, epoch, cleanup_state],
+                params![
+                    worker_instance_id,
+                    placement_thread_id,
+                    epoch,
+                    cleanup_state
+                ],
                 |row| row.get(0),
             )?;
             if !retry {
@@ -6923,10 +6971,10 @@ impl RuntimeDb {
         if session_changed != 1 {
             let retry: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM dedicated_session
-                  WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                  WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
                     AND state IN ('recovering','freezing','frozen','verifying','publish_ready',
                                   'publishing','discarding','terminal'))",
-                params![session_id, worker_instance_id, epoch],
+                params![placement_thread_id, worker_instance_id, epoch],
                 |row| row.get(0),
             )?;
             if !retry {
@@ -6939,20 +6987,24 @@ impl RuntimeDb {
 
     pub fn terminalize_dedicated_session(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_instance_id: &str,
         boot_epoch: u64,
         reason: &str,
     ) -> Result<()> {
-        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
         validate_bounded_runtime_text("worker instance id", worker_instance_id, 256)?;
         validate_bounded_runtime_text("dedicated terminal reason", reason, 2048)?;
         let now = lillux::time::timestamp_millis() as i64;
         let tx = self.conn.unchecked_transaction()?;
         let candidate_required: bool = tx.query_row(
             "SELECT candidate_required != 0 FROM dedicated_session
-              WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3",
-            params![session_id, worker_instance_id, i64::try_from(boot_epoch)?],
+              WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3",
+            params![
+                placement_thread_id,
+                worker_instance_id,
+                i64::try_from(boot_epoch)?
+            ],
             |row| row.get(0),
         )?;
         let terminal_state = if reason == "completed" && candidate_required {
@@ -6963,13 +7015,13 @@ impl RuntimeDb {
         let session_changed = tx.execute(
             "UPDATE dedicated_session SET state=?6, terminal_reason=?4,
                     current_turn_id=NULL, updated_at_ms=?5
-              WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+              WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
                 AND state='recovering'
                 AND EXISTS(SELECT 1 FROM worker_process
-                    WHERE worker_instance_id=?2 AND session_id=?1 AND boot_epoch=?3
+                    WHERE worker_instance_id=?2 AND placement_thread_id=?1 AND boot_epoch=?3
                       AND state='dead' AND cleanup_state='reaped')",
             params![
-                session_id,
+                placement_thread_id,
                 worker_instance_id,
                 i64::try_from(boot_epoch)?,
                 reason,
@@ -6980,10 +7032,10 @@ impl RuntimeDb {
         if session_changed != 1 {
             let retry: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM dedicated_session
-                  WHERE session_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                  WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
                     AND terminal_reason=?4 AND state=?5)",
                 params![
-                    session_id,
+                    placement_thread_id,
                     worker_instance_id,
                     i64::try_from(boot_epoch)?,
                     reason,
@@ -6997,13 +7049,13 @@ impl RuntimeDb {
         }
         tx.execute(
             "UPDATE dedicated_session_approval SET state='delivery_unknown', resolved_at_ms=?2
-              WHERE session_id=?1 AND state='delivery_contacting'",
-            params![session_id, now],
+              WHERE placement_thread_id=?1 AND state='delivery_contacting'",
+            params![placement_thread_id, now],
         )?;
         tx.execute(
             "UPDATE dedicated_session_approval SET state='stale_epoch', resolved_at_ms=?2
-              WHERE session_id=?1 AND state IN ('pending', 'decision_reserved')",
-            params![session_id, now],
+              WHERE placement_thread_id=?1 AND state IN ('pending', 'decision_reserved')",
+            params![placement_thread_id, now],
         )?;
         // Terminal settlement owns the credential lease release in the same
         // durable transaction. This closes the crash window where a dead
@@ -7015,11 +7067,11 @@ impl RuntimeDb {
                     login_expires_at_ms=CASE WHEN state='enrolling' THEN NULL ELSE login_expires_at_ms END,
                     lock_owner=NULL, updated_at_ms=?4
               WHERE profile_id=(SELECT credential_profile_id FROM dedicated_session
-                                  WHERE session_id=?1)
+                                  WHERE placement_thread_id=?1)
                 AND lock_owner=?2
                 AND EXISTS(SELECT 1 FROM dedicated_session
-                  WHERE session_id=?1 AND worker_boot_epoch=?3)",
-            params![session_id, worker_instance_id, i64::try_from(boot_epoch)?, now],
+                  WHERE placement_thread_id=?1 AND worker_boot_epoch=?3)",
+            params![placement_thread_id, worker_instance_id, i64::try_from(boot_epoch)?, now],
         )?;
         tx.commit()?;
         Ok(())
@@ -7027,10 +7079,10 @@ impl RuntimeDb {
 
     pub fn bind_dedicated_session_candidate(
         &self,
-        root_thread_id: &str,
+        placement_thread_id: &str,
         snapshot_hash: &str,
     ) -> Result<bool> {
-        validate_bounded_runtime_text("dedicated root thread id", root_thread_id, 256)?;
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
         if !lillux::valid_hash(snapshot_hash) {
             bail!("dedicated candidate snapshot hash is not canonical");
         }
@@ -7044,14 +7096,14 @@ impl RuntimeDb {
             "UPDATE dedicated_session
                 SET candidate_snapshot_hash=?2, candidate_validation_hash=?3,
                     publication_result='retained', state='frozen', updated_at_ms=?4
-              WHERE root_thread_id=?1 AND state='freezing'
+              WHERE placement_thread_id=?1 AND state='freezing'
                 AND terminal_reason='completed'
                 AND candidate_required=1
                 AND candidate_snapshot_hash IS NULL
                 AND EXISTS(SELECT 1 FROM execution_workspace
                     WHERE workspace_id=dedicated_session.workspace_id AND state='closed')",
             params![
-                root_thread_id,
+                placement_thread_id,
                 snapshot_hash,
                 candidate_validation_hash,
                 lillux::time::timestamp_millis() as i64
@@ -7062,17 +7114,17 @@ impl RuntimeDb {
 
     pub fn reserve_dedicated_candidate_validation(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         candidate_snapshot_hash: &str,
         candidate_validation_hash: &str,
     ) -> Result<bool> {
         let changed = self.conn.execute(
             "UPDATE dedicated_session SET state='verifying', disposition_resume_state='frozen', updated_at_ms=?4
-              WHERE session_id=?1 AND state='frozen'
+              WHERE placement_thread_id=?1 AND state='frozen'
                 AND candidate_snapshot_hash=?2 AND candidate_validation_hash=?3
                 AND publication_result='retained'",
             params![
-                session_id,
+                placement_thread_id,
                 candidate_snapshot_hash,
                 candidate_validation_hash,
                 lillux::time::timestamp_millis() as i64
@@ -7083,11 +7135,11 @@ impl RuntimeDb {
         }
         let retry: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM dedicated_session
-              WHERE session_id=?1 AND state='verifying'
+              WHERE placement_thread_id=?1 AND state='verifying'
                 AND candidate_snapshot_hash=?2 AND candidate_validation_hash=?3
                 AND publication_result='retained')",
             params![
-                session_id,
+                placement_thread_id,
                 candidate_snapshot_hash,
                 candidate_validation_hash
             ],
@@ -7101,12 +7153,12 @@ impl RuntimeDb {
 
     pub fn settle_dedicated_candidate_validation(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         candidate_snapshot_hash: &str,
         candidate_validation_hash: &str,
         evidence: &Value,
     ) -> Result<()> {
-        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
         if !lillux::valid_hash(candidate_snapshot_hash)
             || !lillux::valid_hash(candidate_validation_hash)
         {
@@ -7117,11 +7169,11 @@ impl RuntimeDb {
         let tx = self.conn.unchecked_transaction()?;
         let changed = tx.execute(
             "UPDATE dedicated_session SET state='publish_ready', disposition_resume_state=NULL, updated_at_ms=?4
-              WHERE session_id=?1 AND state='verifying'
+              WHERE placement_thread_id=?1 AND state='verifying'
                 AND candidate_snapshot_hash=?2 AND candidate_validation_hash=?3
                 AND publication_result='retained'",
             params![
-                session_id,
+                placement_thread_id,
                 candidate_snapshot_hash,
                 candidate_validation_hash,
                 now
@@ -7136,20 +7188,20 @@ impl RuntimeDb {
 
     pub fn reserve_dedicated_candidate_discard(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         candidate_snapshot_hash: &str,
     ) -> Result<()> {
-        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
         if !lillux::valid_hash(candidate_snapshot_hash) {
             bail!("discarded candidate hash is not canonical");
         }
         let changed = self.conn.execute(
             "UPDATE dedicated_session
                 SET disposition_resume_state=state, state='discarding', updated_at_ms=?3
-              WHERE session_id=?1 AND candidate_snapshot_hash=?2
+              WHERE placement_thread_id=?1 AND candidate_snapshot_hash=?2
                 AND publication_result='retained' AND state IN ('frozen','publish_ready')",
             params![
-                session_id,
+                placement_thread_id,
                 candidate_snapshot_hash,
                 lillux::time::timestamp_millis() as i64
             ],
@@ -7157,9 +7209,9 @@ impl RuntimeDb {
         if changed != 1 {
             let retry: bool = self.conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM dedicated_session
-                  WHERE session_id=?1 AND candidate_snapshot_hash=?2
+                  WHERE placement_thread_id=?1 AND candidate_snapshot_hash=?2
                     AND publication_result='retained' AND state='discarding')",
-                params![session_id, candidate_snapshot_hash],
+                params![placement_thread_id, candidate_snapshot_hash],
                 |row| row.get(0),
             )?;
             if !retry {
@@ -7171,17 +7223,17 @@ impl RuntimeDb {
 
     pub fn settle_dedicated_candidate_discard(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         candidate_snapshot_hash: &str,
     ) -> Result<()> {
         let changed = self.conn.execute(
             "UPDATE dedicated_session
                 SET state='terminal', publication_result='discarded',
                     disposition_resume_state=NULL, updated_at_ms=?3
-              WHERE session_id=?1 AND candidate_snapshot_hash=?2
+              WHERE placement_thread_id=?1 AND candidate_snapshot_hash=?2
                 AND publication_result='retained' AND state='discarding'",
             params![
-                session_id,
+                placement_thread_id,
                 candidate_snapshot_hash,
                 lillux::time::timestamp_millis() as i64
             ],
@@ -7194,15 +7246,15 @@ impl RuntimeDb {
 
     pub fn reserve_dedicated_candidate_publication(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         candidate_snapshot_hash: &str,
     ) -> Result<()> {
         let changed = self.conn.execute(
             "UPDATE dedicated_session SET state='publishing', disposition_resume_state='publish_ready', updated_at_ms=?3
-              WHERE session_id=?1 AND candidate_snapshot_hash=?2
+              WHERE placement_thread_id=?1 AND candidate_snapshot_hash=?2
                 AND publication_result='retained' AND state='publish_ready'",
             params![
-                session_id,
+                placement_thread_id,
                 candidate_snapshot_hash,
                 lillux::time::timestamp_millis() as i64
             ],
@@ -7210,9 +7262,9 @@ impl RuntimeDb {
         if changed != 1 {
             let retry: bool = self.conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM dedicated_session
-                  WHERE session_id=?1 AND candidate_snapshot_hash=?2
+                  WHERE placement_thread_id=?1 AND candidate_snapshot_hash=?2
                     AND publication_result='retained' AND state='publishing')",
-                params![session_id, candidate_snapshot_hash],
+                params![placement_thread_id, candidate_snapshot_hash],
                 |row| row.get(0),
             )?;
             if !retry {
@@ -7224,11 +7276,11 @@ impl RuntimeDb {
 
     pub fn settle_dedicated_candidate_publication(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         candidate_snapshot_hash: &str,
         publication_result: &str,
     ) -> Result<()> {
-        validate_bounded_runtime_text("dedicated session id", session_id, 256)?;
+        validate_bounded_runtime_text("dedicated placement thread id", placement_thread_id, 256)?;
         if !lillux::valid_hash(candidate_snapshot_hash) {
             bail!("published candidate snapshot hash is not canonical");
         }
@@ -7236,11 +7288,11 @@ impl RuntimeDb {
         let changed = self.conn.execute(
             "UPDATE dedicated_session SET publication_result=?3, state='terminal',
                     disposition_resume_state=NULL, updated_at_ms=?4
-              WHERE session_id=?1 AND state='publishing'
+              WHERE placement_thread_id=?1 AND state='publishing'
                 AND candidate_snapshot_hash=?2
                 AND publication_result='retained'",
             params![
-                session_id,
+                placement_thread_id,
                 candidate_snapshot_hash,
                 publication_result,
                 lillux::time::timestamp_millis() as i64
@@ -7254,7 +7306,7 @@ impl RuntimeDb {
 
     pub fn fail_dedicated_candidate_disposition(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         reserved_state: &str,
     ) -> Result<()> {
         if !matches!(reserved_state, "verifying" | "publishing" | "discarding") {
@@ -7270,11 +7322,11 @@ impl RuntimeDb {
             self.conn.execute(
                 "UPDATE dedicated_session SET state=disposition_resume_state,
                     disposition_resume_state=NULL, updated_at_ms=?3
-                  WHERE session_id=?1 AND state=?2
+                  WHERE placement_thread_id=?1 AND state=?2
                     AND disposition_resume_state IN ('frozen','publish_ready')
                     AND publication_result='retained'",
                 params![
-                    session_id,
+                    placement_thread_id,
                     reserved_state,
                     lillux::time::timestamp_millis() as i64
                 ],
@@ -7283,9 +7335,9 @@ impl RuntimeDb {
             self.conn.execute(
                 "UPDATE dedicated_session SET state=?3, disposition_resume_state=NULL,
                     updated_at_ms=?4
-                  WHERE session_id=?1 AND state=?2 AND publication_result='retained'",
+                  WHERE placement_thread_id=?1 AND state=?2 AND publication_result='retained'",
                 params![
-                    session_id,
+                    placement_thread_id,
                     reserved_state,
                     fallback,
                     lillux::time::timestamp_millis() as i64
@@ -7298,7 +7350,10 @@ impl RuntimeDb {
         Ok(())
     }
 
-    pub fn cancel_dedicated_candidate_for_root_stop(&self, session_id: &str) -> Result<()> {
+    pub fn cancel_dedicated_candidate_for_root_stop(
+        &self,
+        placement_thread_id: &str,
+    ) -> Result<()> {
         let now = lillux::time::timestamp_millis() as i64;
         let changed = self.conn.execute(
             "UPDATE dedicated_session
@@ -7308,14 +7363,14 @@ impl RuntimeDb {
                       ELSE 'discarded'
                     END,
                     disposition_resume_state=NULL, updated_at_ms=?2
-              WHERE session_id=?1
+              WHERE placement_thread_id=?1
                 AND state IN ('freezing','frozen','verifying','publish_ready','discarding')
                 AND EXISTS(SELECT 1 FROM worker_process
                   WHERE worker_instance_id=dedicated_session.worker_instance_id
-                    AND session_id=dedicated_session.session_id
+                    AND placement_thread_id=dedicated_session.placement_thread_id
                     AND boot_epoch=dedicated_session.worker_boot_epoch
                     AND state='dead' AND cleanup_state='reaped')",
-            params![session_id, now],
+            params![placement_thread_id, now],
         )?;
         if changed != 1 {
             bail!("candidate root-stop cancellation lost its dead-worker/session proof");
@@ -7432,9 +7487,9 @@ impl RuntimeDb {
 
     pub fn dedicated_approval_outbox_session_ids(&self) -> Result<Vec<String>> {
         let mut statement = self.conn.prepare(
-            "SELECT DISTINCT session_id FROM dedicated_session_approval
+            "SELECT DISTINCT placement_thread_id FROM dedicated_session_approval
               WHERE state IN ('decision_reserved','delivery_contacting','delivery_unknown')
-              ORDER BY session_id",
+              ORDER BY placement_thread_id",
         )?;
         statement
             .query_map([], |row| row.get::<_, String>(0))?
@@ -8524,7 +8579,7 @@ impl RuntimeDb {
 
     /// Extract only the independently versioned credential-profile authority
     /// before an explicitly confirmed execution-history schema replacement.
-    /// No thread/session row is decoded or carried forward. Epochs 6–11 used
+    /// No thread/placement row is decoded or carried forward. Epochs 6–11 used
     /// one exact profile table shape; older epochs predate credential profiles.
     pub fn credential_profiles_for_explicit_history_reset(
         &self,
@@ -12282,8 +12337,8 @@ mod tests {
         })
         .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
-            session_id: "S-atomic",
-            root_thread_id: "T-atomic",
+            placement_thread_id: "T-atomic",
+            chain_root_id: "T-atomic",
             owner_principal: "fp:operator",
             admitted_capsule_hash: &"a".repeat(64),
             workspace_id: "W-atomic",
@@ -12303,7 +12358,7 @@ mod tests {
             Some("worker-atomic")
         );
         assert_eq!(
-            db.dedicated_session("S-atomic").unwrap().unwrap().state,
+            db.dedicated_session("T-atomic").unwrap().unwrap().state,
             "admitted"
         );
     }
@@ -12314,8 +12369,8 @@ mod tests {
         create_locked_profile(&db, "P-orphan", "worker-orphan");
         create_locked_profile(&db, "P-admitted", "worker-admitted");
         db.admit_dedicated_session(NewDedicatedSession {
-            session_id: "S-admitted",
-            root_thread_id: "T-admitted",
+            placement_thread_id: "T-admitted",
+            chain_root_id: "T-admitted",
             owner_principal: "fp:operator",
             admitted_capsule_hash: &"a".repeat(64),
             workspace_id: "W-admitted",
@@ -12331,7 +12386,7 @@ mod tests {
             (1, 2)
         );
         assert_eq!(
-            db.dedicated_session("S-admitted").unwrap().unwrap().state,
+            db.dedicated_session("T-admitted").unwrap().unwrap().state,
             "recovering"
         );
         assert_eq!(
@@ -12365,8 +12420,8 @@ mod tests {
             )
             .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
-            session_id: "S-fenced",
-            root_thread_id: "T-fenced",
+            placement_thread_id: "T-fenced",
+            chain_root_id: "T-fenced",
             owner_principal: "fp:operator",
             admitted_capsule_hash: &"a".repeat(64),
             workspace_id: "W-fenced",
@@ -12386,7 +12441,7 @@ mod tests {
             control_channel_identity: "fd:fenced".to_owned(),
             state: WorkerProcessState::Attached,
             daemon_generation_id: "daemon-old".to_owned(),
-            session_id: "S-fenced".to_owned(),
+            placement_thread_id: "T-fenced".to_owned(),
             cleanup_state: "owned".to_owned(),
             created_at_ms: 2,
             updated_at_ms: 2,
@@ -12416,14 +12471,14 @@ mod tests {
                 "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
                     base_snapshot, root_path, state, created_at_ms, updated_at_ms
-                 ) VALUES ('W-one', 'T-root', 'dedicated_worker_session', 'trusted-daemon',
+                 ) VALUES ('W-one', 'T-one', 'dedicated_worker_session', 'trusted-daemon',
                            'a', '/tmp/workspace-one', 'ready', 1, 1)",
                 [],
             )
             .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
-            session_id: "S-one",
-            root_thread_id: "T-root",
+            placement_thread_id: "T-one",
+            chain_root_id: "T-root",
             owner_principal: "fp:operator",
             admitted_capsule_hash: &"a".repeat(64),
             workspace_id: "W-one",
@@ -12443,7 +12498,7 @@ mod tests {
             control_channel_identity: "fd:9".to_owned(),
             state: WorkerProcessState::Attached,
             daemon_generation_id: "daemon-one".to_owned(),
-            session_id: "S-one".to_owned(),
+            placement_thread_id: "T-one".to_owned(),
             cleanup_state: "owned".to_owned(),
             created_at_ms: 2,
             updated_at_ms: 2,
@@ -12461,14 +12516,14 @@ mod tests {
         let session_state: String = db
             .conn
             .query_row(
-                "SELECT state FROM dedicated_session WHERE session_id = 'S-one'",
+                "SELECT state FROM dedicated_session WHERE placement_thread_id = 'T-one'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
         assert_eq!(workspace_state, "active");
         assert_eq!(session_state, "binding");
-        db.complete_worker_binding("worker-one", "S-one", 1)
+        db.complete_worker_binding("worker-one", "T-one", 1)
             .unwrap();
         assert_eq!(
             db.worker_process("worker-one").unwrap().unwrap().state,
@@ -12477,20 +12532,20 @@ mod tests {
         let session_state: String = db
             .conn
             .query_row(
-                "SELECT state FROM dedicated_session WHERE session_id = 'S-one'",
+                "SELECT state FROM dedicated_session WHERE placement_thread_id = 'T-one'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
         assert_eq!(session_state, "idle");
-        db.settle_worker_process("worker-one", "S-one", 1, "reaped", "fixture restart")
+        db.settle_worker_process("worker-one", "T-one", 1, "reaped", "fixture restart")
             .unwrap();
         let settled = db.worker_process("worker-one").unwrap().unwrap();
         assert_eq!(settled.state, WorkerProcessState::Dead);
         assert_eq!(settled.cleanup_state, "reaped");
-        db.terminalize_dedicated_session("S-one", "worker-one", 1, "completed")
+        db.terminalize_dedicated_session("T-one", "worker-one", 1, "completed")
             .unwrap();
-        let login_terminal = db.dedicated_session("S-one").unwrap().unwrap();
+        let login_terminal = db.dedicated_session("T-one").unwrap().unwrap();
         assert_eq!(login_terminal.state, "terminal");
         assert!(login_terminal.candidate_snapshot_hash.is_none());
     }
@@ -12510,8 +12565,8 @@ mod tests {
             )
             .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
-            session_id: "S-recover",
-            root_thread_id: "T-recover",
+            placement_thread_id: "T-recover",
+            chain_root_id: "T-recover",
             owner_principal: "fp:operator",
             admitted_capsule_hash: &"a".repeat(64),
             workspace_id: "W-recover",
@@ -12531,23 +12586,23 @@ mod tests {
             control_channel_identity: "fd:recover-1".to_owned(),
             state: WorkerProcessState::Attached,
             daemon_generation_id: "daemon-one".to_owned(),
-            session_id: "S-recover".to_owned(),
+            placement_thread_id: "T-recover".to_owned(),
             cleanup_state: "owned".to_owned(),
             created_at_ms: 2,
             updated_at_ms: 2,
         };
         db.attach_worker_process(&first).unwrap();
-        db.complete_worker_binding("worker-recover-1", "S-recover", 1)
+        db.complete_worker_binding("worker-recover-1", "T-recover", 1)
             .unwrap();
-        db.bind_dedicated_remote_thread("S-recover", "worker-recover-1", 1, "remote-recover")
+        db.bind_dedicated_remote_thread("T-recover", "worker-recover-1", 1, "remote-recover")
             .unwrap();
-        db.fence_abandoned_worker_process("worker-recover-1", "S-recover", 1, "reaped")
+        db.fence_abandoned_worker_process("worker-recover-1", "T-recover", 1, "reaped")
             .unwrap();
 
         db.acquire_credential_profile("P-recover", "fp:operator", "worker-recover-2")
             .unwrap();
         assert_eq!(
-            db.prepare_dedicated_session_recovery("S-recover", 1, "worker-recover-2")
+            db.prepare_dedicated_session_recovery("T-recover", 1, "worker-recover-2")
                 .unwrap(),
             2
         );
@@ -12563,13 +12618,13 @@ mod tests {
             ..first.clone()
         };
         db.attach_worker_process(&second).unwrap();
-        db.complete_worker_binding("worker-recover-2", "S-recover", 2)
+        db.complete_worker_binding("worker-recover-2", "T-recover", 2)
             .unwrap();
 
         let payload = serde_json::json!({"upstream_session_id":"upstream-recover"});
         let reattach = db
             .reserve_dedicated_session_command(NewDedicatedSessionCommand {
-                session_id: "S-recover",
+                placement_thread_id: "T-recover",
                 idempotency_key: "reattach-two",
                 worker_boot_epoch: 2,
                 command_kind: "reattach",
@@ -12577,23 +12632,23 @@ mod tests {
                 payload: &payload,
             })
             .unwrap();
-        db.mark_dedicated_command_contacted("S-recover", reattach.command_sequence, 2)
+        db.mark_dedicated_command_contacted("T-recover", reattach.command_sequence, 2)
             .unwrap();
         db.settle_dedicated_command(
-            "S-recover",
+            "T-recover",
             reattach.command_sequence,
             2,
             true,
             &serde_json::json!({"redacted":true}),
         )
         .unwrap();
-        let recovering = db.dedicated_session("S-recover").unwrap().unwrap();
+        let recovering = db.dedicated_session("T-recover").unwrap().unwrap();
         assert_eq!(recovering.state, "recovering");
         assert_eq!(recovering.send_boundary, "settled");
 
         let recovered_reattach = db
             .reserve_dedicated_session_command(NewDedicatedSessionCommand {
-                session_id: "S-recover",
+                placement_thread_id: "T-recover",
                 idempotency_key: "reattach-recovered-two",
                 worker_boot_epoch: 2,
                 command_kind: "reattach",
@@ -12601,26 +12656,26 @@ mod tests {
                 payload: &payload,
             })
             .unwrap();
-        db.mark_dedicated_command_contacted("S-recover", recovered_reattach.command_sequence, 2)
+        db.mark_dedicated_command_contacted("T-recover", recovered_reattach.command_sequence, 2)
             .unwrap();
         db.settle_recovered_dedicated_command(
-            "S-recover",
+            "T-recover",
             recovered_reattach.command_sequence,
             2,
             &serde_json::json!({"redacted":true}),
         )
         .unwrap();
-        db.observe_dedicated_remote_reattach("S-recover", 2, "remote-recover")
+        db.observe_dedicated_remote_reattach("T-recover", 2, "remote-recover")
             .unwrap();
-        db.settle_dedicated_remote_recovery_status("S-recover", 2, "remote-recover", "safe_idle")
+        db.settle_dedicated_remote_recovery_status("T-recover", 2, "remote-recover", "safe_idle")
             .unwrap();
-        let recovered = db.dedicated_session("S-recover").unwrap().unwrap();
+        let recovered = db.dedicated_session("T-recover").unwrap().unwrap();
         assert_eq!(recovered.state, "idle");
         assert_eq!(recovered.send_boundary, "settled");
 
         let terminal_recovered = db
             .reserve_dedicated_session_command(NewDedicatedSessionCommand {
-                session_id: "S-recover",
+                placement_thread_id: "T-recover",
                 idempotency_key: "reattach-terminal-two",
                 worker_boot_epoch: 2,
                 command_kind: "reattach",
@@ -12628,16 +12683,16 @@ mod tests {
                 payload: &payload,
             })
             .unwrap();
-        db.mark_dedicated_command_contacted("S-recover", terminal_recovered.command_sequence, 2)
+        db.mark_dedicated_command_contacted("T-recover", terminal_recovered.command_sequence, 2)
             .unwrap();
-        db.fence_abandoned_worker_process("worker-recover-2", "S-recover", 2, "reaped")
+        db.fence_abandoned_worker_process("worker-recover-2", "T-recover", 2, "reaped")
             .unwrap();
-        let detached = db.dedicated_session("S-recover").unwrap().unwrap();
+        let detached = db.dedicated_session("T-recover").unwrap().unwrap();
         assert_eq!(detached.state, "outcome_unknown");
         assert!(detached.worker_instance_id.is_none());
         assert!(detached.worker_boot_epoch.is_none());
         db.settle_terminal_recovered_dedicated_command(
-            "S-recover",
+            "T-recover",
             terminal_recovered.command_sequence,
             2,
             &serde_json::json!({"redacted":true}),
@@ -12645,7 +12700,7 @@ mod tests {
         .unwrap();
         let projected = db
             .reserve_dedicated_session_command(NewDedicatedSessionCommand {
-                session_id: "S-recover",
+                placement_thread_id: "T-recover",
                 idempotency_key: "reattach-terminal-two",
                 worker_boot_epoch: 2,
                 command_kind: "reattach",
@@ -12655,7 +12710,7 @@ mod tests {
             .unwrap();
         assert_eq!(projected.state, "completed");
         assert_eq!(
-            db.dedicated_session("S-recover").unwrap().unwrap().state,
+            db.dedicated_session("T-recover").unwrap().unwrap().state,
             "outcome_unknown"
         );
 
@@ -12676,7 +12731,7 @@ mod tests {
         let history_count: i64 = db
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM worker_process WHERE session_id='S-recover'",
+                "SELECT COUNT(*) FROM worker_process WHERE placement_thread_id='T-recover'",
                 [],
                 |row| row.get(0),
             )
@@ -12800,8 +12855,8 @@ mod tests {
             )
             .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
-            session_id: "S-handoff",
-            root_thread_id: "T-handoff",
+            placement_thread_id: "T-handoff",
+            chain_root_id: "T-handoff",
             owner_principal: "fp:operator",
             admitted_capsule_hash: &"a".repeat(64),
             workspace_id: "W-handoff",
@@ -12821,7 +12876,7 @@ mod tests {
             control_channel_identity: "fd:handoff".to_owned(),
             state: WorkerProcessState::Attached,
             daemon_generation_id: "daemon-one".to_owned(),
-            session_id: "S-handoff".to_owned(),
+            placement_thread_id: "T-handoff".to_owned(),
             cleanup_state: "owned".to_owned(),
             created_at_ms: 2,
             updated_at_ms: 2,
@@ -12869,8 +12924,8 @@ mod tests {
             )
             .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
-            session_id: "S-fence",
-            root_thread_id: "T-fence",
+            placement_thread_id: "T-fence",
+            chain_root_id: "T-fence",
             owner_principal: "fp:operator",
             admitted_capsule_hash: &"a".repeat(64),
             workspace_id: "W-fence",
@@ -12894,7 +12949,7 @@ mod tests {
                 control_channel_identity: "fd:12".to_owned(),
                 state: WorkerProcessState::Attached,
                 daemon_generation_id: "daemon-one".to_owned(),
-                session_id: "S-fence".to_owned(),
+                placement_thread_id: "T-fence".to_owned(),
                 cleanup_state: "owned".to_owned(),
                 created_at_ms: now,
                 updated_at_ms: now,
@@ -12918,8 +12973,8 @@ mod tests {
             )
             .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
-            session_id: "S-abandoned",
-            root_thread_id: "T-abandoned",
+            placement_thread_id: "T-abandoned",
+            chain_root_id: "T-abandoned",
             owner_principal: "fp:operator",
             admitted_capsule_hash: &"a".repeat(64),
             workspace_id: "W-abandoned",
@@ -12940,18 +12995,18 @@ mod tests {
             control_channel_identity: "fd:13".to_owned(),
             state: WorkerProcessState::Attached,
             daemon_generation_id: "daemon-one".to_owned(),
-            session_id: "S-abandoned".to_owned(),
+            placement_thread_id: "T-abandoned".to_owned(),
             cleanup_state: "owned".to_owned(),
             created_at_ms: now,
             updated_at_ms: now,
         })
         .unwrap();
-        db.complete_worker_binding("worker-abandoned", "S-abandoned", 1)
+        db.complete_worker_binding("worker-abandoned", "T-abandoned", 1)
             .unwrap();
         let payload = serde_json::json!({"work":"never-contacted"});
         let committed = db
             .reserve_dedicated_session_command(NewDedicatedSessionCommand {
-                session_id: "S-abandoned",
+                placement_thread_id: "T-abandoned",
                 idempotency_key: "before-crash",
                 worker_boot_epoch: 1,
                 command_kind: "fixture",
@@ -12960,7 +13015,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(committed.state, "committed");
-        db.fence_abandoned_worker_process("worker-abandoned", "S-abandoned", 1, "reaped")
+        db.fence_abandoned_worker_process("worker-abandoned", "T-abandoned", 1, "reaped")
             .unwrap();
         assert_eq!(
             db.credential_profile("P-abandoned")
@@ -12971,7 +13026,7 @@ mod tests {
         );
         let retry = db
             .reserve_dedicated_session_command(NewDedicatedSessionCommand {
-                session_id: "S-abandoned",
+                placement_thread_id: "T-abandoned",
                 idempotency_key: "before-crash",
                 worker_boot_epoch: 2,
                 command_kind: "fixture",
@@ -13008,8 +13063,8 @@ mod tests {
             )
             .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
-            session_id: "S-unproved",
-            root_thread_id: "T-unproved",
+            placement_thread_id: "T-unproved",
+            chain_root_id: "T-unproved",
             owner_principal: "fp:operator",
             admitted_capsule_hash: &"a".repeat(64),
             workspace_id: "W-unproved",
@@ -13029,18 +13084,18 @@ mod tests {
             control_channel_identity: "fd:14".to_owned(),
             state: WorkerProcessState::Attached,
             daemon_generation_id: "daemon-one".to_owned(),
-            session_id: "S-unproved".to_owned(),
+            placement_thread_id: "T-unproved".to_owned(),
             cleanup_state: "owned".to_owned(),
             created_at_ms: 2,
             updated_at_ms: 2,
         })
         .unwrap();
-        db.complete_worker_binding("worker-unproved", "S-unproved", 1)
+        db.complete_worker_binding("worker-unproved", "T-unproved", 1)
             .unwrap();
-        db.fence_abandoned_worker_process("worker-unproved", "S-unproved", 1, "unproved")
+        db.fence_abandoned_worker_process("worker-unproved", "T-unproved", 1, "unproved")
             .unwrap();
 
-        let session = db.dedicated_session("S-unproved").unwrap().unwrap();
+        let session = db.dedicated_session("T-unproved").unwrap().unwrap();
         assert_eq!(session.state, "outcome_unknown");
         assert_eq!(
             session.worker_instance_id.as_deref(),
@@ -13058,7 +13113,7 @@ mod tests {
 
         db.settle_worker_process(
             "worker-unproved",
-            "S-unproved",
+            "T-unproved",
             1,
             "reaped",
             "credential_revoked",
@@ -13071,7 +13126,7 @@ mod tests {
                 .cleanup_state,
             "reaped"
         );
-        db.terminalize_dedicated_session("S-unproved", "worker-unproved", 1, "credential_revoked")
+        db.terminalize_dedicated_session("T-unproved", "worker-unproved", 1, "credential_revoked")
             .unwrap();
         assert_eq!(
             db.credential_profile("P-unproved")
@@ -13097,8 +13152,8 @@ mod tests {
             )
             .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
-            session_id: "S-start-unproved",
-            root_thread_id: "T-start-unproved",
+            placement_thread_id: "T-start-unproved",
+            chain_root_id: "T-start-unproved",
             owner_principal: "fp:operator",
             admitted_capsule_hash: &"a".repeat(64),
             workspace_id: "W-start-unproved",
@@ -13118,7 +13173,7 @@ mod tests {
             control_channel_identity: "fd:15".to_owned(),
             state: WorkerProcessState::Attached,
             daemon_generation_id: "daemon-one".to_owned(),
-            session_id: "S-start-unproved".to_owned(),
+            placement_thread_id: "T-start-unproved".to_owned(),
             cleanup_state: "owned".to_owned(),
             created_at_ms: 2,
             updated_at_ms: 2,
@@ -13130,7 +13185,7 @@ mod tests {
         assert_eq!(worker.process_identity, record.process_identity);
         assert_eq!(worker.state, WorkerProcessState::Dead);
         assert_eq!(worker.cleanup_state, "unproved");
-        let session = db.dedicated_session("S-start-unproved").unwrap().unwrap();
+        let session = db.dedicated_session("T-start-unproved").unwrap().unwrap();
         assert_eq!(session.state, "outcome_unknown");
         assert_eq!(session.send_boundary, "outcome_unknown");
         assert_eq!(
@@ -13168,8 +13223,8 @@ mod tests {
             )
             .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
-            session_id: "S-ready-fail",
-            root_thread_id: "T-ready-fail",
+            placement_thread_id: "T-ready-fail",
+            chain_root_id: "T-ready-fail",
             owner_principal: "fp:operator",
             admitted_capsule_hash: &"a".repeat(64),
             workspace_id: "W-ready-fail",
@@ -13189,7 +13244,7 @@ mod tests {
             control_channel_identity: "fd:11".to_owned(),
             state: WorkerProcessState::Attached,
             daemon_generation_id: "daemon-one".to_owned(),
-            session_id: "S-ready-fail".to_owned(),
+            placement_thread_id: "T-ready-fail".to_owned(),
             cleanup_state: "owned".to_owned(),
             created_at_ms: 2,
             updated_at_ms: 2,
@@ -13197,24 +13252,24 @@ mod tests {
         .unwrap();
         db.settle_worker_process(
             "worker-ready-fail",
-            "S-ready-fail",
+            "T-ready-fail",
             1,
             "reaped",
             "readiness failed",
         )
         .unwrap();
         assert_eq!(
-            db.dedicated_session("S-ready-fail").unwrap().unwrap().state,
+            db.dedicated_session("T-ready-fail").unwrap().unwrap().state,
             "recovering"
         );
         db.fail_dedicated_session_start(
-            "S-ready-fail",
+            "T-ready-fail",
             "worker-ready-fail",
             "readiness failed",
             true,
         )
         .unwrap();
-        let session = db.dedicated_session("S-ready-fail").unwrap().unwrap();
+        let session = db.dedicated_session("T-ready-fail").unwrap().unwrap();
         assert_eq!(session.state, "terminal");
         assert_eq!(session.terminal_reason.as_deref(), Some("readiness failed"));
         assert_eq!(
@@ -13246,22 +13301,22 @@ mod tests {
                     worker_instance_id, boot_identity_hash, session_capsule_hash,
                     boot_epoch, lifecycle_generation, process_identity,
                     control_channel_identity, state, daemon_generation_id,
-                    session_id, cleanup_state, created_at_ms, updated_at_ms
+                    placement_thread_id, cleanup_state, created_at_ms, updated_at_ms
                  ) VALUES ('worker-observe', ?1, ?2, 3, 1, '{}', 'fd:observe',
-                           'live', 'daemon-observe', 'S-observe', 'owned', 1, 1)",
+                           'live', 'daemon-observe', 'T-observe', 'owned', 1, 1)",
                 [&"e".repeat(64), &"a".repeat(64)],
             )
             .unwrap();
         db.conn
             .execute(
                 "INSERT INTO dedicated_session(
-                    session_id, root_thread_id, owner_principal, admitted_capsule_hash,
+                    placement_thread_id, chain_root_id, owner_principal, admitted_capsule_hash,
                     worker_instance_id, worker_boot_epoch, workspace_id,
                     candidate_required, credential_profile_id, credential_generation, remote_thread_id,
                     current_turn_id, state, send_boundary, candidate_snapshot_hash,
                     candidate_validation_hash, publication_result, terminal_reason,
                     created_at_ms, updated_at_ms
-                 ) VALUES ('S-observe', 'T-observe', 'fp:operator', ?1,
+                 ) VALUES ('T-observe', 'T-observe', 'fp:operator', ?1,
                            'worker-observe', 3, 'W-observe', 0, 'P-observe', 1,
                            NULL, NULL, 'idle', 'none', NULL, NULL, NULL, NULL, 1, 1)",
                 [&"a".repeat(64)],
@@ -13273,7 +13328,7 @@ mod tests {
         });
         assert_eq!(
             db.reserve_dedicated_observation_batch(
-                "S-observe",
+                "T-observe",
                 3,
                 1,
                 2,
@@ -13286,7 +13341,7 @@ mod tests {
         );
         assert_eq!(
             db.reserve_dedicated_observation_batch(
-                "S-observe",
+                "T-observe",
                 3,
                 1,
                 2,
@@ -13299,7 +13354,7 @@ mod tests {
         );
         assert!(
             db.reserve_dedicated_observation_batch(
-                "S-observe",
+                "T-observe",
                 3,
                 1,
                 2,
@@ -13310,13 +13365,13 @@ mod tests {
             .is_err(),
             "an accepted observation coordinate must retain one exact canonical batch"
         );
-        db.settle_dedicated_observation_batch("S-observe", 3, 1, &"b".repeat(64))
+        db.settle_dedicated_observation_batch("T-observe", 3, 1, &"b".repeat(64))
             .unwrap();
         assert!(
             db.conn
                 .query_row(
                     "SELECT canonical_batch_json FROM dedicated_session_observation_batch
-                      WHERE session_id='S-observe' AND worker_boot_epoch=3 AND first_sequence=1",
+                      WHERE placement_thread_id='T-observe' AND worker_boot_epoch=3 AND first_sequence=1",
                     [],
                     |row| row.get::<_, Option<String>>(0),
                 )
@@ -13326,7 +13381,7 @@ mod tests {
         );
         assert_eq!(
             db.reserve_dedicated_observation_batch(
-                "S-observe",
+                "T-observe",
                 3,
                 1,
                 2,
@@ -13339,7 +13394,7 @@ mod tests {
         );
         assert!(
             db.reserve_dedicated_observation_batch(
-                "S-observe",
+                "T-observe",
                 3,
                 4,
                 4,
@@ -13351,7 +13406,7 @@ mod tests {
         );
         assert_eq!(
             db.reserve_dedicated_observation_batch(
-                "S-observe",
+                "T-observe",
                 3,
                 3,
                 3,
@@ -13364,7 +13419,7 @@ mod tests {
         );
         assert!(
             db.reserve_dedicated_observation_batch(
-                "S-observe",
+                "T-observe",
                 2,
                 1,
                 1,
@@ -13378,13 +13433,13 @@ mod tests {
         assert_eq!(unfinished.len(), 1);
         assert_eq!(unfinished[0].first_sequence, 3);
         assert_eq!(unfinished[0].state, "append_contacting");
-        db.mark_dedicated_observation_batch_unknown("S-observe", 3, 3, &"c".repeat(64))
+        db.mark_dedicated_observation_batch_unknown("T-observe", 3, 3, &"c".repeat(64))
             .unwrap();
         assert_eq!(
             db.dedicated_observation_outbox_records().unwrap()[0].state,
             "append_unknown"
         );
-        db.discard_unappended_dedicated_observation_batch("S-observe", 3, 3, &"c".repeat(64))
+        db.discard_unappended_dedicated_observation_batch("T-observe", 3, 3, &"c".repeat(64))
             .unwrap();
         assert!(
             db.dedicated_observation_outbox_records()
@@ -13393,7 +13448,7 @@ mod tests {
         );
         assert_eq!(
             db.reserve_dedicated_observation_batch(
-                "S-observe",
+                "T-observe",
                 3,
                 3,
                 3,
@@ -13404,14 +13459,14 @@ mod tests {
             .unwrap(),
             ObservationBatchReservation::ContactAppend
         );
-        db.settle_dedicated_observation_batch("S-observe", 3, 3, &"c".repeat(64))
+        db.settle_dedicated_observation_batch("T-observe", 3, 3, &"c".repeat(64))
             .unwrap();
         let frontier = db
             .conn
             .query_row(
                 "SELECT COUNT(*), first_sequence, cumulative_event_count
                    FROM dedicated_session_observation_batch
-                  WHERE session_id='S-observe' AND state='settled'",
+                  WHERE placement_thread_id='T-observe' AND state='settled'",
                 [],
                 |row| {
                     Ok((
@@ -13427,9 +13482,9 @@ mod tests {
             .execute(
                 "UPDATE dedicated_session_observation_batch
                     SET cumulative_event_count=?2
-                  WHERE session_id=?1 AND state='settled'",
+                  WHERE placement_thread_id=?1 AND state='settled'",
                 params![
-                    "S-observe",
+                    "T-observe",
                     i64::try_from(ryeos_state::objects::MAX_HOSTED_SESSION_OBSERVATION_EVENTS)
                         .unwrap()
                 ],
@@ -13437,7 +13492,7 @@ mod tests {
             .unwrap();
         let ceiling = db
             .reserve_dedicated_observation_batch(
-                "S-observe",
+                "T-observe",
                 3,
                 4,
                 4,
@@ -13456,11 +13511,11 @@ mod tests {
             .revoke_credential_profile("P-observe", "fp:operator", 1)
             .unwrap();
         assert_eq!(generation, 2);
-        db.fence_abandoned_worker_process("worker-observe", "S-observe", 3, "unproved")
+        db.fence_abandoned_worker_process("worker-observe", "T-observe", 3, "unproved")
             .unwrap();
         assert!(
             db.reserve_dedicated_observation_batch(
-                "S-observe",
+                "T-observe",
                 3,
                 3,
                 3,
@@ -13524,8 +13579,8 @@ mod tests {
             generation
         );
         db.admit_dedicated_session(NewDedicatedSession {
-            session_id: "S-ledger",
-            root_thread_id: "T-ledger",
+            placement_thread_id: "T-ledger",
+            chain_root_id: "T-ledger",
             owner_principal: "fp:operator",
             admitted_capsule_hash: &"c".repeat(64),
             workspace_id: "W-ledger",
@@ -13546,19 +13601,19 @@ mod tests {
             control_channel_identity: "fd:10".to_owned(),
             state: WorkerProcessState::Attached,
             daemon_generation_id: "daemon-one".to_owned(),
-            session_id: "S-ledger".to_owned(),
+            placement_thread_id: "T-ledger".to_owned(),
             cleanup_state: "owned".to_owned(),
             created_at_ms: now,
             updated_at_ms: now,
         })
         .unwrap();
-        db.complete_worker_binding("worker-ledger", "S-ledger", 4)
+        db.complete_worker_binding("worker-ledger", "T-ledger", 4)
             .unwrap();
 
         let payload = serde_json::json!({"operation": "fixture_turn"});
         let command = db
             .reserve_dedicated_session_command(NewDedicatedSessionCommand {
-                session_id: "S-ledger",
+                placement_thread_id: "T-ledger",
                 idempotency_key: "request-one",
                 worker_boot_epoch: 4,
                 command_kind: "request",
@@ -13568,7 +13623,7 @@ mod tests {
             .unwrap();
         let replay = db
             .reserve_dedicated_session_command(NewDedicatedSessionCommand {
-                session_id: "S-ledger",
+                placement_thread_id: "T-ledger",
                 idempotency_key: "request-one",
                 worker_boot_epoch: 4,
                 command_kind: "request",
@@ -13577,10 +13632,10 @@ mod tests {
             })
             .unwrap();
         assert_eq!(command, replay);
-        db.mark_dedicated_command_contacted("S-ledger", command.command_sequence, 4)
+        db.mark_dedicated_command_contacted("T-ledger", command.command_sequence, 4)
             .unwrap();
         db.observe_dedicated_session_state(
-            "S-ledger",
+            "T-ledger",
             4,
             "idle",
             "turn_running",
@@ -13589,7 +13644,7 @@ mod tests {
         )
         .unwrap();
         db.create_dedicated_session_approval(NewDedicatedSessionApproval {
-            session_id: "S-ledger",
+            placement_thread_id: "T-ledger",
             approval_id: "approval-one",
             worker_instance_id: "worker-ledger",
             worker_boot_epoch: 4,
@@ -13603,7 +13658,7 @@ mod tests {
         let approval_decision_digest =
             ryeos_state::objects::canonical_value_digest(&approval_decision).unwrap();
         db.reserve_dedicated_session_approval_decision(
-            "S-ledger",
+            "T-ledger",
             "approval-one",
             4,
             &"e".repeat(64),
@@ -13615,7 +13670,7 @@ mod tests {
         .unwrap();
         assert!(
             db.reserve_dedicated_session_approval_decision(
-                "S-ledger",
+                "T-ledger",
                 "approval-one",
                 4,
                 &"e".repeat(64),
@@ -13627,7 +13682,7 @@ mod tests {
             .is_err()
         );
         db.mark_dedicated_approval_delivery_contacting(
-            "S-ledger",
+            "T-ledger",
             "approval-one",
             4,
             "reservation-one",
@@ -13635,7 +13690,7 @@ mod tests {
         )
         .unwrap();
         db.settle_dedicated_approval_delivery(
-            "S-ledger",
+            "T-ledger",
             "approval-one",
             4,
             "reservation-one",
@@ -13645,12 +13700,12 @@ mod tests {
         db.conn
             .execute(
                 "INSERT INTO dedicated_session_approval (
-                    session_id, approval_id, worker_instance_id, worker_boot_epoch,
+                    placement_thread_id, approval_id, worker_instance_id, worker_boot_epoch,
                     request_digest, operation_class, requested_authority_json, state,
                     decision_principal, decision_json, decision_digest, reservation_token,
                     expires_at_ms, created_at_ms, resolved_at_ms,
                     delivery_contacted_at_ms, delivery_settled_at_ms
-                 ) VALUES ('S-ledger', 'approval-recovered', 'worker-ledger', 4,
+                 ) VALUES ('T-ledger', 'approval-recovered', 'worker-ledger', 4,
                            ?1, 'fixture', '{}', 'delivery_unknown', 'fp:operator',
                            ?2, ?3, 'reservation-recovered', ?4, 1, 1, 1, NULL)",
                 params![
@@ -13662,7 +13717,7 @@ mod tests {
             )
             .unwrap();
         db.settle_recovered_dedicated_approval_delivery(
-            "S-ledger",
+            "T-ledger",
             "approval-recovered",
             4,
             "reservation-recovered",
@@ -13672,7 +13727,7 @@ mod tests {
         // Root-derived projection repair is idempotent and does not depend on
         // the session still retaining this historical worker epoch.
         db.settle_recovered_dedicated_approval_delivery(
-            "S-ledger",
+            "T-ledger",
             "approval-recovered",
             4,
             "reservation-recovered",
@@ -13683,7 +13738,7 @@ mod tests {
             db.conn
                 .query_row(
                     "SELECT state FROM dedicated_session_approval
-                      WHERE session_id='S-ledger' AND approval_id='approval-recovered'",
+                      WHERE placement_thread_id='T-ledger' AND approval_id='approval-recovered'",
                     [],
                     |row| row.get::<_, String>(0),
                 )
@@ -13691,7 +13746,7 @@ mod tests {
             "delivery_settled"
         );
         db.create_dedicated_session_approval(NewDedicatedSessionApproval {
-            session_id: "S-ledger",
+            placement_thread_id: "T-ledger",
             approval_id: "approval-uncontacted",
             worker_instance_id: "worker-ledger",
             worker_boot_epoch: 4,
@@ -13702,7 +13757,7 @@ mod tests {
         })
         .unwrap();
         db.reserve_dedicated_session_approval_decision(
-            "S-ledger",
+            "T-ledger",
             "approval-uncontacted",
             4,
             &"8".repeat(64),
@@ -13712,15 +13767,15 @@ mod tests {
             "reservation-uncontacted",
         )
         .unwrap();
-        db.reconcile_dedicated_approval_stale_epoch("S-ledger", "approval-uncontacted", 4)
+        db.reconcile_dedicated_approval_stale_epoch("T-ledger", "approval-uncontacted", 4)
             .unwrap();
-        db.reconcile_dedicated_approval_stale_epoch("S-ledger", "approval-uncontacted", 4)
+        db.reconcile_dedicated_approval_stale_epoch("T-ledger", "approval-uncontacted", 4)
             .unwrap();
         assert_eq!(
             db.conn
                 .query_row(
                     "SELECT state FROM dedicated_session_approval
-                      WHERE session_id='S-ledger' AND approval_id='approval-uncontacted'",
+                      WHERE placement_thread_id='T-ledger' AND approval_id='approval-uncontacted'",
                     [],
                     |row| row.get::<_, String>(0),
                 )
@@ -13728,7 +13783,7 @@ mod tests {
             "stale_epoch"
         );
         db.settle_dedicated_command(
-            "S-ledger",
+            "T-ledger",
             command.command_sequence,
             4,
             true,
@@ -13736,7 +13791,7 @@ mod tests {
         )
         .unwrap();
         db.observe_dedicated_session_state(
-            "S-ledger",
+            "T-ledger",
             4,
             "turn_running",
             "idle",
@@ -13745,12 +13800,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            db.dedicated_session("S-ledger").unwrap().unwrap().state,
+            db.dedicated_session("T-ledger").unwrap().unwrap().state,
             "idle"
         );
         let recovered_command = db
             .reserve_dedicated_session_command(NewDedicatedSessionCommand {
-                session_id: "S-ledger",
+                placement_thread_id: "T-ledger",
                 idempotency_key: "request-recovered",
                 worker_boot_epoch: 4,
                 command_kind: "request",
@@ -13758,16 +13813,16 @@ mod tests {
                 payload: &payload,
             })
             .unwrap();
-        db.mark_dedicated_command_contacted("S-ledger", recovered_command.command_sequence, 4)
+        db.mark_dedicated_command_contacted("T-ledger", recovered_command.command_sequence, 4)
             .unwrap();
         db.mark_dedicated_command_outcome_unknown(
-            "S-ledger",
+            "T-ledger",
             recovered_command.command_sequence,
             4,
         )
         .unwrap();
         db.settle_recovered_dedicated_command(
-            "S-ledger",
+            "T-ledger",
             recovered_command.command_sequence,
             4,
             &serde_json::json!({"redacted":true,"response_digest":"c".repeat(64)}),
@@ -13775,7 +13830,7 @@ mod tests {
         .unwrap();
         let recovered = db
             .reserve_dedicated_session_command(NewDedicatedSessionCommand {
-                session_id: "S-ledger",
+                placement_thread_id: "T-ledger",
                 idempotency_key: "request-recovered",
                 worker_boot_epoch: 4,
                 command_kind: "request",
@@ -13784,12 +13839,12 @@ mod tests {
             })
             .unwrap();
         assert_eq!(recovered.state, "completed");
-        let session = db.dedicated_session("S-ledger").unwrap().unwrap();
+        let session = db.dedicated_session("T-ledger").unwrap().unwrap();
         assert_eq!(session.state, "idle");
         assert_eq!(session.send_boundary, "settled");
         let expiry_command = db
             .reserve_dedicated_session_command(NewDedicatedSessionCommand {
-                session_id: "S-ledger",
+                placement_thread_id: "T-ledger",
                 idempotency_key: "request-expiry",
                 worker_boot_epoch: 4,
                 command_kind: "events",
@@ -13797,10 +13852,10 @@ mod tests {
                 payload: &payload,
             })
             .unwrap();
-        db.mark_dedicated_command_contacted("S-ledger", expiry_command.command_sequence, 4)
+        db.mark_dedicated_command_contacted("T-ledger", expiry_command.command_sequence, 4)
             .unwrap();
         db.observe_dedicated_session_state(
-            "S-ledger",
+            "T-ledger",
             4,
             "idle",
             "turn_running",
@@ -13809,7 +13864,7 @@ mod tests {
         )
         .unwrap();
         db.create_dedicated_session_approval(NewDedicatedSessionApproval {
-            session_id: "S-ledger",
+            placement_thread_id: "T-ledger",
             approval_id: "approval-expiry",
             worker_instance_id: "worker-ledger",
             worker_boot_epoch: 4,
@@ -13820,14 +13875,14 @@ mod tests {
         })
         .unwrap();
         db.observe_dedicated_session_approval_expiry(
-            "S-ledger",
+            "T-ledger",
             "approval-expiry",
             4,
             &"b".repeat(64),
         )
         .unwrap();
         db.create_dedicated_session_approval(NewDedicatedSessionApproval {
-            session_id: "S-ledger",
+            placement_thread_id: "T-ledger",
             approval_id: "approval-expiry-contacting",
             worker_instance_id: "worker-ledger",
             worker_boot_epoch: 4,
@@ -13838,7 +13893,7 @@ mod tests {
         })
         .unwrap();
         db.reserve_dedicated_session_approval_decision(
-            "S-ledger",
+            "T-ledger",
             "approval-expiry-contacting",
             4,
             &"d".repeat(64),
@@ -13849,7 +13904,7 @@ mod tests {
         )
         .unwrap();
         db.mark_dedicated_approval_delivery_contacting(
-            "S-ledger",
+            "T-ledger",
             "approval-expiry-contacting",
             4,
             "reservation-expiry-contacting",
@@ -13857,14 +13912,14 @@ mod tests {
         )
         .unwrap();
         db.observe_dedicated_session_approval_expiry(
-            "S-ledger",
+            "T-ledger",
             "approval-expiry-contacting",
             4,
             &"d".repeat(64),
         )
         .unwrap();
         db.mark_dedicated_approval_delivery_unknown(
-            "S-ledger",
+            "T-ledger",
             "approval-expiry-contacting",
             4,
             "reservation-expiry-contacting",
@@ -13873,7 +13928,7 @@ mod tests {
         .unwrap();
         assert!(
             db.settle_dedicated_approval_delivery(
-                "S-ledger",
+                "T-ledger",
                 "approval-expiry-contacting",
                 4,
                 "reservation-expiry-contacting",
@@ -13886,7 +13941,7 @@ mod tests {
             db.conn
                 .query_row(
                     "SELECT state FROM dedicated_session_approval
-                      WHERE session_id='S-ledger' AND approval_id='approval-expiry-contacting'",
+                      WHERE placement_thread_id='T-ledger' AND approval_id='approval-expiry-contacting'",
                     [],
                     |row| row.get::<_, String>(0),
                 )
@@ -13894,12 +13949,12 @@ mod tests {
             "expired"
         );
         assert!(
-            db.pending_dedicated_session_approvals("S-ledger")
+            db.pending_dedicated_session_approvals("T-ledger")
                 .unwrap()
                 .is_empty()
         );
         db.settle_dedicated_command(
-            "S-ledger",
+            "T-ledger",
             expiry_command.command_sequence,
             4,
             true,
@@ -13907,7 +13962,7 @@ mod tests {
         )
         .unwrap();
         db.observe_dedicated_session_state(
-            "S-ledger",
+            "T-ledger",
             4,
             "turn_running",
             "idle",
@@ -13922,7 +13977,7 @@ mod tests {
         );
         assert!(
             db.reserve_dedicated_session_command(NewDedicatedSessionCommand {
-                session_id: "S-ledger",
+                placement_thread_id: "T-ledger",
                 idempotency_key: "request-after-revocation",
                 worker_boot_epoch: 4,
                 command_kind: "request",
@@ -13942,14 +13997,14 @@ mod tests {
                 "INSERT INTO execution_workspace (
                     workspace_id, thread_id, launch_owner, backend_id,
                     base_snapshot, root_path, state, created_at_ms, updated_at_ms
-                 ) VALUES ('W-candidate', 'S-candidate', 'owner', 'trusted-daemon',
+                 ) VALUES ('W-candidate', 'T-candidate', 'owner', 'trusted-daemon',
                            'a', '/tmp/candidate', 'ready', 1, 1)",
                 [],
             )
             .unwrap();
         db.admit_dedicated_session(NewDedicatedSession {
-            session_id: "S-candidate",
-            root_thread_id: "S-candidate",
+            placement_thread_id: "T-candidate",
+            chain_root_id: "T-candidate",
             owner_principal: "fp:operator",
             admitted_capsule_hash: &"a".repeat(64),
             workspace_id: "W-candidate",
@@ -13970,19 +14025,19 @@ mod tests {
             control_channel_identity: "fd:11".to_owned(),
             state: WorkerProcessState::Attached,
             daemon_generation_id: "daemon-one".to_owned(),
-            session_id: "S-candidate".to_owned(),
+            placement_thread_id: "T-candidate".to_owned(),
             cleanup_state: "owned".to_owned(),
             created_at_ms: now,
             updated_at_ms: now,
         })
         .unwrap();
-        db.complete_worker_binding("worker-candidate", "S-candidate", 1)
+        db.complete_worker_binding("worker-candidate", "T-candidate", 1)
             .unwrap();
-        db.reserve_dedicated_session_completion("S-candidate", 1)
+        db.reserve_dedicated_session_completion("T-candidate", 1)
             .unwrap();
-        db.settle_worker_process("worker-candidate", "S-candidate", 1, "reaped", "completed")
+        db.settle_worker_process("worker-candidate", "T-candidate", 1, "reaped", "completed")
             .unwrap();
-        db.terminalize_dedicated_session("S-candidate", "worker-candidate", 1, "completed")
+        db.terminalize_dedicated_session("T-candidate", "worker-candidate", 1, "completed")
             .unwrap();
         db.conn
             .execute(
@@ -13993,54 +14048,54 @@ mod tests {
             .unwrap();
         let candidate = "c".repeat(64);
         assert!(
-            db.bind_dedicated_session_candidate("S-candidate", &candidate)
+            db.bind_dedicated_session_candidate("T-candidate", &candidate)
                 .unwrap()
         );
-        let frozen = db.dedicated_session("S-candidate").unwrap().unwrap();
+        let frozen = db.dedicated_session("T-candidate").unwrap().unwrap();
         assert_eq!(frozen.state, "frozen");
         let plan = frozen.candidate_validation_hash.unwrap();
         assert!(
-            db.reserve_dedicated_candidate_publication("S-candidate", &candidate)
+            db.reserve_dedicated_candidate_publication("T-candidate", &candidate)
                 .is_err()
         );
         assert!(
-            db.reserve_dedicated_candidate_validation("S-candidate", &candidate, &"d".repeat(64))
+            db.reserve_dedicated_candidate_validation("T-candidate", &candidate, &"d".repeat(64))
                 .is_err()
         );
-        db.reserve_dedicated_candidate_validation("S-candidate", &candidate, &plan)
+        db.reserve_dedicated_candidate_validation("T-candidate", &candidate, &plan)
             .unwrap();
-        db.fail_dedicated_candidate_disposition("S-candidate", "verifying")
+        db.fail_dedicated_candidate_disposition("T-candidate", "verifying")
             .unwrap();
         assert_eq!(
-            db.dedicated_session("S-candidate").unwrap().unwrap().state,
+            db.dedicated_session("T-candidate").unwrap().unwrap().state,
             "frozen"
         );
-        db.reserve_dedicated_candidate_validation("S-candidate", &candidate, &plan)
+        db.reserve_dedicated_candidate_validation("T-candidate", &candidate, &plan)
             .unwrap();
         db.settle_dedicated_candidate_validation(
-            "S-candidate",
+            "T-candidate",
             &candidate,
             &plan,
             &serde_json::json!({"ok":true}),
         )
         .unwrap();
         assert_eq!(
-            db.dedicated_session("S-candidate").unwrap().unwrap().state,
+            db.dedicated_session("T-candidate").unwrap().unwrap().state,
             "publish_ready"
         );
-        db.reserve_dedicated_candidate_publication("S-candidate", &candidate)
+        db.reserve_dedicated_candidate_publication("T-candidate", &candidate)
             .unwrap();
         let unknown_result = format!("publication_unknown:{candidate}");
-        db.settle_dedicated_candidate_publication("S-candidate", &candidate, &unknown_result)
+        db.settle_dedicated_candidate_publication("T-candidate", &candidate, &unknown_result)
             .unwrap();
-        let unknown = db.dedicated_session("S-candidate").unwrap().unwrap();
+        let unknown = db.dedicated_session("T-candidate").unwrap().unwrap();
         assert_eq!(unknown.state, "terminal");
         assert_eq!(
             unknown.publication_result.as_deref(),
             Some(unknown_result.as_str())
         );
         assert!(
-            db.reserve_dedicated_candidate_publication("S-candidate", &candidate)
+            db.reserve_dedicated_candidate_publication("T-candidate", &candidate)
                 .is_err()
         );
 
@@ -14049,15 +14104,15 @@ mod tests {
         db.conn
             .execute(
                 "UPDATE dedicated_session SET state='publish_ready', publication_result='retained'
-                  WHERE session_id='S-candidate'",
+                  WHERE placement_thread_id='T-candidate'",
                 [],
             )
             .unwrap();
-        db.reserve_dedicated_candidate_discard("S-candidate", &candidate)
+        db.reserve_dedicated_candidate_discard("T-candidate", &candidate)
             .unwrap();
-        db.settle_dedicated_candidate_discard("S-candidate", &candidate)
+        db.settle_dedicated_candidate_discard("T-candidate", &candidate)
             .unwrap();
-        let discarded = db.dedicated_session("S-candidate").unwrap().unwrap();
+        let discarded = db.dedicated_session("T-candidate").unwrap().unwrap();
         assert_eq!(discarded.state, "terminal");
         assert_eq!(discarded.publication_result.as_deref(), Some("discarded"));
     }

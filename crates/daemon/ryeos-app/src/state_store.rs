@@ -3952,9 +3952,12 @@ impl StateStore {
         g.runtime_db.admit_dedicated_session(session)
     }
 
-    pub fn dedicated_session(&self, session_id: &str) -> Result<Option<DedicatedSessionRecord>> {
+    pub fn dedicated_session(
+        &self,
+        placement_thread_id: &str,
+    ) -> Result<Option<DedicatedSessionRecord>> {
         let g = self.lock()?;
-        g.runtime_db.dedicated_session(session_id)
+        g.runtime_db.dedicated_session(placement_thread_id)
     }
 
     pub fn dedicated_sessions_for_credential_profile(
@@ -3981,24 +3984,24 @@ impl StateStore {
 
     pub fn terminalize_unattached_dedicated_session(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         reason: &str,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db
-            .terminalize_unattached_dedicated_session(session_id, reason)
+            .terminalize_unattached_dedicated_session(placement_thread_id, reason)
     }
 
     pub fn fail_dedicated_session_start(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_instance_id: &str,
         reason: &str,
         cleanup_proved: bool,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.fail_dedicated_session_start(
-            session_id,
+            placement_thread_id,
             worker_instance_id,
             reason,
             cleanup_proved,
@@ -4007,14 +4010,14 @@ impl StateStore {
 
     pub fn bind_dedicated_remote_thread(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_instance_id: &str,
         worker_boot_epoch: u64,
         remote_thread_id: &str,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.bind_dedicated_remote_thread(
-            session_id,
+            placement_thread_id,
             worker_instance_id,
             worker_boot_epoch,
             remote_thread_id,
@@ -4023,13 +4026,13 @@ impl StateStore {
 
     pub fn observe_dedicated_remote_reattach(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_boot_epoch: u64,
         remote_thread_id: &str,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.observe_dedicated_remote_reattach(
-            session_id,
+            placement_thread_id,
             worker_boot_epoch,
             remote_thread_id,
         )
@@ -4037,14 +4040,14 @@ impl StateStore {
 
     pub fn settle_dedicated_remote_recovery_status(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_boot_epoch: u64,
         remote_thread_id: &str,
         remote_status: &str,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.settle_dedicated_remote_recovery_status(
-            session_id,
+            placement_thread_id,
             worker_boot_epoch,
             remote_thread_id,
             remote_status,
@@ -4053,13 +4056,13 @@ impl StateStore {
 
     pub fn prepare_dedicated_session_recovery(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         credential_generation: u64,
         credential_lock_owner: &str,
     ) -> Result<u64> {
         let g = self.lock()?;
         g.runtime_db.prepare_dedicated_session_recovery(
-            session_id,
+            placement_thread_id,
             credential_generation,
             credential_lock_owner,
         )
@@ -4067,23 +4070,26 @@ impl StateStore {
 
     pub fn fail_dedicated_candidate_disposition(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         reserved_state: &str,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db
-            .fail_dedicated_candidate_disposition(session_id, reserved_state)
+            .fail_dedicated_candidate_disposition(placement_thread_id, reserved_state)
     }
 
-    pub fn cancel_dedicated_candidate_for_root_stop(&self, session_id: &str) -> Result<()> {
+    pub fn cancel_dedicated_candidate_for_root_stop(
+        &self,
+        placement_thread_id: &str,
+    ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db
-            .cancel_dedicated_candidate_for_root_stop(session_id)
+            .cancel_dedicated_candidate_for_root_stop(placement_thread_id)
     }
 
     pub fn observe_dedicated_session_state(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_boot_epoch: u64,
         expected: &str,
         next: &str,
@@ -4092,7 +4098,7 @@ impl StateStore {
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.observe_dedicated_session_state(
-            session_id,
+            placement_thread_id,
             worker_boot_epoch,
             expected,
             next,
@@ -4170,21 +4176,21 @@ impl StateStore {
 
     pub fn observe_session_credential_enrollment(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_instance_id: &str,
         worker_boot_epoch: u64,
         sanitized_account: &Value,
     ) -> Result<u64> {
         let g = self.lock()?;
         let login_epoch = g.runtime_db.observe_session_credential_enrollment(
-            session_id,
+            placement_thread_id,
             worker_instance_id,
             worker_boot_epoch,
             sanitized_account,
         )?;
         let profile_id = g
             .runtime_db
-            .dedicated_session(session_id)?
+            .dedicated_session(placement_thread_id)?
             .ok_or_else(|| anyhow!("credential login session disappeared"))?
             .credential_profile_id;
         persist_credential_profile_authority_locked(&g, &profile_id)?;
@@ -4299,13 +4305,13 @@ impl StateStore {
 
     pub fn mark_dedicated_command_contacted(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         command_sequence: u64,
         worker_boot_epoch: u64,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.mark_dedicated_command_contacted(
-            session_id,
+            placement_thread_id,
             command_sequence,
             worker_boot_epoch,
         )
@@ -4313,7 +4319,7 @@ impl StateStore {
 
     pub fn settle_dedicated_command(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         command_sequence: u64,
         worker_boot_epoch: u64,
         succeeded: bool,
@@ -4321,7 +4327,7 @@ impl StateStore {
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.settle_dedicated_command(
-            session_id,
+            placement_thread_id,
             command_sequence,
             worker_boot_epoch,
             succeeded,
@@ -4331,14 +4337,14 @@ impl StateStore {
 
     pub fn settle_recovered_dedicated_command(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         command_sequence: u64,
         worker_boot_epoch: u64,
         result: &Value,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.settle_recovered_dedicated_command(
-            session_id,
+            placement_thread_id,
             command_sequence,
             worker_boot_epoch,
             result,
@@ -4347,14 +4353,14 @@ impl StateStore {
 
     pub fn settle_terminal_recovered_dedicated_command(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         command_sequence: u64,
         worker_boot_epoch: u64,
         result: &Value,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.settle_terminal_recovered_dedicated_command(
-            session_id,
+            placement_thread_id,
             command_sequence,
             worker_boot_epoch,
             result,
@@ -4363,13 +4369,13 @@ impl StateStore {
 
     pub fn mark_dedicated_command_outcome_unknown(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         command_sequence: u64,
         worker_boot_epoch: u64,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.mark_dedicated_command_outcome_unknown(
-            session_id,
+            placement_thread_id,
             command_sequence,
             worker_boot_epoch,
         )
@@ -4377,7 +4383,7 @@ impl StateStore {
 
     pub fn reserve_dedicated_observation_batch(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_boot_epoch: u64,
         first_sequence: u64,
         through_sequence: u64,
@@ -4387,7 +4393,7 @@ impl StateStore {
     ) -> Result<ObservationBatchReservation> {
         let g = self.lock()?;
         g.runtime_db.reserve_dedicated_observation_batch(
-            session_id,
+            placement_thread_id,
             worker_boot_epoch,
             first_sequence,
             through_sequence,
@@ -4399,14 +4405,14 @@ impl StateStore {
 
     pub fn settle_dedicated_observation_batch(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_boot_epoch: u64,
         first_sequence: u64,
         batch_digest: &str,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.settle_dedicated_observation_batch(
-            session_id,
+            placement_thread_id,
             worker_boot_epoch,
             first_sequence,
             batch_digest,
@@ -4422,14 +4428,14 @@ impl StateStore {
 
     pub fn discard_unappended_dedicated_observation_batch(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_boot_epoch: u64,
         first_sequence: u64,
         batch_digest: &str,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.discard_unappended_dedicated_observation_batch(
-            session_id,
+            placement_thread_id,
             worker_boot_epoch,
             first_sequence,
             batch_digest,
@@ -4438,14 +4444,14 @@ impl StateStore {
 
     pub fn mark_dedicated_observation_batch_unknown(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_boot_epoch: u64,
         first_sequence: u64,
         batch_digest: &str,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.mark_dedicated_observation_batch_unknown(
-            session_id,
+            placement_thread_id,
             worker_boot_epoch,
             first_sequence,
             batch_digest,
@@ -4462,16 +4468,17 @@ impl StateStore {
 
     pub fn pending_dedicated_session_approvals(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
     ) -> Result<Vec<runtime_db::DedicatedSessionApprovalRecord>> {
         let g = self.lock()?;
-        g.runtime_db.pending_dedicated_session_approvals(session_id)
+        g.runtime_db
+            .pending_dedicated_session_approvals(placement_thread_id)
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn dedicated_approval_has_exact_state(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         approval_id: &str,
         worker_boot_epoch: u64,
         request_digest: &str,
@@ -4481,7 +4488,7 @@ impl StateStore {
     ) -> Result<bool> {
         let g = self.lock()?;
         g.runtime_db.dedicated_approval_has_exact_state(
-            session_id,
+            placement_thread_id,
             approval_id,
             worker_boot_epoch,
             request_digest,
@@ -4498,13 +4505,13 @@ impl StateStore {
 
     pub fn reconcile_dedicated_approval_delivery_unknown(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         approval_id: &str,
         worker_boot_epoch: u64,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.reconcile_dedicated_approval_delivery_unknown(
-            session_id,
+            placement_thread_id,
             approval_id,
             worker_boot_epoch,
         )
@@ -4512,13 +4519,13 @@ impl StateStore {
 
     pub fn reconcile_dedicated_approval_stale_epoch(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         approval_id: &str,
         worker_boot_epoch: u64,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.reconcile_dedicated_approval_stale_epoch(
-            session_id,
+            placement_thread_id,
             approval_id,
             worker_boot_epoch,
         )
@@ -4526,18 +4533,18 @@ impl StateStore {
 
     pub fn reserve_dedicated_session_completion(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_boot_epoch: u64,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db
-            .reserve_dedicated_session_completion(session_id, worker_boot_epoch)
+            .reserve_dedicated_session_completion(placement_thread_id, worker_boot_epoch)
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn reserve_dedicated_session_approval_decision(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         approval_id: &str,
         worker_boot_epoch: u64,
         request_digest: &str,
@@ -4548,7 +4555,7 @@ impl StateStore {
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.reserve_dedicated_session_approval_decision(
-            session_id,
+            placement_thread_id,
             approval_id,
             worker_boot_epoch,
             request_digest,
@@ -4561,7 +4568,7 @@ impl StateStore {
 
     pub fn mark_dedicated_approval_delivery_contacting(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         approval_id: &str,
         worker_boot_epoch: u64,
         reservation_token: &str,
@@ -4569,7 +4576,7 @@ impl StateStore {
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.mark_dedicated_approval_delivery_contacting(
-            session_id,
+            placement_thread_id,
             approval_id,
             worker_boot_epoch,
             reservation_token,
@@ -4579,7 +4586,7 @@ impl StateStore {
 
     pub fn settle_dedicated_approval_delivery(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         approval_id: &str,
         worker_boot_epoch: u64,
         reservation_token: &str,
@@ -4587,7 +4594,7 @@ impl StateStore {
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.settle_dedicated_approval_delivery(
-            session_id,
+            placement_thread_id,
             approval_id,
             worker_boot_epoch,
             reservation_token,
@@ -4597,7 +4604,7 @@ impl StateStore {
 
     pub fn settle_recovered_dedicated_approval_delivery(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         approval_id: &str,
         worker_boot_epoch: u64,
         reservation_token: &str,
@@ -4605,7 +4612,7 @@ impl StateStore {
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.settle_recovered_dedicated_approval_delivery(
-            session_id,
+            placement_thread_id,
             approval_id,
             worker_boot_epoch,
             reservation_token,
@@ -4615,7 +4622,7 @@ impl StateStore {
 
     pub fn mark_dedicated_approval_delivery_unknown(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         approval_id: &str,
         worker_boot_epoch: u64,
         reservation_token: &str,
@@ -4623,7 +4630,7 @@ impl StateStore {
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.mark_dedicated_approval_delivery_unknown(
-            session_id,
+            placement_thread_id,
             approval_id,
             worker_boot_epoch,
             reservation_token,
@@ -4633,25 +4640,28 @@ impl StateStore {
 
     pub fn expire_dedicated_session_approval(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         approval_id: &str,
         worker_boot_epoch: u64,
     ) -> Result<()> {
         let g = self.lock()?;
-        g.runtime_db
-            .expire_dedicated_session_approval(session_id, approval_id, worker_boot_epoch)
+        g.runtime_db.expire_dedicated_session_approval(
+            placement_thread_id,
+            approval_id,
+            worker_boot_epoch,
+        )
     }
 
     pub fn observe_dedicated_session_approval_expiry(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         approval_id: &str,
         worker_boot_epoch: u64,
         request_digest: &str,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.observe_dedicated_session_approval_expiry(
-            session_id,
+            placement_thread_id,
             approval_id,
             worker_boot_epoch,
             request_digest,
@@ -4685,14 +4695,14 @@ impl StateStore {
     pub fn fence_abandoned_worker_process(
         &self,
         worker_instance_id: &str,
-        session_id: &str,
+        placement_thread_id: &str,
         boot_epoch: u64,
         cleanup_state: &str,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.fence_abandoned_worker_process(
             worker_instance_id,
-            session_id,
+            placement_thread_id,
             boot_epoch,
             cleanup_state,
         )
@@ -4701,18 +4711,18 @@ impl StateStore {
     pub fn complete_worker_binding(
         &self,
         worker_instance_id: &str,
-        session_id: &str,
+        placement_thread_id: &str,
         boot_epoch: u64,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db
-            .complete_worker_binding(worker_instance_id, session_id, boot_epoch)
+            .complete_worker_binding(worker_instance_id, placement_thread_id, boot_epoch)
     }
 
     pub fn settle_worker_process(
         &self,
         worker_instance_id: &str,
-        session_id: &str,
+        placement_thread_id: &str,
         boot_epoch: u64,
         cleanup_state: &str,
         terminal_reason: &str,
@@ -4720,7 +4730,7 @@ impl StateStore {
         let g = self.lock()?;
         g.runtime_db.settle_worker_process(
             worker_instance_id,
-            session_id,
+            placement_thread_id,
             boot_epoch,
             cleanup_state,
             terminal_reason,
@@ -4729,14 +4739,14 @@ impl StateStore {
 
     pub fn terminalize_dedicated_session(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         worker_instance_id: &str,
         boot_epoch: u64,
         reason: &str,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.terminalize_dedicated_session(
-            session_id,
+            placement_thread_id,
             worker_instance_id,
             boot_epoch,
             reason,
@@ -4745,33 +4755,33 @@ impl StateStore {
 
     pub fn bind_dedicated_session_candidate(
         &self,
-        root_thread_id: &str,
+        placement_thread_id: &str,
         snapshot_hash: &str,
     ) -> Result<bool> {
         let g = self.lock()?;
         g.runtime_db
-            .bind_dedicated_session_candidate(root_thread_id, snapshot_hash)
+            .bind_dedicated_session_candidate(placement_thread_id, snapshot_hash)
     }
 
     pub fn reserve_dedicated_candidate_publication(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         candidate_snapshot_hash: &str,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db
-            .reserve_dedicated_candidate_publication(session_id, candidate_snapshot_hash)
+            .reserve_dedicated_candidate_publication(placement_thread_id, candidate_snapshot_hash)
     }
 
     pub fn settle_dedicated_candidate_publication(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         candidate_snapshot_hash: &str,
         publication_result: &str,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.settle_dedicated_candidate_publication(
-            session_id,
+            placement_thread_id,
             candidate_snapshot_hash,
             publication_result,
         )
@@ -4779,13 +4789,13 @@ impl StateStore {
 
     pub fn reserve_dedicated_candidate_validation(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         candidate_snapshot_hash: &str,
         candidate_validation_hash: &str,
     ) -> Result<bool> {
         let g = self.lock()?;
         g.runtime_db.reserve_dedicated_candidate_validation(
-            session_id,
+            placement_thread_id,
             candidate_snapshot_hash,
             candidate_validation_hash,
         )
@@ -4793,14 +4803,14 @@ impl StateStore {
 
     pub fn settle_dedicated_candidate_validation(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         candidate_snapshot_hash: &str,
         candidate_validation_hash: &str,
         evidence: &serde_json::Value,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.settle_dedicated_candidate_validation(
-            session_id,
+            placement_thread_id,
             candidate_snapshot_hash,
             candidate_validation_hash,
             evidence,
@@ -4809,22 +4819,22 @@ impl StateStore {
 
     pub fn reserve_dedicated_candidate_discard(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         candidate_snapshot_hash: &str,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db
-            .reserve_dedicated_candidate_discard(session_id, candidate_snapshot_hash)
+            .reserve_dedicated_candidate_discard(placement_thread_id, candidate_snapshot_hash)
     }
 
     pub fn settle_dedicated_candidate_discard(
         &self,
-        session_id: &str,
+        placement_thread_id: &str,
         candidate_snapshot_hash: &str,
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db
-            .settle_dedicated_candidate_discard(session_id, candidate_snapshot_hash)
+            .settle_dedicated_candidate_discard(placement_thread_id, candidate_snapshot_hash)
     }
 
     /// Run a state publication while the exact execution launch owner remains
@@ -7935,6 +7945,44 @@ impl StateStore {
             finished_at: thread_row.finished_at,
             runtime,
         }))
+    }
+
+    /// Resolve the authoritative continuation tip for one stable execution
+    /// chain. Hosted-worker callers address the chain root; operational state
+    /// is always fenced to the exact placement thread at this verified tip.
+    pub fn current_chain_placement_thread_id(&self, chain_root_id: &str) -> Result<Option<String>> {
+        let mut cursor = chain_root_id.to_owned();
+        let mut visited = std::collections::HashSet::new();
+        for _ in 0..1024 {
+            if !visited.insert(cursor.clone()) {
+                bail!("execution continuation lineage contains a cycle");
+            }
+            let Some(thread) = self.get_thread(&cursor)? else {
+                return if cursor == chain_root_id {
+                    Ok(None)
+                } else {
+                    bail!("execution continuation successor `{cursor}` disappeared")
+                };
+            };
+            if thread.chain_root_id != chain_root_id {
+                bail!("execution continuation escaped its stable chain root");
+            }
+            match thread.successor_thread_id {
+                Some(successor_thread_id) => {
+                    let successor = self
+                        .get_thread(&successor_thread_id)?
+                        .ok_or_else(|| anyhow!("execution continuation successor disappeared"))?;
+                    if successor.chain_root_id != chain_root_id
+                        || successor.upstream_thread_id.as_deref() != Some(cursor.as_str())
+                    {
+                        bail!("execution continuation successor has contradictory lineage");
+                    }
+                    cursor = successor_thread_id;
+                }
+                None => return Ok(Some(cursor)),
+            }
+        }
+        bail!("execution continuation lineage exceeds its bounded depth")
     }
 
     /// Read the immutable generation pinned by authoritative signed history.
@@ -13374,6 +13422,18 @@ mod tests {
         assert_eq!(publication.successor.status, ThreadStatus::Created.as_str());
         assert!(publication.successor.runtime.pid.is_none());
         assert!(publication.successor.runtime.launch_metadata.is_none());
+        assert_eq!(
+            store
+                .current_chain_placement_thread_id(source_thread_id)
+                .expect("resolve authoritative placement"),
+            Some(successor_thread_id.to_string())
+        );
+        assert_eq!(
+            store
+                .current_chain_placement_thread_id("T-absent-chain")
+                .expect("resolve absent chain"),
+            None
+        );
 
         let g = store.lock().expect("inspect continuation publication");
         let planning = g

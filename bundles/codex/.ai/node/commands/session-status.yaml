@@ -1,9 +1,9 @@
-# ryeos:signed:2026-08-24T03:55:20Z:cb15c4e4edd5af23254b0f702470dd1b8926b6b16e22d5f4abf616ddf48cfe09:9kJQDqVZrL0xuWIUBcVO+uzw4iVtSTJBd0f9YgVUQkzOxdBtzP5cj5+dRuiHlOf7k9o87WGH4SIszPjg1cEhBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-26T10:09:18Z:475862b9902b0f50f8faf3df4878c1b5d0c29470ca5038e9770d6c13c9ac8388:M4jaPD9YPSAk+LsocSNMgRz8ZlsGX6QrLUuL9dbFHeZdgUDMtUgp5W0/Agiu5D22eJ2IPsR+YSjJyNoEZHxfCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [codex, session, status]
 description: "Read the durable projection for one Codex session"
 forms:
   - slots:
-      - field: session_id
+      - field: chain_root_id
 dispatch:
   kind: execute_ref
   execute: service:worker-executions/status

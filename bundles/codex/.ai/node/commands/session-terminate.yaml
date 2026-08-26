@@ -1,9 +1,9 @@
-# ryeos:signed:2026-08-24T03:55:20Z:6a8f1560eb26f09e0ae6d657ab6ef62ddd1d4c5ad0ec0afa0d34591d86a89be3:G+62d/cUEWn7V5r/adYmnZVaTx4FNGU0pOVoZ4IInqY3pZk8a2CBVm+bJ6C2EE0+SAE39RXA+NnIFF5ZnPjzBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-26T10:09:18Z:8af10f86250d345acd4238a40c998b9146d64fc734bea1f6a6d0948c772431df:7j2rmQX50FtuSMdvH0isAWOebA2LlhBhc25zE/tnhkh0q1F/YcEqX0NS3yNU21vrButuWyqDowHpcloJiYaDCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [codex, session, terminate]
 description: "Stop and terminally settle one Codex session"
 forms:
   - slots:
-      - field: session_id
+      - field: chain_root_id
       - field: reason
 dispatch:
   kind: execute_ref

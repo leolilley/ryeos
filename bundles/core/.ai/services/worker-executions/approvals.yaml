@@ -1,8 +1,8 @@
-# ryeos:signed:2026-08-19T03:02:47Z:29161c1c7604cdc249606b5f3fdf52a2a4cde772a1d5a99f1305fd3fbdf469ed:1I3v1Rgk9h256qMiB5+72vp+IpMNi2KJsW/6brfqU+FcyJVRKXWEyoRiQzyxtGRBeLiMnui36x7gjPcovTGEDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-26T10:09:18Z:55113da263a3047c07d746a0c0f87992123a38e604ad40a6590584974bae88ab:TOziweUXsgzwBwlZ0x9YaVzUbkOfjhBcy14AGWsqig54PNRM6PEu9MusLtfw2CC8qh4/gN76krXWop6bWy+ADw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: worker-executions
 name: approvals
 kind: service
 endpoint: worker-executions.approvals
 description: List pending owner-authorized worker execution approvals.
 required_caps: ["ryeos.execute.service.worker-executions/approvals"]
-schema: {session_id: string}
+schema: {chain_root_id: string}

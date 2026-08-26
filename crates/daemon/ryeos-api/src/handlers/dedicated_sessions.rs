@@ -14,7 +14,7 @@ use ryeos_app::persistent_session::ExclusiveRetirementOutcome;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
-fn disposition_operation_lock(session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+fn disposition_operation_lock(placement_thread_id: &str) -> Arc<tokio::sync::Mutex<()>> {
     static LOCKS: OnceLock<std::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
         OnceLock::new();
     let mut locks = LOCKS
@@ -22,15 +22,15 @@ fn disposition_operation_lock(session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         .lock()
         .expect("candidate disposition lock poisoned");
     locks.retain(|_, lock| lock.strong_count() != 0);
-    if let Some(lock) = locks.get(session_id).and_then(Weak::upgrade) {
+    if let Some(lock) = locks.get(placement_thread_id).and_then(Weak::upgrade) {
         return lock;
     }
     let lock = Arc::new(tokio::sync::Mutex::new(()));
-    locks.insert(session_id.to_owned(), Arc::downgrade(&lock));
+    locks.insert(placement_thread_id.to_owned(), Arc::downgrade(&lock));
     lock
 }
 
-fn approval_delivery_lock(session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+fn approval_delivery_lock(placement_thread_id: &str) -> Arc<tokio::sync::Mutex<()>> {
     static LOCKS: OnceLock<std::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
         OnceLock::new();
     let mut locks = LOCKS
@@ -38,11 +38,11 @@ fn approval_delivery_lock(session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         .lock()
         .expect("approval delivery lock map poisoned");
     locks.retain(|_, lock| lock.strong_count() != 0);
-    if let Some(lock) = locks.get(session_id).and_then(Weak::upgrade) {
+    if let Some(lock) = locks.get(placement_thread_id).and_then(Weak::upgrade) {
         return lock;
     }
     let lock = Arc::new(tokio::sync::Mutex::new(()));
-    locks.insert(session_id.to_owned(), Arc::downgrade(&lock));
+    locks.insert(placement_thread_id.to_owned(), Arc::downgrade(&lock));
     lock
 }
 
@@ -55,7 +55,8 @@ fn find_authoritative_approval_delivery_settlement(
 ) -> Result<Option<String>, HandlerError> {
     let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.hosted_approval_delivery_fact.v1",
-        "session_id":session.session_id,
+        "chain_root_id":session.chain_root_id,
+        "placement_thread_id":session.placement_thread_id,
         "approval_id":approval.approval_id,
         "reservation_token":reservation_token,
         "stage":"delivery_settled",
@@ -63,7 +64,7 @@ fn find_authoritative_approval_delivery_settlement(
     .map_err(internal)?;
     let fact = ryeos_app::authoritative_root_fact::lookup(
         state,
-        &session.root_thread_id,
+        &session.placement_thread_id,
         "hosted_approval.delivery_settled",
         &operation_id,
     )
@@ -84,7 +85,10 @@ fn find_authoritative_approval_delivery_settlement(
     };
     let exact = payload.get("schema").and_then(Value::as_u64) == Some(1)
         && payload.get("operation_id").and_then(Value::as_str) == Some(operation_id.as_str())
-        && payload.get("session_id").and_then(Value::as_str) == Some(session.session_id.as_str())
+        && payload.get("chain_root_id").and_then(Value::as_str)
+            == Some(session.chain_root_id.as_str())
+        && payload.get("placement_thread_id").and_then(Value::as_str)
+            == Some(session.placement_thread_id.as_str())
         && payload.get("approval_id").and_then(Value::as_str)
             == Some(approval.approval_id.as_str())
         && payload.get("worker_boot_epoch").and_then(Value::as_u64)
@@ -119,7 +123,7 @@ fn has_authoritative_candidate_publication_reservation(
 ) -> Result<bool, HandlerError> {
     let fact = ryeos_app::authoritative_root_fact::lookup(
         state,
-        &session.root_thread_id,
+        &session.placement_thread_id,
         "hosted_candidate.publication_reserved",
         operation_id,
     )
@@ -143,7 +147,10 @@ fn has_authoritative_candidate_publication_reservation(
         && payload.get("origin").and_then(Value::as_str) == Some("owner_authorized")
         && payload.get("owner_principal").and_then(Value::as_str)
             == Some(session.owner_principal.as_str())
-        && payload.get("session_id").and_then(Value::as_str) == Some(session.session_id.as_str())
+        && payload.get("chain_root_id").and_then(Value::as_str)
+            == Some(session.chain_root_id.as_str())
+        && payload.get("placement_thread_id").and_then(Value::as_str)
+            == Some(session.placement_thread_id.as_str())
         && payload
             .get("candidate_snapshot_hash")
             .and_then(Value::as_str)
@@ -169,18 +176,28 @@ fn has_authoritative_candidate_publication_reservation(
 fn owned_session(
     state: &AppState,
     ctx: &HandlerContext,
-    session_id: &str,
+    chain_root_id: &str,
 ) -> Result<ryeos_app::state_store::DedicatedSessionRecord, HandlerError> {
     // Initial hosted execution is deliberately a single configured-operator
     // trust domain. Enforce that predicate before lookup so discovery and
     // timing do not turn owner rows into an accidental multi-tenant boundary.
     ryeos_app::operator_external_content::require_configured_operator(state, ctx)
         .map_err(|_| HandlerError::Forbidden("configured operator required".into()))?;
-    let session = state
+    let placement_thread_id = state
         .state_store
-        .dedicated_session(session_id)
+        .current_chain_placement_thread_id(chain_root_id)
         .map_err(internal)?
         .ok_or(HandlerError::NotFound)?;
+    let session = state
+        .state_store
+        .dedicated_session(&placement_thread_id)
+        .map_err(internal)?
+        .ok_or(HandlerError::NotFound)?;
+    if session.chain_root_id != chain_root_id {
+        return Err(internal(
+            "hosted execution projection contradicts its authoritative chain",
+        ));
+    }
     ctx.require_owner(Some(&session.owner_principal))?;
     Ok(session)
 }
@@ -188,7 +205,7 @@ fn owned_session(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatusRequest {
-    session_id: String,
+    chain_root_id: String,
 }
 
 async fn status(
@@ -196,13 +213,13 @@ async fn status(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
-    serde_json::to_value(owned_session(&state, &ctx, &req.session_id)?).map_err(internal)
+    serde_json::to_value(owned_session(&state, &ctx, &req.chain_root_id)?).map_err(internal)
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandRequest {
-    session_id: String,
+    chain_root_id: String,
     idempotency_key: String,
     route_id: String,
     payload: Value,
@@ -213,7 +230,7 @@ async fn command(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
-    let session = owned_session(&state, &ctx, &req.session_id)?;
+    let session = owned_session(&state, &ctx, &req.chain_root_id)?;
     if session.state == "recovering" {
         return Err(HandlerError::BadRequest(
             "recovering worker executions accept only the runtime-owned reattach route".into(),
@@ -227,21 +244,33 @@ async fn command(
             "worker execution route id is not canonical and bounded".into(),
         ));
     }
-    ryeos_app::dedicated_session_service::execute_command(
+    let mut result = ryeos_app::dedicated_session_service::execute_command(
         &state,
-        &req.session_id,
+        &session.placement_thread_id,
         &req.idempotency_key,
         "route",
         json!({"route_id":req.route_id,"payload":req.payload}),
     )
     .await
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))
+    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let object = result
+        .as_object_mut()
+        .ok_or_else(|| internal("worker command result is not an object"))?;
+    object.insert(
+        "chain_root_id".to_owned(),
+        Value::String(session.chain_root_id),
+    );
+    object.insert(
+        "placement_thread_id".to_owned(),
+        Value::String(session.placement_thread_id),
+    );
+    Ok(result)
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalListRequest {
-    session_id: String,
+    chain_root_id: String,
 }
 
 async fn approvals(
@@ -249,15 +278,19 @@ async fn approvals(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
-    owned_session(&state, &ctx, &req.session_id)?;
+    let session = owned_session(&state, &ctx, &req.chain_root_id)?;
     let approvals = state
         .state_store
-        .pending_dedicated_session_approvals(&req.session_id)
+        .pending_dedicated_session_approvals(&session.placement_thread_id)
         .map_err(internal)?
         .into_iter()
         .filter(|approval| approval.state == "pending")
         .collect::<Vec<_>>();
-    Ok(json!({"approvals": approvals}))
+    Ok(json!({
+        "chain_root_id":session.chain_root_id,
+        "placement_thread_id":session.placement_thread_id,
+        "approvals": approvals,
+    }))
 }
 
 fn repair_approval_outbox_for_session(
@@ -266,7 +299,7 @@ fn repair_approval_outbox_for_session(
 ) -> Result<(), HandlerError> {
     let approvals = state
         .state_store
-        .pending_dedicated_session_approvals(&session.session_id)
+        .pending_dedicated_session_approvals(&session.placement_thread_id)
         .map_err(internal)?;
     for approval in approvals {
         if !matches!(
@@ -314,7 +347,7 @@ fn repair_approval_outbox_for_session(
             state
                 .state_store
                 .settle_recovered_dedicated_approval_delivery(
-                    &session.session_id,
+                    &session.placement_thread_id,
                     &approval.approval_id,
                     approval.worker_boot_epoch,
                     token,
@@ -325,7 +358,7 @@ fn repair_approval_outbox_for_session(
         }
         let root = state
             .state_store
-            .get_thread(&session.root_thread_id)
+            .get_thread(&session.placement_thread_id)
             .map_err(internal)?
             .ok_or_else(|| internal("hosted execution root thread disappeared"))?;
         if ryeos_app::state_store::is_terminal_status(&root.status) {
@@ -333,7 +366,7 @@ fn repair_approval_outbox_for_session(
                 "decision_reserved" => state
                     .state_store
                     .reconcile_dedicated_approval_stale_epoch(
-                        &session.session_id,
+                        &session.placement_thread_id,
                         &approval.approval_id,
                         approval.worker_boot_epoch,
                     )
@@ -341,7 +374,7 @@ fn repair_approval_outbox_for_session(
                 "delivery_contacting" => state
                     .state_store
                     .reconcile_dedicated_approval_delivery_unknown(
-                        &session.session_id,
+                        &session.placement_thread_id,
                         &approval.approval_id,
                         approval.worker_boot_epoch,
                     )
@@ -354,7 +387,7 @@ fn repair_approval_outbox_for_session(
                 }
             }
             tracing::warn!(
-                session_id = %session.session_id,
+                placement_thread_id = %session.placement_thread_id,
                 approval_id = %approval.approval_id,
                 "terminal hosted root cannot accept missing historical approval outbox facts"
             );
@@ -362,7 +395,8 @@ fn repair_approval_outbox_for_session(
         }
         let decision_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
             "schema":"ryeos.hosted_approval_decision_fact.v1",
-            "session_id":session.session_id,
+            "chain_root_id":session.chain_root_id,
+            "placement_thread_id":session.placement_thread_id,
             "approval_id":approval.approval_id,
             "reservation_token":token,
             "stage":"decision_reserved",
@@ -376,7 +410,8 @@ fn repair_approval_outbox_for_session(
             json!({
                 "schema":1,
                 "origin":"owner_authorized",
-                "session_id":session.session_id,
+                "chain_root_id":session.chain_root_id,
+                "placement_thread_id":session.placement_thread_id,
                 "approval_id":approval.approval_id,
                 "worker_boot_epoch":approval.worker_boot_epoch,
                 "request_digest":approval.request_digest,
@@ -397,7 +432,8 @@ fn repair_approval_outbox_for_session(
         ) {
             let contacting_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
                 "schema":"ryeos.hosted_approval_delivery_fact.v1",
-                "session_id":session.session_id,
+                "chain_root_id":session.chain_root_id,
+                "placement_thread_id":session.placement_thread_id,
                 "approval_id":approval.approval_id,
                 "reservation_token":token,
                 "stage":"delivery_contacting",
@@ -411,7 +447,8 @@ fn repair_approval_outbox_for_session(
                 json!({
                     "schema":1,
                     "origin":"daemon_reserved_io",
-                    "session_id":session.session_id,
+                    "chain_root_id":session.chain_root_id,
+                    "placement_thread_id":session.placement_thread_id,
                     "approval_id":approval.approval_id,
                     "worker_boot_epoch":approval.worker_boot_epoch,
                     "request_digest":approval.request_digest,
@@ -424,7 +461,7 @@ fn repair_approval_outbox_for_session(
             state
                 .state_store
                 .reconcile_dedicated_approval_delivery_unknown(
-                    &session.session_id,
+                    &session.placement_thread_id,
                     &approval.approval_id,
                     approval.worker_boot_epoch,
                 )
@@ -432,7 +469,8 @@ fn repair_approval_outbox_for_session(
         }
         let unknown_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
             "schema":"ryeos.hosted_approval_delivery_fact.v1",
-            "session_id":session.session_id,
+            "chain_root_id":session.chain_root_id,
+            "placement_thread_id":session.placement_thread_id,
             "approval_id":approval.approval_id,
             "reservation_token":token,
             "stage":"delivery_unknown",
@@ -446,7 +484,8 @@ fn repair_approval_outbox_for_session(
             json!({
                 "schema":1,
                 "origin":"daemon_observed_io",
-                "session_id":session.session_id,
+                "chain_root_id":session.chain_root_id,
+                "placement_thread_id":session.placement_thread_id,
                 "approval_id":approval.approval_id,
                 "worker_boot_epoch":approval.worker_boot_epoch,
                 "request_digest":approval.request_digest,
@@ -462,15 +501,17 @@ fn repair_approval_outbox_for_session(
 /// service traffic can race the delivery state machine. Listing approvals is
 /// deliberately read-only and never invokes this reconciler.
 pub async fn reconcile_approval_outboxes(state: Arc<AppState>) -> anyhow::Result<()> {
-    for session_id in state.state_store.dedicated_approval_outbox_session_ids()? {
-        let _delivery_guard = approval_delivery_lock(&session_id).lock_owned().await;
-        let Some(session) = state.state_store.dedicated_session(&session_id)? else {
+    for placement_thread_id in state.state_store.dedicated_approval_outbox_session_ids()? {
+        let _delivery_guard = approval_delivery_lock(&placement_thread_id)
+            .lock_owned()
+            .await;
+        let Some(session) = state.state_store.dedicated_session(&placement_thread_id)? else {
             anyhow::bail!("approval outbox references a missing dedicated session");
         };
         let root_operation =
             ryeos_app::hosted_operation::begin_hosted_root_operation_if_appendable(
                 &state.state_store,
-                &session.root_thread_id,
+                &session.placement_thread_id,
             )?;
         let _credential_operation = if root_operation.is_some() {
             Some(
@@ -520,12 +561,12 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
         .state_store
         .dedicated_sessions_in_state("publishing")?
     {
-        let _operation_guard = disposition_operation_lock(&session.session_id)
+        let _operation_guard = disposition_operation_lock(&session.placement_thread_id)
             .lock_owned()
             .await;
         let _root_operation = ryeos_app::hosted_operation::begin_hosted_root_operation(
             &state.state_store,
-            &session.root_thread_id,
+            &session.placement_thread_id,
         )?;
         let candidate = session
             .candidate_snapshot_hash
@@ -537,7 +578,7 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
             .ok_or_else(|| anyhow::anyhow!("publishing session has no validation identity"))?;
         let thread = state
             .state_store
-            .get_thread(&session.root_thread_id)?
+            .get_thread(&session.placement_thread_id)?
             .ok_or_else(|| anyhow::anyhow!("publishing root thread disappeared"))?;
         let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
             base_snapshot_hash,
@@ -565,7 +606,8 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
         }
         let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
             "schema":"ryeos.hosted_candidate_publication_operation.v1",
-            "session_id":session.session_id,
+            "chain_root_id":session.chain_root_id,
+            "placement_thread_id":session.placement_thread_id,
             "candidate_snapshot_hash":candidate,
             "expected_previous_hash":base_snapshot_hash,
             "candidate_validation_hash":validation,
@@ -588,14 +630,15 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
             .with_state_db(|db| db.read_project_head(&principal_key, &project_hash))?;
         if !authorized {
             if current.as_deref() == Some(base_snapshot_hash.as_str()) {
-                state
-                    .state_store
-                    .fail_dedicated_candidate_disposition(&session.session_id, "publishing")?;
+                state.state_store.fail_dedicated_candidate_disposition(
+                    &session.placement_thread_id,
+                    "publishing",
+                )?;
                 continue;
             }
             anyhow::bail!(
                 "publishing session {} contacted project HEAD without authoritative owner reservation",
-                session.session_id
+                session.placement_thread_id
             );
         }
         match classify_candidate_publication_recovery(
@@ -613,7 +656,8 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
                         "schema":1,
                         "origin":"filesystem_verified",
                         "owner_principal":session.owner_principal,
-                        "session_id":session.session_id,
+                        "chain_root_id":session.chain_root_id,
+                        "placement_thread_id":session.placement_thread_id,
                         "candidate_snapshot_hash":candidate,
                         "expected_previous_hash":base_snapshot_hash,
                         "candidate_validation_hash":validation,
@@ -624,15 +668,16 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
                     }),
                 )?;
                 state.state_store.settle_dedicated_candidate_publication(
-                    &session.session_id,
+                    &session.placement_thread_id,
                     candidate,
                     &format!("published:{candidate}"),
                 )?;
             }
             CandidatePublicationRecovery::NotPublished => {
-                state
-                    .state_store
-                    .fail_dedicated_candidate_disposition(&session.session_id, "publishing")?;
+                state.state_store.fail_dedicated_candidate_disposition(
+                    &session.placement_thread_id,
+                    "publishing",
+                )?;
             }
             CandidatePublicationRecovery::Unknown => {
                 append_root_fact_once(
@@ -644,7 +689,8 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
                         "schema":1,
                         "origin":"filesystem_verified",
                         "owner_principal":session.owner_principal,
-                        "session_id":session.session_id,
+                        "chain_root_id":session.chain_root_id,
+                        "placement_thread_id":session.placement_thread_id,
                         "candidate_snapshot_hash":candidate,
                         "expected_previous_hash":base_snapshot_hash,
                         "candidate_validation_hash":validation,
@@ -656,13 +702,15 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
                     }),
                 )?;
                 state.state_store.settle_dedicated_candidate_publication(
-                    &session.session_id,
+                    &session.placement_thread_id,
                     candidate,
                     &format!("publication_unknown:{candidate}"),
                 )?;
             }
         }
-        ryeos_app::dedicated_session_service::notify_projection_change(&session.session_id);
+        ryeos_app::dedicated_session_service::notify_projection_change(
+            &session.placement_thread_id,
+        );
     }
     Ok(())
 }
@@ -670,7 +718,7 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalResolveRequest {
-    session_id: String,
+    chain_root_id: String,
     approval_id: String,
     request_digest: String,
     accept: bool,
@@ -681,23 +729,31 @@ async fn resolve_approval(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
-    let _delivery_guard = approval_delivery_lock(&req.session_id).lock_owned().await;
-    let initial_session = owned_session(&state, &ctx, &req.session_id)?;
+    let initial_session = owned_session(&state, &ctx, &req.chain_root_id)?;
+    let placement_thread_id = initial_session.placement_thread_id.clone();
+    let _delivery_guard = approval_delivery_lock(&placement_thread_id)
+        .lock_owned()
+        .await;
     let _root_operation = ryeos_app::hosted_operation::begin_hosted_root_operation(
         &state.state_store,
-        &initial_session.root_thread_id,
+        &placement_thread_id,
     )
     .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     let _credential_guard = ryeos_app::hosted_operation::acquire_credential_profile_causal_contact(
         &initial_session.credential_profile_id,
-        &req.session_id,
+        &placement_thread_id,
     )
     .await
     .map_err(internal)?;
-    let session = owned_session(&state, &ctx, &req.session_id)?;
+    let session = owned_session(&state, &ctx, &req.chain_root_id)?;
+    if session.placement_thread_id != placement_thread_id {
+        return Err(HandlerError::BadRequest(
+            "hosted execution placement changed while approval delivery was reserved".into(),
+        ));
+    }
     let approval = state
         .state_store
-        .pending_dedicated_session_approvals(&req.session_id)
+        .pending_dedicated_session_approvals(&placement_thread_id)
         .map_err(internal)?
         .into_iter()
         .find(|approval| approval.approval_id == req.approval_id && approval.state == "pending")
@@ -742,7 +798,7 @@ async fn resolve_approval(
     state
         .state_store
         .reserve_dedicated_session_approval_decision(
-            &req.session_id,
+            &placement_thread_id,
             &req.approval_id,
             approval.worker_boot_epoch,
             &req.request_digest,
@@ -754,7 +810,8 @@ async fn resolve_approval(
         .map_err(internal)?;
     let decision_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.hosted_approval_decision_fact.v1",
-        "session_id":req.session_id,
+        "chain_root_id":session.chain_root_id,
+        "placement_thread_id":placement_thread_id,
         "approval_id":req.approval_id,
         "reservation_token":reservation_token,
         "stage":"decision_reserved",
@@ -768,7 +825,8 @@ async fn resolve_approval(
         json!({
             "schema":1,
             "origin":"owner_authorized",
-            "session_id":req.session_id,
+            "chain_root_id":session.chain_root_id,
+            "placement_thread_id":placement_thread_id,
             "approval_id":req.approval_id,
             "worker_boot_epoch":approval.worker_boot_epoch,
             "request_digest":req.request_digest,
@@ -779,7 +837,8 @@ async fn resolve_approval(
     )?;
     let contacting_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.hosted_approval_delivery_fact.v1",
-        "session_id":req.session_id,
+        "chain_root_id":session.chain_root_id,
+        "placement_thread_id":placement_thread_id,
         "approval_id":req.approval_id,
         "reservation_token":reservation_token,
         "stage":"delivery_contacting",
@@ -798,7 +857,8 @@ async fn resolve_approval(
         json!({
             "schema":1,
             "origin":"daemon_reserved_io",
-            "session_id":req.session_id,
+            "chain_root_id":session.chain_root_id,
+            "placement_thread_id":placement_thread_id,
             "approval_id":req.approval_id,
             "worker_boot_epoch":approval.worker_boot_epoch,
             "request_digest":req.request_digest,
@@ -809,7 +869,7 @@ async fn resolve_approval(
     state
         .state_store
         .mark_dedicated_approval_delivery_contacting(
-            &req.session_id,
+            &placement_thread_id,
             &req.approval_id,
             approval.worker_boot_epoch,
             &reservation_token,
@@ -817,9 +877,9 @@ async fn resolve_approval(
         )
         .map_err(internal)?;
     let registry = Arc::clone(&state.persistent_sessions);
-    let session_id = req.session_id.clone();
+    let delivery_placement_thread_id = placement_thread_id.clone();
     let delivery = tokio::task::spawn_blocking(move || {
-        registry.execute_exclusive_control(&session_id, decision)
+        registry.execute_exclusive_control(&delivery_placement_thread_id, decision)
     })
     .await
     .map_err(internal)?;
@@ -829,7 +889,7 @@ async fn resolve_approval(
             state
                 .state_store
                 .mark_dedicated_approval_delivery_unknown(
-                    &req.session_id,
+                    &placement_thread_id,
                     &req.approval_id,
                     approval.worker_boot_epoch,
                     &reservation_token,
@@ -838,7 +898,7 @@ async fn resolve_approval(
                 .map_err(internal)?;
             let cleanup_state = state
                 .persistent_sessions
-                .take_exclusive_failure_cleanup_state(&req.session_id)
+                .take_exclusive_failure_cleanup_state(&placement_thread_id)
                 .map_err(internal)?
                 .ok_or_else(|| internal("approval contact failure lost its cleanup proof"))?;
             let worker_instance_id = session
@@ -849,14 +909,15 @@ async fn resolve_approval(
                 .state_store
                 .fence_abandoned_worker_process(
                     worker_instance_id,
-                    &req.session_id,
+                    &placement_thread_id,
                     approval.worker_boot_epoch,
                     cleanup_state,
                 )
                 .map_err(internal)?;
             let unknown_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
                 "schema":"ryeos.hosted_approval_delivery_fact.v1",
-                "session_id":req.session_id,
+                "chain_root_id":session.chain_root_id,
+                "placement_thread_id":placement_thread_id,
                 "approval_id":req.approval_id,
                 "reservation_token":reservation_token,
                 "stage":"delivery_unknown",
@@ -870,7 +931,8 @@ async fn resolve_approval(
                 json!({
                     "schema":1,
                     "origin":"daemon_observed_io",
-                    "session_id":req.session_id,
+                    "chain_root_id":session.chain_root_id,
+                    "placement_thread_id":placement_thread_id,
                     "approval_id":req.approval_id,
                     "worker_boot_epoch":approval.worker_boot_epoch,
                     "request_digest":req.request_digest,
@@ -894,7 +956,7 @@ async fn resolve_approval(
     if exact_expiry {
         let projected = ryeos_app::dedicated_session_service::wait_for_exact_approval_state(
             &state,
-            &req.session_id,
+            &placement_thread_id,
             &req.approval_id,
             approval.worker_boot_epoch,
             &req.request_digest,
@@ -912,7 +974,7 @@ async fn resolve_approval(
         }
         let cleanup_state = match state
             .persistent_sessions
-            .retire_exclusive(&req.session_id)
+            .retire_exclusive(&placement_thread_id)
             .map_err(internal)?
         {
             ExclusiveRetirementOutcome::Reaped => "reaped",
@@ -926,7 +988,7 @@ async fn resolve_approval(
         state
             .state_store
             .mark_dedicated_approval_delivery_unknown(
-                &req.session_id,
+                &placement_thread_id,
                 &req.approval_id,
                 approval.worker_boot_epoch,
                 &reservation_token,
@@ -941,14 +1003,15 @@ async fn resolve_approval(
             .state_store
             .fence_abandoned_worker_process(
                 worker_instance_id,
-                &req.session_id,
+                &placement_thread_id,
                 approval.worker_boot_epoch,
                 cleanup_state,
             )
             .map_err(internal)?;
         let unknown_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
             "schema":"ryeos.hosted_approval_delivery_fact.v1",
-            "session_id":req.session_id,
+            "chain_root_id":session.chain_root_id,
+            "placement_thread_id":placement_thread_id,
             "approval_id":req.approval_id,
             "reservation_token":reservation_token,
             "stage":"delivery_unknown",
@@ -962,7 +1025,8 @@ async fn resolve_approval(
             json!({
                 "schema":1,
                 "origin":"daemon_observed_io",
-                "session_id":req.session_id,
+                "chain_root_id":session.chain_root_id,
+                "placement_thread_id":placement_thread_id,
                 "approval_id":req.approval_id,
                 "worker_boot_epoch":approval.worker_boot_epoch,
                 "request_digest":req.request_digest,
@@ -976,7 +1040,8 @@ async fn resolve_approval(
     }
     let settled_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.hosted_approval_delivery_fact.v1",
-        "session_id":req.session_id,
+        "chain_root_id":session.chain_root_id,
+        "placement_thread_id":placement_thread_id,
         "approval_id":req.approval_id,
         "reservation_token":reservation_token,
         "stage":"delivery_settled",
@@ -990,7 +1055,8 @@ async fn resolve_approval(
         json!({
             "schema":1,
             "origin":"daemon_observed_io",
-            "session_id":req.session_id,
+            "chain_root_id":session.chain_root_id,
+            "placement_thread_id":placement_thread_id,
             "approval_id":req.approval_id,
             "worker_boot_epoch":approval.worker_boot_epoch,
             "request_digest":req.request_digest,
@@ -1013,7 +1079,7 @@ async fn resolve_approval(
         ));
     }
     if let Err(error) = state.state_store.settle_dedicated_approval_delivery(
-        &req.session_id,
+        &placement_thread_id,
         &req.approval_id,
         approval.worker_boot_epoch,
         &reservation_token,
@@ -1025,6 +1091,8 @@ async fn resolve_approval(
         return Err(internal(error));
     }
     Ok(json!({
+        "chain_root_id":session.chain_root_id,
+        "placement_thread_id":session.placement_thread_id,
         "decision": if req.accept { "accepted" } else { "denied" },
         "delivery_state": "settled",
         "delivery": delivery,
@@ -1034,7 +1102,7 @@ async fn resolve_approval(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TerminateRequest {
-    session_id: String,
+    chain_root_id: String,
     reason: String,
 }
 
@@ -1048,23 +1116,27 @@ async fn terminate(
             "terminal reason must be completed or cancelled".into(),
         ));
     }
-    owned_session(&state, &ctx, &req.session_id)?;
-    ryeos_app::dedicated_session_service::terminate_session(&state, &req.session_id, &req.reason)
-        .await
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))
+    let session = owned_session(&state, &ctx, &req.chain_root_id)?;
+    ryeos_app::dedicated_session_service::terminate_session(
+        &state,
+        &session.placement_thread_id,
+        &req.reason,
+    )
+    .await
+    .map_err(|error| HandlerError::BadRequest(error.to_string()))
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublishRequest {
-    session_id: String,
+    chain_root_id: String,
     expected_previous_hash: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidateCandidateRequest {
-    session_id: String,
+    chain_root_id: String,
     candidate_snapshot_hash: String,
     candidate_validation_hash: String,
 }
@@ -1078,7 +1150,7 @@ fn append_root_fact_once(
 ) -> Result<(), HandlerError> {
     ryeos_app::authoritative_root_fact::append_once(
         state,
-        &session.root_thread_id,
+        &session.placement_thread_id,
         event_type,
         operation_id,
         payload,
@@ -1091,12 +1163,19 @@ async fn validate_candidate_closure_and_base(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
-    let operation_lock = disposition_operation_lock(&req.session_id);
+    let initial = owned_session(&state, &ctx, &req.chain_root_id)?;
+    let placement_thread_id = initial.placement_thread_id.clone();
+    let operation_lock = disposition_operation_lock(&placement_thread_id);
     let _operation_guard = operation_lock.lock_owned().await;
-    let session = owned_session(&state, &ctx, &req.session_id)?;
+    let session = owned_session(&state, &ctx, &req.chain_root_id)?;
+    if session.placement_thread_id != placement_thread_id {
+        return Err(HandlerError::BadRequest(
+            "hosted execution placement changed while candidate validation was reserved".into(),
+        ));
+    }
     let _root_operation = ryeos_app::hosted_operation::begin_hosted_root_operation(
         &state.state_store,
-        &session.root_thread_id,
+        &session.placement_thread_id,
     )
     .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     if session.state == "publish_ready"
@@ -1105,7 +1184,8 @@ async fn validate_candidate_closure_and_base(
             == Some(req.candidate_validation_hash.as_str())
     {
         return Ok(json!({
-            "session_id":req.session_id,
+            "chain_root_id":session.chain_root_id,
+            "placement_thread_id":session.placement_thread_id,
             "state":"publish_ready",
             "candidate_snapshot_hash":req.candidate_snapshot_hash,
             "candidate_validation_hash":req.candidate_validation_hash,
@@ -1123,14 +1203,15 @@ async fn validate_candidate_closure_and_base(
     }
     let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.hosted_candidate_validation_operation.v1",
-        "session_id":req.session_id,
+        "chain_root_id":session.chain_root_id,
+        "placement_thread_id":session.placement_thread_id,
         "candidate_snapshot_hash":req.candidate_snapshot_hash,
         "candidate_validation_hash":req.candidate_validation_hash,
     }))
     .map_err(internal)?;
     let thread = state
         .state_store
-        .get_thread(&session.root_thread_id)
+        .get_thread(&session.placement_thread_id)
         .map_err(internal)?
         .ok_or_else(|| internal("dedicated root thread disappeared"))?;
     let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
@@ -1182,7 +1263,7 @@ async fn validate_candidate_closure_and_base(
     state
         .state_store
         .reserve_dedicated_candidate_validation(
-            &req.session_id,
+            &session.placement_thread_id,
             &req.candidate_snapshot_hash,
             &req.candidate_validation_hash,
         )
@@ -1195,7 +1276,8 @@ async fn validate_candidate_closure_and_base(
         json!({
             "schema":1,
             "origin":"filesystem_verified",
-            "session_id":req.session_id,
+            "chain_root_id":session.chain_root_id,
+            "placement_thread_id":session.placement_thread_id,
             "candidate_snapshot_hash":req.candidate_snapshot_hash,
             "candidate_validation_hash":req.candidate_validation_hash,
             "evidence":evidence,
@@ -1204,15 +1286,16 @@ async fn validate_candidate_closure_and_base(
     state
         .state_store
         .settle_dedicated_candidate_validation(
-            &req.session_id,
+            &session.placement_thread_id,
             &req.candidate_snapshot_hash,
             &req.candidate_validation_hash,
             &evidence,
         )
         .map_err(internal)?;
-    ryeos_app::dedicated_session_service::notify_projection_change(&req.session_id);
+    ryeos_app::dedicated_session_service::notify_projection_change(&session.placement_thread_id);
     Ok(json!({
-        "session_id":req.session_id,
+        "chain_root_id":session.chain_root_id,
+        "placement_thread_id":session.placement_thread_id,
         "state":"publish_ready",
         "candidate_snapshot_hash":req.candidate_snapshot_hash,
         "candidate_validation_hash":req.candidate_validation_hash,
@@ -1223,7 +1306,7 @@ async fn validate_candidate_closure_and_base(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiscardRequest {
-    session_id: String,
+    chain_root_id: String,
     candidate_snapshot_hash: String,
 }
 
@@ -1232,15 +1315,21 @@ async fn discard(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
-    let operation_lock = disposition_operation_lock(&req.session_id);
+    let initial = owned_session(&state, &ctx, &req.chain_root_id)?;
+    let placement_thread_id = initial.placement_thread_id.clone();
+    let operation_lock = disposition_operation_lock(&placement_thread_id);
     let _operation_guard = operation_lock.lock_owned().await;
-    let initial = owned_session(&state, &ctx, &req.session_id)?;
     let root_operation = ryeos_app::hosted_operation::begin_hosted_root_operation_if_appendable(
         &state.state_store,
-        &initial.root_thread_id,
+        &initial.placement_thread_id,
     )
     .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    let session = owned_session(&state, &ctx, &req.session_id)?;
+    let session = owned_session(&state, &ctx, &req.chain_root_id)?;
+    if session.placement_thread_id != placement_thread_id {
+        return Err(HandlerError::BadRequest(
+            "hosted execution placement changed while candidate discard was reserved".into(),
+        ));
+    }
     if session.publication_result.as_deref() == Some("discarded") {
         if session.candidate_snapshot_hash.as_deref() != Some(req.candidate_snapshot_hash.as_str())
         {
@@ -1248,20 +1337,29 @@ async fn discard(
                 "discard retry changed candidate identity".into(),
             ));
         }
-        return Ok(json!({"session_id":req.session_id,"discarded":true,"idempotent":true}));
+        return Ok(json!({
+            "chain_root_id":session.chain_root_id,
+            "placement_thread_id":session.placement_thread_id,
+            "discarded":true,
+            "idempotent":true,
+        }));
     }
     let _root_operation = root_operation.ok_or_else(|| {
         HandlerError::BadRequest("nonterminal discard has a terminal hosted execution root".into())
     })?;
     let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.hosted_candidate_discard_operation.v1",
-        "session_id":req.session_id,
+        "chain_root_id":session.chain_root_id,
+        "placement_thread_id":session.placement_thread_id,
         "candidate_snapshot_hash":req.candidate_snapshot_hash,
     }))
     .map_err(internal)?;
     state
         .state_store
-        .reserve_dedicated_candidate_discard(&req.session_id, &req.candidate_snapshot_hash)
+        .reserve_dedicated_candidate_discard(
+            &session.placement_thread_id,
+            &req.candidate_snapshot_hash,
+        )
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     append_root_fact_once(
         &state,
@@ -1271,16 +1369,24 @@ async fn discard(
         json!({
             "schema":1,
             "origin":"owner_authorized",
-            "session_id":req.session_id,
+            "chain_root_id":session.chain_root_id,
+            "placement_thread_id":session.placement_thread_id,
             "candidate_snapshot_hash":req.candidate_snapshot_hash,
         }),
     )?;
     state
         .state_store
-        .settle_dedicated_candidate_discard(&req.session_id, &req.candidate_snapshot_hash)
+        .settle_dedicated_candidate_discard(
+            &session.placement_thread_id,
+            &req.candidate_snapshot_hash,
+        )
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    ryeos_app::dedicated_session_service::notify_projection_change(&req.session_id);
-    Ok(json!({"session_id":req.session_id,"discarded":true}))
+    ryeos_app::dedicated_session_service::notify_projection_change(&session.placement_thread_id);
+    Ok(json!({
+        "chain_root_id":session.chain_root_id,
+        "placement_thread_id":session.placement_thread_id,
+        "discarded":true,
+    }))
 }
 
 async fn publish(
@@ -1288,8 +1394,6 @@ async fn publish(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
-    let operation_lock = disposition_operation_lock(&req.session_id);
-    let _operation_guard = operation_lock.lock_owned().await;
     state
         .authorizer
         .authorize(
@@ -1304,13 +1408,21 @@ async fn publish(
                 ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY
             ))
         })?;
-    let initial = owned_session(&state, &ctx, &req.session_id)?;
+    let initial = owned_session(&state, &ctx, &req.chain_root_id)?;
+    let placement_thread_id = initial.placement_thread_id.clone();
+    let operation_lock = disposition_operation_lock(&placement_thread_id);
+    let _operation_guard = operation_lock.lock_owned().await;
     let root_operation = ryeos_app::hosted_operation::begin_hosted_root_operation_if_appendable(
         &state.state_store,
-        &initial.root_thread_id,
+        &initial.placement_thread_id,
     )
     .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    let session = owned_session(&state, &ctx, &req.session_id)?;
+    let session = owned_session(&state, &ctx, &req.chain_root_id)?;
+    if session.placement_thread_id != placement_thread_id {
+        return Err(HandlerError::BadRequest(
+            "hosted execution placement changed while candidate publication was reserved".into(),
+        ));
+    }
     if !matches!(
         session.state.as_str(),
         "publish_ready" | "publishing" | "terminal"
@@ -1342,7 +1454,7 @@ async fn publish(
     }
     let thread = state
         .state_store
-        .get_thread(&session.root_thread_id)
+        .get_thread(&session.placement_thread_id)
         .map_err(internal)?
         .ok_or_else(|| internal("dedicated root thread disappeared"))?;
     let authority = thread
@@ -1388,7 +1500,8 @@ async fn publish(
     }
     if already_published {
         return Ok(json!({
-            "session_id":req.session_id,
+            "chain_root_id":session.chain_root_id,
+            "placement_thread_id":session.placement_thread_id,
             "snapshot_hash":candidate,
             "previous_hash":base_snapshot_hash,
             "candidate_validation_hash":candidate_validation_hash,
@@ -1403,7 +1516,8 @@ async fn publish(
     })?;
     let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.hosted_candidate_publication_operation.v1",
-        "session_id":req.session_id,
+        "chain_root_id":session.chain_root_id,
+        "placement_thread_id":session.placement_thread_id,
         "candidate_snapshot_hash":candidate,
         "expected_previous_hash":base_snapshot_hash,
         "candidate_validation_hash":candidate_validation_hash,
@@ -1420,7 +1534,8 @@ async fn publish(
             "schema":1,
             "origin":"owner_authorized",
             "owner_principal":session.owner_principal,
-            "session_id":req.session_id,
+            "chain_root_id":session.chain_root_id,
+            "placement_thread_id":session.placement_thread_id,
             "candidate_snapshot_hash":candidate,
             "expected_previous_hash":base_snapshot_hash,
             "candidate_validation_hash":candidate_validation_hash,
@@ -1467,7 +1582,7 @@ async fn publish(
         .map_err(internal)?;
     state
         .state_store
-        .reserve_dedicated_candidate_publication(&req.session_id, candidate)
+        .reserve_dedicated_candidate_publication(&session.placement_thread_id, candidate)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
     let publication = state.state_store.with_state_db(|db| {
@@ -1494,9 +1609,11 @@ async fn publish(
     if let Err(error) = publication {
         state
             .state_store
-            .fail_dedicated_candidate_disposition(&req.session_id, "publishing")
+            .fail_dedicated_candidate_disposition(&session.placement_thread_id, "publishing")
             .map_err(internal)?;
-        ryeos_app::dedicated_session_service::notify_projection_change(&req.session_id);
+        ryeos_app::dedicated_session_service::notify_projection_change(
+            &session.placement_thread_id,
+        );
         return Err(HandlerError::BadRequest(error.to_string()));
     }
     append_root_fact_once(
@@ -1508,7 +1625,8 @@ async fn publish(
             "schema":1,
             "origin":"filesystem_verified",
             "owner_principal":session.owner_principal,
-            "session_id":req.session_id,
+            "chain_root_id":session.chain_root_id,
+            "placement_thread_id":session.placement_thread_id,
             "candidate_snapshot_hash":candidate,
             "expected_previous_hash":base_snapshot_hash,
             "candidate_validation_hash":candidate_validation_hash,
@@ -1520,14 +1638,15 @@ async fn publish(
     state
         .state_store
         .settle_dedicated_candidate_publication(
-            &req.session_id,
+            &session.placement_thread_id,
             candidate,
             &format!("published:{candidate}"),
         )
         .map_err(internal)?;
-    ryeos_app::dedicated_session_service::notify_projection_change(&req.session_id);
+    ryeos_app::dedicated_session_service::notify_projection_change(&session.placement_thread_id);
     Ok(json!({
-        "session_id":req.session_id,
+        "chain_root_id":session.chain_root_id,
+        "placement_thread_id":session.placement_thread_id,
         "snapshot_hash":candidate,
         "previous_hash":base_snapshot_hash,
         "candidate_validation_hash":candidate_validation_hash,
@@ -1650,7 +1769,33 @@ pub const DISCARD_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 
 #[cfg(test)]
 mod tests {
-    use super::{CandidatePublicationRecovery, classify_candidate_publication_recovery};
+    use super::{
+        CandidatePublicationRecovery, CommandRequest, classify_candidate_publication_recovery,
+    };
+
+    #[test]
+    fn hosted_command_address_is_only_the_stable_chain_root() {
+        let accepted = serde_json::from_value::<CommandRequest>(serde_json::json!({
+            "chain_root_id":"T-root",
+            "idempotency_key":"turn-1",
+            "route_id":"turn.start",
+            "payload":{},
+        }));
+        assert!(accepted.is_ok());
+
+        for forbidden_field in ["session_id", "placement_thread_id"] {
+            let mut value = serde_json::json!({
+                "idempotency_key":"turn-1",
+                "route_id":"turn.start",
+                "payload":{},
+            });
+            value
+                .as_object_mut()
+                .expect("request fixture object")
+                .insert(forbidden_field.to_owned(), serde_json::json!("T-root"));
+            assert!(serde_json::from_value::<CommandRequest>(value).is_err());
+        }
+    }
 
     #[test]
     fn publication_recovery_only_retries_when_head_is_still_the_admitted_base() {

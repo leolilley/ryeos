@@ -48,7 +48,7 @@ pub struct AdmittedPersistentSessionIdentity {
 
 #[derive(Debug, Clone)]
 pub struct ExclusivePersistentSessionIdentity {
-    pub session_id: String,
+    pub placement_thread_id: String,
     pub worker_instance_id: String,
     pub boot_identity_hash: String,
     pub boot_epoch: u64,
@@ -900,7 +900,7 @@ pub fn start_exclusive_capsule(
         bail!("persistent-session protocol does not authorize an exclusive runtime workspace");
     }
     let reservation = state.persistent_sessions.reserve_exclusive(
-        &identity.session_id,
+        &identity.placement_thread_id,
         &capsule.lifecycle,
         &capsule.wire,
     )?;
@@ -946,7 +946,7 @@ pub fn start_exclusive_capsule(
         control_channel_identity: identity.control_channel_identity.clone(),
         state: WorkerProcessState::Attached,
         daemon_generation_id: daemon_generation_id().to_owned(),
-        session_id: identity.session_id.clone(),
+        placement_thread_id: identity.placement_thread_id.clone(),
         cleanup_state: "owned".to_owned(),
         created_at_ms: now,
         updated_at_ms: now,
@@ -978,7 +978,7 @@ pub fn start_exclusive_capsule(
             let mut error = error;
             if let Err(settlement) = state.state_store.settle_worker_process(
                 &identity.worker_instance_id,
-                &identity.session_id,
+                &identity.placement_thread_id,
                 identity.boot_epoch,
                 "unproved",
                 "held process release failed",
@@ -1008,7 +1008,7 @@ pub fn start_exclusive_capsule(
         let mut error = error;
         if let Err(settlement) = state.state_store.settle_worker_process(
             &identity.worker_instance_id,
-            &identity.session_id,
+            &identity.placement_thread_id,
             identity.boot_epoch,
             cleanup_state,
             "exclusive worker readiness failed",
@@ -1025,13 +1025,13 @@ pub fn start_exclusive_capsule(
     }
     if let Err(error) = state.state_store.complete_worker_binding(
         &identity.worker_instance_id,
-        &identity.session_id,
+        &identity.placement_thread_id,
         identity.boot_epoch,
     ) {
         let mut error = error;
         let cleanup_state = match ryeos_app::dedicated_session_service::retire_worker_process(
             state,
-            &identity.session_id,
+            &identity.placement_thread_id,
             &record,
         ) {
             Ok(cleanup_state) => cleanup_state,
@@ -1044,7 +1044,7 @@ pub fn start_exclusive_capsule(
         };
         if let Err(settlement) = state.state_store.settle_worker_process(
             &identity.worker_instance_id,
-            &identity.session_id,
+            &identity.placement_thread_id,
             identity.boot_epoch,
             cleanup_state,
             "durable readiness publication failed",

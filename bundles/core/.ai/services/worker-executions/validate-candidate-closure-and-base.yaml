@@ -1,6 +1,6 @@
-# ryeos:signed:2026-08-19T08:24:49Z:3347fc8e4576477434601100e3e03b513741a693bc8c7164dfae0f26ddc3d948:dtgoo4tCILmZJ82jeJNkQuCly/gfKMG4ez/Q29HzZV/RHhtQkpIVfw7d+0esVCmtB1fmoYOFue+jBCZkebFoBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-26T10:09:18Z:e62ec9d5c93d8af2ccda39caaf8bb49df6e61402bcb2404e4a8d55f520664eb0:AkaUn0MSbjCm0BRr4veOsRBW9kHMwcPOWsAfk8cLfI2GUOXkK6Sp1ffP1yrECYbDoHURK4fQesgEtCHsODq5Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: worker-executions.validate-candidate-closure-and-base
 required_caps: ["ryeos.execute.service.worker-executions/validate-candidate-closure-and-base"]
-schema: {session_id: string, candidate_snapshot_hash: string, candidate_validation_hash: string}
+schema: {chain_root_id: string, candidate_snapshot_hash: string, candidate_validation_hash: string}
 description: Validate canonical closure and admitted-base ancestry for one frozen candidate.
