@@ -743,7 +743,38 @@ pub(super) async fn start(
     // the profile lock. We do not invent a second per-session home that the
     // upstream process would never use.
     let state_root = profile_home.clone();
-    let continuation_remote_thread_id = if !recovering && request.recover_upstream_session {
+    let handoff_reservation = if recovering {
+        None
+    } else {
+        state
+            .state_store
+            .credential_profile_reservation_for_successor(&request.thread_id)?
+            .filter(|reservation| reservation.state == "reserved")
+    };
+    if let Some(reservation) = &handoff_reservation {
+        let remote = state
+            .state_store
+            .remote_continuation_authority(&thread.chain_root_id, &request.thread_id)?
+            .ok_or_else(|| anyhow!("worker adoption successor has no remote-continuation edge"))?;
+        if reservation.profile_id != request.credential_profile_id
+            || reservation.owner_principal != owner
+            || reservation.credential_generation != profile.credential_generation
+            || reservation.operation_id != remote.operation_id
+            || reservation.checkpoint_manifest_hash != remote.checkpoint_manifest_hash
+            || thread.admitted_launch_capsule_hash.as_deref()
+                != Some(remote.target_launch_capsule_hash.as_str())
+        {
+            bail!(
+                "worker adoption credential reservation contradicts the authoritative remote continuation"
+            );
+        }
+    }
+    let continuation_remote_thread_id = if let Some(reservation) = &handoff_reservation {
+        if !request.recover_upstream_session {
+            bail!("worker adoption reservation requires upstream-session recovery");
+        }
+        Some(reservation.upstream_session_id.clone())
+    } else if !recovering && request.recover_upstream_session {
         match thread.upstream_thread_id.as_deref() {
             Some(source_thread_id) => {
                 let source = state
@@ -770,6 +801,25 @@ pub(super) async fn start(
             credential_generation,
             &worker_instance_id,
         )
+    } else if let Some(reservation) = handoff_reservation.as_ref() {
+        state
+            .state_store
+            .admit_dedicated_session_from_reservation(
+                NewDedicatedSession {
+                    placement_thread_id: &request.thread_id,
+                    chain_root_id: &thread.chain_root_id,
+                    owner_principal: owner,
+                    admitted_capsule_hash: &capsule_hash,
+                    workspace_id: &workspace.workspace_id,
+                    candidate_required: request.require_pinned_cow,
+                    credential_profile_id: &request.credential_profile_id,
+                    credential_generation,
+                    credential_lock_owner: &worker_instance_id,
+                },
+                continuation_remote_thread_id.as_deref(),
+                &reservation.reservation_id,
+            )
+            .map(|()| 1)
     } else if let Some(remote_thread_id) = continuation_remote_thread_id.as_deref() {
         state
             .state_store

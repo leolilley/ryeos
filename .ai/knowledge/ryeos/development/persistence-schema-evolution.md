@@ -34,7 +34,7 @@ The current clean-cut execution formats include:
 - admitted launch capsule schema 15;
 - runtime launch metadata epoch 19;
 - the standalone runtime project-authority envelope epoch 3; and
-- the owned runtime SQLite operator schema epoch 14 (encoded in the RyeOS
+- the owned runtime SQLite operator schema epoch 15 (encoded in the RyeOS
   `PRAGMA application_id` family).
 
 The numbers identify independently evolving contracts. A change to a nested
@@ -59,7 +59,7 @@ the exact current envelopes stored in its JSON columns. Normal open never
 migrates or normalizes a predecessor. Any mismatch leaves the file untouched
 and requires the explicit operator-confirmed thread-history/project-head reset.
 
-Runtime epoch 14 includes the epoch-8 hosted-worker substrate,
+Runtime epoch 15 includes the epoch-8 hosted-worker substrate,
 credential-generation fencing, command/approval contact ledgers, observation
 frontier with a cross-epoch cumulative event ceiling, candidate-disposition,
 and multi-epoch process-history contracts, the epoch-9 exact
@@ -73,8 +73,12 @@ fences throughout the hosted-worker projection; it carries no hosted
 `session_id` alias. Epoch 14 admits only launch metadata epoch 19 and admitted
 launch capsule schema 15. Their outer exact-program identity is path-free,
 classifies every sealed invocation field explicitly, and commits the exact
-engine-resolved ref-binding records used by managed launch preparation. No
-execution-history reader or migration for epochs 1 through 13 remains. The
+engine-resolved ref-binding records used by managed launch preparation. Epoch
+15 adds the durable target credential-profile generation reservation consumed
+atomically by an imported successor's dedicated-session admission; restart
+keeps an unconsumed reservation fenced instead of confusing it with an
+abandoned worker lock. No execution-history reader or migration for epochs 1
+through 14 remains. The
 explicit reset may extract only the provider-neutral credential-profile table
 from epochs 6 through 11; from epoch 12 onward the operational database is the
 stable profile authority and the runtime table is repaired from it. Reset never

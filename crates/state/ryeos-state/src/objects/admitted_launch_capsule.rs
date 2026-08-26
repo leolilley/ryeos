@@ -1404,6 +1404,115 @@ impl AdmittedLaunchCapsule {
                 .project_authority
                 .same_continuation_lineage(&other.project_authority)?)
     }
+
+    /// Return the exact named persistent-session capsules retained by this
+    /// outer launch. Names are mechanically opaque here; the caller verifies
+    /// each capsule's inner exact program through the ordinary typed object.
+    pub fn admitted_persistent_session_capsules(
+        &self,
+    ) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+        self.validate()?;
+        let Self {
+            execution_closure:
+                AdmittedExecutionClosure::ManagedRuntime {
+                    prepared_runtime_launch,
+                    ..
+                },
+            ..
+        } = self
+        else {
+            anyhow::bail!("direct execution has no persistent-session capsule map");
+        };
+        let sessions = prepared_runtime_launch
+            .get("admitted_sessions")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                anyhow::anyhow!("prepared runtime launch has no admitted_sessions object")
+            })?;
+        if sessions.len() > 64 {
+            anyhow::bail!("prepared runtime launch exceeds its persistent-session count ceiling");
+        }
+        sessions
+            .iter()
+            .map(|(name, value)| {
+                validate_trimmed_control_free("persistent-session dependency name", name, false)?;
+                if name.len() > 256 {
+                    anyhow::bail!("persistent-session dependency name exceeds its byte ceiling");
+                }
+                let hash = value.as_str().ok_or_else(|| {
+                    anyhow::anyhow!("persistent-session capsule hash must be a string")
+                })?;
+                super::thread_snapshot::validate_canonical_hash(
+                    "persistent-session capsule",
+                    hash,
+                )?;
+                Ok((name.clone(), hash.to_owned()))
+            })
+            .collect()
+    }
+
+    /// Compare the immutable portable admission shared across two node-bound
+    /// placement capsules. The target may substitute only its named
+    /// persistent-session capsule hashes inside the otherwise exact execution
+    /// closure. Project authority, accounting, invocation rebind, realization,
+    /// and each inner program are intentionally verified by their respective
+    /// typed transition contracts rather than weakened here.
+    pub fn same_cross_site_continuation_program_admission(
+        &self,
+        target: &Self,
+    ) -> anyhow::Result<bool> {
+        self.validate()?;
+        target.validate()?;
+        let closure_matches = match (&self.execution_closure, &target.execution_closure) {
+            (
+                AdmittedExecutionClosure::ManagedRuntime {
+                    prepared_runtime_launch: source_prepared,
+                    runtime_descriptor_document: source_runtime,
+                    protocol_descriptor_document: source_protocol,
+                    executor_blob_hash: source_executor,
+                },
+                AdmittedExecutionClosure::ManagedRuntime {
+                    prepared_runtime_launch: target_prepared,
+                    runtime_descriptor_document: target_runtime,
+                    protocol_descriptor_document: target_protocol,
+                    executor_blob_hash: target_executor,
+                },
+            ) => {
+                let mut expected_target = source_prepared.clone();
+                let target_sessions = target_prepared
+                    .get("admitted_sessions")
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("target prepared launch has no admitted_sessions")
+                    })?;
+                expected_target
+                    .as_object_mut()
+                    .expect("validated prepared launch object")
+                    .insert("admitted_sessions".to_owned(), target_sessions);
+                expected_target == *target_prepared
+                    && source_runtime == target_runtime
+                    && source_protocol == target_protocol
+                    && source_executor == target_executor
+            }
+            (
+                AdmittedExecutionClosure::DirectItemExecutor { .. },
+                AdmittedExecutionClosure::DirectItemExecutor { .. },
+            ) => self.execution_closure == target.execution_closure,
+            _ => false,
+        };
+        Ok(self.schema == target.schema
+            && self.kind == target.kind
+            && self.exact_program == target.exact_program
+            && self.exact_program_hash == target.exact_program_hash
+            && self.lifecycle_authority == target.lifecycle_authority
+            && self.launch_driver == target.launch_driver
+            && self.artifact_identity == target.artifact_identity
+            && closure_matches
+            && self.source_binding_hash == target.source_binding_hash
+            && self.effective_caps == target.effective_caps
+            && self.runtime_ref == target.runtime_ref
+            && self.executor_ref == target.executor_ref)
+    }
 }
 
 #[cfg(test)]
@@ -2017,6 +2126,48 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("binding records contradict exact program")
+        );
+    }
+
+    #[test]
+    fn cross_site_capsule_compare_allows_only_named_session_capsule_substitution() {
+        let source = managed_capsule(serde_json::json!({
+            "runtime_data": {"worker_execution":{"route_set":"hosted"}},
+            "admitted_sessions": {"worker":"1".repeat(64)},
+        }));
+        let mut target = source.clone();
+        let AdmittedExecutionClosure::ManagedRuntime {
+            prepared_runtime_launch,
+            ..
+        } = &mut target.execution_closure
+        else {
+            unreachable!()
+        };
+        prepared_runtime_launch["admitted_sessions"]["worker"] = serde_json::json!("2".repeat(64));
+        target.execution_realization_hash = "3".repeat(64);
+        assert!(
+            source
+                .same_cross_site_continuation_program_admission(&target)
+                .unwrap()
+        );
+        assert_eq!(
+            target.admitted_persistent_session_capsules().unwrap(),
+            std::collections::BTreeMap::from([("worker".into(), "2".repeat(64))])
+        );
+
+        let AdmittedExecutionClosure::ManagedRuntime {
+            prepared_runtime_launch,
+            ..
+        } = &mut target.execution_closure
+        else {
+            unreachable!()
+        };
+        prepared_runtime_launch["runtime_data"]["worker_execution"]["route_set"] =
+            serde_json::json!("widened");
+        assert!(
+            !source
+                .same_cross_site_continuation_program_admission(&target)
+                .unwrap()
         );
     }
 

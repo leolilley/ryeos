@@ -23,12 +23,12 @@ use crate::projection_health::ThreadProjectionHealth;
 use crate::runtime_db;
 use crate::write_barrier::{WriteBarrier, WritePermit};
 pub use runtime_db::{
-    CommandRecord, CredentialProfileRecord, DedicatedSessionApprovalRecord,
-    DedicatedSessionCommandRecord, DedicatedSessionRecord, HookDispatchReservation,
-    LaunchPlanningAlreadyReserved, LaunchPlanningCapacityExceeded, LaunchPlanningRecord,
-    NewCommandRecord, NewCredentialProfile, NewDedicatedSession, NewDedicatedSessionApproval,
-    NewDedicatedSessionCommand, NewHookDispatch, ObservationBatchReservation, RuntimeInfo,
-    StopIntent, WorkerProcessRecord,
+    CommandRecord, CredentialProfileRecord, CredentialProfileReservationRecord,
+    DedicatedSessionApprovalRecord, DedicatedSessionCommandRecord, DedicatedSessionRecord,
+    HookDispatchReservation, LaunchPlanningAlreadyReserved, LaunchPlanningCapacityExceeded,
+    LaunchPlanningRecord, NewCommandRecord, NewCredentialProfile, NewCredentialProfileReservation,
+    NewDedicatedSession, NewDedicatedSessionApproval, NewDedicatedSessionCommand, NewHookDispatch,
+    ObservationBatchReservation, RuntimeInfo, StopIntent, WorkerProcessRecord,
 };
 
 mod projection_access;
@@ -1074,6 +1074,7 @@ pub struct ThreadDetail {
 pub(crate) struct CreatedThreadPublication {
     pub(crate) persisted: Vec<PersistedEventRecord>,
     pub(crate) successor: ThreadDetail,
+    pub(crate) remote_writer_grant_hash: Option<String>,
 }
 
 /// Result of an idempotent operator continuation create-or-get.
@@ -3100,8 +3101,237 @@ fn load_bounded_facets_many(g: &Inner, thread_ids: &[String]) -> Result<Vec<quer
 /// marker is daemon-trusted (selectable only via the dedicated method, never a
 /// caller-supplied reason).
 enum RunningContinuationKind<'a> {
-    Machine { sanitized_reason: Option<&'a str> },
+    Machine {
+        sanitized_reason: Option<&'a str>,
+    },
     GraphFollowResume,
+    RemoteAdoption {
+        authority: &'a RemoteAdoptionContinuationAuthority,
+    },
+}
+
+/// Complete in-memory operands for the source node's one atomic remote
+/// continuation cut. Durable authority is carried by the target placement
+/// attestation, source writer grant, canonical continuation event, target
+/// capsule, checkpoint, and resulting signed chain head—not by this carrier.
+#[derive(Debug, Clone)]
+pub struct RemoteAdoptionContinuationAuthority {
+    pub placement_attestation_hash: String,
+    pub placement: crate::worker_handoff::WorkerPlacementAdmissionEvidence,
+    pub resume_rebind: crate::worker_handoff::RemoteResumeContextRebind,
+    pub target_resume_context: crate::launch_metadata::ResumeContext,
+    /// Exact source-ledger readback captured after worker quiescence. Required
+    /// iff the admitted launch carries financial accounting authority.
+    pub source_accounting_frontier: Option<crate::accounting_db::AccountingHandoffFrontier>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteAdoptionPublication {
+    pub successor_thread_id: String,
+    pub writer_grant_hash: String,
+    pub target_launch_capsule_hash: String,
+}
+
+fn validate_remote_adoption_runtime_seed(
+    state_authority: &ryeos_state::PinnedStateAuthority,
+    inner: &Inner,
+    transition: &ryeos_state::sync::AdmittedChainWriterTransition,
+    target_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+    require_adopted_head: bool,
+) -> Result<()> {
+    transition.validate()?;
+    let evidence = &transition.evidence;
+    if evidence.target_node_signer_fingerprint != inner.signer.fingerprint() {
+        bail!("remote adoption runtime seed is not addressed to this node signer");
+    }
+
+    let cas = state_authority.cas_store()?;
+    let placement_value = cas
+        .get_object(&evidence.placement_attestation_hash)?
+        .ok_or_else(|| anyhow!("remote adoption placement attestation is absent"))?;
+    let placement_attestation = ryeos_state::objects::Attestation::from_value(&placement_value)?;
+    placement_attestation.verify_with_trust_store(state_authority.trust_store())?;
+    if placement_attestation.is_expired_at(&lillux::time::iso8601_now())? {
+        bail!("remote adoption placement attestation is expired");
+    }
+    let placement = crate::worker_handoff::WorkerPlacementAdmissionEvidence::from_attestation(
+        &placement_attestation,
+    )?;
+    let expected_writer = crate::worker_handoff::chain_writer_transition_from_placement(
+        &placement,
+        evidence.placement_attestation_hash.clone(),
+        evidence.source_node_signer_fingerprint.clone(),
+        evidence.target_node_signer_fingerprint.clone(),
+    );
+    if expected_writer != *evidence {
+        bail!("remote adoption placement and writer grant describe different transitions");
+    }
+    let writer_value = cas
+        .get_object(&transition.writer_grant_hash)?
+        .ok_or_else(|| anyhow!("remote adoption writer grant is absent"))?;
+    let writer = ryeos_state::objects::Attestation::from_value(&writer_value)?;
+    writer.verify_with_trust_store(state_authority.trust_store())?;
+    if ryeos_state::objects::ChainWriterTransitionEvidence::from_attestation(&writer)? != *evidence
+    {
+        bail!("remote adoption writer grant differs from its admitted transition");
+    }
+
+    target_launch_metadata.validate()?;
+    if target_launch_metadata
+        .continuation_source_thread_id
+        .as_deref()
+        != Some(evidence.source_placement_thread_id.as_str())
+    {
+        bail!("remote adoption runtime seed names another continuation source");
+    }
+    let target_capsule = target_launch_metadata
+        .admitted_launch_capsule()?
+        .ok_or_else(|| anyhow!("remote adoption runtime seed has no admitted launch capsule"))?;
+    if target_capsule.content_hash()? != evidence.transition_subject_hash
+        || target_capsule.content_hash()? != placement.target_launch_capsule_hash
+    {
+        bail!("remote adoption runtime seed does not reproduce the admitted target capsule");
+    }
+    target_capsule
+        .verify_retained_execution_realization(
+            &cas,
+            &state_authority.large_object_store()?,
+            state_authority.trust_store(),
+        )
+        .context("verify remote adoption target execution realization")?;
+    let target_resume = target_launch_metadata
+        .resume_context
+        .as_ref()
+        .ok_or_else(|| anyhow!("remote adoption runtime seed has no ResumeContext"))?;
+    if target_resume.current_site_id != evidence.target_site_id
+        || target_resume.origin_site_id != evidence.origin_site_id
+        || target_resume.principal_identifier() != evidence.owner_principal
+    {
+        bail!("remote adoption runtime seed contradicts owner or site authority");
+    }
+    if target_resume
+        .parameters
+        .get("credential_profile_id")
+        .and_then(Value::as_str)
+        != Some(placement.credential_reservation.profile_id.as_str())
+    {
+        bail!("remote adoption runtime seed selects another credential profile");
+    }
+
+    let checkpoint_value = cas
+        .get_object(&placement.checkpoint_manifest_hash)?
+        .ok_or_else(|| anyhow!("remote adoption checkpoint manifest is absent"))?;
+    let checkpoint = StateManifest::from_current_value(checkpoint_value)?;
+    if checkpoint.contract != ryeos_state::objects::WORKER_SESSION_RESTORE_CONTRACT
+        || checkpoint.publisher_chain_root_id != evidence.chain_root_id
+        || checkpoint.publisher_thread_id != evidence.source_placement_thread_id
+    {
+        bail!("remote adoption checkpoint manifest contradicts the writer transition");
+    }
+    let restore_bytes = cas
+        .get_blob(&checkpoint.restore.blob_hash)?
+        .ok_or_else(|| anyhow!("remote adoption restore document is absent"))?;
+    if lillux::sha256_hex(&restore_bytes) != checkpoint.restore.blob_hash {
+        bail!("remote adoption restore document digest changed");
+    }
+    let restore_value: Value = serde_json::from_slice(&restore_bytes)?;
+    if lillux::canonical_json(&restore_value)?.as_bytes() != restore_bytes {
+        bail!("remote adoption restore document is not canonical JSON");
+    }
+    let restore = ryeos_state::objects::WorkerSessionRestore::from_current_value(restore_value)?;
+    let restored_dependencies = restore
+        .persistent_dependencies
+        .iter()
+        .map(|(name, dependency)| (name.clone(), dependency.exact_program_hash.clone()))
+        .collect::<BTreeMap<_, _>>();
+    if restore.source_position.chain_root_id != evidence.chain_root_id
+        || restore.source_position.placement_thread_id != evidence.source_placement_thread_id
+        || restore.project_candidate_snapshot_hash.as_deref()
+            != Some(
+                placement
+                    .project_rebind
+                    .source_candidate_snapshot_hash
+                    .as_str(),
+            )
+        || restore.outer_exact_program_hash != placement.outer_exact_program_hash
+        || restored_dependencies != placement.persistent_dependency_programs
+        || restore.upstream_session_id != placement.credential_reservation.upstream_session_id
+        || restore.credential_subject_contract_digest
+            != placement.credential_reservation.subject_contract_digest
+        || restore.credential_subject_digest != placement.credential_reservation.subject_digest
+        || restore.source_site_id != placement.source_site_id
+    {
+        bail!("remote adoption checkpoint restore contradicts placement authority");
+    }
+
+    let reservation = inner
+        .runtime_db
+        .credential_profile_reservation_for_successor(&evidence.successor_placement_thread_id)?
+        .ok_or_else(|| anyhow!("remote adoption credential reservation is absent"))?;
+    let admitted_reservation = &placement.credential_reservation;
+    if reservation.reservation_id != admitted_reservation.reservation_id
+        || reservation.operation_id != placement.operation_id
+        || reservation.successor_thread_id != evidence.successor_placement_thread_id
+        || reservation.profile_id != admitted_reservation.profile_id
+        || reservation.owner_principal != admitted_reservation.owner_principal
+        || reservation.credential_generation != admitted_reservation.generation
+        || reservation.subject_contract_digest != admitted_reservation.subject_contract_digest
+        || reservation.subject_digest != admitted_reservation.subject_digest
+        || reservation.checkpoint_manifest_hash != placement.checkpoint_manifest_hash
+        || reservation.upstream_session_id != admitted_reservation.upstream_session_id
+        || reservation.state != "reserved"
+    {
+        bail!("remote adoption credential reservation differs from signed placement authority");
+    }
+
+    if require_adopted_head {
+        let head = inner
+            .state_db
+            .read_generic_head_ref("chains", &evidence.chain_root_id)?
+            .ok_or_else(|| anyhow!("adopted remote chain head is absent"))?;
+        if head.target_hash != transition.target_chain_head_hash
+            || head.signer != evidence.target_node_signer_fingerprint
+        {
+            bail!("remote adoption target head is not the exact locally signed successor");
+        }
+        let successor = inner
+            .state_db
+            .read_authoritative_thread_snapshot(
+                &evidence.chain_root_id,
+                &evidence.successor_placement_thread_id,
+            )?
+            .ok_or_else(|| anyhow!("adopted remote successor snapshot is absent"))?;
+        if successor.current_site_id != evidence.target_site_id
+            || successor.origin_site_id != evidence.origin_site_id
+            || successor.requested_by.as_deref() != Some(evidence.owner_principal.as_str())
+            || successor.admitted_launch_capsule_hash.as_deref()
+                != Some(evidence.transition_subject_hash.as_str())
+        {
+            bail!("adopted remote successor snapshot contradicts its runtime seed");
+        }
+        let source = inner
+            .state_db
+            .read_authoritative_thread_snapshot(
+                &evidence.chain_root_id,
+                &evidence.source_placement_thread_id,
+            )?
+            .ok_or_else(|| anyhow!("adopted remote source snapshot is absent"))?;
+        if source.status != ThreadStatus::Continued
+            || source.result_project_snapshot_hash.as_deref()
+                != Some(
+                    placement
+                        .project_rebind
+                        .source_candidate_snapshot_hash
+                        .as_str(),
+                )
+            || source.admitted_launch_capsule_hash.as_deref()
+                != Some(restore.source_launch_capsule_hash.as_str())
+        {
+            bail!("adopted remote source settlement contradicts its checkpoint restore");
+        }
+    }
+    Ok(())
 }
 
 fn validate_thread_id_path_component(thread_id: &str) -> Result<()> {
@@ -4044,6 +4274,89 @@ impl StateStore {
         let g = self.lock()?;
         g.runtime_db
             .admit_dedicated_session_with_remote(session, Some(remote_thread_id))
+    }
+
+    pub fn admit_dedicated_session_from_reservation(
+        &self,
+        session: NewDedicatedSession<'_>,
+        remote_thread_id: Option<&str>,
+        reservation_id: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.admit_dedicated_session_from_reservation(
+            session,
+            remote_thread_id,
+            reservation_id,
+        )
+    }
+
+    pub fn reserve_credential_profile_generation(
+        &self,
+        reservation: NewCredentialProfileReservation<'_>,
+    ) -> Result<CredentialProfileReservationRecord> {
+        let g = self.lock()?;
+        g.runtime_db
+            .reserve_credential_profile_generation(reservation)
+    }
+
+    pub fn credential_profile_reservation_for_successor(
+        &self,
+        successor_thread_id: &str,
+    ) -> Result<Option<CredentialProfileReservationRecord>> {
+        let g = self.lock()?;
+        g.runtime_db
+            .credential_profile_reservation_for_successor(successor_thread_id)
+    }
+
+    /// Read the typed remote-continuation authority that admitted one exact
+    /// successor. This follows the authoritative braid, never an operational
+    /// job result or caller-provided checkpoint hash.
+    pub fn remote_continuation_authority(
+        &self,
+        chain_root_id: &str,
+        successor_thread_id: &str,
+    ) -> Result<Option<ryeos_state::objects::RemoteContinuationAuthority>> {
+        let g = self.lock()?;
+        let successor = g
+            .state_db
+            .read_authoritative_thread_snapshot(chain_root_id, successor_thread_id)?
+            .ok_or_else(|| anyhow!("remote continuation successor is absent"))?;
+        let Some(source_thread_id) = successor.upstream_thread_id.as_deref() else {
+            return Ok(None);
+        };
+        let source = g
+            .state_db
+            .read_authoritative_thread_snapshot_with_last_event(chain_root_id, source_thread_id)?
+            .ok_or_else(|| anyhow!("remote continuation source is absent"))?;
+        let Some((_hash, event)) = source.last_event else {
+            return Ok(None);
+        };
+        if event.event_type != "thread_continued" {
+            return Ok(None);
+        }
+        let Some(value) = event.payload.get("remote_adoption") else {
+            return Ok(None);
+        };
+        let authority: ryeos_state::objects::RemoteContinuationAuthority =
+            serde_json::from_value(value.clone())
+                .context("decode authoritative remote continuation edge")?;
+        authority.validate()?;
+        if authority.successor_thread_id != successor_thread_id
+            || event
+                .payload
+                .get("successor_thread_id")
+                .and_then(Value::as_str)
+                != Some(successor_thread_id)
+        {
+            bail!("remote continuation authority contradicts its successor edge");
+        }
+        Ok(Some(authority))
+    }
+
+    pub fn release_credential_profile_reservation(&self, reservation_id: &str) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .release_credential_profile_reservation(reservation_id)
     }
 
     pub fn dedicated_session(
@@ -5022,6 +5335,72 @@ impl StateStore {
         )
     }
 
+    /// Adopt an exact cross-site continuation head through the ordinary staged
+    /// import path, then idempotently materialize its target-local runtime seed.
+    /// The head is authoritative; SQLite installation is recoverable and never
+    /// precedes writer-transfer verification.
+    pub fn finalize_remote_adoption_import(
+        &self,
+        staged: ryeos_state::sync::StagedChainImport,
+        transition: &ryeos_state::sync::AdmittedChainWriterTransition,
+        target_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+    ) -> Result<ryeos_state::sync::ImportResult> {
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        validate_remote_adoption_runtime_seed(
+            &self.state_authority,
+            &g,
+            transition,
+            target_launch_metadata,
+            false,
+        )?;
+        let result = ryeos_state::sync::finalize_transferred_import(
+            &g.state_db,
+            staged,
+            transition,
+            g.signer.as_ref(),
+            permit.cas_guard(),
+        )?;
+        validate_remote_adoption_runtime_seed(
+            &self.state_authority,
+            &g,
+            transition,
+            target_launch_metadata,
+            true,
+        )?;
+        g.runtime_db.install_imported_thread_runtime(
+            &transition.evidence.successor_placement_thread_id,
+            &transition.evidence.chain_root_id,
+            target_launch_metadata,
+        )?;
+        Ok(result)
+    }
+
+    /// Repair the only allowed crash gap after a transferred head was adopted
+    /// but before its operational runtime seed was installed. No staged bytes
+    /// or remote phase claims are consulted; the current signed head and the
+    /// complete writer/placement/capsule authority are reverified.
+    pub fn recover_remote_adoption_runtime(
+        &self,
+        transition: &ryeos_state::sync::AdmittedChainWriterTransition,
+        target_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        validate_remote_adoption_runtime_seed(
+            &self.state_authority,
+            &g,
+            transition,
+            target_launch_metadata,
+            true,
+        )?;
+        g.runtime_db.install_imported_thread_runtime(
+            &transition.evidence.successor_placement_thread_id,
+            &transition.evidence.chain_root_id,
+            target_launch_metadata,
+        )
+    }
+
     #[track_caller]
     fn lock(&self) -> Result<StateStoreGuard<'_>> {
         let started = std::time::Instant::now();
@@ -5600,6 +5979,7 @@ impl StateStore {
                         return Ok(CreatedThreadPublication {
                             persisted: Vec::new(),
                             successor,
+                            remote_writer_grant_hash: None,
                         });
                     }
                     Ok(RootCommitReadback::Ambiguous(reason)) => {
@@ -5726,6 +6106,7 @@ impl StateStore {
         Ok(CreatedThreadPublication {
             persisted,
             successor,
+            remote_writer_grant_hash: None,
         })
     }
 
@@ -6734,6 +7115,7 @@ impl StateStore {
                                 *snapshot,
                                 successor_runtime,
                             ),
+                            remote_writer_grant_hash: None,
                         });
                     }
                     Err(authority_error) => {
@@ -6820,6 +7202,7 @@ impl StateStore {
         Ok(CreatedThreadPublication {
             persisted,
             successor,
+            remote_writer_grant_hash: None,
         })
     }
 
@@ -6941,6 +7324,41 @@ impl StateStore {
             initial_events,
         )
         .map(|publication| (publication.persisted, publication.successor))
+    }
+
+    /// Atomically terminalize the exact quiesced source placement and author
+    /// one target-site successor without creating a runnable source-node
+    /// runtime row. The ordinary running-continuation transaction remains the
+    /// sole single-successor serialization boundary.
+    pub fn create_remote_adoption_successor(
+        &self,
+        successor: &NewThreadRecord,
+        source_thread_id: &str,
+        chain_root_id: &str,
+        authority: &RemoteAdoptionContinuationAuthority,
+    ) -> Result<RemoteAdoptionPublication> {
+        let publication = self.create_running_continuation_successor(
+            successor,
+            source_thread_id,
+            chain_root_id,
+            RunningContinuationKind::RemoteAdoption { authority },
+            Some(&authority.target_resume_context),
+            None,
+            Some(
+                &authority
+                    .placement
+                    .project_rebind
+                    .source_candidate_snapshot_hash,
+            ),
+            Vec::new(),
+        )?;
+        Ok(RemoteAdoptionPublication {
+            successor_thread_id: successor.thread_id.clone(),
+            writer_grant_hash: publication.remote_writer_grant_hash.ok_or_else(|| {
+                anyhow!("remote adoption committed without its chain-writer grant identity")
+            })?,
+            target_launch_capsule_hash: authority.placement.target_launch_capsule_hash.clone(),
+        })
     }
 
     /// Create the parent's follow-resume successor: a running-source continuation
@@ -7099,6 +7517,233 @@ impl StateStore {
                      cannot create a launchable continuation successor"
                 )
             })?;
+        let remote_frontier = if let RunningContinuationKind::RemoteAdoption { authority } = &kind {
+            authority.placement.validate()?;
+            let placement = &authority.placement;
+            match (
+                source_launch_metadata.accounting_scope.as_ref(),
+                authority.source_accounting_frontier.as_ref(),
+            ) {
+                (None, None) if placement.accounting.source_scope.is_none() => {}
+                (Some(scope), Some(frontier))
+                    if scope == &frontier.source_scope
+                        && placement.accounting.source_scope.as_ref() == Some(scope)
+                        && placement.accounting.source_financial_high_water
+                            == frontier.financial_high_water
+                        && placement.accounting.source_charged_usd_nanos
+                            == frontier.charged_usd_nanos
+                        && placement.accounting.source_remaining_cap_usd_nanos
+                            == frontier.remaining_cap_usd_nanos
+                        && placement
+                            .accounting
+                            .source_remaining_directive_cap_usd_nanos
+                            == frontier.remaining_directive_cap_usd_nanos => {}
+                _ => bail!(
+                    "remote adoption accounting evidence is not the exact settled source frontier"
+                ),
+            }
+            if placement.chain_root_id != chain_root_id
+                || placement.source_placement_thread_id != source_thread_id
+                || placement.successor_placement_thread_id != successor.thread_id
+                || placement.owner_principal != source_resume_context.principal_identifier()
+                || placement.origin_site_id != source_resume_context.origin_site_id
+                || placement.source_site_id != source_resume_context.current_site_id
+                || placement.target_site_id != authority.target_resume_context.current_site_id
+            {
+                bail!(
+                    "remote adoption placement does not name the exact source, successor, owner, and sites"
+                );
+            }
+            let expected_target_resume =
+                source_resume_context.for_remote_worker_adoption(&authority.resume_rebind)?;
+            if expected_target_resume != authority.target_resume_context {
+                bail!("remote adoption target ResumeContext differs from its typed rebind");
+            }
+            if successor.current_site_id != placement.target_site_id
+                || successor.origin_site_id != placement.origin_site_id
+                || successor.requested_by.as_deref() != Some(placement.owner_principal.as_str())
+            {
+                bail!(
+                    "remote adoption successor snapshot identity contradicts placement authority"
+                );
+            }
+
+            let source_head = g
+                .state_db
+                .read_generic_head_ref("chains", chain_root_id)?
+                .ok_or_else(|| anyhow!("remote adoption source chain has no signed head"))?;
+            if source_head.target_hash != placement.source_chain_head_hash
+                || source_head.signer != g.signer.fingerprint()
+            {
+                bail!("remote adoption source head is no longer the exact locally owned frontier");
+            }
+            let anchor = g
+                .state_db
+                .read_authoritative_thread_append_anchor(chain_root_id, source_thread_id)?
+                .ok_or_else(|| anyhow!("remote adoption source thread has no append anchor"))?;
+            if anchor.thread_last_event_hash.as_deref()
+                != Some(placement.source_last_event_hash.as_str())
+            {
+                bail!("remote adoption source event is no longer the exact thread frontier");
+            }
+
+            let session = g
+                .runtime_db
+                .dedicated_session(source_thread_id)?
+                .ok_or_else(|| anyhow!("remote adoption source has no dedicated worker session"))?;
+            if session.chain_root_id != chain_root_id
+                || session.owner_principal != placement.owner_principal
+                || session.state != "frozen"
+                || session.current_turn_id.is_some()
+                || session.send_boundary != "settled"
+                || session.candidate_snapshot_hash.as_deref()
+                    != Some(
+                        placement
+                            .project_rebind
+                            .source_candidate_snapshot_hash
+                            .as_str(),
+                    )
+                || session.credential_profile_id
+                    != authority.resume_rebind.source_credential_profile_id
+                || session.remote_thread_id.as_deref()
+                    != Some(
+                        placement
+                            .credential_reservation
+                            .upstream_session_id
+                            .as_str(),
+                    )
+            {
+                bail!("remote adoption source session is not the exact frozen settled candidate");
+            }
+            let worker_instance_id = session.worker_instance_id.as_deref().ok_or_else(|| {
+                anyhow!("remote adoption source session has no retained worker identity")
+            })?;
+            let worker = g
+                .runtime_db
+                .worker_process(worker_instance_id)?
+                .ok_or_else(|| anyhow!("remote adoption source worker projection is missing"))?;
+            if worker.placement_thread_id != source_thread_id
+                || worker.state != runtime_db::WorkerProcessState::Dead
+                || worker.cleanup_state != "reaped"
+            {
+                bail!("remote adoption source worker death is not proved reaped");
+            }
+
+            let checkpoint_value = self
+                .state_authority
+                .cas_store()?
+                .get_object(&placement.checkpoint_manifest_hash)?
+                .ok_or_else(|| anyhow!("remote adoption checkpoint manifest is absent"))?;
+            let checkpoint = StateManifest::from_current_value(checkpoint_value)?;
+            if checkpoint.publisher_chain_root_id != chain_root_id
+                || checkpoint.publisher_thread_id != source_thread_id
+                || checkpoint.contract != ryeos_state::objects::WORKER_SESSION_RESTORE_CONTRACT
+            {
+                bail!("remote adoption checkpoint was not published by the exact source placement");
+            }
+            let restore_bytes = self
+                .state_authority
+                .cas_store()?
+                .get_blob(&checkpoint.restore.blob_hash)?
+                .ok_or_else(|| anyhow!("remote adoption restore document is absent"))?;
+            if lillux::sha256_hex(&restore_bytes) != checkpoint.restore.blob_hash {
+                bail!("remote adoption restore document digest changed");
+            }
+            let restore_value: Value = serde_json::from_slice(&restore_bytes)
+                .context("decode remote adoption restore document")?;
+            if lillux::canonical_json(&restore_value)?.as_bytes() != restore_bytes {
+                bail!("remote adoption restore document is not canonical JSON");
+            }
+            let restore =
+                ryeos_state::objects::WorkerSessionRestore::from_current_value(restore_value)?;
+            let source_capsule_hash = source_row
+                .admitted_launch_capsule_hash
+                .as_deref()
+                .ok_or_else(|| anyhow!("remote adoption source has no launch capsule"))?;
+            let restored_dependencies = restore
+                .persistent_dependencies
+                .iter()
+                .map(|(name, dependency)| (name.clone(), dependency.exact_program_hash.clone()))
+                .collect::<BTreeMap<_, _>>();
+            if restore.source_position.chain_root_id != chain_root_id
+                || restore.source_position.placement_thread_id != source_thread_id
+                || restore.project_candidate_snapshot_hash.as_deref()
+                    != Some(
+                        placement
+                            .project_rebind
+                            .source_candidate_snapshot_hash
+                            .as_str(),
+                    )
+                || restore.outer_exact_program_hash != placement.outer_exact_program_hash
+                || restored_dependencies != placement.persistent_dependency_programs
+                || restore.upstream_session_id
+                    != placement.credential_reservation.upstream_session_id
+                || restore.credential_subject_contract_digest
+                    != placement.credential_reservation.subject_contract_digest
+                || restore.credential_subject_digest
+                    != placement.credential_reservation.subject_digest
+                || restore.source_site_id != placement.source_site_id
+                || restore.source_launch_capsule_hash != source_capsule_hash
+            {
+                bail!("remote adoption placement contradicts its authoritative checkpoint restore");
+            }
+            let latest_anchor =
+                queries::latest_state_anchor_event(g.state_db.projection(), source_thread_id)?
+                    .ok_or_else(|| {
+                        anyhow!("remote adoption source has no authoritative state anchor")
+                    })?;
+            let anchor = ryeos_state::objects::StateAnchorMilestone::from_value(
+                serde_json::from_slice(&latest_anchor.payload)
+                    .context("decode latest source state-anchor payload")?,
+            )?;
+            if anchor.payload.manifest_ref != format!("cas:{}", placement.checkpoint_manifest_hash)
+            {
+                bail!("remote adoption checkpoint is not the source's latest state anchor");
+            }
+            match &anchor.subject {
+                ryeos_state::objects::StateAnchorSubject::Execution {
+                    chain_root_id: anchor_chain,
+                    placement_thread_id,
+                    launch_capsule_hash,
+                    source_chain_seq,
+                    source_event_hash,
+                    ..
+                } if anchor_chain == chain_root_id
+                    && placement_thread_id == source_thread_id
+                    && source_row.admitted_launch_capsule_hash.as_deref()
+                        == Some(launch_capsule_hash.as_str())
+                    && restore.source_position.chain_seq == *source_chain_seq
+                    && restore.source_position.event_hash == *source_event_hash => {}
+                _ => bail!("remote adoption checkpoint anchor names another execution authority"),
+            }
+
+            let placement_value = self
+                .state_authority
+                .cas_store()?
+                .get_object(&authority.placement_attestation_hash)?
+                .ok_or_else(|| anyhow!("remote adoption placement attestation is absent"))?;
+            let placement_attestation =
+                ryeos_state::objects::Attestation::from_value(&placement_value)?;
+            placement_attestation.verify_with_trust_store(self.state_authority.trust_store())?;
+            if placement_attestation.is_expired_at(&lillux::time::iso8601_now())? {
+                bail!("remote adoption placement attestation is expired");
+            }
+            let observed =
+                crate::worker_handoff::WorkerPlacementAdmissionEvidence::from_attestation(
+                    &placement_attestation,
+                )?;
+            if observed != *placement {
+                bail!("remote adoption placement attestation differs from its supplied evidence");
+            }
+            let target_signer_fingerprint = placement_attestation.issuer_fingerprint()?.to_string();
+            Some((
+                source_head.target_hash,
+                placement.source_last_event_hash.clone(),
+                target_signer_fingerprint,
+            ))
+        } else {
+            None
+        };
         if matches!(&kind, RunningContinuationKind::GraphFollowResume)
             && source_launch_metadata.native_resume.is_none()
         {
@@ -7127,9 +7772,79 @@ impl StateStore {
         let mut successor_with_upstream = successor.clone();
         successor_with_upstream.upstream_thread_id = Some(source_thread_id.to_string());
 
-        let mut successor_meta = successor_launch_metadata.cloned().unwrap_or_else(|| {
-            source_launch_metadata.continuation_successor_seed(source_resume_context.clone())
-        });
+        if successor_launch_metadata.is_some()
+            && matches!(&kind, RunningContinuationKind::RemoteAdoption { .. })
+        {
+            bail!("remote adoption derives launch metadata only from its attested target capsule");
+        }
+        let mut successor_meta = match &kind {
+            RunningContinuationKind::RemoteAdoption { authority } => {
+                let target_capsule = load_admitted_launch_capsule(
+                    &self.state_authority,
+                    &authority.placement.target_launch_capsule_hash,
+                )?;
+                let source_capsule_hash = source_row
+                    .admitted_launch_capsule_hash
+                    .as_deref()
+                    .ok_or_else(|| {
+                        anyhow!("remote adoption source has no admitted launch capsule")
+                    })?;
+                let source_capsule =
+                    load_admitted_launch_capsule(&self.state_authority, source_capsule_hash)?;
+                crate::worker_handoff::validate_cross_site_capsule_transition(
+                    &source_capsule,
+                    &source_resume_context,
+                    &target_capsule,
+                    &authority.target_resume_context,
+                    &authority.resume_rebind,
+                    &authority.placement,
+                    &self.state_authority.cas_store()?,
+                )?;
+                let source_sealed = source_launch_metadata
+                    .sealed_root_request
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("remote adoption source has no sealed invocation"))?;
+                let expected_target_sealed = source_sealed.for_remote_worker_adoption_invocation(
+                    &source_resume_context,
+                    &authority.target_resume_context,
+                    &authority.resume_rebind,
+                )?;
+                let target_sealed: crate::thread_lifecycle::SealedRootExecutionRequest =
+                    serde_json::from_value(target_capsule.sealed_invocation.clone())
+                        .context("decode remote adoption target sealed invocation")?;
+                if serde_json::to_value(&target_sealed)?
+                    != serde_json::to_value(&expected_target_sealed)?
+                {
+                    bail!("remote adoption target capsule carries a different sealed invocation");
+                }
+                let mut metadata = source_launch_metadata
+                    .continuation_successor_seed(authority.target_resume_context.clone());
+                metadata.launch_driver = Some(target_capsule.launch_driver);
+                metadata.sealed_root_request = Some(target_sealed);
+                metadata.admitted_project_authority =
+                    Some(target_capsule.project_authority.clone());
+                metadata.admitted_artifact_identity =
+                    Some(target_capsule.artifact_identity.clone());
+                metadata.admitted_launch_capsule_schema = Some(target_capsule.schema);
+                metadata.admitted_execution_closure =
+                    Some(target_capsule.execution_closure.clone());
+                metadata.execution_realization_hash =
+                    Some(target_capsule.execution_realization_hash.clone());
+                metadata.accounting_scope = target_capsule.accounting_scope.clone();
+                metadata
+                    .validate()
+                    .context("validate remote adoption target launch metadata")?;
+                if metadata.admitted_launch_capsule()?.as_ref() != Some(&target_capsule) {
+                    bail!(
+                        "remote adoption target metadata does not reproduce its admitted capsule"
+                    );
+                }
+                metadata
+            }
+            _ => successor_launch_metadata.cloned().unwrap_or_else(|| {
+                source_launch_metadata.continuation_successor_seed(source_resume_context.clone())
+            }),
+        };
         let successor_resume_context =
             successor_meta
                 .resume_context
@@ -7147,11 +7862,19 @@ impl StateStore {
                 successor.thread_id
             );
         }
-        successor_resume_context.validate_continuation_transition_from(
-            &source_resume_context,
-            source_result_snapshot_hash,
-            crate::launch_metadata::ContinuationAuthorityTransitionKind::Inherit,
-        )?;
+        match &kind {
+            RunningContinuationKind::RemoteAdoption { authority } => {
+                successor_resume_context.validate_remote_worker_adoption_from(
+                    &source_resume_context,
+                    &authority.resume_rebind,
+                )?;
+            }
+            _ => successor_resume_context.validate_continuation_transition_from(
+                &source_resume_context,
+                source_result_snapshot_hash,
+                crate::launch_metadata::ContinuationAuthorityTransitionKind::Inherit,
+            )?,
+        }
         if successor_meta
             .continuation_source_thread_id
             .as_deref()
@@ -7164,25 +7887,44 @@ impl StateStore {
             launch_metadata: Some(successor_meta.clone()),
             ..RuntimeInfo::default()
         };
-        let (successor_snapshot, source_snapshot_before) = attach_continuation_launch_capsule(
-            &self.state_authority,
-            permit.cas_guard(),
-            &g,
-            build_continuation_snapshot(&successor_with_upstream, &successor_resume_context)?,
-            ContinuationCapsuleTransition {
-                chain_root_id,
-                source_thread_id,
-                launch_metadata: Some(&successor_meta),
-                expected_result_snapshot_hash: source_result_snapshot_hash,
-                kind: crate::launch_metadata::ContinuationAuthorityTransitionKind::Inherit,
-            },
-        )?;
+        let (successor_snapshot, source_snapshot_before) =
+            if let RunningContinuationKind::RemoteAdoption { authority } = &kind {
+                let mut snapshot = build_continuation_snapshot(
+                    &successor_with_upstream,
+                    &successor_resume_context,
+                )?;
+                snapshot.admitted_launch_capsule_hash =
+                    Some(authority.placement.target_launch_capsule_hash.clone());
+                (
+                    snapshot,
+                    authoritative_snapshot_for_transition(&g, chain_root_id, source_thread_id)?,
+                )
+            } else {
+                attach_continuation_launch_capsule(
+                    &self.state_authority,
+                    permit.cas_guard(),
+                    &g,
+                    build_continuation_snapshot(
+                        &successor_with_upstream,
+                        &successor_resume_context,
+                    )?,
+                    ContinuationCapsuleTransition {
+                        chain_root_id,
+                        source_thread_id,
+                        launch_metadata: Some(&successor_meta),
+                        expected_result_snapshot_hash: source_result_snapshot_hash,
+                        kind: crate::launch_metadata::ContinuationAuthorityTransitionKind::Inherit,
+                    },
+                )?
+            };
 
-        // Runtime-db writes FIRST: insert the successor runtime row and seed its
-        // launch identity before any state-db successor snapshot or source
-        // settle. If the seed fails, only an orphan runtime row exists — no
-        // state-db successor edge, source untouched and still running.
-        {
+        // Same-node successors become locally runnable, so their runtime seed
+        // is written before the authoritative edge. A remote successor is
+        // deliberately absent from this node's runtime database; the target
+        // may create its operational row only after it adopts the transferred
+        // signed head.
+        let local_runtime_seeded = !matches!(&kind, RunningContinuationKind::RemoteAdoption { .. });
+        if local_runtime_seeded {
             if let Some(prepared) = successor_launch_metadata
                 && (prepared.native_resume != source_launch_metadata.native_resume
                     || prepared.cancellation_mode != source_launch_metadata.cancellation_mode
@@ -7203,6 +7945,57 @@ impl StateStore {
                 return Err(error);
             }
         }
+
+        let remote_authority = match (&kind, remote_frontier.as_ref()) {
+            (
+                RunningContinuationKind::RemoteAdoption { authority },
+                Some((source_chain_head_hash, source_last_event_hash, target_signer_fingerprint)),
+            ) => {
+                let placement = &authority.placement;
+                if source_snapshot_before.current_site_id != placement.source_site_id
+                    || source_snapshot_before.origin_site_id != placement.origin_site_id
+                    || source_snapshot_before.requested_by.as_deref()
+                        != Some(placement.owner_principal.as_str())
+                    || source_snapshot_before
+                        .admitted_launch_capsule_hash
+                        .is_none()
+                {
+                    bail!("remote adoption source snapshot contradicts placement authority");
+                }
+                let grant_evidence = crate::worker_handoff::chain_writer_transition_from_placement(
+                    placement,
+                    authority.placement_attestation_hash.clone(),
+                    g.signer.fingerprint().to_string(),
+                    target_signer_fingerprint.clone(),
+                );
+                let grant = grant_evidence.sign_attestation(g.signer.as_ref())?;
+                self.state_authority.ensure_guard(permit.cas_guard())?;
+                let writer_grant_hash = self
+                    .state_authority
+                    .cas_store()?
+                    .store_object(&grant.to_value())
+                    .context("store one-successor remote chain-writer grant")?;
+                Some(ryeos_state::objects::RemoteContinuationAuthority {
+                    schema: ryeos_state::objects::REMOTE_CONTINUATION_AUTHORITY_SCHEMA,
+                    operation_id: placement.operation_id.clone(),
+                    source_chain_head_hash: source_chain_head_hash.clone(),
+                    source_last_event_hash: source_last_event_hash.clone(),
+                    checkpoint_manifest_hash: placement.checkpoint_manifest_hash.clone(),
+                    target_placement_attestation_hash: authority.placement_attestation_hash.clone(),
+                    chain_writer_grant_hash: writer_grant_hash,
+                    target_launch_capsule_hash: placement.target_launch_capsule_hash.clone(),
+                    source_site_id: placement.source_site_id.clone(),
+                    target_site_id: placement.target_site_id.clone(),
+                    target_node_signer_fingerprint: target_signer_fingerprint.clone(),
+                    successor_thread_id: successor.thread_id.clone(),
+                })
+            }
+            (RunningContinuationKind::RemoteAdoption { .. }, None) => {
+                bail!("remote adoption lost its verified source frontier")
+            }
+            (_, Some(_)) => bail!("local continuation unexpectedly carries a remote frontier"),
+            (_, None) => None,
+        };
 
         // The successor becomes observable with its creation record and complete
         // authoritative launch audit in the same signed chain head. ResumeContext
@@ -7246,14 +8039,25 @@ impl StateStore {
             RunningContinuationKind::GraphFollowResume => {
                 Some(queries::ContinuationReasonMarker::GraphFollowResume.as_str())
             }
+            RunningContinuationKind::RemoteAdoption { .. } => Some("remote_adoption"),
         };
+        let mut source_payload = json!({
+            "successor_thread_id": &successor.thread_id,
+            "reason": edge_reason,
+        });
+        if let Some(remote) = &remote_authority {
+            source_payload
+                .as_object_mut()
+                .expect("continuation payload is an object")
+                .insert(
+                    "remote_adoption".to_string(),
+                    serde_json::to_value(remote).context("encode remote continuation authority")?,
+                );
+        }
         let source_event = NewEventRecord {
             event_type: "thread_continued".to_string(),
             storage_class: "indexed".to_string(),
-            payload: json!({
-                "successor_thread_id": &successor.thread_id,
-                "reason": edge_reason,
-            }),
+            payload: source_payload,
         };
         let ste = convert_events(
             std::slice::from_ref(&source_event),
@@ -7308,6 +8112,9 @@ impl StateStore {
                                 *snapshot,
                                 successor_runtime,
                             ),
+                            remote_writer_grant_hash: remote_authority
+                                .as_ref()
+                                .map(|remote| remote.chain_writer_grant_hash.clone()),
                         });
                     }
                     Err(authority_error) => {
@@ -7322,14 +8129,16 @@ impl StateStore {
                     }
                     Ok(ContinuationCommitReadback::ProvenAbsent) => {}
                 }
-                if let Err(cleanup_error) =
-                    self.delete_thread_runtime_locked(&g, &successor.thread_id)
-                {
-                    tracing::error!(
-                        thread_id = %successor.thread_id,
-                        error = %cleanup_error,
-                        "failed to remove runtime row after atomic running-continuation birth failed"
-                    );
+                if local_runtime_seeded {
+                    if let Err(cleanup_error) =
+                        self.delete_thread_runtime_locked(&g, &successor.thread_id)
+                    {
+                        tracing::error!(
+                            thread_id = %successor.thread_id,
+                            error = %cleanup_error,
+                            "failed to remove runtime row after atomic running-continuation birth failed"
+                        );
+                    }
                 }
                 return Err(error);
             }
@@ -7358,6 +8167,7 @@ impl StateStore {
                 successor_result.snapshot,
                 successor_runtime,
             ),
+            remote_writer_grant_hash: remote_authority.map(|remote| remote.chain_writer_grant_hash),
         })
     }
 

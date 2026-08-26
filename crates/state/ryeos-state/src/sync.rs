@@ -515,10 +515,48 @@ fn load_exact_staged_chain_head(
 /// 4. release the durable staging roots
 pub fn finalize_import(
     state_db: &StateDb,
-    mut staged: StagedChainImport,
+    staged: StagedChainImport,
     signer: &dyn crate::Signer,
     cas_mutation_guard: &crate::CasMutationGuard,
 ) -> Result<ImportResult> {
+    finalize_import_with_writer_transition(state_db, staged, signer, cas_mutation_guard, None)
+}
+
+/// Consume a staged chain closure through the exact one-successor writer
+/// transition admitted by the source node. This shares ordinary staged-import
+/// verification, journal recovery, projection, and lease cleanup; only the
+/// final chain-head authorization differs.
+pub fn finalize_transferred_import(
+    state_db: &StateDb,
+    staged: StagedChainImport,
+    transition: &AdmittedChainWriterTransition,
+    signer: &dyn crate::Signer,
+    cas_mutation_guard: &crate::CasMutationGuard,
+) -> Result<ImportResult> {
+    finalize_import_with_writer_transition(
+        state_db,
+        staged,
+        signer,
+        cas_mutation_guard,
+        Some(transition),
+    )
+}
+
+fn finalize_import_with_writer_transition(
+    state_db: &StateDb,
+    mut staged: StagedChainImport,
+    signer: &dyn crate::Signer,
+    cas_mutation_guard: &crate::CasMutationGuard,
+    writer_transition: Option<&AdmittedChainWriterTransition>,
+) -> Result<ImportResult> {
+    if let Some(transition) = writer_transition {
+        transition.validate()?;
+        if transition.evidence.chain_root_id != staged.chain_root_id
+            || transition.target_chain_head_hash != staged.chain_head_hash
+        {
+            anyhow::bail!("writer transition does not authorize the exact staged chain head");
+        }
+    }
     let operation = (|| -> Result<()> {
         let authority = state_db.pinned_authority()?;
         authority.ensure_guard(cas_mutation_guard)?;
@@ -551,12 +589,19 @@ pub fn finalize_import(
         // Step 2: publish through StateDb's journaled chain namespace path,
         // which holds the chain critical section through projection and
         // compare-ack.
-        state_db.write_chain_head_ref_admitted(
-            &staged.chain_root_id,
-            &staged.chain_head_hash,
-            signer,
-            cas_mutation_guard,
-        )?;
+        match writer_transition {
+            Some(transition) => state_db.write_transferred_chain_head_admitted(
+                transition,
+                signer,
+                cas_mutation_guard,
+            )?,
+            None => state_db.write_chain_head_ref_admitted(
+                &staged.chain_root_id,
+                &staged.chain_head_hash,
+                signer,
+                cas_mutation_guard,
+            )?,
+        }
 
         tracing::info!(
             chain_root_id = %staged.chain_root_id,

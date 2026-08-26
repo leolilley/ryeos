@@ -871,6 +871,57 @@ impl SealedRootExecutionRequest {
         Ok(successor)
     }
 
+    /// Rebind one already admitted portable worker invocation onto a target
+    /// site. Unlike ordinary continuation this explicitly permits the site,
+    /// directional project authority, and local credential selector changes
+    /// proved by the placement contract. Every other invocation-only field is
+    /// inherited from `self`, and the resulting full ledger must agree with
+    /// the target `ResumeContext` before it can be sealed into a capsule.
+    pub fn for_remote_worker_adoption_invocation(
+        &self,
+        source_resume: &crate::launch_metadata::ResumeContext,
+        target_resume: &crate::launch_metadata::ResumeContext,
+        rebind: &crate::worker_handoff::RemoteResumeContextRebind,
+    ) -> Result<Self> {
+        self.validate_invocation_against_resume(source_resume)
+            .context("source invocation ledger validation before remote adoption")?;
+        target_resume.validate_remote_worker_adoption_from(source_resume, rebind)?;
+        if self.kind != target_resume.kind
+            || self.item_ref != target_resume.item_ref
+            || self.ref_bindings != target_resume.ref_bindings
+            || self.launch_mode != target_resume.launch_mode
+            || self.current_site_id != rebind.source_site_id
+            || self.origin_site_id != target_resume.origin_site_id
+            || target_resume.current_site_id != rebind.target_site_id
+            || target_resume.executor_ref.as_deref() != Some(self.executor_ref())
+            || target_resume.runtime_ref.as_deref() != Some(self.runtime_ref())
+            || self.execution_hints != target_resume.execution_hints.values
+            || self.requested_by.as_deref() != Some(target_resume.principal_identifier())
+            || self.planning_principal != SealedPrincipal::from(&target_resume.requested_by)
+        {
+            bail!(
+                "remote worker invocation does not preserve its admitted program and owner identity"
+            );
+        }
+        let mut target = self.clone();
+        target.current_site_id = rebind.target_site_id.clone();
+        target.target_site_id = Some(rebind.target_site_id.clone());
+        target.parameters = target_resume.parameters.clone();
+        target.project_context = target_resume.project_context.clone();
+        target.project_authority = target_resume.project_authority.clone();
+        target.project_binding_subject_authority = continued_binding_subject_authority(
+            &self.project_binding_subject_authority,
+            &target_resume.project_authority,
+        )?;
+        target
+            .validate_invocation_against_resume(target_resume)
+            .context("target invocation ledger validation after remote adoption rebind")?;
+        if target.admitted_program_value()? != self.admitted_program_value()? {
+            bail!("remote worker invocation rebind changed immutable admitted program identity");
+        }
+        Ok(target)
+    }
+
     /// Exact captured policy carried by the synthetic storage fixture.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]

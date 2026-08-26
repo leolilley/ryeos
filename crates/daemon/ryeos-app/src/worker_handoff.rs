@@ -6,12 +6,15 @@
 //! be interpreted as placement or chain-writer authority.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 
 use ryeos_state::objects::{AdmittedAccountingScope, Attestation, ExecutionProjectAuthority};
 use ryeos_state::signer::Signer;
+
+use crate::launch_metadata::{OriginalPushedHeadRef, ResumeContext, StableProjectIdentity};
 
 pub const WORKER_PLACEMENT_POLICY: &str = "worker-placement-v1";
 pub const WORKER_PLACEMENT_CLAIM: &str = "admitted";
@@ -26,6 +29,9 @@ pub struct CredentialGenerationReservation {
     pub owner_principal: String,
     pub generation: u64,
     pub reservation_id: String,
+    /// Opaque workload-session coordinate that the target worker must recover.
+    /// It is provider-neutral and never interpreted by RyeOS.
+    pub upstream_session_id: String,
     pub subject_contract_digest: String,
     pub subject_digest: String,
 }
@@ -51,6 +57,28 @@ pub struct AccountingConservation {
     pub source_charged_usd_nanos: u64,
     pub source_remaining_cap_usd_nanos: Option<u64>,
     pub target_cap_usd_nanos: Option<u64>,
+    pub source_remaining_directive_cap_usd_nanos: Option<u64>,
+    pub target_directive_cap_usd_nanos: Option<u64>,
+}
+
+/// Node-local operands needed to derive a target `ResumeContext` from an
+/// already admitted source. This is deliberately not a second durable
+/// authority object: the resulting complete resume ledger is sealed into the
+/// target launch capsule, while `WorkerPlacementAdmissionEvidence` binds its
+/// project, credential, site, and accounting substitutions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteResumeContextRebind {
+    pub source_site_id: String,
+    pub target_site_id: String,
+    pub target_project_context: ryeos_engine::contracts::ProjectContext,
+    pub target_project_authority: ExecutionProjectAuthority,
+    pub target_stable_project_identity: Option<StableProjectIdentity>,
+    pub target_local_overlay_root: Option<PathBuf>,
+    pub target_original_snapshot_hash: Option<String>,
+    pub target_original_pushed_head_ref: Option<OriginalPushedHeadRef>,
+    pub target_state_root: Option<PathBuf>,
+    pub source_credential_profile_id: String,
+    pub credential_reservation: CredentialGenerationReservation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +189,13 @@ impl WorkerPlacementAdmissionEvidence {
         self.credential_reservation.validate()?;
         self.project_rebind.validate()?;
         self.accounting.validate()?;
+        if let (Some(source), Some(target)) =
+            (&self.accounting.source_scope, &self.accounting.target_scope)
+            && (source.budget_authority_site_id != self.source_site_id
+                || target.budget_authority_site_id != self.target_site_id)
+        {
+            bail!("accounting scopes do not belong to their admitted source and target sites");
+        }
         Ok(())
     }
 
@@ -193,6 +228,124 @@ impl WorkerPlacementAdmissionEvidence {
     }
 }
 
+impl ResumeContext {
+    /// Derive the complete target-node resume ledger for one cross-site worker
+    /// adoption. Every field starts as an exact source copy and only the
+    /// substitutions represented by `RemoteResumeContextRebind` are applied.
+    /// The ordinary continuation validator remains unchanged and therefore
+    /// continues to reject every site or project-endpoint change.
+    pub fn for_remote_worker_adoption(
+        &self,
+        rebind: &RemoteResumeContextRebind,
+    ) -> anyhow::Result<Self> {
+        rebind.validate_against_source(self)?;
+        let mut target = self.clone();
+        target.parameters = rebind_credential_profile_parameter(
+            &self.parameters,
+            &rebind.source_credential_profile_id,
+            &rebind.credential_reservation.profile_id,
+        )?;
+        target.project_context = rebind.target_project_context.clone();
+        target.project_authority = rebind.target_project_authority.clone();
+        target.stable_project_identity = rebind.target_stable_project_identity.clone();
+        target.local_overlay_root = rebind.target_local_overlay_root.clone();
+        target.original_snapshot_hash = rebind.target_original_snapshot_hash.clone();
+        target.original_pushed_head_ref = rebind.target_original_pushed_head_ref.clone();
+        target.state_root = rebind.target_state_root.clone();
+        target.current_site_id = rebind.target_site_id.clone();
+        target.validate_remote_worker_adoption_from(self, rebind)?;
+        Ok(target)
+    }
+
+    pub fn validate_remote_worker_adoption_from(
+        &self,
+        source: &Self,
+        rebind: &RemoteResumeContextRebind,
+    ) -> anyhow::Result<()> {
+        rebind.validate_against_source(source)?;
+        let mut expected = source.clone();
+        expected.parameters = rebind_credential_profile_parameter(
+            &source.parameters,
+            &rebind.source_credential_profile_id,
+            &rebind.credential_reservation.profile_id,
+        )?;
+        expected.project_context = rebind.target_project_context.clone();
+        expected.project_authority = rebind.target_project_authority.clone();
+        expected.stable_project_identity = rebind.target_stable_project_identity.clone();
+        expected.local_overlay_root = rebind.target_local_overlay_root.clone();
+        expected.original_snapshot_hash = rebind.target_original_snapshot_hash.clone();
+        expected.original_pushed_head_ref = rebind.target_original_pushed_head_ref.clone();
+        expected.state_root = rebind.target_state_root.clone();
+        expected.current_site_id = rebind.target_site_id.clone();
+        if self != &expected {
+            bail!(
+                "remote worker resume authority changed outside its typed site, project, and credential rebind"
+            );
+        }
+        if self.principal_identifier() != rebind.credential_reservation.owner_principal {
+            bail!("target credential reservation is not owned by the session principal");
+        }
+        self.authoritative_project_identity()?;
+        Ok(())
+    }
+}
+
+impl RemoteResumeContextRebind {
+    fn validate_against_source(&self, source: &ResumeContext) -> anyhow::Result<()> {
+        for (label, site) in [
+            ("source site", self.source_site_id.as_str()),
+            ("target site", self.target_site_id.as_str()),
+        ] {
+            label_value(label, site)?;
+        }
+        if self.source_site_id == self.target_site_id
+            || source.current_site_id != self.source_site_id
+            || source.origin_site_id.is_empty()
+        {
+            bail!("remote resume rebind does not describe the exact source-to-target site change");
+        }
+        label_value(
+            "source credential profile",
+            &self.source_credential_profile_id,
+        )?;
+        self.credential_reservation.validate()?;
+        if source.principal_identifier() != self.credential_reservation.owner_principal {
+            bail!("credential reservation owner differs from the source session owner");
+        }
+        self.target_project_authority.validate()?;
+        if let Some(identity) = &self.target_stable_project_identity {
+            identity.validate()?;
+        }
+        Ok(())
+    }
+}
+
+fn rebind_credential_profile_parameter(
+    source: &serde_json::Value,
+    expected_source_profile: &str,
+    target_profile: &str,
+) -> anyhow::Result<serde_json::Value> {
+    label_value("source credential profile", expected_source_profile)?;
+    label_value("target credential profile", target_profile)?;
+    let mut target = source.clone();
+    let object = target
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("worker execution parameters must be an object"))?;
+    match object
+        .get("credential_profile_id")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(profile) if profile == expected_source_profile => {}
+        Some(_) => bail!("source credential profile does not match the sealed worker input"),
+        None => bail!("worker execution parameters have no credential_profile_id"),
+    }
+    object.insert(
+        "credential_profile_id".to_owned(),
+        serde_json::Value::String(target_profile.to_owned()),
+    );
+    Ok(target)
+}
+
 pub fn chain_writer_transition_from_placement(
     placement: &WorkerPlacementAdmissionEvidence,
     placement_attestation_hash: String,
@@ -218,12 +371,117 @@ pub fn chain_writer_transition_from_placement(
     }
 }
 
+/// Verify the complete source-to-target capsule transition before a target
+/// placement attestation can be issued. The outer program and every field of
+/// the execution closure remain exact except for named, independently
+/// re-admitted persistent-session capsules. Node-local project, credential,
+/// realization, and accounting changes must agree with the typed placement
+/// evidence and the exact target resume ledger.
+#[allow(clippy::too_many_arguments)]
+pub fn validate_cross_site_capsule_transition(
+    source_capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+    source_resume: &ResumeContext,
+    target_capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+    target_resume: &ResumeContext,
+    resume_rebind: &RemoteResumeContextRebind,
+    placement: &WorkerPlacementAdmissionEvidence,
+    cas: &lillux::CasStore,
+) -> anyhow::Result<()> {
+    source_capsule.validate()?;
+    target_capsule.validate()?;
+    placement.validate()?;
+    target_resume.validate_remote_worker_adoption_from(source_resume, resume_rebind)?;
+    if !source_capsule.same_cross_site_continuation_program_admission(target_capsule)? {
+        bail!("target capsule changed immutable portable worker admission");
+    }
+    if source_capsule.exact_program_hash != placement.outer_exact_program_hash
+        || target_capsule.exact_program_hash != placement.outer_exact_program_hash
+        || target_capsule.execution_realization_hash != placement.target_execution_realization_hash
+        || target_capsule.content_hash()? != placement.target_launch_capsule_hash
+        || source_capsule.project_authority != source_resume.project_authority
+        || target_capsule.project_authority != target_resume.project_authority
+        || target_capsule.project_authority != placement.project_rebind.target_authority
+        || target_capsule.accounting_scope != placement.accounting.target_scope
+        || source_capsule.accounting_scope != placement.accounting.source_scope
+    {
+        bail!("placement evidence contradicts its source or target launch capsule");
+    }
+    if placement.owner_principal != source_resume.principal_identifier()
+        || placement.owner_principal != target_resume.principal_identifier()
+        || placement.origin_site_id != source_resume.origin_site_id
+        || placement.origin_site_id != target_resume.origin_site_id
+        || placement.source_site_id != source_resume.current_site_id
+        || placement.target_site_id != target_resume.current_site_id
+        || placement.credential_reservation != resume_rebind.credential_reservation
+    {
+        bail!("placement evidence contradicts the exact owner/site resume transition");
+    }
+
+    let source_request: crate::thread_lifecycle::SealedRootExecutionRequest =
+        serde_json::from_value(source_capsule.sealed_invocation.clone())
+            .context("decode source sealed invocation for remote transition")?;
+    let expected_target = source_request.for_remote_worker_adoption_invocation(
+        source_resume,
+        target_resume,
+        resume_rebind,
+    )?;
+    if serde_json::to_value(expected_target)? != target_capsule.sealed_invocation {
+        bail!("target capsule invocation differs outside its typed remote rebind");
+    }
+
+    placement
+        .project_rebind
+        .validate_capsule_transition(&source_capsule.project_authority)?;
+    let source_sessions = source_capsule.admitted_persistent_session_capsules()?;
+    let target_sessions = target_capsule.admitted_persistent_session_capsules()?;
+    if target_sessions != placement.target_persistent_session_capsules
+        || source_sessions.keys().ne(target_sessions.keys())
+    {
+        bail!("placement persistent-session names or target capsules changed");
+    }
+    let mut source_programs = BTreeMap::new();
+    for (name, source_hash) in &source_sessions {
+        let source = load_persistent_capsule(cas, source_hash)?;
+        let target_hash = target_sessions
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("target omitted persistent session `{name}`"))?;
+        let target = load_persistent_capsule(cas, target_hash)?;
+        if source.exact_program_hash != target.exact_program_hash {
+            bail!("target persistent session `{name}` changed its exact program");
+        }
+        source_programs.insert(name.clone(), source.exact_program_hash);
+    }
+    if source_programs != placement.persistent_dependency_programs {
+        bail!("placement persistent dependency program map is not the source capsule set");
+    }
+    Ok(())
+}
+
+fn load_persistent_capsule(
+    cas: &lillux::CasStore,
+    hash: &str,
+) -> anyhow::Result<ryeos_state::objects::AdmittedPersistentSessionCapsule> {
+    let value = cas
+        .get_object(hash)?
+        .ok_or_else(|| anyhow::anyhow!("persistent-session capsule is absent: {hash}"))?;
+    let capsule =
+        ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;
+    if capsule.content_hash()? != hash {
+        bail!("persistent-session capsule content hash is not canonical: {hash}");
+    }
+    Ok(capsule)
+}
+
 impl CredentialGenerationReservation {
     pub fn validate(&self) -> anyhow::Result<()> {
         for (label, value) in [
             ("credential profile", self.profile_id.as_str()),
             ("credential owner", self.owner_principal.as_str()),
             ("credential reservation", self.reservation_id.as_str()),
+            (
+                "credential upstream session",
+                self.upstream_session_id.as_str(),
+            ),
         ] {
             label_value(label, value)?;
         }
@@ -259,6 +517,90 @@ impl ProjectAuthorityRebind {
         }
         self.target_authority.validate()
     }
+
+    fn validate_capsule_transition(
+        &self,
+        source: &ExecutionProjectAuthority,
+    ) -> anyhow::Result<()> {
+        use ryeos_state::objects::{PinnedProjectRealization, PinnedTerminalPublication};
+        self.validate()?;
+        source.validate()?;
+        let ExecutionProjectAuthority::PinnedGeneration {
+            stable_project_identity: source_identity,
+            base_snapshot_hash: source_base,
+            realization: PinnedProjectRealization::Cow { .. },
+            environment: source_environment,
+            capability_ceiling: source_capabilities,
+            child_policy: source_child_policy,
+            ..
+        } = source
+        else {
+            bail!("cross-site worker handoff requires a pinned COW source project");
+        };
+        let ExecutionProjectAuthority::PinnedGeneration {
+            stable_project_identity: target_identity,
+            base_snapshot_hash: target_base,
+            snapshot_hash: target_snapshot,
+            realization:
+                PinnedProjectRealization::Cow {
+                    terminal_publication,
+                },
+            environment: target_environment,
+            capability_ceiling: target_capabilities,
+            child_policy: target_child_policy,
+            ..
+        } = &self.target_authority
+        else {
+            bail!("cross-site worker handoff requires a pinned COW target project");
+        };
+        if source_identity != &self.source_stable_project_identity
+            || target_identity != &self.target_stable_project_identity
+            || source_base != &self.source_base_snapshot_hash
+            || target_base != source_base
+            || target_snapshot != &self.source_candidate_snapshot_hash
+            || source_capabilities != target_capabilities
+            || source_child_policy != target_child_policy
+            || !equivalent_remote_environment(source_environment, target_environment)
+        {
+            bail!("target project authority changed outside its directional endpoint rebind");
+        }
+        let expected_head = self.target_expected_head_hash.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("remote project rebind has no exact target HEAD fence")
+        })?;
+        let publication_expected = match terminal_publication {
+            PinnedTerminalPublication::RetainCurrentHead { expected_hash, .. }
+            | PinnedTerminalPublication::AdvanceHead { expected_hash, .. } => expected_hash,
+            PinnedTerminalPublication::Discard | PinnedTerminalPublication::RetainResult => {
+                bail!("remote target COW has no target project HEAD publication fence")
+            }
+        };
+        if publication_expected != expected_head {
+            bail!("target project publication authority contradicts its admitted HEAD fence");
+        }
+        Ok(())
+    }
+}
+
+fn equivalent_remote_environment(
+    source: &ryeos_state::objects::EnvironmentAuthority,
+    target: &ryeos_state::objects::EnvironmentAuthority,
+) -> bool {
+    use ryeos_state::objects::EnvironmentAuthority;
+    match (source, target) {
+        (
+            EnvironmentAuthority::ProjectOverlay {
+                include_operator_vault: source_vault,
+                name_authority: source_names,
+                ..
+            },
+            EnvironmentAuthority::ProjectOverlay {
+                include_operator_vault: target_vault,
+                name_authority: target_names,
+                ..
+            },
+        ) => source_vault == target_vault && source_names == target_names,
+        _ => source == target,
+    }
 }
 
 impl AccountingConservation {
@@ -272,6 +614,16 @@ impl AccountingConservation {
         if let Some(scope) = &self.target_scope {
             scope.validate()?;
         }
+        if self.source_scope.is_none()
+            && (self.source_financial_high_water != 0
+                || self.source_charged_usd_nanos != 0
+                || self.source_remaining_cap_usd_nanos.is_some()
+                || self.target_cap_usd_nanos.is_some()
+                || self.source_remaining_directive_cap_usd_nanos.is_some()
+                || self.target_directive_cap_usd_nanos.is_some())
+        {
+            bail!("accounting-free handoff carries financial authority");
+        }
         match (
             self.source_remaining_cap_usd_nanos,
             self.target_cap_usd_nanos,
@@ -279,6 +631,32 @@ impl AccountingConservation {
             (Some(source), Some(target)) if target <= source => {}
             (None, None) => {}
             _ => bail!("target accounting cap must be present and no larger than source remainder"),
+        }
+        let has_directive_scope = self
+            .source_scope
+            .as_ref()
+            .and_then(|scope| scope.directive_budget_id.as_ref())
+            .is_some();
+        if has_directive_scope
+            != self
+                .target_scope
+                .as_ref()
+                .and_then(|scope| scope.directive_budget_id.as_ref())
+                .is_some()
+        {
+            bail!("accounting handoff cannot create or discard a directive budget scope");
+        }
+        match (
+            has_directive_scope,
+            self.source_remaining_directive_cap_usd_nanos,
+            self.target_directive_cap_usd_nanos,
+        ) {
+            (true, Some(source), Some(target)) if target <= source => {}
+            (true, None, None) => {}
+            (false, None, None) => {}
+            _ => bail!(
+                "target directive cap must be present and no larger than the source directive remainder"
+            ),
         }
         Ok(())
     }
@@ -357,6 +735,11 @@ fn label_value(label: &str, value: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
+    use ryeos_state::objects::{
+        ChildProjectAuthorityPolicy, EnvironmentAuthority, ExecutionLifecycleAuthority,
+        PinnedProjectRealization, PinnedTerminalPublication,
+    };
 
     fn accounting() -> AccountingConservation {
         AccountingConservation {
@@ -366,6 +749,8 @@ mod tests {
             source_charged_usd_nanos: 5,
             source_remaining_cap_usd_nanos: None,
             target_cap_usd_nanos: None,
+            source_remaining_directive_cap_usd_nanos: None,
+            target_directive_cap_usd_nanos: None,
         }
     }
 
@@ -398,11 +783,159 @@ mod tests {
             owner_principal: "owner-a".into(),
             generation: 1,
             reservation_id: "reservation-a".into(),
+            upstream_session_id: "upstream-a".into(),
             subject_contract_digest: "1".repeat(64),
             subject_digest: "2".repeat(64),
         };
         assert!(reservation.validate().is_ok());
         reservation.generation = 0;
         assert!(reservation.validate().is_err());
+    }
+
+    fn pinned_authority(
+        site: &str,
+        path: &str,
+        base: &str,
+        current: &str,
+    ) -> ExecutionProjectAuthority {
+        ExecutionProjectAuthority::PinnedGeneration {
+            stable_project_identity: format!("{site}:{path}"),
+            display_path: Some(PathBuf::from(path)),
+            base_snapshot_hash: base.to_owned(),
+            snapshot_hash: current.to_owned(),
+            realization: PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::RetainCurrentHead {
+                    principal_key: "a".repeat(64),
+                    project_hash: "b".repeat(64),
+                    expected_hash: base.to_owned(),
+                },
+            },
+            environment: EnvironmentAuthority::None,
+            capability_ceiling: vec!["project.read".into(), "project.write".into()],
+            child_policy: ChildProjectAuthorityPolicy::Inherit,
+        }
+    }
+
+    fn source_resume() -> ResumeContext {
+        let base = "1".repeat(64);
+        let path = PathBuf::from("/source/project");
+        ResumeContext {
+            kind: "worker_execution".into(),
+            item_ref: "worker_execution:test/session".into(),
+            ref_bindings: BTreeMap::new(),
+            launch_mode: "detached".into(),
+            parameters: serde_json::json!({"credential_profile_id":"source-profile"}),
+            project_context: ProjectContext::SnapshotHash { hash: base.clone() },
+            project_authority: pinned_authority("site:a", "/source/project", &base, &base),
+            lifecycle_authority: ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
+            stable_project_identity: Some(
+                StableProjectIdentity::from_path(&path, "site:a").unwrap(),
+            ),
+            local_overlay_root: None,
+            original_snapshot_hash: Some(base.clone()),
+            original_pushed_head_ref: Some(OriginalPushedHeadRef {
+                snapshot_hash: base,
+                original_project_path: path,
+            }),
+            state_root: None,
+            current_site_id: "site:a".into(),
+            origin_site_id: "site:a".into(),
+            requested_by: EffectivePrincipal::Local(Principal {
+                fingerprint: "owner-a".into(),
+                scopes: vec!["execute".into()],
+            }),
+            execution_hints: ExecutionHints::default(),
+            effective_caps: vec!["project.read".into(), "project.write".into()],
+            parent_delegation_caps: None,
+            executor_ref: Some("native:worker-execution".into()),
+            runtime_ref: Some("runtime:worker-execution-runtime".into()),
+        }
+    }
+
+    fn remote_rebind() -> RemoteResumeContextRebind {
+        let base = "1".repeat(64);
+        let candidate = "2".repeat(64);
+        let path = PathBuf::from("/target/project");
+        RemoteResumeContextRebind {
+            source_site_id: "site:a".into(),
+            target_site_id: "site:b".into(),
+            target_project_context: ProjectContext::SnapshotHash {
+                hash: candidate.clone(),
+            },
+            target_project_authority: pinned_authority(
+                "site:b",
+                "/target/project",
+                &base,
+                &candidate,
+            ),
+            target_stable_project_identity: Some(
+                StableProjectIdentity::from_path(&path, "site:b").unwrap(),
+            ),
+            target_local_overlay_root: None,
+            target_original_snapshot_hash: Some(candidate.clone()),
+            target_original_pushed_head_ref: Some(OriginalPushedHeadRef {
+                snapshot_hash: candidate,
+                original_project_path: path,
+            }),
+            target_state_root: None,
+            source_credential_profile_id: "source-profile".into(),
+            credential_reservation: CredentialGenerationReservation {
+                profile_id: "target-profile".into(),
+                owner_principal: "owner-a".into(),
+                generation: 7,
+                reservation_id: "handoff-reservation".into(),
+                upstream_session_id: "upstream-session".into(),
+                subject_contract_digest: "3".repeat(64),
+                subject_digest: "4".repeat(64),
+            },
+        }
+    }
+
+    #[test]
+    fn remote_resume_rebind_changes_only_typed_local_authorities() {
+        let source = source_resume();
+        let rebind = remote_rebind();
+        let target = source.for_remote_worker_adoption(&rebind).unwrap();
+        assert_eq!(target.current_site_id, "site:b");
+        assert_eq!(
+            target.parameters["credential_profile_id"],
+            serde_json::json!("target-profile")
+        );
+        target
+            .validate_remote_worker_adoption_from(&source, &rebind)
+            .unwrap();
+
+        let mut drifted = target;
+        drifted.effective_caps.push("node.admin".into());
+        assert!(
+            drifted
+                .validate_remote_worker_adoption_from(&source, &rebind)
+                .is_err()
+        );
+
+        let project_rebind = ProjectAuthorityRebind {
+            route_digest: "5".repeat(64),
+            source_stable_project_identity: "site:a:/source/project".into(),
+            target_stable_project_identity: "site:b:/target/project".into(),
+            source_candidate_snapshot_hash: "2".repeat(64),
+            source_base_snapshot_hash: "1".repeat(64),
+            target_expected_head_hash: Some("1".repeat(64)),
+            target_authority: rebind.target_project_authority.clone(),
+        };
+        project_rebind
+            .validate_capsule_transition(&source.project_authority)
+            .unwrap();
+        let mut drifted_project = project_rebind;
+        if let ExecutionProjectAuthority::PinnedGeneration {
+            capability_ceiling, ..
+        } = &mut drifted_project.target_authority
+        {
+            capability_ceiling.push("node.admin".into());
+        }
+        assert!(
+            drifted_project
+                .validate_capsule_transition(&source.project_authority)
+                .is_err()
+        );
     }
 }

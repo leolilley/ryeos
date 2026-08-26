@@ -562,6 +562,18 @@ pub struct ActiveReservationStats {
     pub oldest_created_at_ms: Option<i64>,
 }
 
+/// Exact settled financial frontier that may be conserved into one target
+/// placement. This is read from the verified ledger and external anchor after
+/// the source worker has been quiesced; it is not caller-authored accounting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountingHandoffFrontier {
+    pub source_scope: ryeos_state::objects::AdmittedAccountingScope,
+    pub financial_high_water: u64,
+    pub charged_usd_nanos: u64,
+    pub remaining_cap_usd_nanos: Option<u64>,
+    pub remaining_directive_cap_usd_nanos: Option<u64>,
+}
+
 /// Account health as stored (`healthy` / `violated`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthorityAccountHealth {
@@ -3625,6 +3637,200 @@ impl AccountingDb {
             .collect()
     }
 
+    /// Prove that one placement has no unsettled or unpublished provider
+    /// attempt and return the exact remaining execution/directive allowances
+    /// at the currently fsynced financial anchor.
+    pub fn handoff_frontier(
+        &self,
+        placement_thread_id: &str,
+        scope: &ryeos_state::objects::AdmittedAccountingScope,
+    ) -> Result<AccountingHandoffFrontier> {
+        scope.validate()?;
+        let (site_id, ledger_epoch) = self.site_identity();
+        if scope.budget_authority_site_id != site_id || scope.ledger_epoch != ledger_epoch {
+            bail!("handoff accounting scope is not owned by this ledger epoch");
+        }
+        if self
+            .nonterminal_reservations()?
+            .iter()
+            .any(|(_, thread_id, _, _)| thread_id == placement_thread_id)
+        {
+            bail!("handoff placement has an unsettled provider attempt");
+        }
+        if self.unpublished_outbox_for_thread(placement_thread_id)? != 0 {
+            bail!("handoff placement has unpublished provider-attempt testimony");
+        }
+        let accounts = self.account_snapshot(&scope.execution_budget_id)?;
+        let execution = accounts
+            .iter()
+            .find(|account| {
+                account.account_kind == "execution" && account.scope_id == scope.execution_budget_id
+            })
+            .ok_or_else(|| anyhow::anyhow!("handoff execution accounting scope is absent"))?;
+        if execution.state != "active"
+            || execution.health != AuthorityAccountHealth::Healthy
+            || execution.held.as_nanos() != 0
+        {
+            bail!("handoff execution accounting scope is not settled and healthy");
+        }
+        let charged = u64::try_from(execution.committed.as_nanos())
+            .context("handoff execution charge is negative")?;
+        let remaining = execution
+            .limit
+            .map(|limit| {
+                let limit = u64::try_from(limit.as_nanos())
+                    .context("handoff execution limit is negative")?;
+                limit.checked_sub(charged).ok_or_else(|| {
+                    anyhow::anyhow!("handoff execution charge exceeds its admitted limit")
+                })
+            })
+            .transpose()?;
+        let remaining_directive = match scope.directive_budget_id.as_deref() {
+            Some(directive_budget_id) => {
+                let directive = accounts
+                    .iter()
+                    .find(|account| {
+                        account.account_kind == "directive_item"
+                            && account.scope_id == directive_budget_id
+                    })
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("handoff directive accounting scope is absent")
+                    })?;
+                if directive.state != "active"
+                    || directive.health != AuthorityAccountHealth::Healthy
+                    || directive.held.as_nanos() != 0
+                {
+                    bail!("handoff directive accounting scope is not settled and healthy");
+                }
+                let directive_charged = u64::try_from(directive.committed.as_nanos())
+                    .context("handoff directive charge is negative")?;
+                directive
+                    .limit
+                    .map(|limit| {
+                        let limit = u64::try_from(limit.as_nanos())
+                            .context("handoff directive limit is negative")?;
+                        limit.checked_sub(directive_charged).ok_or_else(|| {
+                            anyhow::anyhow!("handoff directive charge exceeds its admitted limit")
+                        })
+                    })
+                    .transpose()?
+            }
+            None => None,
+        };
+        let anchor = self
+            .anchor
+            .read_valid()
+            .context("read financial anchor for worker handoff")?;
+        if anchor.budget_authority_site_id != site_id || anchor.ledger_epoch != ledger_epoch {
+            bail!("handoff financial anchor belongs to another ledger epoch");
+        }
+        Ok(AccountingHandoffFrontier {
+            source_scope: scope.clone(),
+            financial_high_water: anchor.financial_high_water,
+            charged_usd_nanos: charged,
+            remaining_cap_usd_nanos: remaining,
+            remaining_directive_cap_usd_nanos: remaining_directive,
+        })
+    }
+
+    /// Idempotently create and activate the zero-usage target scope admitted by
+    /// a cross-site placement. The target receives only the non-increasing
+    /// remaining allowance, never the source node's mutable ledger rows.
+    pub fn admit_handoff_target_scope(
+        &self,
+        scope: &ryeos_state::objects::AdmittedAccountingScope,
+        root_chain_id: &str,
+        execution_cap_usd_nanos: Option<u64>,
+        directive_cap_usd_nanos: Option<u64>,
+    ) -> Result<()> {
+        scope.validate()?;
+        let (site_id, epoch) = self.site_identity();
+        if scope.budget_authority_site_id != site_id || scope.ledger_epoch != epoch {
+            bail!("target handoff accounting scope is not owned by this ledger epoch");
+        }
+        if scope.directive_budget_id.is_none() && directive_cap_usd_nanos.is_some() {
+            bail!("target handoff directive cap does not match its admitted scope");
+        }
+        let execution_cap = execution_cap_usd_nanos
+            .map(|value| {
+                i64::try_from(value)
+                    .context("target execution cap exceeds accounting range")
+                    .and_then(|value| UsdNanos::from_nanos(value).map_err(Into::into))
+            })
+            .transpose()?;
+        self.create_execution_account_prepared(
+            &scope.execution_budget_id,
+            root_chain_id,
+            execution_cap,
+        )?;
+        if let Some(directive_budget_id) = scope.directive_budget_id.as_deref() {
+            let directive_cap = directive_cap_usd_nanos
+                .map(|value| {
+                    i64::try_from(value)
+                        .context("target directive cap exceeds accounting range")
+                        .and_then(|value| UsdNanos::from_nanos(value).map_err(Into::into))
+                })
+                .transpose()?;
+            self.create_directive_account_prepared(
+                &scope.execution_budget_id,
+                directive_budget_id,
+                directive_cap,
+            )?;
+        }
+        self.activate_account(
+            &scope.execution_budget_id,
+            "execution",
+            &scope.execution_budget_id,
+        )?;
+        if let Some(directive_budget_id) = scope.directive_budget_id.as_deref() {
+            self.activate_account(
+                &scope.execution_budget_id,
+                "directive_item",
+                directive_budget_id,
+            )?;
+        }
+        self.validate_handoff_target_scope(scope, execution_cap_usd_nanos, directive_cap_usd_nanos)
+    }
+
+    pub fn validate_handoff_target_scope(
+        &self,
+        scope: &ryeos_state::objects::AdmittedAccountingScope,
+        execution_cap_usd_nanos: Option<u64>,
+        directive_cap_usd_nanos: Option<u64>,
+    ) -> Result<()> {
+        let accounts = self.account_snapshot(&scope.execution_budget_id)?;
+        let expected = |kind: &str, id: &str, cap: Option<u64>| -> Result<()> {
+            let account = accounts
+                .iter()
+                .find(|account| account.account_kind == kind && account.scope_id == id)
+                .ok_or_else(|| anyhow::anyhow!("target handoff accounting account is absent"))?;
+            let observed_cap = account
+                .limit
+                .map(|value| u64::try_from(value.as_nanos()))
+                .transpose()
+                .context("target handoff accounting cap is negative")?;
+            if account.state != "active"
+                || account.health != AuthorityAccountHealth::Healthy
+                || account.committed.as_nanos() != 0
+                || account.held.as_nanos() != 0
+                || observed_cap != cap
+            {
+                bail!("target handoff accounting account differs from admitted zero-usage scope");
+            }
+            Ok(())
+        };
+        expected(
+            "execution",
+            &scope.execution_budget_id,
+            execution_cap_usd_nanos,
+        )?;
+        match scope.directive_budget_id.as_deref() {
+            Some(id) => expected("directive_item", id, directive_cap_usd_nanos),
+            None if directive_cap_usd_nanos.is_none() => Ok(()),
+            None => bail!("target handoff carries a directive cap without a directive scope"),
+        }
+    }
+
     /// Verify SQLite integrity, per-account debit aggregates, the financial
     /// transition hash chain, and external-anchor agreement, then set the
     /// in-memory hard-admission flag accordingly. `DbAhead` recovers by
@@ -5638,6 +5844,49 @@ mod tests {
             report.hard_admission_enabled,
             "expected healthy ledger, got {:?}",
             report.reasons
+        );
+    }
+
+    #[test]
+    fn handoff_conserves_only_settled_remaining_allowance() {
+        let (_source_dir, source) = setup();
+        source
+            .create_execution_account_prepared(
+                EXEC,
+                "T-root",
+                Some(UsdNanos::from_nanos(100).unwrap()),
+            )
+            .unwrap();
+        source.activate_account(EXEC, "execution", EXEC).unwrap();
+        let (source_site, source_epoch) = source.site_identity();
+        let source_scope = ryeos_state::objects::AdmittedAccountingScope {
+            budget_authority_site_id: source_site,
+            ledger_epoch: source_epoch,
+            execution_budget_id: EXEC.to_string(),
+            directive_budget_id: None,
+        };
+        let frontier = source.handoff_frontier(THREAD, &source_scope).unwrap();
+        assert_eq!(frontier.charged_usd_nanos, 0);
+        assert_eq!(frontier.remaining_cap_usd_nanos, Some(100));
+
+        let (_target_dir, target) = setup();
+        let (target_site, target_epoch) = target.site_identity();
+        let target_scope = ryeos_state::objects::AdmittedAccountingScope {
+            budget_authority_site_id: target_site,
+            ledger_epoch: target_epoch,
+            execution_budget_id: "B-target".to_string(),
+            directive_budget_id: None,
+        };
+        target
+            .admit_handoff_target_scope(&target_scope, "T-root", Some(80), None)
+            .unwrap();
+        target
+            .validate_handoff_target_scope(&target_scope, Some(80), None)
+            .unwrap();
+        assert!(
+            target
+                .validate_handoff_target_scope(&target_scope, Some(81), None)
+                .is_err()
         );
     }
 

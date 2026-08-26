@@ -1118,6 +1118,28 @@ CREATE TABLE IF NOT EXISTS credential_profile (
 
 CREATE INDEX IF NOT EXISTS idx_credential_profile_owner_state
     ON credential_profile(owner_principal, state);
+
+CREATE TABLE IF NOT EXISTS credential_profile_reservation (
+    reservation_id TEXT PRIMARY KEY,
+    operation_id TEXT NOT NULL,
+    successor_thread_id TEXT NOT NULL UNIQUE,
+    profile_id TEXT NOT NULL,
+    owner_principal TEXT NOT NULL,
+    credential_generation INTEGER NOT NULL CHECK (credential_generation > 0),
+    subject_contract_digest TEXT NOT NULL,
+    subject_digest TEXT NOT NULL,
+    checkpoint_manifest_hash TEXT NOT NULL,
+    upstream_session_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('reserved', 'consumed', 'released')),
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_credential_profile_reservation_operation
+    ON credential_profile_reservation(operation_id);
+
+CREATE INDEX IF NOT EXISTS idx_credential_profile_reservation_profile_state
+    ON credential_profile_reservation(profile_id, state);
 "#;
 
 use ryeos_state::sqlite_schema;
@@ -1167,7 +1189,11 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // boot-epoch fences throughout the hosted-worker projection.
 // Epoch 14 admits only the portable outer exact-program/capsule contract and
 // launch-metadata epoch that seal resolved ref-binding identities.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 14;
+// Epoch 15 retains cross-site credential-generation reservations until the
+// exact successor dedicated session atomically consumes them. A predecessor
+// lock_owner alone cannot distinguish a crashed handoff reservation from an
+// abandoned pre-attachment worker start.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 15;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -2545,6 +2571,89 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "credential_profile_reservation",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "reservation_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "operation_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "successor_thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "profile_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner_principal",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "credential_generation",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "subject_contract_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "subject_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "checkpoint_manifest_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "upstream_session_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -2659,6 +2768,18 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "idx_credential_profile_owner_state",
                 table: "credential_profile",
                 columns: &["owner_principal", "state"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_credential_profile_reservation_operation",
+                table: "credential_profile_reservation",
+                columns: &["operation_id"],
+                unique: true,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_credential_profile_reservation_profile_state",
+                table: "credential_profile_reservation",
+                columns: &["profile_id", "state"],
                 unique: false,
             },
         ],
@@ -3357,6 +3478,38 @@ pub struct NewDedicatedSession<'a> {
     pub credential_profile_id: &'a str,
     pub credential_generation: u64,
     pub credential_lock_owner: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewCredentialProfileReservation<'a> {
+    pub reservation_id: &'a str,
+    pub operation_id: &'a str,
+    pub successor_thread_id: &'a str,
+    pub profile_id: &'a str,
+    pub owner_principal: &'a str,
+    pub credential_generation: u64,
+    pub subject_contract_digest: &'a str,
+    pub subject_digest: &'a str,
+    pub checkpoint_manifest_hash: &'a str,
+    pub upstream_session_id: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialProfileReservationRecord {
+    pub reservation_id: String,
+    pub operation_id: String,
+    pub successor_thread_id: String,
+    pub profile_id: String,
+    pub owner_principal: String,
+    pub credential_generation: u64,
+    pub subject_contract_digest: String,
+    pub subject_digest: String,
+    pub checkpoint_manifest_hash: String,
+    pub upstream_session_id: String,
+    pub state: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4146,6 +4299,29 @@ impl RuntimeDb {
         session: NewDedicatedSession<'_>,
         remote_thread_id: Option<&str>,
     ) -> Result<()> {
+        self.admit_dedicated_session_transaction(session, remote_thread_id, None)
+    }
+
+    /// Atomically convert a durable cross-site credential-generation
+    /// reservation into the ordinary dedicated-session lock owner and row.
+    /// No process is released at this boundary; the existing held worker path
+    /// still attaches its exact process identity before release.
+    pub fn admit_dedicated_session_from_reservation(
+        &self,
+        session: NewDedicatedSession<'_>,
+        remote_thread_id: Option<&str>,
+        reservation_id: &str,
+    ) -> Result<()> {
+        validate_bounded_runtime_text("credential reservation id", reservation_id, 256)?;
+        self.admit_dedicated_session_transaction(session, remote_thread_id, Some(reservation_id))
+    }
+
+    fn admit_dedicated_session_transaction(
+        &self,
+        session: NewDedicatedSession<'_>,
+        remote_thread_id: Option<&str>,
+        reservation_id: Option<&str>,
+    ) -> Result<()> {
         for (label, value) in [
             ("dedicated placement thread id", session.placement_thread_id),
             ("dedicated root thread id", session.chain_root_id),
@@ -4167,22 +4343,47 @@ impl RuntimeDb {
         }
         let now = lillux::time::timestamp_millis() as i64;
         let tx = self.conn.unchecked_transaction()?;
-        let acquired = tx.execute(
-            "UPDATE credential_profile
-                SET lock_owner=?3, updated_at_ms=?5
-              WHERE profile_id=?1 AND owner_principal=?2
-                AND credential_generation=?4
-                AND (lock_owner IS NULL OR lock_owner=?3)
-                AND state IN ('unauthenticated','enrolling','confirming','active')",
-            params![
-                session.credential_profile_id,
-                session.owner_principal,
-                session.credential_lock_owner,
-                i64::try_from(session.credential_generation)
-                    .context("credential generation exceeds SQLite integer range")?,
-                now,
-            ],
-        )?;
+        let generation = i64::try_from(session.credential_generation)
+            .context("credential generation exceeds SQLite integer range")?;
+        let acquired = match reservation_id {
+            Some(reservation_id) => tx.execute(
+                "UPDATE credential_profile
+                    SET lock_owner=?4, updated_at_ms=?6
+                  WHERE profile_id=?1 AND owner_principal=?2
+                    AND credential_generation=?3 AND lock_owner=?5
+                    AND state='active'
+                    AND EXISTS(SELECT 1 FROM credential_profile_reservation
+                        WHERE reservation_id=?5 AND successor_thread_id=?7
+                          AND profile_id=?1 AND owner_principal=?2
+                          AND credential_generation=?3 AND state='reserved'
+                          AND upstream_session_id=?8)",
+                params![
+                    session.credential_profile_id,
+                    session.owner_principal,
+                    generation,
+                    session.credential_lock_owner,
+                    reservation_id,
+                    now,
+                    session.placement_thread_id,
+                    remote_thread_id,
+                ],
+            )?,
+            None => tx.execute(
+                "UPDATE credential_profile
+                    SET lock_owner=?3, updated_at_ms=?5
+                  WHERE profile_id=?1 AND owner_principal=?2
+                    AND credential_generation=?4
+                    AND (lock_owner IS NULL OR lock_owner=?3)
+                    AND state IN ('unauthenticated','enrolling','confirming','active')",
+                params![
+                    session.credential_profile_id,
+                    session.owner_principal,
+                    session.credential_lock_owner,
+                    generation,
+                    now,
+                ],
+            )?,
+        };
         if acquired != 1 {
             bail!("dedicated admission could not atomically acquire its credential profile");
         }
@@ -4217,6 +4418,23 @@ impl RuntimeDb {
         if changed != 1 {
             bail!("dedicated admission lost its credential generation/lock fence");
         }
+        if let Some(reservation_id) = reservation_id {
+            let consumed = tx.execute(
+                "UPDATE credential_profile_reservation
+                    SET state='consumed', updated_at_ms=?2
+                  WHERE reservation_id=?1 AND state='reserved'
+                    AND successor_thread_id=?3 AND upstream_session_id=?4",
+                params![
+                    reservation_id,
+                    now,
+                    session.placement_thread_id,
+                    remote_thread_id
+                ],
+            )?;
+            if consumed != 1 {
+                bail!("dedicated admission lost its credential reservation CAS");
+            }
+        }
         tx.commit()?;
         Ok(())
     }
@@ -4246,7 +4464,10 @@ impl RuntimeDb {
                 AND NOT EXISTS(SELECT 1 FROM worker_process
                       WHERE worker_process.worker_instance_id=credential_profile.lock_owner)
                 AND NOT EXISTS(SELECT 1 FROM dedicated_session
-                      WHERE dedicated_session.worker_instance_id=credential_profile.lock_owner)",
+                      WHERE dedicated_session.worker_instance_id=credential_profile.lock_owner)
+                AND NOT EXISTS(SELECT 1 FROM credential_profile_reservation
+                      WHERE credential_profile_reservation.reservation_id=credential_profile.lock_owner
+                        AND credential_profile_reservation.state='reserved')",
             [now],
         )?;
         tx.commit()?;
@@ -4885,6 +5106,241 @@ impl RuntimeDb {
             )
             .map_err(Into::into)
             .and_then(|value| u64::try_from(value).context("negative credential generation"))
+    }
+
+    pub fn reserve_credential_profile_generation(
+        &self,
+        reservation: NewCredentialProfileReservation<'_>,
+    ) -> Result<CredentialProfileReservationRecord> {
+        for (label, value) in [
+            ("credential reservation id", reservation.reservation_id),
+            ("credential reservation operation", reservation.operation_id),
+            (
+                "credential reservation successor",
+                reservation.successor_thread_id,
+            ),
+            ("credential reservation profile", reservation.profile_id),
+            ("credential reservation owner", reservation.owner_principal),
+            (
+                "credential reservation upstream session",
+                reservation.upstream_session_id,
+            ),
+        ] {
+            validate_bounded_runtime_text(label, value, 256)?;
+        }
+        for (label, digest) in [
+            (
+                "credential reservation subject contract",
+                reservation.subject_contract_digest,
+            ),
+            ("credential reservation subject", reservation.subject_digest),
+            (
+                "credential reservation checkpoint",
+                reservation.checkpoint_manifest_hash,
+            ),
+        ] {
+            if !lillux::valid_hash(digest) {
+                bail!("{label} is not a canonical digest");
+            }
+        }
+        if reservation.credential_generation == 0 {
+            bail!("credential reservation generation must be positive");
+        }
+        let now = lillux::time::timestamp_millis() as i64;
+        let generation = i64::try_from(reservation.credential_generation)
+            .context("credential reservation generation exceeds SQLite range")?;
+        let tx = self.conn.unchecked_transaction()?;
+        let existing = Self::credential_profile_reservation_from_connection(
+            &tx,
+            "reservation_id=?1",
+            reservation.reservation_id,
+        )?;
+        if let Some(existing) = existing {
+            let expected = CredentialProfileReservationRecord {
+                reservation_id: reservation.reservation_id.to_owned(),
+                operation_id: reservation.operation_id.to_owned(),
+                successor_thread_id: reservation.successor_thread_id.to_owned(),
+                profile_id: reservation.profile_id.to_owned(),
+                owner_principal: reservation.owner_principal.to_owned(),
+                credential_generation: reservation.credential_generation,
+                subject_contract_digest: reservation.subject_contract_digest.to_owned(),
+                subject_digest: reservation.subject_digest.to_owned(),
+                checkpoint_manifest_hash: reservation.checkpoint_manifest_hash.to_owned(),
+                upstream_session_id: reservation.upstream_session_id.to_owned(),
+                state: existing.state.clone(),
+                created_at_ms: existing.created_at_ms,
+                updated_at_ms: existing.updated_at_ms,
+            };
+            if existing != expected || existing.state == "released" {
+                bail!("credential reservation replay differs from its durable operands");
+            }
+            tx.commit()?;
+            return Ok(existing);
+        }
+        let acquired = tx.execute(
+            "UPDATE credential_profile SET lock_owner=?4, updated_at_ms=?5
+              WHERE profile_id=?1 AND owner_principal=?2
+                AND credential_generation=?3 AND state='active'
+                AND (lock_owner IS NULL OR lock_owner=?4)",
+            params![
+                reservation.profile_id,
+                reservation.owner_principal,
+                generation,
+                reservation.reservation_id,
+                now,
+            ],
+        )?;
+        if acquired != 1 {
+            bail!("credential profile generation is unavailable for handoff reservation");
+        }
+        tx.execute(
+            "INSERT INTO credential_profile_reservation (
+                reservation_id, operation_id, successor_thread_id, profile_id,
+                owner_principal, credential_generation, subject_contract_digest,
+                subject_digest, checkpoint_manifest_hash, upstream_session_id,
+                state, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'reserved', ?11, ?11)",
+            params![
+                reservation.reservation_id,
+                reservation.operation_id,
+                reservation.successor_thread_id,
+                reservation.profile_id,
+                reservation.owner_principal,
+                generation,
+                reservation.subject_contract_digest,
+                reservation.subject_digest,
+                reservation.checkpoint_manifest_hash,
+                reservation.upstream_session_id,
+                now,
+            ],
+        )?;
+        tx.commit()?;
+        self.credential_profile_reservation(reservation.reservation_id)?
+            .ok_or_else(|| anyhow!("credential reservation disappeared after commit"))
+    }
+
+    pub fn credential_profile_reservation(
+        &self,
+        reservation_id: &str,
+    ) -> Result<Option<CredentialProfileReservationRecord>> {
+        validate_bounded_runtime_text("credential reservation id", reservation_id, 256)?;
+        Self::credential_profile_reservation_from_connection(
+            &self.conn,
+            "reservation_id=?1",
+            reservation_id,
+        )
+    }
+
+    pub fn credential_profile_reservation_for_successor(
+        &self,
+        successor_thread_id: &str,
+    ) -> Result<Option<CredentialProfileReservationRecord>> {
+        validate_bounded_runtime_text(
+            "credential reservation successor",
+            successor_thread_id,
+            256,
+        )?;
+        Self::credential_profile_reservation_from_connection(
+            &self.conn,
+            "successor_thread_id=?1",
+            successor_thread_id,
+        )
+    }
+
+    pub fn release_credential_profile_reservation(&self, reservation_id: &str) -> Result<()> {
+        validate_bounded_runtime_text("credential reservation id", reservation_id, 256)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let record = Self::credential_profile_reservation_from_connection(
+            &tx,
+            "reservation_id=?1",
+            reservation_id,
+        )?
+        .ok_or_else(|| anyhow!("credential reservation does not exist"))?;
+        if record.state == "consumed" {
+            bail!("consumed credential reservation cannot be released");
+        }
+        if record.state == "released" {
+            tx.commit()?;
+            return Ok(());
+        }
+        let unlocked = tx.execute(
+            "UPDATE credential_profile SET lock_owner=NULL, updated_at_ms=?3
+              WHERE profile_id=?1 AND lock_owner=?2
+                AND credential_generation=?4",
+            params![
+                record.profile_id,
+                reservation_id,
+                now,
+                i64::try_from(record.credential_generation)?,
+            ],
+        )?;
+        if unlocked != 1 {
+            bail!("credential reservation release lost its profile-generation CAS");
+        }
+        tx.execute(
+            "UPDATE credential_profile_reservation SET state='released', updated_at_ms=?2
+              WHERE reservation_id=?1 AND state='reserved'",
+            params![reservation_id, now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn credential_profile_reservation_from_connection(
+        conn: &Connection,
+        predicate: &str,
+        value: &str,
+    ) -> Result<Option<CredentialProfileReservationRecord>> {
+        let column = match predicate {
+            "reservation_id=?1" => "reservation_id",
+            "successor_thread_id=?1" => "successor_thread_id",
+            _ => bail!("invalid internal credential reservation lookup"),
+        };
+        let sql = format!(
+            "SELECT reservation_id, operation_id, successor_thread_id, profile_id,
+                    owner_principal, credential_generation, subject_contract_digest,
+                    subject_digest, checkpoint_manifest_hash, upstream_session_id,
+                    state, created_at_ms, updated_at_ms
+               FROM credential_profile_reservation WHERE {column}=?1"
+        );
+        conn.query_row(&sql, [value], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, i64>(11)?,
+                row.get::<_, i64>(12)?,
+            ))
+        })
+        .optional()?
+        .map(|row| {
+            Ok(CredentialProfileReservationRecord {
+                reservation_id: row.0,
+                operation_id: row.1,
+                successor_thread_id: row.2,
+                profile_id: row.3,
+                owner_principal: row.4,
+                credential_generation: u64::try_from(row.5)
+                    .context("negative credential reservation generation")?,
+                subject_contract_digest: row.6,
+                subject_digest: row.7,
+                checkpoint_manifest_hash: row.8,
+                upstream_session_id: row.9,
+                state: row.10,
+                created_at_ms: row.11,
+                updated_at_ms: row.12,
+            })
+        })
+        .transpose()
     }
 
     pub fn release_credential_profile(&self, profile_id: &str, lock_owner: &str) -> Result<()> {
@@ -8865,6 +9321,80 @@ impl RuntimeDb {
         Ok(())
     }
 
+    /// Idempotently materialize the operational runtime seed for a thread
+    /// whose authoritative signed head was adopted from another node. The
+    /// caller proves that head first; this transaction refuses to overwrite a
+    /// process identity, another chain, or different launch authority.
+    pub fn install_imported_thread_runtime(
+        &self,
+        thread_id: &str,
+        chain_root_id: &str,
+        launch_metadata: &RuntimeLaunchMetadata,
+    ) -> Result<()> {
+        launch_metadata.validate()?;
+        if launch_metadata.launch_driver
+            == Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
+        {
+            bail!("imported subprocess runtime cannot use the in-process launch driver");
+        }
+        let encoded = encode_current_launch_metadata(launch_metadata)
+            .context("encode imported thread launch metadata")?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO thread_runtime (
+                thread_id, chain_root_id, pid, pgid, metadata, launch_metadata
+             ) VALUES (?1, ?2, NULL, NULL, NULL, NULL)
+             ON CONFLICT(thread_id) DO NOTHING",
+            params![thread_id, chain_root_id],
+        )?;
+        let (observed_chain, pid, pgid, process_identity, observed_metadata): (
+            String,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+        ) = tx.query_row(
+            "SELECT chain_root_id, pid, pgid, process_identity, launch_metadata
+               FROM thread_runtime WHERE thread_id=?1",
+            [thread_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )?;
+        if observed_chain != chain_root_id
+            || pid.is_some()
+            || pgid.is_some()
+            || process_identity.is_some()
+        {
+            bail!("imported thread runtime coordinate is already owned by another launch");
+        }
+        match observed_metadata {
+            Some(existing) if existing != encoded => {
+                bail!("imported thread runtime already carries different launch authority")
+            }
+            Some(_) => {}
+            None => {
+                let changed = tx.execute(
+                    "UPDATE thread_runtime SET launch_metadata=?2
+                      WHERE thread_id=?1 AND chain_root_id=?3
+                        AND launch_metadata IS NULL AND process_identity IS NULL",
+                    params![thread_id, encoded, chain_root_id],
+                )?;
+                if changed != 1 {
+                    bail!("imported thread runtime lost its empty-row installation CAS");
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Atomically create the auxiliary runtime row and the current-schema
     /// durable reservation which makes an in-process birth reconcilable across
     /// a crash before its authoritative CAS head is published.
@@ -12512,6 +13042,124 @@ mod tests {
         assert_eq!(
             db.dedicated_session("T-atomic").unwrap().unwrap().state,
             "admitted"
+        );
+    }
+
+    #[test]
+    fn handoff_credential_reservation_survives_reconcile_and_is_consumed_atomically() {
+        let (_tmp, db) = fresh_db();
+        db.create_credential_profile(NewCredentialProfile {
+            profile_id: "P-handoff-reserved",
+            owner_principal: "fp:operator",
+            home_id: "home-P-handoff-reserved",
+        })
+        .unwrap();
+        db.conn
+            .execute(
+                "UPDATE credential_profile SET state='active' WHERE profile_id='P-handoff-reserved'",
+                [],
+            )
+            .unwrap();
+        let reservation = NewCredentialProfileReservation {
+            reservation_id: "reservation-handoff",
+            operation_id: "operation-handoff",
+            successor_thread_id: "T-handoff-target",
+            profile_id: "P-handoff-reserved",
+            owner_principal: "fp:operator",
+            credential_generation: 1,
+            subject_contract_digest: &"1".repeat(64),
+            subject_digest: &"2".repeat(64),
+            checkpoint_manifest_hash: &"3".repeat(64),
+            upstream_session_id: "upstream-session",
+        };
+        let reserved = db
+            .reserve_credential_profile_generation(reservation.clone())
+            .unwrap();
+        assert_eq!(reserved.state, "reserved");
+        assert_eq!(
+            db.reconcile_unattached_credential_profile_locks().unwrap(),
+            (0, 0)
+        );
+        assert_eq!(
+            db.credential_profile("P-handoff-reserved")
+                .unwrap()
+                .unwrap()
+                .lock_owner
+                .as_deref(),
+            Some("reservation-handoff")
+        );
+
+        db.admit_dedicated_session_from_reservation(
+            NewDedicatedSession {
+                placement_thread_id: "T-handoff-target",
+                chain_root_id: "T-root",
+                owner_principal: "fp:operator",
+                admitted_capsule_hash: &"4".repeat(64),
+                workspace_id: "W-handoff-target",
+                candidate_required: true,
+                credential_profile_id: "P-handoff-reserved",
+                credential_generation: 1,
+                credential_lock_owner: "worker-target",
+            },
+            Some("upstream-session"),
+            "reservation-handoff",
+        )
+        .unwrap();
+        assert_eq!(
+            db.credential_profile_reservation("reservation-handoff")
+                .unwrap()
+                .unwrap()
+                .state,
+            "consumed"
+        );
+        assert_eq!(
+            db.credential_profile("P-handoff-reserved")
+                .unwrap()
+                .unwrap()
+                .lock_owner
+                .as_deref(),
+            Some("worker-target")
+        );
+        assert_eq!(
+            db.dedicated_session("T-handoff-target")
+                .unwrap()
+                .unwrap()
+                .remote_thread_id
+                .as_deref(),
+            Some("upstream-session")
+        );
+    }
+
+    #[test]
+    fn imported_runtime_seed_is_idempotent_and_never_overwrites_authority() {
+        let (_tmp, db) = fresh_db();
+        let metadata = RuntimeLaunchMetadata::default()
+            .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime);
+        db.install_imported_thread_runtime("T-imported", "T-root", &metadata)
+            .unwrap();
+        db.install_imported_thread_runtime("T-imported", "T-root", &metadata)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(
+                db.get_runtime_info("T-imported")
+                    .unwrap()
+                    .unwrap()
+                    .launch_metadata
+                    .unwrap()
+            )
+            .unwrap(),
+            serde_json::to_value(&metadata).unwrap()
+        );
+
+        let mut changed = metadata.clone();
+        changed.cancellation_mode = Some(CancellationMode::Hard);
+        assert!(
+            db.install_imported_thread_runtime("T-imported", "T-root", &changed)
+                .is_err()
+        );
+        assert!(
+            db.install_imported_thread_runtime("T-imported", "T-other", &metadata)
+                .is_err()
         );
     }
 
