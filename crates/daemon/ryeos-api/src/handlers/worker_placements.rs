@@ -19,10 +19,13 @@ use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
 use ryeos_app::worker_handoff::{
     CredentialGenerationReservation, RemoteResumeContextRebind, WORKER_PLACEMENT_ABORT_SERVICE,
-    WORKER_PLACEMENT_ADOPT_SERVICE, WORKER_PLACEMENT_PREPARE_SERVICE,
-    WORKER_SESSION_HANDOFF_OPERATION, WorkerHandoffJobRole, WorkerHandoffPhase,
+    WORKER_PLACEMENT_ADOPT_SERVICE, WORKER_PLACEMENT_PREFLIGHT_SERVICE,
+    WORKER_PLACEMENT_PREPARE_SERVICE, WORKER_SESSION_HANDOFF_OPERATION,
+    WORKER_SESSION_HANDOFF_PREFLIGHT_OPERATION, WorkerHandoffJobRole, WorkerHandoffPhase,
     WorkerPlacementAbortRequest, WorkerPlacementAbortResponse, WorkerPlacementAdmissionEvidence,
-    WorkerPlacementAdoptRequest, WorkerPlacementAdoptResponse, WorkerPlacementPrepareRequest,
+    WorkerPlacementAdoptRequest, WorkerPlacementAdoptResponse, WorkerPlacementPreflightEvidence,
+    WorkerPlacementPreflightJobOperation, WorkerPlacementPreflightRequest,
+    WorkerPlacementPreflightResponse, WorkerPlacementPrepareRequest,
     WorkerPlacementPrepareResponse, WorkerSessionHandoffJobOperation, WorkerSessionHandoffProgress,
 };
 use ryeos_executor::executor::ServiceAvailability;
@@ -52,6 +55,178 @@ struct SourcePlacementOperands {
     source_snapshot: ryeos_state::objects::ThreadSnapshot,
     restore: ryeos_state::objects::WorkerSessionRestore,
     portable_tree: ryeos_state::objects::PortableStateTree,
+}
+
+struct SourcePreflightOperands {
+    launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    launch_capsule: ryeos_state::objects::AdmittedLaunchCapsule,
+    source_snapshot: ryeos_state::objects::ThreadSnapshot,
+}
+
+pub async fn preflight(
+    req: WorkerPlacementPreflightRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value, HandlerError> {
+    req.validate()
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let owner = ryeos_app::operator_external_content::require_configured_operator(&state, &ctx)
+        .map(|fingerprint| format!("fp:{fingerprint}"))
+        .map_err(|_| HandlerError::Forbidden("configured operator required".into()))?;
+    if ctx.fingerprint != owner {
+        return Err(HandlerError::Forbidden(
+            "configured operator identity changed".into(),
+        ));
+    }
+    let authenticated_source_site = ctx
+        .authenticated_origin_site_id
+        .as_deref()
+        .ok_or_else(|| HandlerError::Forbidden("source-node forwarding proof required".into()))?;
+    if authenticated_source_site != req.source_site_id
+        || req.target_site_id != state.threads.site_id()
+    {
+        return Err(HandlerError::Forbidden(
+            "worker placement preflight differs from authenticated sites".into(),
+        ));
+    }
+
+    let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
+    let source_remote = config::resolve_remote_by_site_id(&remotes, &req.source_site_id)
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let source_key = source_remote
+        .remote
+        .pinned_signing_key()
+        .map_err(internal)?;
+    let source_signer = source_remote
+        .remote
+        .principal_id
+        .strip_prefix("fp:")
+        .ok_or_else(|| internal("configured source principal is not a fingerprint"))?;
+    let source_client =
+        RemoteClient::from_remote_cfg_as_configured_operator(&state, &source_remote.remote, &ctx)
+            .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    let source_head = source_client
+        .federation_chain_head(&req.chain_root_id, source_signer, &source_key)
+        .await
+        .map_err(|error| internal(format!("read source preflight chain head: {error:#}")))?;
+    if source_head.target_hash != req.source_chain_head_hash {
+        return Err(HandlerError::BadRequest(
+            "source chain head changed before target preflight".into(),
+        ));
+    }
+    let closure = source_client
+        .objects_closure_get(
+            &[
+                req.source_chain_head_hash.clone(),
+                req.source_launch_capsule_hash.clone(),
+            ],
+            ObjectsClosureRequestOptions {
+                max_objects: Some(16_384),
+                max_blobs: Some(16_384),
+                max_object_bytes: Some(2 * 1024 * 1024),
+                max_total_object_bytes: Some(16 * 1024 * 1024),
+                max_blob_bytes: Some(MAX_HANDOFF_CLOSURE_BYTES),
+                max_total_blob_bytes: Some(MAX_HANDOFF_CLOSURE_BYTES),
+                max_response_bytes: Some(64 * 1024 * 1024),
+                max_links_per_object: Some(65_536),
+                allow_incomplete: false,
+            },
+        )
+        .await
+        .map_err(|error| internal(format!("fetch source preflight closure: {error:#}")))?;
+    let mut payload = import::closure_response_to_export_payload(
+        &req.chain_root_id,
+        &req.source_chain_head_hash,
+        &closure.entries,
+    )
+    .map_err(internal)?;
+    let metadata_bytes = lillux::canonical_json(&req.source_launch_metadata)
+        .map_err(internal)?
+        .into_bytes();
+    if lillux::sha256_hex(&metadata_bytes) != req.source_launch_metadata_blob_hash {
+        return Err(HandlerError::BadRequest(
+            "source preflight launch metadata changed digest".into(),
+        ));
+    }
+    if let Some(existing) = payload
+        .entries
+        .iter()
+        .find(|entry| entry.hash == req.source_launch_metadata_blob_hash)
+    {
+        if !existing.is_blob || existing.data != metadata_bytes {
+            return Err(HandlerError::BadRequest(
+                "source preflight closure contradicts launch metadata".into(),
+            ));
+        }
+    } else {
+        payload.total_bytes = payload
+            .total_bytes
+            .checked_add(metadata_bytes.len())
+            .ok_or_else(|| internal("preflight payload byte count overflow"))?;
+        payload.entries.push(ryeos_state::sync::SyncEntry {
+            hash: req.source_launch_metadata_blob_hash.clone(),
+            is_blob: true,
+            data: metadata_bytes,
+        });
+    }
+    let operation = WorkerPlacementPreflightJobOperation::from_request(
+        WorkerHandoffJobRole::Target,
+        owner.clone(),
+        source_remote.config_key.clone(),
+        &req,
+    )
+    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let job_id = target_preflight_job_id(&req.preflight_id);
+    let _operation_guard = target_handoff_operation_lock(&job_id).lock_owned().await;
+    let (_, job) = state
+        .state_store
+        .stage_sync_payload_and_create_job(
+            &payload,
+            &ryeos_state::sync::ImportAttribution {
+                source_principal: Some(source_remote.remote.principal_id.clone()),
+                source_peer: Some(source_remote.config_key.clone()),
+                job_id: Some(job_id.clone()),
+            },
+            &ryeos_state::NewSyncJob {
+                job_id: job_id.clone(),
+                operation_type: WORKER_SESSION_HANDOFF_PREFLIGHT_OPERATION.to_owned(),
+                operation: operation.to_value().map_err(internal)?,
+                peer: Some(source_remote.config_key.clone()),
+                roots: vec![
+                    req.source_chain_head_hash.clone(),
+                    req.source_launch_capsule_hash.clone(),
+                    req.source_launch_metadata_blob_hash.clone(),
+                ],
+                heads: vec![req.source_chain_head_hash.clone()],
+                max_attempts: 4,
+            },
+        )
+        .map_err(internal)?;
+    if job.state == ryeos_state::SyncJobState::Completed {
+        let response: WorkerPlacementPreflightResponse = serde_json::from_value(
+            job.result
+                .ok_or_else(|| internal("completed preflight job has no result"))?,
+        )
+        .map_err(internal)?;
+        response
+            .validate_against(&req, state.identity.verifying_key())
+            .map_err(internal)?;
+        return serde_json::to_value(response).map_err(internal);
+    }
+
+    let source = load_source_preflight_operands(&state, &req).map_err(internal)?;
+    let response = preflight_after_staging(&state, &req, &owner, &source)
+        .await
+        .map_err(|error| HandlerError::BadRequest(format!("target preflight failed: {error:#}")))?;
+    let result = serde_json::to_value(&response).map_err(internal)?;
+    let stored = state
+        .state_store
+        .complete_worker_handoff_preflight(&job_id, &response.preflight_attestation, result.clone())
+        .map_err(internal)?;
+    if stored != response.preflight_attestation_hash {
+        return Err(internal("stored preflight receipt digest changed"));
+    }
+    Ok(result)
 }
 
 pub async fn prepare(
@@ -84,6 +259,56 @@ pub async fn prepare(
             "placement request targets another site".into(),
         ));
     }
+    let preflight_job_id = target_preflight_job_id(&req.preflight_id);
+    let preflight_job = state
+        .state_store
+        .with_state_db(|db| db.get_sync_job(&preflight_job_id))
+        .map_err(internal)?
+        .ok_or_else(|| HandlerError::BadRequest("target preflight does not exist".into()))?;
+    if preflight_job.state != ryeos_state::SyncJobState::Completed {
+        return Err(HandlerError::BadRequest(
+            "target preflight has not completed".into(),
+        ));
+    }
+    let preflight_operation =
+        WorkerPlacementPreflightJobOperation::from_value(preflight_job.operation.clone())
+            .map_err(internal)?;
+    let preflight_response: WorkerPlacementPreflightResponse = serde_json::from_value(
+        preflight_job
+            .result
+            .clone()
+            .ok_or_else(|| internal("completed target preflight has no result"))?,
+    )
+    .map_err(internal)?;
+    preflight_response
+        .preflight_attestation
+        .verify_with_key(state.identity.verifying_key())
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let preflight_evidence = WorkerPlacementPreflightEvidence::from_attestation(
+        &preflight_response.preflight_attestation,
+    )
+    .map_err(internal)?;
+    if preflight_operation.role != WorkerHandoffJobRole::Target
+        || preflight_operation.preflight_id != req.preflight_id
+        || preflight_operation.owner_principal != owner
+        || preflight_operation.chain_root_id != req.chain_root_id
+        || preflight_operation.source_site_id != req.source_site_id
+        || preflight_operation.target_site_id != req.target_site_id
+        || preflight_operation.target_project_path != req.target_project_path
+        || preflight_operation.project_route_digest != req.project_route_digest
+        || preflight_operation.target_credential_profile_id != req.target_credential_profile_id
+        || preflight_response.preflight_attestation_hash != req.preflight_attestation_hash
+        || preflight_response.preflight_attestation_hash
+            != ryeos_state::objects::canonical_value_digest(
+                &preflight_response.preflight_attestation.to_value(),
+            )
+            .map_err(internal)?
+        || preflight_evidence.preflight_id != req.preflight_id
+    {
+        return Err(HandlerError::BadRequest(
+            "final placement request differs from its target preflight".into(),
+        ));
+    }
 
     let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
     let source_remote = config::resolve_remote_by_site_id(&remotes, &req.source_site_id)
@@ -112,6 +337,7 @@ pub async fn prepare(
     let roots = vec![
         req.source_chain_head_hash.clone(),
         req.transfer_manifest_hash.clone(),
+        req.preflight_attestation_hash.clone(),
     ];
     let closure = source_client
         .objects_closure_get(
@@ -153,6 +379,8 @@ pub async fn prepare(
     let operation = WorkerSessionHandoffJobOperation::new(
         WorkerHandoffJobRole::Target,
         req.operation_id.clone(),
+        req.preflight_id.clone(),
+        req.preflight_attestation_hash.clone(),
         owner.clone(),
         req.chain_root_id.clone(),
         transfer.origin_site_id.clone(),
@@ -217,6 +445,7 @@ pub async fn prepare(
         &target_project_path,
         &job_id,
         &operands,
+        &preflight_evidence,
     )
     .await;
     drop(profile_operation);
@@ -679,6 +908,8 @@ async fn adopt_authorized(
     let placement = load_local_placement(&state, &req.placement_attestation_hash)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     if placement.operation_id != req.operation_id
+        || placement.preflight_id != operation.preflight_id
+        || placement.preflight_attestation_hash != operation.preflight_attestation_hash
         || placement.chain_root_id != req.chain_root_id
         || placement.source_site_id != operation.source_site_id
         || placement.target_site_id != operation.target_site_id
@@ -1343,6 +1574,7 @@ async fn prepare_after_staging(
     target_project_path: &Path,
     job_id: &str,
     source: &SourcePlacementOperands,
+    preflight: &WorkerPlacementPreflightEvidence,
 ) -> Result<WorkerPlacementPrepareResponse> {
     let source_resume = source
         .launch_metadata
@@ -1355,6 +1587,31 @@ async fn prepare_after_staging(
     {
         bail!("source launch ledger contradicts transfer owner or sites");
     }
+    if preflight.preflight_id != req.preflight_id
+        || preflight.owner_principal != owner
+        || preflight.chain_root_id != req.chain_root_id
+        || preflight.origin_site_id != source.manifest.origin_site_id
+        || preflight.source_site_id != req.source_site_id
+        || preflight.target_site_id != req.target_site_id
+        || preflight.source_placement_thread_id != source.manifest.source_placement_thread_id
+        || preflight.successor_placement_thread_id != source.manifest.successor_placement_thread_id
+        || preflight.source_launch_capsule_hash != source.manifest.source_launch_capsule_hash
+        || preflight.target_project_path != req.target_project_path
+        || preflight.project_route_digest != req.project_route_digest
+        || preflight.target_credential_profile_id != req.target_credential_profile_id
+        || preflight.outer_exact_program_hash != source.launch_capsule.exact_program_hash
+    {
+        bail!("final source placement differs from target preflight evidence");
+    }
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    ryeos_state::sync::verify_chain_closure_anchored_pinned(
+        &authority.cas_store()?,
+        &req.chain_root_id,
+        &req.source_chain_head_hash,
+        &preflight.source_chain_head_hash,
+    )?;
+    drop(guard);
     let candidate = source
         .restore
         .project_candidate_snapshot_hash
@@ -1405,6 +1662,10 @@ async fn prepare_after_staging(
     let subject_digest = credential_contract.derive_subject_digest(target_account)?;
     if subject_contract_digest != source.restore.credential_subject_contract_digest
         || subject_digest != source.restore.credential_subject_digest
+        || subject_contract_digest != preflight.credential_subject_contract_digest
+        || subject_digest != preflight.credential_subject_digest
+        || target_profile.credential_generation != preflight.target_credential_generation
+        || source.restore.upstream_session_id != preflight.upstream_session_id
     {
         bail!("target credential profile represents another workload account");
     }
@@ -1505,6 +1766,24 @@ async fn prepare_after_staging(
     if target_programs != source_programs {
         bail!("target persistent sessions do not reproduce the source exact programs");
     }
+    if target_programs != preflight.persistent_dependency_programs
+        || target_sessions != preflight.target_persistent_session_capsules
+        || target_capsule.execution_realization_hash != preflight.target_execution_realization_hash
+    {
+        bail!("final target program/substrate admission differs from preflight");
+    }
+    let target_isolation_digest =
+        ryeos_state::objects::canonical_value_digest(&serde_json::to_value(
+            target_metadata
+                .isolation
+                .as_ref()
+                .context("final target placement has no isolation provenance")?,
+        )?)?;
+    if target_isolation_digest != preflight.target_isolation_digest
+        || target_head != preflight.target_project_head_hash
+    {
+        bail!("target project or isolation changed after preflight");
+    }
     let prepared_seed = ryeos_app::worker_handoff::prepare_placement_runtime_seed(
         &req.operation_id,
         &req.chain_root_id,
@@ -1517,6 +1796,8 @@ async fn prepare_after_staging(
     )?;
     let placement = WorkerPlacementAdmissionEvidence::new(
         req.operation_id.clone(),
+        req.preflight_id.clone(),
+        req.preflight_attestation_hash.clone(),
         owner.to_owned(),
         req.chain_root_id.clone(),
         source.manifest.origin_site_id.clone(),
@@ -1596,6 +1877,170 @@ async fn prepare_after_staging(
     Ok(response)
 }
 
+async fn preflight_after_staging(
+    state: &Arc<AppState>,
+    req: &WorkerPlacementPreflightRequest,
+    owner: &str,
+    source: &SourcePreflightOperands,
+) -> Result<WorkerPlacementPreflightResponse> {
+    if state
+        .threads
+        .get_thread(&req.successor_placement_thread_id)?
+        .is_some()
+        || state
+            .state_store
+            .dedicated_session(&req.successor_placement_thread_id)?
+            .is_some()
+        || state
+            .state_store
+            .credential_profile_reservation_for_successor(&req.successor_placement_thread_id)?
+            .is_some()
+    {
+        bail!("proposed successor placement already exists or is reserved");
+    }
+    let source_resume = source
+        .launch_metadata
+        .resume_context
+        .as_ref()
+        .context("source preflight placement has no ResumeContext")?;
+    if source_resume.current_site_id != req.source_site_id
+        || source_resume.origin_site_id != req.origin_site_id
+        || source_resume.principal_identifier() != owner
+        || source.source_snapshot.requested_by.as_deref() != Some(owner)
+    {
+        bail!("source preflight launch ledger contradicts owner or sites");
+    }
+    let target_project_path = canonical_target_project_path(&req.target_project_path)?;
+    let target_project_ref = ryeos_executor::execution::project_source::canonical_project_ref(
+        target_project_path
+            .to_str()
+            .context("target project path is not UTF-8")?,
+    )?;
+    let target_project_hash = lillux::sha256_hex(target_project_ref.as_bytes());
+    let principal_key = ryeos_state::refs::principal_storage_key(owner)?.to_owned();
+    let target_head = state
+        .state_store
+        .with_state_db(|db| db.read_project_head(&principal_key, &target_project_hash))?
+        .context("target project has no principal-scoped HEAD")?;
+    let (project_rebind, target_identity, target_overlay_root) =
+        ryeos_app::worker_handoff::build_remote_project_rebind(
+            &source.source_snapshot.project_authority,
+            &target_project_path,
+            &req.target_site_id,
+            owner,
+            &target_head,
+            &target_head,
+            &target_project_hash,
+            &req.project_route_digest,
+        )?;
+
+    let credential_contract = credential_contract_from_capsule(
+        state,
+        &source.launch_capsule,
+        &req.credential_subject_contract_digest,
+    )?;
+    let target_profile = state
+        .state_store
+        .credential_profile(&req.target_credential_profile_id)?
+        .context("target credential profile does not exist")?;
+    if target_profile.owner_principal != owner
+        || target_profile.state != "active"
+        || target_profile.lock_owner.is_some()
+    {
+        bail!("target credential profile is not active, unlocked, and owner-exact");
+    }
+    let target_account = target_profile
+        .sanitized_account
+        .as_ref()
+        .context("target credential profile has no confirmed account")?;
+    if credential_contract.contract_digest()? != req.credential_subject_contract_digest
+        || credential_contract.derive_subject_digest(target_account)?
+            != req.credential_subject_digest
+    {
+        bail!("target credential profile represents another workload account");
+    }
+    let preview_reservation = CredentialGenerationReservation {
+        profile_id: target_profile.profile_id.clone(),
+        owner_principal: owner.to_owned(),
+        generation: target_profile.credential_generation,
+        reservation_id: format!("worker-preflight:{}", req.preflight_id),
+        upstream_session_id: req.upstream_session_id.clone(),
+        subject_contract_digest: req.credential_subject_contract_digest.clone(),
+        subject_digest: req.credential_subject_digest.clone(),
+    };
+    preview_reservation.validate()?;
+    let resume_rebind = RemoteResumeContextRebind {
+        source_site_id: req.source_site_id.clone(),
+        target_site_id: req.target_site_id.clone(),
+        target_project_context: ryeos_engine::contracts::ProjectContext::SnapshotHash {
+            hash: target_head.clone(),
+        },
+        target_project_authority: project_rebind.target_authority,
+        target_stable_project_identity: Some(target_identity),
+        target_local_overlay_root: target_overlay_root,
+        target_original_snapshot_hash: Some(target_head.clone()),
+        target_original_pushed_head_ref: None,
+        target_state_root: None,
+        source_credential_profile_id: source_profile_id(source_resume)?,
+        credential_reservation: preview_reservation,
+    };
+    let target_resume = source_resume.for_remote_worker_adoption(&resume_rebind)?;
+    let prepared = ryeos_executor::execution::launch::prepare_remote_machine_successor_launch(
+        state,
+        &req.successor_placement_thread_id,
+        &req.source_placement_thread_id,
+        &source.launch_metadata,
+        source_resume,
+        &target_resume,
+        &resume_rebind,
+        None,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let target_metadata = prepared.launch_metadata();
+    let target_capsule = target_metadata
+        .admitted_launch_capsule()?
+        .context("target preflight produced no launch capsule")?;
+    let target_sessions = target_capsule.admitted_persistent_session_capsules()?;
+    let target_programs = persistent_programs(state, &target_sessions)?;
+    let source_sessions = source
+        .launch_capsule
+        .admitted_persistent_session_capsules()?;
+    let source_programs = persistent_programs(state, &source_sessions)?;
+    if target_programs != source_programs {
+        bail!("target preflight does not reproduce source persistent programs");
+    }
+    let isolation = target_metadata
+        .isolation
+        .as_ref()
+        .context("target preflight produced no isolation provenance")?;
+    let target_isolation_digest =
+        ryeos_state::objects::canonical_value_digest(&serde_json::to_value(isolation)?)?;
+    let evidence = WorkerPlacementPreflightEvidence::new(
+        req,
+        owner.to_owned(),
+        source.launch_capsule.exact_program_hash.clone(),
+        source_programs,
+        target_sessions,
+        target_capsule.execution_realization_hash.clone(),
+        target_isolation_digest,
+        target_head,
+        target_profile.credential_generation,
+    )?;
+    let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
+    let preflight_attestation = evidence.sign_attestation(&signer)?;
+    let preflight_attestation_hash =
+        ryeos_state::objects::canonical_value_digest(&preflight_attestation.to_value())?;
+    let response = WorkerPlacementPreflightResponse {
+        preflight_id: req.preflight_id.clone(),
+        preflight_attestation_hash,
+        preflight_attestation,
+        evidence,
+    };
+    response.validate_against(req, state.identity.verifying_key())?;
+    Ok(response)
+}
+
 fn validate_transfer_request(
     transfer: &ryeos_state::objects::PlacementTransferManifest,
     req: &WorkerPlacementPrepareRequest,
@@ -1628,6 +2073,72 @@ fn canonical_target_project_path(raw: &str) -> Result<PathBuf> {
 
 fn target_job_id(operation_id: &str) -> String {
     format!("worker-handoff-target:{operation_id}")
+}
+
+fn target_preflight_job_id(preflight_id: &str) -> String {
+    format!("worker-handoff-preflight-target:{preflight_id}")
+}
+
+fn load_source_preflight_operands(
+    state: &AppState,
+    request: &WorkerPlacementPreflightRequest,
+) -> Result<SourcePreflightOperands> {
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&guard)?;
+    let cas = authority.cas_store()?;
+    let chain_value = cas
+        .get_object(&request.source_chain_head_hash)?
+        .context("staged preflight source chain head is absent")?;
+    let chain: ryeos_state::objects::ChainState = serde_json::from_value(chain_value)?;
+    chain.validate()?;
+    if chain.chain_root_id != request.chain_root_id {
+        bail!("staged preflight chain belongs to another execution");
+    }
+    let source_entry = chain
+        .threads
+        .get(&request.source_placement_thread_id)
+        .context("preflight chain omits source placement")?;
+    if source_entry.last_event_hash.as_deref() != Some(&request.source_last_event_hash) {
+        bail!("preflight source event differs from the signed chain head");
+    }
+    let snapshot_value = cas
+        .get_object(&source_entry.snapshot_hash)?
+        .context("preflight source snapshot is absent")?;
+    let source_snapshot = ryeos_state::objects::ThreadSnapshot::from_current_value(snapshot_value)?;
+    if source_snapshot.thread_id != request.source_placement_thread_id
+        || source_snapshot.chain_root_id != request.chain_root_id
+        || source_snapshot.current_site_id != request.source_site_id
+        || source_snapshot.origin_site_id != request.origin_site_id
+        || source_snapshot.admitted_launch_capsule_hash.as_deref()
+            != Some(request.source_launch_capsule_hash.as_str())
+    {
+        bail!("preflight source snapshot contradicts its request");
+    }
+    let metadata_bytes = cas
+        .get_blob(&request.source_launch_metadata_blob_hash)?
+        .context("preflight source launch metadata is absent")?;
+    let metadata_value: Value = serde_json::from_slice(&metadata_bytes)?;
+    if lillux::sha256_hex(&metadata_bytes) != request.source_launch_metadata_blob_hash
+        || lillux::canonical_json(&metadata_value)?.as_bytes() != metadata_bytes
+        || metadata_value != request.source_launch_metadata
+    {
+        bail!("preflight source launch metadata changed");
+    }
+    let launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata =
+        serde_json::from_value(metadata_value)?;
+    launch_metadata.validate()?;
+    let launch_capsule = launch_metadata
+        .admitted_launch_capsule()?
+        .context("preflight source metadata has no launch capsule")?;
+    if launch_capsule.content_hash()? != request.source_launch_capsule_hash {
+        bail!("preflight source metadata reproduces another launch capsule");
+    }
+    Ok(SourcePreflightOperands {
+        launch_metadata,
+        launch_capsule,
+        source_snapshot,
+    })
 }
 
 fn load_source_placement_operands(
@@ -1787,12 +2298,23 @@ fn source_credential_contract(
     state: &AppState,
     source: &SourcePlacementOperands,
 ) -> Result<ryeos_state::objects::CredentialSubjectProjectionContract> {
+    credential_contract_from_capsule(
+        state,
+        &source.launch_capsule,
+        &source.restore.credential_subject_contract_digest,
+    )
+}
+
+fn credential_contract_from_capsule(
+    state: &AppState,
+    launch_capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+    expected_contract_digest: &str,
+) -> Result<ryeos_state::objects::CredentialSubjectProjectionContract> {
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
     let mut matches = Vec::new();
-    for capsule_hash in source
-        .launch_capsule
+    for capsule_hash in launch_capsule
         .admitted_persistent_session_capsules()?
         .values()
     {
@@ -1803,7 +2325,7 @@ fn source_credential_contract(
             ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;
         if let Some(profile) = capsule.structured_session_profile.as_ref()
             && let Some(contract) = profile.credential_subject_contract()?
-            && contract.contract_digest()? == source.restore.credential_subject_contract_digest
+            && contract.contract_digest()? == expected_contract_digest
         {
             matches.push(contract);
         }
@@ -1993,6 +2515,19 @@ pub const PREPARE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         Box::pin(async move {
             let req: WorkerPlacementPrepareRequest = crate::handler_error::parse_request(params)?;
             prepare(req, ctx, state).await.map_err(Into::into)
+        })
+    },
+};
+
+pub const PREFLIGHT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: WORKER_PLACEMENT_PREFLIGHT_SERVICE,
+    endpoint: "worker-placements.preflight",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.worker-placements/preflight"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            let req: WorkerPlacementPreflightRequest = crate::handler_error::parse_request(params)?;
+            preflight(req, ctx, state).await.map_err(Into::into)
         })
     },
 };

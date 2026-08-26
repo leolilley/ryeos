@@ -1,0 +1,24 @@
+# ryeos:signed:2026-08-26T15:16:44Z:ba6921b2762d466c682aefa8cd774d0571aa80d7e196ec7d15c5efda9a01f74f:ecE7G9xmMXGnLToAfYNysaAzUMyW6iuWHzgiCmetC7fkonztpTAnvwk0bXQ2j4jvQTKmuz1ReuR9tRriwhclCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: worker-placements.preflight
+required_caps: ["ryeos.execute.service.worker-placements/preflight"]
+schema:
+  preflight_id: string
+  chain_root_id: string
+  origin_site_id: string
+  source_site_id: string
+  target_site_id: string
+  source_placement_thread_id: string
+  successor_placement_thread_id: string
+  source_chain_head_hash: string
+  source_last_event_hash: string
+  source_launch_capsule_hash: string
+  source_launch_metadata: object
+  source_launch_metadata_blob_hash: string
+  target_project_path: string
+  project_route_digest: string
+  target_credential_profile_id: string
+  upstream_session_id: string
+  credential_subject_contract_digest: string
+  credential_subject_digest: string
+description: Check one proposed remote worker placement without reserving credentials, importing authority, or starting a process.

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-26T14:44:07Z:7f8d26d78ad47caab5fdb81ef53945f125a3672cff3aff956599b999f43b347a:7xcSR1/VKjnYBpbadg7GujSmZECmzaRbxQqkhQs0Ug4FQ0rs8ej9ncnnBvUAqy3XnujhKpvK5PAnDQPhuq3CAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-26T15:16:44Z:0aa5a005f512af2e54fe8c6125905ca6716f930a8d8d6f8e924c1ab9093d4ee1:9YaqhBg5LlgWMBVivfhq+08Y+1r9a46HoieJ3LIbV7IrWjPJ2NAoR9lht0b834DtQ3mFBqVD2yVq4DjqSGtCBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [worker, session, handoff]
 description: "Move one frozen portable worker session to a configured remote node"
 forms:
@@ -7,6 +7,7 @@ forms:
       - field: manifest_ref
       - field: remote
       - field: target_credential_profile_id
+      - field: preflight_id
 dispatch:
   kind: execute_ref
   execute: service:worker-executions/handoff

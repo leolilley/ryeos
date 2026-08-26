@@ -3163,6 +3163,50 @@ fn validate_remote_adoption_runtime_seed(
     let placement = crate::worker_handoff::WorkerPlacementAdmissionEvidence::from_attestation(
         &placement_attestation,
     )?;
+    let preflight_value = cas
+        .get_object(&placement.preflight_attestation_hash)?
+        .ok_or_else(|| anyhow!("remote adoption preflight receipt is absent"))?;
+    let preflight_attestation = ryeos_state::objects::Attestation::from_value(&preflight_value)?;
+    preflight_attestation.verify_with_key(&transition.target_node_verifying_key)?;
+    let preflight = crate::worker_handoff::WorkerPlacementPreflightEvidence::from_attestation(
+        &preflight_attestation,
+    )?;
+    if placement.preflight_id != preflight.preflight_id
+        || placement.owner_principal != preflight.owner_principal
+        || placement.chain_root_id != preflight.chain_root_id
+        || placement.origin_site_id != preflight.origin_site_id
+        || placement.source_site_id != preflight.source_site_id
+        || placement.target_site_id != preflight.target_site_id
+        || placement.source_placement_thread_id != preflight.source_placement_thread_id
+        || placement.successor_placement_thread_id != preflight.successor_placement_thread_id
+        || placement.outer_exact_program_hash != preflight.outer_exact_program_hash
+        || placement.persistent_dependency_programs != preflight.persistent_dependency_programs
+        || placement.target_persistent_session_capsules
+            != preflight.target_persistent_session_capsules
+        || placement.target_execution_realization_hash
+            != preflight.target_execution_realization_hash
+        || placement.credential_reservation.profile_id != preflight.target_credential_profile_id
+        || placement.credential_reservation.generation != preflight.target_credential_generation
+        || placement.credential_reservation.upstream_session_id != preflight.upstream_session_id
+        || placement.credential_reservation.subject_contract_digest
+            != preflight.credential_subject_contract_digest
+        || placement.credential_reservation.subject_digest != preflight.credential_subject_digest
+        || placement.project_rebind.route_digest != preflight.project_route_digest
+        || placement
+            .project_rebind
+            .target_expected_head_hash
+            .as_deref()
+            != Some(preflight.target_project_head_hash.as_str())
+    {
+        bail!("remote adoption final placement contradicts its target preflight receipt");
+    }
+    match &placement.project_rebind.target_authority {
+        ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+            display_path: Some(path),
+            ..
+        } if path.to_str() == Some(preflight.target_project_path.as_str()) => {}
+        _ => bail!("remote adoption target path differs from its preflight receipt"),
+    }
     let expected_writer = crate::worker_handoff::chain_writer_transition_from_placement(
         &placement,
         evidence.placement_attestation_hash.clone(),
@@ -3226,6 +3270,16 @@ fn validate_remote_adoption_runtime_seed(
     let target_launch_metadata: crate::launch_metadata::RuntimeLaunchMetadata =
         serde_json::from_value(metadata_value).context("decode placement runtime metadata")?;
     target_launch_metadata.validate()?;
+    let target_isolation_digest =
+        ryeos_state::objects::canonical_value_digest(&serde_json::to_value(
+            target_launch_metadata
+                .isolation
+                .as_ref()
+                .ok_or_else(|| anyhow!("remote adoption runtime seed has no isolation"))?,
+        )?)?;
+    if target_isolation_digest != preflight.target_isolation_digest {
+        bail!("remote adoption isolation differs from its target preflight");
+    }
     if target_launch_metadata
         .continuation_source_thread_id
         .as_deref()
@@ -3309,6 +3363,7 @@ fn validate_remote_adoption_runtime_seed(
             != placement.credential_reservation.subject_contract_digest
         || restore.credential_subject_digest != placement.credential_reservation.subject_digest
         || restore.source_site_id != placement.source_site_id
+        || restore.source_launch_capsule_hash != preflight.source_launch_capsule_hash
     {
         bail!("remote adoption checkpoint restore contradicts placement authority");
     }
@@ -3377,8 +3432,22 @@ fn validate_remote_adoption_runtime_seed(
                 .ok_or_else(|| anyhow!("adopted remote source has no remote authority"))?,
         )?;
         remote.validate()?;
-        if remote.target_runtime_seed_hash != placement.target_runtime_seed_hash {
-            bail!("adopted remote continuation names another placement runtime seed");
+        if remote.operation_id != placement.operation_id
+            || remote.preflight_id != placement.preflight_id
+            || remote.preflight_attestation_hash != placement.preflight_attestation_hash
+            || remote.source_chain_head_hash != placement.source_chain_head_hash
+            || remote.source_last_event_hash != placement.source_last_event_hash
+            || remote.checkpoint_manifest_hash != placement.checkpoint_manifest_hash
+            || remote.target_placement_attestation_hash != evidence.placement_attestation_hash
+            || remote.chain_writer_grant_hash != transition.writer_grant_hash
+            || remote.target_launch_capsule_hash != placement.target_launch_capsule_hash
+            || remote.target_runtime_seed_hash != placement.target_runtime_seed_hash
+            || remote.source_site_id != placement.source_site_id
+            || remote.target_site_id != placement.target_site_id
+            || remote.target_node_signer_fingerprint != evidence.target_node_signer_fingerprint
+            || remote.successor_thread_id != placement.successor_placement_thread_id
+        {
+            bail!("adopted remote continuation contradicts signed placement authority");
         }
         if source.status != ThreadStatus::Continued
             || source.result_project_snapshot_hash.as_deref()
@@ -5458,6 +5527,67 @@ impl StateStore {
                 state: ryeos_state::CasEntryState::Local,
             })?;
         g.state_db.create_sync_job(job)
+    }
+
+    /// Complete a non-authoritative worker-placement preflight. The signed
+    /// receipt is rooted by the existing sync job, but no chain head,
+    /// credential reservation, or runnable placement is created here.
+    pub fn complete_worker_handoff_preflight(
+        &self,
+        job_id: &str,
+        attestation: &ryeos_state::objects::Attestation,
+        result: Value,
+    ) -> Result<String> {
+        attestation.validate()?;
+        if attestation.policy != crate::worker_handoff::WORKER_PLACEMENT_PREFLIGHT_POLICY
+            || attestation.claim != crate::worker_handoff::WORKER_PLACEMENT_PREFLIGHT_CLAIM
+        {
+            bail!("worker handoff preflight receipt has another policy");
+        }
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let job = g
+            .state_db
+            .get_sync_job(job_id)?
+            .ok_or_else(|| anyhow!("worker handoff preflight job does not exist"))?;
+        if job.operation_type != crate::worker_handoff::WORKER_SESSION_HANDOFF_PREFLIGHT_OPERATION {
+            bail!("sync job is not a worker handoff preflight");
+        }
+        self.state_authority.ensure_guard(permit.cas_guard())?;
+        let value = attestation.to_value();
+        let expected = ryeos_state::objects::canonical_value_digest(&value)?;
+        let stored = self.state_authority.cas_store()?.put_object(&value)?;
+        if stored.hash != expected {
+            bail!("stored worker handoff preflight receipt digest changed");
+        }
+        g.state_db
+            .record_cas_entry(&ryeos_state::NewCasEntryAttribution {
+                hash: expected.clone(),
+                entry_kind: ryeos_state::CasEntryKind::Object,
+                bytes: u64::try_from(lillux::canonical_json(&value)?.len())?,
+                source_principal: Some(format!("fp:{}", g.signer.fingerprint())),
+                source_peer: None,
+                job_id: Some(job_id.to_owned()),
+                state: ryeos_state::CasEntryState::Local,
+            })?;
+        let mut roots = job.roots;
+        roots.push(expected.clone());
+        roots.sort();
+        roots.dedup();
+        g.state_db.update_sync_job(
+            job_id,
+            &ryeos_state::SyncJobUpdate {
+                state: ryeos_state::SyncJobState::Completed,
+                phase: "preflight_complete".to_owned(),
+                roots: Some(roots),
+                heads: None,
+                uploaded_hashes: Vec::new(),
+                fetched_hashes: Vec::new(),
+                last_error: None,
+                result: Some(result),
+            },
+        )?;
+        Ok(expected)
     }
 
     /// Settle process-local sync attempts before daemon recovery creates any
@@ -8333,6 +8463,8 @@ impl StateStore {
                 Some(ryeos_state::objects::RemoteContinuationAuthority {
                     schema: ryeos_state::objects::REMOTE_CONTINUATION_AUTHORITY_SCHEMA,
                     operation_id: placement.operation_id.clone(),
+                    preflight_id: placement.preflight_id.clone(),
+                    preflight_attestation_hash: placement.preflight_attestation_hash.clone(),
                     source_chain_head_hash: source_chain_head_hash.clone(),
                     source_last_event_hash: source_last_event_hash.clone(),
                     checkpoint_manifest_hash: placement.checkpoint_manifest_hash.clone(),

@@ -787,6 +787,10 @@ fn links_thread_event(value: &Value) -> Result<ContractLinks, String> {
             .map_err(|error| format!("invalid remote continuation authority: {error}"))?;
         for (hash, expected) in [
             (
+                &remote.preflight_attestation_hash,
+                ExpectedObject::Kind("attestation"),
+            ),
+            (
                 &remote.checkpoint_manifest_hash,
                 ExpectedObject::Kind(crate::objects::STATE_MANIFEST_KIND),
             ),

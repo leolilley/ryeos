@@ -1,9 +1,11 @@
-# ryeos:signed:2026-08-26T14:44:07Z:df854215b264d7f3e2b24d88ed77664934b0fa23600c8a86b8198464b054bb23:Po3QsIcy9zdp9+aPm73iN6Oq6tsglezJuLgZSDho60RDwaTLAfacBHuguLJKt4ArfGQI2AGZDWd5uD2CtcbKAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-26T15:16:44Z:6e04d380b9742dfe24a7538010813aa31e837137851955a49e275ff9858bfa6e:jpzaN8kXFZtM88b+R8+O9en1nh/0zbXEPs/DAtNwWII+cpdtxOMAsvDp7osxlOWAbdJpySdRv+2nYeJZYP0iCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: worker-placements.prepare
 required_caps: ["ryeos.execute.service.worker-placements/prepare"]
 schema:
   operation_id: string
+  preflight_id: string
+  preflight_attestation_hash: string
   chain_root_id: string
   source_site_id: string
   target_site_id: string
@@ -13,4 +15,4 @@ schema:
   project_route_digest: string
   target_credential_profile_id: string
   source_accounting_frontier: object?
-description: Admit one exact target-local placement for a configured-operator worker handoff.
+description: Finally admit one exact target-local placement under its completed non-final preflight.

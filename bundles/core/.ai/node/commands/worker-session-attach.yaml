@@ -1,0 +1,10 @@
+# ryeos:signed:2026-08-26T15:16:44Z:20cd340e269cbf2dcdf75f8ac1c365cbf87929be005b6b42d3c16c7fc3e351e6:fqXD4D+SRca8S8SrFvMSn2xHra7knS51Fzu3wCEVoKIymHOLhQiL9r3/GDDcnBGa7lveVuiFkjb2AlFnmaFrCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [worker, session, attach]
+description: "Attach to the authoritative event braid for one worker session chain"
+forms:
+  - slots:
+      - field: thread_id
+dispatch:
+  kind: execute_ref
+  execute: service:threads/tail
+  availability: daemon

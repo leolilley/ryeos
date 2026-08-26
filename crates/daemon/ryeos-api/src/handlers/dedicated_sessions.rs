@@ -1095,11 +1095,340 @@ async fn resume(
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct HandoffPreflightRequest {
+    chain_root_id: String,
+    remote: String,
+    target_credential_profile_id: String,
+}
+
+async fn handoff_preflight(
+    req: HandoffPreflightRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value, HandlerError> {
+    let initial = owned_session(&state, &ctx, &req.chain_root_id)?;
+    let source_thread_id = initial.placement_thread_id.clone();
+    let _disposition = disposition_operation_lock(&source_thread_id)
+        .lock_owned()
+        .await;
+    let source = owned_session(&state, &ctx, &req.chain_root_id)?;
+    if source.placement_thread_id != source_thread_id
+        || matches!(
+            source.state.as_str(),
+            "terminal" | "published" | "discarded"
+        )
+    {
+        return Err(HandlerError::BadRequest(
+            "worker placement changed or terminalized during handoff preflight".into(),
+        ));
+    }
+    let _root_operation = ryeos_app::hosted_operation::begin_hosted_root_operation(
+        &state.state_store,
+        &source_thread_id,
+    )
+    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let _profile_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
+        &source.credential_profile_id,
+    )
+    .await
+    .map_err(internal)?;
+    let source = state
+        .state_store
+        .dedicated_session(&source_thread_id)
+        .map_err(internal)?
+        .ok_or_else(|| internal("worker preflight source disappeared"))?;
+    let upstream_session_id = source.remote_thread_id.clone().ok_or_else(|| {
+        HandlerError::BadRequest("worker has no resumable upstream session".into())
+    })?;
+    let profile = state
+        .state_store
+        .credential_profile(&source.credential_profile_id)
+        .map_err(internal)?
+        .ok_or_else(|| internal("worker credential profile disappeared"))?;
+    if profile.owner_principal != source.owner_principal
+        || profile.state != "active"
+        || profile.credential_generation != source.credential_generation
+    {
+        return Err(HandlerError::BadRequest(
+            "source credential profile is not active and generation-exact".into(),
+        ));
+    }
+    let sanitized_account = profile
+        .sanitized_account
+        .as_ref()
+        .ok_or_else(|| internal("active source credential profile has no sanitized account"))?;
+    let inner_capsule =
+        load_persistent_session_capsule(&state, &source.admitted_capsule_hash).map_err(internal)?;
+    let structured = inner_capsule
+        .structured_session_profile
+        .as_ref()
+        .ok_or_else(|| internal("worker capsule has no structured-session contract"))?;
+    structured
+        .portable_state_contract()
+        .map_err(internal)?
+        .ok_or_else(|| HandlerError::BadRequest("worker profile is not portable".into()))?;
+    let credential_contract = structured
+        .credential_subject_contract()
+        .map_err(internal)?
+        .ok_or_else(|| {
+            HandlerError::BadRequest("worker profile has no credential subject".into())
+        })?;
+    let credential_subject_contract_digest =
+        credential_contract.contract_digest().map_err(internal)?;
+    let credential_subject_digest = credential_contract
+        .derive_subject_digest(sanitized_account)
+        .map_err(internal)?;
+
+    let (source_snapshot, source_event) = state
+        .state_store
+        .get_authoritative_thread_snapshot_with_last_event(&source.chain_root_id, &source_thread_id)
+        .map_err(internal)?
+        .ok_or_else(|| internal("authoritative preflight source disappeared"))?;
+    let source_event_hash = source_event
+        .and_then(|event| event.event_hash)
+        .ok_or_else(|| internal("preflight source has no authoritative last event"))?;
+    let source_head = state
+        .state_store
+        .with_state_db(|db| db.read_generic_head_ref("chains", &source.chain_root_id))
+        .map_err(internal)?
+        .ok_or_else(|| internal("preflight source has no signed chain head"))?;
+    if source_head.signer != state.identity.fingerprint() {
+        return Err(internal("preflight source head is not owned by this node"));
+    }
+    let source_launch_capsule_hash = source_snapshot
+        .admitted_launch_capsule_hash
+        .clone()
+        .ok_or_else(|| internal("preflight source has no launch capsule"))?;
+    let source_metadata = state
+        .state_store
+        .get_launch_metadata(&source_thread_id)
+        .map_err(internal)?
+        .ok_or_else(|| internal("preflight source has no launch metadata"))?;
+    source_metadata.validate().map_err(internal)?;
+    let source_capsule = source_metadata
+        .admitted_launch_capsule()
+        .map_err(internal)?
+        .ok_or_else(|| internal("preflight source metadata has no launch capsule"))?;
+    if source_capsule.content_hash().map_err(internal)? != source_launch_capsule_hash {
+        return Err(internal("preflight source launch capsule changed"));
+    }
+    let source_resume = source_metadata
+        .resume_context
+        .as_ref()
+        .ok_or_else(|| internal("preflight source has no ResumeContext"))?;
+    let source_project_path = source_resume
+        .stable_project_identity
+        .as_ref()
+        .map(|identity| identity.display_path.clone())
+        .ok_or_else(|| {
+            HandlerError::BadRequest("preflight source has no stable project endpoint".into())
+        })?;
+    let report = crate::remote::config::load_remotes_layered_report(
+        &state.config.app_root,
+        Some(&source_project_path),
+    )
+    .map_err(internal)?;
+    let loaded_remote = crate::remote::config::get_loaded_remote(&report.remotes, &req.remote)
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let binding =
+        crate::remote::config::resolve_loaded_project_binding(&loaded_remote, &source_project_path)
+            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    if binding.sync_scope != crate::remote::config::ProjectSyncScope::FullProject {
+        return Err(HandlerError::BadRequest(
+            "worker handoff preflight requires a configured full_project route".into(),
+        ));
+    }
+    let target_site_id = loaded_remote.config.site_id.clone();
+    if target_site_id == state.threads.site_id() {
+        return Err(HandlerError::BadRequest(
+            "handoff preflight target is the current site".into(),
+        ));
+    }
+    let project_route_digest = ryeos_state::objects::canonical_value_digest(&json!({
+        "schema":"ryeos.worker_project_route.v1",
+        "remote":loaded_remote.config.name,
+        "source_site_id":state.threads.site_id(),
+        "target_site_id":target_site_id,
+        "source_project_path":binding.local_project_path,
+        "target_project_path":binding.remote_project_path,
+        "sync_scope":"full_project",
+    }))
+    .map_err(internal)?;
+    let source_launch_metadata = serde_json::to_value(&source_metadata).map_err(internal)?;
+    let source_launch_metadata_blob_hash = lillux::sha256_hex(
+        lillux::canonical_json(&source_launch_metadata)
+            .map_err(internal)?
+            .as_bytes(),
+    );
+    let preflight_id = ryeos_state::objects::canonical_value_digest(&json!({
+        "schema":"ryeos.worker_session_handoff_preflight_operation.v1",
+        "owner_principal":source.owner_principal,
+        "chain_root_id":source.chain_root_id,
+        "origin_site_id":source_snapshot.origin_site_id,
+        "source_site_id":state.threads.site_id(),
+        "target_site_id":target_site_id,
+        "source_placement_thread_id":source_thread_id,
+        "source_chain_head_hash":source_head.target_hash,
+        "source_last_event_hash":source_event_hash,
+        "source_launch_capsule_hash":source_launch_capsule_hash,
+        "source_launch_metadata_blob_hash":source_launch_metadata_blob_hash,
+        "project_route_digest":project_route_digest,
+        "target_project_path":binding.remote_project_path,
+        "target_credential_profile_id":req.target_credential_profile_id,
+        "upstream_session_id":upstream_session_id,
+        "credential_subject_contract_digest":credential_subject_contract_digest,
+        "credential_subject_digest":credential_subject_digest,
+    }))
+    .map_err(internal)?;
+    let successor_placement_thread_id = format!("T-handoff-{}", &preflight_id[..32]);
+    let request = ryeos_app::worker_handoff::WorkerPlacementPreflightRequest {
+        preflight_id: preflight_id.clone(),
+        chain_root_id: source.chain_root_id.clone(),
+        origin_site_id: source_snapshot.origin_site_id.clone(),
+        source_site_id: state.threads.site_id().to_owned(),
+        target_site_id: target_site_id.clone(),
+        source_placement_thread_id: source_thread_id.clone(),
+        successor_placement_thread_id: successor_placement_thread_id.clone(),
+        source_chain_head_hash: source_head.target_hash.clone(),
+        source_last_event_hash: source_event_hash,
+        source_launch_capsule_hash,
+        source_launch_metadata,
+        source_launch_metadata_blob_hash,
+        target_project_path: binding.remote_project_path.clone(),
+        project_route_digest,
+        target_credential_profile_id: req.target_credential_profile_id.clone(),
+        upstream_session_id,
+        credential_subject_contract_digest,
+        credential_subject_digest,
+    };
+    request.validate().map_err(internal)?;
+    let target_client =
+        crate::remote::client::RemoteClient::from_remote_cfg_as_configured_operator(
+            &state,
+            &loaded_remote.config,
+            &ctx,
+        )
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    let target_value = target_client
+        .execute(
+            ryeos_app::worker_handoff::WORKER_PLACEMENT_PREFLIGHT_SERVICE,
+            &BTreeMap::new(),
+            None,
+            &serde_json::to_value(&request).map_err(internal)?,
+            &ryeos_app::execution_policy::ExecutionPolicy::projectless(
+                ryeos_app::execution_policy::ExecutionResponse::Wait,
+            ),
+            None,
+        )
+        .await
+        .map_err(|error| internal(format!("target placement preflight: {error:#}")))?;
+    let response: ryeos_app::worker_handoff::WorkerPlacementPreflightResponse =
+        serde_json::from_value(target_value)
+            .map_err(|error| internal(format!("decode target preflight response: {error}")))?;
+    let target_key = loaded_remote
+        .config
+        .pinned_signing_key()
+        .map_err(internal)?;
+    response
+        .validate_against(&request, &target_key)
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let target_node_client =
+        crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config);
+    let target_closure = target_node_client
+        .objects_closure_get(
+            &[response.preflight_attestation_hash.clone()],
+            crate::remote::client::ObjectsClosureRequestOptions {
+                max_objects: Some(16_384),
+                max_blobs: Some(16_384),
+                max_object_bytes: Some(2 * 1024 * 1024),
+                max_total_object_bytes: Some(16 * 1024 * 1024),
+                max_blob_bytes: Some(48 * 1024 * 1024),
+                max_total_blob_bytes: Some(48 * 1024 * 1024),
+                max_response_bytes: Some(64 * 1024 * 1024),
+                max_links_per_object: Some(65_536),
+                allow_incomplete: false,
+            },
+        )
+        .await
+        .map_err(|error| internal(format!("fetch target preflight receipt: {error:#}")))?;
+    let payload = crate::remote::import::closure_response_to_export_payload(
+        &format!("worker-preflight:{preflight_id}"),
+        &response.preflight_attestation_hash,
+        &target_closure.entries,
+    )
+    .map_err(internal)?;
+    let operation = ryeos_app::worker_handoff::WorkerPlacementPreflightJobOperation::from_request(
+        ryeos_app::worker_handoff::WorkerHandoffJobRole::Source,
+        source.owner_principal.clone(),
+        req.remote.clone(),
+        &request,
+    )
+    .map_err(internal)?;
+    let job_id = source_preflight_job_id(&preflight_id);
+    state
+        .state_store
+        .stage_sync_payload_and_create_job(
+            &payload,
+            &ryeos_state::sync::ImportAttribution {
+                source_principal: Some(loaded_remote.config.principal_id.clone()),
+                source_peer: Some(req.remote.clone()),
+                job_id: Some(job_id.clone()),
+            },
+            &ryeos_state::NewSyncJob {
+                job_id: job_id.clone(),
+                operation_type: ryeos_app::worker_handoff::WORKER_SESSION_HANDOFF_PREFLIGHT_OPERATION
+                    .to_owned(),
+                operation: operation.to_value().map_err(internal)?,
+                peer: Some(req.remote),
+                roots: vec![response.preflight_attestation_hash.clone()],
+                heads: vec![request.source_chain_head_hash.clone()],
+                max_attempts: 4,
+            },
+        )
+        .map_err(internal)?;
+    state
+        .state_store
+        .with_state_db(|db| {
+            db.update_sync_job(
+                &job_id,
+                &ryeos_state::SyncJobUpdate {
+                    state: ryeos_state::SyncJobState::Completed,
+                    phase: "preflight_complete".to_owned(),
+                    roots: None,
+                    heads: None,
+                    uploaded_hashes: Vec::new(),
+                    fetched_hashes: vec![response.preflight_attestation_hash.clone()],
+                    last_error: None,
+                    result: Some(serde_json::to_value(&response)?),
+                },
+            )
+        })
+        .map_err(internal)?;
+    Ok(json!({
+        "preflight_id":preflight_id,
+        "preflight_attestation_hash":response.preflight_attestation_hash,
+        "chain_root_id":source.chain_root_id,
+        "source_placement_thread_id":source_thread_id,
+        "successor_placement_thread_id":successor_placement_thread_id,
+        "target_site_id":target_site_id,
+        "target_project_head_hash":response.evidence.target_project_head_hash,
+        "target_credential_generation":response.evidence.target_credential_generation,
+        "status":"eligible",
+    }))
+}
+
+fn source_preflight_job_id(preflight_id: &str) -> String {
+    format!("worker-handoff-preflight-source:{preflight_id}")
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HandoffRequest {
     chain_root_id: String,
     manifest_ref: String,
     remote: String,
     target_credential_profile_id: String,
+    preflight_id: String,
 }
 
 async fn handoff(
@@ -1176,6 +1505,11 @@ async fn handoff(
     let source_event_hash = source_event
         .and_then(|event| event.event_hash)
         .ok_or_else(|| internal("handoff source has no authoritative last event"))?;
+    let launch_capsule_hash = source_snapshot
+        .admitted_launch_capsule_hash
+        .as_deref()
+        .ok_or_else(|| internal("handoff source has no launch capsule"))?
+        .to_owned();
     let source_head = state
         .state_store
         .with_state_db(|db| db.read_generic_head_ref("chains", &source.chain_root_id))
@@ -1231,8 +1565,84 @@ async fn handoff(
         "sync_scope":"full_project",
     }))
     .map_err(internal)?;
+    let preflight_job = state
+        .state_store
+        .with_state_db(|db| db.get_sync_job(&source_preflight_job_id(&req.preflight_id)))
+        .map_err(internal)?
+        .ok_or_else(|| HandlerError::BadRequest("handoff preflight does not exist".into()))?;
+    if preflight_job.state != ryeos_state::SyncJobState::Completed {
+        return Err(HandlerError::BadRequest(
+            "handoff preflight has not completed".into(),
+        ));
+    }
+    let preflight_operation =
+        ryeos_app::worker_handoff::WorkerPlacementPreflightJobOperation::from_value(
+            preflight_job.operation,
+        )
+        .map_err(internal)?;
+    let preflight_response: ryeos_app::worker_handoff::WorkerPlacementPreflightResponse =
+        serde_json::from_value(
+            preflight_job
+                .result
+                .ok_or_else(|| internal("completed handoff preflight has no result"))?,
+        )
+        .map_err(internal)?;
+    let target_key = loaded_remote
+        .config
+        .pinned_signing_key()
+        .map_err(internal)?;
+    preflight_response
+        .preflight_attestation
+        .verify_with_key(&target_key)
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let preflight_evidence =
+        ryeos_app::worker_handoff::WorkerPlacementPreflightEvidence::from_attestation(
+            &preflight_response.preflight_attestation,
+        )
+        .map_err(internal)?;
+    if preflight_operation.role != ryeos_app::worker_handoff::WorkerHandoffJobRole::Source
+        || preflight_operation.preflight_id != req.preflight_id
+        || preflight_operation.owner_principal != source.owner_principal
+        || preflight_operation.chain_root_id != source.chain_root_id
+        || preflight_operation.source_site_id != state.threads.site_id()
+        || preflight_operation.target_site_id != target_site_id
+        || preflight_operation.source_placement_thread_id != source_thread_id
+        || preflight_operation.target_project_path != binding.remote_project_path
+        || preflight_operation.project_route_digest != route_digest
+        || preflight_operation.target_credential_profile_id != req.target_credential_profile_id
+        || preflight_operation.peer_remote_name != req.remote
+        || preflight_response.preflight_attestation_hash
+            != ryeos_state::objects::canonical_value_digest(
+                &preflight_response.preflight_attestation.to_value(),
+            )
+            .map_err(internal)?
+        || preflight_evidence.preflight_id != req.preflight_id
+        || preflight_evidence.source_launch_capsule_hash != launch_capsule_hash
+        || preflight_evidence.target_project_path != binding.remote_project_path
+        || preflight_evidence.project_route_digest != route_digest
+        || preflight_evidence.target_credential_profile_id != req.target_credential_profile_id
+    {
+        return Err(HandlerError::BadRequest(
+            "handoff request differs from its completed target preflight".into(),
+        ));
+    }
+    let authority = state
+        .state_store
+        .pinned_state_authority()
+        .map_err(internal)?;
+    let guard = authority.acquire_shared_guard().map_err(internal)?;
+    ryeos_state::sync::verify_chain_closure_anchored_pinned(
+        &authority.cas_store().map_err(internal)?,
+        &source.chain_root_id,
+        &source_head.target_hash,
+        &preflight_evidence.source_chain_head_hash,
+    )
+    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    drop(guard);
     let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.worker_session_handoff_operation.v1",
+        "preflight_id":req.preflight_id,
+        "preflight_attestation_hash":preflight_response.preflight_attestation_hash,
         "owner_principal":source.owner_principal,
         "chain_root_id":source.chain_root_id,
         "source_site_id":state.threads.site_id(),
@@ -1245,7 +1655,7 @@ async fn handoff(
         "target_credential_profile_id":req.target_credential_profile_id,
     }))
     .map_err(internal)?;
-    let successor_thread_id = format!("T-handoff-{}", &operation_id[..32]);
+    let successor_thread_id = preflight_evidence.successor_placement_thread_id.clone();
     let source_accounting_frontier = match (
         state.accounting.as_ref(),
         source_metadata.accounting_scope.as_ref(),
@@ -1262,10 +1672,6 @@ async fn handoff(
         }
         (_, None) => None,
     };
-    let launch_capsule_hash = source_snapshot
-        .admitted_launch_capsule_hash
-        .as_deref()
-        .ok_or_else(|| internal("handoff source has no launch capsule"))?;
     let prepared_transfer = ryeos_app::worker_handoff::prepare_placement_transfer_manifest(
         &operation_id,
         &source.owner_principal,
@@ -1278,7 +1684,7 @@ async fn handoff(
         &source_head.target_hash,
         &source_event_hash,
         &checkpoint.manifest_hash,
-        launch_capsule_hash,
+        &launch_capsule_hash,
         &source_metadata,
     )
     .map_err(internal)?;
@@ -1286,6 +1692,8 @@ async fn handoff(
     let operation = ryeos_app::worker_handoff::WorkerSessionHandoffJobOperation::new(
         ryeos_app::worker_handoff::WorkerHandoffJobRole::Source,
         operation_id.clone(),
+        req.preflight_id.clone(),
+        preflight_response.preflight_attestation_hash.clone(),
         source.owner_principal.clone(),
         source.chain_root_id.clone(),
         source_snapshot.origin_site_id.clone(),
@@ -1315,7 +1723,10 @@ async fn handoff(
                     .to_owned(),
                 operation: operation.to_value().map_err(internal)?,
                 peer: Some(req.remote.clone()),
-                roots: vec![transfer_manifest_hash.clone()],
+                roots: vec![
+                    transfer_manifest_hash.clone(),
+                    preflight_response.preflight_attestation_hash.clone(),
+                ],
                 heads: vec![source_head.target_hash.clone()],
                 max_attempts: 16,
             },
@@ -1323,6 +1734,8 @@ async fn handoff(
         .map_err(internal)?;
 
     let prepare_request = ryeos_app::worker_handoff::WorkerPlacementPrepareRequest {
+        preflight_id: req.preflight_id.clone(),
+        preflight_attestation_hash: preflight_response.preflight_attestation_hash.clone(),
         operation_id: operation_id.clone(),
         chain_root_id: source.chain_root_id.clone(),
         source_site_id: state.threads.site_id().to_owned(),
@@ -1712,9 +2125,12 @@ async fn resume_committed_handoff(
     .map_err(internal)?;
     if operation.role != ryeos_app::worker_handoff::WorkerHandoffJobRole::Source
         || operation.operation_id != remote_authority.operation_id
+        || operation.preflight_id != remote_authority.preflight_id
+        || operation.preflight_attestation_hash != remote_authority.preflight_attestation_hash
         || operation.chain_root_id != req.chain_root_id
         || operation.successor_placement_thread_id != placement_thread_id
         || operation.peer_remote_name != req.remote
+        || operation.preflight_id != req.preflight_id
         || operation.target_credential_profile_id != req.target_credential_profile_id
         || format!("cas:{}", operation.checkpoint_manifest_hash) != req.manifest_ref
     {
@@ -1923,6 +2339,8 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
                 .with_state_db(|db| db.read_generic_head_ref("chains", &operation.chain_root_id))?
                 .ok_or_else(|| anyhow::anyhow!("source handoff chain head disappeared"))?;
             if remote.operation_id != operation.operation_id
+                || remote.preflight_id != operation.preflight_id
+                || remote.preflight_attestation_hash != operation.preflight_attestation_hash
                 || remote.source_chain_head_hash != operation.source_chain_head_hash
                 || remote.source_last_event_hash != operation.source_last_event_hash
                 || remote.checkpoint_manifest_hash != operation.checkpoint_manifest_hash
@@ -1998,6 +2416,8 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
             .with_state_db(|db| db.read_generic_head_ref("chains", &operation.chain_root_id))?
             .ok_or_else(|| anyhow::anyhow!("source handoff chain head disappeared"))?;
         if remote.operation_id != operation.operation_id
+            || remote.preflight_id != operation.preflight_id
+            || remote.preflight_attestation_hash != operation.preflight_attestation_hash
             || remote.target_placement_attestation_hash != placement_hash
             || remote.chain_writer_grant_hash != writer_hash
             || remote.successor_thread_id != operation.successor_placement_thread_id
@@ -3885,6 +4305,19 @@ pub const HANDOFF_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     },
 };
 
+pub const HANDOFF_PREFLIGHT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:worker-executions/handoff-preflight",
+    endpoint: "worker-executions.handoff-preflight",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.worker-executions/handoff-preflight"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            let req: HandoffPreflightRequest = crate::handler_error::parse_request(params)?;
+            handoff_preflight(req, ctx, state).await.map_err(Into::into)
+        })
+    },
+};
+
 pub const COMMAND_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:worker-executions/command",
     endpoint: "worker-executions.command",
@@ -3984,8 +4417,8 @@ pub const DISCARD_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::{
-        CandidatePublicationRecovery, CheckpointRequest, CommandRequest, ResumeRequest,
-        classify_candidate_publication_recovery,
+        CandidatePublicationRecovery, CheckpointRequest, CommandRequest, HandoffPreflightRequest,
+        HandoffRequest, ResumeRequest, classify_candidate_publication_recovery,
     };
 
     #[test]
@@ -4046,6 +4479,45 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn hosted_handoff_requires_the_exact_completed_preflight_coordinate() {
+        let complete = serde_json::json!({
+            "chain_root_id":"T-root",
+            "manifest_ref":format!("cas:{}", "a".repeat(64)),
+            "remote":"target",
+            "target_credential_profile_id":"profile-target",
+            "preflight_id":"b".repeat(64),
+        });
+        assert!(serde_json::from_value::<HandoffRequest>(complete.clone()).is_ok());
+
+        let mut missing = complete;
+        missing
+            .as_object_mut()
+            .expect("request fixture object")
+            .remove("preflight_id");
+        assert!(serde_json::from_value::<HandoffRequest>(missing).is_err());
+    }
+
+    #[test]
+    fn hosted_handoff_preflight_has_only_non_final_placement_inputs() {
+        let request = serde_json::json!({
+            "chain_root_id":"T-root",
+            "remote":"target",
+            "target_credential_profile_id":"profile-target",
+        });
+        assert!(serde_json::from_value::<HandoffPreflightRequest>(request.clone()).is_ok());
+
+        let mut final_input = request;
+        final_input
+            .as_object_mut()
+            .expect("request fixture object")
+            .insert(
+                "manifest_ref".to_owned(),
+                serde_json::json!(format!("cas:{}", "a".repeat(64))),
+            );
+        assert!(serde_json::from_value::<HandoffPreflightRequest>(final_input).is_err());
     }
 
     #[test]

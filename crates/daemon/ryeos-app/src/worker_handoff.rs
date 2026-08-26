@@ -18,18 +18,122 @@ use crate::launch_metadata::{OriginalPushedHeadRef, ResumeContext, StableProject
 
 pub const WORKER_PLACEMENT_POLICY: &str = "worker-placement-v1";
 pub const WORKER_PLACEMENT_CLAIM: &str = "admitted";
+pub const WORKER_PLACEMENT_PREFLIGHT_POLICY: &str = "worker-placement-preflight-v1";
+pub const WORKER_PLACEMENT_PREFLIGHT_CLAIM: &str = "eligible";
+pub const WORKER_SESSION_HANDOFF_PREFLIGHT_OPERATION: &str = "worker_session_handoff_preflight";
 pub const WORKER_SESSION_HANDOFF_OPERATION: &str = "worker_session_handoff";
+pub const WORKER_PLACEMENT_PREFLIGHT_SERVICE: &str = "service:worker-placements/preflight";
 pub const WORKER_PLACEMENT_PREPARE_SERVICE: &str = "service:worker-placements/prepare";
 pub const WORKER_PLACEMENT_ADOPT_SERVICE: &str = "service:worker-placements/adopt";
 pub const WORKER_PLACEMENT_ABORT_SERVICE: &str = "service:worker-placements/abort";
 
 const PLACEMENT_EVIDENCE_SCHEMA: &str = "ryeos.worker_placement_admission.v1";
-const HANDOFF_JOB_SCHEMA: &str = "ryeos.worker_session_handoff_job.v1";
+const PREFLIGHT_EVIDENCE_SCHEMA: &str = "ryeos.worker_placement_preflight.v1";
+const PREFLIGHT_JOB_SCHEMA: &str = "ryeos.worker_session_handoff_preflight_job.v1";
+const HANDOFF_JOB_SCHEMA: &str = "ryeos.worker_session_handoff_job.v2";
 const HANDOFF_PROGRESS_SCHEMA: &str = "ryeos.worker_session_handoff_progress.v1";
+
+/// Non-final target check performed while the source placement may still be
+/// live. The launch metadata is transport data, not trusted authority: the
+/// target reproduces its capsule and binds its canonical digest in the signed
+/// receipt before using it for local preparation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementPreflightRequest {
+    pub preflight_id: String,
+    pub chain_root_id: String,
+    pub origin_site_id: String,
+    pub source_site_id: String,
+    pub target_site_id: String,
+    pub source_placement_thread_id: String,
+    pub successor_placement_thread_id: String,
+    pub source_chain_head_hash: String,
+    pub source_last_event_hash: String,
+    pub source_launch_capsule_hash: String,
+    pub source_launch_metadata: serde_json::Value,
+    pub source_launch_metadata_blob_hash: String,
+    pub target_project_path: String,
+    pub project_route_digest: String,
+    pub target_credential_profile_id: String,
+    pub upstream_session_id: String,
+    pub credential_subject_contract_digest: String,
+    pub credential_subject_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementPreflightResponse {
+    pub preflight_id: String,
+    pub preflight_attestation_hash: String,
+    pub preflight_attestation: Attestation,
+    pub evidence: WorkerPlacementPreflightEvidence,
+}
+
+/// Exact target-signed receipt for checks that do not require the final
+/// checkpoint/candidate. This never grants chain-writer or process authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementPreflightEvidence {
+    pub schema: String,
+    pub operation_type: String,
+    pub preflight_id: String,
+    pub owner_principal: String,
+    pub chain_root_id: String,
+    pub origin_site_id: String,
+    pub source_site_id: String,
+    pub target_site_id: String,
+    pub source_placement_thread_id: String,
+    pub successor_placement_thread_id: String,
+    pub source_chain_head_hash: String,
+    pub source_last_event_hash: String,
+    pub source_launch_capsule_hash: String,
+    pub source_launch_metadata_blob_hash: String,
+    pub outer_exact_program_hash: String,
+    pub persistent_dependency_programs: BTreeMap<String, String>,
+    pub target_persistent_session_capsules: BTreeMap<String, String>,
+    pub target_execution_realization_hash: String,
+    pub target_isolation_digest: String,
+    pub target_project_path: String,
+    pub project_route_digest: String,
+    pub target_project_head_hash: String,
+    pub target_credential_profile_id: String,
+    pub target_credential_generation: u64,
+    pub upstream_session_id: String,
+    pub credential_subject_contract_digest: String,
+    pub credential_subject_digest: String,
+}
+
+/// Immutable local sync-job body used to retain a preflight receipt and its
+/// staged portable-program closure on each participating node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerPlacementPreflightJobOperation {
+    pub schema: String,
+    pub operation_type: String,
+    pub role: WorkerHandoffJobRole,
+    pub preflight_id: String,
+    pub owner_principal: String,
+    pub chain_root_id: String,
+    pub origin_site_id: String,
+    pub source_site_id: String,
+    pub target_site_id: String,
+    pub source_placement_thread_id: String,
+    pub successor_placement_thread_id: String,
+    pub source_chain_head_hash: String,
+    pub source_last_event_hash: String,
+    pub source_launch_capsule_hash: String,
+    pub source_launch_metadata_blob_hash: String,
+    pub peer_remote_name: String,
+    pub target_project_path: String,
+    pub project_route_digest: String,
+    pub target_credential_profile_id: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerPlacementPrepareRequest {
+    pub preflight_id: String,
+    pub preflight_attestation_hash: String,
     pub operation_id: String,
     pub chain_root_id: String,
     pub source_site_id: String,
@@ -137,6 +241,8 @@ pub struct WorkerSessionHandoffJobOperation {
     pub operation_type: String,
     pub role: WorkerHandoffJobRole,
     pub operation_id: String,
+    pub preflight_id: String,
+    pub preflight_attestation_hash: String,
     pub owner_principal: String,
     pub chain_root_id: String,
     pub origin_site_id: String,
@@ -160,6 +266,8 @@ impl WorkerSessionHandoffJobOperation {
     pub fn new(
         role: WorkerHandoffJobRole,
         operation_id: String,
+        preflight_id: String,
+        preflight_attestation_hash: String,
         owner_principal: String,
         chain_root_id: String,
         origin_site_id: String,
@@ -182,6 +290,8 @@ impl WorkerSessionHandoffJobOperation {
             operation_type: WORKER_SESSION_HANDOFF_OPERATION.to_owned(),
             role,
             operation_id,
+            preflight_id,
+            preflight_attestation_hash,
             owner_principal,
             chain_root_id,
             origin_site_id,
@@ -222,6 +332,11 @@ impl WorkerSessionHandoffJobOperation {
             &self.source_last_event_hash,
             &self.checkpoint_manifest_hash,
             &self.transfer_manifest_hash,
+        )?;
+        hash("handoff preflight", &self.preflight_id)?;
+        hash(
+            "handoff preflight attestation",
+            &self.preflight_attestation_hash,
         )?;
         hash("handoff project route", &self.project_route_digest)?;
         for (label, value) in [
@@ -354,6 +469,11 @@ impl WorkerPlacementPrepareRequest {
     pub fn validate(&self) -> anyhow::Result<()> {
         for (label, value) in [
             ("operation", self.operation_id.as_str()),
+            ("preflight", self.preflight_id.as_str()),
+            (
+                "preflight attestation",
+                self.preflight_attestation_hash.as_str(),
+            ),
             ("source chain head", self.source_chain_head_hash.as_str()),
             ("transfer manifest", self.transfer_manifest_hash.as_str()),
             ("project route", self.project_route_digest.as_str()),
@@ -384,6 +504,370 @@ impl WorkerPlacementPrepareRequest {
             }
         }
         Ok(())
+    }
+}
+
+impl WorkerPlacementPreflightRequest {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for (label, value) in [
+            ("preflight", self.preflight_id.as_str()),
+            ("source chain head", self.source_chain_head_hash.as_str()),
+            ("source last event", self.source_last_event_hash.as_str()),
+            (
+                "source launch capsule",
+                self.source_launch_capsule_hash.as_str(),
+            ),
+            (
+                "source launch metadata",
+                self.source_launch_metadata_blob_hash.as_str(),
+            ),
+            ("project route", self.project_route_digest.as_str()),
+            (
+                "credential subject contract",
+                self.credential_subject_contract_digest.as_str(),
+            ),
+            (
+                "credential subject",
+                self.credential_subject_digest.as_str(),
+            ),
+        ] {
+            hash(label, value)?;
+        }
+        for (label, value) in [
+            ("chain root", self.chain_root_id.as_str()),
+            ("origin site", self.origin_site_id.as_str()),
+            ("source site", self.source_site_id.as_str()),
+            ("target site", self.target_site_id.as_str()),
+            ("source placement", self.source_placement_thread_id.as_str()),
+            (
+                "successor placement",
+                self.successor_placement_thread_id.as_str(),
+            ),
+            ("target project path", self.target_project_path.as_str()),
+            (
+                "target credential profile",
+                self.target_credential_profile_id.as_str(),
+            ),
+            ("upstream session", self.upstream_session_id.as_str()),
+        ] {
+            label_value(label, value)?;
+        }
+        if self.source_site_id == self.target_site_id
+            || !std::path::Path::new(&self.target_project_path).is_absolute()
+        {
+            bail!("worker placement preflight is not an exact cross-site project request");
+        }
+        let metadata_bytes = lillux::canonical_json(&self.source_launch_metadata)?;
+        if metadata_bytes.len() > 2 * 1024 * 1024
+            || lillux::sha256_hex(metadata_bytes.as_bytes())
+                != self.source_launch_metadata_blob_hash
+        {
+            bail!("preflight launch metadata exceeds its bound or changed digest");
+        }
+        Ok(())
+    }
+}
+
+impl WorkerPlacementPreflightEvidence {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        request: &WorkerPlacementPreflightRequest,
+        owner_principal: String,
+        outer_exact_program_hash: String,
+        persistent_dependency_programs: BTreeMap<String, String>,
+        target_persistent_session_capsules: BTreeMap<String, String>,
+        target_execution_realization_hash: String,
+        target_isolation_digest: String,
+        target_project_head_hash: String,
+        target_credential_generation: u64,
+    ) -> anyhow::Result<Self> {
+        let evidence = Self {
+            schema: PREFLIGHT_EVIDENCE_SCHEMA.to_owned(),
+            operation_type: WORKER_SESSION_HANDOFF_PREFLIGHT_OPERATION.to_owned(),
+            preflight_id: request.preflight_id.clone(),
+            owner_principal,
+            chain_root_id: request.chain_root_id.clone(),
+            origin_site_id: request.origin_site_id.clone(),
+            source_site_id: request.source_site_id.clone(),
+            target_site_id: request.target_site_id.clone(),
+            source_placement_thread_id: request.source_placement_thread_id.clone(),
+            successor_placement_thread_id: request.successor_placement_thread_id.clone(),
+            source_chain_head_hash: request.source_chain_head_hash.clone(),
+            source_last_event_hash: request.source_last_event_hash.clone(),
+            source_launch_capsule_hash: request.source_launch_capsule_hash.clone(),
+            source_launch_metadata_blob_hash: request.source_launch_metadata_blob_hash.clone(),
+            outer_exact_program_hash,
+            persistent_dependency_programs,
+            target_persistent_session_capsules,
+            target_execution_realization_hash,
+            target_isolation_digest,
+            target_project_path: request.target_project_path.clone(),
+            project_route_digest: request.project_route_digest.clone(),
+            target_project_head_hash,
+            target_credential_profile_id: request.target_credential_profile_id.clone(),
+            target_credential_generation,
+            upstream_session_id: request.upstream_session_id.clone(),
+            credential_subject_contract_digest: request.credential_subject_contract_digest.clone(),
+            credential_subject_digest: request.credential_subject_digest.clone(),
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != PREFLIGHT_EVIDENCE_SCHEMA
+            || self.operation_type != WORKER_SESSION_HANDOFF_PREFLIGHT_OPERATION
+            || self.target_credential_generation == 0
+        {
+            bail!("worker placement preflight evidence is not the exact current contract");
+        }
+        for (label, value) in [
+            ("preflight", self.preflight_id.as_str()),
+            ("source chain head", self.source_chain_head_hash.as_str()),
+            ("source last event", self.source_last_event_hash.as_str()),
+            (
+                "source launch capsule",
+                self.source_launch_capsule_hash.as_str(),
+            ),
+            (
+                "source launch metadata",
+                self.source_launch_metadata_blob_hash.as_str(),
+            ),
+            (
+                "outer exact program",
+                self.outer_exact_program_hash.as_str(),
+            ),
+            (
+                "target execution realization",
+                self.target_execution_realization_hash.as_str(),
+            ),
+            ("target isolation", self.target_isolation_digest.as_str()),
+            ("project route", self.project_route_digest.as_str()),
+            (
+                "target project head",
+                self.target_project_head_hash.as_str(),
+            ),
+            (
+                "credential subject contract",
+                self.credential_subject_contract_digest.as_str(),
+            ),
+            (
+                "credential subject",
+                self.credential_subject_digest.as_str(),
+            ),
+        ] {
+            hash(label, value)?;
+        }
+        for (label, value) in [
+            ("owner", self.owner_principal.as_str()),
+            ("chain root", self.chain_root_id.as_str()),
+            ("origin site", self.origin_site_id.as_str()),
+            ("source site", self.source_site_id.as_str()),
+            ("target site", self.target_site_id.as_str()),
+            ("source placement", self.source_placement_thread_id.as_str()),
+            (
+                "successor placement",
+                self.successor_placement_thread_id.as_str(),
+            ),
+            ("target project path", self.target_project_path.as_str()),
+            (
+                "target credential profile",
+                self.target_credential_profile_id.as_str(),
+            ),
+            ("upstream session", self.upstream_session_id.as_str()),
+        ] {
+            label_value(label, value)?;
+        }
+        if self.source_site_id == self.target_site_id
+            || !std::path::Path::new(&self.target_project_path).is_absolute()
+            || self.persistent_dependency_programs.is_empty()
+            || self
+                .persistent_dependency_programs
+                .keys()
+                .collect::<Vec<_>>()
+                != self
+                    .target_persistent_session_capsules
+                    .keys()
+                    .collect::<Vec<_>>()
+        {
+            bail!("worker placement preflight evidence has invalid placement coordinates");
+        }
+        for (label, entries) in [
+            ("persistent program", &self.persistent_dependency_programs),
+            (
+                "target persistent-session capsule",
+                &self.target_persistent_session_capsules,
+            ),
+        ] {
+            for (name, digest) in entries {
+                label_value("persistent dependency name", name)?;
+                hash(label, digest)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn sign_attestation(&self, signer: &dyn Signer) -> anyhow::Result<Attestation> {
+        self.validate()?;
+        Attestation::unsigned(
+            self.source_launch_capsule_hash.clone(),
+            WORKER_PLACEMENT_PREFLIGHT_CLAIM.to_owned(),
+            WORKER_PLACEMENT_PREFLIGHT_POLICY.to_owned(),
+            lillux::time::iso8601_now(),
+            None,
+            serde_json::to_value(self)?,
+        )
+        .sign(signer)
+    }
+
+    pub fn from_attestation(attestation: &Attestation) -> anyhow::Result<Self> {
+        if attestation.policy != WORKER_PLACEMENT_PREFLIGHT_POLICY
+            || attestation.claim != WORKER_PLACEMENT_PREFLIGHT_CLAIM
+        {
+            bail!("attestation is not a worker placement preflight receipt");
+        }
+        let evidence: Self = serde_json::from_value(attestation.evidence.clone())?;
+        evidence.validate()?;
+        if attestation.subject_hash != evidence.source_launch_capsule_hash {
+            bail!("preflight receipt subject differs from its source capsule");
+        }
+        Ok(evidence)
+    }
+}
+
+impl WorkerPlacementPreflightResponse {
+    pub fn validate_against(
+        &self,
+        request: &WorkerPlacementPreflightRequest,
+        target_key: &lillux::crypto::VerifyingKey,
+    ) -> anyhow::Result<()> {
+        request.validate()?;
+        self.evidence.validate()?;
+        self.preflight_attestation.verify_with_key(target_key)?;
+        let evidence =
+            WorkerPlacementPreflightEvidence::from_attestation(&self.preflight_attestation)?;
+        let attestation_hash =
+            ryeos_state::objects::canonical_value_digest(&self.preflight_attestation.to_value())?;
+        if self.preflight_id != request.preflight_id
+            || self.preflight_attestation_hash != attestation_hash
+            || self.evidence != evidence
+            || evidence.preflight_id != request.preflight_id
+            || evidence.chain_root_id != request.chain_root_id
+            || evidence.origin_site_id != request.origin_site_id
+            || evidence.source_site_id != request.source_site_id
+            || evidence.target_site_id != request.target_site_id
+            || evidence.source_placement_thread_id != request.source_placement_thread_id
+            || evidence.successor_placement_thread_id != request.successor_placement_thread_id
+            || evidence.source_chain_head_hash != request.source_chain_head_hash
+            || evidence.source_last_event_hash != request.source_last_event_hash
+            || evidence.source_launch_capsule_hash != request.source_launch_capsule_hash
+            || evidence.source_launch_metadata_blob_hash != request.source_launch_metadata_blob_hash
+            || evidence.target_project_path != request.target_project_path
+            || evidence.project_route_digest != request.project_route_digest
+            || evidence.target_credential_profile_id != request.target_credential_profile_id
+            || evidence.upstream_session_id != request.upstream_session_id
+            || evidence.credential_subject_contract_digest
+                != request.credential_subject_contract_digest
+            || evidence.credential_subject_digest != request.credential_subject_digest
+        {
+            bail!("worker placement preflight response contradicts its request");
+        }
+        Ok(())
+    }
+}
+
+impl WorkerPlacementPreflightJobOperation {
+    pub fn from_request(
+        role: WorkerHandoffJobRole,
+        owner_principal: String,
+        peer_remote_name: String,
+        request: &WorkerPlacementPreflightRequest,
+    ) -> anyhow::Result<Self> {
+        request.validate()?;
+        let operation = Self {
+            schema: PREFLIGHT_JOB_SCHEMA.to_owned(),
+            operation_type: WORKER_SESSION_HANDOFF_PREFLIGHT_OPERATION.to_owned(),
+            role,
+            preflight_id: request.preflight_id.clone(),
+            owner_principal,
+            chain_root_id: request.chain_root_id.clone(),
+            origin_site_id: request.origin_site_id.clone(),
+            source_site_id: request.source_site_id.clone(),
+            target_site_id: request.target_site_id.clone(),
+            source_placement_thread_id: request.source_placement_thread_id.clone(),
+            successor_placement_thread_id: request.successor_placement_thread_id.clone(),
+            source_chain_head_hash: request.source_chain_head_hash.clone(),
+            source_last_event_hash: request.source_last_event_hash.clone(),
+            source_launch_capsule_hash: request.source_launch_capsule_hash.clone(),
+            source_launch_metadata_blob_hash: request.source_launch_metadata_blob_hash.clone(),
+            peer_remote_name,
+            target_project_path: request.target_project_path.clone(),
+            project_route_digest: request.project_route_digest.clone(),
+            target_credential_profile_id: request.target_credential_profile_id.clone(),
+        };
+        operation.validate()?;
+        Ok(operation)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != PREFLIGHT_JOB_SCHEMA
+            || self.operation_type != WORKER_SESSION_HANDOFF_PREFLIGHT_OPERATION
+        {
+            bail!("worker handoff preflight job is not the exact current contract");
+        }
+        for (label, value) in [
+            ("preflight", self.preflight_id.as_str()),
+            ("source chain head", self.source_chain_head_hash.as_str()),
+            ("source last event", self.source_last_event_hash.as_str()),
+            (
+                "source launch capsule",
+                self.source_launch_capsule_hash.as_str(),
+            ),
+            (
+                "source launch metadata",
+                self.source_launch_metadata_blob_hash.as_str(),
+            ),
+            ("project route", self.project_route_digest.as_str()),
+        ] {
+            hash(label, value)?;
+        }
+        for (label, value) in [
+            ("owner", self.owner_principal.as_str()),
+            ("chain root", self.chain_root_id.as_str()),
+            ("origin site", self.origin_site_id.as_str()),
+            ("source site", self.source_site_id.as_str()),
+            ("target site", self.target_site_id.as_str()),
+            ("source placement", self.source_placement_thread_id.as_str()),
+            (
+                "successor placement",
+                self.successor_placement_thread_id.as_str(),
+            ),
+            ("peer remote", self.peer_remote_name.as_str()),
+            ("target project path", self.target_project_path.as_str()),
+            (
+                "target credential profile",
+                self.target_credential_profile_id.as_str(),
+            ),
+        ] {
+            label_value(label, value)?;
+        }
+        if self.source_site_id == self.target_site_id
+            || !std::path::Path::new(&self.target_project_path).is_absolute()
+        {
+            bail!("worker handoff preflight job has invalid cross-site coordinates");
+        }
+        Ok(())
+    }
+
+    pub fn to_value(&self) -> anyhow::Result<serde_json::Value> {
+        self.validate()?;
+        Ok(serde_json::to_value(self)?)
+    }
+
+    pub fn from_value(value: serde_json::Value) -> anyhow::Result<Self> {
+        let operation: Self = serde_json::from_value(value)?;
+        operation.validate()?;
+        Ok(operation)
     }
 }
 
@@ -489,6 +973,8 @@ impl WorkerPlacementPrepareResponse {
         self.placement.validate()?;
         self.credential_reservation.validate()?;
         if self.placement.operation_id != request.operation_id
+            || self.placement.preflight_id != request.preflight_id
+            || self.placement.preflight_attestation_hash != request.preflight_attestation_hash
             || self.placement.chain_root_id != request.chain_root_id
             || self.placement.source_site_id != request.source_site_id
             || self.placement.target_site_id != request.target_site_id
@@ -592,6 +1078,8 @@ pub struct WorkerPlacementAdmissionEvidence {
     pub schema: String,
     pub operation_type: String,
     pub operation_id: String,
+    pub preflight_id: String,
+    pub preflight_attestation_hash: String,
     pub owner_principal: String,
     pub chain_root_id: String,
     pub origin_site_id: String,
@@ -619,6 +1107,8 @@ pub struct WorkerPlacementAdmissionEvidence {
 impl WorkerPlacementAdmissionEvidence {
     pub fn new(
         operation_id: String,
+        preflight_id: String,
+        preflight_attestation_hash: String,
         owner_principal: String,
         chain_root_id: String,
         origin_site_id: String,
@@ -643,6 +1133,8 @@ impl WorkerPlacementAdmissionEvidence {
             schema: PLACEMENT_EVIDENCE_SCHEMA.to_owned(),
             operation_type: WORKER_SESSION_HANDOFF_OPERATION.to_owned(),
             operation_id,
+            preflight_id,
+            preflight_attestation_hash,
             owner_principal,
             chain_root_id,
             origin_site_id,
@@ -684,6 +1176,11 @@ impl WorkerPlacementAdmissionEvidence {
             &self.source_last_event_hash,
             &self.checkpoint_manifest_hash,
             &self.target_launch_capsule_hash,
+        )?;
+        hash("placement preflight", &self.preflight_id)?;
+        hash(
+            "placement preflight attestation",
+            &self.preflight_attestation_hash,
         )?;
         hash("outer exact program", &self.outer_exact_program_hash)?;
         hash(
@@ -1519,6 +2016,37 @@ mod tests {
         PinnedProjectRealization, PinnedTerminalPublication,
     };
 
+    struct PreflightTestSigner {
+        signing_key: lillux::crypto::SigningKey,
+        fingerprint: String,
+    }
+
+    impl PreflightTestSigner {
+        fn new() -> Self {
+            let signing_key = lillux::crypto::SigningKey::from_bytes(&[42; 32]);
+            let fingerprint = lillux::crypto::fingerprint(&signing_key.verifying_key());
+            Self {
+                signing_key,
+                fingerprint,
+            }
+        }
+    }
+
+    impl Signer for PreflightTestSigner {
+        fn sign(&self, data: &[u8]) -> Vec<u8> {
+            use lillux::crypto::Signer as _;
+            self.signing_key.sign(data).to_bytes().to_vec()
+        }
+
+        fn fingerprint(&self) -> &str {
+            &self.fingerprint
+        }
+
+        fn verifying_key(&self) -> lillux::crypto::VerifyingKey {
+            self.signing_key.verifying_key()
+        }
+    }
+
     fn accounting() -> AccountingConservation {
         AccountingConservation {
             source_scope: None,
@@ -1609,6 +2137,96 @@ mod tests {
         response.validate_against(&request).unwrap();
         response.disposition = "released_without_chain_evidence".into();
         assert!(response.validate_against(&request).is_err());
+    }
+
+    fn preflight_request() -> WorkerPlacementPreflightRequest {
+        let source_launch_metadata = serde_json::json!({"schema":1});
+        WorkerPlacementPreflightRequest {
+            preflight_id: "1".repeat(64),
+            chain_root_id: "T-root".into(),
+            origin_site_id: "site:a".into(),
+            source_site_id: "site:a".into(),
+            target_site_id: "site:b".into(),
+            source_placement_thread_id: "T-source".into(),
+            successor_placement_thread_id: "T-target".into(),
+            source_chain_head_hash: "2".repeat(64),
+            source_last_event_hash: "3".repeat(64),
+            source_launch_capsule_hash: "4".repeat(64),
+            source_launch_metadata_blob_hash: lillux::sha256_hex(
+                lillux::canonical_json(&source_launch_metadata)
+                    .unwrap()
+                    .as_bytes(),
+            ),
+            source_launch_metadata,
+            target_project_path: "/target/project".into(),
+            project_route_digest: "5".repeat(64),
+            target_credential_profile_id: "profile-target".into(),
+            upstream_session_id: "upstream-session".into(),
+            credential_subject_contract_digest: "6".repeat(64),
+            credential_subject_digest: "7".repeat(64),
+        }
+    }
+
+    fn preflight_evidence(
+        request: &WorkerPlacementPreflightRequest,
+    ) -> WorkerPlacementPreflightEvidence {
+        WorkerPlacementPreflightEvidence::new(
+            request,
+            "fp:owner".into(),
+            "8".repeat(64),
+            BTreeMap::from([("worker".into(), "9".repeat(64))]),
+            BTreeMap::from([("worker".into(), "a".repeat(64))]),
+            "b".repeat(64),
+            "c".repeat(64),
+            "d".repeat(64),
+            3,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn preflight_receipt_is_target_key_and_request_bound() {
+        let request = preflight_request();
+        request.validate().unwrap();
+        let evidence = preflight_evidence(&request);
+        let target = PreflightTestSigner::new();
+        let attestation = evidence.sign_attestation(&target).unwrap();
+        let mut response = WorkerPlacementPreflightResponse {
+            preflight_id: request.preflight_id.clone(),
+            preflight_attestation_hash: ryeos_state::objects::canonical_value_digest(
+                &attestation.to_value(),
+            )
+            .unwrap(),
+            preflight_attestation: attestation,
+            evidence,
+        };
+        response
+            .validate_against(&request, &target.verifying_key())
+            .unwrap();
+
+        response.evidence.target_credential_generation += 1;
+        assert!(
+            response
+                .validate_against(&request, &target.verifying_key())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn preflight_job_retains_only_non_authoritative_coordinates() {
+        let request = preflight_request();
+        let operation = WorkerPlacementPreflightJobOperation::from_request(
+            WorkerHandoffJobRole::Target,
+            "fp:owner".into(),
+            "source-remote".into(),
+            &request,
+        )
+        .unwrap();
+        let decoded =
+            WorkerPlacementPreflightJobOperation::from_value(operation.to_value().unwrap())
+                .unwrap();
+        assert_eq!(decoded, operation);
+        assert!(!operation.to_value().unwrap().to_string().contains("token"));
     }
 
     fn pinned_authority(

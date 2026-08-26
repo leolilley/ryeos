@@ -1,0 +1,12 @@
+# ryeos:signed:2026-08-26T15:16:44Z:14c11ba13b1809120de7ea0baeb5593ce96d1ffb73ebbeca5e3cef1aff015555:aOBz+OjZtAvY/qBGxftmWA09I2FdzRqYItqxkZ4x0juisr8QjyF4dHDc2YciOn08XRtXO6QlgJDNeGFRRgRNCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [worker, session, handoff-preflight]
+description: "Preflight one cross-site worker handoff before quiescing its source"
+forms:
+  - slots:
+      - field: chain_root_id
+      - field: remote
+      - field: target_credential_profile_id
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/handoff-preflight
+  availability: daemon

@@ -24,7 +24,7 @@ pub const MAX_STRUCTURED_OBSERVATION_BATCH_BYTES: usize = 384 * 1024;
 /// across all of its worker epochs. This bounds root-chain and projection
 /// growth independently of the seven-day lifetime ceiling.
 pub const MAX_HOSTED_SESSION_OBSERVATION_EVENTS: u64 = 1_048_576;
-pub const REMOTE_CONTINUATION_AUTHORITY_SCHEMA: u32 = 1;
+pub const REMOTE_CONTINUATION_AUTHORITY_SCHEMA: u32 = 2;
 
 /// Typed authority retained on a cross-site `thread_continued` edge.
 ///
@@ -36,6 +36,8 @@ pub const REMOTE_CONTINUATION_AUTHORITY_SCHEMA: u32 = 1;
 pub struct RemoteContinuationAuthority {
     pub schema: u32,
     pub operation_id: String,
+    pub preflight_id: String,
+    pub preflight_attestation_hash: String,
     pub source_chain_head_hash: String,
     pub source_last_event_hash: String,
     pub checkpoint_manifest_hash: String,
@@ -56,6 +58,11 @@ impl RemoteContinuationAuthority {
         }
         for (label, value) in [
             ("remote continuation operation", self.operation_id.as_str()),
+            ("remote continuation preflight", self.preflight_id.as_str()),
+            (
+                "remote continuation preflight attestation",
+                self.preflight_attestation_hash.as_str(),
+            ),
             (
                 "remote continuation source head",
                 self.source_chain_head_hash.as_str(),
@@ -398,6 +405,8 @@ mod remote_continuation_tests {
         RemoteContinuationAuthority {
             schema: REMOTE_CONTINUATION_AUTHORITY_SCHEMA,
             operation_id: "1".repeat(64),
+            preflight_id: "a".repeat(64),
+            preflight_attestation_hash: "b".repeat(64),
             source_chain_head_hash: "2".repeat(64),
             source_last_event_hash: "3".repeat(64),
             checkpoint_manifest_hash: "4".repeat(64),
