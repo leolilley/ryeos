@@ -68,4 +68,5 @@ pub mod stream_envelope;
 pub mod temp_dir_guard;
 pub mod thread_lifecycle;
 pub mod vault;
+pub mod worker_handoff;
 pub mod write_barrier;

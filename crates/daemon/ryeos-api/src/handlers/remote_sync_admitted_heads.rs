@@ -99,7 +99,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     })?;
     let expected_signer = lillux::crypto::fingerprint(&expected_key);
     let expected_issuer = format!("fp:{expected_signer}");
-    let ids = create_batch_job(&state, &remote_cfg.name)?;
+    let ids = create_batch_job(&state, &remote_cfg.name, &req.policy)?;
     let mut progress = BatchProgress::new();
 
     let result: Result<Value> = async {
@@ -242,13 +242,19 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     }
 }
 
-fn create_batch_job(state: &Arc<AppState>, peer: &str) -> Result<SyncJobIds> {
+fn create_batch_job(state: &Arc<AppState>, peer: &str, policy: &str) -> Result<SyncJobIds> {
     let job_id = format!("remote-sync-admissions:{}", uuid::Uuid::new_v4());
     let attempt_id = format!("remote-sync-admissions-attempt:{}", uuid::Uuid::new_v4());
     state.state_store.with_state_db(|db| {
         db.create_sync_job(&NewSyncJob {
             job_id: job_id.clone(),
             operation_type: "remote_sync_admitted_heads".to_string(),
+            operation: serde_json::json!({
+                "schema": 1,
+                "operation_type": "remote_sync_admitted_heads",
+                "peer": peer,
+                "policy": policy,
+            }),
             peer: Some(peer.to_string()),
             roots: Vec::new(),
             heads: Vec::new(),

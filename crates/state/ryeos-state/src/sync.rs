@@ -15,6 +15,31 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Fully verified operands for the one chain-head publication that changes
+/// node writers. The attested evidence is immutable; `target_chain_head_hash`
+/// is the locally verified result of applying that exact grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedChainWriterTransition {
+    pub evidence: crate::objects::ChainWriterTransitionEvidence,
+    pub writer_grant_hash: String,
+    pub target_chain_head_hash: String,
+}
+
+impl AdmittedChainWriterTransition {
+    pub fn validate(&self) -> Result<()> {
+        self.evidence.validate()?;
+        crate::objects::thread_snapshot::validate_canonical_hash(
+            "chain writer grant",
+            &self.writer_grant_hash,
+        )?;
+        crate::objects::thread_snapshot::validate_canonical_hash(
+            "transferred chain head",
+            &self.target_chain_head_hash,
+        )?;
+        Ok(())
+    }
+}
+
 use crate::reachability;
 use crate::{CasEntryKind, CasEntryState, NewCasEntryAttribution, StagedCasRootLease, StateDb};
 

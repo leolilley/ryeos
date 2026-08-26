@@ -67,6 +67,15 @@ pub async fn import_admitted_root_with_job(
         db.create_sync_job(&NewSyncJob {
             job_id: job_id.clone(),
             operation_type: "remote_import_admitted_root".to_string(),
+            operation: serde_json::json!({
+                "schema": 1,
+                "operation_type": "remote_import_admitted_root",
+                "subject_hash": req.subject_hash,
+                "policy": req.policy,
+                "expected_issuer": req.expected_issuer,
+                "expected_attestation_hash": req.expected_attestation_hash,
+                "source_peer": peer,
+            }),
             peer: Some(peer.clone()),
             roots: vec![req.subject_hash.clone()],
             heads: Vec::new(),

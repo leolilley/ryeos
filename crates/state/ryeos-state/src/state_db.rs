@@ -4275,7 +4275,33 @@ impl StateDb {
         signer: &dyn Signer,
         cas_mutation_guard: &crate::recovery::CasMutationGuard,
     ) -> anyhow::Result<()> {
-        self.publish_external_chain_head(chain_root_id, target_hash, signer, cas_mutation_guard)
+        self.publish_external_chain_head(
+            chain_root_id,
+            target_hash,
+            signer,
+            cas_mutation_guard,
+            None,
+        )
+    }
+
+    /// Publish the one successor head authorized by a source-node writer
+    /// transition. Unlike ordinary import this may establish a chain on a new
+    /// node, but only after the signed grant, target placement attestation,
+    /// continuation event, snapshots, and exact source anchor agree.
+    pub fn write_transferred_chain_head_admitted(
+        &self,
+        transition: &crate::sync::AdmittedChainWriterTransition,
+        signer: &dyn Signer,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<()> {
+        transition.validate()?;
+        self.publish_external_chain_head(
+            &transition.evidence.chain_root_id,
+            &transition.target_chain_head_hash,
+            signer,
+            cas_mutation_guard,
+            Some(transition),
+        )
     }
 
     /// Read and verify a namespace-neutral signed head from `refs/generic`.
@@ -5097,6 +5123,7 @@ impl StateDb {
         target_hash: &str,
         signer: &dyn Signer,
         cas_mutation_guard: &crate::recovery::CasMutationGuard,
+        writer_transition: Option<&crate::sync::AdmittedChainWriterTransition>,
     ) -> anyhow::Result<()> {
         crate::signer::ensure_signer_trusted(signer, self.trust_store.as_ref())?;
         cas_mutation_guard.ensure_protects_pinned_runtime(&self._runtime_state_directory)?;
@@ -5109,6 +5136,32 @@ impl StateDb {
         )?;
         let current = chain_lock.read_verified_head(self.trust_store.as_ref())?;
         let current_hash = current.as_ref().map(|head| head.target_hash.as_str());
+        let required_anchor = if let Some(transition) = writer_transition {
+            verify_chain_writer_transition_adoption(
+                &cas,
+                self.trust_store.as_ref(),
+                transition,
+                signer.fingerprint(),
+            )?;
+            if chain_root_id != transition.evidence.chain_root_id
+                || target_hash != transition.target_chain_head_hash
+            {
+                anyhow::bail!("chain writer transition changed its publication coordinate");
+            }
+            match current.as_ref() {
+                None => {}
+                Some(head) if head.target_hash == transition.evidence.source_chain_head_hash => {}
+                Some(head)
+                    if head.target_hash == transition.target_chain_head_hash
+                        && head.signer == transition.evidence.target_node_signer_fingerprint => {}
+                Some(_) => {
+                    anyhow::bail!("local chain head is not the writer grant source or exact target")
+                }
+            }
+            Some(transition.evidence.source_chain_head_hash.as_str())
+        } else {
+            current_hash
+        };
         // The exact trusted current target is the import anchor. An equal
         // target is idempotent; a different target must prove that current is
         // an ancestor, so import can advance but never fork or roll back a
@@ -5118,7 +5171,7 @@ impl StateDb {
             chain_root_id,
             target_hash,
             true,
-            current_hash,
+            required_anchor,
         )?;
         let invalidates_retirement = self.pending_remove_invalidated_by_mutation_locked(
             chain_root_id,
@@ -5750,6 +5803,150 @@ impl StateDb {
             }
         }
     }
+}
+
+fn verify_chain_writer_transition_adoption(
+    cas: &lillux::CasStore,
+    trust: &TrustStore,
+    transition: &crate::sync::AdmittedChainWriterTransition,
+    publishing_signer: &str,
+) -> anyhow::Result<()> {
+    use crate::objects::{
+        AdmittedLaunchCapsule, Attestation, ChainState, ChainWriterTransitionEvidence,
+        RemoteContinuationAuthority, StateManifest, ThreadEvent, ThreadSnapshot, ThreadStatus,
+    };
+
+    transition.validate()?;
+    let evidence = &transition.evidence;
+    if publishing_signer != evidence.target_node_signer_fingerprint {
+        anyhow::bail!("transferred chain head is not signed by its granted target writer");
+    }
+
+    let writer_value = cas
+        .get_object(&transition.writer_grant_hash)?
+        .ok_or_else(|| anyhow::anyhow!("chain writer grant is absent"))?;
+    let writer_attestation = Attestation::from_value(&writer_value)?;
+    writer_attestation.verify_with_trust_store(trust)?;
+    let observed_writer = ChainWriterTransitionEvidence::from_attestation(&writer_attestation)?;
+    if &observed_writer != evidence {
+        anyhow::bail!("chain writer grant differs from admitted transition operands");
+    }
+
+    let placement_value = cas
+        .get_object(&evidence.placement_attestation_hash)?
+        .ok_or_else(|| anyhow::anyhow!("target placement attestation is absent"))?;
+    let placement = Attestation::from_value(&placement_value)?;
+    placement.verify_with_trust_store(trust)?;
+    if placement.issuer_fingerprint()? != evidence.target_node_signer_fingerprint
+        || placement.subject_hash != evidence.transition_subject_hash
+    {
+        anyhow::bail!("target placement attestation contradicts the writer grant");
+    }
+
+    let capsule_value = cas
+        .get_object(&evidence.transition_subject_hash)?
+        .ok_or_else(|| anyhow::anyhow!("target launch capsule is absent"))?;
+    AdmittedLaunchCapsule::from_current_value(capsule_value)?;
+
+    let source_value = cas
+        .get_object(&evidence.source_chain_head_hash)?
+        .ok_or_else(|| anyhow::anyhow!("writer transition source chain head is absent"))?;
+    let source: ChainState = serde_json::from_value(source_value)?;
+    source.validate()?;
+    if source.chain_root_id != evidence.chain_root_id {
+        anyhow::bail!("writer transition source head belongs to another chain");
+    }
+    let source_entry_before = source
+        .threads
+        .get(&evidence.source_placement_thread_id)
+        .ok_or_else(|| anyhow::anyhow!("writer transition source placement is absent"))?;
+    if source_entry_before.last_event_hash.as_deref()
+        != Some(evidence.source_last_event_hash.as_str())
+    {
+        anyhow::bail!("writer transition source event is not the source head frontier");
+    }
+
+    let target_value = cas
+        .get_object(&transition.target_chain_head_hash)?
+        .ok_or_else(|| anyhow::anyhow!("transferred target chain head is absent"))?;
+    let target: ChainState = serde_json::from_value(target_value)?;
+    target.validate()?;
+    if target.chain_root_id != evidence.chain_root_id
+        || target.prev_chain_state_hash.as_deref() != Some(evidence.source_chain_head_hash.as_str())
+    {
+        anyhow::bail!("transferred chain head is not the immediate granted successor");
+    }
+    let source_entry_after = target
+        .threads
+        .get(&evidence.source_placement_thread_id)
+        .ok_or_else(|| anyhow::anyhow!("transferred source placement disappeared"))?;
+    if source_entry_after.status != ThreadStatus::Continued {
+        anyhow::bail!("transferred source placement was not terminalized as continued");
+    }
+    let continuation_hash = source_entry_after
+        .last_event_hash
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("transferred source has no continuation event"))?;
+    let continuation_value = cas
+        .get_object(continuation_hash)?
+        .ok_or_else(|| anyhow::anyhow!("transferred continuation event is absent"))?;
+    let continuation: ThreadEvent = serde_json::from_value(continuation_value)?;
+    continuation.validate()?;
+    if continuation.event_type != "thread_continued"
+        || continuation.thread_id != evidence.source_placement_thread_id
+        || continuation.chain_root_id != evidence.chain_root_id
+        || continuation.prev_thread_event_hash.as_deref()
+            != Some(evidence.source_last_event_hash.as_str())
+    {
+        anyhow::bail!("transferred continuation event is not the granted source edge");
+    }
+    let remote: RemoteContinuationAuthority = serde_json::from_value(
+        continuation
+            .payload
+            .get("remote_adoption")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("continuation has no remote-adoption authority"))?,
+    )?;
+    remote.validate()?;
+    if remote.operation_id != evidence.operation_id
+        || remote.source_chain_head_hash != evidence.source_chain_head_hash
+        || remote.source_last_event_hash != evidence.source_last_event_hash
+        || remote.target_placement_attestation_hash != evidence.placement_attestation_hash
+        || remote.chain_writer_grant_hash != transition.writer_grant_hash
+        || remote.target_launch_capsule_hash != evidence.transition_subject_hash
+        || remote.source_site_id != evidence.source_site_id
+        || remote.target_site_id != evidence.target_site_id
+        || remote.target_node_signer_fingerprint != evidence.target_node_signer_fingerprint
+        || remote.successor_thread_id != evidence.successor_placement_thread_id
+    {
+        anyhow::bail!("remote continuation event differs from its writer grant");
+    }
+    let checkpoint_value = cas
+        .get_object(&remote.checkpoint_manifest_hash)?
+        .ok_or_else(|| anyhow::anyhow!("remote continuation checkpoint is absent"))?;
+    StateManifest::from_current_value(checkpoint_value)?;
+
+    let successor_entry = target
+        .threads
+        .get(&evidence.successor_placement_thread_id)
+        .ok_or_else(|| anyhow::anyhow!("transferred successor placement is absent"))?;
+    let successor_value = cas
+        .get_object(&successor_entry.snapshot_hash)?
+        .ok_or_else(|| anyhow::anyhow!("transferred successor snapshot is absent"))?;
+    let successor = ThreadSnapshot::from_current_value(successor_value)?;
+    if successor.chain_root_id != evidence.chain_root_id
+        || successor.thread_id != evidence.successor_placement_thread_id
+        || successor.upstream_thread_id.as_deref()
+            != Some(evidence.source_placement_thread_id.as_str())
+        || successor.current_site_id != evidence.target_site_id
+        || successor.origin_site_id != evidence.origin_site_id
+        || successor.requested_by.as_deref() != Some(evidence.owner_principal.as_str())
+        || successor.admitted_launch_capsule_hash.as_deref()
+            != Some(evidence.transition_subject_hash.as_str())
+    {
+        anyhow::bail!("transferred successor snapshot contradicts its writer grant");
+    }
+    Ok(())
 }
 
 #[cfg(test)]

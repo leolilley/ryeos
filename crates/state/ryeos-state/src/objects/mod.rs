@@ -17,6 +17,7 @@ pub mod admitted_launch_capsule;
 pub mod attestation;
 pub mod bundle_event;
 pub mod chain_state;
+pub mod chain_writer_transition;
 pub mod effect_record;
 pub mod execution_identity;
 pub mod execution_project_authority;
@@ -54,6 +55,10 @@ pub use bundle_event::{
     MAX_BUNDLE_EVENT_SERIALIZED_BYTES, hash_bundle_event, validate_bundle_identifier,
 };
 pub use chain_state::{ChainState, ChainStateBuilder, ChainThreadEntry};
+pub use chain_writer_transition::{
+    CHAIN_WRITER_TRANSITION_CLAIM, CHAIN_WRITER_TRANSITION_POLICY, CHAIN_WRITER_TRANSITION_SCHEMA,
+    ChainWriterTransitionEvidence,
+};
 pub use effect_record::{
     AdmittedDispatchSubject, AdmittedEffectAuthorization, DispatchEffectAnswer,
     DispatchEffectIdentity, DispatchEffectRecord, EFFECT_KEY_SCHEMA, EFFECT_RECORD_KIND,
@@ -140,7 +145,8 @@ pub use state_manifest::{
 };
 pub use thread_event::{
     EventDurability, MAX_HOSTED_SESSION_OBSERVATION_EVENTS, MAX_STRUCTURED_OBSERVATION_BATCH_BYTES,
-    MAX_THREAD_EVENT_SERIALIZED_BYTES, ThreadEvent,
+    MAX_THREAD_EVENT_SERIALIZED_BYTES, REMOTE_CONTINUATION_AUTHORITY_SCHEMA,
+    RemoteContinuationAuthority, ThreadEvent,
 };
 pub use thread_snapshot::{
     CapturedEffectiveTrustClass, CapturedItemSpace, CapturedItemTrustClass,

@@ -15,7 +15,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, Transactio
 use crate::sqlite_schema;
 
 const OPERATIONAL_APP_ID: i32 = 0x5259_4f50; // "RYOP"
-const OPERATIONAL_SCHEMA_VERSION: i32 = 5;
+const OPERATIONAL_SCHEMA_VERSION: i32 = 6;
 const REPLAY_INDEX_EPOCH: i32 = 4;
 pub const OPERATIONAL_DB_FILENAME: &str = "operational.sqlite3";
 pub(crate) const OPERATIONAL_INITIALIZED_FILENAME: &str = "operational.initialized";
@@ -24,7 +24,7 @@ const OPERATIONAL_INITIALIZED_CONTENT: &[u8] = b"ryeos-operational-v1\n";
 const SCHEMA_SQL: &str = r#"
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
-PRAGMA user_version=5;
+PRAGMA user_version=6;
 
 CREATE TABLE cas_entries (
     hash TEXT NOT NULL,
@@ -47,6 +47,7 @@ CREATE INDEX idx_cas_entries_job_id ON cas_entries(job_id);
 CREATE TABLE sync_jobs (
     job_id TEXT PRIMARY KEY,
     operation_type TEXT NOT NULL,
+    operation_json BLOB NOT NULL DEFAULT X'7B7D',
     peer TEXT,
     state TEXT NOT NULL CHECK (state IN ('planned', 'running', 'completed', 'failed', 'retryable', 'cancelled')),
     phase TEXT NOT NULL,
@@ -174,6 +175,14 @@ CREATE TABLE credential_profiles (
 
 CREATE INDEX idx_credential_profiles_owner_state
     ON credential_profiles(owner_principal, state);
+"#;
+
+/// Schema-v6 addition: a durable sync job retains the immutable canonical
+/// operation it is coordinating. Phases and mutable roots remain recovery
+/// progress; they are never allowed to manufacture the caller, peer, or
+/// authority operands after a crash.
+const SYNC_JOB_OPERATION_DDL: &str = r#"
+ALTER TABLE sync_jobs ADD COLUMN operation_json BLOB NOT NULL DEFAULT X'7B7D';
 "#;
 
 /// Schema-v2 additions, applied verbatim by the v1→v2 forward migration. A
@@ -326,6 +335,12 @@ fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec {
                         name: "operation_type",
                         col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "operation_json",
+                        col_type: "BLOB",
                         pk: false,
                         not_null: true,
                     },
@@ -1933,13 +1948,70 @@ fn migrate_forward_if_owned(conn: &Connection, path: &Path) -> Result<()> {
                     .context("begin operational v4→v5 credential authority migration")?;
                 tx.execute_batch(CREDENTIAL_PROFILES_DDL)
                     .context("install stable credential-profile authority")?;
-                tx.pragma_update(None, "user_version", OPERATIONAL_SCHEMA_VERSION)
+                tx.pragma_update(None, "user_version", 5)
                     .context("stamp operational schema v5")?;
                 tx.commit()
                     .context("commit operational v4→v5 credential authority migration")?;
                 tracing::info!(
                     path = %path.display(),
                     "operational schema migrated v4 → v5 (credential-profile authority)"
+                );
+            }
+            5 => {
+                let tx = conn
+                    .unchecked_transaction()
+                    .context("begin operational v5→v6 sync-operation migration")?;
+                let already_present: i64 = tx
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info('sync_jobs') WHERE name = 'operation_json'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .context("inspect durable sync-job operation column")?;
+                if already_present == 0 {
+                    tx.execute_batch(SYNC_JOB_OPERATION_DDL)
+                        .context("install durable sync-job operation payload")?;
+                }
+                // v5 rows predate immutable operation retention. Preserve
+                // their exact existing type and peer as explicitly marked
+                // legacy recovery evidence; never leave an untyped `{}` that
+                // a later reconciler could reinterpret as caller authority.
+                let legacy_jobs = {
+                    let mut statement = tx
+                        .prepare(
+                            "SELECT job_id, operation_type, peer FROM sync_jobs WHERE operation_json = X'7B7D'",
+                        )
+                        .context("prepare legacy sync-job operation migration")?;
+                    statement
+                        .query_map([], |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, Option<String>>(2)?,
+                            ))
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?
+                };
+                for (job_id, operation_type, peer) in legacy_jobs {
+                    let operation = serde_json::to_vec(&serde_json::json!({
+                        "schema": 1,
+                        "operation_type": operation_type,
+                        "legacy_recovery": true,
+                        "peer": peer,
+                    }))?;
+                    tx.execute(
+                        "UPDATE sync_jobs SET operation_json = ? WHERE job_id = ? AND operation_json = X'7B7D'",
+                        rusqlite::params![operation, job_id],
+                    )
+                    .context("retain canonical legacy sync-job operation")?;
+                }
+                tx.pragma_update(None, "user_version", OPERATIONAL_SCHEMA_VERSION)
+                    .context("stamp operational schema v6")?;
+                tx.commit()
+                    .context("commit operational v5→v6 sync-operation migration")?;
+                tracing::info!(
+                    path = %path.display(),
+                    "operational schema migrated v5 → v6 (durable sync operations)"
                 );
             }
             other => {
@@ -2256,6 +2328,7 @@ impl SyncJobAttemptState {
 pub struct SyncJobRecord {
     pub job_id: String,
     pub operation_type: String,
+    pub operation: serde_json::Value,
     pub peer: Option<String>,
     pub state: SyncJobState,
     pub phase: String,
@@ -2276,6 +2349,7 @@ pub struct SyncJobRecord {
 pub struct NewSyncJob {
     pub job_id: String,
     pub operation_type: String,
+    pub operation: serde_json::Value,
     pub peer: Option<String>,
     pub roots: Vec<String>,
     pub heads: Vec<String>,
@@ -2850,6 +2924,17 @@ impl OperationalDb {
     pub fn create_sync_job(&self, job: &NewSyncJob) -> Result<SyncJobRecord> {
         validate_sync_job_id(&job.job_id)?;
         validate_non_empty_label("operation_type", &job.operation_type)?;
+        let operation = job
+            .operation
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("sync job operation must be a JSON object"))?;
+        if operation
+            .get("operation_type")
+            .and_then(serde_json::Value::as_str)
+            != Some(job.operation_type.as_str())
+        {
+            anyhow::bail!("sync job operation_type does not match its canonical operation payload");
+        }
         for hash in job.roots.iter().chain(job.heads.iter()) {
             validate_canonical_hash("sync job root/head hash", hash)?;
         }
@@ -2857,17 +2942,23 @@ impl OperationalDb {
         let now = lillux::time::iso8601_now();
         let roots_json = serde_json::to_vec(&job.roots).context("failed to serialize job roots")?;
         let heads_json = serde_json::to_vec(&job.heads).context("failed to serialize job heads")?;
+        let operation_json =
+            serde_json::to_vec(&job.operation).context("failed to serialize job operation")?;
+        if operation_json.len() > 256 * 1024 {
+            anyhow::bail!("sync job operation exceeds the 256 KiB maximum");
+        }
         let empty_hashes = serde_json::to_vec(&Vec::<String>::new())?;
         self.conn
             .execute(
                 "INSERT INTO sync_jobs (
-                    job_id, operation_type, peer, state, phase, roots_json, heads_json,
+                    job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
                     uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
                     last_error, result_json, created_at, updated_at, finished_at
-                 ) VALUES (?, ?, ?, 'planned', 'planned', ?, ?, ?, ?, 0, ?, NULL, NULL, ?, ?, NULL)",
+                 ) VALUES (?, ?, ?, ?, 'planned', 'planned', ?, ?, ?, ?, 0, ?, NULL, NULL, ?, ?, NULL)",
                 rusqlite::params![
                     &job.job_id,
                     &job.operation_type,
+                    operation_json,
                     &job.peer,
                     roots_json,
                     heads_json,
@@ -3220,7 +3311,7 @@ impl OperationalDb {
         validate_sync_job_id(job_id)?;
         self.conn
             .query_row(
-                "SELECT job_id, operation_type, peer, state, phase, roots_json, heads_json,
+                "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
                     uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
                     last_error, result_json, created_at, updated_at, finished_at
                  FROM sync_jobs WHERE job_id = ?",
@@ -3238,12 +3329,12 @@ impl OperationalDb {
     ) -> Result<Vec<SyncJobRecord>> {
         let limit = limit.clamp(1, 500);
         let sql = if state.is_some() {
-            "SELECT job_id, operation_type, peer, state, phase, roots_json, heads_json,
+            "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
                 uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
                 last_error, result_json, created_at, updated_at, finished_at
              FROM sync_jobs WHERE state = ? ORDER BY created_at DESC, job_id DESC LIMIT ?"
         } else {
-            "SELECT job_id, operation_type, peer, state, phase, roots_json, heads_json,
+            "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
                 uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
                 last_error, result_json, created_at, updated_at, finished_at
              FROM sync_jobs ORDER BY created_at DESC, job_id DESC LIMIT ?"
@@ -3413,11 +3504,14 @@ fn sync_job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncJobRecord>
     let uploaded_json: Vec<u8> = row.get("uploaded_hashes_json")?;
     let fetched_json: Vec<u8> = row.get("fetched_hashes_json")?;
     let result_json: Option<Vec<u8>> = row.get("result_json")?;
+    let operation_json: Vec<u8> = row.get("operation_json")?;
     let attempt_count: i64 = row.get("attempt_count")?;
     let max_attempts: i64 = row.get("max_attempts")?;
     Ok(SyncJobRecord {
         job_id: row.get("job_id")?,
         operation_type: row.get("operation_type")?,
+        operation: serde_json::from_slice(&operation_json)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
         peer: row.get("peer")?,
         state: SyncJobState::from_str(&state).map_err(|_| rusqlite::Error::InvalidQuery)?,
         phase: row.get("phase")?,
@@ -4617,6 +4711,7 @@ mod tests {
             .create_sync_job(&NewSyncJob {
                 job_id: "job:alpha".to_string(),
                 operation_type: "mirror_pull".to_string(),
+                operation: serde_json::json!({"schema":1,"operation_type":"mirror_pull"}),
                 peer: Some("node-a".to_string()),
                 roots: vec![root_hash.clone()],
                 heads: vec![head_hash.clone()],
@@ -4626,6 +4721,10 @@ mod tests {
 
         assert_eq!(created.job_id, "job:alpha");
         assert_eq!(created.operation_type, "mirror_pull");
+        assert_eq!(
+            created.operation,
+            serde_json::json!({"schema":1,"operation_type":"mirror_pull"})
+        );
         assert_eq!(created.peer.as_deref(), Some("node-a"));
         assert_eq!(created.state, SyncJobState::Planned);
         assert_eq!(created.phase, "planned");
@@ -4652,6 +4751,7 @@ mod tests {
 
         let running = db.get_sync_job("job:alpha").unwrap().unwrap();
         assert_eq!(running.state, SyncJobState::Running);
+        assert_eq!(running.operation, created.operation);
         assert_eq!(running.phase, "fetching_closure");
         assert_eq!(running.uploaded_hashes, vec![uploaded_hash]);
         assert_eq!(running.fetched_hashes, vec![fetched_hash]);
@@ -4675,6 +4775,7 @@ mod tests {
 
         let completed = db.get_sync_job("job:alpha").unwrap().unwrap();
         assert_eq!(completed.state, SyncJobState::Completed);
+        assert_eq!(completed.operation, created.operation);
         assert_eq!(completed.phase, "done");
         assert_eq!(completed.attempt_count, 0);
         assert_eq!(
@@ -4692,6 +4793,32 @@ mod tests {
     }
 
     #[test]
+    fn sync_job_refuses_an_operation_type_outside_its_canonical_payload() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let db = OperationalDb::open(&tempdir.path().join("operational.sqlite3")).unwrap();
+        let error = db
+            .create_sync_job(&NewSyncJob {
+                job_id: "job:mismatch".to_string(),
+                operation_type: "worker_session_handoff".to_string(),
+                operation: serde_json::json!({
+                    "schema": 1,
+                    "operation_type": "remote_execute",
+                    "owner_principal": "must-not-be-recovered-from-mutable-state"
+                }),
+                peer: Some("site:b".to_string()),
+                roots: vec![],
+                heads: vec![],
+                max_attempts: 3,
+            })
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not match its canonical operation payload")
+        );
+    }
+
+    #[test]
     fn sync_job_attempt_lifecycle_is_persisted() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("operational.sqlite3");
@@ -4700,6 +4827,7 @@ mod tests {
         db.create_sync_job(&NewSyncJob {
             job_id: "job:attempts".to_string(),
             operation_type: "remote_execute".to_string(),
+            operation: serde_json::json!({"schema":1,"operation_type":"remote_execute"}),
             peer: Some("node-a".to_string()),
             roots: vec![],
             heads: vec![],
@@ -4816,6 +4944,7 @@ mod tests {
             db.create_sync_job(&NewSyncJob {
                 job_id: job_id.to_string(),
                 operation_type: "remote_execute".to_string(),
+                operation: serde_json::json!({"schema":1,"operation_type":"remote_execute"}),
                 peer: None,
                 roots: vec![],
                 heads: vec![],
@@ -4870,6 +4999,7 @@ mod tests {
         db.create_sync_job(&NewSyncJob {
             job_id: "job:limited".to_string(),
             operation_type: "remote_execute".to_string(),
+            operation: serde_json::json!({"schema":1,"operation_type":"remote_execute"}),
             peer: None,
             roots: vec![],
             heads: vec![],
@@ -4906,6 +5036,7 @@ mod tests {
         db.create_sync_job(&NewSyncJob {
             job_id: "job:terminal".to_string(),
             operation_type: "remote_execute".to_string(),
+            operation: serde_json::json!({"schema":1,"operation_type":"remote_execute"}),
             peer: None,
             roots: vec![],
             heads: vec![],
@@ -4960,6 +5091,7 @@ mod tests {
         db.create_sync_job(&NewSyncJob {
             job_id: "job-running".to_string(),
             operation_type: "mirror_pull".to_string(),
+            operation: serde_json::json!({"schema":1,"operation_type":"mirror_pull"}),
             peer: None,
             roots: vec![],
             heads: vec![],
@@ -4969,6 +5101,7 @@ mod tests {
         db.create_sync_job(&NewSyncJob {
             job_id: "job-completed".to_string(),
             operation_type: "mirror_pull".to_string(),
+            operation: serde_json::json!({"schema":1,"operation_type":"mirror_pull"}),
             peer: None,
             roots: vec![],
             heads: vec![],
@@ -5016,6 +5149,7 @@ mod tests {
         db.create_sync_job(&NewSyncJob {
             job_id: "job-transition".to_string(),
             operation_type: "mirror_pull".to_string(),
+            operation: serde_json::json!({"schema":1,"operation_type":"mirror_pull"}),
             peer: None,
             roots: vec![],
             heads: vec![],
@@ -5103,6 +5237,7 @@ mod tests {
             .create_sync_job(&NewSyncJob {
                 job_id: "job-invalid".to_string(),
                 operation_type: "mirror_pull".to_string(),
+                operation: serde_json::json!({"schema":1,"operation_type":"mirror_pull"}),
                 peer: None,
                 roots: vec!["not-a-hash".to_string()],
                 heads: vec![],
@@ -5116,6 +5251,7 @@ mod tests {
             .create_sync_job(&NewSyncJob {
                 job_id: "job-uppercase".to_string(),
                 operation_type: "mirror_pull".to_string(),
+                operation: serde_json::json!({"schema":1,"operation_type":"mirror_pull"}),
                 peer: None,
                 roots: vec!["AA".repeat(32)],
                 heads: vec![],

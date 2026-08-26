@@ -856,6 +856,35 @@ impl RemoteClient {
         Ok(response)
     }
 
+    /// Exact owner-scoped read of one known execution-chain head. This never
+    /// exposes a `chains` prefix/listing surface: the authenticated request
+    /// names the stable root and the target rechecks its authoritative owner.
+    pub async fn federation_chain_head(
+        &self,
+        chain_root_id: &str,
+        expected_signer: &str,
+        verifying_key: &lillux::crypto::VerifyingKey,
+    ) -> Result<FederationHeadRemoteRecord> {
+        let body = serde_json::json!({ "chain_root_id": chain_root_id });
+        let resp = self.signed_post("/federation/heads/list", &body).await?;
+        let response: FederationHeadsListResponse = serde_json::from_value(resp)
+            .context("failed to parse exact federation chain-head response")?;
+        let expected_prefix = format!("chains/{chain_root_id}");
+        response.validate(&expected_prefix)?;
+        response.verify_signed_refs(expected_signer, verifying_key)?;
+        if response.truncated || response.heads.len() != 1 {
+            anyhow::bail!("exact federation chain-head response must contain one head");
+        }
+        let head = response.heads.into_iter().next().expect("length checked");
+        if head.namespace != "chains"
+            || head.name != format!("{chain_root_id}/head")
+            || head.ref_path != format!("chains/{chain_root_id}/head")
+        {
+            anyhow::bail!("exact federation chain-head response changed its coordinate");
+        }
+        Ok(head)
+    }
+
     /// POST /sync/jobs/list (authenticated).
     pub async fn sync_jobs_list(
         &self,

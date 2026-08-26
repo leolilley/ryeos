@@ -24,6 +24,100 @@ pub const MAX_STRUCTURED_OBSERVATION_BATCH_BYTES: usize = 384 * 1024;
 /// across all of its worker epochs. This bounds root-chain and projection
 /// growth independently of the seven-day lifetime ceiling.
 pub const MAX_HOSTED_SESSION_OBSERVATION_EVENTS: u64 = 1_048_576;
+pub const REMOTE_CONTINUATION_AUTHORITY_SCHEMA: u32 = 1;
+
+/// Typed authority retained on a cross-site `thread_continued` edge.
+///
+/// These are explicit object edges, not hashes scraped from opaque
+/// attestation evidence. They therefore drive transfer completeness,
+/// verification, reachability, and GC through the ordinary event braid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteContinuationAuthority {
+    pub schema: u32,
+    pub operation_id: String,
+    pub source_chain_head_hash: String,
+    pub source_last_event_hash: String,
+    pub checkpoint_manifest_hash: String,
+    pub target_placement_attestation_hash: String,
+    pub chain_writer_grant_hash: String,
+    pub target_launch_capsule_hash: String,
+    pub source_site_id: String,
+    pub target_site_id: String,
+    pub target_node_signer_fingerprint: String,
+    pub successor_thread_id: String,
+}
+
+impl RemoteContinuationAuthority {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != REMOTE_CONTINUATION_AUTHORITY_SCHEMA {
+            anyhow::bail!("remote continuation authority is not the current schema");
+        }
+        for (label, value) in [
+            ("remote continuation operation", self.operation_id.as_str()),
+            (
+                "remote continuation source head",
+                self.source_chain_head_hash.as_str(),
+            ),
+            (
+                "remote continuation source event",
+                self.source_last_event_hash.as_str(),
+            ),
+            (
+                "remote continuation checkpoint",
+                self.checkpoint_manifest_hash.as_str(),
+            ),
+            (
+                "remote continuation placement attestation",
+                self.target_placement_attestation_hash.as_str(),
+            ),
+            (
+                "remote continuation writer grant",
+                self.chain_writer_grant_hash.as_str(),
+            ),
+            (
+                "remote continuation launch capsule",
+                self.target_launch_capsule_hash.as_str(),
+            ),
+        ] {
+            validate_canonical_hash(label, value)?;
+        }
+        for (label, value) in [
+            (
+                "remote continuation source site",
+                self.source_site_id.as_str(),
+            ),
+            (
+                "remote continuation target site",
+                self.target_site_id.as_str(),
+            ),
+            (
+                "remote continuation successor",
+                self.successor_thread_id.as_str(),
+            ),
+        ] {
+            if value.is_empty()
+                || value.len() > 4096
+                || value.trim() != value
+                || value.bytes().any(|byte| byte.is_ascii_control())
+            {
+                anyhow::bail!("{label} is not a bounded canonical label");
+            }
+        }
+        if self.source_site_id == self.target_site_id {
+            anyhow::bail!("remote continuation must change current site");
+        }
+        if self.target_node_signer_fingerprint.len() != 64
+            || !self
+                .target_node_signer_fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            anyhow::bail!("remote continuation target signer is not canonical");
+        }
+        Ok(())
+    }
+}
 
 /// Event durability classes.
 ///
@@ -124,6 +218,26 @@ impl ThreadEvent {
         }
         if let Some(hash) = &self.prev_thread_event_hash {
             validate_canonical_hash("prev_thread_event_hash", hash)?;
+        }
+        if self.event_type == "thread_continued"
+            && let Some(remote) = self.payload.get("remote_adoption")
+        {
+            let remote: RemoteContinuationAuthority = serde_json::from_value(remote.clone())
+                .context("decode remote continuation authority")?;
+            remote.validate()?;
+            if self
+                .payload
+                .get("successor_thread_id")
+                .and_then(|value| value.as_str())
+                != Some(remote.successor_thread_id.as_str())
+            {
+                anyhow::bail!("remote continuation successor contradicts its event edge");
+            }
+            if self.prev_thread_event_hash.as_deref()
+                != Some(remote.source_last_event_hash.as_str())
+            {
+                anyhow::bail!("remote continuation source event is not its thread predecessor");
+            }
         }
         let serialized_bytes = lillux::canonical_json(&self.to_value())
             .context("failed to canonicalize thread event")?
@@ -268,6 +382,44 @@ pub fn sorted_object_value(value: &serde_json::Value) -> serde_json::Value {
             serde_json::Value::Array(arr.iter().map(sorted_object_value).collect())
         }
         other => other.clone(),
+    }
+}
+
+#[cfg(test)]
+mod remote_continuation_tests {
+    use super::*;
+
+    fn authority() -> RemoteContinuationAuthority {
+        RemoteContinuationAuthority {
+            schema: REMOTE_CONTINUATION_AUTHORITY_SCHEMA,
+            operation_id: "1".repeat(64),
+            source_chain_head_hash: "2".repeat(64),
+            source_last_event_hash: "3".repeat(64),
+            checkpoint_manifest_hash: "4".repeat(64),
+            target_placement_attestation_hash: "5".repeat(64),
+            chain_writer_grant_hash: "6".repeat(64),
+            target_launch_capsule_hash: "7".repeat(64),
+            source_site_id: "site:a".into(),
+            target_site_id: "site:b".into(),
+            target_node_signer_fingerprint: "8".repeat(64),
+            successor_thread_id: "T-target".into(),
+        }
+    }
+
+    #[test]
+    fn remote_edge_is_bound_to_its_actual_thread_predecessor_and_successor() {
+        let remote = authority();
+        let mut event = NewEvent::new("T-root", "T-source", "thread_continued")
+            .prev_thread_event_hash(Some(remote.source_last_event_hash.clone()))
+            .payload(serde_json::json!({
+                "successor_thread_id":"T-target",
+                "reason":"remote_adoption",
+                "remote_adoption":remote,
+            }))
+            .build();
+        event.validate().unwrap();
+        event.payload["successor_thread_id"] = serde_json::json!("T-other");
+        assert!(event.validate().is_err());
     }
 }
 

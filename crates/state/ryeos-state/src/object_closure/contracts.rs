@@ -712,6 +712,40 @@ fn links_thread_event(value: &Value) -> Result<ContractLinks, String> {
             &mut links.object_edges,
         )?;
     }
+    if value.get("event_type").and_then(Value::as_str) == Some("thread_continued")
+        && value.pointer("/payload/remote_adoption").is_some()
+    {
+        let remote: crate::objects::RemoteContinuationAuthority = serde_json::from_value(
+            value
+                .pointer("/payload/remote_adoption")
+                .cloned()
+                .ok_or_else(|| "remote continuation authority disappeared".to_string())?,
+        )
+        .map_err(|error| format!("invalid remote continuation authority: {error}"))?;
+        remote
+            .validate()
+            .map_err(|error| format!("invalid remote continuation authority: {error}"))?;
+        for (hash, expected) in [
+            (
+                &remote.checkpoint_manifest_hash,
+                ExpectedObject::Kind(crate::objects::STATE_MANIFEST_KIND),
+            ),
+            (
+                &remote.target_placement_attestation_hash,
+                ExpectedObject::Kind("attestation"),
+            ),
+            (
+                &remote.chain_writer_grant_hash,
+                ExpectedObject::Kind("attestation"),
+            ),
+            (
+                &remote.target_launch_capsule_hash,
+                ExpectedObject::Kind("admitted_launch_capsule"),
+            ),
+        ] {
+            super::push_typed_hash(hash, expected, None, &mut links.object_edges)?;
+        }
+    }
     Ok(links)
 }
 

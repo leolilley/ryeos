@@ -320,6 +320,15 @@ pub async fn execute_unary_forward(
         &NewSyncJob {
             job_id: job_id.clone(),
             operation_type: "remote_execute".to_string(),
+            operation: serde_json::json!({
+                "schema": 1,
+                "operation_type": "remote_execute",
+                "acting_principal": req.acting_principal,
+                "target_site_id": req.remote.remote.site_id,
+                "item_ref": req.item_ref,
+                "source_snapshot_hash": req.source_snapshot_hash,
+                "remote_project_path": req.remote_project_path,
+            }),
             peer: Some(client.base_url().to_string()),
             roots: Vec::new(),
             heads: Vec::new(),
