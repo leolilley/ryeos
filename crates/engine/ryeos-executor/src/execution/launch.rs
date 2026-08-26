@@ -3566,6 +3566,20 @@ fn launch_audit_records(
     Ok(records)
 }
 
+fn sealed_ref_binding_records(
+    prepared_launch: &super::launch_preparation::PreparedRuntimeLaunch,
+) -> Result<BTreeMap<String, Value>> {
+    prepared_launch
+        .binding_records
+        .iter()
+        .map(|(name, record)| {
+            serde_json::to_value(record)
+                .map(|value| (name.clone(), value))
+                .with_context(|| format!("serialize admitted ref binding record `{name}`"))
+        })
+        .collect()
+}
+
 fn mint_budget_id(prefix: &str) -> String {
     let random_bytes: [u8; 16] = rand::random();
     let hex = lillux::sha256_hex(&random_bytes);
@@ -5025,10 +5039,11 @@ async fn build_and_launch_inner(
             })?;
     }
     let sealed_request =
-        ryeos_app::thread_lifecycle::SealedRootExecutionRequest::capture_finalized(
+        ryeos_app::thread_lifecycle::SealedRootExecutionRequest::capture_finalized_with_ref_bindings(
             params.resolved,
             authority.selected_runtime.canonical_ref.to_string(),
             &authority.effective_program,
+            sealed_ref_binding_records(&authority.prepared_launch)?,
         )?;
     authority
         .launch_metadata
@@ -7162,10 +7177,11 @@ async fn prepare_follow_child_launch_inner(
             // augmented resolution so a retry/relaunch receives the same runtime
             // envelope instead of reusing the parent's pre-augmentation view.
             let augmented_sealed_request =
-                ryeos_app::thread_lifecycle::SealedRootExecutionRequest::capture_finalized(
+                ryeos_app::thread_lifecycle::SealedRootExecutionRequest::capture_finalized_with_ref_bindings(
                     &execution.resolved,
                     authority.selected_runtime.canonical_ref.to_string(),
                     &authority.effective_program,
+                    sealed_ref_binding_records(&authority.prepared_launch)?,
                 )?;
             prepared.set_sealed_root_request(augmented_sealed_request);
             let realization_contract_ref = authority.selected_runtime.canonical_ref.to_string();

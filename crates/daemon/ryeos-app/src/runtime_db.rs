@@ -1163,7 +1163,11 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // of stable operational authority. The revision permits deterministic repair
 // after a crash between runtime and operational SQLite commits, while the
 // explicit history cut extracts predecessor profile rows before replacement.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 13;
+// Epoch 13 separates stable worker chain addressing from exact placement and
+// boot-epoch fences throughout the hosted-worker projection.
+// Epoch 14 admits only the portable outer exact-program/capsule contract and
+// launch-metadata epoch that seal resolved ref-binding identities.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 14;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

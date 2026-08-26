@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-24T04:41:21Z:ae2aae6a0a0782b8859097ea44e67b1a887fd4d28ca8b326231161f729f78b67:DvOKMSwif+dnllfQhSsXprPzCbQ2Ek2gvKw7kPn64Cc1Np/F/OfHhNa3Carr5nXrGa0wx8yxdA1weqkyfOJvAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-26T10:41:54Z:46aa8d11bde4da59442c5757729fc14e706f1d7ab7f6bb7fcbf06b3ef4932baf:oXlS7pFOr/+n4YYr7l2MwAozPFl9BAP2ag+s/TP1h8uGvKP1NZACXEgF+OOepMpZQijpnwhytSKRTPIfyBz5BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: worker_execution
 default: true
@@ -13,7 +13,12 @@ launch_contract:
   primary_allowed_kinds: [worker_execution]
   primary_allowed_spaces: [bundle]
   primary_allowed_trust: [trusted_bundle]
-  ref_bindings: {}
+  ref_bindings:
+    environment:
+      required: false
+      allowed_kinds: [config]
+      allowed_spaces: [bundle, project]
+      allowed_trust: [trusted_bundle, trusted_project]
   preparation:
     kind: handler
     handler: handler:ryeos/core/worker-execution-launch

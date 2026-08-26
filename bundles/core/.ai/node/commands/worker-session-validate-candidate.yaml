@@ -1,0 +1,12 @@
+# ryeos:signed:2026-08-26T10:18:38Z:1808262d78a43797161455abedf8bbd4b2c8d39fd5b725acaf066ef31102c81c:7vYftd5p0uXw/RuXdOOudrYjJU79SsCuNCyXjA6ypeKj8X+iPquM73Rkm73FnAiWG+rLiy8OZa0MTuWfdpXeBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [worker, session, validate, candidate]
+description: "Validate the exact frozen candidate for one hosted worker session"
+forms:
+  - slots:
+      - field: chain_root_id
+      - field: candidate_snapshot_hash
+      - field: candidate_validation_hash
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/validate-candidate-closure-and-base
+  availability: daemon

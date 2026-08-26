@@ -63,7 +63,9 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
 // deserialization can reinterpret (or partially decode) that authority.
 // v15 carries the pinned COW base/current project-authority pair.
 // v18 carries the retained-current-HEAD principal/project/base destination.
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 18;
+// v19 carries the path-free outer exact-program projection and its exact
+// resolved ref-binding identities through the embedded sealed invocation.
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 19;
 
 /// Per-thread daemon-owned state directory.
 ///

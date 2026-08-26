@@ -1013,11 +1013,12 @@ fn strip_declared_control_flags(
     declared: &[ryeos_runtime::CommandControlFlag],
 ) -> Result<ResolvedControlFlags, CliError> {
     use ryeos_runtime::ControlFlagBinding as Bind;
-    let mut routes: std::collections::HashMap<&str, Bind> = std::collections::HashMap::new();
+    let mut routes: std::collections::HashMap<&str, &ryeos_runtime::CommandControlFlag> =
+        std::collections::HashMap::new();
     for cf in declared {
-        routes.insert(cf.flag.as_str(), cf.binding);
+        routes.insert(cf.flag.as_str(), cf);
         for alias in &cf.aliases {
-            routes.insert(alias.as_str(), cf.binding);
+            routes.insert(alias.as_str(), cf);
         }
     }
 
@@ -1033,10 +1034,11 @@ fn strip_declared_control_flags(
             Some((name, value)) => (name, Some(value.to_string())),
             None => (rest, None),
         };
-        let Some(&binding) = routes.get(name) else {
+        let Some(&control_flag) = routes.get(name) else {
             out.push(token);
             continue;
         };
+        let binding = control_flag.binding;
         if binding.takes_value() {
             let value = match inline {
                 Some(value) => value,
@@ -1054,10 +1056,12 @@ fn strip_declared_control_flags(
                 }
                 Bind::StateRoot => flags.state_root = Some(value),
                 Bind::RefBinding => {
-                    let (binding_name, item_ref) =
-                        value.split_once('=').ok_or_else(|| CliError::Local {
+                    let (binding_name, item_ref) = match control_flag.ref_binding_name.as_deref() {
+                        Some(binding_name) => (binding_name, value.as_str()),
+                        None => value.split_once('=').ok_or_else(|| CliError::Local {
                             detail: format!("--{name} requires name=canonical-ref, got '{value}'"),
-                        })?;
+                        })?,
+                    };
                     validate_ref_binding_name(binding_name)?;
                     if item_ref.is_empty() {
                         return Err(CliError::Local {
@@ -2141,24 +2145,28 @@ mod tests {
                 flag: "async".into(),
                 help: "Accepted/background launch; returns a thread_id".into(),
                 binding: B::LaunchModeAccepted,
+                ref_binding_name: None,
                 aliases: vec![],
             },
             F {
                 flag: "stream".into(),
                 help: "Force the live execution stream on".into(),
                 binding: B::StreamOn,
+                ref_binding_name: None,
                 aliases: vec![],
             },
             F {
                 flag: "no-stream".into(),
                 help: "Print the buffered JSON result instead of streaming".into(),
                 binding: B::StreamOff,
+                ref_binding_name: None,
                 aliases: vec!["json".into()],
             },
             F {
                 flag: "debug-raw".into(),
                 help: "Attach a debug block to the result".into(),
                 binding: B::DebugRaw,
+                ref_binding_name: None,
                 aliases: vec![],
             },
             F {
@@ -2166,6 +2174,7 @@ mod tests {
                 help: "Capture the project at admission and execute from a retained COW generation"
                     .into(),
                 binding: B::PinProjectAtAdmission,
+                ref_binding_name: None,
                 aliases: vec![],
             },
             F {
@@ -2174,30 +2183,35 @@ mod tests {
                     "Execute from the current principal project HEAD in a retained COW generation"
                         .into(),
                 binding: B::PinCurrentHeadAtAdmission,
+                ref_binding_name: None,
                 aliases: vec![],
             },
             F {
                 flag: "method".into(),
                 help: "Method selector for method-dispatch kinds (call.method)".into(),
                 binding: B::CallMethod,
+                ref_binding_name: None,
                 aliases: vec![],
             },
             F {
                 flag: "args".into(),
                 help: "Method args as a JSON object (call.args)".into(),
                 binding: B::CallArgs,
+                ref_binding_name: None,
                 aliases: vec![],
             },
             F {
                 flag: "state-root".into(),
                 help: "Place runtime state under an explicit path".into(),
                 binding: B::StateRoot,
+                ref_binding_name: None,
                 aliases: vec![],
             },
             F {
                 flag: "ref-binding".into(),
                 help: "Bind a secondary execution ref".into(),
                 binding: B::RefBinding,
+                ref_binding_name: None,
                 aliases: vec![],
             },
         ]
@@ -2236,6 +2250,29 @@ mod tests {
             let mut invalid = invalid;
             assert!(strip_declared_control_flags(&mut invalid, &cf).is_err());
         }
+    }
+
+    #[test]
+    fn fixed_ref_binding_flag_routes_its_value_under_the_declared_name() {
+        use ryeos_runtime::{CommandControlFlag as F, ControlFlagBinding as B};
+        let controls = [F {
+            flag: "environment".into(),
+            help: "Select environment".into(),
+            binding: B::RefBinding,
+            ref_binding_name: Some("environment".into()),
+            aliases: vec![],
+        }];
+        let mut tail = s(&[
+            "profile",
+            "--environment",
+            "config:codex/environments/default",
+        ]);
+        let flags = strip_declared_control_flags(&mut tail, &controls).unwrap();
+        assert_eq!(tail, s(&["profile"]));
+        assert_eq!(
+            flags.ref_bindings.get("environment").map(String::as_str),
+            Some("config:codex/environments/default")
+        );
     }
 
     fn direct_execute_command() -> CommandDef {

@@ -1,4 +1,5 @@
 use anyhow::Context as _;
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -6,8 +7,300 @@ use super::{
     ExecutionRecoveryAuthority, validate_trimmed_control_free,
 };
 
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 14;
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 15;
 pub const ADMITTED_DIRECT_COMMAND_ROOT: &str = "/ryeos/admitted-direct-command";
+
+const SEALED_ROOT_INVOCATION_FIELDS: &[&str] = &[
+    "captured_history_policy",
+    "current_site_id",
+    "effective_definition_digest",
+    "execution_hints",
+    "executor_ref",
+    "executor_route",
+    "item_ref",
+    "kind",
+    "launch_mode",
+    "origin_site_id",
+    "parameters",
+    "planning_principal",
+    "project_authority",
+    "project_binding_subject_authority",
+    "project_context",
+    "ref_bindings",
+    "resolved_ref_bindings",
+    "requested_by",
+    "resolution_output",
+    "resolution_subject_authority",
+    "resolved_history_policy",
+    "resolved_result_policy",
+    "runtime_ref",
+    "schema_version",
+    "target_site_id",
+    "usage_subject",
+    "usage_subject_asserted_by",
+    "validate_only",
+    "verified_pinned_version",
+    "verified_signer_fingerprint",
+    "verified_subject",
+    "verified_trust_class",
+];
+
+const INVOCATION_ONLY_FIELDS: &[&str] = &[
+    "captured_history_policy",
+    "current_site_id",
+    "launch_mode",
+    "origin_site_id",
+    "parameters",
+    "planning_principal",
+    "project_authority",
+    "project_binding_subject_authority",
+    "project_context",
+    "requested_by",
+    "resolution_subject_authority",
+    "resolved_history_policy",
+    "target_site_id",
+    "usage_subject",
+    "usage_subject_asserted_by",
+    "validate_only",
+];
+
+fn require_exact_keys(
+    value: &serde_json::Value,
+    expected: &[&str],
+    label: &str,
+) -> anyhow::Result<()> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("{label} must be an object"))?;
+    let mut actual = object.keys().map(String::as_str).collect::<Vec<_>>();
+    actual.sort_unstable();
+    let mut expected = expected.to_vec();
+    expected.sort_unstable();
+    if actual != expected {
+        anyhow::bail!(
+            "{label} must contain exactly [{}], got [{}]",
+            expected.join(", "),
+            actual.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn retained_resolution_projection(value: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    require_exact_keys(
+        value,
+        &[
+            "ancestors",
+            "composed",
+            "effective_trust_class",
+            "references_edges",
+            "referenced_items",
+            "root",
+            "step_outputs",
+        ],
+        "sealed resolution",
+    )?;
+    let mut retained = value.clone();
+    let object = retained
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("sealed resolution must be an object"))?;
+    object
+        .remove("step_outputs")
+        .ok_or_else(|| anyhow::anyhow!("sealed resolution has no step_outputs"))?;
+
+    let retain_ancestor = |entry: &mut serde_json::Value| -> anyhow::Result<()> {
+        require_exact_keys(
+            entry,
+            &[
+                "added_by",
+                "alias_resolution",
+                "raw_content",
+                "raw_content_digest",
+                "requested_id",
+                "resolved_ref",
+                "signer_fingerprint",
+                "source_content_digest",
+                "source_path",
+                "source_root",
+                "source_space",
+                "trust_class",
+            ],
+            "sealed resolution ancestor",
+        )?;
+        entry
+            .as_object_mut()
+            .expect("validated resolution ancestor")
+            .remove("source_path")
+            .ok_or_else(|| anyhow::anyhow!("sealed resolution ancestor has no source_path"))?;
+        Ok(())
+    };
+    retain_ancestor(
+        object
+            .get_mut("root")
+            .ok_or_else(|| anyhow::anyhow!("sealed resolution has no root"))?,
+    )?;
+    for field in ["ancestors", "referenced_items"] {
+        for entry in object
+            .get_mut(field)
+            .and_then(serde_json::Value::as_array_mut)
+            .ok_or_else(|| anyhow::anyhow!("sealed resolution {field} must be an array"))?
+        {
+            retain_ancestor(entry)?;
+        }
+    }
+    for edge in object
+        .get_mut("references_edges")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| anyhow::anyhow!("sealed resolution references_edges must be an array"))?
+    {
+        require_exact_keys(
+            edge,
+            &[
+                "added_by",
+                "from_ref",
+                "from_source_path",
+                "to_ref",
+                "to_source_path",
+                "to_source_space",
+                "trust_class",
+            ],
+            "sealed resolution edge",
+        )?;
+        let edge = edge
+            .as_object_mut()
+            .expect("validated resolution edge object");
+        edge.remove("from_source_path")
+            .ok_or_else(|| anyhow::anyhow!("sealed resolution edge has no from_source_path"))?;
+        edge.remove("to_source_path")
+            .ok_or_else(|| anyhow::anyhow!("sealed resolution edge has no to_source_path"))?;
+    }
+    Ok(retained)
+}
+
+fn admitted_subject_projection(value: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    require_exact_keys(
+        value,
+        &[
+            "canonical_ref",
+            "content_hash",
+            "kind",
+            "materialized_project_root",
+            "metadata",
+            "probed_absent",
+            "raw_content_digest",
+            "resolved_from",
+            "shadowed",
+            "signature_header",
+            "source_content_b64",
+            "source_format",
+            "source_path",
+            "source_root",
+            "source_space",
+            "subject_resolution_authority",
+        ],
+        "sealed resolved subject",
+    )?;
+    let source_format = value
+        .get("source_format")
+        .ok_or_else(|| anyhow::anyhow!("sealed resolved subject has no source_format"))?;
+    require_exact_keys(
+        source_format,
+        &[
+            "extension",
+            "parser",
+            "signature_after_shebang",
+            "signature_prefix",
+            "signature_suffix",
+        ],
+        "sealed subject source format",
+    )?;
+    let source_bytes = base64::engine::general_purpose::STANDARD
+        .decode(
+            value
+                .get("source_content_b64")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("sealed subject source content is not base64"))?,
+        )
+        .context("decode sealed subject source content")?;
+    let source_content =
+        String::from_utf8(source_bytes).context("sealed subject source content is not UTF-8")?;
+    let source_content_digest = lillux::sha256_hex(source_content.as_bytes());
+    let declared_source_digest = value
+        .get("content_hash")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("sealed subject has no content_hash"))?;
+    if source_content_digest != declared_source_digest {
+        anyhow::bail!("sealed subject source-content digest mismatch");
+    }
+    let signature_prefix = source_format
+        .get("signature_prefix")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("sealed subject source format has no signature_prefix"))?;
+    let signature_suffix = match source_format.get("signature_suffix") {
+        Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(value)) => Some(value.as_str()),
+        _ => anyhow::bail!("sealed subject signature_suffix is not required-nullable"),
+    };
+    let raw_content = lillux::signature::strip_signature_lines_with_envelope(
+        &source_content,
+        signature_prefix,
+        signature_suffix,
+    );
+    let raw_content_digest = lillux::signature::content_hash(&raw_content);
+    if value
+        .get("raw_content_digest")
+        .and_then(serde_json::Value::as_str)
+        != Some(raw_content_digest.as_str())
+    {
+        anyhow::bail!("sealed subject runtime-body digest mismatch");
+    }
+    Ok(serde_json::json!({
+        "canonical_ref": value["canonical_ref"],
+        "kind": value["kind"],
+        "source_content": source_content,
+        "source_content_digest": source_content_digest,
+        "raw_content": raw_content,
+        "raw_content_digest": raw_content_digest,
+        "source_extension": source_format["extension"],
+        "parser_ref": source_format["parser"],
+    }))
+}
+
+/// Derive the portable, executable-program identity from one complete sealed
+/// root invocation. The exact-key assertions are intentional: a new sealed
+/// field cannot silently enter or escape program identity without updating
+/// this classification boundary and its tests.
+pub fn project_sealed_root_exact_program(
+    sealed_invocation: &serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    require_exact_keys(
+        sealed_invocation,
+        SEALED_ROOT_INVOCATION_FIELDS,
+        "sealed root invocation",
+    )?;
+    let mut program = sealed_invocation.clone();
+    let object = program
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("sealed root invocation must be an object"))?;
+    for field in INVOCATION_ONLY_FIELDS {
+        object.remove(*field).ok_or_else(|| {
+            anyhow::anyhow!("sealed root invocation is missing classified field {field}")
+        })?;
+    }
+    let subject = admitted_subject_projection(
+        object
+            .get("verified_subject")
+            .ok_or_else(|| anyhow::anyhow!("sealed invocation has no verified_subject"))?,
+    )?;
+    object.insert("verified_subject".to_string(), subject);
+    let resolution = retained_resolution_projection(
+        object
+            .get("resolution_output")
+            .ok_or_else(|| anyhow::anyhow!("sealed invocation has no resolution_output"))?,
+    )?;
+    object.insert("resolution_output".to_string(), resolution);
+    Ok(program)
+}
 
 pub fn admitted_direct_command_execution_path(
     content_hash: &str,
@@ -827,9 +1120,9 @@ impl AdmittedLaunchCapsule {
                 observed_program_hash
             );
         }
-        let mut invocation_program = self.sealed_invocation.clone();
-        let invocation_object = invocation_program
-            .as_object_mut()
+        let invocation_object = self
+            .sealed_invocation
+            .as_object()
             .ok_or_else(|| anyhow::anyhow!("sealed invocation must be an object"))?;
         let invocation_project_authority: ExecutionProjectAuthority = serde_json::from_value(
             invocation_object
@@ -848,22 +1141,8 @@ impl AdmittedLaunchCapsule {
                 "admitted launch capsule sealed invocation project authority differs from its outer authority"
             );
         }
-        for invocation_field in [
-            "parameters",
-            "requested_by",
-            "planning_principal",
-            "project_context",
-            "project_authority",
-            "project_binding_subject_authority",
-            "usage_subject",
-            "usage_subject_asserted_by",
-        ] {
-            invocation_object.remove(invocation_field).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "admitted launch capsule sealed invocation is missing {invocation_field}"
-                )
-            })?;
-        }
+        let invocation_program = project_sealed_root_exact_program(&self.sealed_invocation)
+            .context("project admitted program from sealed invocation")?;
         if invocation_program != self.exact_program {
             anyhow::bail!(
                 "admitted launch capsule sealed invocation does not match its exact program"
@@ -883,6 +1162,15 @@ impl AdmittedLaunchCapsule {
         if let Some(hash) = &self.source_binding_hash {
             super::thread_snapshot::validate_canonical_hash("launch capsule source binding", hash)?;
         }
+        let resolved_ref_bindings = self
+            .exact_program
+            .get("resolved_ref_bindings")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "admitted launch capsule exact program has no resolved_ref_bindings object"
+                )
+            })?;
         match (&self.artifact_identity, &self.execution_closure) {
             (
                 AdmittedLaunchArtifactIdentity::ManagedRuntime {
@@ -893,6 +1181,7 @@ impl AdmittedLaunchCapsule {
                     ..
                 },
                 AdmittedExecutionClosure::ManagedRuntime {
+                    prepared_runtime_launch,
                     runtime_descriptor_document,
                     protocol_descriptor_document,
                     ..
@@ -919,6 +1208,19 @@ impl AdmittedLaunchCapsule {
                 {
                     anyhow::bail!(
                         "admitted managed descriptor documents contradict artifact identity"
+                    );
+                }
+                let prepared_binding_records = prepared_runtime_launch
+                    .get("binding_records")
+                    .and_then(serde_json::Value::as_object)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "admitted prepared runtime launch has no binding_records object"
+                        )
+                    })?;
+                if prepared_binding_records != resolved_ref_bindings {
+                    anyhow::bail!(
+                        "admitted prepared runtime binding records contradict exact program"
                     );
                 }
             }
@@ -953,6 +1255,11 @@ impl AdmittedLaunchCapsule {
                     lillux::sha256_hex(lillux::canonical_json(execution_plan)?.as_bytes());
                 if &observed_plan_hash != execution_plan_hash {
                     anyhow::bail!("admitted direct execution plan contradicts artifact identity");
+                }
+                if !resolved_ref_bindings.is_empty() {
+                    anyhow::bail!(
+                        "direct admitted execution cannot carry managed-runtime ref binding records"
+                    );
                 }
             }
             _ => anyhow::bail!("admitted execution closure and artifact drivers disagree"),
@@ -1115,44 +1422,122 @@ mod tests {
         (document, header.content_hash, header.signer_fingerprint)
     }
 
+    fn sealed_invocation_fixture(
+        item_ref: &str,
+        runtime_ref: &str,
+        executor_ref: &str,
+    ) -> (serde_json::Value, serde_json::Value, String) {
+        let source_content = "{}";
+        let source_digest = lillux::sha256_hex(source_content.as_bytes());
+        let ancestor = serde_json::json!({
+            "requested_id": item_ref,
+            "resolved_ref": item_ref,
+            "source_path": "/fixture/root.yaml",
+            "source_space": "bundle",
+            "source_root": {"kind":"bundle","name":"core"},
+            "trust_class": "trusted_bundle",
+            "signer_fingerprint": null,
+            "alias_resolution": null,
+            "added_by": "pipeline_init",
+            "raw_content": source_content,
+            "source_content_digest": source_digest,
+            "raw_content_digest": source_digest,
+        });
+        let sealed_invocation = serde_json::json!({
+            "schema_version": 10,
+            "kind": "fixture",
+            "item_ref": item_ref,
+            "executor_ref": executor_ref,
+            "executor_route": {"kind":"fixture"},
+            "runtime_ref": runtime_ref,
+            "launch_mode": "detached",
+            "current_site_id": "site:fixture-a",
+            "origin_site_id": "site:fixture-a",
+            "target_site_id": null,
+            "requested_by": null,
+            "usage_subject": null,
+            "usage_subject_asserted_by": null,
+            "parameters": {},
+            "ref_bindings": {},
+            "resolved_ref_bindings": {},
+            "verified_subject": {
+                "canonical_ref": item_ref,
+                "kind": "fixture",
+                "source_path": "/fixture/root.yaml",
+                "source_space": "bundle",
+                "source_root": {"kind":"bundle","name":"core"},
+                "resolved_from": "fixture",
+                "shadowed": [],
+                "probed_absent": [],
+                "materialized_project_root": null,
+                "subject_resolution_authority": {"kind":"projectless"},
+                "raw_content_digest": source_digest,
+                "source_content_b64": base64::engine::general_purpose::STANDARD.encode(source_content),
+                "content_hash": source_digest,
+                "signature_header": null,
+                "source_format": {
+                    "extension": "yaml",
+                    "parser": "parser:fixture/yaml",
+                    "signature_prefix": "#",
+                    "signature_suffix": null,
+                    "signature_after_shebang": false,
+                },
+                "metadata": {
+                    "executor_id": null,
+                    "version": null,
+                    "description": null,
+                    "category": null,
+                    "required_secrets": [],
+                    "extra": {},
+                },
+            },
+            "verified_signer_fingerprint": null,
+            "verified_trust_class": "trusted_bundle",
+            "verified_pinned_version": null,
+            "resolution_output": {
+                "root": ancestor,
+                "ancestors": [],
+                "references_edges": [],
+                "referenced_items": [],
+                "step_outputs": {"diagnostic_path":"/fixture/ignored"},
+                "effective_trust_class": "trusted_bundle",
+                "composed": {"composed":{},"derived":{},"policy_facts":[]},
+            },
+            "effective_definition_digest": "1".repeat(64),
+            "planning_principal": {"type":"local","fingerprint":"fixture","scopes":[]},
+            "project_context": {"kind":"none"},
+            "project_authority": serde_json::to_value(ExecutionProjectAuthority::PROJECTLESS).unwrap(),
+            "project_binding_subject_authority": {"kind":"projectless"},
+            "resolution_subject_authority": {"kind":"projectless"},
+            "execution_hints": {},
+            "validate_only": false,
+            "resolved_history_policy": {"retention":"durable"},
+            "resolved_result_policy": {"retention":"full"},
+            "captured_history_policy": {"retention":"durable"},
+        });
+        let exact_program = project_sealed_root_exact_program(&sealed_invocation).unwrap();
+        let exact_program_hash =
+            lillux::sha256_hex(lillux::canonical_json(&exact_program).unwrap().as_bytes());
+        (sealed_invocation, exact_program, exact_program_hash)
+    }
+
     fn direct_capsule(executable_identity: DirectExecutableIdentity) -> AdmittedLaunchCapsule {
         let command = match &executable_identity {
             DirectExecutableIdentity::BundleExecutor { content_hash, .. }
             | DirectExecutableIdentity::CapturedContent { content_hash } => {
                 AdmittedDirectCommandClosure::ContentAddressed {
                     executable_blob_hash: content_hash.clone(),
-                    execution_path: std::path::PathBuf::from("/admitted/bin/executor"),
+                    execution_path: admitted_direct_command_execution_path(
+                        content_hash,
+                        std::path::Path::new("/executor"),
+                    )
+                    .unwrap(),
                 }
             }
             DirectExecutableIdentity::NodePolicy => AdmittedDirectCommandClosure::NodePolicy,
         };
-        let exact_program = serde_json::json!({
-            "item_ref": "tool:test/run",
-            "runtime_ref": "runtime:direct",
-            "executor_ref": "tool:test/executor",
-        });
-        let exact_program_hash =
-            lillux::sha256_hex(lillux::canonical_json(&exact_program).unwrap().as_bytes());
-        let mut sealed_invocation = exact_program.clone();
-        let object = sealed_invocation.as_object_mut().unwrap();
-        for field in [
-            "parameters",
-            "requested_by",
-            "planning_principal",
-            "project_context",
-            "usage_subject",
-            "usage_subject_asserted_by",
-        ] {
-            object.insert(field.to_string(), serde_json::Value::Null);
-        }
-        object.insert(
-            "project_authority".to_string(),
-            serde_json::to_value(ExecutionProjectAuthority::PROJECTLESS).unwrap(),
-        );
-        object.insert(
-            "project_binding_subject_authority".to_string(),
-            serde_json::json!({"kind": "projectless"}),
-        );
+        let (sealed_invocation, exact_program, exact_program_hash) =
+            sealed_invocation_fixture("tool:test/run", "runtime:direct", "tool:test/executor");
         let (protocol_descriptor_document, protocol_content_hash, protocol_signer_fingerprint) =
             signed_descriptor("protocol: direct\n", 31);
         let execution_plan = serde_json::json!({"plan_id": "test"});
@@ -1208,32 +1593,16 @@ mod tests {
     }
 
     fn managed_capsule(prepared_runtime_launch: serde_json::Value) -> AdmittedLaunchCapsule {
-        let exact_program = serde_json::json!({
-            "item_ref": "directive:test/run",
-            "runtime_ref": "runtime:test/directive",
-            "executor_ref": "executor:test/subprocess",
-        });
-        let exact_program_hash =
-            lillux::sha256_hex(lillux::canonical_json(&exact_program).unwrap().as_bytes());
-        let mut sealed_invocation = exact_program.clone();
-        let object = sealed_invocation.as_object_mut().unwrap();
-        for field in [
-            "parameters",
-            "requested_by",
-            "planning_principal",
-            "project_context",
-            "usage_subject",
-            "usage_subject_asserted_by",
-        ] {
-            object.insert(field.to_string(), serde_json::Value::Null);
+        let mut prepared_runtime_launch = prepared_runtime_launch;
+        if let Some(object) = prepared_runtime_launch.as_object_mut() {
+            object
+                .entry("binding_records".to_string())
+                .or_insert_with(|| serde_json::json!({}));
         }
-        object.insert(
-            "project_authority".to_string(),
-            serde_json::to_value(ExecutionProjectAuthority::PROJECTLESS).unwrap(),
-        );
-        object.insert(
-            "project_binding_subject_authority".to_string(),
-            serde_json::json!({"kind": "projectless"}),
+        let (sealed_invocation, exact_program, exact_program_hash) = sealed_invocation_fixture(
+            "directive:test/run",
+            "runtime:test/directive",
+            "executor:test/subprocess",
         );
         let (runtime_descriptor_document, runtime_content_hash, runtime_signer_fingerprint) =
             signed_descriptor("runtime: managed\n", 32);
@@ -1285,6 +1654,84 @@ mod tests {
         });
         capsule.validate().unwrap();
         assert_eq!(capsule.content_hash().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn exact_program_projection_is_path_and_placement_free_but_behavior_sensitive() {
+        let (original, exact, _) =
+            sealed_invocation_fixture("tool:test/run", "runtime:direct", "tool:test/executor");
+        let mut relocated = original.clone();
+        relocated["verified_subject"]["source_path"] = serde_json::json!("/elsewhere/subject.yaml");
+        relocated["verified_subject"]["materialized_project_root"] =
+            serde_json::json!("/elsewhere/project");
+        relocated["verified_subject"]["shadowed"] = serde_json::json!([{
+            "label":"shadow", "space":"bundle", "path":"/elsewhere/shadow.yaml"
+        }]);
+        relocated["verified_subject"]["probed_absent"] = serde_json::json!([{
+            "path":"/elsewhere/missing.yaml", "space":"bundle", "source_root":{"kind":"bundle","name":"core"}
+        }]);
+        relocated["resolution_output"]["root"]["source_path"] =
+            serde_json::json!("/elsewhere/root.yaml");
+        relocated["resolution_output"]["step_outputs"] =
+            serde_json::json!({"diagnostic_path":"/elsewhere/ignored"});
+        relocated["current_site_id"] = serde_json::json!("site:fixture-b");
+        relocated["origin_site_id"] = serde_json::json!("site:origin");
+        relocated["target_site_id"] = serde_json::json!("site:fixture-b");
+        relocated["launch_mode"] = serde_json::json!("wait");
+        relocated["validate_only"] = serde_json::json!(true);
+        relocated["resolved_history_policy"] = serde_json::json!({"retention":"short"});
+        relocated["captured_history_policy"] = serde_json::json!({"retention":"short"});
+
+        assert_eq!(
+            project_sealed_root_exact_program(&relocated).unwrap(),
+            exact
+        );
+
+        relocated["execution_hints"] = serde_json::json!({"behavior":"changed"});
+        assert_ne!(
+            project_sealed_root_exact_program(&relocated).unwrap(),
+            exact
+        );
+    }
+
+    #[test]
+    fn exact_program_projection_refuses_unclassified_sealed_fields() {
+        let (mut invocation, _, _) =
+            sealed_invocation_fixture("tool:test/run", "runtime:direct", "tool:test/executor");
+        invocation.as_object_mut().unwrap().insert(
+            "new_unclassified_field".to_string(),
+            serde_json::Value::Null,
+        );
+        assert!(
+            project_sealed_root_exact_program(&invocation)
+                .unwrap_err()
+                .to_string()
+                .contains("must contain exactly")
+        );
+    }
+
+    #[test]
+    fn exact_program_commits_resolved_ref_binding_content_identity() {
+        let (mut invocation, original, _) =
+            sealed_invocation_fixture("tool:test/run", "runtime:direct", "tool:test/executor");
+        invocation["ref_bindings"] = serde_json::json!({"environment":"config:test/environment"});
+        invocation["resolved_ref_bindings"] = serde_json::json!({
+            "environment": {
+                "canonical_ref":"config:test/environment",
+                "source_space":"bundle",
+                "effective_trust_class":"trusted_bundle",
+                "resolution":{"root_raw_content_digest":"1".repeat(64)}
+            }
+        });
+        let first = project_sealed_root_exact_program(&invocation).unwrap();
+        assert_ne!(first, original);
+
+        invocation["resolved_ref_bindings"]["environment"]["resolution"]["root_raw_content_digest"] =
+            serde_json::json!("2".repeat(64));
+        assert_ne!(
+            project_sealed_root_exact_program(&invocation).unwrap(),
+            first
+        );
     }
 
     #[test]
@@ -1549,6 +1996,28 @@ mod tests {
             .validate()
             .unwrap_err();
         assert!(error.to_string().contains("must be an object"));
+    }
+
+    #[test]
+    fn managed_capsule_rejects_ref_binding_records_outside_its_exact_program() {
+        let mut capsule = managed_capsule(serde_json::json!({"argv": ["worker"]}));
+        let AdmittedExecutionClosure::ManagedRuntime {
+            prepared_runtime_launch,
+            ..
+        } = &mut capsule.execution_closure
+        else {
+            unreachable!()
+        };
+        prepared_runtime_launch["binding_records"] = serde_json::json!({
+            "environment": {"unexpected":"identity"}
+        });
+        assert!(
+            capsule
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("binding records contradict exact program")
+        );
     }
 
     #[test]

@@ -941,6 +941,9 @@ struct PreflightCommandControlFlag {
     binding: String,
     #[allow(dead_code)]
     #[serde(default)]
+    ref_binding_name: Option<String>,
+    #[allow(dead_code)]
+    #[serde(default)]
     aliases: Vec<String>,
 }
 
@@ -1622,7 +1625,7 @@ mod tests {
         let value: serde_json::Value = serde_yaml::from_str(&body).expect("yaml parse");
         let record: PreflightCommandRecord =
             serde_json::from_value(value).expect("preflight command record parse");
-        assert_eq!(record.control_flags.len(), 8, "expected 8 control flags");
+        assert_eq!(record.control_flags.len(), 10, "expected 10 control flags");
     }
 
     /// Command preflight must recognize the same sensitive-field metadata as

@@ -1,0 +1,11 @@
+# ryeos:signed:2026-08-26T10:18:38Z:a9a824fe1668dae34b3ca611a60d422e90dfef1f3379df2eb9a3b3183e13a23a:jwlO9c7RxymmjY0KnuinUIxCNwKFDli1GuLGkHND+JGt1boSEk4YwE8s9VKC0gmlhp78h7nadX+WMJMRw3rQBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [worker, session, publish]
+description: "Compare-and-swap publish a validated hosted worker candidate"
+forms:
+  - slots:
+      - field: chain_root_id
+      - field: expected_previous_hash
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/publish
+  availability: daemon

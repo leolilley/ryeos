@@ -1,9 +1,10 @@
-# ryeos:signed:2026-08-24T22:45:39Z:71c9569840e12aca1f40c1fe432454e48c085e96099cd6985a43caa9d7c01592:Im78kaL8Oc0awKzcAPupT3L4sXkD3t4sX8olZJa7i0DLFrkTve0FisXNYPcMu9bZUlcJtzit/sba/wZAkM+tBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-26T10:41:54Z:ed98d6d934eed7d0f46d584f75094655a722e6d4f1f0d530e3fb6a2196011208:CJqExLpEfWwF1N18q5syda2955c38nf2eMAeNB54G9Qsmynywql1g3RO4CVXlb2l6zbU6aVttNTeEsmQvXnEBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: codex
 description: Open one RyeOS-owned Codex session against an immutable project generation.
 config:
-  worker_ref: worker:codex/hosted
+  worker_ref: null
+  environment_binding: environment
   required_credential_state: active
   route_set: session
   allowed_effect_classes:

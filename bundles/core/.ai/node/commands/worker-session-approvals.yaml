@@ -1,0 +1,10 @@
+# ryeos:signed:2026-08-26T10:18:38Z:c85b11fbdbb8f2b59525b270327cb30c3420d202e65fe2a177045d6f6108eff7:JEscqy52TXTiBOYq8cHv/MzhazPq8g3OgHw+Alfmr8pHoMV649W2CfKekzVlQS6PwHWZuDY8MSWpGwg6SZcvCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [worker, session, approvals]
+description: "List pending owner-authorized hosted worker approvals"
+forms:
+  - slots:
+      - field: chain_root_id
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/approvals
+  availability: daemon

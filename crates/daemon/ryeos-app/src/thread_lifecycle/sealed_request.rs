@@ -125,7 +125,7 @@ where
 /// v7 seals subject-resolution authority independently for the project
 /// binding, admitted resolution closure, resolved root item, and the complete
 /// typed executor route selected at admission.
-pub(super) const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 9;
+pub(super) const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -528,6 +528,7 @@ pub struct SealedRootExecutionRequest {
     usage_subject_asserted_by: Option<String>,
     parameters: Value,
     ref_bindings: BTreeMap<String, String>,
+    resolved_ref_bindings: BTreeMap<String, Value>,
     verified_subject: SealedResolvedItem,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     verified_signer_fingerprint: Option<String>,
@@ -555,11 +556,25 @@ impl SealedRootExecutionRequest {
         runtime_ref: String,
         program: &ryeos_engine::effective_program::FinalizedEffectiveProgram,
     ) -> Result<Self> {
+        Self::capture_finalized_with_ref_bindings(request, runtime_ref, program, BTreeMap::new())
+    }
+
+    /// Seal a managed launch together with the exact, engine-resolved binding
+    /// identities used by its launch preparer. Values are deliberately opaque
+    /// here: the state capsule owns their mechanical equality check while the
+    /// executor remains the only component that constructs the records.
+    pub fn capture_finalized_with_ref_bindings(
+        request: &ResolvedExecutionRequest,
+        runtime_ref: String,
+        program: &ryeos_engine::effective_program::FinalizedEffectiveProgram,
+        resolved_ref_bindings: BTreeMap<String, Value>,
+    ) -> Result<Self> {
         Self::capture_with_effective_parts(
             request,
             runtime_ref,
             program.resolution().clone(),
             program.effective_definition_digest().clone(),
+            resolved_ref_bindings,
         )
     }
 
@@ -568,6 +583,7 @@ impl SealedRootExecutionRequest {
         runtime_ref: String,
         resolution_output: ryeos_engine::resolution::ResolutionOutput,
         effective_definition_digest: ryeos_engine::resolution::EffectiveDefinitionDigest,
+        resolved_ref_bindings: BTreeMap<String, Value>,
     ) -> Result<Self> {
         let admission = request.root_admission.as_ref().ok_or_else(|| {
             anyhow!("cannot seal a root execution request without root admission")
@@ -655,6 +671,7 @@ impl SealedRootExecutionRequest {
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             parameters: request.parameters.clone(),
             ref_bindings: request.ref_bindings.clone(),
+            resolved_ref_bindings,
             verified_subject: SealedResolvedItem::capture(
                 &verified.resolved,
                 admission
@@ -738,31 +755,17 @@ impl SealedRootExecutionRequest {
         &self.project_context
     }
 
-    /// Stable program closure shared by continuation segments. Invocation
-    /// stimulus, principal envelope, and project realization are authorized
-    /// separately and may change at an explicit continuation boundary; item
-    /// bytes, resolution, bindings, runtime identity, and launch semantics may
-    /// not.
+    /// Stable portable program closure shared by continuation segments and
+    /// independently admitted nodes. The state-object projector owns the
+    /// exhaustive field classification so a new sealed field cannot silently
+    /// enter or escape program identity. It also replaces live diagnostic
+    /// paths with the retained resolution and admitted-subject projections.
     pub fn admitted_program_value(&self) -> Result<Value> {
-        let mut value = serde_json::to_value(self).context("serialize admitted program")?;
-        let object = value
-            .as_object_mut()
-            .ok_or_else(|| anyhow!("sealed execution request is not an object"))?;
-        for invocation_field in [
-            "parameters",
-            "requested_by",
-            "planning_principal",
-            "project_context",
-            "project_authority",
-            "project_binding_subject_authority",
-            "usage_subject",
-            "usage_subject_asserted_by",
-        ] {
-            object
-                .remove(invocation_field)
-                .ok_or_else(|| anyhow!("sealed execution request is missing {invocation_field}"))?;
-        }
-        Ok(value)
+        let invocation =
+            serde_json::to_value(self).context("serialize admitted root invocation")?;
+        ryeos_state::objects::admitted_launch_capsule::project_sealed_root_exact_program(
+            &invocation,
+        )
     }
 
     pub fn admitted_program_hash(&self) -> Result<String> {
@@ -939,6 +942,7 @@ impl SealedRootExecutionRequest {
             usage_subject_asserted_by: None,
             parameters: json!({}),
             ref_bindings: BTreeMap::new(),
+            resolved_ref_bindings: BTreeMap::new(),
             verified_subject: SealedResolvedItem {
                 canonical_ref: canonical_item_ref.clone(),
                 kind: "graph".to_string(),

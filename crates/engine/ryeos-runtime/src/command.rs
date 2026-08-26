@@ -287,6 +287,10 @@ pub struct CommandControlFlag {
     pub help: String,
     /// Where the flag's value lands.
     pub binding: ControlFlagBinding,
+    /// For `ref_binding`, bind the flag's value directly under this declared
+    /// name. When absent, the generic `name=canonical-ref` value form is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_binding_name: Option<String>,
     /// Additional spellings that bind identically, e.g. `json` for `no_stream`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
@@ -434,6 +438,14 @@ pub enum CommandRegistryError {
     },
     #[error("command '{name}' marks undeclared argument field '{field}' as sensitive")]
     UndeclaredSensitiveField { name: String, field: String },
+    #[error("command '{name}' control flag '--{flag}' has invalid fixed ref binding '{binding}'")]
+    InvalidControlRefBinding {
+        name: String,
+        flag: String,
+        binding: String,
+    },
+    #[error("command '{name}' control flag '--{flag}' sets ref_binding_name for a non-ref binding")]
+    MisplacedControlRefBinding { name: String, flag: String },
     #[error("no command matches tokens {tokens:?}")]
     NoMatch { tokens: Vec<String> },
 }
@@ -553,8 +565,43 @@ fn validate_command(
             });
         }
     }
+    for flag in &record.control_flags {
+        match (flag.binding, flag.ref_binding_name.as_deref()) {
+            (ControlFlagBinding::RefBinding, Some(binding)) if !valid_ref_binding_name(binding) => {
+                return Err(CommandRegistryError::InvalidControlRefBinding {
+                    name: record.name.clone(),
+                    flag: flag.flag.clone(),
+                    binding: binding.to_string(),
+                });
+            }
+            (ControlFlagBinding::RefBinding, _) => {}
+            (_, Some(_)) => {
+                return Err(CommandRegistryError::MisplacedControlRefBinding {
+                    name: record.name.clone(),
+                    flag: flag.flag.clone(),
+                });
+            }
+            (_, None) => {}
+        }
+    }
     validate_registration_caps(record, policy)?;
     Ok(())
+}
+
+fn valid_ref_binding_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.split('_').enumerate().all(|(index, segment)| {
+            !segment.is_empty()
+                && segment.chars().enumerate().all(|(char_index, ch)| {
+                    ch.is_ascii_lowercase() || ch.is_ascii_digit() && (index > 0 || char_index > 0)
+                })
+                && (index > 0
+                    || segment
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_lowercase()))
+        })
 }
 
 fn validate_tokens(name: &str, tokens: &[String]) -> Result<(), CommandRegistryError> {

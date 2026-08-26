@@ -1,0 +1,11 @@
+# ryeos:signed:2026-08-26T10:18:38Z:914cd27742b640245a66061cf0a319a52efc01c37c214cd794e30eeffdcc3441:oVK7H9+8MSmCxXILqI1OBqik32vtNrymj2Vz8O/CM7+/SOaY4vr5W4LzYnQMR/Q1q3k+e3HOiwbtIBMecN8fCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [worker, session, discard]
+description: "Discard one retained hosted worker candidate"
+forms:
+  - slots:
+      - field: chain_root_id
+      - field: candidate_snapshot_hash
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/discard
+  availability: daemon

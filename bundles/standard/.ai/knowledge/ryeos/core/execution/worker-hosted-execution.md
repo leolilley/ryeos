@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-08-26T02:45:10Z:6f1a95f5b30e2964b2facb7957b3b92c3a83f164f94832dcdcf1de8695de9adb:fvwNQMBz3R8G1TeLYVVXYqn1GOpIC8VL7PjtXsRKSpXC6Guu3QcZV4m9P1nUZ+g2LWiTnxmabLKceAdXz+uOBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-26T10:44:16Z:bd1218ee23c300c62ca4dea8b925c4d68dfe697539a9cd3140f812a71efb0fb2:ZZ5b94609f8kTpDgXie3TJfE8ilthbooYAn75n1/OJktwbakWZ+Gz3Pqxgett3csqlXAI6/hAZ7QbuLAlXM7DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
 title: "Worker-Hosted Execution"
 description: "Implemented authority, protocol, lifecycle, recovery, and publication contracts for session-bound hosted workers"
 entry_type: reference
-version: "1.0.0"
+version: "1.1.0"
 ```
 
 # Worker-Hosted Execution
@@ -33,8 +33,10 @@ authority. Lillux's attached process identity is process-control authority.
 Recovery reconciles it with both admitted capsules; it never reconstructs
 authority from a mutable worker row or registry resolution.
 
-Worker process history is append-only across boots: `(session_id, boot_epoch)`
-is unique and a replacement receives `MAX(boot_epoch)+1`. Dead/reaped or
+The stable public identity is `chain_root_id`; each current or historical
+placement is identified by `placement_thread_id`. Worker process history is
+append-only across boots: `(placement_thread_id, boot_epoch)` is unique and a
+replacement receives `MAX(boot_epoch)+1`. Dead/reaped or
 dead/unproved rows remain as exact cleanup evidence. The dedicated-session,
 credential-lock, and workspace ownership compare-and-swap transaction admits
 at most one current worker; recovery cannot erase or reuse a prior epoch.
@@ -61,6 +63,44 @@ fingerprint; on the hosted target this classifies every request signed by that
 key as remote and rejects it without the source-node proof. This is not
 caller-principal impersonation or a provider exception; delegated callers
 cannot select it.
+
+## Portable environment selection
+
+A project worker execution selects its signed portable environment through the
+runtime-declared `environment` ref binding. The selector is not an ordinary
+parameter and cannot be smuggled through the worker input envelope. The generic
+launch preparer accepts only a trusted bundle/project `config` with the closed
+`ryeos.worker_environment.v1` schema, derives the exact worker dependency from
+it, and retains the engine-resolved path-free binding record in the outer
+admitted program. Changing the config bytes at the same canonical ref therefore
+changes `exact_program_hash`.
+
+The outer program projection classifies every sealed invocation field. It
+retains executable semantics, trust, exact source content, composed resolution,
+execution hints, raw ref names, and resolved ref-binding identities. It excludes
+local winning paths, resolver diagnostics, project materialization paths,
+principal/site placement, launch mode, request parameters, validation mode, and
+chain-retention policy. A new sealed field is refused until explicitly assigned
+to the program or invocation side. Managed launch validation also proves that
+the binding records in the retained execution closure equal those in the exact
+program; direct execution cannot carry them.
+
+The environment config is authored selection, not a third admitted capsule or
+a credential container. The complete portable program is the existing outer
+launch program plus each named persistent-session dependency program and their
+typed closures. Node-local credentials, profile generation, process capsule,
+execution realization, workspace path, and callback authority remain placement
+state.
+
+## Generic session client
+
+`ryeos worker session status|command|approvals|approval|terminate|validate-candidate|publish|discard`
+are signed Core command descriptors over the existing generic worker-execution
+services. Every operation begins with `chain_root_id`, resolves the authoritative
+current placement, and then fences placement thread and boot epoch internally.
+Historical catch-up uses chain replay and live attachment uses the existing
+cursor-based chain event stream. Attach and detach are client behavior: opening
+or closing that stream creates no session row and mutates no worker authority.
 
 ## Closed structured-session protocol
 

@@ -1,0 +1,11 @@
+# ryeos:signed:2026-08-26T10:18:38Z:8cfdf10f57bfd834329433ef8cbf83a58d2e92f68c73b9afb00ed6aa691d21d1:Ka8tHg2Pc+QS3Tas1UfeEb08ZwHDLIhbDWrZr8QdChL8p7dgbYcureDQwTe410WzAV9ChqhPFor5m0YbRsExBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [worker, session, terminate]
+description: "Stop and terminally settle one hosted worker session"
+forms:
+  - slots:
+      - field: chain_root_id
+      - field: reason
+dispatch:
+  kind: execute_ref
+  execute: service:worker-executions/terminate
+  availability: daemon

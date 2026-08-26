@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-08-26T10:09:18Z:c9ede1f689e3dac8c9530de7d7651bf1f34d5fe31bd4d40f94eb99ca1545b3a5:LOhnt8Y7bkJFyQyK9WgSmae1xoAq9UYS+iVgTwQfyqsOZlAvYRAP2qx2sktXye8xYt0Ta7V6iVH8oudpkVtuDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-26T10:41:54Z:decbf3a87f853111eae2283bfe7f5724c70dd75c04c23877073f5929959c863a:YJKX/kJQzZY8Kp/5mdKBoyjHvQbuLAKJVrC4Y8aXLgT/FU72LdX2gvH7rzfElbZXWuSRtAlk/DcDC3h30qqZDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "persistence-schema-evolution"
 title: "Persistence Schema Evolution"
 description: "Rules for immutable CAS wire identities, retained SQLite migrations, rebuildable projections, and explicit history retirement"
 entry_type: reference
-version: "1.4.0"
+version: "1.5.0"
 ```
 
 # Persistence Schema Evolution
@@ -31,10 +31,10 @@ The current clean-cut execution formats include:
 
 - thread snapshot schema 10;
 - project snapshot schema 5;
-- admitted launch capsule schema 14;
-- runtime launch metadata epoch 18;
+- admitted launch capsule schema 15;
+- runtime launch metadata epoch 19;
 - the standalone runtime project-authority envelope epoch 3; and
-- the owned runtime SQLite operator schema epoch 13 (encoded in the RyeOS
+- the owned runtime SQLite operator schema epoch 14 (encoded in the RyeOS
   `PRAGMA application_id` family).
 
 The numbers identify independently evolving contracts. A change to a nested
@@ -59,7 +59,7 @@ the exact current envelopes stored in its JSON columns. Normal open never
 migrates or normalizes a predecessor. Any mismatch leaves the file untouched
 and requires the explicit operator-confirmed thread-history/project-head reset.
 
-Runtime epoch 13 includes the epoch-8 hosted-worker substrate,
+Runtime epoch 14 includes the epoch-8 hosted-worker substrate,
 credential-generation fencing, command/approval contact ledgers, observation
 frontier with a cross-epoch cumulative event ceiling, candidate-disposition,
 and multi-epoch process-history contracts, the epoch-9 exact
@@ -70,11 +70,15 @@ adapter protocol-v3 journal cut, plus a revisioned live projection of stable
 credential-profile lifecycle authority. Epoch 13 cleanly separates stable
 `chain_root_id` addressing from exact `placement_thread_id` and worker-boot
 fences throughout the hosted-worker projection; it carries no hosted
-`session_id` alias. No execution-history reader or migration for epochs 1
-through 12 remains. The explicit reset may extract only
-the independently versioned, provider-neutral credential-profile table from
-epochs 6 through 12 before replacing the runtime database; it never decodes or
-carries forward execution/thread rows. Earlier history requires the explicit
+`session_id` alias. Epoch 14 admits only launch metadata epoch 19 and admitted
+launch capsule schema 15. Their outer exact-program identity is path-free,
+classifies every sealed invocation field explicitly, and commits the exact
+engine-resolved ref-binding records used by managed launch preparation. No
+execution-history reader or migration for epochs 1 through 13 remains. The
+explicit reset may extract only the provider-neutral credential-profile table
+from epochs 6 through 11; from epoch 12 onward the operational database is the
+stable profile authority and the runtime table is repaired from it. Reset never
+decodes or carries forward execution/thread rows. Earlier history requires the explicit
 retirement ceremony below; normal startup never rewrites it.
 
 `operational.sqlite3` owns stable credential-profile ownership, lifecycle,

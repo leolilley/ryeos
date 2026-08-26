@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-26T05:49:11Z:6653e529418cae0af890e3cf6a52a48e7399a183e36d18a2b17fd48c1ed0b6df:Mx2HlfcEJNoxzhyzciMwprT4Qa9XCyeipOCIZ5bInlNiEHWH4381QBaXqCcaR/Tq7Za60JnpqAfNL1AEMFh+Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-26T10:44:16Z:4c6d4af3c0e389b2186fb81cc13d3b06bcee7779b3210a78353475b4ceb2864d:svvDmRJYoz14/EYbyim+VvWPbCqh+Pu8axGw13b0w3IGVc+0mYXthv9vL9p5XchJG3sjnubVuGzHmPxsE3Q2DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   Activation, credential ceremony, command routes, and release acceptance for
   the pinned Codex structured-session workload.
@@ -122,7 +122,11 @@ knowledge bundle.
    services through wait-mode `service:remote/run` with
    `outbound_principal: configured_operator`; do not connect an operator-key
    client directly to the hosted daemon. Call
-   `session.start`, then
+   Start the worker with the signed
+   `config:codex/environments/default` environment (the local CLI spelling is
+   `codex session start <profile> --environment
+   config:codex/environments/default --async --current-head`; a typed remote
+   request carries the same `environment` ref binding). Call `session.start`, then
    `turn.start`, `turn.steer`, and `turn.interrupt`. Every turn is bound to the
    one returned remote thread; cross-thread targeting is rejected.
 7. Resolve digest-fenced pending approvals. This release exposes bounded
