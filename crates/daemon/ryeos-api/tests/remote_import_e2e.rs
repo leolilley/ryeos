@@ -18,6 +18,7 @@ use ryeos_api::handlers::{
     objects_closure_get, remote_import_admitted_head, remote_sync_admitted_heads,
 };
 use ryeos_api::remote::config::{self, RemoteConfig};
+use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
 use ryeos_state::{CasEntryKind, CasEntryState, SyncJobState};
 
@@ -84,6 +85,34 @@ where
     })
 }
 
+async fn json_handler_with_context<T, Fut, E>(
+    state: Arc<AppState>,
+    body: Value,
+    context: HandlerContext,
+    handle: impl FnOnce(T, HandlerContext, Arc<AppState>) -> Fut,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)>
+where
+    T: DeserializeOwned,
+    Fut: std::future::Future<Output = std::result::Result<Value, E>>,
+    E: std::fmt::Display,
+{
+    let req = serde_json::from_value::<T>(body).map_err(|error| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": error.to_string() })),
+        )
+    })?;
+    handle(req, context, state)
+        .await
+        .map(Json)
+        .map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": error.to_string() })),
+            )
+        })
+}
+
 async fn start_remote_server(
     state: Arc<AppState>,
 ) -> Result<(String, tokio::task::JoinHandle<()>)> {
@@ -112,9 +141,10 @@ async fn start_remote_server_with_incomplete_roots(
             "/federation/heads/list",
             post(
                 |State(state): State<Arc<AppState>>, Json(body): Json<Value>| async move {
-                    json_handler::<federation_heads_list::Request, _>(
+                    json_handler_with_context::<federation_heads_list::Request, _, _>(
                         state,
                         body,
+                        HandlerContext::anonymous(),
                         federation_heads_list::handle,
                     )
                     .await
