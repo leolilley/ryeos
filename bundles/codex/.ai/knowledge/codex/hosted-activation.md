@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-25T02:34:35Z:84c5a89110871b33953420a84541224d87a9137611c505dec059e6004bf825c9:KTXqdH66jJNXJiQY5hvQLr7dctJF3Oj+bDypfZord5C3DXDsaB7FtH/NaJ4/DFiEOrh+DaNHj+d4OLpkKjb/Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-26T01:18:46Z:0f2743af5075999ab2a4efc3434448cdfe14d9ca28a369fa365805d62b3f9b42:kTXy5zR59o7MLlSHQCRRVFcMfqN4mXFTJuyDWXlnQmss5yOGiLwJQtodTuLmie2d+oUnumLZyMXwY2Gzv9olCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -206,8 +206,19 @@ dedicated workers. Stderr drains continuously to a non-retained private sink.
 
 ## Release acceptance
 
-Run packaged artifacts in a disposable app/state root, never the developer's
-installed node, and prove:
+Use two deliberately separate qualification environments:
+
+- package, clean-install, schema-cutover, and adversarial security tests use a
+  disposable node so destructive setup and fault injection cannot damage
+  lasting operator state;
+- the real remote activation qualification uses the durable dedicated hosted
+  target that will retain its node identity, credential profile, private home,
+  external-content bindings, and session state across ordinary daemon
+  restarts.
+
+Neither tier should casually mutate the developer's primary interactive node.
+Run the following matrix in the tier appropriate to the behavior under test,
+and prove:
 
 - remote configured-operator acceptance only with the exact admitted
   source-node co-signature, rejection of a missing/wrong-site proof, another
