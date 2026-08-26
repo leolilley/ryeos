@@ -565,7 +565,8 @@ pub struct ActiveReservationStats {
 /// Exact settled financial frontier that may be conserved into one target
 /// placement. This is read from the verified ledger and external anchor after
 /// the source worker has been quiesced; it is not caller-authored accounting.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AccountingHandoffFrontier {
     pub source_scope: ryeos_state::objects::AdmittedAccountingScope,
     pub financial_high_water: u64,

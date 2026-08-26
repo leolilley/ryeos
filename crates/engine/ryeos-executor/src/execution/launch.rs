@@ -7445,6 +7445,52 @@ pub async fn prepare_machine_successor_launch(
     Ok(PreparedMachineSuccessorLaunch { prepared })
 }
 
+/// Prepare one cross-site machine successor without consulting or creating a
+/// source-node runtime row on this node. The source launch ledger is an
+/// authenticated transfer operand; this node independently replays the sealed
+/// target invocation, admits its local persistent sessions/realization, and
+/// returns a held preparation with no launch claim or process.
+pub async fn prepare_remote_machine_successor_launch(
+    state: &AppState,
+    successor_thread_id: &str,
+    source_thread_id: &str,
+    source_launch_metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    source_resume: &ryeos_app::launch_metadata::ResumeContext,
+    target_resume: &ryeos_app::launch_metadata::ResumeContext,
+    resume_rebind: &ryeos_app::worker_handoff::RemoteResumeContextRebind,
+) -> Result<PreparedMachineSuccessorLaunch, BuildAndLaunchError> {
+    source_launch_metadata.validate()?;
+    target_resume
+        .validate_remote_worker_adoption_from(source_resume, resume_rebind)
+        .map_err(BuildAndLaunchError::Internal)?;
+    let source_sealed = source_launch_metadata
+        .sealed_root_request
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("remote source has no sealed launch invocation"))?;
+    let target_sealed = source_sealed
+        .for_remote_worker_adoption_invocation(source_resume, target_resume, resume_rebind)
+        .map_err(BuildAndLaunchError::Internal)?;
+    let template = source_launch_metadata
+        .continuation_successor_seed(target_resume.clone())
+        .with_continuation_source(source_thread_id)
+        .with_sealed_root_request(target_sealed);
+    let mut prepared = prepare_successor_launch(
+        state,
+        successor_thread_id,
+        target_resume,
+        SuccessorMode::Machine,
+        None,
+        Some(&template),
+    )
+    .await?;
+    prepared.resume_context = target_resume.clone();
+    prepared.launch_metadata = std::mem::take(&mut prepared.launch_metadata)
+        .with_resume_context(target_resume.clone())
+        .with_continuation_source(source_thread_id);
+    prepared.authority.launch_metadata = Some(prepared.launch_metadata.clone());
+    Ok(PreparedMachineSuccessorLaunch { prepared })
+}
+
 /// Launch a newly persisted operator successor with the exact authoritative
 /// output computed before its row and ResumeContext were created.
 pub async fn launch_prepared_operator_successor(

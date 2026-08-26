@@ -21,6 +21,255 @@ pub const WORKER_PLACEMENT_CLAIM: &str = "admitted";
 pub const WORKER_SESSION_HANDOFF_OPERATION: &str = "worker_session_handoff";
 
 const PLACEMENT_EVIDENCE_SCHEMA: &str = "ryeos.worker_placement_admission.v1";
+const HANDOFF_JOB_SCHEMA: &str = "ryeos.worker_session_handoff_job.v1";
+const HANDOFF_PROGRESS_SCHEMA: &str = "ryeos.worker_session_handoff_progress.v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerHandoffJobRole {
+    Source,
+    Target,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerHandoffPhase {
+    Planned,
+    SourceExported,
+    TargetPrepared,
+    SourceCommitted,
+    TargetAdopted,
+    StateInstalled,
+    ProcessAttached,
+    Completed,
+}
+
+impl WorkerHandoffPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Planned => "planned",
+            Self::SourceExported => "source_exported",
+            Self::TargetPrepared => "target_prepared",
+            Self::SourceCommitted => "source_committed",
+            Self::TargetAdopted => "target_adopted",
+            Self::StateInstalled => "state_installed",
+            Self::ProcessAttached => "process_attached",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+/// Immutable, bounded operation body retained in the existing sync-job row on
+/// each participating node. Large launch bytes live in
+/// `PlacementTransferManifest`; mutable testimony lives in
+/// `WorkerSessionHandoffProgress` and never replaces chain authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerSessionHandoffJobOperation {
+    pub schema: String,
+    pub operation_type: String,
+    pub role: WorkerHandoffJobRole,
+    pub operation_id: String,
+    pub owner_principal: String,
+    pub chain_root_id: String,
+    pub origin_site_id: String,
+    pub source_site_id: String,
+    pub target_site_id: String,
+    pub source_placement_thread_id: String,
+    pub successor_placement_thread_id: String,
+    pub source_chain_head_hash: String,
+    pub source_last_event_hash: String,
+    pub checkpoint_manifest_hash: String,
+    pub transfer_manifest_hash: String,
+    pub peer_remote_name: String,
+    pub source_project_path: String,
+    pub target_project_path: String,
+    pub project_route_digest: String,
+    pub target_credential_profile_id: String,
+}
+
+impl WorkerSessionHandoffJobOperation {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        role: WorkerHandoffJobRole,
+        operation_id: String,
+        owner_principal: String,
+        chain_root_id: String,
+        origin_site_id: String,
+        source_site_id: String,
+        target_site_id: String,
+        source_placement_thread_id: String,
+        successor_placement_thread_id: String,
+        source_chain_head_hash: String,
+        source_last_event_hash: String,
+        checkpoint_manifest_hash: String,
+        transfer_manifest_hash: String,
+        peer_remote_name: String,
+        source_project_path: String,
+        target_project_path: String,
+        project_route_digest: String,
+        target_credential_profile_id: String,
+    ) -> anyhow::Result<Self> {
+        let operation = Self {
+            schema: HANDOFF_JOB_SCHEMA.to_owned(),
+            operation_type: WORKER_SESSION_HANDOFF_OPERATION.to_owned(),
+            role,
+            operation_id,
+            owner_principal,
+            chain_root_id,
+            origin_site_id,
+            source_site_id,
+            target_site_id,
+            source_placement_thread_id,
+            successor_placement_thread_id,
+            source_chain_head_hash,
+            source_last_event_hash,
+            checkpoint_manifest_hash,
+            transfer_manifest_hash,
+            peer_remote_name,
+            source_project_path,
+            target_project_path,
+            project_route_digest,
+            target_credential_profile_id,
+        };
+        operation.validate()?;
+        Ok(operation)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != HANDOFF_JOB_SCHEMA
+            || self.operation_type != WORKER_SESSION_HANDOFF_OPERATION
+        {
+            bail!("worker handoff job is not the exact current contract");
+        }
+        validate_common(
+            &self.operation_id,
+            &self.owner_principal,
+            &self.chain_root_id,
+            &self.origin_site_id,
+            &self.source_site_id,
+            &self.target_site_id,
+            &self.source_placement_thread_id,
+            &self.successor_placement_thread_id,
+            &self.source_chain_head_hash,
+            &self.source_last_event_hash,
+            &self.checkpoint_manifest_hash,
+            &self.transfer_manifest_hash,
+        )?;
+        hash("handoff project route", &self.project_route_digest)?;
+        for (label, value) in [
+            ("peer remote", self.peer_remote_name.as_str()),
+            ("source project path", self.source_project_path.as_str()),
+            ("target project path", self.target_project_path.as_str()),
+            (
+                "target credential profile",
+                self.target_credential_profile_id.as_str(),
+            ),
+        ] {
+            label_value(label, value)?;
+        }
+        for (label, path) in [
+            ("source project path", self.source_project_path.as_str()),
+            ("target project path", self.target_project_path.as_str()),
+        ] {
+            if !std::path::Path::new(path).is_absolute() {
+                bail!("worker handoff {label} is not absolute");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn to_value(&self) -> anyhow::Result<serde_json::Value> {
+        self.validate()?;
+        Ok(serde_json::to_value(self)?)
+    }
+
+    pub fn from_value(value: serde_json::Value) -> anyhow::Result<Self> {
+        let operation: Self = serde_json::from_value(value)?;
+        operation.validate()?;
+        Ok(operation)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerSessionHandoffProgress {
+    pub schema: String,
+    pub operation_id: String,
+    pub phase: WorkerHandoffPhase,
+    pub placement_attestation_hash: Option<String>,
+    pub target_runtime_seed_hash: Option<String>,
+    pub writer_grant_hash: Option<String>,
+    pub target_chain_head_hash: Option<String>,
+    pub credential_reservation_id: Option<String>,
+}
+
+impl WorkerSessionHandoffProgress {
+    pub fn planned(operation_id: String) -> anyhow::Result<Self> {
+        let progress = Self {
+            schema: HANDOFF_PROGRESS_SCHEMA.to_owned(),
+            operation_id,
+            phase: WorkerHandoffPhase::Planned,
+            placement_attestation_hash: None,
+            target_runtime_seed_hash: None,
+            writer_grant_hash: None,
+            target_chain_head_hash: None,
+            credential_reservation_id: None,
+        };
+        progress.validate()?;
+        Ok(progress)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != HANDOFF_PROGRESS_SCHEMA {
+            bail!("worker handoff progress is not the exact current contract");
+        }
+        hash("handoff progress operation", &self.operation_id)?;
+        for (label, value) in [
+            (
+                "placement attestation",
+                self.placement_attestation_hash.as_deref(),
+            ),
+            (
+                "target runtime seed",
+                self.target_runtime_seed_hash.as_deref(),
+            ),
+            ("writer grant", self.writer_grant_hash.as_deref()),
+            ("target chain head", self.target_chain_head_hash.as_deref()),
+        ] {
+            if let Some(value) = value {
+                hash(label, value)?;
+            }
+        }
+        if let Some(reservation) = &self.credential_reservation_id {
+            label_value("credential reservation", reservation)?;
+        }
+        if self.phase >= WorkerHandoffPhase::TargetPrepared
+            && (self.placement_attestation_hash.is_none()
+                || self.target_runtime_seed_hash.is_none()
+                || self.credential_reservation_id.is_none())
+        {
+            bail!("target-prepared handoff progress is incomplete");
+        }
+        if self.phase >= WorkerHandoffPhase::SourceCommitted
+            && (self.writer_grant_hash.is_none() || self.target_chain_head_hash.is_none())
+        {
+            bail!("source-committed handoff progress is incomplete");
+        }
+        Ok(())
+    }
+
+    pub fn to_value(&self) -> anyhow::Result<serde_json::Value> {
+        self.validate()?;
+        Ok(serde_json::to_value(self)?)
+    }
+
+    pub fn from_value(value: serde_json::Value) -> anyhow::Result<Self> {
+        let progress: Self = serde_json::from_value(value)?;
+        progress.validate()?;
+        Ok(progress)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -243,6 +492,69 @@ impl WorkerPlacementAdmissionEvidence {
 pub struct PreparedPlacementRuntimeSeed {
     pub object: ryeos_state::objects::PlacementRuntimeSeed,
     pub launch_metadata_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedPlacementTransferManifest {
+    pub object: ryeos_state::objects::PlacementTransferManifest,
+    pub source_launch_metadata_bytes: Vec<u8>,
+}
+
+impl PreparedPlacementTransferManifest {
+    pub fn object_hash(&self) -> anyhow::Result<String> {
+        self.object.content_hash()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_placement_transfer_manifest(
+    operation_id: &str,
+    owner_principal: &str,
+    chain_root_id: &str,
+    origin_site_id: &str,
+    source_site_id: &str,
+    target_site_id: &str,
+    source_placement_thread_id: &str,
+    successor_placement_thread_id: &str,
+    source_chain_head_hash: &str,
+    source_last_event_hash: &str,
+    checkpoint_manifest_hash: &str,
+    source_launch_capsule_hash: &str,
+    source_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+) -> anyhow::Result<PreparedPlacementTransferManifest> {
+    source_launch_metadata.validate()?;
+    let value = serde_json::to_value(source_launch_metadata)
+        .context("serialize source placement launch metadata")?;
+    let canonical = lillux::canonical_json(&value)
+        .context("canonicalize source placement launch metadata")?
+        .into_bytes();
+    let size = u64::try_from(canonical.len()).context("source launch metadata size overflow")?;
+    if size == 0 || size > ryeos_state::objects::MAX_PLACEMENT_RUNTIME_METADATA_BYTES {
+        bail!(
+            "source placement launch metadata is {size} bytes; maximum is {}",
+            ryeos_state::objects::MAX_PLACEMENT_RUNTIME_METADATA_BYTES
+        );
+    }
+    let object = ryeos_state::objects::PlacementTransferManifest::new(
+        operation_id.to_owned(),
+        owner_principal.to_owned(),
+        chain_root_id.to_owned(),
+        origin_site_id.to_owned(),
+        source_site_id.to_owned(),
+        target_site_id.to_owned(),
+        source_placement_thread_id.to_owned(),
+        successor_placement_thread_id.to_owned(),
+        source_chain_head_hash.to_owned(),
+        source_last_event_hash.to_owned(),
+        checkpoint_manifest_hash.to_owned(),
+        source_launch_capsule_hash.to_owned(),
+        lillux::sha256_hex(&canonical),
+        size,
+    )?;
+    Ok(PreparedPlacementTransferManifest {
+        object,
+        source_launch_metadata_bytes: canonical,
+    })
 }
 
 impl PreparedPlacementRuntimeSeed {

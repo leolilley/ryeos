@@ -66,6 +66,7 @@ pub(super) const CURRENT_OBJECT_KINDS: &[&str] = &[
     "observed_execution_realization",
     "persistent_session_capsule",
     "placement_runtime_seed",
+    "placement_transfer_manifest",
     "project_file",
     "project_snapshot",
     "project_snapshot_policy",
@@ -148,6 +149,11 @@ const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
         kind: crate::objects::PLACEMENT_RUNTIME_SEED_KIND,
         validate: validate_placement_runtime_seed,
         links: links_placement_runtime_seed,
+    },
+    ObjectContract {
+        kind: crate::objects::PLACEMENT_TRANSFER_MANIFEST_KIND,
+        validate: validate_placement_transfer_manifest,
+        links: links_placement_transfer_manifest,
     },
     ObjectContract {
         kind: "project_file",
@@ -317,6 +323,10 @@ fn validate_persistent_session_capsule(value: &Value) -> anyhow::Result<()> {
 
 fn validate_placement_runtime_seed(value: &Value) -> anyhow::Result<()> {
     crate::objects::PlacementRuntimeSeed::from_current_value(value.clone()).map(|_| ())
+}
+
+fn validate_placement_transfer_manifest(value: &Value) -> anyhow::Result<()> {
+    crate::objects::PlacementTransferManifest::from_current_value(value.clone()).map(|_| ())
 }
 
 fn validate_source_manifest(value: &Value) -> anyhow::Result<()> {
@@ -492,6 +502,32 @@ fn links_placement_runtime_seed(value: &Value) -> Result<ContractLinks, String> 
         &mut links.object_edges,
     )?;
     links.blob_hashes.push(seed.launch_metadata_blob_hash);
+    Ok(links)
+}
+
+fn links_placement_transfer_manifest(value: &Value) -> Result<ContractLinks, String> {
+    let manifest = crate::objects::PlacementTransferManifest::from_current_value(value.clone())
+        .map_err(|error| error.to_string())?;
+    let mut links = ContractLinks::leaf();
+    for (hash, expected) in [
+        (
+            &manifest.source_chain_head_hash,
+            ExpectedObject::Kind("chain_state"),
+        ),
+        (
+            &manifest.checkpoint_manifest_hash,
+            ExpectedObject::Kind(crate::objects::STATE_MANIFEST_KIND),
+        ),
+        (
+            &manifest.source_launch_capsule_hash,
+            ExpectedObject::Kind("admitted_launch_capsule"),
+        ),
+    ] {
+        super::push_typed_hash(hash, expected, None, &mut links.object_edges)?;
+    }
+    links
+        .blob_hashes
+        .push(manifest.source_launch_metadata_blob_hash);
     Ok(links)
 }
 

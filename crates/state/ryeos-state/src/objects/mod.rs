@@ -29,6 +29,7 @@ pub mod item_source;
 pub mod live_input;
 pub mod persistent_session_capsule;
 pub mod placement_runtime_seed;
+pub mod placement_transfer_manifest;
 pub mod portable_state_tree;
 pub mod project_file;
 pub mod project_snapshot;
@@ -120,6 +121,9 @@ pub use persistent_session_capsule::{
 pub use placement_runtime_seed::{
     MAX_PLACEMENT_RUNTIME_METADATA_BYTES, PLACEMENT_RUNTIME_SEED_KIND,
     PLACEMENT_RUNTIME_SEED_SCHEMA, PlacementRuntimeSeed,
+};
+pub use placement_transfer_manifest::{
+    PLACEMENT_TRANSFER_MANIFEST_KIND, PLACEMENT_TRANSFER_MANIFEST_SCHEMA, PlacementTransferManifest,
 };
 pub use portable_state_tree::{
     PORTABLE_STATE_TREE_KIND, PORTABLE_STATE_TREE_MEDIA_TYPE, PORTABLE_STATE_TREE_SCHEMA,

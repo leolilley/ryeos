@@ -5394,6 +5394,68 @@ impl StateStore {
         )
     }
 
+    /// Publish the large, secret-free source launch ledger under a bounded
+    /// CAS manifest and create the existing sync-job row that pins it. CAS
+    /// publication precedes the SQLite root inside one write-permit window;
+    /// a crash in the narrow gap leaves only collectable unreachable bytes,
+    /// never a job naming absent authority.
+    pub fn create_worker_handoff_source_job(
+        &self,
+        prepared: &crate::worker_handoff::PreparedPlacementTransferManifest,
+        job: &ryeos_state::NewSyncJob,
+    ) -> Result<ryeos_state::SyncJobRecord> {
+        prepared.object.validate()?;
+        let manifest_hash = prepared.object_hash()?;
+        if job.operation_type != crate::worker_handoff::WORKER_SESSION_HANDOFF_OPERATION
+            || !job.roots.iter().any(|hash| hash == &manifest_hash)
+        {
+            bail!("worker handoff sync job does not pin its transfer manifest");
+        }
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        if let Some(existing) = g.state_db.get_sync_job(&job.job_id)? {
+            if existing.operation_type != job.operation_type
+                || existing.operation != job.operation
+                || !existing.roots.iter().any(|hash| hash == &manifest_hash)
+            {
+                bail!("worker handoff job identity is already bound to another operation");
+            }
+            return Ok(existing);
+        }
+        self.state_authority.ensure_guard(permit.cas_guard())?;
+        let cas = self.state_authority.cas_store()?;
+        let stored_metadata = cas.put_blob(&prepared.source_launch_metadata_bytes)?;
+        if stored_metadata.hash != prepared.object.source_launch_metadata_blob_hash {
+            bail!("stored source placement launch metadata digest changed");
+        }
+        let object_value = prepared.object.to_value()?;
+        let stored_manifest = cas.put_object(&object_value)?;
+        if stored_manifest.hash != manifest_hash {
+            bail!("stored placement transfer manifest digest changed");
+        }
+        g.state_db
+            .record_cas_entry(&ryeos_state::NewCasEntryAttribution {
+                hash: stored_metadata.hash,
+                entry_kind: ryeos_state::CasEntryKind::Blob,
+                bytes: u64::try_from(prepared.source_launch_metadata_bytes.len())?,
+                source_principal: Some(format!("fp:{}", g.signer.fingerprint())),
+                source_peer: None,
+                job_id: Some(job.job_id.clone()),
+                state: ryeos_state::CasEntryState::Local,
+            })?;
+        g.state_db
+            .record_cas_entry(&ryeos_state::NewCasEntryAttribution {
+                hash: manifest_hash,
+                entry_kind: ryeos_state::CasEntryKind::Object,
+                bytes: u64::try_from(lillux::canonical_json(&object_value)?.len())?,
+                source_principal: Some(format!("fp:{}", g.signer.fingerprint())),
+                source_peer: None,
+                job_id: Some(job.job_id.clone()),
+                state: ryeos_state::CasEntryState::Local,
+            })?;
+        g.state_db.create_sync_job(job)
+    }
+
     /// Adopt an exact cross-site continuation head through the ordinary staged
     /// import path, then idempotently materialize its target-local runtime seed.
     /// The head is authoritative; SQLite installation is recoverable and never
