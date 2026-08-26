@@ -65,6 +65,7 @@ pub(super) const CURRENT_OBJECT_KINDS: &[&str] = &[
     "item_source",
     "observed_execution_realization",
     "persistent_session_capsule",
+    "placement_runtime_seed",
     "project_file",
     "project_snapshot",
     "project_snapshot_policy",
@@ -142,6 +143,11 @@ const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
         kind: crate::objects::PERSISTENT_SESSION_CAPSULE_KIND,
         validate: validate_persistent_session_capsule,
         links: links_persistent_session_capsule,
+    },
+    ObjectContract {
+        kind: crate::objects::PLACEMENT_RUNTIME_SEED_KIND,
+        validate: validate_placement_runtime_seed,
+        links: links_placement_runtime_seed,
     },
     ObjectContract {
         kind: "project_file",
@@ -309,6 +315,10 @@ fn validate_persistent_session_capsule(value: &Value) -> anyhow::Result<()> {
     crate::objects::AdmittedPersistentSessionCapsule::from_current_value(value).map(|_| ())
 }
 
+fn validate_placement_runtime_seed(value: &Value) -> anyhow::Result<()> {
+    crate::objects::PlacementRuntimeSeed::from_current_value(value.clone()).map(|_| ())
+}
+
 fn validate_source_manifest(value: &Value) -> anyhow::Result<()> {
     crate::objects::SourceManifest::from_value(value).map(|_| ())
 }
@@ -468,6 +478,20 @@ fn links_attestation(value: &Value) -> Result<ContractLinks, String> {
         None,
         &mut links.object_edges,
     )?;
+    Ok(links)
+}
+
+fn links_placement_runtime_seed(value: &Value) -> Result<ContractLinks, String> {
+    let seed = crate::objects::PlacementRuntimeSeed::from_current_value(value.clone())
+        .map_err(|error| error.to_string())?;
+    let mut links = ContractLinks::leaf();
+    super::push_typed_hash(
+        &seed.target_launch_capsule_hash,
+        ExpectedObject::Kind("admitted_launch_capsule"),
+        None,
+        &mut links.object_edges,
+    )?;
+    links.blob_hashes.push(seed.launch_metadata_blob_hash);
     Ok(links)
 }
 
@@ -741,6 +765,10 @@ fn links_thread_event(value: &Value) -> Result<ContractLinks, String> {
             (
                 &remote.target_launch_capsule_hash,
                 ExpectedObject::Kind("admitted_launch_capsule"),
+            ),
+            (
+                &remote.target_runtime_seed_hash,
+                ExpectedObject::Kind(crate::objects::PLACEMENT_RUNTIME_SEED_KIND),
             ),
         ] {
             super::push_typed_hash(hash, expected, None, &mut links.object_edges)?;

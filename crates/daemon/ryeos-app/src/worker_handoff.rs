@@ -105,6 +105,10 @@ pub struct WorkerPlacementAdmissionEvidence {
     pub project_rebind: ProjectAuthorityRebind,
     pub accounting: AccountingConservation,
     pub target_launch_capsule_hash: String,
+    /// Immutable CAS recovery seed for the exact successor placement. The
+    /// seed is independently reachable from the continuation edge; this hash
+    /// binds target admission to those exact runtime bytes before source cut.
+    pub target_runtime_seed_hash: String,
 }
 
 impl WorkerPlacementAdmissionEvidence {
@@ -128,6 +132,7 @@ impl WorkerPlacementAdmissionEvidence {
         project_rebind: ProjectAuthorityRebind,
         accounting: AccountingConservation,
         target_launch_capsule_hash: String,
+        target_runtime_seed_hash: String,
     ) -> Self {
         Self {
             schema: PLACEMENT_EVIDENCE_SCHEMA.to_owned(),
@@ -151,6 +156,7 @@ impl WorkerPlacementAdmissionEvidence {
             project_rebind,
             accounting,
             target_launch_capsule_hash,
+            target_runtime_seed_hash,
         }
     }
 
@@ -179,6 +185,7 @@ impl WorkerPlacementAdmissionEvidence {
             "target execution realization",
             &self.target_execution_realization_hash,
         )?;
+        hash("target runtime seed", &self.target_runtime_seed_hash)?;
         if self.source_site_id == self.target_site_id {
             bail!("cross-site worker placement must change current site");
         }
@@ -226,6 +233,63 @@ impl WorkerPlacementAdmissionEvidence {
         }
         Ok(evidence)
     }
+}
+
+/// Canonical runtime seed bytes prepared for publication in the private CAS.
+/// The object carries only bounded coordinates and a blob edge, keeping
+/// generic object traversal bounded even when the retained exact program is
+/// larger than the ordinary object ceiling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedPlacementRuntimeSeed {
+    pub object: ryeos_state::objects::PlacementRuntimeSeed,
+    pub launch_metadata_bytes: Vec<u8>,
+}
+
+impl PreparedPlacementRuntimeSeed {
+    pub fn object_hash(&self) -> anyhow::Result<String> {
+        self.object.content_hash()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_placement_runtime_seed(
+    operation_id: &str,
+    chain_root_id: &str,
+    source_placement_thread_id: &str,
+    successor_placement_thread_id: &str,
+    target_site_id: &str,
+    owner_principal: &str,
+    target_launch_capsule_hash: &str,
+    launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+) -> anyhow::Result<PreparedPlacementRuntimeSeed> {
+    launch_metadata.validate()?;
+    let value =
+        serde_json::to_value(launch_metadata).context("serialize placement runtime seed")?;
+    let canonical = lillux::canonical_json(&value)
+        .context("canonicalize placement runtime seed")?
+        .into_bytes();
+    let size = u64::try_from(canonical.len()).context("placement runtime seed size overflow")?;
+    if size == 0 || size > ryeos_state::objects::MAX_PLACEMENT_RUNTIME_METADATA_BYTES {
+        bail!(
+            "placement runtime metadata is {size} bytes; maximum is {}",
+            ryeos_state::objects::MAX_PLACEMENT_RUNTIME_METADATA_BYTES
+        );
+    }
+    let object = ryeos_state::objects::PlacementRuntimeSeed::new(
+        operation_id.to_owned(),
+        chain_root_id.to_owned(),
+        source_placement_thread_id.to_owned(),
+        successor_placement_thread_id.to_owned(),
+        target_site_id.to_owned(),
+        owner_principal.to_owned(),
+        target_launch_capsule_hash.to_owned(),
+        lillux::sha256_hex(&canonical),
+        size,
+    )?;
+    Ok(PreparedPlacementRuntimeSeed {
+        object,
+        launch_metadata_bytes: canonical,
+    })
 }
 
 impl ResumeContext {

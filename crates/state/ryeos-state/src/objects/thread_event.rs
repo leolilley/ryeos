@@ -42,6 +42,7 @@ pub struct RemoteContinuationAuthority {
     pub target_placement_attestation_hash: String,
     pub chain_writer_grant_hash: String,
     pub target_launch_capsule_hash: String,
+    pub target_runtime_seed_hash: String,
     pub source_site_id: String,
     pub target_site_id: String,
     pub target_node_signer_fingerprint: String,
@@ -78,6 +79,10 @@ impl RemoteContinuationAuthority {
             (
                 "remote continuation launch capsule",
                 self.target_launch_capsule_hash.as_str(),
+            ),
+            (
+                "remote continuation runtime seed",
+                self.target_runtime_seed_hash.as_str(),
             ),
         ] {
             validate_canonical_hash(label, value)?;
@@ -399,6 +404,7 @@ mod remote_continuation_tests {
             target_placement_attestation_hash: "5".repeat(64),
             chain_writer_grant_hash: "6".repeat(64),
             target_launch_capsule_hash: "7".repeat(64),
+            target_runtime_seed_hash: "9".repeat(64),
             source_site_id: "site:a".into(),
             target_site_id: "site:b".into(),
             target_node_signer_fingerprint: "8".repeat(64),

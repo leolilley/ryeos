@@ -28,6 +28,7 @@ pub mod external_large_content_manifest;
 pub mod item_source;
 pub mod live_input;
 pub mod persistent_session_capsule;
+pub mod placement_runtime_seed;
 pub mod portable_state_tree;
 pub mod project_file;
 pub mod project_snapshot;
@@ -115,6 +116,10 @@ pub use persistent_session_capsule::{
     PERSISTENT_SESSION_CAPSULE_KIND, PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
     PersistentSessionAuthority, PersistentSessionLifecycleContract, PersistentSessionWireContract,
     PortableSessionStateClass, PortableSessionStateContract, PortableSessionStateSelector,
+};
+pub use placement_runtime_seed::{
+    MAX_PLACEMENT_RUNTIME_METADATA_BYTES, PLACEMENT_RUNTIME_SEED_KIND,
+    PLACEMENT_RUNTIME_SEED_SCHEMA, PlacementRuntimeSeed,
 };
 pub use portable_state_tree::{
     PORTABLE_STATE_TREE_KIND, PORTABLE_STATE_TREE_MEDIA_TYPE, PORTABLE_STATE_TREE_SCHEMA,

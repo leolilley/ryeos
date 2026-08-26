@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -3131,15 +3132,15 @@ pub struct RemoteAdoptionPublication {
     pub successor_thread_id: String,
     pub writer_grant_hash: String,
     pub target_launch_capsule_hash: String,
+    pub target_runtime_seed_hash: String,
 }
 
 fn validate_remote_adoption_runtime_seed(
     state_authority: &ryeos_state::PinnedStateAuthority,
     inner: &Inner,
     transition: &ryeos_state::sync::AdmittedChainWriterTransition,
-    target_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
     require_adopted_head: bool,
-) -> Result<()> {
+) -> Result<crate::launch_metadata::RuntimeLaunchMetadata> {
     transition.validate()?;
     let evidence = &transition.evidence;
     if evidence.target_node_signer_fingerprint != inner.signer.fingerprint() {
@@ -3177,6 +3178,49 @@ fn validate_remote_adoption_runtime_seed(
         bail!("remote adoption writer grant differs from its admitted transition");
     }
 
+    let seed_value = cas
+        .get_object(&placement.target_runtime_seed_hash)?
+        .ok_or_else(|| anyhow!("remote adoption placement runtime seed is absent"))?;
+    let seed = ryeos_state::objects::PlacementRuntimeSeed::from_current_value(seed_value)?;
+    if seed.content_hash()? != placement.target_runtime_seed_hash
+        || seed.operation_id != placement.operation_id
+        || seed.chain_root_id != evidence.chain_root_id
+        || seed.source_placement_thread_id != evidence.source_placement_thread_id
+        || seed.successor_placement_thread_id != evidence.successor_placement_thread_id
+        || seed.target_site_id != evidence.target_site_id
+        || seed.owner_principal != evidence.owner_principal
+        || seed.target_launch_capsule_hash != evidence.transition_subject_hash
+    {
+        bail!("remote adoption placement runtime seed contradicts signed placement authority");
+    }
+    let (mut metadata_file, metadata_size) = cas
+        .open_blob(&seed.launch_metadata_blob_hash)?
+        .ok_or_else(|| anyhow!("remote adoption placement runtime metadata is absent"))?;
+    if metadata_size != seed.launch_metadata_size_bytes
+        || metadata_size > ryeos_state::objects::MAX_PLACEMENT_RUNTIME_METADATA_BYTES
+    {
+        bail!("remote adoption placement runtime metadata size changed");
+    }
+    let mut metadata_bytes = Vec::with_capacity(
+        usize::try_from(metadata_size).context("placement runtime metadata size overflow")?,
+    );
+    metadata_file
+        .by_ref()
+        .take(ryeos_state::objects::MAX_PLACEMENT_RUNTIME_METADATA_BYTES.saturating_add(1))
+        .read_to_end(&mut metadata_bytes)
+        .context("read bounded placement runtime metadata")?;
+    if u64::try_from(metadata_bytes.len())? != metadata_size
+        || lillux::sha256_hex(&metadata_bytes) != seed.launch_metadata_blob_hash
+    {
+        bail!("remote adoption placement runtime metadata digest changed");
+    }
+    let metadata_value: Value = serde_json::from_slice(&metadata_bytes)
+        .context("decode placement runtime metadata JSON")?;
+    if lillux::canonical_json(&metadata_value)?.as_bytes() != metadata_bytes {
+        bail!("remote adoption placement runtime metadata is not canonical JSON");
+    }
+    let target_launch_metadata: crate::launch_metadata::RuntimeLaunchMetadata =
+        serde_json::from_value(metadata_value).context("decode placement runtime metadata")?;
     target_launch_metadata.validate()?;
     if target_launch_metadata
         .continuation_source_thread_id
@@ -3310,13 +3354,28 @@ fn validate_remote_adoption_runtime_seed(
         {
             bail!("adopted remote successor snapshot contradicts its runtime seed");
         }
-        let source = inner
+        let source_readback = inner
             .state_db
-            .read_authoritative_thread_snapshot(
+            .read_authoritative_thread_snapshot_with_last_event(
                 &evidence.chain_root_id,
                 &evidence.source_placement_thread_id,
             )?
             .ok_or_else(|| anyhow!("adopted remote source snapshot is absent"))?;
+        let source = source_readback.snapshot;
+        let (_continuation_hash, continuation_event) = source_readback
+            .last_event
+            .ok_or_else(|| anyhow!("adopted remote source has no continuation event"))?;
+        let remote: ryeos_state::objects::RemoteContinuationAuthority = serde_json::from_value(
+            continuation_event
+                .payload
+                .get("remote_adoption")
+                .cloned()
+                .ok_or_else(|| anyhow!("adopted remote source has no remote authority"))?,
+        )?;
+        remote.validate()?;
+        if remote.target_runtime_seed_hash != placement.target_runtime_seed_hash {
+            bail!("adopted remote continuation names another placement runtime seed");
+        }
         if source.status != ThreadStatus::Continued
             || source.result_project_snapshot_hash.as_deref()
                 != Some(
@@ -3331,7 +3390,7 @@ fn validate_remote_adoption_runtime_seed(
             bail!("adopted remote source settlement contradicts its checkpoint restore");
         }
     }
-    Ok(())
+    Ok(target_launch_metadata)
 }
 
 fn validate_thread_id_path_component(thread_id: &str) -> Result<()> {
@@ -5343,17 +5402,10 @@ impl StateStore {
         &self,
         staged: ryeos_state::sync::StagedChainImport,
         transition: &ryeos_state::sync::AdmittedChainWriterTransition,
-        target_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
     ) -> Result<ryeos_state::sync::ImportResult> {
         let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
-        validate_remote_adoption_runtime_seed(
-            &self.state_authority,
-            &g,
-            transition,
-            target_launch_metadata,
-            false,
-        )?;
+        validate_remote_adoption_runtime_seed(&self.state_authority, &g, transition, false)?;
         let result = ryeos_state::sync::finalize_transferred_import(
             &g.state_db,
             staged,
@@ -5361,17 +5413,12 @@ impl StateStore {
             g.signer.as_ref(),
             permit.cas_guard(),
         )?;
-        validate_remote_adoption_runtime_seed(
-            &self.state_authority,
-            &g,
-            transition,
-            target_launch_metadata,
-            true,
-        )?;
+        let target_launch_metadata =
+            validate_remote_adoption_runtime_seed(&self.state_authority, &g, transition, true)?;
         g.runtime_db.install_imported_thread_runtime(
             &transition.evidence.successor_placement_thread_id,
             &transition.evidence.chain_root_id,
-            target_launch_metadata,
+            &target_launch_metadata,
         )?;
         Ok(result)
     }
@@ -5383,21 +5430,15 @@ impl StateStore {
     pub fn recover_remote_adoption_runtime(
         &self,
         transition: &ryeos_state::sync::AdmittedChainWriterTransition,
-        target_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
     ) -> Result<()> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
-        validate_remote_adoption_runtime_seed(
-            &self.state_authority,
-            &g,
-            transition,
-            target_launch_metadata,
-            true,
-        )?;
+        let target_launch_metadata =
+            validate_remote_adoption_runtime_seed(&self.state_authority, &g, transition, true)?;
         g.runtime_db.install_imported_thread_runtime(
             &transition.evidence.successor_placement_thread_id,
             &transition.evidence.chain_root_id,
-            target_launch_metadata,
+            &target_launch_metadata,
         )
     }
 
@@ -7358,6 +7399,7 @@ impl StateStore {
                 anyhow!("remote adoption committed without its chain-writer grant identity")
             })?,
             target_launch_capsule_hash: authority.placement.target_launch_capsule_hash.clone(),
+            target_runtime_seed_hash: authority.placement.target_runtime_seed_hash.clone(),
         })
     }
 
@@ -7970,9 +8012,30 @@ impl StateStore {
                 );
                 let grant = grant_evidence.sign_attestation(g.signer.as_ref())?;
                 self.state_authority.ensure_guard(permit.cas_guard())?;
-                let writer_grant_hash = self
-                    .state_authority
-                    .cas_store()?
+                let cas = self.state_authority.cas_store()?;
+                let prepared_seed = crate::worker_handoff::prepare_placement_runtime_seed(
+                    &placement.operation_id,
+                    chain_root_id,
+                    source_thread_id,
+                    &successor.thread_id,
+                    &placement.target_site_id,
+                    &placement.owner_principal,
+                    &placement.target_launch_capsule_hash,
+                    &successor_meta,
+                )?;
+                let expected_seed_hash = prepared_seed.object_hash()?;
+                if expected_seed_hash != placement.target_runtime_seed_hash {
+                    bail!("target placement attestation binds another runtime recovery seed");
+                }
+                let stored_metadata = cas.put_blob(&prepared_seed.launch_metadata_bytes)?;
+                if stored_metadata.hash != prepared_seed.object.launch_metadata_blob_hash {
+                    bail!("stored placement runtime metadata digest changed");
+                }
+                let stored_seed_hash = cas.store_object(&prepared_seed.object.to_value()?)?;
+                if stored_seed_hash != expected_seed_hash {
+                    bail!("stored placement runtime seed digest changed");
+                }
+                let writer_grant_hash = cas
                     .store_object(&grant.to_value())
                     .context("store one-successor remote chain-writer grant")?;
                 Some(ryeos_state::objects::RemoteContinuationAuthority {
@@ -7984,6 +8047,7 @@ impl StateStore {
                     target_placement_attestation_hash: authority.placement_attestation_hash.clone(),
                     chain_writer_grant_hash: writer_grant_hash,
                     target_launch_capsule_hash: placement.target_launch_capsule_hash.clone(),
+                    target_runtime_seed_hash: stored_seed_hash,
                     source_site_id: placement.source_site_id.clone(),
                     target_site_id: placement.target_site_id.clone(),
                     target_node_signer_fingerprint: target_signer_fingerprint.clone(),

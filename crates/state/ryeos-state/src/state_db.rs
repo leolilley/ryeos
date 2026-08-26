@@ -5813,7 +5813,8 @@ fn verify_chain_writer_transition_adoption(
 ) -> anyhow::Result<()> {
     use crate::objects::{
         AdmittedLaunchCapsule, Attestation, ChainState, ChainWriterTransitionEvidence,
-        RemoteContinuationAuthority, StateManifest, ThreadEvent, ThreadSnapshot, ThreadStatus,
+        PlacementRuntimeSeed, RemoteContinuationAuthority, StateManifest, ThreadEvent,
+        ThreadSnapshot, ThreadStatus,
     };
 
     transition.validate()?;
@@ -5920,6 +5921,21 @@ fn verify_chain_writer_transition_adoption(
         || remote.successor_thread_id != evidence.successor_placement_thread_id
     {
         anyhow::bail!("remote continuation event differs from its writer grant");
+    }
+    let runtime_seed_value = cas
+        .get_object(&remote.target_runtime_seed_hash)?
+        .ok_or_else(|| anyhow::anyhow!("remote continuation runtime seed is absent"))?;
+    let runtime_seed = PlacementRuntimeSeed::from_current_value(runtime_seed_value)?;
+    if runtime_seed.content_hash()? != remote.target_runtime_seed_hash
+        || runtime_seed.operation_id != evidence.operation_id
+        || runtime_seed.chain_root_id != evidence.chain_root_id
+        || runtime_seed.source_placement_thread_id != evidence.source_placement_thread_id
+        || runtime_seed.successor_placement_thread_id != evidence.successor_placement_thread_id
+        || runtime_seed.target_site_id != evidence.target_site_id
+        || runtime_seed.owner_principal != evidence.owner_principal
+        || runtime_seed.target_launch_capsule_hash != evidence.transition_subject_hash
+    {
+        anyhow::bail!("remote continuation runtime seed contradicts its writer grant");
     }
     let checkpoint_value = cas
         .get_object(&remote.checkpoint_manifest_hash)?
