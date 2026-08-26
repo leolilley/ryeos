@@ -87,7 +87,7 @@ key's hosted `local_client` grant with a target-node-signed `remote_operator`
 grant. This is a semantic class conversion, not a scope update:
 
 ```sh
-HOSTED_SCOPES='ryeos.execute.worker_execution.codex/login,ryeos.execute.worker_execution.codex/session,ryeos.execute.service.launch/status,ryeos.execute.service.launch/cancel,ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.system/push-head,ryeos.execute.service.credential-profiles/create,ryeos.execute.service.credential-profiles/get,ryeos.execute.service.credential-profiles/revoke,ryeos.execute.service.credential-profiles/confirm,ryeos.execute.service.credential-profiles/delete,ryeos.execute.service.worker-executions/status,ryeos.execute.service.worker-executions/command,ryeos.execute.service.worker-executions/approvals,ryeos.execute.service.worker-executions/resolve-approval,ryeos.execute.service.worker-executions/terminate,ryeos.execute.service.worker-executions/publish,ryeos.execute.service.worker-executions/validate-candidate-closure-and-base,ryeos.execute.service.worker-executions/discard,ryeos.write.project.live'
+HOSTED_SCOPES='ryeos.execute.worker_execution.codex/login,ryeos.execute.worker_execution.codex/session,ryeos.execute.service.launch/status,ryeos.execute.service.launch/cancel,ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.system/push-head,ryeos.execute.service.credential-profiles/create,ryeos.execute.service.credential-profiles/get,ryeos.execute.service.credential-profiles/revoke,ryeos.execute.service.credential-profiles/confirm,ryeos.execute.service.credential-profiles/delete,ryeos.execute.service.worker-executions/status,ryeos.execute.service.worker-executions/command,ryeos.execute.service.worker-executions/approvals,ryeos.execute.service.worker-executions/resolve-approval,ryeos.execute.service.worker-executions/terminate,ryeos.execute.service.worker-executions/checkpoint,ryeos.execute.service.worker-executions/resume,ryeos.execute.service.worker-executions/handoff-preflight,ryeos.execute.service.worker-executions/handoff,ryeos.execute.service.worker-executions/publish,ryeos.execute.service.worker-executions/validate-candidate-closure-and-base,ryeos.execute.service.worker-executions/discard,ryeos.write.project.live'
 RYEOS_APP_ROOT=/path/to/hosted-app-root ryeos authorize-client \
   --public-key "<configured_operator_raw_ed25519_base64>" \
   --label "hosted operator forwarded from source" \
@@ -103,6 +103,16 @@ exact request authorization by the separately admitted source-node key. The
 target accepts `remote_operator` only when both grants, the co-signature, the
 site, and the caller-signed required-origin assertion agree. A key holder
 calling the hosted daemon directly has no source-node proof and is rejected.
+
+Those are owner-facing Codex/session scopes. Portable placement does not add
+its internal services to the operator grant. Instead, each placement peer's
+node key receives the provider-neutral exact node ceiling documented in
+`knowledge:ryeos/core/execution/worker-hosted-execution`: bounded closure read,
+worker-placement preflight/prepare/adopt/abort, and follow-terminal delivery.
+The source and target daemons use those node-authenticated contracts only
+after the owner has authorized `handoff`; the peer node never becomes the
+session owner. This separation permits handoff back to a node whose operator
+key remains an ordinary local client.
 
 There is one authorized-key file per fingerprint. Local-only external-content
 maintenance therefore uses the same configured-operator key in an explicit

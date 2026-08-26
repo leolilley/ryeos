@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-08-26T10:44:16Z:bd1218ee23c300c62ca4dea8b925c4d68dfe697539a9cd3140f812a71efb0fb2:ZZ5b94609f8kTpDgXie3TJfE8ilthbooYAn75n1/OJktwbakWZ+Gz3Pqxgett3csqlXAI6/hAZ7QbuLAlXM7DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-26T16:27:42Z:a2abcdad2a8129b3768000e249aa340610828375a7dd7bf0febb855431cd9345:zTCE8NQhiMJOlHTlzfo8Rb6cwNgrtQOzgLSzaB1DekJxNqWZcouOqEAu/r8ZudKHEquBsme5kKObIbCdLCrCBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
 title: "Worker-Hosted Execution"
 description: "Implemented authority, protocol, lifecycle, recovery, and publication contracts for session-bound hosted workers"
 entry_type: reference
-version: "1.1.0"
+version: "1.2.0"
 ```
 
 # Worker-Hosted Execution
@@ -64,6 +64,32 @@ key as remote and rejects it without the source-node proof. This is not
 caller-principal impersonation or a provider exception; delegated callers
 cannot select it.
 
+Portable placement is deliberately different from public operator forwarding.
+An owner-authorized source operation creates the immutable handoff job, while
+preflight, prepare, adopt, abort, bounded closure reads, and remote follow
+delivery authenticate the exact configured peer as `remote_node` under narrow
+service scopes. The target derives ownership only from the source-node-signed
+chain/head and launch ledger, then binds later calls to its own signed preflight
+and durable job. The transport node never becomes `requested_by`. Keeping this
+internal path node-authenticated lets a normal local operator endpoint receive
+a return handoff and lets crash recovery proceed without replaying a user
+request or forcing one operator-key grant into incompatible local and remote
+semantic classes.
+
+For a bidirectional placement peer, the current exact node-grant ceiling is:
+
+```text
+ryeos.execute.service.objects/closure/get
+ryeos.execute.service.worker-placements/preflight
+ryeos.execute.service.worker-placements/prepare
+ryeos.execute.service.worker-placements/adopt
+ryeos.execute.service.worker-placements/abort
+ryeos.execute.service.federation/follow-terminal-deliver
+```
+
+Deployment may narrow a one-way peer to the subset it receives. These scopes
+belong to the peer node key, not the configured-operator grant.
+
 ## Portable environment selection
 
 A project worker execution selects its signed portable environment through the
@@ -91,6 +117,52 @@ launch program plus each named persistent-session dependency program and their
 typed closures. Node-local credentials, profile generation, process capsule,
 execution realization, workspace path, and callback authority remain placement
 state.
+
+## Portable checkpoint and placement
+
+A portable checkpoint is admitted only after the exact placement is frozen,
+its last worker process is proved reaped, every command and approval contact is
+settled, the credential profile is active and unlocked at the exact generation,
+and no provider attempt or unpublished accounting testimony remains. The
+checkpoint is an ordinary `StateManifest` whose typed restore document binds
+the stable `chain_root_id`, source placement and event, outer exact program,
+named persistent dependencies, project candidate authority, settlement digest,
+credential-subject projection, and source site.
+
+Workload-owned portable state is selected by the closed contract frozen in the
+persistent-session capsule. RyeOS captures only matching files into a canonical
+portable-state tree. Credential files and values, unrelated workload sessions,
+and unselected profile-home bytes are excluded. Restore is conditional on the
+exact predecessor manifest/tree and changes only admitted selector roots before
+any successor process is released. A target selects its own owner-authorized
+credential profile and exact generation; only the domain-tagged, signed
+credential-subject digest crosses sites.
+
+Cross-site handoff is a cold continuation, not filesystem or process migration.
+The source resolves one directional configured full-project route and obtains a
+target-signed preflight for the exact proposed successor. After quiescence and
+checkpoint capture, typed sync jobs retain staged closures and every recovery
+coordinate. The target verifies the complete outer/dependency programs,
+checkpoint, project base/HEAD, local credential subject/generation, accounting
+ceiling, and node policy, then signs the final placement admission without
+releasing a process. The source atomically terminalizes its placement and
+creates one remote continuation under the same `chain_root_id`; only then may
+the target adopt that chain head, conditionally install state, attach its held
+process identities, and release the new placement.
+
+The continuation event binds `origin_site_id`, source and target sites, source
+and successor placement threads, both signed chain heads, checkpoint and
+placement attestations, project rebind, accounting settlement, and any retained
+follow-delivery reservation. Source and target durable jobs recover their own
+side of every crash gap. A failed pre-commit transfer leaves the source current;
+after the continuation commit the source cannot reactivate and target recovery
+owns completion. Routing follows the signed current chain head, so a stale
+placement thread or boot epoch cannot accept commands.
+
+This federation contract needs no global session registry, shared filesystem,
+identical app-root paths, host-local node-instance ID, scheduler, or transparent
+migration layer. Each app root remains one complete node; authenticated RyeOS
+site/node identities and signed chain placement are the cross-node boundary.
 
 ## Generic session client
 
@@ -206,6 +278,25 @@ Reserved I/O boundaries are `daemon_reserved_io`; observed responses are
 `filesystem_verified`; publication is `owner_authorized`. Upstream account-plan
 metadata is testimony, not entitlement proof.
 
+For a followed worker moved away from its graph parent, the parent site signs a
+reservation before the first transfer. It binds the exact parent chain/head,
+follow waiter and successor, child item/specification, initial child thread,
+stable child chain root, owner, and parent node/site. Every later placement
+retains that same attestation; an intermediate source cannot replace it.
+
+When the followed child terminalizes on another site, that site signs the exact
+terminal chain head, event, status, complete managed terminal envelope, and
+reservation hash. A target-owned retryable sync job delivers the attestation
+through exact-scope authenticated node transport to the original parent site.
+The parent fetches and stages the complete target closure, verifies it is an extension of
+its retained pre-handoff child head, rechecks the signed reservation against the
+live waiter and parent chain ancestry, appends one idempotent delivery fact to
+the dormant successor, and then uses the existing follow-resume path. Startup
+reconstructs a missing target delivery job from the authoritative terminal
+chain, and both parent and target jobs make fact-before-projection and
+projection-before-kick crash gaps retryable. A handoff back to the parent site
+uses ordinary local follow settlement instead of a remote delivery.
+
 ## Credentials and recovery
 
 RyeOS owns an opaque mode-0700 profile home and generation/operation lock.
@@ -309,7 +400,8 @@ event; candidate exposure is permitted only after workspace closure.
 
 This substrate release does not provide hostile multi-principal containment,
 provider-only egress, per-worker descendant quotas, worker pooling, invocation
-leasing, cross-session reset, federation, or RyeOS local inference.
+leasing, cross-session reset, a scheduler, live migration, simultaneous active
+placements, a workload-native remote-client gateway, or RyeOS local inference.
 
 See also `knowledge:ryeos/core/kinds/worker` for the generic authored worker
 kind.

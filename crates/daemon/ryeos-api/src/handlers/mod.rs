@@ -37,6 +37,7 @@ pub mod external_content_bind;
 pub mod external_content_import;
 pub mod external_content_release;
 pub mod external_content_scrub;
+pub mod federated_follow;
 pub mod federation_capabilities;
 pub mod federation_heads_list;
 pub mod health_status;
@@ -123,6 +124,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     admission_attestations_for_subject::DESCRIPTOR,
     federation_capabilities::DESCRIPTOR,
     federation_heads_list::DESCRIPTOR,
+    federated_follow::DESCRIPTOR,
     health_status::DESCRIPTOR,
     identity_public_key::DESCRIPTOR,
     node_status::DESCRIPTOR,

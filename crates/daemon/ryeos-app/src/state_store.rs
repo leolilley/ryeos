@@ -3139,6 +3139,75 @@ pub struct RemoteAdoptionPublication {
     pub target_runtime_seed_hash: String,
 }
 
+fn retained_remote_follow_reservation(
+    state_authority: &ryeos_state::PinnedStateAuthority,
+    inner: &Inner,
+    chain_root_id: &str,
+) -> Result<
+    Option<(
+        String,
+        ryeos_state::objects::Attestation,
+        crate::federated_follow::RemoteFollowReservationEvidence,
+    )>,
+> {
+    let cas = state_authority.cas_store()?;
+    let mut cursor = chain_root_id.to_owned();
+    let mut visited = HashSet::new();
+    let mut retained = None;
+    for _ in 0..1024 {
+        if !visited.insert(cursor.clone()) {
+            bail!("remote follow reservation lineage contains a cycle");
+        }
+        let Some(readback) = inner
+            .state_db
+            .read_authoritative_thread_snapshot_with_last_event(chain_root_id, &cursor)?
+        else {
+            if cursor == chain_root_id {
+                return Ok(None);
+            }
+            bail!("remote follow reservation lineage successor disappeared");
+        };
+        if let Some((_event_hash, event)) = readback.last_event
+            && event.event_type == ryeos_state::event_types::THREAD_CONTINUED
+            && let Some(value) = event.payload.get("remote_adoption")
+        {
+            let authority: ryeos_state::objects::RemoteContinuationAuthority =
+                serde_json::from_value(value.clone())
+                    .context("decode retained remote continuation authority")?;
+            authority.validate()?;
+            if let Some(hash) = authority.follow_delivery_reservation_attestation_hash {
+                if let Some((existing, _, _)) = &retained
+                    && existing != &hash
+                {
+                    bail!("remote continuation lineage changed its parent follow reservation");
+                }
+                let value = cas
+                    .get_object(&hash)?
+                    .ok_or_else(|| anyhow!("retained remote follow reservation is absent"))?;
+                if ryeos_state::objects::canonical_value_digest(&value)? != hash {
+                    bail!("retained remote follow reservation changed digest");
+                }
+                let attestation = ryeos_state::objects::Attestation::from_value(&value)?;
+                let evidence =
+                    crate::federated_follow::RemoteFollowReservationEvidence::from_attestation(
+                        &attestation,
+                    )?;
+                if evidence.child_chain_root_id != chain_root_id {
+                    bail!("retained remote follow reservation belongs to another child chain");
+                }
+                retained = Some((hash, attestation, evidence));
+            }
+        }
+        let Some(successor) =
+            queries::continuation_successor(inner.state_db.projection(), &cursor)?
+        else {
+            return Ok(retained);
+        };
+        cursor = successor;
+    }
+    bail!("remote follow reservation lineage exceeds its bounded depth")
+}
+
 fn validate_remote_adoption_runtime_seed(
     state_authority: &ryeos_state::PinnedStateAuthority,
     inner: &Inner,
@@ -3171,7 +3240,27 @@ fn validate_remote_adoption_runtime_seed(
     let preflight = crate::worker_handoff::WorkerPlacementPreflightEvidence::from_attestation(
         &preflight_attestation,
     )?;
+    if let Some(hash) = &preflight.follow_delivery_reservation_attestation_hash {
+        let reservation_value = cas
+            .get_object(hash)?
+            .ok_or_else(|| anyhow!("remote follow delivery reservation is absent"))?;
+        if ryeos_state::objects::canonical_value_digest(&reservation_value)? != *hash {
+            bail!("remote follow delivery reservation changed digest");
+        }
+        let reservation = ryeos_state::objects::Attestation::from_value(&reservation_value)?;
+        let evidence = crate::federated_follow::RemoteFollowReservationEvidence::from_attestation(
+            &reservation,
+        )?;
+        if evidence.owner_principal != preflight.owner_principal
+            || evidence.child_chain_root_id != preflight.chain_root_id
+            || evidence.child_initial_thread_id != preflight.chain_root_id
+        {
+            bail!("remote follow delivery reservation contradicts placement authority");
+        }
+    }
     if placement.preflight_id != preflight.preflight_id
+        || placement.follow_delivery_reservation_attestation_hash
+            != preflight.follow_delivery_reservation_attestation_hash
         || placement.owner_principal != preflight.owner_principal
         || placement.chain_root_id != preflight.chain_root_id
         || placement.origin_site_id != preflight.origin_site_id
@@ -3435,6 +3524,8 @@ fn validate_remote_adoption_runtime_seed(
         if remote.operation_id != placement.operation_id
             || remote.preflight_id != placement.preflight_id
             || remote.preflight_attestation_hash != placement.preflight_attestation_hash
+            || remote.follow_delivery_reservation_attestation_hash
+                != placement.follow_delivery_reservation_attestation_hash
             || remote.source_chain_head_hash != placement.source_chain_head_hash
             || remote.source_last_event_hash != placement.source_last_event_hash
             || remote.checkpoint_manifest_hash != placement.checkpoint_manifest_hash
@@ -8465,6 +8556,9 @@ impl StateStore {
                     operation_id: placement.operation_id.clone(),
                     preflight_id: placement.preflight_id.clone(),
                     preflight_attestation_hash: placement.preflight_attestation_hash.clone(),
+                    follow_delivery_reservation_attestation_hash: placement
+                        .follow_delivery_reservation_attestation_hash
+                        .clone(),
                     source_chain_head_hash: source_chain_head_hash.clone(),
                     source_last_event_hash: source_last_event_hash.clone(),
                     checkpoint_manifest_hash: placement.checkpoint_manifest_hash.clone(),
@@ -12900,6 +12994,311 @@ impl StateStore {
     pub fn clear_follow_waiter(&self, follow_key: &str) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db.clear_follow_waiter(follow_key)
+    }
+
+    /// Snapshot and sign the exact parent-side follow reservation for a child
+    /// that is about to leave this site. The waiter remains solely in the
+    /// parent node's runtime database; the returned attestation is only a
+    /// narrow terminal-delivery coordinate and grants no parent mutation.
+    pub fn prepare_remote_follow_delivery_reservation(
+        &self,
+        child_chain_root_id: &str,
+        owner_principal: &str,
+        parent_site_id: &str,
+    ) -> Result<Option<(String, ryeos_state::objects::Attestation)>> {
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let Some(waiter) = g
+            .runtime_db
+            .get_follow_waiter_by_child_chain(child_chain_root_id)?
+        else {
+            let Some((hash, attestation, evidence)) =
+                retained_remote_follow_reservation(&self.state_authority, &g, child_chain_root_id)?
+            else {
+                return Ok(None);
+            };
+            if evidence.owner_principal != owner_principal {
+                bail!("retained remote follow reservation belongs to another owner");
+            }
+            return Ok(Some((hash, attestation)));
+        };
+        if waiter.phase != runtime_db::follow_phase::WAITING {
+            bail!(
+                "followed child cannot hand off while its parent waiter is {}",
+                waiter.phase
+            );
+        }
+        let successor_thread_id = waiter
+            .parent_successor_thread_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("follow waiter has no reserved parent successor"))?;
+        let child = waiter
+            .children
+            .iter()
+            .find(|child| child.child_chain_root_id == child_chain_root_id)
+            .ok_or_else(|| anyhow!("follow waiter lost its selected child"))?;
+        if child.terminal_thread_id.is_some()
+            || child.terminal_status.is_some()
+            || child.terminal_envelope.is_some()
+        {
+            bail!("followed child already has terminal delivery evidence");
+        }
+        let parent = g
+            .state_db
+            .get_thread(&waiter.parent_thread_id)?
+            .ok_or_else(|| anyhow!("follow parent disappeared"))?;
+        let successor = g
+            .state_db
+            .get_thread(successor_thread_id)?
+            .ok_or_else(|| anyhow!("follow parent successor disappeared"))?;
+        let initial_child = g
+            .state_db
+            .get_thread(&child.child_thread_id)?
+            .ok_or_else(|| anyhow!("follow child root disappeared"))?;
+        if parent.chain_root_id != waiter.parent_chain_root_id
+            || parent.status != ThreadStatus::Continued.as_str()
+            || parent.requested_by.as_deref() != Some(owner_principal)
+            || successor.chain_root_id != waiter.parent_chain_root_id
+            || successor.upstream_thread_id.as_deref() != Some(waiter.parent_thread_id.as_str())
+            || successor.requested_by.as_deref() != Some(owner_principal)
+            || initial_child.chain_root_id != child_chain_root_id
+            || initial_child.thread_id != child.child_thread_id
+            || initial_child.requested_by.as_deref() != Some(owner_principal)
+            || initial_child.current_site_id != parent_site_id
+            || queries::continuation_successor(g.state_db.projection(), successor_thread_id)?
+                .is_some()
+            || !matches!(
+                queries::continuation_edge(
+                    g.state_db.projection(),
+                    &waiter.parent_thread_id,
+                )?,
+                Some((ref successor, Some(ref reason), _))
+                    if successor == successor_thread_id
+                        && reason == queries::ContinuationReasonMarker::GraphFollowResume.as_str()
+            )
+            || !queries::thread_edge_exists(
+                g.state_db.projection(),
+                &waiter.parent_thread_id,
+                &child.child_thread_id,
+            )?
+        {
+            bail!("follow delivery reservation contradicts authoritative parent/child lineage");
+        }
+        let parent_head = g
+            .state_db
+            .read_generic_head_ref("chains", &waiter.parent_chain_root_id)?
+            .ok_or_else(|| anyhow!("follow parent chain head disappeared"))?;
+        if parent_head.signer != g.signer.fingerprint() {
+            bail!("follow parent chain head is not owned by this node");
+        }
+        let evidence = crate::federated_follow::RemoteFollowReservationEvidence::new(
+            owner_principal.to_owned(),
+            parent_site_id.to_owned(),
+            g.signer.fingerprint().to_owned(),
+            waiter.parent_chain_root_id,
+            parent_head.target_hash,
+            waiter.parent_thread_id,
+            successor_thread_id.to_owned(),
+            waiter.follow_key,
+            child.item_index,
+            child.item_ref.clone(),
+            child.spec_hash.clone(),
+            child.child_thread_id.clone(),
+            child.child_chain_root_id.clone(),
+        )?;
+        let attestation = evidence.sign_attestation(g.signer.as_ref())?;
+        self.state_authority.ensure_guard(permit.cas_guard())?;
+        let value = attestation.to_value();
+        let hash = self.state_authority.cas_store()?.store_object(&value)?;
+        if hash != ryeos_state::objects::canonical_value_digest(&value)? {
+            bail!("stored follow reservation digest changed");
+        }
+        Ok(Some((hash, attestation)))
+    }
+
+    /// Retain one target-signed terminal receipt and a durable delivery job
+    /// when a remotely placed followed child reaches its authoritative tip.
+    /// The parent waiter is never copied here; the source-signed reservation
+    /// is the exact, narrow address to which the receipt may later be applied.
+    pub fn reserve_remote_follow_terminal_delivery(
+        &self,
+        child_chain_root_id: &str,
+        child_terminal_thread_id: &str,
+        child_terminal_status: &str,
+        terminal_envelope: &Value,
+    ) -> Result<Option<String>> {
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let Some((reservation_hash, _reservation_attestation, reservation)) =
+            retained_remote_follow_reservation(&self.state_authority, &g, child_chain_root_id)?
+        else {
+            return Ok(None);
+        };
+        let readback = g
+            .state_db
+            .read_authoritative_thread_snapshot_with_last_event(
+                child_chain_root_id,
+                child_terminal_thread_id,
+            )?
+            .ok_or_else(|| anyhow!("remote followed child terminal disappeared"))?;
+        let terminal = readback.snapshot;
+        let (target_last_event_hash, _) = readback
+            .last_event
+            .ok_or_else(|| anyhow!("remote followed child terminal has no last event"))?;
+        let status = ThreadStatus::from_str_lossy(child_terminal_status)
+            .ok_or_else(|| anyhow!("remote followed child has an unknown terminal status"))?;
+        if !status.is_terminal()
+            || status == ThreadStatus::Continued
+            || terminal.status != status
+            || terminal.thread_id != child_terminal_thread_id
+            || terminal.chain_root_id != child_chain_root_id
+            || terminal.requested_by.as_deref() != Some(reservation.owner_principal.as_str())
+            || terminal.current_site_id == reservation.parent_site_id
+            || queries::continuation_successor(g.state_db.projection(), child_terminal_thread_id)?
+                .is_some()
+        {
+            bail!("remote follow terminal contradicts the authoritative child-chain tip");
+        }
+        let decoded =
+            ryeos_runtime::envelope::decode_managed_runtime_terminal_envelope(terminal_envelope)
+                .map_err(anyhow::Error::msg)
+                .context("decode remote follow terminal envelope")?;
+        if decoded.child_thread_id != child_terminal_thread_id
+            || decoded.status.as_str() != child_terminal_status
+        {
+            bail!("remote follow terminal envelope contradicts its authoritative settlement");
+        }
+        let target_head = g
+            .state_db
+            .read_generic_head_ref("chains", child_chain_root_id)?
+            .ok_or_else(|| anyhow!("remote followed child chain head disappeared"))?;
+        if target_head.signer != g.signer.fingerprint() {
+            bail!("remote followed child terminal head is not owned by this node");
+        }
+        let evidence = crate::federated_follow::RemoteFollowTerminalEvidence::new(
+            reservation_hash.clone(),
+            child_chain_root_id.to_owned(),
+            child_terminal_thread_id.to_owned(),
+            child_terminal_status.to_owned(),
+            terminal.current_site_id.clone(),
+            g.signer.fingerprint().to_owned(),
+            target_head.target_hash.clone(),
+            target_last_event_hash,
+            terminal_envelope.clone(),
+        )?;
+        let operation = crate::federated_follow::RemoteFollowDeliveryJobOperation::new(
+            crate::federated_follow::RemoteFollowDeliveryJobRole::Target,
+            evidence.operation_id.clone(),
+            reservation_hash.clone(),
+            reservation.owner_principal.clone(),
+            child_chain_root_id.to_owned(),
+            reservation.parent_site_id.clone(),
+            terminal.current_site_id.clone(),
+        )?;
+        let job_id = format!("remote-follow-terminal-target:{}", evidence.operation_id);
+        if let Some(existing) = g.state_db.get_sync_job(&job_id)? {
+            if existing.operation_type != crate::federated_follow::REMOTE_FOLLOW_DELIVERY_OPERATION
+                || existing.operation != operation.to_value()?
+                || existing.heads != vec![target_head.target_hash]
+            {
+                bail!("remote follow terminal job identity is already bound to another delivery");
+            }
+            return Ok(Some(job_id));
+        }
+
+        let attestation = evidence.sign_attestation(g.signer.as_ref())?;
+        let attestation_value = attestation.to_value();
+        let attestation_hash = ryeos_state::objects::canonical_value_digest(&attestation_value)?;
+        let request = crate::federated_follow::RemoteFollowTerminalDeliveryRequest {
+            operation_id: evidence.operation_id.clone(),
+            reservation_attestation_hash: reservation_hash.clone(),
+            terminal_attestation_hash: attestation_hash.clone(),
+            child_chain_root_id: child_chain_root_id.to_owned(),
+            target_chain_head_hash: target_head.target_hash.clone(),
+            parent_site_id: reservation.parent_site_id.clone(),
+            target_site_id: terminal.current_site_id,
+        };
+        request.validate()?;
+        self.state_authority.ensure_guard(permit.cas_guard())?;
+        let stored = self
+            .state_authority
+            .cas_store()?
+            .put_object(&attestation_value)?;
+        if stored.hash != attestation_hash {
+            bail!("stored remote follow terminal receipt digest changed");
+        }
+        g.state_db
+            .record_cas_entry(&ryeos_state::NewCasEntryAttribution {
+                hash: attestation_hash.clone(),
+                entry_kind: ryeos_state::CasEntryKind::Object,
+                bytes: u64::try_from(lillux::canonical_json(&attestation_value)?.len())?,
+                source_principal: Some(format!("fp:{}", g.signer.fingerprint())),
+                source_peer: None,
+                job_id: Some(job_id.clone()),
+                state: ryeos_state::CasEntryState::Local,
+            })?;
+        g.state_db.create_sync_job(&ryeos_state::NewSyncJob {
+            job_id: job_id.clone(),
+            operation_type: crate::federated_follow::REMOTE_FOLLOW_DELIVERY_OPERATION.to_owned(),
+            operation: operation.to_value()?,
+            peer: Some(reservation.parent_site_id),
+            roots: vec![
+                reservation_hash,
+                attestation_hash,
+                target_head.target_hash.clone(),
+            ],
+            heads: vec![target_head.target_hash],
+            max_attempts: 16,
+        })?;
+        g.state_db.update_sync_job(
+            &job_id,
+            &ryeos_state::SyncJobUpdate {
+                state: ryeos_state::SyncJobState::Retryable,
+                phase: "delivery_pending".to_owned(),
+                roots: None,
+                heads: None,
+                uploaded_hashes: Vec::new(),
+                fetched_hashes: Vec::new(),
+                last_error: None,
+                result: Some(serde_json::to_value(request)?),
+            },
+        )?;
+        Ok(Some(job_id))
+    }
+
+    /// Startup-only reconstruction candidates for the crash gap after an
+    /// authoritative terminal append and before its remote delivery job was
+    /// retained. The returned set is derived from complete projection state;
+    /// callers reconstruct the canonical envelope from the signed snapshot and
+    /// re-enter `reserve_remote_follow_terminal_delivery` idempotently.
+    pub fn remote_follow_terminal_recovery_candidates(
+        &self,
+    ) -> Result<Vec<(String, String, String)>> {
+        let g = self.lock()?;
+        let rows = queries::list_threads_by_status(
+            g.state_db.projection(),
+            &["completed", "failed", "cancelled", "killed", "timed_out"],
+        )?;
+        let mut candidates = Vec::new();
+        for row in rows {
+            if queries::continuation_successor(g.state_db.projection(), &row.thread_id)?.is_some() {
+                continue;
+            }
+            let Some((_hash, _attestation, reservation)) =
+                retained_remote_follow_reservation(&self.state_authority, &g, &row.chain_root_id)?
+            else {
+                continue;
+            };
+            if row.current_site_id == reservation.parent_site_id {
+                // A child may hand back to the original parent site before it
+                // terminalizes. Its reservation remains in the portable
+                // continuation history, but ordinary local follow recovery
+                // owns settlement there; it is not a remote-delivery gap.
+                continue;
+            }
+            candidates.push((row.chain_root_id, row.thread_id, row.status));
+        }
+        Ok(candidates)
     }
 
     /// Append the portable parent→child spawn edge exactly once. The write

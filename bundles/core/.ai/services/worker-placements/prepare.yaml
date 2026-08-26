@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-26T15:16:44Z:6e04d380b9742dfe24a7538010813aa31e837137851955a49e275ff9858bfa6e:jpzaN8kXFZtM88b+R8+O9en1nh/0zbXEPs/DAtNwWII+cpdtxOMAsvDp7osxlOWAbdJpySdRv+2nYeJZYP0iCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-26T16:27:42Z:a608e02013972e519083c3cb567cd369d9de5c9e8d644a2dfaa3889460d3fa0d:uIw8s4Zic7RPkImq9jB3X0w0D8bP8RuMxmrwfORmMIqAO+T6OQKMLrLDrdlbci95KpVuniORDj8lqhWYtB44CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: worker-placements.prepare
 required_caps: ["ryeos.execute.service.worker-placements/prepare"]
@@ -14,5 +14,6 @@ schema:
   target_project_path: string
   project_route_digest: string
   target_credential_profile_id: string
+  follow_delivery_reservation_attestation_hash: string?
   source_accounting_frontier: object?
 description: Finally admit one exact target-local placement under its completed non-final preflight.

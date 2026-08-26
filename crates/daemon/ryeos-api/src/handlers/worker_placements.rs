@@ -1,4 +1,4 @@
-//! Configured-operator internal services for cross-site worker placement.
+//! Node-authenticated internal services for cross-site worker placement.
 //!
 //! These handlers are provider-neutral. They consume a typed portable worker
 //! checkpoint and signed workload-program data, then reuse normal launch,
@@ -31,6 +31,35 @@ use ryeos_app::worker_handoff::{
 use ryeos_executor::executor::ServiceAvailability;
 
 const MAX_HANDOFF_CLOSURE_BYTES: u64 = 48 * 1024 * 1024;
+
+fn authenticated_remote_node_site(ctx: &HandlerContext) -> Result<&str, HandlerError> {
+    if !ctx.verified
+        || ctx.authorized_key_class
+            != Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode)
+    {
+        return Err(HandlerError::Forbidden(
+            "authenticated source-node authority required".into(),
+        ));
+    }
+    ctx.authenticated_origin_site_id
+        .as_deref()
+        .ok_or_else(|| HandlerError::Forbidden("authenticated source site required".into()))
+}
+
+fn require_authenticated_source_node(
+    ctx: &HandlerContext,
+    expected_site_id: &str,
+    expected_principal: &str,
+) -> Result<(), HandlerError> {
+    if authenticated_remote_node_site(ctx)? != expected_site_id
+        || ctx.fingerprint != expected_principal
+    {
+        return Err(HandlerError::Forbidden(
+            "authenticated source-node authority required".into(),
+        ));
+    }
+    Ok(())
+}
 
 fn target_handoff_operation_lock(job_id: &str) -> Arc<tokio::sync::Mutex<()>> {
     static LOCKS: OnceLock<std::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
@@ -70,21 +99,8 @@ pub async fn preflight(
 ) -> Result<Value, HandlerError> {
     req.validate()
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    let owner = ryeos_app::operator_external_content::require_configured_operator(&state, &ctx)
-        .map(|fingerprint| format!("fp:{fingerprint}"))
-        .map_err(|_| HandlerError::Forbidden("configured operator required".into()))?;
-    if ctx.fingerprint != owner {
-        return Err(HandlerError::Forbidden(
-            "configured operator identity changed".into(),
-        ));
-    }
-    let authenticated_source_site = ctx
-        .authenticated_origin_site_id
-        .as_deref()
-        .ok_or_else(|| HandlerError::Forbidden("source-node forwarding proof required".into()))?;
-    if authenticated_source_site != req.source_site_id
-        || req.target_site_id != state.threads.site_id()
-    {
+    let owner = req.owner_principal.clone();
+    if req.target_site_id != state.threads.site_id() {
         return Err(HandlerError::Forbidden(
             "worker placement preflight differs from authenticated sites".into(),
         ));
@@ -93,33 +109,22 @@ pub async fn preflight(
     let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
     let source_remote = config::resolve_remote_by_site_id(&remotes, &req.source_site_id)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    let source_key = source_remote
-        .remote
-        .pinned_signing_key()
-        .map_err(internal)?;
-    let source_signer = source_remote
-        .remote
-        .principal_id
-        .strip_prefix("fp:")
-        .ok_or_else(|| internal("configured source principal is not a fingerprint"))?;
-    let source_client =
-        RemoteClient::from_remote_cfg_as_configured_operator(&state, &source_remote.remote, &ctx)
-            .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
-    let source_head = source_client
-        .federation_chain_head(&req.chain_root_id, source_signer, &source_key)
-        .await
-        .map_err(|error| internal(format!("read source preflight chain head: {error:#}")))?;
-    if source_head.target_hash != req.source_chain_head_hash {
-        return Err(HandlerError::BadRequest(
-            "source chain head changed before target preflight".into(),
-        ));
+    require_authenticated_source_node(
+        &ctx,
+        &req.source_site_id,
+        &source_remote.remote.principal_id,
+    )?;
+    let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote);
+    let mut preflight_roots = vec![
+        req.source_chain_head_hash.clone(),
+        req.source_launch_capsule_hash.clone(),
+    ];
+    if let Some(hash) = &req.follow_delivery_reservation_attestation_hash {
+        preflight_roots.push(hash.clone());
     }
     let closure = source_client
         .objects_closure_get(
-            &[
-                req.source_chain_head_hash.clone(),
-                req.source_launch_capsule_hash.clone(),
-            ],
+            &preflight_roots,
             ObjectsClosureRequestOptions {
                 max_objects: Some(16_384),
                 max_blobs: Some(16_384),
@@ -134,6 +139,61 @@ pub async fn preflight(
         )
         .await
         .map_err(|error| internal(format!("fetch source preflight closure: {error:#}")))?;
+    if let Some(hash) = &req.follow_delivery_reservation_attestation_hash {
+        let value = closure
+            .entries
+            .iter()
+            .find(|entry| entry.kind == "object" && &entry.hash == hash)
+            .and_then(|entry| entry.value.clone())
+            .ok_or_else(|| internal("source closure omitted its follow delivery reservation"))?;
+        let attestation = ryeos_state::objects::Attestation::from_value(&value)
+            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        if ryeos_state::objects::canonical_value_digest(&value).map_err(internal)? != *hash {
+            return Err(HandlerError::BadRequest(
+                "follow delivery reservation changed digest".into(),
+            ));
+        }
+        let reservation =
+            ryeos_app::federated_follow::RemoteFollowReservationEvidence::from_attestation(
+                &attestation,
+            )
+            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        let (parent_key, parent_signer) = if reservation.parent_site_id == state.threads.site_id() {
+            validate_returned_follow_reservation(&state, &reservation, &owner)
+                .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            (
+                *state.identity.verifying_key(),
+                state.identity.fingerprint().to_owned(),
+            )
+        } else {
+            let parent_remote =
+                config::resolve_remote_by_site_id(&remotes, &reservation.parent_site_id)
+                    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            let parent_key = parent_remote
+                .remote
+                .pinned_signing_key()
+                .map_err(internal)?;
+            let parent_signer = parent_remote
+                .remote
+                .principal_id
+                .strip_prefix("fp:")
+                .ok_or_else(|| internal("configured follow-parent principal is not a fingerprint"))?
+                .to_owned();
+            (parent_key, parent_signer)
+        };
+        attestation
+            .verify_with_key(&parent_key)
+            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        if reservation.owner_principal != owner
+            || reservation.parent_node_signer_fingerprint != parent_signer
+            || reservation.child_chain_root_id != req.chain_root_id
+            || reservation.child_initial_thread_id != req.chain_root_id
+        {
+            return Err(HandlerError::BadRequest(
+                "follow delivery reservation differs from the proposed child placement".into(),
+            ));
+        }
+    }
     let mut payload = import::closure_response_to_export_payload(
         &req.chain_root_id,
         &req.source_chain_head_hash,
@@ -171,7 +231,6 @@ pub async fn preflight(
     }
     let operation = WorkerPlacementPreflightJobOperation::from_request(
         WorkerHandoffJobRole::Target,
-        owner.clone(),
         source_remote.config_key.clone(),
         &req,
     )
@@ -192,11 +251,17 @@ pub async fn preflight(
                 operation_type: WORKER_SESSION_HANDOFF_PREFLIGHT_OPERATION.to_owned(),
                 operation: operation.to_value().map_err(internal)?,
                 peer: Some(source_remote.config_key.clone()),
-                roots: vec![
-                    req.source_chain_head_hash.clone(),
-                    req.source_launch_capsule_hash.clone(),
-                    req.source_launch_metadata_blob_hash.clone(),
-                ],
+                roots: {
+                    let mut roots = vec![
+                        req.source_chain_head_hash.clone(),
+                        req.source_launch_capsule_hash.clone(),
+                        req.source_launch_metadata_blob_hash.clone(),
+                    ];
+                    if let Some(hash) = &req.follow_delivery_reservation_attestation_hash {
+                        roots.push(hash.clone());
+                    }
+                    roots
+                },
                 heads: vec![req.source_chain_head_hash.clone()],
                 max_attempts: 4,
             },
@@ -215,7 +280,7 @@ pub async fn preflight(
     }
 
     let source = load_source_preflight_operands(&state, &req).map_err(internal)?;
-    let response = preflight_after_staging(&state, &req, &owner, &source)
+    let response = preflight_after_staging(&state, &req, &source)
         .await
         .map_err(|error| HandlerError::BadRequest(format!("target preflight failed: {error:#}")))?;
     let result = serde_json::to_value(&response).map_err(internal)?;
@@ -229,6 +294,72 @@ pub async fn preflight(
     Ok(result)
 }
 
+fn validate_returned_follow_reservation(
+    state: &AppState,
+    reservation: &ryeos_app::federated_follow::RemoteFollowReservationEvidence,
+    owner: &str,
+) -> Result<()> {
+    let parent_head = state
+        .state_store
+        .with_state_db(|db| db.read_generic_head_ref("chains", &reservation.parent_chain_root_id))?
+        .context("return target follow parent head disappeared")?;
+    if parent_head.signer != state.identity.fingerprint() {
+        bail!("return target follow parent is not locally owned");
+    }
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    ryeos_state::sync::verify_chain_closure_anchored_pinned(
+        &authority.cas_store()?,
+        &reservation.parent_chain_root_id,
+        &parent_head.target_hash,
+        &reservation.parent_chain_head_hash,
+    )?;
+    drop(guard);
+    let waiter = state
+        .state_store
+        .get_follow_waiter_by_child_chain(&reservation.child_chain_root_id)?
+        .context("return target has no live parent follow waiter")?;
+    let child = waiter
+        .children
+        .iter()
+        .find(|child| child.child_chain_root_id == reservation.child_chain_root_id)
+        .context("return target parent waiter lost its selected child")?;
+    let parent = state
+        .state_store
+        .get_thread(&reservation.parent_thread_id)?
+        .context("return target follow parent disappeared")?;
+    let successor = state
+        .state_store
+        .get_thread(&reservation.parent_successor_thread_id)?
+        .context("return target follow successor disappeared")?;
+    if reservation.owner_principal != owner
+        || waiter.phase != ryeos_app::runtime_db::follow_phase::WAITING
+        || waiter.follow_key != reservation.follow_key
+        || waiter.parent_thread_id != reservation.parent_thread_id
+        || waiter.parent_chain_root_id != reservation.parent_chain_root_id
+        || waiter.parent_successor_thread_id.as_deref()
+            != Some(reservation.parent_successor_thread_id.as_str())
+        || child.item_index != reservation.child_item_index
+        || child.item_ref != reservation.child_item_ref
+        || child.spec_hash != reservation.child_spec_hash
+        || child.child_thread_id != reservation.child_initial_thread_id
+        || child.child_chain_root_id != reservation.child_chain_root_id
+        || child.terminal_thread_id.is_some()
+        || child.terminal_status.is_some()
+        || child.terminal_envelope.is_some()
+        || parent.chain_root_id != reservation.parent_chain_root_id
+        || parent.status != ryeos_state::objects::ThreadStatus::Continued.as_str()
+        || parent.requested_by.as_deref() != Some(owner)
+        || successor.chain_root_id != reservation.parent_chain_root_id
+        || successor.upstream_thread_id.as_deref() != Some(reservation.parent_thread_id.as_str())
+        || successor.status != ryeos_state::objects::ThreadStatus::Created.as_str()
+        || successor.requested_by.as_deref() != Some(owner)
+    {
+        bail!("returned child differs from its local parent follow reservation");
+    }
+    Ok(())
+}
+
 pub async fn prepare(
     req: WorkerPlacementPrepareRequest,
     ctx: HandlerContext,
@@ -236,29 +367,20 @@ pub async fn prepare(
 ) -> Result<Value, HandlerError> {
     req.validate()
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    let owner = ryeos_app::operator_external_content::require_configured_operator(&state, &ctx)
-        .map(|fingerprint| format!("fp:{fingerprint}"))
-        .map_err(|_| HandlerError::Forbidden("configured operator required".into()))?;
-    if ctx.fingerprint != owner {
-        return Err(HandlerError::Forbidden(
-            "configured operator identity changed".into(),
-        ));
-    }
-    let authenticated_source_site = ctx
-        .authenticated_origin_site_id
-        .as_deref()
-        .ok_or_else(|| HandlerError::Forbidden("source-node forwarding proof required".into()))?;
-    if authenticated_source_site != req.source_site_id {
-        return Err(HandlerError::Forbidden(
-            "placement source site differs from authenticated forwarding origin".into(),
-        ));
-    }
     let target_site_id = state.threads.site_id();
     if req.target_site_id != target_site_id {
         return Err(HandlerError::BadRequest(
             "placement request targets another site".into(),
         ));
     }
+    let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
+    let source_remote = config::resolve_remote_by_site_id(&remotes, &req.source_site_id)
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    require_authenticated_source_node(
+        &ctx,
+        &req.source_site_id,
+        &source_remote.remote.principal_id,
+    )?;
     let preflight_job_id = target_preflight_job_id(&req.preflight_id);
     let preflight_job = state
         .state_store
@@ -273,6 +395,7 @@ pub async fn prepare(
     let preflight_operation =
         WorkerPlacementPreflightJobOperation::from_value(preflight_job.operation.clone())
             .map_err(internal)?;
+    let owner = preflight_operation.owner_principal.clone();
     let preflight_response: WorkerPlacementPreflightResponse = serde_json::from_value(
         preflight_job
             .result
@@ -297,6 +420,8 @@ pub async fn prepare(
         || preflight_operation.target_project_path != req.target_project_path
         || preflight_operation.project_route_digest != req.project_route_digest
         || preflight_operation.target_credential_profile_id != req.target_credential_profile_id
+        || preflight_operation.follow_delivery_reservation_attestation_hash
+            != req.follow_delivery_reservation_attestation_hash
         || preflight_response.preflight_attestation_hash != req.preflight_attestation_hash
         || preflight_response.preflight_attestation_hash
             != ryeos_state::objects::canonical_value_digest(
@@ -304,41 +429,23 @@ pub async fn prepare(
             )
             .map_err(internal)?
         || preflight_evidence.preflight_id != req.preflight_id
+        || preflight_evidence.follow_delivery_reservation_attestation_hash
+            != req.follow_delivery_reservation_attestation_hash
     {
         return Err(HandlerError::BadRequest(
             "final placement request differs from its target preflight".into(),
         ));
     }
 
-    let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
-    let source_remote = config::resolve_remote_by_site_id(&remotes, &req.source_site_id)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    let source_key = source_remote
-        .remote
-        .pinned_signing_key()
-        .map_err(internal)?;
-    let source_signer = source_remote
-        .remote
-        .principal_id
-        .strip_prefix("fp:")
-        .ok_or_else(|| internal("configured source principal is not a fingerprint"))?;
-    let source_client =
-        RemoteClient::from_remote_cfg_as_configured_operator(&state, &source_remote.remote, &ctx)
-            .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
-    let source_head = source_client
-        .federation_chain_head(&req.chain_root_id, source_signer, &source_key)
-        .await
-        .map_err(|error| internal(format!("read source chain head: {error:#}")))?;
-    if source_head.target_hash != req.source_chain_head_hash {
-        return Err(HandlerError::BadRequest(
-            "source chain head changed before target preparation".into(),
-        ));
-    }
-    let roots = vec![
+    let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote);
+    let mut roots = vec![
         req.source_chain_head_hash.clone(),
         req.transfer_manifest_hash.clone(),
         req.preflight_attestation_hash.clone(),
     ];
+    if let Some(hash) = &req.follow_delivery_reservation_attestation_hash {
+        roots.push(hash.clone());
+    }
     let closure = source_client
         .objects_closure_get(
             &roots,
@@ -400,6 +507,7 @@ pub async fn prepare(
         target_project_path.display().to_string(),
         req.project_route_digest.clone(),
         req.target_credential_profile_id.clone(),
+        req.follow_delivery_reservation_attestation_hash.clone(),
     )
     .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     let job_id = target_job_id(&req.operation_id);
@@ -491,19 +599,28 @@ pub async fn adopt(
 ) -> Result<Value, HandlerError> {
     req.validate()
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    let owner = ryeos_app::operator_external_content::require_configured_operator(&state, &ctx)
-        .map(|fingerprint| format!("fp:{fingerprint}"))
-        .map_err(|_| HandlerError::Forbidden("configured operator required".into()))?;
-    if ctx.fingerprint != owner {
-        return Err(HandlerError::Forbidden(
-            "configured operator identity changed".into(),
-        ));
-    }
-    let source_site_id = ctx
-        .authenticated_origin_site_id
-        .clone()
-        .ok_or_else(|| HandlerError::Forbidden("source-node forwarding proof required".into()))?;
-    adopt_authorized(req, owner, source_site_id, Some(&ctx), state).await
+    let job = state
+        .state_store
+        .with_state_db(|db| db.get_sync_job(&target_job_id(&req.operation_id)))
+        .map_err(internal)?
+        .ok_or_else(|| HandlerError::BadRequest("target placement job does not exist".into()))?;
+    let operation = WorkerSessionHandoffJobOperation::from_value(job.operation)
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
+    let source_remote = config::resolve_remote_by_site_id(&remotes, &operation.source_site_id)
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    require_authenticated_source_node(
+        &ctx,
+        &operation.source_site_id,
+        &source_remote.remote.principal_id,
+    )?;
+    adopt_authorized(
+        req,
+        operation.owner_principal,
+        operation.source_site_id,
+        state,
+    )
+    .await
 }
 
 pub async fn abort(
@@ -513,18 +630,15 @@ pub async fn abort(
 ) -> Result<Value, HandlerError> {
     req.validate()
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    let owner = ryeos_app::operator_external_content::require_configured_operator(&state, &ctx)
-        .map(|fingerprint| format!("fp:{fingerprint}"))
-        .map_err(|_| HandlerError::Forbidden("configured operator required".into()))?;
-    if ctx.fingerprint != owner {
-        return Err(HandlerError::Forbidden(
-            "configured operator identity changed".into(),
-        ));
-    }
-    let source_site_id = ctx
-        .authenticated_origin_site_id
-        .as_deref()
-        .ok_or_else(|| HandlerError::Forbidden("source-node forwarding proof required".into()))?;
+    let authenticated_source_site = authenticated_remote_node_site(&ctx)?.to_owned();
+    let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
+    let source_remote = config::resolve_remote_by_site_id(&remotes, &authenticated_source_site)
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    require_authenticated_source_node(
+        &ctx,
+        &authenticated_source_site,
+        &source_remote.remote.principal_id,
+    )?;
     let job_id = target_job_id(&req.operation_id);
     let _operation_guard = target_handoff_operation_lock(&job_id).lock_owned().await;
     let Some(job) = state
@@ -544,9 +658,8 @@ pub async fn abort(
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     if operation.role != WorkerHandoffJobRole::Target
         || operation.operation_id != req.operation_id
-        || operation.owner_principal != owner
         || operation.chain_root_id != req.chain_root_id
-        || operation.source_site_id != source_site_id
+        || operation.source_site_id != authenticated_source_site
         || operation.target_site_id != state.threads.site_id()
     {
         return Err(HandlerError::Forbidden(
@@ -585,30 +698,7 @@ pub async fn abort(
         ));
     }
 
-    let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
-    let source_remote = config::resolve_remote_by_site_id(&remotes, source_site_id)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    let source_key = source_remote
-        .remote
-        .pinned_signing_key()
-        .map_err(internal)?;
-    let source_signer = source_remote
-        .remote
-        .principal_id
-        .strip_prefix("fp:")
-        .ok_or_else(|| internal("configured source principal is not a fingerprint"))?;
-    let source_client =
-        RemoteClient::from_remote_cfg_as_configured_operator(&state, &source_remote.remote, &ctx)
-            .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
-    let source_head = source_client
-        .federation_chain_head(&req.chain_root_id, source_signer, &source_key)
-        .await
-        .map_err(|error| internal(format!("read source handoff-abort head: {error:#}")))?;
-    if source_head.target_hash != req.abort_chain_head_hash {
-        return Err(HandlerError::BadRequest(
-            "source abort head is no longer authoritative".into(),
-        ));
-    }
+    let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote);
     let closure = source_client
         .objects_closure_get(
             &[req.abort_chain_head_hash.clone()],
@@ -729,7 +819,6 @@ async fn adopt_authorized(
     req: WorkerPlacementAdoptRequest,
     owner: String,
     source_site_id: String,
-    transport_ctx: Option<&HandlerContext>,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     req.validate()
@@ -831,24 +920,7 @@ async fn adopt_authorized(
         }
         payload
     } else {
-        let transport_ctx = transport_ctx.ok_or_else(|| {
-            internal("unstaged target recovery still requires authenticated source transport")
-        })?;
-        let source_client = RemoteClient::from_remote_cfg_as_configured_operator(
-            &state,
-            &source_remote.remote,
-            transport_ctx,
-        )
-        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
-        let source_head = source_client
-            .federation_chain_head(&req.chain_root_id, source_signer, &source_key)
-            .await
-            .map_err(|error| internal(format!("read committed source chain head: {error:#}")))?;
-        if source_head.target_hash != req.target_chain_head_hash {
-            return Err(HandlerError::BadRequest(
-                "source has not published the requested successor chain head".into(),
-            ));
-        }
+        let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote);
         let closure = source_client
             .objects_closure_get(
                 &[req.target_chain_head_hash.clone()],
@@ -1159,7 +1231,6 @@ pub async fn recover_durable_target_handoffs(state: &AppState) -> Result<usize> 
             request,
             operation.owner_principal.clone(),
             operation.source_site_id.clone(),
-            None,
             Arc::new(state.clone()),
         )
         .await
@@ -1599,6 +1670,8 @@ async fn prepare_after_staging(
         || preflight.target_project_path != req.target_project_path
         || preflight.project_route_digest != req.project_route_digest
         || preflight.target_credential_profile_id != req.target_credential_profile_id
+        || preflight.follow_delivery_reservation_attestation_hash
+            != req.follow_delivery_reservation_attestation_hash
         || preflight.outer_exact_program_hash != source.launch_capsule.exact_program_hash
     {
         bail!("final source placement differs from target preflight evidence");
@@ -1798,6 +1871,7 @@ async fn prepare_after_staging(
         req.operation_id.clone(),
         req.preflight_id.clone(),
         req.preflight_attestation_hash.clone(),
+        req.follow_delivery_reservation_attestation_hash.clone(),
         owner.to_owned(),
         req.chain_root_id.clone(),
         source.manifest.origin_site_id.clone(),
@@ -1880,9 +1954,9 @@ async fn prepare_after_staging(
 async fn preflight_after_staging(
     state: &Arc<AppState>,
     req: &WorkerPlacementPreflightRequest,
-    owner: &str,
     source: &SourcePreflightOperands,
 ) -> Result<WorkerPlacementPreflightResponse> {
+    let owner = req.owner_principal.as_str();
     if state
         .threads
         .get_thread(&req.successor_placement_thread_id)?
@@ -2018,7 +2092,6 @@ async fn preflight_after_staging(
         ryeos_state::objects::canonical_value_digest(&serde_json::to_value(isolation)?)?;
     let evidence = WorkerPlacementPreflightEvidence::new(
         req,
-        owner.to_owned(),
         source.launch_capsule.exact_program_hash.clone(),
         source_programs,
         target_sessions,
@@ -2557,3 +2630,55 @@ pub const ABORT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+
+    fn context(
+        class: ryeos_app::identity::AuthorizedKeyPrincipalClass,
+        fingerprint: &str,
+        site_id: Option<&str>,
+    ) -> HandlerContext {
+        HandlerContext::new_with_authority(
+            fingerprint.to_owned(),
+            Vec::new(),
+            true,
+            Some(class),
+            site_id.map(str::to_owned),
+        )
+    }
+
+    #[test]
+    fn placement_transport_requires_the_exact_configured_remote_node() {
+        let admitted = context(
+            ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode,
+            "fp:source-node",
+            Some("site:source"),
+        );
+        require_authenticated_source_node(&admitted, "site:source", "fp:source-node").unwrap();
+
+        for rejected in [
+            context(
+                ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                "fp:operator",
+                Some("site:source"),
+            ),
+            context(
+                ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode,
+                "fp:other-node",
+                Some("site:source"),
+            ),
+            context(
+                ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode,
+                "fp:source-node",
+                Some("site:other"),
+            ),
+        ] {
+            assert!(
+                require_authenticated_source_node(&rejected, "site:source", "fp:source-node")
+                    .is_err()
+            );
+        }
+    }
+}

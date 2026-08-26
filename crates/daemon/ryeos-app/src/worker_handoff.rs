@@ -27,10 +27,10 @@ pub const WORKER_PLACEMENT_PREPARE_SERVICE: &str = "service:worker-placements/pr
 pub const WORKER_PLACEMENT_ADOPT_SERVICE: &str = "service:worker-placements/adopt";
 pub const WORKER_PLACEMENT_ABORT_SERVICE: &str = "service:worker-placements/abort";
 
-const PLACEMENT_EVIDENCE_SCHEMA: &str = "ryeos.worker_placement_admission.v1";
-const PREFLIGHT_EVIDENCE_SCHEMA: &str = "ryeos.worker_placement_preflight.v1";
-const PREFLIGHT_JOB_SCHEMA: &str = "ryeos.worker_session_handoff_preflight_job.v1";
-const HANDOFF_JOB_SCHEMA: &str = "ryeos.worker_session_handoff_job.v2";
+const PLACEMENT_EVIDENCE_SCHEMA: &str = "ryeos.worker_placement_admission.v2";
+const PREFLIGHT_EVIDENCE_SCHEMA: &str = "ryeos.worker_placement_preflight.v2";
+const PREFLIGHT_JOB_SCHEMA: &str = "ryeos.worker_session_handoff_preflight_job.v2";
+const HANDOFF_JOB_SCHEMA: &str = "ryeos.worker_session_handoff_job.v3";
 const HANDOFF_PROGRESS_SCHEMA: &str = "ryeos.worker_session_handoff_progress.v1";
 
 /// Non-final target check performed while the source placement may still be
@@ -41,6 +41,7 @@ const HANDOFF_PROGRESS_SCHEMA: &str = "ryeos.worker_session_handoff_progress.v1"
 #[serde(deny_unknown_fields)]
 pub struct WorkerPlacementPreflightRequest {
     pub preflight_id: String,
+    pub owner_principal: String,
     pub chain_root_id: String,
     pub origin_site_id: String,
     pub source_site_id: String,
@@ -58,6 +59,7 @@ pub struct WorkerPlacementPreflightRequest {
     pub upstream_session_id: String,
     pub credential_subject_contract_digest: String,
     pub credential_subject_digest: String,
+    pub follow_delivery_reservation_attestation_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +103,7 @@ pub struct WorkerPlacementPreflightEvidence {
     pub upstream_session_id: String,
     pub credential_subject_contract_digest: String,
     pub credential_subject_digest: String,
+    pub follow_delivery_reservation_attestation_hash: Option<String>,
 }
 
 /// Immutable local sync-job body used to retain a preflight receipt and its
@@ -127,6 +130,7 @@ pub struct WorkerPlacementPreflightJobOperation {
     pub target_project_path: String,
     pub project_route_digest: String,
     pub target_credential_profile_id: String,
+    pub follow_delivery_reservation_attestation_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,6 +147,7 @@ pub struct WorkerPlacementPrepareRequest {
     pub target_project_path: String,
     pub project_route_digest: String,
     pub target_credential_profile_id: String,
+    pub follow_delivery_reservation_attestation_hash: Option<String>,
     pub source_accounting_frontier: Option<crate::accounting_db::AccountingHandoffFrontier>,
 }
 
@@ -259,6 +264,7 @@ pub struct WorkerSessionHandoffJobOperation {
     pub target_project_path: String,
     pub project_route_digest: String,
     pub target_credential_profile_id: String,
+    pub follow_delivery_reservation_attestation_hash: Option<String>,
 }
 
 impl WorkerSessionHandoffJobOperation {
@@ -284,6 +290,7 @@ impl WorkerSessionHandoffJobOperation {
         target_project_path: String,
         project_route_digest: String,
         target_credential_profile_id: String,
+        follow_delivery_reservation_attestation_hash: Option<String>,
     ) -> anyhow::Result<Self> {
         let operation = Self {
             schema: HANDOFF_JOB_SCHEMA.to_owned(),
@@ -308,6 +315,7 @@ impl WorkerSessionHandoffJobOperation {
             target_project_path,
             project_route_digest,
             target_credential_profile_id,
+            follow_delivery_reservation_attestation_hash,
         };
         operation.validate()?;
         Ok(operation)
@@ -339,6 +347,9 @@ impl WorkerSessionHandoffJobOperation {
             &self.preflight_attestation_hash,
         )?;
         hash("handoff project route", &self.project_route_digest)?;
+        if let Some(digest) = &self.follow_delivery_reservation_attestation_hash {
+            hash("follow delivery reservation", digest)?;
+        }
         for (label, value) in [
             ("peer remote", self.peer_remote_name.as_str()),
             ("source project path", self.source_project_path.as_str()),
@@ -503,6 +514,9 @@ impl WorkerPlacementPrepareRequest {
                 bail!("source accounting frontier belongs to another site");
             }
         }
+        if let Some(digest) = &self.follow_delivery_reservation_attestation_hash {
+            hash("follow delivery reservation", digest)?;
+        }
         Ok(())
     }
 }
@@ -533,7 +547,11 @@ impl WorkerPlacementPreflightRequest {
         ] {
             hash(label, value)?;
         }
+        if let Some(digest) = &self.follow_delivery_reservation_attestation_hash {
+            hash("follow delivery reservation", digest)?;
+        }
         for (label, value) in [
+            ("owner", self.owner_principal.as_str()),
             ("chain root", self.chain_root_id.as_str()),
             ("origin site", self.origin_site_id.as_str()),
             ("source site", self.source_site_id.as_str()),
@@ -572,7 +590,6 @@ impl WorkerPlacementPreflightEvidence {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         request: &WorkerPlacementPreflightRequest,
-        owner_principal: String,
         outer_exact_program_hash: String,
         persistent_dependency_programs: BTreeMap<String, String>,
         target_persistent_session_capsules: BTreeMap<String, String>,
@@ -585,7 +602,7 @@ impl WorkerPlacementPreflightEvidence {
             schema: PREFLIGHT_EVIDENCE_SCHEMA.to_owned(),
             operation_type: WORKER_SESSION_HANDOFF_PREFLIGHT_OPERATION.to_owned(),
             preflight_id: request.preflight_id.clone(),
-            owner_principal,
+            owner_principal: request.owner_principal.clone(),
             chain_root_id: request.chain_root_id.clone(),
             origin_site_id: request.origin_site_id.clone(),
             source_site_id: request.source_site_id.clone(),
@@ -609,6 +626,9 @@ impl WorkerPlacementPreflightEvidence {
             upstream_session_id: request.upstream_session_id.clone(),
             credential_subject_contract_digest: request.credential_subject_contract_digest.clone(),
             credential_subject_digest: request.credential_subject_digest.clone(),
+            follow_delivery_reservation_attestation_hash: request
+                .follow_delivery_reservation_attestation_hash
+                .clone(),
         };
         evidence.validate()?;
         Ok(evidence)
@@ -657,6 +677,9 @@ impl WorkerPlacementPreflightEvidence {
             ),
         ] {
             hash(label, value)?;
+        }
+        if let Some(digest) = &self.follow_delivery_reservation_attestation_hash {
+            hash("follow delivery reservation", digest)?;
         }
         for (label, value) in [
             ("owner", self.owner_principal.as_str()),
@@ -752,6 +775,7 @@ impl WorkerPlacementPreflightResponse {
             || self.preflight_attestation_hash != attestation_hash
             || self.evidence != evidence
             || evidence.preflight_id != request.preflight_id
+            || evidence.owner_principal != request.owner_principal
             || evidence.chain_root_id != request.chain_root_id
             || evidence.origin_site_id != request.origin_site_id
             || evidence.source_site_id != request.source_site_id
@@ -769,6 +793,8 @@ impl WorkerPlacementPreflightResponse {
             || evidence.credential_subject_contract_digest
                 != request.credential_subject_contract_digest
             || evidence.credential_subject_digest != request.credential_subject_digest
+            || evidence.follow_delivery_reservation_attestation_hash
+                != request.follow_delivery_reservation_attestation_hash
         {
             bail!("worker placement preflight response contradicts its request");
         }
@@ -779,7 +805,6 @@ impl WorkerPlacementPreflightResponse {
 impl WorkerPlacementPreflightJobOperation {
     pub fn from_request(
         role: WorkerHandoffJobRole,
-        owner_principal: String,
         peer_remote_name: String,
         request: &WorkerPlacementPreflightRequest,
     ) -> anyhow::Result<Self> {
@@ -789,7 +814,7 @@ impl WorkerPlacementPreflightJobOperation {
             operation_type: WORKER_SESSION_HANDOFF_PREFLIGHT_OPERATION.to_owned(),
             role,
             preflight_id: request.preflight_id.clone(),
-            owner_principal,
+            owner_principal: request.owner_principal.clone(),
             chain_root_id: request.chain_root_id.clone(),
             origin_site_id: request.origin_site_id.clone(),
             source_site_id: request.source_site_id.clone(),
@@ -804,6 +829,9 @@ impl WorkerPlacementPreflightJobOperation {
             target_project_path: request.target_project_path.clone(),
             project_route_digest: request.project_route_digest.clone(),
             target_credential_profile_id: request.target_credential_profile_id.clone(),
+            follow_delivery_reservation_attestation_hash: request
+                .follow_delivery_reservation_attestation_hash
+                .clone(),
         };
         operation.validate()?;
         Ok(operation)
@@ -855,6 +883,9 @@ impl WorkerPlacementPreflightJobOperation {
             || !std::path::Path::new(&self.target_project_path).is_absolute()
         {
             bail!("worker handoff preflight job has invalid cross-site coordinates");
+        }
+        if let Some(digest) = &self.follow_delivery_reservation_attestation_hash {
+            hash("follow delivery reservation", digest)?;
         }
         Ok(())
     }
@@ -975,6 +1006,8 @@ impl WorkerPlacementPrepareResponse {
         if self.placement.operation_id != request.operation_id
             || self.placement.preflight_id != request.preflight_id
             || self.placement.preflight_attestation_hash != request.preflight_attestation_hash
+            || self.placement.follow_delivery_reservation_attestation_hash
+                != request.follow_delivery_reservation_attestation_hash
             || self.placement.chain_root_id != request.chain_root_id
             || self.placement.source_site_id != request.source_site_id
             || self.placement.target_site_id != request.target_site_id
@@ -1080,6 +1113,7 @@ pub struct WorkerPlacementAdmissionEvidence {
     pub operation_id: String,
     pub preflight_id: String,
     pub preflight_attestation_hash: String,
+    pub follow_delivery_reservation_attestation_hash: Option<String>,
     pub owner_principal: String,
     pub chain_root_id: String,
     pub origin_site_id: String,
@@ -1109,6 +1143,7 @@ impl WorkerPlacementAdmissionEvidence {
         operation_id: String,
         preflight_id: String,
         preflight_attestation_hash: String,
+        follow_delivery_reservation_attestation_hash: Option<String>,
         owner_principal: String,
         chain_root_id: String,
         origin_site_id: String,
@@ -1135,6 +1170,7 @@ impl WorkerPlacementAdmissionEvidence {
             operation_id,
             preflight_id,
             preflight_attestation_hash,
+            follow_delivery_reservation_attestation_hash,
             owner_principal,
             chain_root_id,
             origin_site_id,
@@ -1182,6 +1218,9 @@ impl WorkerPlacementAdmissionEvidence {
             "placement preflight attestation",
             &self.preflight_attestation_hash,
         )?;
+        if let Some(digest) = &self.follow_delivery_reservation_attestation_hash {
+            hash("follow delivery reservation", digest)?;
+        }
         hash("outer exact program", &self.outer_exact_program_hash)?;
         hash(
             "target execution realization",
@@ -2143,6 +2182,7 @@ mod tests {
         let source_launch_metadata = serde_json::json!({"schema":1});
         WorkerPlacementPreflightRequest {
             preflight_id: "1".repeat(64),
+            owner_principal: "fp:owner".into(),
             chain_root_id: "T-root".into(),
             origin_site_id: "site:a".into(),
             source_site_id: "site:a".into(),
@@ -2164,6 +2204,7 @@ mod tests {
             upstream_session_id: "upstream-session".into(),
             credential_subject_contract_digest: "6".repeat(64),
             credential_subject_digest: "7".repeat(64),
+            follow_delivery_reservation_attestation_hash: None,
         }
     }
 
@@ -2172,7 +2213,6 @@ mod tests {
     ) -> WorkerPlacementPreflightEvidence {
         WorkerPlacementPreflightEvidence::new(
             request,
-            "fp:owner".into(),
             "8".repeat(64),
             BTreeMap::from([("worker".into(), "9".repeat(64))]),
             BTreeMap::from([("worker".into(), "a".repeat(64))]),
@@ -2204,6 +2244,14 @@ mod tests {
             .validate_against(&request, &target.verifying_key())
             .unwrap();
 
+        let mut wrong_owner = request.clone();
+        wrong_owner.owner_principal = "fp:other-owner".into();
+        assert!(
+            response
+                .validate_against(&wrong_owner, &target.verifying_key())
+                .is_err()
+        );
+
         response.evidence.target_credential_generation += 1;
         assert!(
             response
@@ -2217,7 +2265,6 @@ mod tests {
         let request = preflight_request();
         let operation = WorkerPlacementPreflightJobOperation::from_request(
             WorkerHandoffJobRole::Target,
-            "fp:owner".into(),
             "source-remote".into(),
             &request,
         )
@@ -2226,6 +2273,7 @@ mod tests {
             WorkerPlacementPreflightJobOperation::from_value(operation.to_value().unwrap())
                 .unwrap();
         assert_eq!(decoded, operation);
+        assert_eq!(operation.owner_principal, request.owner_principal);
         assert!(!operation.to_value().unwrap().to_string().contains("token"));
     }
 

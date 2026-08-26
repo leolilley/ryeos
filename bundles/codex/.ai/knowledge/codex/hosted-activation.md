@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-26T10:44:16Z:4c6d4af3c0e389b2186fb81cc13d3b06bcee7779b3210a78353475b4ceb2864d:svvDmRJYoz14/EYbyim+VvWPbCqh+Pu8axGw13b0w3IGVc+0mYXthv9vL9p5XchJG3sjnubVuGzHmPxsE3Q2DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-26T16:27:42Z:bb532338d2c23bcc5ec5bc94d477bf118efaa24d4b96f30f6de02e3d832bef46:jCl515x2953YDNaO2i97v0fxoQLEBsP0LvFzwS8NeFNeYA3C7c4TM+S8l1nJcUasCilGV+V4riOUQD2b4ENtCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
-version: "1.1.0"
+version: "1.2.0"
 description: >
   Activation, credential ceremony, command routes, and release acceptance for
   the pinned Codex structured-session workload.
@@ -106,6 +106,15 @@ knowledge bundle.
    source-node co-signature. A plain `local_client` grant is not acceptable,
    and ordinary remote-node grants remain node principals that cannot own this
    workflow.
+   Portable placement is a separate internal transport boundary: admit each
+   configured peer node key with only the generic closure-read,
+   worker-placement preflight/prepare/adopt/abort, and follow-terminal scopes
+   listed in `knowledge:ryeos/core/execution/worker-hosted-execution`. Do not
+   add those services to the configured-operator grant. The public handoff is
+   owner-authorized; autonomous transfer and recovery then use node-signed
+   chain, placement, continuation, and follow testimony. This lets the original
+   local operator endpoint receive a return handoff without changing its key's
+   semantic class.
 5. Open projectless login, call `credential.login.start`, finish the ephemeral
    ceremony, call `credential.account.read`, close it, and confirm the exact
    login epoch/account digest. The attached caller receives the device code;
@@ -234,6 +243,8 @@ and prove:
 - remote configured-operator acceptance only with the exact admitted
   source-node co-signature, rejection of a missing/wrong-site proof, another
   key, a plain local-client grant, and local-only operator APIs;
+- bidirectional handoff peers use exact remote-node placement/closure/follow
+  scopes, never configured-operator transport for autonomous internal jobs;
 - online delegation/admission create-only behavior, explicit stopped-daemon
   class transition in both directions, and the complete maintenance ceremony;
 - device login, confirmation, fresh-process continuity, refresh, and restart;

@@ -1909,6 +1909,17 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
             "settled sync-job attempts interrupted by the previous daemon process"
         );
     }
+    match state.threads.reconcile_remote_follow_terminal_deliveries() {
+        Ok(rebuilt) if rebuilt != 0 => tracing::warn!(
+            rebuilt,
+            "rebuilt remote follow-terminal delivery jobs from authoritative terminals"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::error!(
+            error = %error,
+            "remote follow-terminal job reconstruction failed; signed terminals remain authoritative"
+        ),
+    }
     if let Err(error) =
         ryeos_api::handlers::dedicated_sessions::recover_durable_source_handoffs(&state).await
     {
@@ -1923,6 +1934,15 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
         tracing::error!(
             error = %error,
             "initial target worker-handoff recovery failed; durable jobs remain retryable"
+        );
+    }
+    if let Err(error) =
+        ryeos_api::handlers::federated_follow::recover_durable_remote_follow_deliveries(&state)
+            .await
+    {
+        tracing::error!(
+            error = %error,
+            "initial remote follow-terminal recovery failed; durable jobs remain retryable"
         );
     }
     let shutdown = shutdown_signal();
@@ -1984,6 +2004,16 @@ async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
         tracing::info!(
             recovered_handoffs,
             "periodic recovery completed target worker handoffs"
+        );
+    }
+    let recovered_follow_deliveries =
+        ryeos_api::handlers::federated_follow::recover_durable_remote_follow_deliveries(state)
+            .await
+            .context("periodic remote follow-terminal recovery")?;
+    if recovered_follow_deliveries != 0 {
+        tracing::info!(
+            recovered_follow_deliveries,
+            "periodic recovery completed remote follow-terminal deliveries"
         );
     }
     ryeos_app::cascade::repair_cancelled_window_members(state)

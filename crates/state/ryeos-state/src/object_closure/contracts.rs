@@ -813,6 +813,14 @@ fn links_thread_event(value: &Value) -> Result<ContractLinks, String> {
         ] {
             super::push_typed_hash(hash, expected, None, &mut links.object_edges)?;
         }
+        if let Some(hash) = &remote.follow_delivery_reservation_attestation_hash {
+            super::push_typed_hash(
+                hash,
+                ExpectedObject::Kind("attestation"),
+                None,
+                &mut links.object_edges,
+            )?;
+        }
     }
     Ok(links)
 }

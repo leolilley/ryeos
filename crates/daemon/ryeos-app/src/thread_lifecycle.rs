@@ -4324,14 +4324,12 @@ impl ThreadLifecycleService {
         if terminal_status == ryeos_state::objects::ThreadStatus::Continued.as_str() {
             return;
         }
-        match self
+        let has_local_waiter = match self
             .state_store
             .get_follow_waiter_by_child_chain(chain_root_id)
         {
-            // No waiter awaits this chain — nothing to record (the common,
-            // non-follow case). No noise.
-            Ok(None) => return,
-            Ok(Some(_)) => {}
+            Ok(None) => false,
+            Ok(Some(_)) => true,
             Err(e) => {
                 tracing::warn!(
                     thread_id,
@@ -4341,7 +4339,7 @@ impl ThreadLifecycleService {
                 );
                 return;
             }
-        }
+        };
         // Only the followed child itself — or a continuation successor of it —
         // settles the follow. The child's chain also carries AUXILIARY runs
         // (launch-time knowledge composition, nested dispatches); the first of
@@ -4386,6 +4384,29 @@ impl ThreadLifecycleService {
                 degraded_follow_envelope(thread_id, terminal_status, result, error, final_cost)
             }
         };
+        if !has_local_waiter {
+            match self.state_store.reserve_remote_follow_terminal_delivery(
+                chain_root_id,
+                thread_id,
+                terminal_status,
+                &envelope,
+            ) {
+                Ok(Some(job_id)) => tracing::info!(
+                    thread_id,
+                    chain_root_id,
+                    job_id,
+                    "retained remote follow terminal delivery"
+                ),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    thread_id,
+                    chain_root_id,
+                    error = %e,
+                    "failed to retain remote follow terminal delivery",
+                ),
+            }
+            return;
+        }
         if let Err(e) = self.state_store.mark_follow_child_terminal(
             chain_root_id,
             thread_id,
@@ -4498,6 +4519,47 @@ impl ThreadLifecycleService {
             &envelope,
         )?;
         Ok(flipped.then_some(waiter.follow_key))
+    }
+
+    /// Rebuild target-owned remote follow delivery jobs after a crash between
+    /// the signed terminal commit and the ordinary post-finalize callback.
+    /// This complete projection scan is intentionally startup-only.
+    pub fn reconcile_remote_follow_terminal_deliveries(&self) -> Result<usize> {
+        let candidates = self
+            .state_store
+            .remote_follow_terminal_recovery_candidates()?;
+        let mut retained = 0usize;
+        for (chain_root_id, thread_id, terminal_status) in candidates {
+            let terminal = self
+                .state_store
+                .get_thread_terminal_authority(&thread_id)?
+                .ok_or_else(|| anyhow!("remote follow terminal recovery lost its authority"))?;
+            if terminal.status.as_str() != terminal_status {
+                bail!("remote follow terminal recovery status changed");
+            }
+            let envelope = terminal.managed_envelope.unwrap_or_else(|| {
+                degraded_follow_envelope(
+                    &thread_id,
+                    &terminal_status,
+                    terminal.result.as_ref(),
+                    terminal.error.as_ref(),
+                    terminal.final_cost.as_ref(),
+                )
+            });
+            if self
+                .state_store
+                .reserve_remote_follow_terminal_delivery(
+                    &chain_root_id,
+                    &thread_id,
+                    &terminal_status,
+                    &envelope,
+                )?
+                .is_some()
+            {
+                retained += 1;
+            }
+        }
+        Ok(retained)
     }
 
     fn update_scheduler_fire_on_thread_terminal(

@@ -99,8 +99,10 @@ impl ReplayIndex {
     }
 
     fn remember_exact(&mut self, key: FactKey, fact: CachedFact) {
-        if self.recent.contains_key(&key) {
-            self.recent.insert(key, fact);
+        if let std::collections::hash_map::Entry::Occupied(mut entry) =
+            self.recent.entry(key.clone())
+        {
+            entry.insert(fact);
             return;
         }
         while self.recent.len() >= RECENT_FACTS {
@@ -414,6 +416,65 @@ pub fn append_once(
         &[],
     )
     .map(|_| ())
+}
+
+/// Append one exact recovery fact to a successor that has been durably
+/// created but is intentionally not runnable yet. This is the narrow form
+/// used when external evidence must settle a local waiter before that
+/// successor can start. Ordinary live-root testimony continues to use
+/// [`append_once`].
+pub fn append_once_to_created_thread(
+    state: &AppState,
+    thread_id: &str,
+    event_type: &str,
+    operation_id: &str,
+    mut payload: Value,
+) -> Result<AppendOnceOutcome> {
+    let lock = operation_lock(thread_id);
+    let _guard = lock
+        .lock()
+        .map_err(|_| anyhow!("authoritative root fact lock poisoned"))?;
+    let thread = state
+        .state_store
+        .get_thread(thread_id)?
+        .ok_or_else(|| anyhow!("recovery fact thread disappeared"))?;
+    payload
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("authoritative recovery fact payload is not an object"))?
+        .insert(
+            "operation_id".to_owned(),
+            Value::String(operation_id.to_owned()),
+        );
+    let fact = lookup_under_lock(
+        state,
+        &thread.chain_root_id,
+        &thread.thread_id,
+        event_type,
+        operation_id,
+    )?;
+    if fact.count > 1 {
+        bail!("recovery fact operation is duplicated in the authoritative chain");
+    }
+    let expected_digest = ryeos_state::objects::canonical_value_digest(&payload)?;
+    if let Some(existing_digest) = fact.payload_digest {
+        if existing_digest != expected_digest {
+            bail!("recovery fact operation id is bound to contradictory canonical testimony");
+        }
+        return Ok(AppendOnceOutcome::AlreadyPresent);
+    }
+    if thread.status != ryeos_state::objects::ThreadStatus::Created.as_str() {
+        bail!("recovery fact target is not an unstarted successor");
+    }
+    state.state_store.append_events(
+        &thread.chain_root_id,
+        &thread.thread_id,
+        &[NewEventRecord {
+            event_type: event_type.to_owned(),
+            storage_class: "indexed".to_owned(),
+            payload,
+        }],
+    )?;
+    Ok(AppendOnceOutcome::Appended)
 }
 
 /// Atomically append a canonical idempotence fact and its associated events.

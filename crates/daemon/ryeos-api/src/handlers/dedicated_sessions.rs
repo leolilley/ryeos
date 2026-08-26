@@ -1260,6 +1260,15 @@ async fn handoff_preflight(
             .map_err(internal)?
             .as_bytes(),
     );
+    let follow_delivery_reservation_attestation_hash = state
+        .state_store
+        .prepare_remote_follow_delivery_reservation(
+            &source.chain_root_id,
+            &source.owner_principal,
+            state.threads.site_id(),
+        )
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?
+        .map(|(hash, _attestation)| hash);
     let preflight_id = ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.worker_session_handoff_preflight_operation.v1",
         "owner_principal":source.owner_principal,
@@ -1278,11 +1287,13 @@ async fn handoff_preflight(
         "upstream_session_id":upstream_session_id,
         "credential_subject_contract_digest":credential_subject_contract_digest,
         "credential_subject_digest":credential_subject_digest,
+        "follow_delivery_reservation_attestation_hash":follow_delivery_reservation_attestation_hash,
     }))
     .map_err(internal)?;
     let successor_placement_thread_id = format!("T-handoff-{}", &preflight_id[..32]);
     let request = ryeos_app::worker_handoff::WorkerPlacementPreflightRequest {
         preflight_id: preflight_id.clone(),
+        owner_principal: source.owner_principal.clone(),
         chain_root_id: source.chain_root_id.clone(),
         origin_site_id: source_snapshot.origin_site_id.clone(),
         source_site_id: state.threads.site_id().to_owned(),
@@ -1300,15 +1311,11 @@ async fn handoff_preflight(
         upstream_session_id,
         credential_subject_contract_digest,
         credential_subject_digest,
+        follow_delivery_reservation_attestation_hash,
     };
     request.validate().map_err(internal)?;
     let target_client =
-        crate::remote::client::RemoteClient::from_remote_cfg_as_configured_operator(
-            &state,
-            &loaded_remote.config,
-            &ctx,
-        )
-        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+        crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config);
     let target_value = target_client
         .execute(
             ryeos_app::worker_handoff::WORKER_PLACEMENT_PREFLIGHT_SERVICE,
@@ -1351,15 +1358,51 @@ async fn handoff_preflight(
         )
         .await
         .map_err(|error| internal(format!("fetch target preflight receipt: {error:#}")))?;
-    let payload = crate::remote::import::closure_response_to_export_payload(
+    let mut payload = crate::remote::import::closure_response_to_export_payload(
         &format!("worker-preflight:{preflight_id}"),
         &response.preflight_attestation_hash,
         &target_closure.entries,
     )
     .map_err(internal)?;
+    if let Some(hash) = &request.follow_delivery_reservation_attestation_hash {
+        let authority = state
+            .state_store
+            .pinned_state_authority()
+            .map_err(internal)?;
+        let guard = authority.acquire_shared_guard().map_err(internal)?;
+        authority.ensure_guard(&guard).map_err(internal)?;
+        let value = authority
+            .cas_store()
+            .map_err(internal)?
+            .get_object(hash)
+            .map_err(internal)?
+            .ok_or_else(|| internal("local follow delivery reservation disappeared"))?;
+        let bytes = lillux::canonical_json(&value)
+            .map_err(internal)?
+            .into_bytes();
+        if lillux::sha256_hex(&bytes) != *hash {
+            return Err(internal("local follow delivery reservation changed digest"));
+        }
+        if let Some(existing) = payload.entries.iter().find(|entry| &entry.hash == hash) {
+            if existing.is_blob || existing.data != bytes {
+                return Err(internal(
+                    "target preflight closure contradicts the local follow reservation",
+                ));
+            }
+        } else {
+            payload.total_bytes = payload
+                .total_bytes
+                .checked_add(bytes.len())
+                .ok_or_else(|| internal("preflight payload byte count overflow"))?;
+            payload.entries.push(ryeos_state::sync::SyncEntry {
+                hash: hash.clone(),
+                is_blob: false,
+                data: bytes,
+            });
+        }
+    }
     let operation = ryeos_app::worker_handoff::WorkerPlacementPreflightJobOperation::from_request(
         ryeos_app::worker_handoff::WorkerHandoffJobRole::Source,
-        source.owner_principal.clone(),
         req.remote.clone(),
         &request,
     )
@@ -1380,7 +1423,13 @@ async fn handoff_preflight(
                     .to_owned(),
                 operation: operation.to_value().map_err(internal)?,
                 peer: Some(req.remote),
-                roots: vec![response.preflight_attestation_hash.clone()],
+                roots: {
+                    let mut roots = vec![response.preflight_attestation_hash.clone()];
+                    if let Some(hash) = &request.follow_delivery_reservation_attestation_hash {
+                        roots.push(hash.clone());
+                    }
+                    roots
+                },
                 heads: vec![request.source_chain_head_hash.clone()],
                 max_attempts: 4,
             },
@@ -1610,6 +1659,8 @@ async fn handoff(
         || preflight_operation.target_project_path != binding.remote_project_path
         || preflight_operation.project_route_digest != route_digest
         || preflight_operation.target_credential_profile_id != req.target_credential_profile_id
+        || preflight_operation.follow_delivery_reservation_attestation_hash
+            != preflight_evidence.follow_delivery_reservation_attestation_hash
         || preflight_operation.peer_remote_name != req.remote
         || preflight_response.preflight_attestation_hash
             != ryeos_state::objects::canonical_value_digest(
@@ -1653,6 +1704,7 @@ async fn handoff(
         "checkpoint_manifest_hash":checkpoint.manifest_hash,
         "project_route_digest":route_digest,
         "target_credential_profile_id":req.target_credential_profile_id,
+        "follow_delivery_reservation_attestation_hash":preflight_evidence.follow_delivery_reservation_attestation_hash.clone(),
     }))
     .map_err(internal)?;
     let successor_thread_id = preflight_evidence.successor_placement_thread_id.clone();
@@ -1710,6 +1762,9 @@ async fn handoff(
         binding.remote_project_path.clone(),
         route_digest.clone(),
         req.target_credential_profile_id.clone(),
+        preflight_evidence
+            .follow_delivery_reservation_attestation_hash
+            .clone(),
     )
     .map_err(internal)?;
     let job_id = format!("worker-handoff-source:{operation_id}");
@@ -1723,10 +1778,18 @@ async fn handoff(
                     .to_owned(),
                 operation: operation.to_value().map_err(internal)?,
                 peer: Some(req.remote.clone()),
-                roots: vec![
-                    transfer_manifest_hash.clone(),
-                    preflight_response.preflight_attestation_hash.clone(),
-                ],
+                roots: {
+                    let mut roots = vec![
+                        transfer_manifest_hash.clone(),
+                        preflight_response.preflight_attestation_hash.clone(),
+                    ];
+                    if let Some(hash) =
+                        &preflight_evidence.follow_delivery_reservation_attestation_hash
+                    {
+                        roots.push(hash.clone());
+                    }
+                    roots
+                },
                 heads: vec![source_head.target_hash.clone()],
                 max_attempts: 16,
             },
@@ -1745,15 +1808,13 @@ async fn handoff(
         target_project_path: binding.remote_project_path.clone(),
         project_route_digest: route_digest,
         target_credential_profile_id: req.target_credential_profile_id.clone(),
+        follow_delivery_reservation_attestation_hash: preflight_evidence
+            .follow_delivery_reservation_attestation_hash
+            .clone(),
         source_accounting_frontier: source_accounting_frontier.clone(),
     };
     let target_client =
-        crate::remote::client::RemoteClient::from_remote_cfg_as_configured_operator(
-            &state,
-            &loaded_remote.config,
-            &ctx,
-        )
-        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+        crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config);
     let prepare_attempt =
         begin_worker_handoff_attempt(&state, &job_id, "target_prepare", "source-handoff")?;
     let prepared_result: Result<
@@ -2127,6 +2188,8 @@ async fn resume_committed_handoff(
         || operation.operation_id != remote_authority.operation_id
         || operation.preflight_id != remote_authority.preflight_id
         || operation.preflight_attestation_hash != remote_authority.preflight_attestation_hash
+        || operation.follow_delivery_reservation_attestation_hash
+            != remote_authority.follow_delivery_reservation_attestation_hash
         || operation.chain_root_id != req.chain_root_id
         || operation.successor_placement_thread_id != placement_thread_id
         || operation.peer_remote_name != req.remote
@@ -2179,12 +2242,7 @@ async fn resume_committed_handoff(
         ));
     }
     let target_client =
-        crate::remote::client::RemoteClient::from_remote_cfg_as_configured_operator(
-            state,
-            &loaded_remote.config,
-            ctx,
-        )
-        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+        crate::remote::client::RemoteClient::from_remote_cfg(state, &loaded_remote.config);
     let adopt_request = ryeos_app::worker_handoff::WorkerPlacementAdoptRequest {
         operation_id: operation.operation_id.clone(),
         chain_root_id: operation.chain_root_id.clone(),
@@ -2341,6 +2399,8 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
             if remote.operation_id != operation.operation_id
                 || remote.preflight_id != operation.preflight_id
                 || remote.preflight_attestation_hash != operation.preflight_attestation_hash
+                || remote.follow_delivery_reservation_attestation_hash
+                    != operation.follow_delivery_reservation_attestation_hash
                 || remote.source_chain_head_hash != operation.source_chain_head_hash
                 || remote.source_last_event_hash != operation.source_last_event_hash
                 || remote.checkpoint_manifest_hash != operation.checkpoint_manifest_hash
@@ -2418,6 +2478,8 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
         if remote.operation_id != operation.operation_id
             || remote.preflight_id != operation.preflight_id
             || remote.preflight_attestation_hash != operation.preflight_attestation_hash
+            || remote.follow_delivery_reservation_attestation_hash
+                != operation.follow_delivery_reservation_attestation_hash
             || remote.target_placement_attestation_hash != placement_hash
             || remote.chain_writer_grant_hash != writer_hash
             || remote.successor_thread_id != operation.successor_placement_thread_id
@@ -2438,12 +2500,7 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
             continue;
         }
         let client =
-            crate::remote::client::RemoteClient::from_remote_cfg_for_admitted_operator_job(
-                state,
-                &loaded_remote.config,
-                &operation.owner_principal,
-                &operation.source_site_id,
-            )?;
+            crate::remote::client::RemoteClient::from_remote_cfg(state, &loaded_remote.config);
         let request = ryeos_app::worker_handoff::WorkerPlacementAdoptRequest {
             operation_id: operation.operation_id.clone(),
             chain_root_id: operation.chain_root_id.clone(),
@@ -2637,12 +2694,7 @@ async fn recover_pre_cut_source_handoff_abort(
     if loaded_remote.config.site_id != operation.target_site_id {
         anyhow::bail!("source handoff configured target site changed before abort");
     }
-    let client = crate::remote::client::RemoteClient::from_remote_cfg_for_admitted_operator_job(
-        state,
-        &loaded_remote.config,
-        &operation.owner_principal,
-        &operation.source_site_id,
-    )?;
+    let client = crate::remote::client::RemoteClient::from_remote_cfg(state, &loaded_remote.config);
     let request = ryeos_app::worker_handoff::WorkerPlacementAbortRequest {
         operation_id: operation.operation_id.clone(),
         chain_root_id: operation.chain_root_id.clone(),

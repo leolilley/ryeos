@@ -24,7 +24,7 @@ pub const MAX_STRUCTURED_OBSERVATION_BATCH_BYTES: usize = 384 * 1024;
 /// across all of its worker epochs. This bounds root-chain and projection
 /// growth independently of the seven-day lifetime ceiling.
 pub const MAX_HOSTED_SESSION_OBSERVATION_EVENTS: u64 = 1_048_576;
-pub const REMOTE_CONTINUATION_AUTHORITY_SCHEMA: u32 = 2;
+pub const REMOTE_CONTINUATION_AUTHORITY_SCHEMA: u32 = 3;
 
 /// Typed authority retained on a cross-site `thread_continued` edge.
 ///
@@ -38,6 +38,7 @@ pub struct RemoteContinuationAuthority {
     pub operation_id: String,
     pub preflight_id: String,
     pub preflight_attestation_hash: String,
+    pub follow_delivery_reservation_attestation_hash: Option<String>,
     pub source_chain_head_hash: String,
     pub source_last_event_hash: String,
     pub checkpoint_manifest_hash: String,
@@ -93,6 +94,9 @@ impl RemoteContinuationAuthority {
             ),
         ] {
             validate_canonical_hash(label, value)?;
+        }
+        if let Some(value) = &self.follow_delivery_reservation_attestation_hash {
+            validate_canonical_hash("remote follow delivery reservation", value)?;
         }
         for (label, value) in [
             (
@@ -407,6 +411,7 @@ mod remote_continuation_tests {
             operation_id: "1".repeat(64),
             preflight_id: "a".repeat(64),
             preflight_attestation_hash: "b".repeat(64),
+            follow_delivery_reservation_attestation_hash: Some("c".repeat(64)),
             source_chain_head_hash: "2".repeat(64),
             source_last_event_hash: "3".repeat(64),
             checkpoint_manifest_hash: "4".repeat(64),
