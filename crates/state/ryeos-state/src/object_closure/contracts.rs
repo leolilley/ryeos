@@ -715,6 +715,28 @@ fn links_admitted_launch_capsule(value: &Value) -> Result<ContractLinks, String>
             )?;
         }
     }
+    if let Some(dependencies) = execution_closure
+        .get("prepared_runtime_launch")
+        .and_then(|launch| launch.get("content_dependencies"))
+    {
+        let dependencies = dependencies
+            .as_object()
+            .ok_or_else(|| "admitted launch content dependencies must be an object".to_owned())?;
+        for dependency in dependencies.values() {
+            for hash in super::retained_resolution_external_realization_manifest_hashes(
+                dependency
+                    .get("resolution")
+                    .ok_or_else(|| "content dependency is missing its resolution".to_owned())?,
+            )? {
+                super::push_typed_hash(
+                    &hash,
+                    ExpectedObject::OneOf(EXTERNAL_MANIFEST_KINDS),
+                    None,
+                    &mut links.object_edges,
+                )?;
+            }
+        }
+    }
     Ok(links)
 }
 

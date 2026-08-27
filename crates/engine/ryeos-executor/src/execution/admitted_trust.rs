@@ -228,6 +228,16 @@ pub(crate) fn validate_managed_current_trust(
             );
         }
     }
+    for (name, dependency) in &prepared.content_dependencies {
+        dependency
+            .validate()
+            .with_context(|| format!("validate admitted content dependency `{name}`"))?;
+        validate_primary_resolution(&policy, &dependency.resolution.restore())
+            .with_context(|| format!("validate admitted content dependency `{name}`"))?;
+        if dependency.canonical_ref != dependency.resolution.root_ref() {
+            bail!("admitted content dependency `{name}` canonical ref contradicts its resolution");
+        }
+    }
     for contributor in &prepared.config_contributors {
         validate_config_contributor(&policy, contributor)?;
     }

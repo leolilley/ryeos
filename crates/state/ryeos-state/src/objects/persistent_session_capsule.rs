@@ -15,7 +15,8 @@ use super::{
 };
 
 pub const PERSISTENT_SESSION_CAPSULE_KIND: &str = "persistent_session_capsule";
-pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 4;
+pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 5;
+pub const MAX_EXECUTABLE_SEARCH_PATH_ENTRIES: usize = 32;
 
 fn deserialize_required_nullable<'de, D, T>(
     deserializer: D,
@@ -318,6 +319,34 @@ pub struct PersistentSessionAuthority {
     pub executor_ref: String,
 }
 
+/// One ordered, logical executable-search entry. The capsule retains
+/// realization identities rather than host paths; materialization resolves
+/// them only from the capsule's exact external-realization set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutableSearchPathEntry {
+    pub realization_id: String,
+    pub relative_directory: String,
+}
+
+impl ExecutableSearchPathEntry {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.realization_id.is_empty()
+            || self.realization_id.len() > 64
+            || !self.realization_id.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+            })
+        {
+            anyhow::bail!("executable-search realization id is not canonical");
+        }
+        if self.relative_directory != "." {
+            super::validate_canonical_project_relative_path(&self.relative_directory)
+                .map_err(|error| anyhow::anyhow!("executable-search directory: {error}"))?;
+        }
+        Ok(())
+    }
+}
+
 impl PersistentSessionAuthority {
     pub fn validate(&self) -> anyhow::Result<()> {
         super::thread_snapshot::validate_canonical_hash(
@@ -394,6 +423,9 @@ pub struct AdmittedPersistentSessionCapsule {
     /// family. Other persistent-session protocol families retain `null`.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub structured_session_profile: Option<AdmittedStructuredSessionProfile>,
+    /// Ordered search path compiled from signed content dependencies. This is
+    /// a logical realization-relative contract, never an ambient host PATH.
+    pub executable_search: Vec<ExecutableSearchPathEntry>,
     pub runtime_ref: String,
     pub executor_ref: String,
 }
@@ -458,6 +490,42 @@ impl AdmittedPersistentSessionCapsule {
             }
         } else if self.wire.wire_protocol == "ryeos.structured-session" {
             anyhow::bail!("structured-session capsule has no admitted profile identity");
+        }
+        if self.executable_search.len() > MAX_EXECUTABLE_SEARCH_PATH_ENTRIES {
+            anyhow::bail!("persistent-session executable search exceeds its entry bound");
+        }
+        let realized = self
+            .exact_program
+            .get("resolution_output")
+            .and_then(|resolution| resolution.get("composed"))
+            .and_then(|composed| composed.get("derived"))
+            .and_then(|derived| derived.get(super::EXTERNAL_REALIZATIONS_DERIVED_KEY))
+            .map(super::ExternalContentRealizationSet::from_value)
+            .transpose()?;
+        let mut identities = BTreeSet::new();
+        for entry in &self.executable_search {
+            entry.validate()?;
+            if !identities.insert((
+                entry.realization_id.as_str(),
+                entry.relative_directory.as_str(),
+            )) {
+                anyhow::bail!("persistent-session executable search contains a duplicate entry");
+            }
+            let realization = realized
+                .as_ref()
+                .and_then(|set| set.iter().find(|item| item.id == entry.realization_id))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "executable-search realization `{}` is absent from the exact program",
+                        entry.realization_id
+                    )
+                })?;
+            if realization.kind != super::ExternalContentKind::Tree {
+                anyhow::bail!(
+                    "executable-search realization `{}` is not tree-shaped",
+                    entry.realization_id
+                );
+            }
         }
         Ok(())
     }

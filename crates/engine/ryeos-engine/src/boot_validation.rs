@@ -49,6 +49,7 @@ use crate::runtime_registry::{
 use ryeos_handler_protocol::{
     ConfigMergeModeWire, ExternalEffectAuthorityDeclWire, FinancialAuthorityDeclWire,
     HandlerRequest, HandlerResponse, ItemSpaceWire, LaunchConfigInputDeclWire,
+    LaunchContentDependencyPolicyWire, LaunchContentExternalPolicyWire,
     LaunchExecutionDependencyPolicyWire, LaunchSecretPolicyDeclWire, RefBindingDeclWire,
     RuntimeFactDeclWire, RuntimeFactKindWire, TrustClassWire, ValidateComposerConfigRequest,
     ValidateLaunchPreparerConfigRequest, ValidateLaunchPreparerConfigResponse,
@@ -734,6 +735,20 @@ fn launch_preparer_validation_request(
                 .copied()
                 .map(trust_class_wire)
                 .collect(),
+        },
+        content_dependencies: LaunchContentDependencyPolicyWire {
+            max_dependencies: contract.content_dependencies.max_dependencies,
+            allowed_bindings: contract.content_dependencies.allowed_bindings.clone(),
+            max_targets_per_dependency: contract.content_dependencies.max_targets_per_dependency,
+            max_executable_search_entries: contract
+                .content_dependencies
+                .max_executable_search_entries,
+            external_content: contract.content_dependencies.external_content.as_ref().map(
+                |external| LaunchContentExternalPolicyWire {
+                    max_declarations: external.max_declarations,
+                    large_content_max_total_bytes: external.large_content_max_total_bytes,
+                },
+            ),
         },
         financial_authority: match contract.financial_authority {
             crate::runtime_registry::FinancialAuthorityDecl::None => {

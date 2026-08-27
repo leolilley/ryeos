@@ -136,18 +136,6 @@ enum ConfigurationAuthority {
     ImmutableArgv,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExternalRealization {
-    id: String,
-    kind: String,
-    mode: String,
-    manifest_hash: String,
-    entry_count: usize,
-    total_bytes: u64,
-    mount: String,
-}
-
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InitializationStep {
@@ -585,21 +573,14 @@ fn load_profile_schemas(
             bail!("structured-session schema identity is not a safe local path");
         }
         let path = profile_root.join(relative);
-        let metadata = std::fs::symlink_metadata(&path)
-            .with_context(|| format!("inspect admitted schema `{identity}`"))?;
-        if metadata.file_type().is_symlink()
-            || !metadata.file_type().is_file()
-            || metadata.len() > 8 * 1024 * 1024
-        {
-            bail!("structured-session schema is not a bounded regular file");
-        }
+        let bytes = lillux::read_regular_file_bounded_no_follow(&path, 8 * 1024 * 1024)
+            .with_context(|| format!("read admitted schema `{identity}` through Lillux"))?;
         total = total
-            .checked_add(usize::try_from(metadata.len())?)
+            .checked_add(bytes.len())
             .ok_or_else(|| anyhow!("structured-session schema bytes overflow"))?;
         if total > 16 * 1024 * 1024 {
             bail!("structured-session schemas exceed their aggregate byte ceiling");
         }
-        let bytes = std::fs::read(&path)?;
         let schema: Value = serde_json::from_slice(&bytes)
             .with_context(|| format!("decode admitted schema `{identity}`"))?;
         reject_nonlocal_schema_refs(&schema, 0)?;
@@ -643,7 +624,7 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    disable_core_dumps()?;
+    lillux::disable_process_core_dumps().map_err(anyhow::Error::msg)?;
     let fd = required_fd("RYEOS_SESSION_FD")?;
     let workspace = required_env("RYEOS_WORKSPACE")?;
     let workload_home = required_env("RYEOS_WORKLOAD_HOME")?;
@@ -670,7 +651,8 @@ fn run() -> Result<()> {
         .nth(1)
         .map(std::path::PathBuf::from)
         .ok_or_else(|| anyhow!("structured-session bridge requires an admitted profile"))?;
-    let profile_bytes = std::fs::read(&profile_path).context("read structured-session profile")?;
+    let profile_bytes = lillux::read_regular_file_bounded_no_follow(&profile_path, 64 * 1024)
+        .context("read structured-session profile through Lillux")?;
     if profile_bytes.is_empty() || profile_bytes.len() > 64 * 1024 {
         bail!("structured-session profile is empty or exceeds its bound");
     }
@@ -715,12 +697,19 @@ fn run() -> Result<()> {
     let external_root = required_env("RYEOS_EXTERNAL_ROOT")?;
     let external_realizations = required_env("RYEOS_EXTERNAL_REALIZATIONS")?;
     require_absolute_normalized("external realization root", &external_root)?;
-    let executable = resolve_pinned_executable(
+    let (executable, workload_argv0, mut workload_handles) = resolve_pinned_executable(
         std::path::Path::new(&external_root),
         &external_realizations,
         &profile.workload_realization_id,
         executable_name,
     )?;
+    let executable_search = optional_env("RYEOS_EXECUTABLE_SEARCH")?;
+    let (executable_path, mut inherited_descriptors) = resolve_pinned_executable_search(
+        std::path::Path::new(&external_root),
+        &external_realizations,
+        executable_search.as_deref(),
+    )?;
+    inherited_descriptors.append(&mut workload_handles);
     reset_compatibility_baseline_config(
         std::path::Path::new(&workload_home),
         &baseline_config,
@@ -735,7 +724,7 @@ fn run() -> Result<()> {
     // SAFETY: the signed protocol gives this process unique ownership of the
     // inherited descriptor. No other safe Rust owner is constructed.
     let mut channel = unsafe { UnixStream::from_raw_fd(fd) };
-    set_close_on_exec(&channel)?;
+    lillux::protect_descriptor_from_exec(&channel).map_err(anyhow::Error::msg)?;
     let events = Arc::new(Mutex::new(EventQueue::default()));
     let (workload_result_sender, workload_results) = sync_channel::<WorkloadCommandResult>(32);
     let (pending_control_sender, pending_controls) = sync_channel::<PendingControl>(32);
@@ -752,6 +741,11 @@ fn run() -> Result<()> {
         Arc::clone(&events),
         pending_controls,
         workload_result_sender.clone(),
+        workload_argv0
+            .to_str()
+            .ok_or_else(|| anyhow!("descriptor-rooted workload argv[0] is not valid UTF-8"))?,
+        executable_path.as_deref(),
+        inherited_descriptors,
     )?;
     app.initialize()?;
     protect_profile_home(std::path::Path::new(&workload_home))?;
@@ -770,7 +764,7 @@ fn run() -> Result<()> {
     let reader = channel
         .try_clone()
         .context("clone RyeOS session reader descriptor")?;
-    set_close_on_exec(&reader)?;
+    lillux::protect_descriptor_from_exec(&reader).map_err(anyhow::Error::msg)?;
     let (session_sender, session_incoming) = sync_channel(128);
     thread::Builder::new()
         .name("ryeos-session-control-reader".to_owned())
@@ -979,19 +973,6 @@ fn run() -> Result<()> {
     }
 }
 
-fn disable_core_dumps() -> Result<()> {
-    let limit = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    // SAFETY: setrlimit only changes this worker process. The zero limit is
-    // inherited by the pinned structured workload and every descendant it launches.
-    if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &limit) } != 0 {
-        return Err(std::io::Error::last_os_error()).context("disable worker core dumps");
-    }
-    Ok(())
-}
-
 /// Atomically reset the workload's compatibility seed before each process
 /// generation. This file is deliberately not a same-UID authority boundary:
 /// the signed immutable argv is the sole security configuration authority,
@@ -1003,8 +984,8 @@ fn reset_compatibility_baseline_config(
     source: &std::path::Path,
     destination_name: &str,
 ) -> Result<()> {
-    let admitted =
-        std::fs::read(source).context("read admitted structured-session baseline config")?;
+    let admitted = lillux::read_regular_file_bounded_no_follow(source, 64 * 1024)
+        .context("read admitted structured-session baseline config through Lillux")?;
     if admitted.is_empty() || admitted.len() > 64 * 1024 {
         bail!("admitted structured-session baseline config is empty or exceeds its bound");
     }
@@ -1023,7 +1004,11 @@ fn resolve_pinned_executable(
     sealed_realizations: &str,
     realization_id: &str,
     executable_name: &std::path::Path,
-) -> Result<std::path::PathBuf> {
+) -> Result<(
+    std::path::PathBuf,
+    std::path::PathBuf,
+    Vec<lillux::InheritedDescriptorAuthority>,
+)> {
     if realization_id.is_empty()
         || realization_id.len() > 128
         || !realization_id
@@ -1032,8 +1017,10 @@ fn resolve_pinned_executable(
     {
         bail!("structured-session workload realization id is not canonical");
     }
-    let realizations: Vec<ExternalRealization> =
-        serde_json::from_str(sealed_realizations).context("decode sealed external realizations")?;
+    let realizations = ryeos_state::objects::ExternalContentRealizationSet::from_value(
+        &serde_json::from_str(sealed_realizations)
+            .context("decode sealed external realizations")?,
+    )?;
     let mut matches = realizations
         .iter()
         .filter(|realization| realization.id == realization_id);
@@ -1043,7 +1030,7 @@ fn resolve_pinned_executable(
     if matches.next().is_some() {
         bail!("workload realization id is ambiguous");
     }
-    if realization.mode != "pinned"
+    if realization.mode != ryeos_state::objects::ExternalContentMode::Pinned
         || !lillux::valid_hash(&realization.manifest_hash)
         || realization.entry_count == 0
         || realization.total_bytes == 0
@@ -1059,31 +1046,137 @@ fn resolve_pinned_executable(
     {
         bail!("workload realization mount is not a safe relative path");
     }
-    let path = match realization.kind.as_str() {
-        "file" => {
+    let pinned = match realization.kind {
+        ryeos_state::objects::ExternalContentKind::File => {
             if mount.file_name() != executable_name.file_name() {
                 bail!("file realization mount does not match the workload executable");
             }
-            external_root.join(mount)
+            open_pinned_regular_file(external_root, mount)?
         }
-        "tree" => external_root.join(mount).join(executable_name),
-        _ => bail!("workload realization kind cannot contain an executable"),
+        ryeos_state::objects::ExternalContentKind::Tree => {
+            let directory = open_pinned_directory(external_root, mount)?;
+            match directory.open_pinned_regular(executable_name.as_os_str(), false)? {
+                Some(file) => file,
+                None => bail!("pinned structured-session workload executable is absent"),
+            }
+        }
     };
-    let metadata = std::fs::symlink_metadata(&path)
-        .context("inspect pinned structured-session workload executable")?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        bail!("pinned structured-session workload executable is not an exact regular file");
+    pinned.require_executable()?;
+    let executable_handle = pinned.into_inherited_descriptor_path()?;
+    let executable = executable_handle.path().to_path_buf();
+    let root = lillux::PinnedDirectory::open(external_root)?
+        .ok_or_else(|| anyhow!("external realization root is unavailable"))?;
+    let root_handle = root.into_inherited_descriptor_path()?;
+    let descriptor_root = root_handle.path();
+    let argv0 = match realization.kind {
+        ryeos_state::objects::ExternalContentKind::File => descriptor_root.join(mount),
+        ryeos_state::objects::ExternalContentKind::Tree => {
+            descriptor_root.join(mount).join(executable_name)
+        }
+    };
+    Ok((executable, argv0, vec![executable_handle, root_handle]))
+}
+
+fn resolve_pinned_executable_search(
+    external_root: &std::path::Path,
+    sealed_realizations: &str,
+    encoded: Option<&str>,
+) -> Result<(Option<String>, Vec<lillux::InheritedDescriptorAuthority>)> {
+    let Some(encoded) = encoded else {
+        return Ok((None, Vec::new()));
+    };
+    let search: Vec<ryeos_state::objects::ExecutableSearchPathEntry> =
+        serde_json::from_str(encoded).context("decode admitted executable search")?;
+    if search.is_empty() || search.len() > ryeos_state::objects::MAX_EXECUTABLE_SEARCH_PATH_ENTRIES
+    {
+        bail!("admitted executable search has an invalid entry count");
     }
-    let path = path
-        .canonicalize()
-        .context("canonicalize pinned structured-session workload executable")?;
-    require_absolute_normalized(
-        "pinned structured-session workload executable",
-        path.to_str().ok_or_else(|| {
-            anyhow!("pinned structured-session workload executable path is not UTF-8")
-        })?,
+    let realizations = ryeos_state::objects::ExternalContentRealizationSet::from_value(
+        &serde_json::from_str(sealed_realizations)
+            .context("decode sealed external realizations for executable search")?,
     )?;
-    Ok(path)
+    let mut paths = Vec::with_capacity(search.len());
+    let mut handles = Vec::with_capacity(search.len());
+    let mut seen = HashSet::new();
+    for entry in search {
+        entry.validate()?;
+        if !seen.insert((
+            entry.realization_id.clone(),
+            entry.relative_directory.clone(),
+        )) {
+            bail!("admitted executable search contains a duplicate entry");
+        }
+        let realization = realizations
+            .iter()
+            .find(|realization| realization.id == entry.realization_id)
+            .ok_or_else(|| anyhow!("executable search names an absent realization"))?;
+        if realization.kind != ryeos_state::objects::ExternalContentKind::Tree
+            || realization.mode != ryeos_state::objects::ExternalContentMode::Pinned
+        {
+            bail!("executable search requires a pinned tree realization");
+        }
+        let mut relative = std::path::PathBuf::from(&realization.mount);
+        if entry.relative_directory != "." {
+            relative.push(&entry.relative_directory);
+        }
+        let directory = open_pinned_directory(external_root, &relative)?;
+        let handle = directory.into_inherited_descriptor_path()?;
+        let path = handle
+            .path()
+            .to_str()
+            .ok_or_else(|| anyhow!("descriptor-rooted executable search path is not UTF-8"))?;
+        if path.contains(':') {
+            bail!("descriptor-rooted executable search path contains a separator");
+        }
+        paths.push(path.to_owned());
+        handles.push(handle);
+    }
+    Ok((Some(paths.join(":")), handles))
+}
+
+fn open_pinned_directory(
+    root: &std::path::Path,
+    relative: &std::path::Path,
+) -> Result<lillux::PinnedDirectory> {
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        bail!("pinned realization directory is not a safe relative path");
+    }
+    let mut directory = lillux::PinnedDirectory::open(root)?
+        .ok_or_else(|| anyhow!("external realization root is unavailable"))?;
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            unreachable!("relative path was validated");
+        };
+        directory = directory
+            .open_child_directory(name)?
+            .ok_or_else(|| anyhow!("pinned realization directory is absent"))?;
+    }
+    Ok(directory)
+}
+
+fn open_pinned_regular_file(
+    root: &std::path::Path,
+    relative: &std::path::Path,
+) -> Result<lillux::PinnedRegularFile> {
+    let name = relative
+        .file_name()
+        .ok_or_else(|| anyhow!("pinned realization file has no name"))?;
+    let parent = relative
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    let directory = match parent {
+        Some(parent) => open_pinned_directory(root, parent)?,
+        None => lillux::PinnedDirectory::open(root)?
+            .ok_or_else(|| anyhow!("external realization root is unavailable"))?,
+    };
+    directory
+        .open_pinned_regular(name, false)?
+        .ok_or_else(|| anyhow!("pinned realization file is absent"))
 }
 
 fn protect_profile_home(root: &std::path::Path) -> Result<()> {
@@ -1091,34 +1184,6 @@ fn protect_profile_home(root: &std::path::Path) -> Result<()> {
         .ok_or_else(|| anyhow!("profile workload home is missing"))?;
     home.tighten_owner_private_directory()
         .context("protect live profile-home root through Lillux")
-}
-
-fn set_close_on_exec(stream: &UnixStream) -> Result<()> {
-    use std::os::fd::AsRawFd as _;
-    let fd = stream.as_raw_fd();
-    // SAFETY: fcntl only reads/updates flags on the live descriptor borrowed
-    // from `stream`; ownership and lifetime remain with Rust.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags < 0 {
-        return Err(std::io::Error::last_os_error()).context("read session descriptor flags");
-    }
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
-        return Err(std::io::Error::last_os_error()).context("fence session descriptor from exec");
-    }
-    Ok(())
-}
-
-fn configure_private_creation_mask(command: &mut Command) {
-    // The structured workload owns opaque credential/state bytes under its
-    // node-private home. Install the creation mask only in the forked child:
-    // changing the daemon/bridge process-wide umask would race unrelated
-    // threads. The workload and all descendants inherit this owner-only mask.
-    unsafe {
-        command.pre_exec(|| {
-            libc::umask(0o077);
-            Ok(())
-        });
-    }
 }
 
 impl StructuredWorkload {
@@ -1133,9 +1198,13 @@ impl StructuredWorkload {
         events: Arc<Mutex<EventQueue>>,
         pending_controls: Receiver<PendingControl>,
         control_results: SyncSender<WorkloadCommandResult>,
+        workload_argv0: &str,
+        executable_path: Option<&str>,
+        inherited_descriptors: Vec<lillux::InheritedDescriptorAuthority>,
     ) -> Result<Self> {
         let mut command = Command::new(executable);
         command
+            .arg0(workload_argv0)
             .args(&profile.workload_args)
             .current_dir(workspace)
             .stdin(Stdio::piped())
@@ -1146,7 +1215,12 @@ impl StructuredWorkload {
             .env("LC_ALL", "C")
             .env(&profile.workload_home_env, workload_home)
             .env("HOME", workload_home);
-        configure_private_creation_mask(&mut command);
+        if let Some(path) = executable_path {
+            command.env("PATH", path);
+        }
+        lillux::configure_owner_private_creation_mask(&mut command);
+        lillux::configure_inherited_descriptor_authorities(&mut command, &inherited_descriptors)
+            .map_err(anyhow::Error::msg)?;
         let mut child = command
             .spawn()
             .with_context(|| format!("start pinned structured-session workload `{executable}`"))?;
@@ -2251,6 +2325,19 @@ fn required_env(name: &str) -> Result<String> {
     Ok(value)
 }
 
+fn optional_env(name: &str) -> Result<Option<String>> {
+    let Some(value) = std::env::var_os(name) else {
+        return Ok(None);
+    };
+    let value = value
+        .into_string()
+        .map_err(|_| anyhow!("environment {name} is not valid UTF-8"))?;
+    if value.is_empty() || value.len() > 128 * 1024 || value.chars().any(char::is_control) {
+        bail!("environment {name} is not canonical and bounded");
+    }
+    Ok(Some(value))
+}
+
 fn require_absolute_normalized(label: &str, value: &str) -> Result<()> {
     let path = std::path::Path::new(value);
     if !path.is_absolute()
@@ -2542,6 +2629,9 @@ mod tests {
             events,
             controls,
             result_sender,
+            "/bin/sh",
+            None,
+            Vec::new(),
         )
         .unwrap();
         workload.bound_session_id = Some("session-one".to_owned());
@@ -2691,9 +2781,12 @@ mod tests {
 
     #[test]
     fn workload_executable_comes_only_from_the_selected_sealed_realization() {
+        use std::os::unix::fs::PermissionsExt as _;
+
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("fixture-worker");
         std::fs::write(&executable, b"fixture").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o500)).unwrap();
         let sealed = serde_json::to_string(&json!([{
             "id":"fixture",
             "kind":"file",
@@ -2704,16 +2797,17 @@ mod tests {
             "mount":"fixture-worker"
         }]))
         .unwrap();
-        assert_eq!(
-            resolve_pinned_executable(
-                root.path(),
-                &sealed,
-                "fixture",
-                std::path::Path::new("fixture-worker")
-            )
-            .unwrap(),
-            executable.canonicalize().unwrap()
-        );
+        let (descriptor, argv0, authorities) = resolve_pinned_executable(
+            root.path(),
+            &sealed,
+            "fixture",
+            std::path::Path::new("fixture-worker"),
+        )
+        .unwrap();
+        assert!(descriptor.starts_with("/proc/self/fd"));
+        assert!(argv0.starts_with("/proc/self/fd"));
+        assert_eq!(argv0.file_name().unwrap(), "fixture-worker");
+        assert_eq!(authorities.len(), 2);
         assert!(
             resolve_pinned_executable(
                 root.path(),
@@ -2810,7 +2904,7 @@ mod tests {
                 Ok(())
             });
         }
-        configure_private_creation_mask(&mut command);
+        lillux::configure_owner_private_creation_mask(&mut command);
         assert!(command.status().unwrap().success());
         assert_eq!(
             std::fs::metadata(root.path().join("child-file"))
@@ -2890,7 +2984,7 @@ mod tests {
     fn control_descriptor_is_close_on_exec() {
         use std::os::fd::AsRawFd as _;
         let (left, _right) = UnixStream::pair().unwrap();
-        set_close_on_exec(&left).unwrap();
+        lillux::protect_descriptor_from_exec(&left).unwrap();
         // SAFETY: F_GETFD only observes the borrowed descriptor.
         let flags = unsafe { libc::fcntl(left.as_raw_fd(), libc::F_GETFD) };
         assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);

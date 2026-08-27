@@ -42,6 +42,9 @@ const MAX_LAUNCH_RUNTIME_DATA_KEYS: usize = 32;
 const MAX_LAUNCH_CONFIG_INPUTS: usize = 16;
 const MAX_LAUNCH_RUNTIME_FACTS: usize = 128;
 const MAX_LAUNCH_EXECUTION_DEPENDENCIES: usize = 8;
+const MAX_LAUNCH_CONTENT_DEPENDENCIES: usize = 8;
+const MAX_LAUNCH_CONTENT_TARGETS: usize = 8;
+const MAX_LAUNCH_EXECUTABLE_SEARCH_ENTRIES: usize = 32;
 const MAX_LAUNCH_SECRET_NAMES: usize = 32;
 const MAX_LAUNCH_FACT_BYTES: u32 = 16 * 1024;
 const MAX_LAUNCH_NAME_BYTES: usize = 64;
@@ -161,6 +164,11 @@ pub struct LaunchContractDecl {
     /// launch preparer may select. Resolution and trust are always derived by
     /// the engine; the handler supplies only canonical item refs.
     pub execution_dependencies: LaunchExecutionDependencyPolicy,
+    /// Signed mechanical ceiling for non-executable bound items whose exact
+    /// pinned realizations may contribute to named execution dependencies.
+    /// Kind/space/trust remain authoritative in `ref_bindings` and are not
+    /// repeated here.
+    pub content_dependencies: LaunchContentDependencyPolicy,
     /// Required declaration of the financial authority this runtime's launch
     /// preparation must produce. `none` states the runtime exercises no
     /// direct financial boundary; an accounting runtime declares the exact
@@ -180,6 +188,42 @@ pub struct LaunchExecutionDependencyPolicy {
     pub allowed_kinds: Vec<String>,
     pub allowed_spaces: Vec<LaunchItemSpace>,
     pub allowed_trust: Vec<TrustClass>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchContentDependencyPolicy {
+    pub max_dependencies: u16,
+    pub allowed_bindings: Vec<String>,
+    pub max_targets_per_dependency: u16,
+    pub max_executable_search_entries: u16,
+    pub external_content: Option<LaunchContentExternalPolicy>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchContentExternalPolicy {
+    pub max_declarations: u16,
+    pub large_content_max_total_bytes: Option<u64>,
+}
+
+impl LaunchContentExternalPolicy {
+    /// Adapt the launch policy to the existing external-content declaration
+    /// compiler. Content dependencies deliberately grant no named-root
+    /// authority: every declaration must already be locator-free and pinned.
+    pub fn declaration_contract(&self) -> crate::kind_registry::ExecutionExternalContentDecl {
+        crate::kind_registry::ExecutionExternalContentDecl {
+            realization_derived: crate::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY
+                .to_owned(),
+            allowed_roots: Vec::new(),
+            max_declarations: usize::from(self.max_declarations),
+            large_content: self.large_content_max_total_bytes.map(|maximum| {
+                crate::kind_registry::ExecutionLargeContentGrant {
+                    max_total_bytes: Some(maximum),
+                }
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -1100,17 +1144,94 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
         }
     }
 
+    let content_policy = &contract.content_dependencies;
+    if usize::from(content_policy.max_dependencies) > MAX_LAUNCH_CONTENT_DEPENDENCIES
+        || usize::from(content_policy.max_targets_per_dependency) > MAX_LAUNCH_CONTENT_TARGETS
+        || usize::from(content_policy.max_executable_search_entries)
+            > MAX_LAUNCH_EXECUTABLE_SEARCH_ENTRIES
+    {
+        return runtime_yaml_error(
+            yaml_path,
+            "launch_contract.content_dependencies exceeds a daemon count ceiling",
+        );
+    }
+    let content_disabled = content_policy.max_dependencies == 0;
+    if content_disabled
+        != (content_policy.allowed_bindings.is_empty()
+            && content_policy.max_targets_per_dependency == 0
+            && content_policy.max_executable_search_entries == 0
+            && content_policy.external_content.is_none())
+    {
+        return runtime_yaml_error(
+            yaml_path,
+            "launch_contract.content_dependencies must be wholly empty exactly when max_dependencies is zero",
+        );
+    }
+    if !content_disabled {
+        if content_policy.max_targets_per_dependency == 0 {
+            return runtime_yaml_error(
+                yaml_path,
+                "launch_contract.content_dependencies.max_targets_per_dependency must be nonzero",
+            );
+        }
+        validate_non_empty_unique(
+            yaml_path,
+            "launch_contract.content_dependencies.allowed_bindings",
+            &content_policy.allowed_bindings,
+        )?;
+        for binding in &content_policy.allowed_bindings {
+            validate_launch_name(
+                yaml_path,
+                "launch_contract.content_dependencies.allowed_bindings",
+                binding,
+            )?;
+            if !contract.ref_bindings.contains_key(binding) {
+                return runtime_yaml_error(
+                    yaml_path,
+                    format!(
+                        "launch_contract.content_dependencies binding `{binding}` is not declared by ref_bindings"
+                    ),
+                );
+            }
+        }
+        let external = content_policy.external_content.as_ref().ok_or_else(|| {
+            EngineError::RuntimeYamlInvalid {
+                path: yaml_path.to_owned(),
+                reason: "launch content dependencies require an external_content ceiling"
+                    .to_owned(),
+            }
+        })?;
+        if external.max_declarations == 0
+            || usize::from(external.max_declarations)
+                > crate::external_content::MAX_DECLARATIONS_PER_ITEM
+        {
+            return runtime_yaml_error(
+                yaml_path,
+                "launch_contract.content_dependencies.external_content.max_declarations is outside the substrate ceiling",
+            );
+        }
+        if let Some(maximum) = external.large_content_max_total_bytes
+            && (maximum == 0 || maximum > ryeos_state::objects::MAX_LARGE_CONTENT_TOTAL_BYTES)
+        {
+            return runtime_yaml_error(
+                yaml_path,
+                "launch content-dependency large-content ceiling is outside the substrate bound",
+            );
+        }
+    }
+
     if matches!(&contract.preparation, LaunchPreparationDecl::None)
         && (!contract.config_inputs.is_empty()
             || secret_policy.max_requirements != 0
             || !secret_policy.allowed_names.is_empty()
             || !contract.required_runtime_data.is_empty()
             || !contract.runtime_facts.is_empty()
-            || contract.execution_dependencies.max_dependencies != 0)
+            || contract.execution_dependencies.max_dependencies != 0
+            || contract.content_dependencies.max_dependencies != 0)
     {
         return runtime_yaml_error(
             yaml_path,
-            "launch_contract.preparation kind `none` requires empty config inputs, secret policy, runtime data, runtime facts, and execution dependencies",
+            "launch_contract.preparation kind `none` requires empty config inputs, secret policy, runtime data, runtime facts, execution dependencies, and content dependencies",
         );
     }
 

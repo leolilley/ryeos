@@ -1,8 +1,10 @@
 # ryeos:signed:2026-08-26T10:41:54Z:158691c0ee1d0236fa55b91592b71b6e03555df7fc0201c4d57671ed9fc3a3b7:Oopb4wXK/U1vfkVwewbTOhUxL43ekTkGDYODrRYYGSRJ+ipdPNxEuwiF0zCzVUYliJjerctowbYufmMgZcAKBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex/environments
-schema: ryeos.worker_environment.v1
+schema: ryeos.worker_environment.v2
 worker_ref: worker:codex/hosted
-configuration: {}
+external_content: []
+configuration:
+  executable_search: []
 credential_requirement:
   workload_family: codex
   required_state: active

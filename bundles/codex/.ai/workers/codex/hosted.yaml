@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-26T23:06:53Z:08bac8d002961b2eefde7952ecda9a9afcf873ef2bf4717cf9e230605904c14f:Na/TuU1B+Ulel88o2f8ByVUWnzQk4LO4yPfT6DR0fGHCTmKQo4iEEmgq3sIlAQqYjn2/SWQIGQ7BkMEOggwrAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-27T07:02:41Z:fb644ce57eac3475c91f0273dc3af6aa758b9de675696ae2e8679cedf65a5ec8:kE8iNRZ3N4DkmIfE3UIzGatj5Qs+u9kAltOrMMuqxTDXFn9QczCkFl+Rx2cOGNMZCo00WgMkIKvl1W3/xdf2DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "codex"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -32,12 +32,6 @@ external_content:
     digest: "984168b4c3f0efcbee4d1707fda8f8320bdb08a75cb704a8205f853e79e4dc2d"
     metadata_hint: "openai-codex-code-mode-host-v0.147.0-x86_64-unknown-linux-musl"
     mount: codex-code-mode-host
-  - id: codex-bwrap
-    kind: file
-    mode: pinned
-    digest: "5f2c25277b1a2150937372ade46eef46aa2227b749f984bea208b5467540b86f"
-    metadata_hint: "openai-codex-bwrap-v0.147.0-x86_64-unknown-linux-musl"
-    mount: codex-resources/bwrap
   - id: codex-zsh
     kind: file
     mode: pinned

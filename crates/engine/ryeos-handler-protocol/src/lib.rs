@@ -404,6 +404,12 @@ pub struct LaunchPrepareSuccess {
     /// under the signed policy below; handlers cannot supply resolution bytes,
     /// trust, executable identity, or realization claims.
     pub execution_dependencies: BTreeMap<String, LaunchExecutionDependencyRequestWire>,
+    /// Exact non-executable bound items selected by the kind-owned preparer
+    /// to contribute retained external realizations to named execution
+    /// dependencies. The generic launch layer resolves only an already
+    /// admitted ref-binding; handlers cannot supply bytes, paths, trust, or
+    /// manifest claims.
+    pub content_dependencies: BTreeMap<String, LaunchContentDependencyRequestWire>,
     /// Financial authority result declared by the runtime launch contract.
     /// Required — an absent field is a protocol error, never a default.
     /// The executor validates the payload strictly against the declared
@@ -421,6 +427,21 @@ pub struct LaunchPrepareSuccess {
 #[serde(deny_unknown_fields)]
 pub struct LaunchExecutionDependencyRequestWire {
     pub item_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchContentDependencyRequestWire {
+    pub binding: String,
+    pub targets: Vec<String>,
+    pub executable_search: Vec<ExecutableSearchPathEntryWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutableSearchPathEntryWire {
+    pub realization_id: String,
+    pub relative_directory: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -524,6 +545,10 @@ pub struct ValidateLaunchPreparerConfigRequest {
     pub required_runtime_data: Vec<String>,
     pub runtime_facts: BTreeMap<String, RuntimeFactDeclWire>,
     pub execution_dependencies: LaunchExecutionDependencyPolicyWire,
+    /// Signed ceiling for already-bound non-executable content selected by
+    /// the preparer. Kind/space/trust remain owned by `ref_bindings` and are
+    /// deliberately not repeated here.
+    pub content_dependencies: LaunchContentDependencyPolicyWire,
     /// Required financial-authority contract term. A preparer that does not
     /// understand this term fails strict decoding instead of silently
     /// acknowledging a contract it cannot satisfy.
@@ -538,6 +563,23 @@ pub struct LaunchExecutionDependencyPolicyWire {
     pub allowed_kinds: Vec<String>,
     pub allowed_spaces: Vec<ItemSpaceWire>,
     pub allowed_trust: Vec<TrustClassWire>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchContentDependencyPolicyWire {
+    pub max_dependencies: u16,
+    pub allowed_bindings: Vec<String>,
+    pub max_targets_per_dependency: u16,
+    pub max_executable_search_entries: u16,
+    pub external_content: Option<LaunchContentExternalPolicyWire>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchContentExternalPolicyWire {
+    pub max_declarations: u16,
+    pub large_content_max_total_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

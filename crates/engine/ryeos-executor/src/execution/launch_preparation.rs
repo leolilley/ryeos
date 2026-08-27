@@ -42,6 +42,7 @@ const MAX_REF_BINDINGS: usize = 32;
 const MAX_REF_BINDING_NAME_BYTES: usize = 64;
 const MAX_REF_BINDING_VALUE_BYTES: usize = 2_048;
 const MAX_EXECUTION_DEPENDENCY_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CONTENT_DEPENDENCY_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -71,6 +72,11 @@ pub struct PreparedRuntimeLaunch {
     /// Generic launch code treats names and payloads mechanically; consumers
     /// interpret only dependencies they own.
     pub execution_dependencies: BTreeMap<String, PreparedExecutionDependency>,
+    /// Path-free retained bound items whose exact pinned external
+    /// realizations contribute to named execution dependencies. Selection is
+    /// kind-owned; generic launch code applies only the signed mechanical
+    /// policy and never interprets workload configuration fields.
+    pub content_dependencies: BTreeMap<String, PreparedContentDependency>,
     /// Session capsules admitted from execution dependencies before the outer
     /// launch capsule is minted. Keys remain preparer-owned opaque dependency
     /// names; generic launch code validates and retains only their hashes.
@@ -88,6 +94,67 @@ pub struct PreparedRuntimeLaunch {
     /// Its family is opaque to generic launch code, which validates, seals,
     /// and transports the mechanical contract without interpreting it.
     pub external_effect_authority: Option<ryeos_effect_contract::AdmittedExternalEffectAuthority>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedContentDependency {
+    pub binding: String,
+    pub canonical_ref: String,
+    pub resolution: ryeos_engine::resolution::RetainedResolutionOutput,
+    pub targets: Vec<String>,
+    pub executable_search: Vec<ryeos_handler_protocol::ExecutableSearchPathEntryWire>,
+    pub external_content_policy: ryeos_engine::runtime_registry::LaunchContentExternalPolicy,
+}
+
+impl PreparedContentDependency {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !valid_ref_binding_name(&self.binding) {
+            anyhow::bail!("prepared content dependency binding is not canonical");
+        }
+        let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(&self.canonical_ref)?;
+        if canonical.to_string() != self.canonical_ref
+            || canonical.suffix.is_some()
+            || self.resolution.root_ref() != self.canonical_ref
+            || self.targets.is_empty()
+            || self.targets.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            anyhow::bail!("prepared content dependency identity is inconsistent");
+        }
+        let restored = self.resolution.restore();
+        if restored.root.source_space == ryeos_engine::contracts::ItemSpace::Node
+            || restored.effective_trust_class == ryeos_engine::resolution::TrustClass::TrustedNode
+            || restored.root.signer_fingerprint.is_none()
+        {
+            anyhow::bail!("prepared content dependency is not signed portable content");
+        }
+        if self.external_content_policy.max_declarations == 0 {
+            anyhow::bail!("prepared content dependency has no declaration ceiling");
+        }
+        let mut searches = BTreeSet::new();
+        for entry in &self.executable_search {
+            if entry.realization_id.is_empty()
+                || entry.realization_id.len() > 64
+                || !entry.realization_id.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'-')
+                })
+                || (entry.relative_directory != "."
+                    && ryeos_state::objects::validate_canonical_project_relative_path(
+                        &entry.relative_directory,
+                    )
+                    .is_err())
+                || !searches.insert((
+                    entry.realization_id.as_str(),
+                    entry.relative_directory.as_str(),
+                ))
+            {
+                anyhow::bail!("prepared executable-search entry is not canonical");
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,6 +335,7 @@ struct PreparedRuntimeLaunchInputs {
     primary: LaunchPreparedItemWire,
     binding_wires: BTreeMap<String, LaunchPreparedItemWire>,
     binding_records: BTreeMap<String, RefBindingLaunchRecord>,
+    binding_resolutions: BTreeMap<String, ryeos_engine::resolution::ResolutionOutput>,
     config_inputs: BTreeMap<String, LaunchConfigSnapshotWire>,
     config_dependency_proof: ryeos_engine::launch_config::LaunchConfigDependencyProof,
     principal: EffectivePrincipal,
@@ -1058,6 +1126,7 @@ fn prepare_runtime_launch_inputs(
     let scopes = principal_scopes(request.principal);
     let mut binding_wires = BTreeMap::new();
     let mut binding_records = BTreeMap::new();
+    let mut binding_resolutions = BTreeMap::new();
     let ref_binding_resolution_timer = request
         .ref_binding_resolution_timings
         .map(|timings| timings.nested("background_dispatch", "ref_binding_resolution"));
@@ -1110,6 +1179,7 @@ fn prepare_runtime_launch_inputs(
             },
         );
         binding_wires.insert(name.clone(), prepared_item_wire(&resolution)?);
+        binding_resolutions.insert(name.clone(), resolution.as_ref().clone());
     }
     drop(ref_binding_resolution_timer);
 
@@ -1134,6 +1204,7 @@ fn prepare_runtime_launch_inputs(
         primary: prepared_item_wire(request.primary)?,
         binding_wires,
         binding_records,
+        binding_resolutions,
         config_inputs: config_set.snapshots.clone(),
         config_dependency_proof: config_set.dependency_proof.clone(),
         principal: request.principal.clone(),
@@ -1468,6 +1539,7 @@ fn finish_runtime_launch_preparation_parts(
             required_secrets: Vec::new(),
             runtime_facts: BTreeMap::new(),
             execution_dependencies: BTreeMap::new(),
+            content_dependencies: BTreeMap::new(),
             financial_authority: ryeos_handler_protocol::FinancialAuthorityResultWire::None,
             external_effect_authority:
                 ryeos_handler_protocol::ExternalEffectAuthorityResultWire::None,
@@ -1495,6 +1567,12 @@ fn finish_runtime_launch_preparation_parts(
     validate_result(contract, ref_bindings, &inputs.config_inputs, &mut result)?;
     let execution_dependencies =
         resolve_execution_dependencies(engine, contract, inputs, result.execution_dependencies)?;
+    let content_dependencies = resolve_content_dependencies(
+        contract,
+        inputs,
+        &execution_dependencies,
+        result.content_dependencies,
+    )?;
     let config_contributors = collect_config_contributors(&inputs.config_inputs);
     let financial_authority = validate_financial_authority(contract, result.financial_authority)?;
     let external_effect_authority =
@@ -1512,6 +1590,7 @@ fn finish_runtime_launch_preparation_parts(
         runtime_facts: result.runtime_facts,
         binding_records: inputs.binding_records.clone(),
         execution_dependencies,
+        content_dependencies,
         admitted_sessions: BTreeMap::new(),
         config_contributors,
         financial_authority,
@@ -1724,6 +1803,177 @@ fn resolve_execution_dependencies(
         resolved.insert(name, dependency);
     }
     Ok(resolved)
+}
+
+fn resolve_content_dependencies(
+    contract: &ryeos_engine::runtime_registry::LaunchContractDecl,
+    inputs: &PreparedRuntimeLaunchInputs,
+    execution_dependencies: &BTreeMap<String, PreparedExecutionDependency>,
+    requests: BTreeMap<String, ryeos_handler_protocol::LaunchContentDependencyRequestWire>,
+) -> Result<BTreeMap<String, PreparedContentDependency>, DispatchError> {
+    let policy = &contract.content_dependencies;
+    if requests.len() > usize::from(policy.max_dependencies) {
+        return Err(preparation_error(
+            "content_dependency_limit_exceeded",
+            format!(
+                "launch preparer requested {} content dependencies, exceeding the signed maximum {}",
+                requests.len(),
+                policy.max_dependencies
+            ),
+            LaunchPrepareErrorClass::Internal,
+        ));
+    }
+    let external_policy = policy.external_content.as_ref();
+    let mut prepared = BTreeMap::new();
+    let mut aggregate_bytes = 0usize;
+    for (name, request) in requests {
+        if !valid_ref_binding_name(&name)
+            || name != request.binding
+            || !policy.allowed_bindings.contains(&request.binding)
+        {
+            return Err(preparation_error(
+                "content_dependency_binding_denied",
+                format!("content dependency `{name}` is not an admitted ref binding"),
+                LaunchPrepareErrorClass::Internal,
+            ));
+        }
+        let resolution = inputs
+            .binding_resolutions
+            .get(&request.binding)
+            .ok_or_else(|| {
+                preparation_error(
+                    "content_dependency_binding_missing",
+                    format!("content dependency `{name}` selected an absent resolved binding"),
+                    LaunchPrepareErrorClass::Internal,
+                )
+            })?;
+        let binding_record = &inputs.binding_records[&request.binding];
+        if binding_record.canonical_ref != resolution.root.resolved_ref
+            || binding_record.resolution != resolution.as_launched_digest()
+        {
+            return Err(preparation_error(
+                "content_dependency_binding_diverged",
+                format!("content dependency `{name}` differs from its bound authority"),
+                LaunchPrepareErrorClass::Internal,
+            ));
+        }
+        if request.targets.is_empty()
+            || request.targets.len() > usize::from(policy.max_targets_per_dependency)
+            || request.targets.windows(2).any(|pair| pair[0] >= pair[1])
+            || request
+                .targets
+                .iter()
+                .any(|target| !execution_dependencies.contains_key(target))
+        {
+            return Err(preparation_error(
+                "content_dependency_target_invalid",
+                format!("content dependency `{name}` has an invalid target set"),
+                LaunchPrepareErrorClass::Internal,
+            ));
+        }
+        if request.executable_search.len() > usize::from(policy.max_executable_search_entries) {
+            return Err(preparation_error(
+                "content_dependency_search_limit_exceeded",
+                format!("content dependency `{name}` exceeds its executable-search ceiling"),
+                LaunchPrepareErrorClass::Internal,
+            ));
+        }
+        let external_policy = external_policy.ok_or_else(|| {
+            preparation_error(
+                "content_dependency_policy_missing",
+                "content dependency was produced under a disabled external-content policy",
+                LaunchPrepareErrorClass::Internal,
+            )
+        })?;
+        let synthetic_contract = external_policy.declaration_contract();
+        let declarer =
+            ryeos_engine::external_content::declaring_authority(resolution).map_err(|error| {
+                preparation_error(
+                    "content_dependency_authority_invalid",
+                    format!("content dependency `{name}` has invalid declaring authority: {error}"),
+                    LaunchPrepareErrorClass::Configuration,
+                )
+            })?;
+        let declarations = ryeos_engine::external_content::declarations_from_composed(
+            &resolution.composed.composed,
+            Some(&synthetic_contract),
+            declarer,
+        )
+        .map_err(|error| {
+            preparation_error(
+                "content_dependency_declaration_invalid",
+                format!("content dependency `{name}` declaration is invalid: {error}"),
+                LaunchPrepareErrorClass::Configuration,
+            )
+        })?
+        .ok_or_else(|| {
+            preparation_error(
+                "content_dependency_declaration_missing",
+                format!("content dependency `{name}` has no external_content declaration"),
+                LaunchPrepareErrorClass::Configuration,
+            )
+        })?;
+        if declarations.is_empty()
+            || declarations.iter().any(|declaration| {
+                declaration.mode != ryeos_engine::external_content::ExternalContentMode::Pinned
+                    || declaration.locator.is_some()
+                    || declaration.digest.is_none()
+            })
+        {
+            return Err(preparation_error(
+                "content_dependency_declaration_nonportable",
+                format!(
+                    "content dependency `{name}` must use at least one locator-free pinned declaration"
+                ),
+                LaunchPrepareErrorClass::Configuration,
+            ));
+        }
+        let dependency = PreparedContentDependency {
+            binding: request.binding,
+            canonical_ref: resolution.root.resolved_ref.clone(),
+            resolution: ryeos_engine::resolution::RetainedResolutionOutput::capture(resolution),
+            targets: request.targets,
+            executable_search: request.executable_search,
+            external_content_policy: external_policy.clone(),
+        };
+        dependency.validate().map_err(|error| {
+            preparation_error(
+                "content_dependency_capture_invalid",
+                format!("content dependency `{name}` capture is invalid: {error}"),
+                LaunchPrepareErrorClass::Internal,
+            )
+        })?;
+        aggregate_bytes = aggregate_bytes
+            .checked_add(
+                serde_json::to_vec(&dependency)
+                    .map_err(|error| {
+                        preparation_error(
+                            "content_dependency_serialize_failed",
+                            error.to_string(),
+                            LaunchPrepareErrorClass::Internal,
+                        )
+                    })?
+                    .len(),
+            )
+            .ok_or_else(|| {
+                preparation_error(
+                    "content_dependency_size_exceeded",
+                    "content dependency size overflow",
+                    LaunchPrepareErrorClass::Internal,
+                )
+            })?;
+        if aggregate_bytes > MAX_CONTENT_DEPENDENCY_BYTES {
+            return Err(preparation_error(
+                "content_dependency_size_exceeded",
+                format!(
+                    "content dependencies exceed the daemon limit of {MAX_CONTENT_DEPENDENCY_BYTES} bytes"
+                ),
+                LaunchPrepareErrorClass::Internal,
+            ));
+        }
+        prepared.insert(name, dependency);
+    }
+    Ok(prepared)
 }
 
 fn validate_external_effect_authority(

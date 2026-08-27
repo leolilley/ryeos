@@ -24,12 +24,14 @@ use ryeos_engine::kind_registry::{PersistentSessionDecl, TerminatorDecl};
 use ryeos_engine::protocols::descriptor::PersistentSessionProcessMode;
 use ryeos_engine::protocols::{VerifiedProtocol, validate_persistent_session_protocol};
 use ryeos_state::objects::{
-    AdmittedPersistentSessionCapsule, PERSISTENT_SESSION_CAPSULE_KIND,
+    AdmittedPersistentSessionCapsule, ExecutableSearchPathEntry, PERSISTENT_SESSION_CAPSULE_KIND,
     PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION, PersistentSessionAuthority,
     PersistentSessionLifecycleContract, PersistentSessionWireContract,
 };
 
-use super::launch_preparation::{PreparedExecutionDependency, PreparedRuntimeLaunch};
+use super::launch_preparation::{
+    PreparedContentDependency, PreparedExecutionDependency, PreparedRuntimeLaunch,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -164,6 +166,32 @@ pub(crate) fn reset_for_cross_site_admission(
         dependency.subject = target_subject;
         dependency.validate()?;
     }
+    for dependency in prepared.content_dependencies.values_mut() {
+        dependency.validate()?;
+        let mut source_resolution = dependency.resolution.restore();
+        clear_node_local_admission_projections(&mut source_resolution);
+        let canonical =
+            ryeos_engine::canonical_ref::CanonicalRef::parse(&dependency.canonical_ref)?;
+        let target_resolution =
+            engine.effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+                item_ref: canonical,
+                expected_kind: None,
+                project_root: None,
+                subject_resolution_authority: SubjectResolutionAuthority::Projectless,
+            })?;
+        let source_portable =
+            ryeos_engine::resolution::RetainedResolutionOutput::capture(&source_resolution);
+        let target_portable =
+            ryeos_engine::resolution::RetainedResolutionOutput::capture(&target_resolution);
+        if serde_json::to_value(&source_portable)? != serde_json::to_value(&target_portable)? {
+            bail!(
+                "target content dependency `{}` differs from the transferred portable program",
+                dependency.canonical_ref
+            );
+        }
+        dependency.resolution = target_portable;
+        dependency.validate()?;
+    }
     Ok(())
 }
 
@@ -201,7 +229,8 @@ pub(crate) fn admit_or_verify_prepared_sessions(
     recovered: bool,
 ) -> Result<AdmittedSessionPublications> {
     let mut expected_names = BTreeSet::new();
-    let mut publications = Vec::new();
+    let (content_by_target, search_by_target, mut publications) =
+        admit_or_verify_content_dependencies(state, prepared, recovered)?;
     let (dependencies, admitted_sessions) = (
         &mut prepared.execution_dependencies,
         &mut prepared.admitted_sessions,
@@ -215,8 +244,14 @@ pub(crate) fn admit_or_verify_prepared_sessions(
                 continue;
             };
             expected_names.insert(name.clone());
-            verify_session_capsule(state, engine, dependency, hash)
-                .with_context(|| format!("verify recovered session dependency `{name}`"))?;
+            verify_session_capsule(
+                state,
+                engine,
+                dependency,
+                hash,
+                search_by_target.get(name).map(Vec::as_slice).unwrap_or(&[]),
+            )
+            .with_context(|| format!("verify recovered session dependency `{name}`"))?;
         } else {
             let Some((declaration, protocol)) = session_contract(engine, dependency)? else {
                 continue;
@@ -225,16 +260,23 @@ pub(crate) fn admit_or_verify_prepared_sessions(
             if admitted_sessions.contains_key(name) {
                 bail!("fresh session dependency `{name}` already carries a capsule hash");
             }
-            let (hash, admitted_publications) =
-                admit_session_capsule(state, engine, dependency, &declaration, &protocol)
-                    .inspect_err(|error| {
-                        tracing::warn!(
-                            dependency = %name,
-                            error = %error,
-                            "persistent-session dependency admission failed"
-                        );
-                    })
-                    .with_context(|| format!("admit persistent-session dependency `{name}`"))?;
+            let (hash, admitted_publications) = admit_session_capsule(
+                state,
+                engine,
+                dependency,
+                &declaration,
+                &protocol,
+                content_by_target.get(name),
+                search_by_target.get(name).map(Vec::as_slice).unwrap_or(&[]),
+            )
+            .inspect_err(|error| {
+                tracing::warn!(
+                    dependency = %name,
+                    error = %error,
+                    "persistent-session dependency admission failed"
+                );
+            })
+            .with_context(|| format!("admit persistent-session dependency `{name}`"))?;
             admitted_sessions.insert(name.clone(), hash);
             publications.extend(admitted_publications);
         }
@@ -246,6 +288,132 @@ pub(crate) fn admit_or_verify_prepared_sessions(
         );
     }
     Ok(AdmittedSessionPublications { publications })
+}
+
+type TargetContentSets =
+    BTreeMap<String, ryeos_engine::external_realization::RealizedExternalContentSet>;
+type TargetExecutableSearch = BTreeMap<String, Vec<ExecutableSearchPathEntry>>;
+
+fn admit_or_verify_content_dependencies(
+    state: &AppState,
+    prepared: &mut PreparedRuntimeLaunch,
+    recovered: bool,
+) -> Result<(
+    TargetContentSets,
+    TargetExecutableSearch,
+    Vec<ryeos_state::PendingCasPublication>,
+)> {
+    let mut entries_by_target: BTreeMap<
+        String,
+        Vec<ryeos_engine::external_realization::RealizedExternalContent>,
+    > = BTreeMap::new();
+    let mut search_by_target: TargetExecutableSearch = BTreeMap::new();
+    let mut publications = Vec::new();
+    for (name, dependency) in &mut prepared.content_dependencies {
+        dependency
+            .validate()
+            .with_context(|| format!("validate content dependency `{name}`"))?;
+        let mut resolution = dependency.resolution.restore();
+        let realized = if recovered {
+            ryeos_app::external_content_admission::recover_external_realizations(
+                state,
+                &resolution,
+            )?
+            .ok_or_else(|| anyhow!("recovered content dependency `{name}` has no realization"))?;
+            realization_set(&resolution)?
+        } else {
+            let mut publication = None;
+            ryeos_app::external_content_admission::admit_portable_content_dependency_in_publication(
+                state,
+                &mut resolution,
+                &dependency.external_content_policy,
+                None,
+                &mut publication,
+            )?;
+            dependency.resolution =
+                ryeos_engine::resolution::RetainedResolutionOutput::capture(&resolution);
+            if let Some(publication) = publication {
+                publications.push(publication);
+            }
+            realization_set(&resolution)?
+        };
+        validate_dependency_search(name, dependency, &realized)?;
+        for target in &dependency.targets {
+            entries_by_target
+                .entry(target.clone())
+                .or_default()
+                .extend(realized.iter().cloned());
+            search_by_target.entry(target.clone()).or_default().extend(
+                dependency
+                    .executable_search
+                    .iter()
+                    .map(|entry| ExecutableSearchPathEntry {
+                        realization_id: entry.realization_id.clone(),
+                        relative_directory: entry.relative_directory.clone(),
+                    }),
+            );
+        }
+    }
+    let content_by_target = entries_by_target
+        .into_iter()
+        .map(|(target, entries)| {
+            Ok((
+                target,
+                ryeos_engine::external_realization::RealizedExternalContentSet::new(entries)?,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    for search in search_by_target.values() {
+        if search.len() > ryeos_state::objects::MAX_EXECUTABLE_SEARCH_PATH_ENTRIES {
+            bail!("combined executable search exceeds the session capsule bound");
+        }
+        let mut seen = BTreeSet::new();
+        if search.iter().any(|entry| {
+            !seen.insert((
+                entry.realization_id.as_str(),
+                entry.relative_directory.as_str(),
+            ))
+        }) {
+            bail!("combined executable search contains duplicate entries");
+        }
+    }
+    Ok((content_by_target, search_by_target, publications))
+}
+
+fn realization_set(
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+) -> Result<ryeos_engine::external_realization::RealizedExternalContentSet> {
+    let value = resolution
+        .composed
+        .derived
+        .get(ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY)
+        .ok_or_else(|| anyhow!("content dependency has no retained external realization"))?;
+    Ok(ryeos_engine::external_realization::RealizedExternalContentSet::from_value(value)?)
+}
+
+fn validate_dependency_search(
+    name: &str,
+    dependency: &PreparedContentDependency,
+    realized: &ryeos_engine::external_realization::RealizedExternalContentSet,
+) -> Result<()> {
+    for search in &dependency.executable_search {
+        let entry = realized
+            .iter()
+            .find(|entry| entry.id == search.realization_id)
+            .ok_or_else(|| {
+                anyhow!(
+                    "content dependency `{name}` executable search names absent realization `{}`",
+                    search.realization_id
+                )
+            })?;
+        if entry.kind != ryeos_state::objects::ExternalContentKind::Tree {
+            bail!(
+                "content dependency `{name}` executable search names non-tree realization `{}`",
+                search.realization_id
+            );
+        }
+    }
+    Ok(())
 }
 
 fn session_contract(
@@ -359,6 +527,8 @@ fn admit_session_capsule(
     dependency: &mut PreparedExecutionDependency,
     declaration: &PersistentSessionDecl,
     protocol: &VerifiedProtocol,
+    inherited_content: Option<&ryeos_engine::external_realization::RealizedExternalContentSet>,
+    executable_search: &[ExecutableSearchPathEntry],
 ) -> Result<(String, Vec<ryeos_state::PendingCasPublication>)> {
     let roots = engine.resolution_roots(None);
     let mut resolution = dependency.resolution.clone();
@@ -381,7 +551,7 @@ fn admit_session_capsule(
             &dependency.captured_verified_subject()?.resolved.kind,
             &mut resolution,
             &roots,
-            None,
+            inherited_content,
             &mut publication,
         )?;
     let validation = engine.effective_validators.validate(
@@ -525,6 +695,7 @@ fn admit_session_capsule(
             .map(|captured| captured.binding().digest())
             .transpose()?,
         structured_session_profile,
+        executable_search: executable_search.to_vec(),
         runtime_ref: session_authority.runtime_ref,
         executor_ref,
     };
@@ -553,6 +724,7 @@ fn verify_session_capsule(
     engine: &ryeos_engine::engine::Engine,
     dependency: &PreparedExecutionDependency,
     capsule_hash: &str,
+    executable_search: &[ExecutableSearchPathEntry],
 ) -> Result<AdmittedPersistentSessionCapsule> {
     let capsule = load_capsule(state, capsule_hash)?;
     let exact: PersistentSessionExactProgram =
@@ -565,6 +737,9 @@ fn verify_session_capsule(
     {
         bail!("persistent-session capsule contradicts its captured dependency");
     }
+    if capsule.executable_search != executable_search {
+        bail!("persistent-session capsule contradicts its executable-search dependency");
+    }
     let observed_digest = exact.resolution_output.effective_definition_digest()?;
     if observed_digest.as_str() != exact.effective_definition_digest {
         bail!("persistent-session exact effective-definition digest changed");
@@ -573,6 +748,7 @@ fn verify_session_capsule(
     let (protocol_ref, protocol_digest) = capsule_protocol_identity(&capsule)?;
     let resolution = exact.resolution_output.restore();
     ryeos_app::source_closure_admission::recover_source_closure(state, &state.engine, &resolution)?;
+    ryeos_app::external_content_admission::recover_external_realizations(state, &resolution)?;
     super::execution_realization::verify_persistent_session(
         state,
         &capsule,
@@ -727,33 +903,16 @@ fn start_capsule_process(
 /// Create a daemon-owned execution view under RyeOS's code-enforced
 /// `.ai/cache` snapshot exclusion. Disabled-isolation launches can materialize
 /// immutable runtime inputs here without adding them to the project candidate.
-fn create_node_owned_runtime_view(workspace: &Path) -> Result<PathBuf> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let mut current = workspace.to_path_buf();
+fn create_node_owned_runtime_view(workspace: &Path) -> Result<lillux::PinnedDirectory> {
+    let mut current = lillux::PinnedDirectory::open(workspace)?
+        .ok_or_else(|| anyhow!("persistent-session workspace is missing"))?;
     for component in [".ai", "cache", "ryeos-runtime"] {
-        current.push(component);
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                    bail!("node-owned runtime view collides with a non-directory");
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir(&current).with_context(|| {
-                    format!("create node-owned runtime view {}", current.display())
-                })?;
-            }
-            Err(error) => return Err(error).context("inspect node-owned runtime view"),
-        }
+        current = current
+            .open_or_create_child(std::ffi::OsStr::new(component), 0o700)
+            .with_context(|| format!("open node-owned runtime-view component `{component}`"))?;
     }
-    std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o700))?;
-    let canonical_workspace = workspace.canonicalize()?;
-    let canonical_view = current.canonicalize()?;
-    if !canonical_view.starts_with(&canonical_workspace) {
-        bail!("node-owned runtime view escaped its workspace");
-    }
-    Ok(canonical_view)
+    current.tighten_owner_private_directory()?;
+    Ok(current)
 }
 
 fn prepare_structured_session_baseline(
@@ -762,74 +921,48 @@ fn prepare_structured_session_baseline(
     state_root: &Path,
     enforced: bool,
 ) -> Result<Option<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>> {
-    use std::io::Write as _;
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-
-    let source = source_entry
+    let source_parent = source_entry
         .parent()
-        .ok_or_else(|| anyhow!("structured-session entry has no source parent"))?
-        .join(&profile.baseline_source);
-    let source_metadata = std::fs::symlink_metadata(&source)
-        .context("inspect admitted structured-session baseline")?;
-    if source_metadata.file_type().is_symlink()
-        || !source_metadata.is_file()
-        || source_metadata.len() == 0
-        || source_metadata.len() > 64 * 1024
-    {
-        bail!("admitted structured-session baseline is not one bounded regular file");
+        .ok_or_else(|| anyhow!("structured-session entry has no source parent"))?;
+    let source_directory = lillux::PinnedDirectory::open(source_parent)?
+        .ok_or_else(|| anyhow!("structured-session source parent is missing"))?;
+    let source_file = source_directory
+        .open_pinned_regular(std::ffi::OsStr::new(&profile.baseline_source), false)?
+        .ok_or_else(|| anyhow!("admitted structured-session baseline is missing"))?;
+    let bytes = source_file.read_bounded(64 * 1024)?;
+    if bytes.is_empty() {
+        bail!("admitted structured-session baseline is empty");
     }
-    let bytes = std::fs::read(&source).context("read admitted structured-session baseline")?;
-    let destination = state_root.join(&profile.baseline_destination);
-    match std::fs::symlink_metadata(&destination) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            bail!("workload compatibility seed is not a regular file");
-        }
-        Ok(metadata)
-            if metadata.permissions().mode() & 0o777 == 0o400
-                && std::fs::read(&destination)? == bytes => {}
-        Ok(_) | Err(_) => {
-            if let Err(error) = std::fs::symlink_metadata(&destination)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                return Err(error).context("inspect workload compatibility seed");
-            }
-            let temporary = state_root.join(".ryeos-baseline.pending");
-            match std::fs::symlink_metadata(&temporary) {
-                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                    bail!("incomplete workload compatibility seed is not a regular file");
-                }
-                Ok(_) => std::fs::remove_file(&temporary)
-                    .context("remove incomplete workload compatibility seed")?,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(error).context("inspect workload compatibility seed staging file");
-                }
-            }
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o400)
-                .open(&temporary)
-                .context("create structured-session compatibility seed staging file")?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            std::fs::rename(&temporary, &destination)?;
-            std::fs::File::open(state_root)?.sync_all()?;
-        }
+
+    let state_directory = lillux::PinnedDirectory::open(state_root)?
+        .ok_or_else(|| anyhow!("structured-session state root is missing"))?;
+    let destination_name = std::ffi::OsStr::new(&profile.baseline_destination);
+    let incumbent = state_directory
+        .open_pinned_regular(destination_name, false)
+        .context("open workload compatibility seed through Lillux")?;
+    let current_matches = incumbent
+        .as_ref()
+        .map(|entry| {
+            Ok(entry.permission_mode()? == 0o400 && entry.read_bounded(64 * 1024)? == bytes)
+        })
+        .transpose()?
+        .unwrap_or(false);
+    if !current_matches {
+        state_directory
+            .atomic_write_pinned_if_same(destination_name, incumbent.as_ref(), &bytes, 0o400)
+            .context("publish workload compatibility seed through Lillux")?;
     }
     if !enforced {
         return Ok(None);
     }
-    let source_file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&source)
-        .context("pin admitted structured-session baseline")?;
+    let source_path = source_file.path().to_path_buf();
+    let destination = state_root.join(&profile.baseline_destination);
+    let source_descriptor = source_file.try_clone_descriptor()?;
     Ok(Some(
         ryeos_engine::isolation::IsolationReadOnlyMountAuthority::new_state_overlay(
-            source,
+            source_path,
             destination,
-            source_file,
+            source_descriptor,
         ),
     ))
 }
@@ -856,7 +989,7 @@ fn spawn_capsule_process_held(
         workspace
     } else {
         private_runtime_view = create_node_owned_runtime_view(workspace)?;
-        private_runtime_view.as_path()
+        private_runtime_view.path()
     };
     let bound = if state.isolation.is_enforced() {
         super::external_content::bind_external_realizations(state, &resolution, &workspace)?
@@ -935,11 +1068,18 @@ fn spawn_capsule_process_held(
         worker_socket,
         capsule.wire.channel_env.clone(),
     )?;
+    let executable_search_env = (!capsule.executable_search.is_empty())
+        .then(|| {
+            lillux::canonical_json(&serde_json::to_value(&capsule.executable_search)?)
+                .map_err(anyhow::Error::from)
+        })
+        .transpose()?;
     plan.bind_persistent_session_spawn_environment(
         external_env.as_deref(),
         external_env.as_ref().map(|_| realization_workspace),
         source_env,
         source_entry,
+        executable_search_env.as_deref(),
     )?;
     let mut runtime_env_allowlist = session_protocol.runtime_env_allowlist.clone();
     if let Some(name) = session_protocol.readiness_identity_env.as_ref() {
@@ -1521,6 +1661,7 @@ mod tests {
             execution_realization_hash: "8".repeat(64),
             source_binding_hash: None,
             structured_session_profile: None,
+            executable_search: Vec::new(),
             runtime_ref: "runtime:fixture/session".to_owned(),
             executor_ref: "native:fixture".to_owned(),
         }

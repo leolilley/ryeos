@@ -226,6 +226,7 @@ fn prepare_inner(
         required_secrets,
         runtime_facts: prepared.runtime_facts,
         execution_dependencies,
+        content_dependencies: BTreeMap::new(),
         financial_authority: FinancialAuthorityResultWire::Accounting { authority },
         external_effect_authority: ExternalEffectAuthorityResultWire::External {
             authority: serde_json::to_value(external_effect_authority).map_err(|error| {
@@ -578,6 +579,14 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
         &request.execution_dependencies.allowed_trust,
         &[TrustClassWire::TrustedBundle],
     )?;
+    if request.content_dependencies.max_dependencies != 0
+        || !request.content_dependencies.allowed_bindings.is_empty()
+        || request.content_dependencies.max_targets_per_dependency != 0
+        || request.content_dependencies.max_executable_search_entries != 0
+        || request.content_dependencies.external_content.is_some()
+    {
+        return Err("content_dependencies must be disabled".into());
+    }
 
     if request.secret_policy.max_requirements != 4 {
         return Err("secret_policy.max_requirements must be 4".into());

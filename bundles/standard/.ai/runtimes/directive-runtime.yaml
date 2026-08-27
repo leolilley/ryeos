@@ -77,6 +77,12 @@ launch_contract:
       - bundle
     allowed_trust:
       - trusted_bundle
+  content_dependencies:
+    max_dependencies: 0
+    allowed_bindings: []
+    max_targets_per_dependency: 0
+    max_executable_search_entries: 0
+    external_content: null
   financial_authority:
     kind: accounting
   external_effect_authority:

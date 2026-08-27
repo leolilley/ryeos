@@ -30,6 +30,14 @@ launch_contract:
     allowed_kinds: [worker]
     allowed_spaces: [bundle]
     allowed_trust: [trusted_bundle]
+  content_dependencies:
+    max_dependencies: 1
+    allowed_bindings: [environment]
+    max_targets_per_dependency: 1
+    max_executable_search_entries: 16
+    external_content:
+      max_declarations: 8
+      large_content_max_total_bytes: 4294967296
   financial_authority: {kind: none}
   external_effect_authority: {kind: external}
   secret_policy:

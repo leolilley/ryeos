@@ -1161,6 +1161,21 @@ fn persistent_session_external_realization_manifest_hashes(
         .map_err(|error| format!("invalid persistent-session external realization set: {error}"))
 }
 
+fn retained_resolution_external_realization_manifest_hashes(
+    resolution: &Value,
+) -> Result<Vec<String>, String> {
+    let Some(value) = resolution
+        .get("composed")
+        .and_then(|composed| composed.get("derived"))
+        .and_then(|derived| derived.get(crate::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY))
+    else {
+        return Ok(Vec::new());
+    };
+    crate::objects::ExternalContentRealizationSet::from_value(value)
+        .map(|set| set.manifest_hashes())
+        .map_err(|error| format!("invalid content-dependency external realization set: {error}"))
+}
+
 fn push_required_hash(value: &Value, field: &str, out: &mut Vec<String>) -> Result<(), String> {
     let hash = value
         .get(field)

@@ -491,6 +491,124 @@ pub fn configure_inherited_fds(
     }
 }
 
+/// Convert one already-open CLOEXEC descriptor into the stable pathname that
+/// a Linux child can use after `configure_inherited_fds` makes that exact
+/// descriptor inheritable in the forked child. No ambient pathname is
+/// reopened. The returned handle must be retained through `Command::spawn`.
+pub struct InheritedDescriptorAuthority {
+    path: std::path::PathBuf,
+    handle: std::sync::Arc<std::fs::File>,
+}
+
+impl InheritedDescriptorAuthority {
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+pub(crate) fn inherited_descriptor_path(
+    file: std::fs::File,
+) -> Result<InheritedDescriptorAuthority, String> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        Err("descriptor-rooted inherited paths are unavailable on this platform".to_owned())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd as _;
+        let file = std::sync::Arc::new(file);
+        let fd = file.as_raw_fd();
+        if fd <= libc::STDERR_FILENO {
+            return Err(format!("inherited descriptor {fd} overlaps stdio"));
+        }
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 {
+            return Err(format!(
+                "inherited descriptor {fd} cannot be inspected: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if flags & libc::FD_CLOEXEC == 0 {
+            return Err(format!(
+                "inherited descriptor {fd} is not protected by FD_CLOEXEC"
+            ));
+        }
+        Ok(InheritedDescriptorAuthority {
+            path: std::path::PathBuf::from(format!("/proc/self/fd/{fd}")),
+            handle: file,
+        })
+    }
+}
+
+/// Configure a command to inherit a set of typed descriptor-path
+/// authorities. The raw file handles remain private to Lillux.
+pub fn configure_inherited_descriptor_authorities(
+    command: &mut process::Command,
+    authorities: &[InheritedDescriptorAuthority],
+) -> Result<(), String> {
+    let handles = authorities
+        .iter()
+        .map(|authority| std::sync::Arc::clone(&authority.handle))
+        .collect::<Vec<_>>();
+    configure_inherited_fds(command, &handles)
+}
+
+/// Ensure a live descriptor is protected from accidental inheritance. The
+/// platform flag manipulation remains inside Lillux.
+#[cfg(unix)]
+pub fn protect_descriptor_from_exec<T: std::os::fd::AsRawFd>(descriptor: &T) -> Result<(), String> {
+    let fd = descriptor.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(format!(
+            "descriptor {fd} cannot be inspected: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if flags & libc::FD_CLOEXEC != 0 {
+        return Ok(());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(format!(
+            "descriptor {fd} cannot be protected from exec: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+/// Disable core dumps for this process and all subsequently spawned
+/// descendants.
+#[cfg(unix)]
+pub fn disable_process_core_dumps() -> Result<(), String> {
+    let limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &limit) } != 0 {
+        return Err(format!(
+            "disable process core dumps: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+/// Install an owner-private creation mask only in this command's forked
+/// child. The parent process-wide mask is never changed.
+#[cfg(unix)]
+pub fn configure_owner_private_creation_mask(command: &mut process::Command) {
+    use std::os::unix::process::CommandExt as _;
+
+    unsafe {
+        command.pre_exec(|| {
+            libc::umask(0o077);
+            Ok(())
+        });
+    }
+}
+
 /// Result of a detached spawn.
 pub struct SpawnResult {
     pub pid: u32,

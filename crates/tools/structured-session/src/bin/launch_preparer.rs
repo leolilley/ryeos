@@ -1,9 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ryeos_handler_bins::run_handler;
 use ryeos_handler_protocol::{
-    ExternalEffectAuthorityDeclWire, ExternalEffectAuthorityResultWire, FinancialAuthorityDeclWire,
-    FinancialAuthorityResultWire, HandlerRequest, HandlerResponse, ItemSpaceWire,
+    ExecutableSearchPathEntryWire, ExternalEffectAuthorityDeclWire,
+    ExternalEffectAuthorityResultWire, FinancialAuthorityDeclWire, FinancialAuthorityResultWire,
+    HandlerRequest, HandlerResponse, ItemSpaceWire, LaunchContentDependencyRequestWire,
     LaunchExecutionDependencyRequestWire, LaunchPrepareError, LaunchPrepareErrorClass,
     LaunchPrepareResponse, LaunchPrepareSuccess, LaunchPreparedItemWire, TrustClassWire,
     ValidateLaunchPreparerConfigRequest, ValidateLaunchPreparerConfigResponse,
@@ -17,6 +18,12 @@ const ENVIRONMENT_BINDING: &str = "environment";
 enum WorkerSelection {
     Direct(String),
     Environment(String),
+}
+
+struct ValidatedWorkerEnvironment {
+    worker_ref: String,
+    has_external_content: bool,
+    executable_search: Vec<ExecutableSearchPathEntryWire>,
 }
 
 fn main() {
@@ -82,7 +89,7 @@ fn prepare(request: ryeos_handler_protocol::LaunchPrepareRequest) -> LaunchPrepa
                 )
             })?;
         let selection = validate_execution_config(&config)?;
-        let worker_ref = match selection {
+        let (worker_ref, content_dependencies) = match selection {
             WorkerSelection::Direct(worker_ref) => {
                 if !request.ref_bindings.is_empty() {
                     return Err(wire_error(
@@ -90,7 +97,7 @@ fn prepare(request: ryeos_handler_protocol::LaunchPrepareRequest) -> LaunchPrepa
                         "direct worker execution cannot carry an environment binding",
                     ));
                 }
-                worker_ref
+                (worker_ref, BTreeMap::new())
             }
             WorkerSelection::Environment(binding_name) => {
                 if request.ref_bindings.len() != 1 {
@@ -105,7 +112,20 @@ fn prepare(request: ryeos_handler_protocol::LaunchPrepareRequest) -> LaunchPrepa
                         "worker execution's declared environment binding is absent",
                     )
                 })?;
-                validate_worker_environment(environment)?
+                let environment = validate_worker_environment(environment)?;
+                let content_dependencies = if environment.has_external_content {
+                    BTreeMap::from([(
+                        ENVIRONMENT_BINDING.to_owned(),
+                        LaunchContentDependencyRequestWire {
+                            binding: ENVIRONMENT_BINDING.to_owned(),
+                            targets: vec![DEPENDENCY_NAME.to_owned()],
+                            executable_search: environment.executable_search,
+                        },
+                    )])
+                } else {
+                    BTreeMap::new()
+                };
+                (environment.worker_ref, content_dependencies)
             }
         };
         let mut effective_config = config;
@@ -130,6 +150,7 @@ fn prepare(request: ryeos_handler_protocol::LaunchPrepareRequest) -> LaunchPrepa
                     item_ref: worker_ref,
                 },
             )]),
+            content_dependencies,
             financial_authority: FinancialAuthorityResultWire::None,
             external_effect_authority: ExternalEffectAuthorityResultWire::External {
                 authority: serde_json::json!({
@@ -173,6 +194,18 @@ fn validate(request: ValidateLaunchPreparerConfigRequest) -> ValidateLaunchPrepa
         && request.execution_dependencies.allowed_kinds == ["worker"]
         && request.execution_dependencies.allowed_spaces == [ItemSpaceWire::Bundle]
         && request.execution_dependencies.allowed_trust == [TrustClassWire::TrustedBundle]
+        && request.content_dependencies.max_dependencies == 1
+        && request.content_dependencies.allowed_bindings == [ENVIRONMENT_BINDING]
+        && request.content_dependencies.max_targets_per_dependency == 1
+        && request.content_dependencies.max_executable_search_entries == 16
+        && request
+            .content_dependencies
+            .external_content
+            .as_ref()
+            .is_some_and(|external| {
+                external.max_declarations == 8
+                    && external.large_content_max_total_bytes == Some(4_294_967_296)
+            })
         && matches!(
             request.financial_authority,
             FinancialAuthorityDeclWire::None
@@ -384,7 +417,7 @@ fn validate_worker_ref(worker_ref: &str) -> Result<String, LaunchPrepareError> {
 
 fn validate_worker_environment(
     environment: &LaunchPreparedItemWire,
-) -> Result<String, LaunchPrepareError> {
+) -> Result<ValidatedWorkerEnvironment, LaunchPrepareError> {
     if !environment.canonical_ref.starts_with("config:")
         || !matches!(
             (
@@ -410,6 +443,7 @@ fn validate_worker_environment(
         "category",
         "schema",
         "worker_ref",
+        "external_content",
         "configuration",
         "credential_requirement",
         "portable_state_contract",
@@ -421,15 +455,11 @@ fn validate_worker_environment(
         ));
     }
     if value.get("schema").and_then(serde_json::Value::as_str)
-        != Some("ryeos.worker_environment.v1")
+        != Some("ryeos.worker_environment.v2")
         || value
             .get("category")
             .and_then(serde_json::Value::as_str)
             .is_none_or(|category| category.is_empty() || category.len() > 128)
-        || value
-            .get("configuration")
-            .and_then(serde_json::Value::as_object)
-            .is_none_or(|configuration| !configuration.is_empty())
         || value
             .get("portable_state_contract")
             .and_then(serde_json::Value::as_str)
@@ -437,8 +467,100 @@ fn validate_worker_environment(
     {
         return Err(wire_error(
             "worker_environment_invalid",
-            "worker environment is outside the admitted v1 contract",
+            "worker environment is outside the admitted v2 contract",
         ));
+    }
+    let declarations: Vec<ryeos_engine::external_content::ExternalContentDeclaration> =
+        serde_json::from_value(value.get("external_content").cloned().ok_or_else(|| {
+            wire_error(
+                "worker_environment_content_invalid",
+                "worker environment has no external-content declaration list",
+            )
+        })?)
+        .map_err(|_| {
+            wire_error(
+                "worker_environment_content_invalid",
+                "worker environment external-content declarations are malformed",
+            )
+        })?;
+    if declarations.len() > 8 {
+        return Err(wire_error(
+            "worker_environment_content_invalid",
+            "worker environment exceeds its external-content declaration ceiling",
+        ));
+    }
+    let declaration_ids = declarations
+        .iter()
+        .map(|declaration| declaration.id.as_str())
+        .collect::<BTreeSet<_>>();
+    if declaration_ids.len() != declarations.len()
+        || declarations.iter().any(|declaration| {
+            declaration.mode != ryeos_engine::external_content::ExternalContentMode::Pinned
+                || declaration.locator.is_some()
+                || declaration.digest.is_none()
+        })
+    {
+        return Err(wire_error(
+            "worker_environment_content_invalid",
+            "worker environment content must be unique locator-free pinned declarations",
+        ));
+    }
+    let configuration = value
+        .get("configuration")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            wire_error(
+                "worker_environment_invalid",
+                "worker environment configuration must be an object",
+            )
+        })?;
+    if configuration.len() != 1 || !configuration.contains_key("executable_search") {
+        return Err(wire_error(
+            "worker_environment_invalid",
+            "worker environment configuration must contain only executable_search",
+        ));
+    }
+    let executable_search: Vec<ExecutableSearchPathEntryWire> =
+        serde_json::from_value(configuration["executable_search"].clone()).map_err(|_| {
+            wire_error(
+                "worker_environment_executable_search_invalid",
+                "worker environment executable search is malformed",
+            )
+        })?;
+    if executable_search.len() > 16 {
+        return Err(wire_error(
+            "worker_environment_executable_search_invalid",
+            "worker environment executable search exceeds its signed ceiling",
+        ));
+    }
+    let mut seen_search = BTreeSet::new();
+    for entry in &executable_search {
+        if !declaration_ids.contains(entry.realization_id.as_str())
+            || !seen_search.insert((
+                entry.realization_id.as_str(),
+                entry.relative_directory.as_str(),
+            ))
+            || (entry.relative_directory != "."
+                && ryeos_state::objects::validate_canonical_project_relative_path(
+                    &entry.relative_directory,
+                )
+                .is_err())
+        {
+            return Err(wire_error(
+                "worker_environment_executable_search_invalid",
+                "worker environment executable search does not name a unique canonical declared realization directory",
+            ));
+        }
+        let declaration = declarations
+            .iter()
+            .find(|declaration| declaration.id == entry.realization_id)
+            .expect("search declaration id was retained");
+        if declaration.kind != ryeos_engine::external_content::ExternalContentKind::Tree {
+            return Err(wire_error(
+                "worker_environment_executable_search_invalid",
+                "worker environment executable search requires tree realizations",
+            ));
+        }
     }
     let credential = value
         .get("credential_requirement")
@@ -476,12 +598,17 @@ fn validate_worker_environment(
             "worker environment credential requirement is outside the admitted vocabulary",
         ));
     }
-    validate_worker_ref(
+    let worker_ref = validate_worker_ref(
         value
             .get("worker_ref")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default(),
-    )
+    )?;
+    Ok(ValidatedWorkerEnvironment {
+        worker_ref,
+        has_external_content: !declarations.is_empty(),
+        executable_search,
+    })
 }
 
 #[cfg(test)]
@@ -561,9 +688,10 @@ mod tests {
             composed: ryeos_handler_protocol::LaunchComposedViewWire {
                 composed: serde_json::json!({
                     "category":"fixture/environments",
-                    "schema":"ryeos.worker_environment.v1",
+                    "schema":"ryeos.worker_environment.v2",
                     "worker_ref":"worker:fixture/hosted",
-                    "configuration":{},
+                    "external_content":[],
+                    "configuration":{"executable_search":[]},
                     "credential_requirement":{
                         "workload_family":"fixture",
                         "required_state":"active",
@@ -576,10 +704,9 @@ mod tests {
             },
             resolution_digest: serde_json::json!({"digest":"retained"}),
         };
-        assert_eq!(
-            validate_worker_environment(&environment).unwrap(),
-            "worker:fixture/hosted"
-        );
+        let validated = validate_worker_environment(&environment).unwrap();
+        assert_eq!(validated.worker_ref, "worker:fixture/hosted");
+        assert!(validated.executable_search.is_empty());
 
         let mut malformed = environment;
         malformed.composed.composed["configuration"]["ambient_path"] =

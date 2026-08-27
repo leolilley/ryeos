@@ -119,7 +119,8 @@ pub use item_source::ItemSource;
 pub use live_input::{LiveInput, LiveInputIntent};
 pub use persistent_session_capsule::{
     AdmittedPersistentSessionCapsule, AdmittedStructuredSessionProfile,
-    CredentialSubjectProjectionContract, MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES,
+    CredentialSubjectProjectionContract, ExecutableSearchPathEntry,
+    MAX_EXECUTABLE_SEARCH_PATH_ENTRIES, MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES,
     PERSISTENT_SESSION_CAPSULE_KIND, PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
     PersistentSessionAuthority, PersistentSessionLifecycleContract, PersistentSessionWireContract,
     PortableSessionStateClass, PortableSessionStateContract, PortableSessionStateSelector,

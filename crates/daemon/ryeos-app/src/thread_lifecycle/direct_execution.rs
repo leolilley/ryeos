@@ -183,6 +183,7 @@ impl PreparedItemPlan {
         external_root: Option<&Path>,
         admitted_source: Option<&str>,
         admitted_source_entry: Option<&Path>,
+        executable_search: Option<&str>,
     ) -> Result<()> {
         if external_realizations.is_some() != external_root.is_some() {
             bail!("persistent-session external identity and root must be bound together");
@@ -220,6 +221,17 @@ impl PreparedItemPlan {
                 .insert("RYEOS_ADMITTED_SOURCE".to_owned(), source.to_owned());
             spec.env_sources.insert(
                 "RYEOS_ADMITTED_SOURCE".to_owned(),
+                RuntimeEnvSource::EnginePlan,
+            );
+        }
+        if let Some(search) = executable_search {
+            if spec.env.contains_key("RYEOS_EXECUTABLE_SEARCH") {
+                bail!("persistent-session plan attempts to override executable search");
+            }
+            spec.env
+                .insert("RYEOS_EXECUTABLE_SEARCH".to_owned(), search.to_owned());
+            spec.env_sources.insert(
+                "RYEOS_EXECUTABLE_SEARCH".to_owned(),
                 RuntimeEnvSource::EnginePlan,
             );
         }
@@ -396,13 +408,15 @@ impl PreparedItemPlan {
         };
         let original = command.code().clone();
         let execution_path = admitted_direct_command_path(&original)?;
-        let source = std::fs::File::open(&original.source_path).with_context(|| {
-            format!(
-                "open admitted direct executable {}",
-                original.source_path.display()
-            )
-        })?;
-        let stored = cas.put_blob_from_open_regular(source, &original.source_path)?;
+        let source = lillux::open_pinned_regular_file_no_follow(&original.source_path)
+            .with_context(|| {
+                format!(
+                    "open admitted direct executable {} through Lillux",
+                    original.source_path.display()
+                )
+            })?;
+        let stored =
+            cas.put_blob_from_open_regular(source.try_clone_descriptor()?, &original.source_path)?;
         if stored.hash != original.content_hash {
             bail!(
                 "direct executable changed before admission: expected {}, captured {}",
@@ -799,8 +813,10 @@ fn capture_signed_descriptor_document(
     expected_signer: &str,
     trust_store: &ryeos_engine::trust::TrustStore,
 ) -> Result<String> {
-    let document = std::fs::read_to_string(path)
-        .with_context(|| format!("read admitted descriptor {}", path.display()))?;
+    let bytes = lillux::read_regular_file_bounded_no_follow(path, 8 * 1024 * 1024)
+        .with_context(|| format!("read admitted descriptor {} through Lillux", path.display()))?;
+    let document = String::from_utf8(bytes)
+        .with_context(|| format!("decode admitted descriptor {} as UTF-8", path.display()))?;
     let header =
         lillux::signature::parse_signature_line(document.lines().next().unwrap_or(""), "#", None)
             .ok_or_else(|| anyhow!("admitted descriptor has no valid signature header"))?;
@@ -1626,6 +1642,7 @@ mod tests {
                 None,
                 Some("{\"binding_hash\":\"fixture\"}"),
                 Some(entry),
+                None,
             )
             .unwrap();
 
@@ -1664,6 +1681,7 @@ mod tests {
                     None,
                     Some("sealed"),
                     Some(&project_root.join("bootstrap.py")),
+                    None,
                 )
                 .unwrap_err()
                 .to_string()
@@ -1679,7 +1697,7 @@ mod tests {
         let mut prepared = prepared_plan(plan);
         assert!(
             prepared
-                .bind_persistent_session_spawn_environment(None, None, Some("sealed"), None)
+                .bind_persistent_session_spawn_environment(None, None, Some("sealed"), None, None,)
                 .unwrap_err()
                 .to_string()
                 .contains("must be bound together")

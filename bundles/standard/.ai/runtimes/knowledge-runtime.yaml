@@ -24,6 +24,12 @@ launch_contract:
     allowed_kinds: []
     allowed_spaces: []
     allowed_trust: []
+  content_dependencies:
+    max_dependencies: 0
+    allowed_bindings: []
+    max_targets_per_dependency: 0
+    max_executable_search_entries: 0
+    external_content: null
   financial_authority:
     kind: none
   external_effect_authority:

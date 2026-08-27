@@ -211,6 +211,75 @@ pub fn admit_external_realizations_in_publication(
         return inherit_external_realizations(state, resolution, inherited);
     };
 
+    admit_declarations_in_publication(
+        state,
+        Some(engine),
+        Some(roots),
+        resolution,
+        contract,
+        declarations,
+        inherited,
+        publication,
+        kind,
+    )
+}
+
+/// Admit the locator-free pinned declarations of a prepared content
+/// dependency. The signed launch policy supplies only mechanical ceilings;
+/// manifest identity and consumer binding remain owned by the resolved item
+/// and the existing external-content subsystem.
+pub fn admit_portable_content_dependency_in_publication(
+    state: &AppState,
+    resolution: &mut ryeos_engine::resolution::ResolutionOutput,
+    policy: &ryeos_engine::runtime_registry::LaunchContentExternalPolicy,
+    inherited: Option<&RealizedExternalContentSet>,
+    publication: &mut Option<PendingCasPublication>,
+) -> anyhow::Result<AdmittedExternalRealizations> {
+    let contract = policy.declaration_contract();
+    let declarer = ryeos_engine::external_content::declaring_authority(resolution)?;
+    let declarations = ryeos_engine::external_content::declarations_from_composed(
+        &resolution.composed.composed,
+        Some(&contract),
+        declarer,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("content dependency has no external_content declaration"))?;
+    if declarations.is_empty()
+        || declarations.iter().any(|declaration| {
+            declaration.mode != ryeos_engine::external_content::ExternalContentMode::Pinned
+                || declaration.locator.is_some()
+                || declaration.digest.is_none()
+        })
+    {
+        anyhow::bail!(
+            "content dependency must contain at least one locator-free pinned declaration"
+        );
+    }
+    admit_declarations_in_publication(
+        state,
+        None,
+        None,
+        resolution,
+        Some(&contract),
+        declarations,
+        inherited,
+        publication,
+        "content-dependency",
+    )?
+    .ok_or_else(|| anyhow::anyhow!("content dependency produced no external realization"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn admit_declarations_in_publication(
+    state: &AppState,
+    engine: Option<&ryeos_engine::engine::Engine>,
+    roots: Option<&ryeos_engine::item_resolution::ResolutionRoots>,
+    resolution: &mut ryeos_engine::resolution::ResolutionOutput,
+    contract: Option<&ryeos_engine::kind_registry::ExecutionExternalContentDecl>,
+    declarations: Vec<ExternalContentDeclaration>,
+    inherited: Option<&RealizedExternalContentSet>,
+    publication: &mut Option<PendingCasPublication>,
+    diagnostic_kind: &str,
+) -> anyhow::Result<Option<AdmittedExternalRealizations>> {
     if publication.is_none() {
         let authority = pinned_state_authority(state)?;
         let guard = authority.acquire_shared_guard()?;
@@ -239,7 +308,8 @@ pub fn admit_external_realizations_in_publication(
         .expect("external admission initialized its publication")
         .staged_roots_mut();
     let mut budget = LaunchCaptureBudget::default();
-    let mut realized = Vec::with_capacity(declarations.len());
+    let mut realized =
+        Vec::with_capacity(declarations.len() + inherited.map(|set| set.iter().len()).unwrap_or(0));
     let mut sink = GuardedCasBlobSink {
         guard: &guard,
         cas: &cas,
@@ -302,7 +372,11 @@ pub fn admit_external_realizations_in_publication(
                 declaration.id
             )
         })?;
-        let base_path = resolve_named_root(engine, roots, &locator.root)?;
+        let base_path = resolve_named_root(
+            engine.ok_or_else(|| anyhow::anyhow!("locator admission has no engine authority"))?,
+            roots.ok_or_else(|| anyhow::anyhow!("locator admission has no resolution roots"))?,
+            &locator.root,
+        )?;
         let base = lillux::PinnedDirectory::open(&base_path)?.ok_or_else(|| {
             anyhow::anyhow!(
                 "external content root `{}` is unavailable",
@@ -351,6 +425,9 @@ pub fn admit_external_realizations_in_publication(
         });
     }
 
+    if let Some(inherited) = inherited {
+        realized.extend(inherited.iter().cloned());
+    }
     let realized = RealizedExternalContentSet::new(realized)?;
     resolution.composed.derived.insert(
         ryeos_engine::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY.to_owned(),
@@ -360,7 +437,7 @@ pub fn admit_external_realizations_in_publication(
     let proof = ryeos_engine::external_realization::prove_external_realizations(realized, &store)?;
     let (stored_blobs, reused_blobs) = sink.counts();
     tracing::info!(
-        kind,
+        kind = diagnostic_kind,
         declaration_count = declarations.len(),
         stored_blobs,
         reused_blobs,

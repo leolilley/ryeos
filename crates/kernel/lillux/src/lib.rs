@@ -12,10 +12,12 @@ pub mod vault;
 pub use exec::retain_fork_sensitive_descriptors;
 pub use exec::{
     AbortedProcess, AttachmentAbortError, AttachmentReleaseError, DEFAULT_MAX_CAPTURE_BYTES,
-    ForkSensitiveDescriptorLease, OutputLimitExceeded, ProcessAwaitingAttachment, RunningProcess,
-    SpawnResult, SubprocessLimits, SubprocessRequest, SubprocessResult,
-    SupervisedLauncherAttachmentStatusPipe, SupervisedLauncherStatusPipe, SupervisedProcessStatus,
-    configure_inherited_fds, configure_subprocess_limits, sealed_executable_memfd, sealed_memfd,
+    ForkSensitiveDescriptorLease, InheritedDescriptorAuthority, OutputLimitExceeded,
+    ProcessAwaitingAttachment, RunningProcess, SpawnResult, SubprocessLimits, SubprocessRequest,
+    SubprocessResult, SupervisedLauncherAttachmentStatusPipe, SupervisedLauncherStatusPipe,
+    SupervisedProcessStatus, configure_inherited_descriptor_authorities, configure_inherited_fds,
+    configure_owner_private_creation_mask, configure_subprocess_limits, disable_process_core_dumps,
+    protect_descriptor_from_exec, sealed_executable_memfd, sealed_memfd,
     supervised_launcher_attachment_status_pipe, supervised_launcher_status_pipe,
     validate_subprocess_limits,
 };
@@ -37,7 +39,8 @@ pub use secure_fs::{
     PinnedRegularFile, collect_directory_tree_no_follow, collect_regular_files_no_follow,
     digest_open_regular_file_stable_exact, ensure_open_regular_file_unchanged,
     inspect_optional_entry_no_follow, matches_regular_file_identity,
-    normalized_portable_regular_mode, observe_open_regular_file, read_open_regular_file_bounded,
+    normalized_portable_regular_mode, observe_open_regular_file,
+    open_pinned_regular_file_no_follow, read_open_regular_file_bounded,
     read_open_regular_file_exact_bounded, read_open_regular_file_stable_bounded,
     read_optional_regular_file_bounded_no_follow, read_optional_regular_file_no_follow,
     read_regular_file_bounded_no_follow, read_regular_file_no_follow,

@@ -655,6 +655,71 @@ pub struct PinnedRegularFile {
     pub file: File,
 }
 
+impl PinnedRegularFile {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn name(&self) -> &OsStr {
+        &self.name
+    }
+
+    /// Read this exact already-open regular file under a hard byte ceiling.
+    pub fn read_bounded(&self, max_bytes: u64) -> Result<Vec<u8>> {
+        read_open_regular_file_bounded(self.file.try_clone()?, max_bytes)
+            .with_context(|| format!("read pinned regular file {}", self.path.display()))
+    }
+
+    /// Return the ordinary permission bits of this exact pinned inode.
+    pub fn permission_mode(&self) -> Result<u32> {
+        observe_open_regular_file(&self.file)?.permission_mode()
+    }
+
+    /// Duplicate this exact open regular-file descriptor for a typed consumer
+    /// that retains descriptor authority across a later operation.
+    pub fn try_clone_descriptor(&self) -> Result<File> {
+        self.file
+            .try_clone()
+            .with_context(|| format!("duplicate pinned regular file {}", self.path.display()))
+    }
+
+    /// Require this already-open regular file to carry at least one executable
+    /// mode bit. The check remains descriptor-relative and OS mechanics stay
+    /// inside Lillux.
+    pub fn require_executable(&self) -> Result<()> {
+        let metadata = self
+            .file
+            .metadata()
+            .with_context(|| format!("inspect pinned regular file {}", self.path.display()))?;
+        if !metadata.is_file() {
+            anyhow::bail!(
+                "pinned executable is not a regular file: {}",
+                self.path.display()
+            );
+        }
+        #[cfg(not(unix))]
+        anyhow::bail!("descriptor-relative executable-mode checks are unavailable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                anyhow::bail!(
+                    "pinned regular file has no executable bit: {}",
+                    self.path.display()
+                );
+            }
+            Ok(())
+        }
+    }
+
+    /// Consume this exact file authority into a descriptor-rooted child path.
+    pub fn into_inherited_descriptor_path(
+        self,
+    ) -> Result<crate::exec::InheritedDescriptorAuthority> {
+        crate::exec::inherited_descriptor_path(self.file).map_err(anyhow::Error::msg)
+    }
+}
+
 /// Hard limits for one descriptor-relative directory traversal.
 ///
 /// `max_entries` counts every observed child name, including directories and
@@ -2230,6 +2295,29 @@ impl PinnedDirectory {
         }
     }
 
+    /// Open one existing regular child and retain both its descriptor and its
+    /// descriptor-relative diagnostic identity.
+    pub fn open_pinned_regular(
+        &self,
+        name: &OsStr,
+        writable: bool,
+    ) -> Result<Option<PinnedRegularFile>> {
+        let file = self.open_regular(name, writable)?;
+        Ok(file.map(|file| PinnedRegularFile {
+            path: self.path.join(name),
+            name: name.to_os_string(),
+            file,
+        }))
+    }
+
+    /// Consume this exact directory authority into a descriptor-rooted child
+    /// path without reopening its ambient namespace name.
+    pub fn into_inherited_descriptor_path(
+        self,
+    ) -> Result<crate::exec::InheritedDescriptorAuthority> {
+        crate::exec::inherited_descriptor_path(self.directory).map_err(anyhow::Error::msg)
+    }
+
     /// Pin one direct child as an `O_PATH` mount source. Regular files,
     /// directories, and Unix sockets are accepted; links and special devices
     /// are rejected. The returned descriptor remains bound to the exact entry
@@ -3234,6 +3322,18 @@ impl PinnedDirectory {
         }
     }
 
+    /// Typed counterpart to [`Self::atomic_write_if_same`]. The incumbent's
+    /// raw descriptor never leaves Lillux.
+    pub fn atomic_write_pinned_if_same(
+        &self,
+        name: &OsStr,
+        expected: Option<&PinnedRegularFile>,
+        bytes: &[u8],
+        mode: u32,
+    ) -> Result<()> {
+        self.atomic_write_if_same(name, expected.map(|entry| &entry.file), bytes, mode)
+    }
+
     /// Stage complete replacement bytes inside this exact directory, then
     /// publish them through the quarantine/NOREPLACE conditional boundary.
     /// The validation closure runs against the quarantined incumbent at the
@@ -4217,6 +4317,23 @@ pub fn inspect_optional_entry_no_follow(path: &Path) -> Result<Option<PinnedEntr
 /// component. Missing files are errors.
 pub fn read_regular_file_no_follow(path: &Path) -> Result<Vec<u8>> {
     read_optional_regular_file_no_follow(path)?
+        .ok_or_else(|| anyhow::anyhow!("secure file does not exist: {}", path.display()))
+}
+
+/// Open one regular file without following any path component and retain its
+/// typed descriptor authority for a later bounded read, CAS capture, mount,
+/// or inherited-descriptor conversion.
+pub fn open_pinned_regular_file_no_follow(path: &Path) -> Result<PinnedRegularFile> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("regular file has no parent: {}", path.display()))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("regular file has no name: {}", path.display()))?;
+    let directory = PinnedDirectory::open(parent)?
+        .ok_or_else(|| anyhow::anyhow!("regular-file parent is missing: {}", parent.display()))?;
+    directory
+        .open_pinned_regular(name, false)?
         .ok_or_else(|| anyhow::anyhow!("secure file does not exist: {}", path.display()))
 }
 
