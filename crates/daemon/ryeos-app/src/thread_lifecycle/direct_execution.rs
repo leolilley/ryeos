@@ -718,6 +718,7 @@ impl PreparedItemPlan {
             isolation_live_access_authority: None,
             isolation_state_root: state_root.map(Path::to_path_buf),
             isolation_checkpoint_dir: None,
+            isolation_checkpoint_authority: None,
             isolation_daemon_socket_path: None,
             // A persistent session executes its captured command and exact
             // external realizations. Mutable bundle roots and node trust state
@@ -1312,6 +1313,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItemAwaitingAtta
     // FirstWins behavior: only the first native_resume subprocess gets
     // the checkpoint/resume bindings.
     let mut allocated_checkpoint_dir: Option<std::path::PathBuf> = None;
+    let mut allocated_checkpoint_authority: Option<Arc<lillux::PinnedDirectory>> = None;
     let mut resume_env_for_first_native_resume: Option<Vec<EnvBinding>> = None;
     // This is the executor-chain spawn path: native_resume here is the
     // SUBPROCESS/tool form declared via the `native_resume` decorate handler
@@ -1324,10 +1326,17 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItemAwaitingAtta
             if let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = node
                 && spec.execution.native_resume.is_some()
             {
-                let ckpt = ts_dir.join(crate::launch_metadata::CHECKPOINTS_SUBDIR);
-                std::fs::create_dir_all(&ckpt).map_err(|e| {
-                    anyhow!("failed to create checkpoint dir {}: {e}", ckpt.display())
-                })?;
+                let thread_state = lillux::PinnedDirectory::open_or_create(ts_dir)
+                    .with_context(|| format!("pin daemon thread state dir {}", ts_dir.display()))?;
+                let checkpoint = thread_state
+                    .open_or_create_child(
+                        std::ffi::OsStr::new(crate::launch_metadata::CHECKPOINTS_SUBDIR),
+                        0o700,
+                    )
+                    .with_context(|| {
+                        format!("create pinned checkpoint dir below {}", ts_dir.display())
+                    })?;
+                let ckpt = checkpoint.path().to_path_buf();
                 let mut bindings = vec![EnvBinding::new(
                     "RYEOS_CHECKPOINT_DIR",
                     ckpt.display().to_string(),
@@ -1341,6 +1350,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItemAwaitingAtta
                     ));
                 }
                 allocated_checkpoint_dir = Some(ckpt);
+                allocated_checkpoint_authority = Some(Arc::new(checkpoint));
                 resume_env_for_first_native_resume = Some(bindings);
                 break; // first DispatchSubprocess wins, mirrors FirstWins
             }
@@ -1467,6 +1477,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItemAwaitingAtta
         isolation_live_access_authority,
         isolation_state_root: state_root.map(std::path::Path::to_path_buf),
         isolation_checkpoint_dir: allocated_checkpoint_dir.clone(),
+        isolation_checkpoint_authority: allocated_checkpoint_authority,
         isolation_daemon_socket_path: isolation_daemon_socket_path
             .map(std::path::Path::to_path_buf),
         isolation_bundle_roots,

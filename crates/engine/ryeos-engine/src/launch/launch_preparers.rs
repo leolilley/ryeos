@@ -278,6 +278,7 @@ impl LaunchPreparerRunner {
                 live_access: None,
                 state_root: None,
                 checkpoint_dir: None,
+                checkpoint_authority: None,
                 daemon_socket_path: None,
                 bundle_roots: &self.bundle_roots,
                 node_trusted_keys_dir: None,

@@ -3421,6 +3421,10 @@ pub struct BuildAndLaunchParams<'a> {
     /// [`CheckpointResumeMode`]. Drives `RYEOS_RESUME=1` injection and predecessor
     /// copy-forward, and only for replay-aware (`native_resume`) kinds.
     pub checkpoint_resume_mode: CheckpointResumeMode,
+    /// Exact checkpoint directory retained across daemon-owned preparation
+    /// such as follow-result splicing. When present, launch verifies that the
+    /// namespace still names this inode and continues with this authority.
+    pub pre_pinned_checkpoint_authority: Option<Arc<lillux::PinnedDirectory>>,
     /// A machine continuation uses `resume_attempts` to bound the pre-attach
     /// auto-launch window. Once its new process is durably attached, that
     /// budget has completed its job and must be cleared before the successor's
@@ -3536,6 +3540,7 @@ struct PreparedManagedLaunchAuthority {
     verified_protocol: ryeos_engine::protocols::VerifiedProtocol,
     materialized_executor: MaterializedExecutor,
     checkpoint_dir: Option<PathBuf>,
+    checkpoint_authority: Option<Arc<lillux::PinnedDirectory>>,
     is_resume: bool,
     launch_metadata: Option<ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
     pending_project_snapshot: Option<super::CapturedProjectGeneration>,
@@ -4730,20 +4735,51 @@ async fn prepare_managed_launch_authority(
         }
     })?;
     let native_resume = selected_runtime.yaml.native_resume.clone();
-    let checkpoint_dir = if native_resume.is_some() {
-        let dir = ryeos_app::launch_metadata::daemon_checkpoint_dir(
+    let (checkpoint_dir, checkpoint_authority) = if native_resume.is_some() {
+        let thread_state = ryeos_app::launch_metadata::daemon_thread_state_dir(
             &params.state.config.app_root,
             thread_id,
         );
-        std::fs::create_dir_all(&dir).map_err(|error| {
-            BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "failed to allocate checkpoint dir for replay-aware runtime `{}`: {error}",
-                params.resolved.item_ref
-            ))
-        })?;
-        Some(dir)
+        let thread_state =
+            lillux::PinnedDirectory::open_or_create(&thread_state).map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "failed to pin thread state for replay-aware runtime `{}`: {error}",
+                    params.resolved.item_ref
+                ))
+            })?;
+        let current_checkpoint = thread_state
+            .open_or_create_child(
+                OsStr::new(ryeos_app::launch_metadata::CHECKPOINTS_SUBDIR),
+                0o700,
+            )
+            .map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "failed to allocate pinned checkpoint dir for replay-aware runtime `{}`: {error}",
+                    params.resolved.item_ref
+                ))
+            })?;
+        let checkpoint = if let Some(retained) = &params.pre_pinned_checkpoint_authority {
+            if !retained
+                .is_same_directory(&current_checkpoint)
+                .map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "compare retained checkpoint authority for `{}`: {error}",
+                        params.resolved.item_ref
+                    ))
+                })?
+            {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "retained checkpoint authority for `{}` was replaced before launch",
+                    params.resolved.item_ref
+                )));
+            }
+            Arc::clone(retained)
+        } else {
+            Arc::new(current_checkpoint)
+        };
+        (Some(checkpoint.path().to_path_buf()), Some(checkpoint))
     } else {
-        None
+        (None, None)
     };
     let is_resume = params.checkpoint_resume_mode.injects_resume_env() && native_resume.is_some();
     if params
@@ -4757,9 +4793,9 @@ async fn prepare_managed_launch_authority(
                 params.resolved.item_ref
             ))
         })?;
-        let successor_dir = checkpoint_dir.as_deref().ok_or_else(|| {
+        let successor_authority = checkpoint_authority.as_deref().ok_or_else(|| {
             BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "machine continuation of `{}` has no checkpoint dir",
+                "machine continuation of `{}` has no checkpoint authority",
                 params.resolved.item_ref
             ))
         })?;
@@ -4767,11 +4803,25 @@ async fn prepare_managed_launch_authority(
             &params.state.config.app_root,
             previous,
         );
-        if !ryeos_runtime::CheckpointWriter::copy_latest(&previous_dir, successor_dir).map_err(
-            |error| {
-                BuildAndLaunchError::Internal(anyhow::anyhow!("copy-forward checkpoint: {error}"))
-            },
-        )? {
+        let previous_authority = lillux::PinnedDirectory::open(&previous_dir)
+            .map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "pin predecessor checkpoint directory: {error}"
+                ))
+            })?
+            .ok_or_else(|| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "machine continuation of `{}`: predecessor `{previous}` has no checkpoint directory",
+                    params.resolved.item_ref
+                ))
+            })?;
+        if !ryeos_runtime::CheckpointWriter::copy_latest_pinned(
+            &previous_authority,
+            successor_authority,
+        )
+        .map_err(|error| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!("copy-forward checkpoint: {error}"))
+        })? {
             return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
                 "machine continuation of `{}`: predecessor `{previous}` has no checkpoint to resume from",
                 params.resolved.item_ref
@@ -4929,6 +4979,7 @@ async fn prepare_managed_launch_authority(
         verified_protocol,
         materialized_executor,
         checkpoint_dir,
+        checkpoint_authority,
         is_resume,
         launch_metadata,
         pending_project_snapshot,
@@ -5435,6 +5486,7 @@ async fn run_claimed_thread_row_inner(
         suppress_stimulus,
         capability_policy: _,
         checkpoint_resume_mode,
+        pre_pinned_checkpoint_authority: _,
         rearm_native_resume_budget_after_attach,
         launch_handoff,
     } = params;
@@ -5447,6 +5499,7 @@ async fn run_claimed_thread_row_inner(
         verified_protocol,
         materialized_executor: materialized_binary,
         checkpoint_dir,
+        checkpoint_authority,
         is_resume,
         launch_metadata,
         pending_project_snapshot,
@@ -6325,6 +6378,7 @@ async fn run_claimed_thread_row_inner(
         .cas_root()
         .map_err(BuildAndLaunchError::Internal)?;
     let checkpoint_dir_owned = checkpoint_dir.clone();
+    let checkpoint_authority_owned = checkpoint_authority;
     // Execution starts at the exec boundary inside the blocking task, and the
     // launcher then blocks for the runtime's whole lifetime — so the flip of
     // the audit record from its pre-execution `created` posture to `running`
@@ -6403,6 +6457,7 @@ async fn run_claimed_thread_row_inner(
             source_closure: bound_source_closure,
             cas_root: &cas_root_owned,
             checkpoint_dir: checkpoint_dir_owned.as_deref(),
+            checkpoint_authority: checkpoint_authority_owned.as_deref(),
             // A machine continuation of a replay-aware kind resumes from the
             // predecessor's copied-forward checkpoint; a fresh launch writes a
             // cold one.
@@ -7241,6 +7296,7 @@ async fn prepare_follow_child_launch_inner(
                 )?,
             },
             checkpoint_resume_mode: CheckpointResumeMode::None,
+            pre_pinned_checkpoint_authority: None,
             rearm_native_resume_budget_after_attach: false,
             launch_handoff: None,
         },
@@ -7421,6 +7477,7 @@ async fn prepare_successor_launch(
             suppress_stimulus,
             capability_policy,
             checkpoint_resume_mode,
+            pre_pinned_checkpoint_authority: None,
             rearm_native_resume_budget_after_attach: false,
             launch_handoff: None,
         },
@@ -8050,8 +8107,15 @@ async fn launch_successor_inner_with_claim(
 
     // Rebuild + run while the owned claim guard remains in this future. It is
     // released on every return, including cancellation and panic unwind.
-    let result =
-        launch_claimed_successor(&state, successor, mode, launch_handoff, prepared_successor).await;
+    let result = launch_claimed_successor(
+        &state,
+        successor,
+        mode,
+        launch_handoff,
+        prepared_successor,
+        None,
+    )
+    .await;
 
     match result {
         Ok(native) => Ok(SuccessorLaunchOutcome::Launched(native)),
@@ -8089,6 +8153,7 @@ async fn launch_claimed_successor(
     mode: SuccessorMode,
     launch_handoff: Option<&LaunchHandoff>,
     prepared_successor: Option<PreparedSuccessorLaunch>,
+    pre_pinned_checkpoint_authority: Option<Arc<lillux::PinnedDirectory>>,
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     let successor_id = successor.thread_id.clone();
     // A continuation successor must link upstream (chain-fold) and carry the
@@ -8212,6 +8277,7 @@ async fn launch_claimed_successor(
             // result, so resume from its OWN dir — do NOT re-copy.
             SuccessorMode::Follow => CheckpointResumeMode::SameThread,
         },
+        pre_pinned_checkpoint_authority,
         // The machine-launch counter bounds only the created-successor
         // pre-attachment window. After attachment, native resume owns its own
         // same-thread crash budget. Operator/follow launches did not consume
@@ -8505,6 +8571,7 @@ async fn launch_claimed_native_resume(
             // Pin the captured authority verbatim (same as a machine relaunch).
             capability_policy: CapabilityPolicy::ExactPinned(resume.effective_caps.as_slice()),
             checkpoint_resume_mode: CheckpointResumeMode::SameThread,
+            pre_pinned_checkpoint_authority: None,
             rearm_native_resume_budget_after_attach: false,
             launch_handoff: None,
         },
@@ -8742,6 +8809,7 @@ async fn launch_admitted_root_with_claim(
             suppress_stimulus: false,
             capability_policy: CapabilityPolicy::ExactPinned(resume.effective_caps.as_slice()),
             checkpoint_resume_mode: CheckpointResumeMode::None,
+            pre_pinned_checkpoint_authority: None,
             rearm_native_resume_budget_after_attach: false,
             launch_handoff: None,
         },
@@ -8968,6 +9036,7 @@ async fn launch_claimed_follow_child(
         },
         // Fresh launch, not a checkpoint resume.
         checkpoint_resume_mode: CheckpointResumeMode::None,
+        pre_pinned_checkpoint_authority: None,
         rearm_native_resume_budget_after_attach: false,
         // Clamp the child to the parent's hard limits + launch at parent depth
         // + 1 on the hot path; reconcile reconstructs the persisted parent
@@ -9940,11 +10009,41 @@ async fn launch_follow_resume_claimed(
         &state.config.app_root,
         &waiter.parent_thread_id,
     );
-    let succ_dir =
-        ryeos_app::launch_metadata::daemon_checkpoint_dir(&state.config.app_root, successor_id);
-    let spliced = ryeos_runtime::checkpoint::CheckpointWriter::copy_latest_with_splice(
-        &prev_dir,
-        &succ_dir,
+    let predecessor_authority = lillux::PinnedDirectory::open(&prev_dir)
+        .map_err(|error| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "follow-resume: pin predecessor checkpoint directory: {error}"
+            ))
+        })?
+        .ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "follow-resume: predecessor {} has no checkpoint directory",
+                waiter.parent_thread_id
+            ))
+        })?;
+    let successor_state_dir =
+        ryeos_app::launch_metadata::daemon_thread_state_dir(&state.config.app_root, successor_id);
+    let successor_state_authority = lillux::PinnedDirectory::open_or_create(&successor_state_dir)
+        .map_err(|error| {
+        BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "follow-resume: pin successor thread-state directory: {error}"
+        ))
+    })?;
+    let successor_checkpoint_authority = Arc::new(
+        successor_state_authority
+            .open_or_create_child(
+                OsStr::new(ryeos_app::launch_metadata::CHECKPOINTS_SUBDIR),
+                0o700,
+            )
+            .map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "follow-resume: pin successor checkpoint directory: {error}"
+                ))
+            })?,
+    );
+    let spliced = ryeos_runtime::checkpoint::CheckpointWriter::copy_latest_with_splice_pinned(
+        &predecessor_authority,
+        &successor_checkpoint_authority,
         ryeos_runtime::checkpoint::FOLLOW_RESULT_KEY,
         terminal_envelope,
     )
@@ -9956,9 +10055,16 @@ async fn launch_follow_resume_claimed(
         )));
     }
 
-    launch_claimed_successor(state, successor, SuccessorMode::Follow, None, None)
-        .await
-        .map(SuccessorLaunchOutcome::Launched)
+    launch_claimed_successor(
+        state,
+        successor,
+        SuccessorMode::Follow,
+        None,
+        None,
+        Some(successor_checkpoint_authority),
+    )
+    .await
+    .map(SuccessorLaunchOutcome::Launched)
 }
 
 fn parent_limits_from_context(

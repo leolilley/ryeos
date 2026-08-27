@@ -20,6 +20,7 @@ enum WorkerSelection {
     Environment(String),
 }
 
+#[derive(Debug)]
 struct ValidatedWorkerEnvironment {
     worker_ref: String,
     has_external_content: bool,

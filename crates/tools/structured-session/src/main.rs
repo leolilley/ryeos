@@ -1,8 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::fd::{FromRawFd, RawFd};
-use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt as _;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
@@ -625,7 +622,6 @@ fn main() {
 
 fn run() -> Result<()> {
     lillux::disable_process_core_dumps().map_err(anyhow::Error::msg)?;
-    let fd = required_fd("RYEOS_SESSION_FD")?;
     let workspace = required_env("RYEOS_WORKSPACE")?;
     let workload_home = required_env("RYEOS_WORKLOAD_HOME")?;
     let route_set = required_env("RYEOS_STRUCTURED_SESSION_ROUTE_SET")?;
@@ -721,10 +717,14 @@ fn run() -> Result<()> {
             .ok_or_else(|| anyhow!("structured-session profile has no parent"))?,
         &profile,
     )?;
-    // SAFETY: the signed protocol gives this process unique ownership of the
-    // inherited descriptor. No other safe Rust owner is constructed.
-    let mut channel = unsafe { UnixStream::from_raw_fd(fd) };
-    lillux::protect_descriptor_from_exec(&channel).map_err(anyhow::Error::msg)?;
+    // SAFETY: the signed launch protocol gives this process unique ownership
+    // of the connected session descriptor minted by the typed isolation
+    // authority. Lillux performs the raw ownership conversion and immediately
+    // protects the adopted channel from further inheritance.
+    let mut channel = unsafe {
+        lillux::take_inherited_duplex_channel_from_env("RYEOS_SESSION_FD")
+            .map_err(anyhow::Error::msg)?
+    };
     let events = Arc::new(Mutex::new(EventQueue::default()));
     let (workload_result_sender, workload_results) = sync_channel::<WorkloadCommandResult>(32);
     let (pending_control_sender, pending_controls) = sync_channel::<PendingControl>(32);
@@ -749,7 +749,11 @@ fn run() -> Result<()> {
     )?;
     app.initialize()?;
     protect_profile_home(std::path::Path::new(&workload_home))?;
-    let workload_pid = app.child.id();
+    let mut workload_termination = Some(
+        lillux::CooperativeChildTermination::for_child(&app.child)
+            .map_err(anyhow::Error::msg)
+            .context("pin structured-session workload termination authority")?,
+    );
     let app = Arc::new(Mutex::new(app));
     write_frame(
         &mut channel,
@@ -764,7 +768,6 @@ fn run() -> Result<()> {
     let reader = channel
         .try_clone()
         .context("clone RyeOS session reader descriptor")?;
-    lillux::protect_descriptor_from_exec(&reader).map_err(anyhow::Error::msg)?;
     let (session_sender, session_incoming) = sync_channel(128);
     thread::Builder::new()
         .name("ryeos-session-control-reader".to_owned())
@@ -777,7 +780,79 @@ fn run() -> Result<()> {
     let mut active_controls = HashSet::new();
     let mut cancelled_requests = HashSet::new();
     let mut cancelled_workload = false;
+    let mut pending_workload_termination: Option<(
+        String,
+        lillux::PendingCooperativeChildTermination,
+    )> = None;
+    let mut pending_cancelled_responses: HashSet<String> = HashSet::new();
+    let mut pending_cancellation_protocol_error: Option<&'static str> = None;
     loop {
+        let workload_terminated = pending_workload_termination
+            .as_ref()
+            .map(|(_, pending)| pending.has_exited().map_err(anyhow::Error::msg))
+            .transpose()
+            .context("observe cooperatively terminated structured-session workload")?
+            .unwrap_or(false);
+        if workload_terminated {
+            let (request_id, _) = pending_workload_termination
+                .take()
+                .expect("checked pending workload termination");
+            write_error(&mut channel, &request_id, "request cancelled")?;
+            for pending_id in pending_cancelled_responses.drain() {
+                write_error(&mut channel, &pending_id, "request cancelled")?;
+            }
+            if let Some(reason) = pending_cancellation_protocol_error.take() {
+                bail!("{reason}");
+            }
+        }
+        if pending_workload_termination.is_some() {
+            match session_incoming.recv_timeout(Duration::from_millis(50)) {
+                Ok(Ok(frame)) => {
+                    if validate_incoming_frame(&frame).is_ok()
+                        && matches!(frame.kind, FrameKind::Request | FrameKind::Control)
+                    {
+                        let Some(request_id) = frame.request_id.as_deref() else {
+                            pending_cancellation_protocol_error.get_or_insert(
+                                "request received during cancellation has no request id",
+                            );
+                            continue;
+                        };
+                        let cancelled_request_id = &pending_workload_termination
+                            .as_ref()
+                            .expect("checked pending workload termination")
+                            .0;
+                        if request_id == cancelled_request_id
+                            || pending_cancelled_responses.contains(request_id)
+                        {
+                            pending_cancellation_protocol_error.get_or_insert(
+                                "daemon reused a pending cancelled structured-session request id",
+                            );
+                        } else if pending_cancelled_responses.len() >= MAX_PENDING_SERVER_REQUESTS {
+                            pending_cancellation_protocol_error.get_or_insert(
+                                "structured-session cancellation response backlog is exhausted",
+                            );
+                        } else {
+                            pending_cancelled_responses.insert(request_id.to_owned());
+                        }
+                    } else {
+                        pending_cancellation_protocol_error.get_or_insert(
+                            "invalid or unexpected structured-session frame during cancellation",
+                        );
+                    }
+                }
+                Ok(Err(_)) => {
+                    pending_cancellation_protocol_error
+                        .get_or_insert("RyeOS session reader failed during cancellation");
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    pending_cancellation_protocol_error
+                        .get_or_insert("RyeOS session reader disconnected during cancellation");
+                    thread::sleep(Duration::from_millis(50));
+                }
+            }
+            continue;
+        }
         while let Ok((request_id, outcome)) = workload_results.try_recv() {
             if cancelled_requests.remove(&request_id) {
                 continue;
@@ -926,24 +1001,20 @@ fn run() -> Result<()> {
                 // method. Terminating the exact pinned workload is the only
                 // provider-neutral prompt cancellation boundary; this worker
                 // epoch is not reused afterward.
-                // SAFETY: `workload_pid` is the child spawned and still owned
-                // by `StructuredWorkload`; SIGTERM cannot target another pid
-                // until that owned child has been reaped.
-                if unsafe { libc::kill(workload_pid as libc::pid_t, libc::SIGTERM) } != 0 {
-                    let error = std::io::Error::last_os_error();
-                    if error.raw_os_error() != Some(libc::ESRCH) {
-                        return Err(error)
-                            .context("terminate cancelled structured-session workload");
-                    }
-                }
+                let pending = workload_termination
+                    .take()
+                    .ok_or_else(|| anyhow!("structured-session workload was already cancelled"))?
+                    .request()
+                    .map_err(anyhow::Error::msg)
+                    .context("terminate cancelled structured-session workload")?;
                 active_request = None;
                 cancelled_requests.insert(request_id.to_owned());
                 for control_id in active_controls.drain() {
                     cancelled_requests.insert(control_id.clone());
-                    write_error(&mut channel, &control_id, "request cancelled")?;
+                    pending_cancelled_responses.insert(control_id);
                 }
+                pending_workload_termination = Some((request_id.to_owned(), pending));
                 cancelled_workload = true;
-                write_error(&mut channel, request_id, "request cancelled")?;
             }
             FrameKind::ObservationAck => {
                 let pending = pending_observation
@@ -1203,8 +1274,9 @@ impl StructuredWorkload {
         inherited_descriptors: Vec<lillux::InheritedDescriptorAuthority>,
     ) -> Result<Self> {
         let mut command = Command::new(executable);
+        lillux::configure_command_argv0(&mut command, workload_argv0)
+            .map_err(anyhow::Error::msg)?;
         command
-            .arg0(workload_argv0)
             .args(&profile.workload_args)
             .current_dir(workspace)
             .stdin(Stdio::piped())
@@ -2307,16 +2379,6 @@ fn canonical_id(value: &Value) -> Result<String> {
     serde_json::to_string(value).context("encode JSON-RPC id")
 }
 
-fn required_fd(name: &str) -> Result<RawFd> {
-    let fd = required_env(name)?
-        .parse::<RawFd>()
-        .with_context(|| format!("parse inherited descriptor {name}"))?;
-    if fd < 3 {
-        bail!("inherited descriptor {name} is not canonical");
-    }
-    Ok(fd)
-}
-
 fn required_env(name: &str) -> Result<String> {
     let value = std::env::var(name).with_context(|| format!("missing environment {name}"))?;
     if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control) {
@@ -2376,7 +2438,7 @@ fn validate_incoming_frame(frame: &Frame) -> Result<()> {
 }
 
 fn read_session_frames(
-    mut stream: UnixStream,
+    mut stream: lillux::InheritedDuplexChannel,
     sender: SyncSender<std::result::Result<Frame, String>>,
 ) {
     loop {
@@ -2388,7 +2450,7 @@ fn read_session_frames(
     }
 }
 
-fn read_frame(stream: &mut UnixStream) -> Result<Frame> {
+fn read_frame(stream: &mut lillux::InheritedDuplexChannel) -> Result<Frame> {
     let mut length = [0u8; 4];
     stream
         .read_exact(&mut length)
@@ -2404,7 +2466,7 @@ fn read_frame(stream: &mut UnixStream) -> Result<Frame> {
     serde_json::from_slice(&body).context("decode RyeOS frame")
 }
 
-fn write_frame(stream: &mut UnixStream, frame: &Frame) -> Result<()> {
+fn write_frame(stream: &mut lillux::InheritedDuplexChannel, frame: &Frame) -> Result<()> {
     let encoded = serde_json::to_vec(frame).context("encode RyeOS frame")?;
     if encoded.is_empty() || encoded.len() > MAX_FRAME_BYTES {
         bail!("RyeOS output frame exceeds bound");
@@ -2414,7 +2476,11 @@ fn write_frame(stream: &mut UnixStream, frame: &Frame) -> Result<()> {
     stream.flush().context("flush RyeOS frame")
 }
 
-fn write_final(stream: &mut UnixStream, request_id: &str, body: Value) -> Result<()> {
+fn write_final(
+    stream: &mut lillux::InheritedDuplexChannel,
+    request_id: &str,
+    body: Value,
+) -> Result<()> {
     write_frame(
         stream,
         &Frame {
@@ -2427,7 +2493,11 @@ fn write_final(stream: &mut UnixStream, request_id: &str, body: Value) -> Result
     )
 }
 
-fn write_error(stream: &mut UnixStream, request_id: &str, message: &str) -> Result<()> {
+fn write_error(
+    stream: &mut lillux::InheritedDuplexChannel,
+    request_id: &str,
+    message: &str,
+) -> Result<()> {
     let bounded = message.chars().take(2_048).collect::<String>();
     write_frame(
         stream,
@@ -2445,6 +2515,8 @@ fn write_error(stream: &mut UnixStream, request_id: &str, message: &str) -> Resu
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::net::UnixStream;
+    use std::os::unix::process::CommandExt as _;
 
     #[test]
     fn forbidden_fields_reject_presence_including_null() {

@@ -257,6 +257,7 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
         ),
         isolation_state_root: None,
         isolation_checkpoint_dir: None,
+        isolation_checkpoint_authority: None,
         isolation_daemon_socket_path: None,
         isolation_bundle_roots: Vec::new(),
         isolation_node_trusted_keys_dir: None,

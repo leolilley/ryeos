@@ -943,7 +943,9 @@ fn prepare_structured_session_baseline(
     let current_matches = incumbent
         .as_ref()
         .map(|entry| {
-            Ok(entry.permission_mode()? == 0o400 && entry.read_bounded(64 * 1024)? == bytes)
+            Ok::<bool, anyhow::Error>(
+                entry.permission_mode()? == 0o400 && entry.read_bounded(64 * 1024)? == bytes,
+            )
         })
         .transpose()?
         .unwrap_or(false);

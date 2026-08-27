@@ -396,6 +396,7 @@ async fn dispatch_managed_subprocess(
         capability_policy: crate::execution::launch::CapabilityPolicy::AdmissionDefault,
         // Fresh launch: cold start, no checkpoint resume.
         checkpoint_resume_mode: crate::execution::launch::CheckpointResumeMode::None,
+        pre_pinned_checkpoint_authority: None,
         rearm_native_resume_budget_after_attach: false,
         launch_handoff,
     })
@@ -1007,6 +1008,7 @@ async fn dispatch_streaming_subprocess(
                     live_access: live_access.as_ref(),
                     state_root: request.provenance.state_root_override(),
                     checkpoint_dir: None,
+                    checkpoint_authority: None,
                     daemon_socket_path: None,
                     bundle_roots: &bundle_roots,
                     node_trusted_keys_dir: Some(&state.config.runtime_root().trusted_keys_dir()),
