@@ -41,6 +41,7 @@ pub mod kind_profiles;
 pub mod launch_metadata;
 pub mod launch_stage_timings;
 pub mod live_input_queue;
+pub mod managed_external_content;
 pub mod node_config;
 pub mod operator_external_content;
 pub mod persistent_session;

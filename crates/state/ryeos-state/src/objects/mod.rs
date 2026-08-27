@@ -22,6 +22,7 @@ pub mod effect_record;
 pub mod execution_identity;
 pub mod execution_project_authority;
 pub mod execution_realization;
+pub mod external_content_activation;
 pub mod external_content_binding;
 pub mod external_content_manifest;
 pub mod external_large_content_manifest;
@@ -86,6 +87,12 @@ pub use execution_realization::{
     EXECUTION_REALIZATION_SCHEMA_VERSION, ExecutionComponentReference, ExecutionComponentStorage,
     MAX_EXECUTION_COMPONENTS, MAX_EXECUTION_PROPERTIES, MAX_EXECUTION_REALIZATION_BYTES,
     OBSERVED_EXECUTION_REALIZATION_KIND, ObservedExecutionRealization,
+};
+pub use external_content_activation::{
+    EXTERNAL_CONTENT_ACTIVATION_HEAD_NAMESPACE, EXTERNAL_CONTENT_ACTIVATION_KIND,
+    EXTERNAL_CONTENT_ACTIVATION_SCHEMA, ExternalContentActivationComponentReceipt,
+    ExternalContentActivationReceipt, ExternalContentActivationSourceReceipt,
+    MAX_EXTERNAL_CONTENT_ACTIVATION_COMPONENTS, MAX_EXTERNAL_CONTENT_ACTIVATION_SOURCES,
 };
 pub use external_content_binding::{
     EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE, EXTERNAL_CONTENT_BINDING_KIND,

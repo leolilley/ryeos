@@ -18,6 +18,11 @@ pub struct ExternalContentImportPolicyRecord {
     pub schema: u32,
     pub roots: BTreeMap<String, ExternalContentImportRoot>,
     pub limits: ExternalContentImportLimits,
+    /// Optional node-owned permission and ceilings for activation from signed
+    /// trusted-bundle declarations. Absence disables managed acquisition while
+    /// preserving the independent local named-root import primitive.
+    #[serde(default)]
+    pub managed_activation: Option<ManagedExternalContentActivationPolicy>,
     #[serde(skip)]
     pub source_file: PathBuf,
 }
@@ -39,6 +44,23 @@ pub struct ExternalContentImportLimits {
     pub max_total_bytes: u64,
     pub store_budget_bytes: u64,
     pub minimum_free_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedExternalContentActivationPolicy {
+    pub allow_online: bool,
+    #[serde(default)]
+    pub allowed_https_hosts: Vec<String>,
+    pub max_archives: usize,
+    pub max_compressed_bytes: u64,
+    pub max_expanded_bytes: u64,
+    pub max_members: usize,
+    pub max_member_bytes: u64,
+    pub max_concurrent_activations: usize,
+    pub cache_budget_bytes: u64,
+    pub minimum_free_bytes: u64,
+    pub max_attempts: u64,
 }
 
 pub struct ExternalContentImportPolicySection;
@@ -114,6 +136,63 @@ impl ExternalContentImportPolicyRecord {
         {
             bail!("external-content import storage budget is incoherent");
         }
+        if let Some(managed) = self.managed_activation.as_ref() {
+            managed.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl ManagedExternalContentActivationPolicy {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.allowed_https_hosts.len() > 64 {
+            bail!("managed external-content host allowlist exceeds 64 entries");
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for host in &self.allowed_https_hosts {
+            if host.is_empty()
+                || host.len() > 253
+                || host.bytes().any(|byte| {
+                    !(byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'.' | b'-'))
+                })
+                || host.starts_with('.')
+                || host.ends_with('.')
+                || host.contains("..")
+                || !seen.insert(host)
+            {
+                bail!("managed external-content HTTPS host is not canonical");
+            }
+        }
+        if self.allow_online && self.allowed_https_hosts.is_empty() {
+            bail!("online managed external-content activation requires an HTTPS host allowlist");
+        }
+        if self.max_archives == 0 || self.max_archives > 8 {
+            bail!("managed external-content max_archives is outside 1..=8");
+        }
+        if self.max_members == 0 || self.max_members > 1024 {
+            bail!("managed external-content max_members is outside 1..=1024");
+        }
+        if self.max_compressed_bytes == 0
+            || self.max_expanded_bytes == 0
+            || self.max_member_bytes == 0
+            || self.max_compressed_bytes > self.cache_budget_bytes
+            || self.max_member_bytes > self.max_expanded_bytes
+            || self.max_expanded_bytes
+                > ryeos_state::objects::MAX_LARGE_CONTENT_TOTAL_BYTES.saturating_mul(8)
+        {
+            bail!("managed external-content byte ceilings are incoherent");
+        }
+        if self.cache_budget_bytes == 0 || self.minimum_free_bytes == 0 {
+            bail!("managed external-content storage reserve is incoherent");
+        }
+        if self.max_concurrent_activations == 0 || self.max_concurrent_activations > 16 {
+            bail!("managed external-content concurrency is outside 1..=16");
+        }
+        if self.max_attempts == 0 || self.max_attempts > 16 {
+            bail!("managed external-content max_attempts is outside 1..=16");
+        }
         Ok(())
     }
 }
@@ -164,6 +243,7 @@ mod tests {
                 store_budget_bytes: 2048,
                 minimum_free_bytes: 1024,
             },
+            managed_activation: None,
             source_file: PathBuf::new(),
         };
         assert!(policy.validate().is_err());
@@ -183,8 +263,30 @@ mod tests {
                 "max_total_bytes": 1024,
                 "store_budget_bytes": 2048,
                 "minimum_free_bytes": 1024
-            }
+            },
+            "managed_activation": null
         });
         assert!(serde_json::from_value::<ExternalContentImportPolicyRecord>(value).is_err());
+    }
+
+    #[test]
+    fn managed_activation_requires_explicit_bounded_online_hosts() {
+        let policy = ManagedExternalContentActivationPolicy {
+            allow_online: true,
+            allowed_https_hosts: Vec::new(),
+            max_archives: 1,
+            max_compressed_bytes: 1024,
+            max_expanded_bytes: 2048,
+            max_members: 4,
+            max_member_bytes: 1024,
+            max_concurrent_activations: 1,
+            cache_budget_bytes: 4096,
+            minimum_free_bytes: 1024,
+            max_attempts: 3,
+        };
+        assert!(policy.validate().is_err());
+        let mut admitted = policy;
+        admitted.allowed_https_hosts = vec!["releases.example.test".to_owned()];
+        admitted.validate().unwrap();
     }
 }

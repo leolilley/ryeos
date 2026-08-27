@@ -59,6 +59,7 @@ pub(super) const CURRENT_OBJECT_KINDS: &[&str] = &[
     "chain_state",
     "dispatch_effect_record",
     "execution_identity",
+    "external_content_activation",
     "external_content_binding",
     "external_content_manifest",
     "external_large_content_manifest",
@@ -114,6 +115,11 @@ const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
         kind: crate::objects::EXECUTION_IDENTITY_KIND,
         validate: validate_execution_identity,
         links: links_leaf,
+    },
+    ObjectContract {
+        kind: crate::objects::EXTERNAL_CONTENT_ACTIVATION_KIND,
+        validate: validate_external_content_activation,
+        links: links_external_content_activation,
     },
     ObjectContract {
         kind: crate::objects::EXTERNAL_CONTENT_BINDING_KIND,
@@ -271,6 +277,10 @@ fn validate_execution_identity(value: &Value) -> anyhow::Result<()> {
 
 fn validate_external_content_manifest(value: &Value) -> anyhow::Result<()> {
     crate::objects::ExternalContentManifestObject::from_value(value).map(|_| ())
+}
+
+fn validate_external_content_activation(value: &Value) -> anyhow::Result<()> {
+    crate::objects::ExternalContentActivationReceipt::from_value(value).map(|_| ())
 }
 
 fn validate_external_content_binding(value: &Value) -> anyhow::Result<()> {
@@ -532,6 +542,21 @@ fn links_placement_transfer_manifest(value: &Value) -> Result<ContractLinks, Str
     links
         .blob_hashes
         .push(manifest.source_launch_metadata_blob_hash);
+    Ok(links)
+}
+
+fn links_external_content_activation(value: &Value) -> Result<ContractLinks, String> {
+    let receipt = crate::objects::ExternalContentActivationReceipt::from_value(value)
+        .map_err(|error| error.to_string())?;
+    let mut links = ContractLinks::leaf();
+    for component in receipt.components {
+        super::push_typed_hash(
+            &component.binding_hash,
+            ExpectedObject::Kind(crate::objects::EXTERNAL_CONTENT_BINDING_KIND),
+            None,
+            &mut links.object_edges,
+        )?;
+    }
     Ok(links)
 }
 
@@ -1056,5 +1081,37 @@ mod tests {
         assert!(links.object_edges.iter().any(|edge| {
             edge.hash == candidate && edge.expected == ExpectedObject::Kind("project_snapshot")
         }));
+    }
+
+    #[test]
+    fn activation_receipt_roots_every_component_binding() {
+        let receipt = crate::objects::ExternalContentActivationReceipt::new(
+            "config:fixture/activation".to_owned(),
+            "a".repeat(64),
+            "worker:fixture/hosted".to_owned(),
+            "b".repeat(64),
+            "c".repeat(64),
+            "d".repeat(64),
+            vec![crate::objects::ExternalContentActivationSourceReceipt {
+                id: "package".to_owned(),
+                archive_sha256: "e".repeat(64),
+            }],
+            vec![crate::objects::ExternalContentActivationComponentReceipt {
+                id: "runtime".to_owned(),
+                source_id: "package".to_owned(),
+                member_sha256: "f".repeat(64),
+                manifest_hash: "1".repeat(64),
+                manifest_kind: crate::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND.to_owned(),
+                binding_id: "2".repeat(64),
+                binding_hash: "3".repeat(64),
+                shape: "file".to_owned(),
+                storage: "large_content".to_owned(),
+            }],
+            "4".repeat(64),
+        )
+        .unwrap();
+        let links = links_external_content_activation(&receipt.to_value().unwrap()).unwrap();
+        assert_eq!(links.object_edges.len(), 1);
+        assert_eq!(links.object_edges[0].hash, "3".repeat(64));
     }
 }
