@@ -89,6 +89,109 @@ impl AdmittedSessionPublications {
     }
 }
 
+/// Remove only node-local admission output before independently admitting a
+/// transferred portable program on another node. Authored/composed values and
+/// the captured dependency remain exact; source closure, external realization,
+/// and session capsule coordinates are recomputed from target-local authority.
+pub(crate) fn reset_for_cross_site_admission(
+    engine: &ryeos_engine::engine::Engine,
+    principal: &EffectivePrincipal,
+    prepared: &mut PreparedRuntimeLaunch,
+) -> Result<()> {
+    prepared.admitted_sessions.clear();
+    for dependency in prepared.execution_dependencies.values_mut() {
+        dependency.validate()?;
+        let mut source_resolution = dependency.resolution.clone();
+        clear_node_local_admission_projections(&mut source_resolution);
+
+        let canonical =
+            ryeos_engine::canonical_ref::CanonicalRef::parse(&dependency.canonical_ref)?;
+        let plan_context = PlanContext {
+            requested_by: principal.clone(),
+            project_context: ProjectContext::None,
+            subject_resolution_authority: SubjectResolutionAuthority::Projectless,
+            current_site_id: "cross-site-admission".to_owned(),
+            origin_site_id: "cross-site-admission".to_owned(),
+            execution_hints: ExecutionHints::default(),
+            validate_only: true,
+        };
+        let target_resolved = engine.resolve(&plan_context, &canonical)?;
+        let target_verified = engine.verify(&plan_context, target_resolved)?;
+        let target_resolution =
+            engine.effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+                item_ref: canonical,
+                expected_kind: None,
+                project_root: None,
+                subject_resolution_authority: SubjectResolutionAuthority::Projectless,
+            })?;
+        let source_portable =
+            ryeos_engine::resolution::RetainedResolutionOutput::capture(&source_resolution);
+        let target_portable =
+            ryeos_engine::resolution::RetainedResolutionOutput::capture(&target_resolution);
+        if serde_json::to_value(&source_portable)? != serde_json::to_value(&target_portable)? {
+            bail!(
+                "target dependency `{}` differs from the transferred portable program",
+                dependency.canonical_ref
+            );
+        }
+
+        let target_subject = super::launch_preparation::PreparedExecutionDependencySubject {
+            source_path: target_verified.resolved.source_path.clone(),
+            source_space: target_verified.resolved.source_space,
+            source_root: target_verified.resolved.source_root.clone(),
+            resolved_from: target_verified.resolved.resolved_from.clone(),
+            materialized_project_root: target_verified.resolved.materialized_project_root.clone(),
+            subject_resolution_authority: target_verified
+                .resolved
+                .subject_resolution_authority
+                .clone(),
+            raw_content_digest: target_verified.resolved.raw_content_digest.clone(),
+            content_hash: target_verified.resolved.content_hash.clone(),
+            signature_header: target_verified.resolved.signature_header.clone(),
+            source_format: target_verified.resolved.source_format.clone(),
+            metadata: target_verified.resolved.metadata.clone(),
+            signer: target_verified.signer.clone(),
+            trust_class: target_verified.trust_class,
+        };
+        if portable_subject_value(&dependency.subject)? != portable_subject_value(&target_subject)?
+        {
+            bail!(
+                "target dependency `{}` verification authority differs from the transferred program",
+                dependency.canonical_ref
+            );
+        }
+        dependency.resolution = target_resolution;
+        dependency.subject = target_subject;
+        dependency.validate()?;
+    }
+    Ok(())
+}
+
+fn clear_node_local_admission_projections(
+    resolution: &mut ryeos_engine::resolution::ResolutionOutput,
+) {
+    resolution
+        .composed
+        .derived
+        .remove(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY);
+    resolution
+        .composed
+        .derived
+        .remove(ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY);
+}
+
+fn portable_subject_value(
+    subject: &super::launch_preparation::PreparedExecutionDependencySubject,
+) -> Result<Value> {
+    let mut value = serde_json::to_value(subject)?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("prepared dependency subject must be an object"))?;
+    object.remove("source_path");
+    object.remove("materialized_project_root");
+    Ok(value)
+}
+
 /// Admit fresh session dependencies or verify recovered capsule references.
 /// No mutable item/config lookup occurs on recovery.
 pub(crate) fn admit_or_verify_prepared_sessions(
@@ -1059,6 +1162,11 @@ pub fn start_exclusive_capsule(
             error.context(ExclusiveWorkerCleanupUnproved)
         });
     }
+    // Wake attachment-gated controllers only after the held process has been
+    // released, the exclusive transport is bound, and the durable worker row
+    // is live. The projection remains the authority; this process-local signal
+    // only removes a polling loop and is safe to lose across restart.
+    ryeos_app::dedicated_session_service::notify_projection_change(&identity.placement_thread_id);
     Ok(())
 }
 

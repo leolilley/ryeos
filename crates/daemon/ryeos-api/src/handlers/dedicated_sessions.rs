@@ -1276,7 +1276,7 @@ async fn handoff_preflight(
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?
         .map(|(hash, _attestation)| hash);
     let preflight_id = ryeos_state::objects::canonical_value_digest(&json!({
-        "schema":"ryeos.worker_session_handoff_preflight_operation.v1",
+        "schema":"ryeos.worker_session_handoff_preflight_operation.v2",
         "owner_principal":source.owner_principal,
         "chain_root_id":source.chain_root_id,
         "origin_site_id":source_snapshot.origin_site_id,
@@ -1323,7 +1323,7 @@ async fn handoff_preflight(
     let target_client =
         crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config);
     let target_value = target_client
-        .execute(
+        .execute_service_result(
             ryeos_app::worker_handoff::WORKER_PLACEMENT_PREFLIGHT_SERVICE,
             &BTreeMap::new(),
             None,
@@ -1331,7 +1331,6 @@ async fn handoff_preflight(
             &ryeos_app::execution_policy::ExecutionPolicy::projectless(
                 ryeos_app::execution_policy::ExecutionResponse::Wait,
             ),
-            None,
         )
         .await
         .map_err(|error| {
@@ -1424,51 +1423,68 @@ async fn handoff_preflight(
     )
     .map_err(internal)?;
     let job_id = source_preflight_job_id(&preflight_id);
-    state
-        .state_store
-        .stage_sync_payload_and_create_job(
-            &payload,
-            &ryeos_state::sync::ImportAttribution {
-                source_principal: Some(loaded_remote.config.principal_id.clone()),
-                source_peer: Some(req.remote.clone()),
-                job_id: Some(job_id.clone()),
-            },
-            &ryeos_state::NewSyncJob {
-                job_id: job_id.clone(),
-                operation_type: ryeos_app::worker_handoff::WORKER_SESSION_HANDOFF_PREFLIGHT_OPERATION
-                    .to_owned(),
-                operation: operation.to_value().map_err(internal)?,
-                peer: Some(req.remote),
-                roots: {
-                    let mut roots = vec![response.preflight_attestation_hash.clone()];
-                    if let Some(hash) = &request.follow_delivery_reservation_attestation_hash {
-                        roots.push(hash.clone());
-                    }
-                    roots
+    let (_, existing_job) =
+        state
+            .state_store
+            .stage_sync_payload_and_create_job(
+                &payload,
+                &ryeos_state::sync::ImportAttribution {
+                    source_principal: Some(loaded_remote.config.principal_id.clone()),
+                    source_peer: Some(req.remote.clone()),
+                    job_id: Some(job_id.clone()),
                 },
-                heads: vec![request.source_chain_head_hash.clone()],
-                max_attempts: 4,
-            },
-        )
-        .map_err(internal)?;
-    state
-        .state_store
-        .with_state_db(|db| {
-            db.update_sync_job(
-                &job_id,
-                &ryeos_state::SyncJobUpdate {
-                    state: ryeos_state::SyncJobState::Completed,
-                    phase: "preflight_complete".to_owned(),
-                    roots: None,
-                    heads: None,
-                    uploaded_hashes: Vec::new(),
-                    fetched_hashes: vec![response.preflight_attestation_hash.clone()],
-                    last_error: None,
-                    result: Some(serde_json::to_value(&response)?),
+                &ryeos_state::NewSyncJob {
+                    job_id: job_id.clone(),
+                    operation_type:
+                        ryeos_app::worker_handoff::WORKER_SESSION_HANDOFF_PREFLIGHT_OPERATION
+                            .to_owned(),
+                    operation: operation.to_value().map_err(internal)?,
+                    peer: Some(req.remote),
+                    roots: {
+                        let mut roots = vec![response.preflight_attestation_hash.clone()];
+                        if let Some(hash) = &request.follow_delivery_reservation_attestation_hash {
+                            roots.push(hash.clone());
+                        }
+                        roots
+                    },
+                    heads: vec![request.source_chain_head_hash.clone()],
+                    max_attempts: 4,
                 },
             )
-        })
+            .map_err(internal)?;
+    if existing_job.state == ryeos_state::SyncJobState::Completed {
+        let retained: ryeos_app::worker_handoff::WorkerPlacementPreflightResponse =
+            serde_json::from_value(
+                existing_job
+                    .result
+                    .ok_or_else(|| internal("completed source preflight has no result"))?,
+            )
+            .map_err(internal)?;
+        if retained != response {
+            return Err(internal(
+                "completed source preflight differs from the target's idempotent receipt",
+            ));
+        }
+    } else {
+        let attempt_id = begin_worker_handoff_attempt(
+            &state,
+            &job_id,
+            "preflight_complete",
+            "source-handoff-preflight",
+        )
         .map_err(internal)?;
+        settle_worker_handoff_attempt(
+            &state,
+            &job_id,
+            &attempt_id,
+            ryeos_state::SyncJobAttemptState::Completed,
+            ryeos_state::SyncJobState::Completed,
+            "preflight_complete",
+            None,
+            Some(serde_json::to_value(&response).map_err(internal)?),
+        )
+        .map_err(internal)?;
+    }
     Ok(json!({
         "preflight_id":preflight_id,
         "preflight_attestation_hash":response.preflight_attestation_hash,
@@ -1729,6 +1745,13 @@ async fn handoff(
     }))
     .map_err(internal)?;
     let successor_thread_id = preflight_evidence.successor_placement_thread_id.clone();
+    let project_candidate_snapshot_hash = checkpoint
+        .restore
+        .project_candidate_snapshot_hash
+        .as_deref()
+        .ok_or_else(|| {
+            HandlerError::BadRequest("remote handoff checkpoint has no project candidate".into())
+        })?;
     let source_accounting_frontier = match (
         state.accounting.as_ref(),
         source_metadata.accounting_scope.as_ref(),
@@ -1757,6 +1780,7 @@ async fn handoff(
         &source_head.target_hash,
         &source_event_hash,
         &checkpoint.manifest_hash,
+        project_candidate_snapshot_hash,
         &launch_capsule_hash,
         &source_metadata,
     )
@@ -1843,7 +1867,7 @@ async fn handoff(
         HandlerError,
     > = async {
         let target_value = target_client
-            .execute(
+            .execute_service_result(
                 ryeos_app::worker_handoff::WORKER_PLACEMENT_PREPARE_SERVICE,
                 &BTreeMap::new(),
                 None,
@@ -1851,7 +1875,6 @@ async fn handoff(
                 &ryeos_app::execution_policy::ExecutionPolicy::projectless(
                     ryeos_app::execution_policy::ExecutionResponse::Wait,
                 ),
-                None,
             )
             .await
             .map_err(|error| {
@@ -1979,12 +2002,8 @@ async fn handoff(
     let resume_rebind = ryeos_app::worker_handoff::RemoteResumeContextRebind {
         source_site_id: state.threads.site_id().to_owned(),
         target_site_id: target_site_id.clone(),
-        target_project_context: ryeos_engine::contracts::ProjectContext::SnapshotHash {
-            hash: prepared
-                .placement
-                .project_rebind
-                .source_candidate_snapshot_hash
-                .clone(),
+        target_project_context: ryeos_engine::contracts::ProjectContext::LocalPath {
+            path: PathBuf::from(&binding.remote_project_path),
         },
         target_project_authority: target_authority.clone(),
         target_stable_project_identity: Some(target_identity),
@@ -2003,6 +2022,9 @@ async fn handoff(
     };
     let target_resume = source_resume
         .for_remote_worker_adoption(&resume_rebind)
+        .map_err(internal)?;
+    let (successor_project_root, successor_project_snapshot_hash) = target_resume
+        .authoritative_project_identity()
         .map_err(internal)?;
     let final_frontier = match (
         state.accounting.as_ref(),
@@ -2032,15 +2054,9 @@ async fn handoff(
         origin_site_id: source_snapshot.origin_site_id.clone(),
         upstream_thread_id: Some(source_thread_id.clone()),
         requested_by: Some(source.owner_principal.clone()),
-        project_root: None,
+        project_root: successor_project_root,
         project_authority: target_authority.clone(),
-        base_project_snapshot_hash: Some(
-            prepared
-                .placement
-                .project_rebind
-                .source_base_snapshot_hash
-                .clone(),
-        ),
+        base_project_snapshot_hash: successor_project_snapshot_hash,
         usage_subject: None,
         usage_subject_asserted_by: None,
         captured_history_policy: None,
@@ -2112,7 +2128,7 @@ async fn handoff(
         HandlerError,
     > = async {
         let adopted_value = target_client
-            .execute(
+            .execute_service_result(
                 ryeos_app::worker_handoff::WORKER_PLACEMENT_ADOPT_SERVICE,
                 &BTreeMap::new(),
                 None,
@@ -2120,7 +2136,6 @@ async fn handoff(
                 &ryeos_app::execution_policy::ExecutionPolicy::projectless(
                     ryeos_app::execution_policy::ExecutionResponse::Wait,
                 ),
-                None,
             )
             .await
             .map_err(|error| {
@@ -2295,50 +2310,72 @@ async fn resume_committed_handoff(
             .clone()
             .ok_or_else(|| internal("committed handoff progress has no writer grant"))?,
     };
-    let value = target_client
-        .execute(
-            ryeos_app::worker_handoff::WORKER_PLACEMENT_ADOPT_SERVICE,
-            &BTreeMap::new(),
-            None,
-            &serde_json::to_value(&adopt_request).map_err(internal)?,
-            &ryeos_app::execution_policy::ExecutionPolicy::projectless(
-                ryeos_app::execution_policy::ExecutionResponse::Wait,
-            ),
-            None,
-        )
-        .await
-        .map_err(|error| {
-            crate::remote::client::map_remote_call_error(error, "retry target placement adoption")
-        })?;
-    let adopted: ryeos_app::worker_handoff::WorkerPlacementAdoptResponse =
-        serde_json::from_value(value).map_err(internal)?;
-    if adopted.operation_id != operation.operation_id
-        || adopted.chain_root_id != operation.chain_root_id
-        || adopted.placement_thread_id != operation.successor_placement_thread_id
-        || adopted.target_chain_head_hash != adopt_request.target_chain_head_hash
-    {
-        return Err(internal(
-            "retried target adoption changed its authority coordinates",
-        ));
-    }
-    state
-        .state_store
-        .with_state_db(|db| {
-            db.update_sync_job(
-                &job_id,
-                &ryeos_state::SyncJobUpdate {
-                    state: ryeos_state::SyncJobState::Completed,
-                    phase: "completed".to_owned(),
-                    roots: None,
-                    heads: None,
-                    uploaded_hashes: vec![adopt_request.target_chain_head_hash.clone()],
-                    fetched_hashes: Vec::new(),
-                    last_error: None,
-                    result: Some(serde_json::to_value(&adopted)?),
-                },
+    let adopt_attempt =
+        begin_worker_handoff_attempt(state, &job_id, "target_adopt_retry", "source-handoff")?;
+    let adopted_result: Result<
+        ryeos_app::worker_handoff::WorkerPlacementAdoptResponse,
+        HandlerError,
+    > = async {
+        let value = target_client
+            .execute_service_result(
+                ryeos_app::worker_handoff::WORKER_PLACEMENT_ADOPT_SERVICE,
+                &BTreeMap::new(),
+                None,
+                &serde_json::to_value(&adopt_request).map_err(internal)?,
+                &ryeos_app::execution_policy::ExecutionPolicy::projectless(
+                    ryeos_app::execution_policy::ExecutionResponse::Wait,
+                ),
             )
-        })
-        .map_err(internal)?;
+            .await
+            .map_err(|error| {
+                crate::remote::client::map_remote_call_error(
+                    error,
+                    "retry target placement adoption",
+                )
+            })?;
+        let adopted: ryeos_app::worker_handoff::WorkerPlacementAdoptResponse =
+            serde_json::from_value(value).map_err(internal)?;
+        if adopted.operation_id != operation.operation_id
+            || adopted.chain_root_id != operation.chain_root_id
+            || adopted.placement_thread_id != operation.successor_placement_thread_id
+            || adopted.target_chain_head_hash != adopt_request.target_chain_head_hash
+        {
+            return Err(internal(
+                "retried target adoption changed its authority coordinates",
+            ));
+        }
+        Ok(adopted)
+    }
+    .await;
+    let adopted = match adopted_result {
+        Ok(adopted) => {
+            settle_worker_handoff_attempt(
+                state,
+                &job_id,
+                &adopt_attempt,
+                ryeos_state::SyncJobAttemptState::Completed,
+                ryeos_state::SyncJobState::Completed,
+                "completed",
+                None,
+                Some(serde_json::to_value(&adopted).map_err(internal)?),
+            )?;
+            adopted
+        }
+        Err(error) => {
+            let detail = bounded_handoff_recovery_error(&error.to_string());
+            settle_worker_handoff_attempt(
+                state,
+                &job_id,
+                &adopt_attempt,
+                ryeos_state::SyncJobAttemptState::Failed,
+                ryeos_state::SyncJobState::Retryable,
+                "target_adopt_failed",
+                Some(detail),
+                Some(progress.to_value().map_err(internal)?),
+            )?;
+            return Err(error);
+        }
+    };
     Ok(Some(handoff_response(&operation, &adopted)?))
 }
 
@@ -2554,7 +2591,7 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
         )
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let result = client
-            .execute(
+            .execute_service_result(
                 ryeos_app::worker_handoff::WORKER_PLACEMENT_ADOPT_SERVICE,
                 &BTreeMap::new(),
                 None,
@@ -2562,7 +2599,6 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
                 &ryeos_app::execution_policy::ExecutionPolicy::projectless(
                     ryeos_app::execution_policy::ExecutionResponse::Wait,
                 ),
-                None,
             )
             .await;
         match result {
@@ -2749,7 +2785,7 @@ async fn recover_pre_cut_source_handoff_abort(
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     match client
-        .execute(
+        .execute_service_result(
             ryeos_app::worker_handoff::WORKER_PLACEMENT_ABORT_SERVICE,
             &BTreeMap::new(),
             None,
@@ -2757,7 +2793,6 @@ async fn recover_pre_cut_source_handoff_abort(
             &ryeos_app::execution_policy::ExecutionPolicy::projectless(
                 ryeos_app::execution_policy::ExecutionResponse::Wait,
             ),
-            None,
         )
         .await
     {

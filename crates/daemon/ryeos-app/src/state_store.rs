@@ -3255,6 +3255,11 @@ fn validate_remote_adoption_runtime_seed(
     let preflight = crate::worker_handoff::WorkerPlacementPreflightEvidence::from_attestation(
         &preflight_attestation,
     )?;
+    crate::worker_handoff::validate_target_realization_after_preflight(
+        &cas,
+        &preflight.target_execution_realization_hash,
+        &placement.target_execution_realization_hash,
+    )?;
     if let Some(hash) = &preflight.follow_delivery_reservation_attestation_hash {
         let reservation_value = cas
             .get_object(hash)?
@@ -3287,8 +3292,6 @@ fn validate_remote_adoption_runtime_seed(
         || placement.persistent_dependency_programs != preflight.persistent_dependency_programs
         || placement.target_persistent_session_capsules
             != preflight.target_persistent_session_capsules
-        || placement.target_execution_realization_hash
-            != preflight.target_execution_realization_hash
         || placement.credential_reservation.profile_id != preflight.target_credential_profile_id
         || placement.credential_reservation.generation != preflight.target_credential_generation
         || placement.credential_reservation.upstream_session_id != preflight.upstream_session_id
@@ -5641,6 +5644,7 @@ impl StateStore {
     pub fn complete_worker_handoff_preflight(
         &self,
         job_id: &str,
+        attempt_id: &str,
         attestation: &ryeos_state::objects::Attestation,
         result: Value,
     ) -> Result<String> {
@@ -5680,15 +5684,22 @@ impl StateStore {
         roots.push(expected.clone());
         roots.sort();
         roots.dedup();
-        g.state_db.update_sync_job(
+        g.state_db.finish_sync_job_attempt_and_update_job(
+            attempt_id,
+            &ryeos_state::FinishSyncJobAttempt {
+                state: ryeos_state::SyncJobAttemptState::Completed,
+                phase: "preflight_complete".to_owned(),
+                error: None,
+                result: Some(result.clone()),
+            },
             job_id,
             &ryeos_state::SyncJobUpdate {
                 state: ryeos_state::SyncJobState::Completed,
                 phase: "preflight_complete".to_owned(),
                 roots: Some(roots),
                 heads: None,
-                uploaded_hashes: Vec::new(),
-                fetched_hashes: Vec::new(),
+                uploaded_hashes: job.uploaded_hashes,
+                fetched_hashes: job.fetched_hashes,
                 last_error: None,
                 result: Some(result),
             },
@@ -5725,11 +5736,20 @@ impl StateStore {
         if let Some(existing) = g.state_db.get_sync_job(&job.job_id)? {
             if existing.operation_type != job.operation_type
                 || existing.operation != job.operation
-                || existing.roots != job.roots
-                || existing.heads != job.heads
+                || existing.peer != job.peer
+                || existing.max_attempts != job.max_attempts
+                || !job
+                    .roots
+                    .iter()
+                    .all(|root| existing.roots.iter().any(|existing| existing == root))
             {
                 bail!("staged sync job identity is already bound to another operation");
             }
+            // `roots` may grow as signed receipts are published and `heads`
+            // may advance as the durable workflow progresses. The immutable
+            // operation and initial roots above identify an idempotent re-drive;
+            // comparing the mutable frontier would make every completed job
+            // unreplayable.
             return Ok((ryeos_state::sync::ImportResult::default(), existing));
         }
         let import = ryeos_state::sync::import_objects_staged(
@@ -6923,10 +6943,13 @@ impl StateStore {
             return Ok(FinalizeCreatedUnattachedOutcome::AlreadyTerminal);
         }
 
+        // Birth can commit before the runtime row is installed. Absence is an
+        // exact unattached state for this conditional transition, not an
+        // error; the launch-claim check below still fences a concurrent owner.
         let runtime = g
             .runtime_db
             .get_runtime_info(thread_id)?
-            .ok_or_else(|| anyhow!("runtime row missing during finalization: {thread_id}"))?;
+            .unwrap_or_default();
         let process_attached =
             runtime.pid.is_some() || runtime.pgid.is_some() || runtime.process_identity.is_some();
         let launch_claimed = g.runtime_db.get_launch_claim(thread_id)?.is_some();
@@ -8329,10 +8352,25 @@ impl StateStore {
         }
         let mut successor_meta = match &kind {
             RunningContinuationKind::RemoteAdoption { authority } => {
-                let target_capsule = load_admitted_launch_capsule(
-                    &self.state_authority,
-                    &authority.placement.target_launch_capsule_hash,
-                )?;
+                let cas = self.state_authority.cas_store()?;
+                let target_capsule_hash = &authority.placement.target_launch_capsule_hash;
+                let target_capsule_value = cas
+                    .get_object(target_capsule_hash)?
+                    .ok_or_else(|| anyhow!("remote adoption target launch capsule is absent"))?;
+                let target_capsule =
+                    ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(
+                        target_capsule_value,
+                    )?;
+                if target_capsule.content_hash()? != *target_capsule_hash {
+                    bail!("remote adoption target launch capsule changed content hash");
+                }
+                target_capsule
+                    .verify_retained_execution_realization_with_key(
+                        &cas,
+                        &self.state_authority.large_object_store()?,
+                        &authority.target_node_verifying_key,
+                    )
+                    .context("verify remote target execution realization")?;
                 let source_capsule_hash = source_row
                     .admitted_launch_capsule_hash
                     .as_deref()
@@ -8687,11 +8725,16 @@ impl StateStore {
             storage_class: "indexed".to_string(),
             payload: source_payload,
         };
-        let ste = convert_events(
+        let mut ste = convert_events(
             std::slice::from_ref(&source_event),
             chain_root_id,
             source_thread_id,
         );
+        if let Some(remote) = &remote_authority {
+            ste.first_mut()
+                .expect("running continuation source event batch is non-empty")
+                .prev_thread_event_hash = Some(remote.source_last_event_hash.clone());
+        }
         let expected_source_event = ste
             .first()
             .cloned()

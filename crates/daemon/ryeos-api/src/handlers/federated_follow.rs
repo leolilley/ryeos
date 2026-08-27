@@ -508,7 +508,7 @@ pub async fn recover_durable_remote_follow_deliveries(state: &AppState) -> Resul
             Ok(())
         })?;
         let result = client
-            .execute(
+            .execute_service_result(
                 REMOTE_FOLLOW_DELIVERY_SERVICE,
                 &BTreeMap::new(),
                 None,
@@ -516,7 +516,6 @@ pub async fn recover_durable_remote_follow_deliveries(state: &AppState) -> Resul
                 &ryeos_app::execution_policy::ExecutionPolicy::projectless(
                     ryeos_app::execution_policy::ExecutionResponse::Wait,
                 ),
-                None,
             )
             .await;
         match result {

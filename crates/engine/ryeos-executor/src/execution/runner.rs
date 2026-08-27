@@ -4264,6 +4264,21 @@ async fn dispatch_detached_bg_task(
     if dispatch_kind.waits_for_recovery_gate()
         && !ryeos_app::recovery_execution_gate::wait_if_armed().await
     {
+        // Reconcile reserved this native-resume attempt before enqueueing the
+        // launch. If startup fails before the execution gate opens, no worker
+        // was contacted and the reservation must not consume the bounded
+        // retry budget. The owned launch claim drops immediately after this
+        // reset, preserving the same rearm-before-release ordering as stale
+        // dead-generation claim recovery.
+        if dispatch_kind.is_checkpoint_resume()
+            && let Err(error) = bg_state.state_store.reset_resume_attempts(&bg_thread_id)
+        {
+            tracing::error!(
+                thread_id = %bg_thread_id,
+                error = %error,
+                "failed to rearm native-resume attempt interrupted before recovery-gate release"
+            );
+        }
         return;
     }
 

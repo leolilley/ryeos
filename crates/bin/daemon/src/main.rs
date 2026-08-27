@@ -1734,7 +1734,7 @@ fn prepare_follow_recovery_actions(
 /// `created|running` set. The startup execution gate keeps every detached
 /// recovery task inert here, so each row must be terminal, attached to a
 /// verified RyeOS process, protected by a launch claim, or owned by a durable
-/// follow/launch-window state machine.
+/// follow/launch-window/remote-adoption state machine.
 fn ensure_recovery_targets_classified(state: &AppState, targets: &BTreeSet<String>) -> Result<()> {
     for thread_id in targets {
         let thread = state
@@ -1779,12 +1779,19 @@ fn ensure_recovery_targets_classified(state: &AppState, targets: &BTreeSet<Strin
                 .is_follow_resume_successor(upstream_id, thread_id)?,
             None => false,
         };
+        let durable_remote_adoption_edge = status == ryeos_state::objects::ThreadStatus::Created
+            && thread.upstream_thread_id.is_some()
+            && state
+                .state_store
+                .remote_continuation_authority(&thread.chain_root_id, thread_id)?
+                .is_some();
         if status.is_terminal()
             || live_owned_process
             || state.state_store.get_launch_claim(thread_id)?.is_some()
             || thread.runtime.recovery_wait.is_some()
             || durable_follow_owner
             || durable_follow_resume_edge
+            || durable_remote_adoption_edge
             || durable_window_owner
         {
             continue;

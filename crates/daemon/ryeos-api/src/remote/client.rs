@@ -1024,6 +1024,34 @@ impl RemoteClient {
         Ok(response)
     }
 
+    /// Execute one wait-mode service and return its typed service value rather
+    /// than the surrounding `/execute` audit envelope. Internal node-to-node
+    /// protocols use this boundary so callers cannot accidentally deserialize
+    /// `{thread, result}` as the service contract itself.
+    pub async fn execute_service_result(
+        &self,
+        item_ref: &str,
+        ref_bindings: &BTreeMap<String, String>,
+        project_path: Option<&str>,
+        parameters: &Value,
+        execution_policy: &ryeos_app::execution_policy::ExecutionPolicy,
+    ) -> Result<Value> {
+        if execution_policy.response != ryeos_app::execution_policy::ExecutionResponse::Wait {
+            anyhow::bail!("typed remote service result requires wait-mode execution");
+        }
+        let response = self
+            .execute(
+                item_ref,
+                ref_bindings,
+                project_path,
+                parameters,
+                execution_policy,
+                None,
+            )
+            .await?;
+        extract_remote_wait_result(response)
+    }
+
     /// POST /execute with a full method call (`call.method`, `call.args`).
     ///
     /// This is the extended variant used by remote method forwarding,
@@ -1416,6 +1444,38 @@ fn validate_remote_execute_response(response: &Value, launch_id: Option<&str>) -
     ryeos_runtime::validate_runtime_thread_id(thread_id)
         .map_err(|error| anyhow::anyhow!("accepted remote launch response: {error}"))?;
     Ok(())
+}
+
+fn extract_remote_wait_result(response: Value) -> Result<Value> {
+    let mut envelope = response
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("remote wait response is not an object"))?;
+    let thread = envelope
+        .remove("thread")
+        .ok_or_else(|| anyhow::anyhow!("remote wait response omitted thread evidence"))?;
+    let result = envelope
+        .remove("result")
+        .ok_or_else(|| anyhow::anyhow!("remote wait response omitted its service result"))?;
+    if !envelope.is_empty() {
+        anyhow::bail!(
+            "remote wait response has unknown top-level fields: {}",
+            envelope.keys().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+    let thread = thread
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("remote wait thread evidence is not an object"))?;
+    if thread.get("status").and_then(Value::as_str) != Some("completed") {
+        anyhow::bail!("remote wait response did not report a completed execution");
+    }
+    let thread_id = thread
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("remote wait thread evidence omitted thread_id"))?;
+    ryeos_executor::executor::validate_service_invocation_id(thread_id)
+        .map_err(|error| anyhow::anyhow!("remote wait service evidence: {error}"))?;
+    Ok(result)
 }
 
 fn typed_hashes_request_body_size(object_hashes: &[String], blob_hashes: &[String]) -> usize {
@@ -2935,6 +2995,37 @@ mod tests {
             }),
         ] {
             assert!(validate_remote_execute_response(&invalid, Some(&launch_id)).is_err());
+        }
+    }
+
+    #[test]
+    fn wait_service_result_unwraps_only_a_completed_execution_envelope() {
+        let result = serde_json::json!({"receipt": "ok"});
+        let envelope = serde_json::json!({
+            "thread": {
+                "thread_id": "svc-1787790000000-deadbeef",
+                "status": "completed"
+            },
+            "result": result
+        });
+        assert_eq!(extract_remote_wait_result(envelope).unwrap(), result);
+
+        for invalid in [
+            serde_json::json!({
+                "thread": {"thread_id": "svc-1787790000000-deadbeef", "status": "running"},
+                "result": {}
+            }),
+            serde_json::json!({
+                "thread": {"thread_id": "not-canonical", "status": "completed"},
+                "result": {}
+            }),
+            serde_json::json!({
+                "thread": {"thread_id": "svc-1787790000000-deadbeef", "status": "completed"},
+                "result": {},
+                "unexpected": true
+            }),
+        ] {
+            assert!(extract_remote_wait_result(invalid).is_err());
         }
     }
 

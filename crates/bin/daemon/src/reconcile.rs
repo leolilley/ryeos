@@ -1230,6 +1230,27 @@ async fn reconcile_active_threads_inner(
             continue;
         }
 
+        // A remotely adopted successor is born authoritatively `created`
+        // before its target-owned handoff job installs portable state and
+        // attaches the worker. That ownership does not depend on a runtime
+        // row: a crash may happen before launch metadata is projected at all.
+        // Classify the signed continuation edge before inspecting or clearing
+        // volatile launch/process state. Once attachment publishes `running`,
+        // ordinary execution recovery owns the placement again.
+        if thread.status == ryeos_state::objects::ThreadStatus::Created.as_str()
+            && thread.upstream_thread_id.is_some()
+            && state
+                .state_store
+                .remote_continuation_authority(&thread.chain_root_id, &thread.thread_id)?
+                .is_some()
+        {
+            tracing::info!(
+                thread_id = %thread.thread_id,
+                "created remote-adoption successor — leaving pre-attachment state to target handoff recovery"
+            );
+            continue;
+        }
+
         let pgid = thread.runtime.pgid;
         let identity = thread.runtime.process_identity.as_ref();
         let target_liveness = identity

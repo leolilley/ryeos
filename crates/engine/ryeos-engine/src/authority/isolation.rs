@@ -1360,6 +1360,17 @@ impl IsolationRuntime {
         &self.inspection
     }
 
+    /// Return the exact node isolation class retained by this runtime without
+    /// compiling or starting a process. Cross-node placement preflight uses
+    /// this as a target promise; the concrete launch later adds its redacted
+    /// plan digest under the same retained generation.
+    pub fn admission_class_provenance(&self) -> Result<IsolationLaunchProvenance, EngineError> {
+        self.ensure_registered_generation_current()?;
+        let provenance = self.launch_provenance(None);
+        self.ensure_registered_generation_current()?;
+        Ok(provenance)
+    }
+
     pub fn retain_registered_generation(
         mut self,
         lifeline: Arc<dyn IsolationGenerationLifeline>,

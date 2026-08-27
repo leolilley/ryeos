@@ -28,6 +28,27 @@ pub struct IsolationLaunchProvenance {
     pub plan_digest: Option<String>,
 }
 
+impl IsolationLaunchProvenance {
+    /// Project one concrete launch onto the node-owned isolation class that
+    /// can be promised before a target process is compiled. The redacted plan
+    /// digest is deliberately excluded: it is an attempt fact, while every
+    /// other field identifies the retained policy/backend generation and its
+    /// effective capabilities.
+    pub fn admission_class(&self) -> Self {
+        Self {
+            plan_digest: None,
+            ..self.clone()
+        }
+    }
+
+    /// Require two launch records to belong to the same node isolation class.
+    /// A preflight class has no plan digest; a later concrete attempt may have
+    /// one without changing the class promised before authority moved.
+    pub fn has_same_admission_class(&self, other: &Self) -> bool {
+        self.admission_class() == other.admission_class()
+    }
+}
+
 pub struct AppliedIsolationLaunch {
     pub request: lillux::SubprocessRequest,
     pub provenance: IsolationLaunchProvenance,

@@ -141,6 +141,29 @@ pub fn mint_service_invocation_id() -> String {
     )
 }
 
+/// Validate the correlation coordinate minted for an in-process service
+/// execution. Service invocations are audit threads, but they intentionally do
+/// not claim the runtime `T-...` identity class.
+pub fn validate_service_invocation_id(value: &str) -> anyhow::Result<()> {
+    let body = value
+        .strip_prefix("svc-")
+        .ok_or_else(|| anyhow::anyhow!("service invocation id must start with `svc-`"))?;
+    let (millis, nonce) = body
+        .rsplit_once('-')
+        .ok_or_else(|| anyhow::anyhow!("service invocation id is missing its nonce"))?;
+    if !(10..=20).contains(&millis.len()) || !millis.bytes().all(|byte| byte.is_ascii_digit()) {
+        anyhow::bail!("service invocation id has an invalid timestamp");
+    }
+    if nonce.len() != 8
+        || !nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        anyhow::bail!("service invocation id has an invalid nonce");
+    }
+    Ok(())
+}
+
 struct RecordedServiceTerminalGuard {
     state: AppState,
     thread_id: String,
@@ -984,6 +1007,24 @@ pub async fn execute_service_verified(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn service_invocation_identity_is_a_distinct_strict_coordinate() {
+        let minted = mint_service_invocation_id();
+        validate_service_invocation_id(&minted).unwrap();
+        for invalid in [
+            "T-runtime-thread",
+            "svc-short-deadbeef",
+            "svc-1787790000000-DEADBEEF",
+            "svc-1787790000000-deadbee",
+            "svc-1787790000000-deadbeef-extra",
+        ] {
+            assert!(
+                validate_service_invocation_id(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
 
     fn digest_only_result_policy() -> ryeos_engine::history_policy::ResolvedThreadResultPolicy {
         ryeos_engine::history_policy::ResolvedThreadResultPolicy {

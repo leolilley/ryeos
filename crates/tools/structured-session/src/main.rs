@@ -1044,7 +1044,7 @@ fn resolve_pinned_executable(
         bail!("workload realization id is ambiguous");
     }
     if realization.mode != "pinned"
-        || realization.manifest_hash.len() != 64
+        || !lillux::valid_hash(&realization.manifest_hash)
         || realization.entry_count == 0
         || realization.total_bytes == 0
     {

@@ -5183,6 +5183,25 @@ impl RuntimeDb {
             tx.commit()?;
             return Ok(existing);
         }
+        if let Some(existing) = Self::credential_profile_reservation_from_connection(
+            &tx,
+            "successor_thread_id=?1",
+            reservation.successor_thread_id,
+        )? {
+            if existing.state != "released" {
+                bail!(
+                    "credential reservation successor is already owned by another live operation"
+                );
+            }
+            let deleted = tx.execute(
+                "DELETE FROM credential_profile_reservation
+                  WHERE reservation_id=?1 AND successor_thread_id=?2 AND state='released'",
+                params![existing.reservation_id, reservation.successor_thread_id],
+            )?;
+            if deleted != 1 {
+                bail!("released credential reservation changed during replacement");
+            }
+        }
         let acquired = tx.execute(
             "UPDATE credential_profile SET lock_owner=?4, updated_at_ms=?5
               WHERE profile_id=?1 AND owner_principal=?2
@@ -13223,6 +13242,68 @@ mod tests {
                 .remote_thread_id
                 .as_deref(),
             Some("upstream-session")
+        );
+    }
+
+    #[test]
+    fn released_handoff_credential_reservation_allows_a_new_operation_for_the_same_successor() {
+        let (_tmp, db) = fresh_db();
+        db.create_credential_profile(NewCredentialProfile {
+            profile_id: "P-handoff-retry",
+            owner_principal: "fp:operator",
+            home_id: "home-P-handoff-retry",
+        })
+        .unwrap();
+        db.conn
+            .execute(
+                "UPDATE credential_profile SET state='active' WHERE profile_id='P-handoff-retry'",
+                [],
+            )
+            .unwrap();
+        let first = NewCredentialProfileReservation {
+            reservation_id: "reservation-first",
+            operation_id: "operation-first",
+            successor_thread_id: "T-handoff-retry",
+            profile_id: "P-handoff-retry",
+            owner_principal: "fp:operator",
+            credential_generation: 1,
+            subject_contract_digest: &"1".repeat(64),
+            subject_digest: &"2".repeat(64),
+            checkpoint_manifest_hash: &"3".repeat(64),
+            upstream_session_id: "upstream-session",
+        };
+        db.reserve_credential_profile_generation(first).unwrap();
+        db.release_credential_profile_reservation("reservation-first")
+            .unwrap();
+
+        let second = NewCredentialProfileReservation {
+            reservation_id: "reservation-second",
+            operation_id: "operation-second",
+            successor_thread_id: "T-handoff-retry",
+            profile_id: "P-handoff-retry",
+            owner_principal: "fp:operator",
+            credential_generation: 1,
+            subject_contract_digest: &"1".repeat(64),
+            subject_digest: &"2".repeat(64),
+            checkpoint_manifest_hash: &"3".repeat(64),
+            upstream_session_id: "upstream-session",
+        };
+        let reserved = db.reserve_credential_profile_generation(second).unwrap();
+        assert_eq!(reserved.reservation_id, "reservation-second");
+        assert_eq!(reserved.operation_id, "operation-second");
+        assert_eq!(reserved.state, "reserved");
+        assert!(
+            db.credential_profile_reservation("reservation-first")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            db.credential_profile("P-handoff-retry")
+                .unwrap()
+                .unwrap()
+                .lock_owner
+                .as_deref(),
+            Some("reservation-second")
         );
     }
 

@@ -934,6 +934,35 @@ impl AdmittedLaunchCapsule {
         large_store: &crate::large_object_store::LargeObjectStore,
         trust: &crate::refs::TrustStore,
     ) -> anyhow::Result<super::AdmittedExecutionRealization> {
+        self.verify_retained_execution_realization_by(cas, large_store, |attestation| {
+            attestation.verify_with_trust_store(trust)
+        })
+    }
+
+    /// Verify a realization retained from an authenticated remote node using
+    /// that route's exact pinned node key. The remote key is deliberately not
+    /// inserted into the local launch trust store: federation authority and
+    /// local executable admission remain separate trust domains.
+    pub fn verify_retained_execution_realization_with_key(
+        &self,
+        cas: &lillux::CasStore,
+        large_store: &crate::large_object_store::LargeObjectStore,
+        verifying_key: &lillux::crypto::VerifyingKey,
+    ) -> anyhow::Result<super::AdmittedExecutionRealization> {
+        self.verify_retained_execution_realization_by(cas, large_store, |attestation| {
+            attestation.verify_with_key(verifying_key)
+        })
+    }
+
+    fn verify_retained_execution_realization_by<F>(
+        &self,
+        cas: &lillux::CasStore,
+        large_store: &crate::large_object_store::LargeObjectStore,
+        verify_substrate_attestation: F,
+    ) -> anyhow::Result<super::AdmittedExecutionRealization>
+    where
+        F: FnOnce(&super::Attestation) -> anyhow::Result<()>,
+    {
         self.validate()?;
         let value = cas
             .get_object(&self.execution_realization_hash)?
@@ -1009,7 +1038,7 @@ impl AdmittedLaunchCapsule {
         {
             anyhow::bail!("execution substrate attestation contradicts retained identity");
         }
-        attestation.verify_with_trust_store(trust)?;
+        verify_substrate_attestation(&attestation)?;
         if attestation.is_expired_at(&lillux::time::iso8601_now())? {
             anyhow::bail!("execution substrate attestation is expired");
         }
@@ -1478,18 +1507,8 @@ impl AdmittedLaunchCapsule {
                     executor_blob_hash: target_executor,
                 },
             ) => {
-                let mut expected_target = source_prepared.clone();
-                let target_sessions = target_prepared
-                    .get("admitted_sessions")
-                    .cloned()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("target prepared launch has no admitted_sessions")
-                    })?;
-                expected_target
-                    .as_object_mut()
-                    .expect("validated prepared launch object")
-                    .insert("admitted_sessions".to_owned(), target_sessions);
-                expected_target == *target_prepared
+                cross_site_prepared_runtime_launch_projection(source_prepared)?
+                    == cross_site_prepared_runtime_launch_projection(target_prepared)?
                     && source_runtime == target_runtime
                     && source_protocol == target_protocol
                     && source_executor == target_executor
@@ -1513,6 +1532,64 @@ impl AdmittedLaunchCapsule {
             && self.runtime_ref == target.runtime_ref
             && self.executor_ref == target.executor_ref)
     }
+}
+
+fn cross_site_prepared_runtime_launch_projection(
+    prepared: &serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let mut projected = prepared.clone();
+    let object = projected
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("prepared runtime launch must be an object"))?;
+    object.remove("admitted_sessions");
+    let Some(dependencies) = object.get_mut("execution_dependencies") else {
+        return Ok(projected);
+    };
+    let dependencies = dependencies.as_object_mut().ok_or_else(|| {
+        anyhow::anyhow!("prepared runtime execution_dependencies must be an object")
+    })?;
+    for (name, dependency) in dependencies {
+        require_exact_keys(
+            dependency,
+            &["canonical_ref", "resolution", "subject"],
+            &format!("prepared execution dependency `{name}`"),
+        )?;
+        let dependency = dependency
+            .as_object_mut()
+            .expect("exact keys require object");
+        let resolution = retained_resolution_projection(
+            dependency
+                .get("resolution")
+                .ok_or_else(|| anyhow::anyhow!("prepared dependency has no resolution"))?,
+        )?;
+        dependency.insert("resolution".to_owned(), resolution);
+        let subject = dependency
+            .get_mut("subject")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| anyhow::anyhow!("prepared dependency subject must be an object"))?;
+        require_exact_keys(
+            &serde_json::Value::Object(subject.clone()),
+            &[
+                "source_path",
+                "source_space",
+                "source_root",
+                "resolved_from",
+                "materialized_project_root",
+                "subject_resolution_authority",
+                "raw_content_digest",
+                "content_hash",
+                "signature_header",
+                "source_format",
+                "metadata",
+                "signer",
+                "trust_class",
+            ],
+            &format!("prepared execution dependency `{name}` subject"),
+        )?;
+        subject.remove("source_path");
+        subject.remove("materialized_project_root");
+    }
+    Ok(projected)
 }
 
 #[cfg(test)]

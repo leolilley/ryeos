@@ -294,6 +294,13 @@ impl From<ryeos_engine::error::EngineError> for BuildAndLaunchError {
 }
 
 impl BuildAndLaunchError {
+    pub fn diagnostic_message(&self) -> String {
+        match self {
+            Self::Internal(error) => format!("{error:#}"),
+            _ => self.to_string(),
+        }
+    }
+
     /// Whether a launch failure is an infrastructure interruption that is safe
     /// to re-drive without changing the authored execution. Keep this deliberately
     /// narrow: capability, secret, materialization, and unknown failures are
@@ -3816,6 +3823,7 @@ async fn prepare_managed_launch_authority(
     params: &BuildAndLaunchParams<'_>,
     thread_id: &str,
     metadata_template: Option<&ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
+    transferred_continuation_capsule: Option<&ryeos_state::objects::AdmittedLaunchCapsule>,
 ) -> Result<PreparedManagedLaunchAuthority, BuildAndLaunchError> {
     let engine = params.provenance.request_engine();
     let subject_resolution_authority = params.provenance.subject_resolution_authority();
@@ -3843,7 +3851,19 @@ async fn prepare_managed_launch_authority(
     let continuation_source = metadata_template
         .and_then(|metadata| metadata.continuation_source_thread_id.as_deref())
         .or(params.previous_thread_id);
-    let inherited_admitted_capsule = if persisted_admitted_capsule.is_none() {
+    if persisted_admitted_capsule.is_some() && transferred_continuation_capsule.is_some() {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "managed continuation cannot combine local and transferred launch authority"
+        )));
+    }
+    if transferred_continuation_capsule.is_some() && continuation_source.is_none() {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "transferred continuation authority has no exact source placement"
+        )));
+    }
+    let inherited_admitted_capsule = if persisted_admitted_capsule.is_none()
+        && transferred_continuation_capsule.is_none()
+    {
         continuation_source
             .map(|source_thread_id| {
                 params
@@ -3863,6 +3883,7 @@ async fn prepare_managed_launch_authority(
     };
     let authoritative_admitted_capsule = persisted_admitted_capsule
         .as_ref()
+        .or(transferred_continuation_capsule)
         .or(inherited_admitted_capsule.as_ref());
     if let (Some(authoritative), Some(template)) =
         (authoritative_admitted_capsule, metadata_template)
@@ -3875,10 +3896,16 @@ async fn prepare_managed_launch_authority(
                     "continuation metadata seed has no admitted launch capsule"
                 ))
             })?;
-        if !authoritative
-            .same_continuation_admission(&template_capsule)
-            .map_err(BuildAndLaunchError::Internal)?
-        {
+        let admission_matches = if transferred_continuation_capsule.is_some() {
+            authoritative
+                .same_cross_site_continuation_program_admission(&template_capsule)
+                .map_err(BuildAndLaunchError::Internal)?
+        } else {
+            authoritative
+                .same_continuation_admission(&template_capsule)
+                .map_err(BuildAndLaunchError::Internal)?
+        };
+        if !admission_matches {
             return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
                 "operational launch metadata differs from its authoritative CAS admission"
             )));
@@ -4441,12 +4468,26 @@ async fn prepare_managed_launch_authority(
         &prepared_launch,
     )
     .map_err(BuildAndLaunchError::Internal)?;
+    // A cross-site continuation inherits the source's portable outer program,
+    // but persistent-session capsules bind node-local realization and must be
+    // admitted again on the target. The transferred source capsule remains
+    // the authority for the cross-site program comparison above; its inner
+    // capsule hashes are never treated as target-local recovery coordinates.
+    let cross_site_continuation = transferred_continuation_capsule.is_some();
+    if cross_site_continuation {
+        super::persistent_session::reset_for_cross_site_admission(
+            engine,
+            &params.resolved.plan_context.requested_by,
+            &mut prepared_launch,
+        )
+        .map_err(BuildAndLaunchError::Internal)?;
+    }
     let pending_session_publications =
         super::persistent_session::admit_or_verify_prepared_sessions(
             params.state,
             engine,
             &mut prepared_launch,
-            admitted_capsule.is_some(),
+            admitted_capsule.is_some() && !cross_site_continuation,
         )
         .map_err(BuildAndLaunchError::Internal)?;
     let effective_caps = if let Some(capsule) = admitted_capsule.as_ref() {
@@ -4739,6 +4780,57 @@ async fn prepare_managed_launch_authority(
     }
     let pending_project_snapshot: Option<super::CapturedProjectGeneration> = None;
     let freshly_minted_accounting_scope;
+    let admitted_execution_closure = match (admitted_capsule.as_ref(), cross_site_continuation) {
+        (Some(capsule), false) => capsule.execution_closure.clone(),
+        (Some(capsule), true) => {
+            let ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
+                runtime_descriptor_document,
+                protocol_descriptor_document,
+                ..
+            } = &capsule.execution_closure
+            else {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "cross-site managed continuation found a non-managed admitted execution closure"
+                )));
+            };
+            // Runtime, protocol, and executor documents are immutable portable
+            // program authority already captured by the source capsule. Only
+            // the prepared runtime/session projection is node-local and was
+            // rebuilt above against the target engine and substrate.
+            ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
+                prepared_runtime_launch: serde_json::to_value(&prepared_launch).map_err(
+                    |error| {
+                        BuildAndLaunchError::Internal(anyhow::anyhow!(
+                            "serialize target-admitted prepared launch: {error}"
+                        ))
+                    },
+                )?,
+                runtime_descriptor_document: runtime_descriptor_document.clone(),
+                protocol_descriptor_document: protocol_descriptor_document.clone(),
+                executor_blob_hash: executor_blob_hash.clone(),
+            }
+        }
+        (None, _) => ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
+            prepared_runtime_launch: serde_json::to_value(&prepared_launch).map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "serialize admitted prepared launch: {error}"
+                ))
+            })?,
+            runtime_descriptor_document: capture_managed_descriptor_document(
+                &selected_runtime.descriptor_path,
+                &selected_runtime.raw_content_digest,
+                &selected_runtime.signer_fingerprint,
+                &engine.node_trust_store,
+            )?,
+            protocol_descriptor_document: capture_managed_descriptor_document(
+                &verified_protocol.descriptor_path,
+                &verified_protocol.raw_content_digest,
+                &verified_protocol.signer_fingerprint,
+                &engine.node_trust_store,
+            )?,
+            executor_blob_hash: executor_blob_hash.clone(),
+        },
+    };
     let launch_metadata = {
         let original_pushed_head_ref =
             ryeos_app::launch_metadata::OriginalPushedHeadRef::from_provenance(params.provenance);
@@ -4777,32 +4869,7 @@ async fn prepare_managed_launch_authority(
         metadata = metadata
             .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime)
             .with_admitted_artifact_identity(admitted_artifact_identity)
-            .with_admitted_execution_closure(if let Some(capsule) = admitted_capsule.as_ref() {
-                capsule.execution_closure.clone()
-            } else {
-                ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
-                    prepared_runtime_launch: serde_json::to_value(&prepared_launch).map_err(
-                        |error| {
-                            BuildAndLaunchError::Internal(anyhow::anyhow!(
-                                "serialize admitted prepared launch: {error}"
-                            ))
-                        },
-                    )?,
-                    runtime_descriptor_document: capture_managed_descriptor_document(
-                        &selected_runtime.descriptor_path,
-                        &selected_runtime.raw_content_digest,
-                        &selected_runtime.signer_fingerprint,
-                        &engine.node_trust_store,
-                    )?,
-                    protocol_descriptor_document: capture_managed_descriptor_document(
-                        &verified_protocol.descriptor_path,
-                        &verified_protocol.raw_content_digest,
-                        &verified_protocol.signer_fingerprint,
-                        &engine.node_trust_store,
-                    )?,
-                    executor_blob_hash: executor_blob_hash.clone(),
-                }
-            })
+            .with_admitted_execution_closure(admitted_execution_closure)
             .with_resume_context(ryeos_app::launch_metadata::ResumeContext {
                 kind: params.resolved.kind.clone(),
                 item_ref: params.resolved.item_ref.clone(),
@@ -5057,7 +5124,7 @@ async fn build_and_launch_inner(
                 map_launch_planning_check_error(error, &thread_id, "authoritative planning")
             })?;
     }
-    let mut authority = prepare_managed_launch_authority(&params, &thread_id, None).await?;
+    let mut authority = prepare_managed_launch_authority(&params, &thread_id, None, None).await?;
     if params.pre_minted_thread_id.is_some() {
         params
             .state
@@ -5262,6 +5329,7 @@ async fn run_claimed_thread_row(
         &params,
         &thread.thread_id,
         Some(&persisted_metadata),
+        None,
     )
     .await
     {
@@ -5366,7 +5434,7 @@ async fn run_claimed_thread_row_inner(
         parent_execution_context,
         suppress_stimulus,
         capability_policy: _,
-        checkpoint_resume_mode: _,
+        checkpoint_resume_mode,
         rearm_native_resume_budget_after_attach,
         launch_handoff,
     } = params;
@@ -5476,15 +5544,16 @@ async fn run_claimed_thread_row_inner(
         }
     }
 
-    // A machine-continuation successor continues its predecessor's work under a
-    // fresh thread id and carries no parent execution context, so the block above
-    // does not link it. Link it to its immediate predecessor: on continuation the
-    // predecessor goes terminal and is a dead end in the descendant walk, so
-    // without this a cancel/kill of an ancestor would stop at the (terminal)
-    // predecessor and miss the live successor still running — and authoring — the
-    // work. (`previous_thread_id` and a parent context are mutually exclusive, so
-    // this never contends with the link above.)
-    if let Some(previous) = previous_thread_id {
+    // A local machine-continuation successor continues its predecessor's work
+    // under a fresh thread id and carries no parent execution context, so the
+    // block above does not link it. Link it to its immediate local predecessor
+    // for operational stop propagation. A continuation whose state was restored
+    // by an authority above this runtime has no predecessor runtime row on this
+    // node: its signed cross-site edge already supplies chain authority, and the
+    // current placement is addressed directly for local stop ownership.
+    if let Some(previous) = previous_thread_id
+        && checkpoint_resume_mode != CheckpointResumeMode::ExternallyRestoredContinuation
+    {
         let inherited_stop =
             state
                 .state_store
@@ -7177,6 +7246,7 @@ async fn prepare_follow_child_launch_inner(
         },
         thread_id,
         Some(launch_metadata),
+        None,
     )
     .await?;
     let (launch_metadata, prepared_resume, fresh_launch_authority_digest) =
@@ -7292,6 +7362,7 @@ async fn prepare_successor_launch(
     mode: SuccessorMode,
     previous_thread_id: Option<&str>,
     metadata_template: Option<&ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
+    transferred_continuation_capsule: Option<&ryeos_state::objects::AdmittedLaunchCapsule>,
 ) -> Result<PreparedSuccessorLaunch, BuildAndLaunchError> {
     let sealed_request = metadata_template
         .and_then(|metadata| metadata.sealed_root_request.as_ref())
@@ -7355,6 +7426,7 @@ async fn prepare_successor_launch(
         },
         successor_thread_id,
         metadata_template,
+        transferred_continuation_capsule,
     )
     .await?;
     let mut launch_metadata = authority
@@ -7429,6 +7501,7 @@ pub async fn prepare_operator_successor_launch(
         SuccessorMode::Operator,
         Some(source_thread_id),
         Some(&successor_metadata),
+        None,
     )
     .await?;
     prepared.launch_claim = Some(
@@ -7457,6 +7530,7 @@ pub async fn prepare_existing_operator_successor_launch(
             SuccessorMode::Operator,
             None,
             Some(launch_metadata),
+            None,
         )
         .await?,
     })
@@ -7472,6 +7546,24 @@ pub async fn prepare_existing_machine_successor_launch(
     successor_thread_id: &str,
     launch_metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
 ) -> Result<PreparedMachineSuccessorLaunch, BuildAndLaunchError> {
+    let admitted_isolation = launch_metadata.isolation.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "remote machine successor {successor_thread_id} has no target isolation admission"
+        )
+    })?;
+    let current_isolation = state
+        .isolation
+        .admission_class_provenance()
+        .map_err(|error| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "resolve current target isolation class: {error}"
+            ))
+        })?;
+    if !admitted_isolation.has_same_admission_class(&current_isolation) {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "remote machine successor {successor_thread_id} target isolation class changed after admission"
+        )));
+    }
     let resume = launch_metadata.resume_context.as_ref().ok_or_else(|| {
         anyhow::anyhow!("machine successor {successor_thread_id} has no persisted ResumeContext")
     })?;
@@ -7482,15 +7574,18 @@ pub async fn prepare_existing_machine_successor_launch(
         SuccessorMode::Machine,
         None,
         Some(launch_metadata),
+        None,
     )
     .await?;
     prepared.resume_context = resume.clone();
     prepared.launch_metadata = launch_metadata.clone();
     prepared.authority.launch_metadata = Some(launch_metadata.clone());
-    prepared.launch_claim = Some(
-        ThreadLaunchClaim::acquire_fresh(state, successor_thread_id)
-            .map_err(BuildAndLaunchError::Internal)?,
-    );
+    // This successor is already authoritative and visible: target adoption
+    // imported its signed `created` row and target-local runtime seed before
+    // this preparation begins.  Leave the carrier unclaimed so the launch
+    // boundary acquires the existing-row claim atomically.  A fresh claim is
+    // reserved only before publishing a newly-created local successor.
+    prepared.launch_claim = None;
     Ok(PreparedMachineSuccessorLaunch { prepared })
 }
 
@@ -7558,6 +7653,7 @@ async fn prepare_machine_successor_launch_with_bootstrap(
         SuccessorMode::Machine,
         Some(source_thread_id),
         Some(&successor_metadata),
+        None,
     )
     .await?;
 
@@ -7588,6 +7684,7 @@ pub async fn prepare_remote_machine_successor_launch(
     successor_thread_id: &str,
     source_thread_id: &str,
     source_launch_metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    source_launch_capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
     source_resume: &ryeos_app::launch_metadata::ResumeContext,
     target_resume: &ryeos_app::launch_metadata::ResumeContext,
     resume_rebind: &ryeos_app::worker_handoff::RemoteResumeContextRebind,
@@ -7619,9 +7716,54 @@ pub async fn prepare_remote_machine_successor_launch(
         SuccessorMode::Machine,
         None,
         Some(&template),
+        Some(source_launch_capsule),
     )
     .await?;
+    // The authority pass above needs the complete transferred capsule to
+    // validate the portable program. Once that pass is complete, the foreign
+    // substrate hash is no longer admission authority: clear it before the
+    // target node mints its own execution-realization evidence.
+    prepared.launch_metadata.execution_realization_hash = None;
+    let realization_contract_ref = prepared
+        .authority
+        .selected_runtime
+        .canonical_ref
+        .to_string();
+    let realization_contract_digest = prepared
+        .authority
+        .selected_runtime
+        .raw_content_digest
+        .clone();
+    let realization_admission = super::execution_realization::admit_or_verify(
+        state,
+        &prepared.launch_metadata,
+        prepared.authority.effective_program.resolution(),
+        prepared
+            .authority
+            .effective_program
+            .effective_definition_digest()
+            .as_str(),
+        &realization_contract_ref,
+        &realization_contract_digest,
+        prepared.authority.pending_external_realization.as_mut(),
+    )
+    .map_err(BuildAndLaunchError::Internal)?;
+    if prepared.authority.pending_external_realization.is_none() {
+        prepared.authority.pending_external_realization = realization_admission.publication;
+    }
+    prepared.launch_metadata = std::mem::take(&mut prepared.launch_metadata)
+        .with_execution_realization_hash(realization_admission.hash);
     prepared.resume_context = target_resume.clone();
+    prepared.launch_metadata.isolation = Some(
+        state
+            .isolation
+            .admission_class_provenance()
+            .map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "resolve target isolation admission class: {error}"
+                ))
+            })?,
+    );
     prepared.launch_metadata = std::mem::take(&mut prepared.launch_metadata)
         .with_resume_context(target_resume.clone())
         .with_continuation_source(source_thread_id);

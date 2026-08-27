@@ -232,9 +232,12 @@ pub struct RuntimeLaunchMetadata {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub follow_launch_window: Option<FollowLaunchWindow>,
 
-    /// Exact secret-free isolation generation and compiled-plan identity used
-    /// at the spawn boundary. `None` only before isolation compilation or for
-    /// execution paths that never launch a subprocess.
+    /// Exact secret-free isolation generation and, after spawn compilation,
+    /// the redacted plan identity used at the process boundary. A held remote
+    /// placement may carry the target admission class with `plan_digest: null`
+    /// before process authority exists; the concrete attempt must remain in
+    /// that class. `None` is reserved for paths that have not promised or
+    /// compiled subprocess isolation.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub isolation: Option<ryeos_engine::isolation::IsolationLaunchProvenance>,
 
@@ -548,7 +551,7 @@ impl ResumeContext {
     /// local paths retain their path attribution and optional immutable launch
     /// pin, while remote/reference contexts must resolve to an immutable CAS
     /// snapshot before a continuation can be committed.
-    pub(crate) fn authoritative_project_identity(
+    pub fn authoritative_project_identity(
         &self,
     ) -> anyhow::Result<(Option<PathBuf>, Option<String>)> {
         self.project_authority.validate()?;

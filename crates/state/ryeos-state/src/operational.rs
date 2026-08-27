@@ -3601,6 +3601,38 @@ impl OperationalDb {
             .context("failed to collect active sync operation jobs")
     }
 
+    /// Oldest-first bounded scan for one exact operation family and state.
+    /// Recovery owners use this for narrowly qualified terminal cleanup; it
+    /// avoids searching an unrelated global terminal-job page.
+    pub fn list_sync_jobs_by_operation_type_and_state(
+        &self,
+        operation_type: &str,
+        state: SyncJobState,
+        limit: usize,
+    ) -> Result<Vec<SyncJobRecord>> {
+        validate_non_empty_label("operation_type", operation_type)?;
+        let limit = limit.clamp(1, 500);
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+                    uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
+                    last_error, result_json, created_at, updated_at, finished_at
+                 FROM sync_jobs
+                 WHERE operation_type = ?1 AND state = ?2
+                 ORDER BY created_at ASC, job_id ASC LIMIT ?3",
+            )
+            .context("failed to prepare exact sync operation state query")?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![operation_type, state.as_str(), i64::try_from(limit)?],
+                sync_job_from_row,
+            )
+            .context("failed to query exact sync operation state jobs")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect exact sync operation state jobs")
+    }
+
     pub fn count_active_sync_jobs(&self) -> Result<u64> {
         let count: i64 = self
             .conn

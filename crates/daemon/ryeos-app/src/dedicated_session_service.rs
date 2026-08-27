@@ -133,6 +133,40 @@ pub async fn wait_for_projection_change(
     }
 }
 
+/// Wait on the pushed dedicated-session projection signal until one exact
+/// placement has a durable worker identity, reaches a terminal/recovery
+/// boundary, or the caller's bounded deadline expires. The signal is armed
+/// before every read, so attachment cannot be lost between observation and
+/// sleep. This is the cross-component attachment seam; callers must still
+/// validate the exact worker epoch and placement authority after it wakes.
+pub async fn wait_for_worker_attachment_projection(
+    state: &AppState,
+    placement_thread_id: &str,
+    timeout: std::time::Duration,
+) -> Result<Option<DedicatedSessionRecord>> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let signal = projection_signal(placement_thread_id);
+        let notified = signal.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let current = state.state_store.dedicated_session(placement_thread_id)?;
+        if current.as_ref().is_some_and(|session| {
+            (session.worker_instance_id.is_some() && session.worker_boot_epoch.is_some())
+                || matches!(
+                    session.state.as_str(),
+                    "terminal" | "recovering" | "outcome_unknown"
+                )
+        }) {
+            return Ok(current);
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() || tokio::time::timeout(remaining, notified).await.is_err() {
+            return state.state_store.dedicated_session(placement_thread_id);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn wait_for_exact_approval_state(
     state: &AppState,

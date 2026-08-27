@@ -284,14 +284,16 @@ pub async fn preflight(
         return serde_json::to_value(response).map_err(internal);
     }
 
+    let mut attempt =
+        TargetPreflightAttempt::begin(Arc::clone(&state), &job_id).map_err(internal)?;
+
     let source = load_source_preflight_operands(&state, &req).map_err(internal)?;
     let response = preflight_after_staging(&state, &req, &source)
         .await
         .map_err(|error| HandlerError::BadRequest(format!("target preflight failed: {error:#}")))?;
     let result = serde_json::to_value(&response).map_err(internal)?;
-    let stored = state
-        .state_store
-        .complete_worker_handoff_preflight(&job_id, &response.preflight_attestation, result.clone())
+    let stored = attempt
+        .complete(&response.preflight_attestation, result.clone())
         .map_err(internal)?;
     if stored != response.preflight_attestation_hash {
         return Err(internal("stored preflight receipt digest changed"));
@@ -522,7 +524,7 @@ pub async fn prepare(
     .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     let job_id = target_job_id(&req.operation_id);
     let _operation_guard = target_handoff_operation_lock(&job_id).lock_owned().await;
-    state
+    let (_, existing_job) = state
         .state_store
         .stage_sync_payload_and_create_job(
             &payload,
@@ -542,6 +544,19 @@ pub async fn prepare(
             },
         )
         .map_err(internal)?;
+
+    if existing_job.state == ryeos_state::SyncJobState::Completed {
+        let response: WorkerPlacementPrepareResponse = serde_json::from_value(
+            existing_job
+                .result
+                .ok_or_else(|| internal("completed target placement has no result"))?,
+        )
+        .map_err(internal)?;
+        response
+            .validate_against(&req)
+            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        return serde_json::to_value(response).map_err(internal);
+    }
 
     let operands = load_source_placement_operands(&state, &transfer).map_err(internal)?;
     let attempt_id = begin_target_handoff_attempt(
@@ -780,25 +795,30 @@ pub async fn abort(
             || reservation.owner_principal != operation.owner_principal
             || reservation.profile_id != operation.target_credential_profile_id
         {
-            return Err(internal(
-                "target credential reservation differs from aborted handoff",
-            ));
-        }
-        match reservation.state.as_str() {
-            "reserved" => {
-                state
-                    .state_store
-                    .release_credential_profile_reservation(&reservation.reservation_id)
-                    .map_err(internal)?;
-                "reservation_released"
-            }
-            "released" => "already_released",
-            "consumed" => {
-                return Err(HandlerError::BadRequest(
-                    "target placement already consumed its credential reservation".into(),
+            if reservation.state == "released" {
+                "already_released"
+            } else {
+                return Err(internal(
+                    "live target credential reservation differs from aborted handoff",
                 ));
             }
-            _ => return Err(internal("unknown target credential reservation state")),
+        } else {
+            match reservation.state.as_str() {
+                "reserved" => {
+                    state
+                        .state_store
+                        .release_credential_profile_reservation(&reservation.reservation_id)
+                        .map_err(internal)?;
+                    "reservation_released"
+                }
+                "released" => "already_released",
+                "consumed" => {
+                    return Err(HandlerError::BadRequest(
+                        "target placement already consumed its credential reservation".into(),
+                    ));
+                }
+                _ => return Err(internal("unknown target credential reservation state")),
+            }
         }
     } else {
         "already_released"
@@ -1043,6 +1063,43 @@ async fn adopt_authorized(
         target_node_verifying_key: *state.identity.verifying_key(),
     };
 
+    // Once the exact admitted worker is attached, its retained remote
+    // continuation edge proves that this node already finalized the chain
+    // import. Worker observations may have advanced the target-signed chain
+    // beyond `target_chain_head_hash`, so retrying the raw import comparison
+    // would reject a successful adoption as an unrelated local advance.
+    if target_worker_is_attached(
+        &state,
+        &operation,
+        &placement,
+        &req.placement_attestation_hash,
+    )
+    .map_err(internal)?
+    {
+        let _profile_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
+            &placement.credential_reservation.profile_id,
+        )
+        .await
+        .map_err(internal)?;
+        if target_worker_is_attached(
+            &state,
+            &operation,
+            &placement,
+            &req.placement_attestation_hash,
+        )
+        .map_err(internal)?
+        {
+            return complete_target_adoption(
+                &state,
+                &job_id,
+                &req,
+                &operation,
+                &mut adoption_attempt,
+            )
+            .map_err(internal);
+        }
+    }
+
     let current_head = state
         .state_store
         .with_state_db(|db| db.read_generic_head_ref("chains", &req.chain_root_id))
@@ -1090,7 +1147,14 @@ async fn adopt_authorized(
     )
     .await
     .map_err(internal)?;
-    if target_worker_is_attached(&state, &operation, &placement).map_err(internal)? {
+    if target_worker_is_attached(
+        &state,
+        &operation,
+        &placement,
+        &req.placement_attestation_hash,
+    )
+    .map_err(internal)?
+    {
         return complete_target_adoption(&state, &job_id, &req, &operation, &mut adoption_attempt)
             .map_err(internal);
     }
@@ -1142,7 +1206,7 @@ async fn adopt_authorized(
         &launch_metadata,
     )
     .await
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(error.diagnostic_message()))?;
     let task_state = (*state).clone();
     let task_id = operation.successor_placement_thread_id.clone();
     let (handoff, ready) = ryeos_executor::execution::launch::LaunchHandoff::channel();
@@ -1157,6 +1221,31 @@ async fn adopt_authorized(
         return Err(internal(
             "worker adoption handoff returned another successor",
         ));
+    }
+    let _ = ryeos_app::dedicated_session_service::wait_for_worker_attachment_projection(
+        &state,
+        &operation.successor_placement_thread_id,
+        std::time::Duration::from_secs(60),
+    )
+    .await
+    .map_err(internal)?;
+    if !target_worker_is_attached(
+        &state,
+        &operation,
+        &placement,
+        &req.placement_attestation_hash,
+    )
+    .map_err(internal)?
+    {
+        return Err(HandlerError::Structured {
+            code: "worker_attachment_pending".to_owned(),
+            status: 503,
+            body: serde_json::json!({
+                "code":"worker_attachment_pending",
+                "error":"target worker launch was scheduled but exact attachment was not observed before the bounded deadline",
+                "retryable":true,
+            }),
+        });
     }
     update_target_progress(
         &state,
@@ -1175,9 +1264,16 @@ async fn adopt_authorized(
 /// a remote as the operator: it runs only after the final source closure and
 /// writer grant are already staged under the exact target job.
 pub async fn recover_durable_target_handoffs(state: &AppState) -> Result<usize> {
-    let jobs = state.state_store.with_state_db(|db| {
+    let mut jobs = state.state_store.with_state_db(|db| {
         db.list_active_sync_jobs_by_operation_type(WORKER_SESSION_HANDOFF_OPERATION, 64)
     })?;
+    jobs.extend(state.state_store.with_state_db(|db| {
+        db.list_sync_jobs_by_operation_type_and_state(
+            WORKER_SESSION_HANDOFF_OPERATION,
+            ryeos_state::SyncJobState::Failed,
+            64,
+        )
+    })?);
     let mut recovered = 0usize;
     for job in jobs {
         let operation = match WorkerSessionHandoffJobOperation::from_value(job.operation.clone()) {
@@ -1243,6 +1339,56 @@ pub async fn recover_durable_target_handoffs(state: &AppState) -> Result<usize> 
         {
             continue;
         }
+        // The target handoff job is the sole pre-attachment launch owner. If
+        // an older daemon allowed generic continuation recovery to finalize
+        // that exact successor before a dedicated session attached, retain the
+        // signed terminal as the chain outcome and settle the operational job
+        // around it. This is also the fail-closed repair for the crash window
+        // between a pre-attachment terminal commit and reservation cleanup.
+        // A running or formerly attached session never enters this path.
+        {
+            let _operation_guard = target_handoff_operation_lock(&job.job_id)
+                .lock_owned()
+                .await;
+            let latest = state
+                .state_store
+                .with_state_db(|db| db.get_sync_job(&job.job_id))?
+                .context("target worker handoff job disappeared during terminal recovery")?;
+            let failed_pre_attachment_cleanup = latest.state == ryeos_state::SyncJobState::Failed
+                && latest.phase == "target_terminal_before_attachment";
+            if failed_pre_attachment_cleanup
+                || !matches!(
+                    latest.state,
+                    ryeos_state::SyncJobState::Completed
+                        | ryeos_state::SyncJobState::Failed
+                        | ryeos_state::SyncJobState::Cancelled
+                )
+            {
+                let latest_progress = latest
+                    .result
+                    .clone()
+                    .map(WorkerSessionHandoffProgress::from_value)
+                    .transpose()?
+                    .context("target terminal recovery lost its durable progress")?;
+                if settle_pre_attachment_target_terminal(
+                    state,
+                    &latest,
+                    &operation,
+                    &latest_progress,
+                )? {
+                    recovered += 1;
+                    continue;
+                }
+            }
+            if matches!(
+                latest.state,
+                ryeos_state::SyncJobState::Completed
+                    | ryeos_state::SyncJobState::Failed
+                    | ryeos_state::SyncJobState::Cancelled
+            ) {
+                continue;
+            }
+        }
         let request = WorkerPlacementAdoptRequest {
             operation_id: operation.operation_id.clone(),
             chain_root_id: operation.chain_root_id.clone(),
@@ -1297,6 +1443,200 @@ pub async fn recover_durable_target_handoffs(state: &AppState) -> Result<usize> 
     Ok(recovered)
 }
 
+fn settle_pre_attachment_target_terminal(
+    state: &AppState,
+    job: &ryeos_state::SyncJobRecord,
+    operation: &WorkerSessionHandoffJobOperation,
+    progress: &WorkerSessionHandoffProgress,
+) -> Result<bool> {
+    if progress.phase < WorkerHandoffPhase::SourceCommitted {
+        return Ok(false);
+    }
+    let Some(successor) = state
+        .threads
+        .get_thread(&operation.successor_placement_thread_id)?
+    else {
+        return Ok(false);
+    };
+    let Some((mut authoritative_successor, _, _)) = state
+        .state_store
+        .get_authoritative_thread_snapshot_with_last_event(
+            &operation.chain_root_id,
+            &operation.successor_placement_thread_id,
+        )?
+    else {
+        return Ok(false);
+    };
+    if authoritative_successor.chain_root_id != operation.chain_root_id
+        || authoritative_successor.upstream_thread_id.as_deref()
+            != Some(operation.source_placement_thread_id.as_str())
+        || authoritative_successor.current_site_id != operation.target_site_id
+        || authoritative_successor.requested_by.as_deref()
+            != Some(operation.owner_principal.as_str())
+        || successor.chain_root_id != authoritative_successor.chain_root_id
+        || successor.thread_id != authoritative_successor.thread_id
+    {
+        bail!("pre-attachment target terminal contradicts its durable handoff job");
+    }
+    let terminal_before_start = is_settleable_pre_attachment_terminal(
+        authoritative_successor.status,
+        authoritative_successor.started_at.is_some(),
+    );
+    if authoritative_successor.status != ryeos_state::objects::ThreadStatus::Created
+        && !terminal_before_start
+    {
+        return Ok(false);
+    }
+    let has_attachment_state = successor.runtime.pid.is_some()
+        || successor.runtime.pgid.is_some()
+        || successor.runtime.process_identity.is_some()
+        || state
+            .state_store
+            .dedicated_session(&operation.successor_placement_thread_id)?
+            .is_some();
+    if has_attachment_state && terminal_before_start {
+        bail!("target terminal has worker attachment state and cannot release its reservation");
+    }
+    if has_attachment_state {
+        return Ok(false);
+    }
+    let authority = state
+        .state_store
+        .remote_continuation_authority(
+            &operation.chain_root_id,
+            &operation.successor_placement_thread_id,
+        )?
+        .context("target terminal has no signed remote-adoption edge")?;
+    if authority.operation_id != operation.operation_id
+        || authority.preflight_id != operation.preflight_id
+        || authority.preflight_attestation_hash != operation.preflight_attestation_hash
+        || authority.successor_thread_id != operation.successor_placement_thread_id
+        || authority.target_site_id != operation.target_site_id
+    {
+        bail!("target terminal remote-adoption authority differs from its durable job");
+    }
+    let pre_terminal_head = state
+        .state_store
+        .with_state_db(|db| db.read_generic_head_ref("chains", &operation.chain_root_id))?
+        .context("pre-attachment target terminal has no signed chain head")?;
+    if pre_terminal_head.signer != state.identity.fingerprint() {
+        bail!("pre-attachment target terminal chain is not target-owned");
+    }
+    if authoritative_successor.status == ryeos_state::objects::ThreadStatus::Created {
+        if job.state != ryeos_state::SyncJobState::Failed
+            || job.phase != "target_terminal_before_attachment"
+        {
+            return Ok(false);
+        }
+        let outcome = state.threads.finalize_created_unattached_if_current(
+            &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+                thread_id: operation.successor_placement_thread_id.clone(),
+                status: ryeos_state::objects::ThreadStatus::Failed
+                    .as_str()
+                    .to_owned(),
+                outcome_code: Some("target_handoff_failed_before_attachment".to_owned()),
+                result: None,
+                error: Some(serde_json::json!({
+                    "code":"target_handoff_failed_before_attachment",
+                    "message":"target worker handoff failed before process attachment",
+                    "operation_id":operation.operation_id,
+                })),
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            },
+        )?;
+        if !outcome.is_settled() {
+            bail!("failed target handoff successor gained an attachment or launch owner");
+        }
+        authoritative_successor = state
+            .state_store
+            .get_authoritative_thread_snapshot_with_last_event(
+                &operation.chain_root_id,
+                &operation.successor_placement_thread_id,
+            )?
+            .map(|(snapshot, _, _)| snapshot)
+            .context("target successor disappeared after pre-attachment terminalization")?;
+    }
+    // A successor that terminalized before attachment is authoritative
+    // regardless of which terminal cause won the race. In particular,
+    // startup reconciliation can durably settle an unattached Created row as
+    // `killed` from an already-recorded stop intent. Restricting cleanup to
+    // `failed` leaves that proved-dead placement retrying forever and keeps
+    // its target-local credential generation reserved. The attachment and
+    // started-at fences above make every terminal variant equally safe to
+    // settle around; the signed terminal itself remains the chain outcome.
+    if !is_settleable_pre_attachment_terminal(
+        authoritative_successor.status,
+        authoritative_successor.started_at.is_some(),
+    ) {
+        return Ok(false);
+    }
+    let terminal_head = state
+        .state_store
+        .with_state_db(|db| db.read_generic_head_ref("chains", &operation.chain_root_id))?
+        .context("pre-attachment target terminal has no signed terminal chain head")?;
+    if terminal_head.signer != state.identity.fingerprint() {
+        bail!("pre-attachment target terminal chain lost target ownership");
+    }
+    let reservation = state
+        .state_store
+        .credential_profile_reservation_for_successor(&operation.successor_placement_thread_id)?
+        .context("pre-attachment target terminal lost its credential reservation")?;
+    if reservation.operation_id != operation.operation_id
+        || reservation.owner_principal != operation.owner_principal
+        || reservation.profile_id != operation.target_credential_profile_id
+    {
+        bail!("target terminal credential reservation differs from its durable job");
+    }
+    match reservation.state.as_str() {
+        "reserved" => state
+            .state_store
+            .release_credential_profile_reservation(&reservation.reservation_id)?,
+        "released" => {}
+        "consumed" => bail!("pre-attachment target terminal consumed its credential reservation"),
+        other => bail!("unknown target credential reservation state {other:?}"),
+    }
+    let terminal_error = state
+        .state_store
+        .get_thread_result(&operation.successor_placement_thread_id)?
+        .and_then(|result| result.error)
+        .map(|error| error.to_string())
+        .unwrap_or_else(|| "target successor failed before worker attachment".to_owned());
+    if job.state != ryeos_state::SyncJobState::Failed {
+        state.state_store.with_state_db(|db| {
+            db.update_sync_job(
+                &job.job_id,
+                &ryeos_state::SyncJobUpdate {
+                    state: ryeos_state::SyncJobState::Failed,
+                    phase: "target_terminal_before_attachment".to_owned(),
+                    roots: None,
+                    heads: Some(vec![terminal_head.target_hash.clone()]),
+                    uploaded_hashes: Vec::new(),
+                    fetched_hashes: Vec::new(),
+                    last_error: Some(bounded_recovery_error(&terminal_error)),
+                    result: Some(progress.to_value()?),
+                },
+            )
+        })?;
+    }
+    tracing::error!(
+        job_id = %job.job_id,
+        thread_id = %operation.successor_placement_thread_id,
+        chain_head_hash = %terminal_head.target_hash,
+        "settled target handoff around signed pre-attachment terminal"
+    );
+    Ok(true)
+}
+
+fn is_settleable_pre_attachment_terminal(
+    status: ryeos_state::objects::ThreadStatus,
+    has_started_at: bool,
+) -> bool {
+    status.is_terminal() && !has_started_at
+}
+
 fn recover_staged_target_abort(
     state: &AppState,
     job: &ryeos_state::SyncJobRecord,
@@ -1326,18 +1666,23 @@ fn recover_staged_target_abort(
             || reservation.owner_principal != operation.owner_principal
             || reservation.profile_id != operation.target_credential_profile_id
         {
-            bail!("target credential reservation differs from aborted handoff");
-        }
-        match reservation.state.as_str() {
-            "reserved" => {
-                state
-                    .state_store
-                    .release_credential_profile_reservation(&reservation.reservation_id)?;
-                "reservation_released"
+            if reservation.state == "released" {
+                "already_released"
+            } else {
+                bail!("live target credential reservation differs from aborted handoff");
             }
-            "released" => "already_released",
-            "consumed" => bail!("aborted target placement already consumed its reservation"),
-            other => bail!("unknown target credential reservation state {other:?}"),
+        } else {
+            match reservation.state.as_str() {
+                "reserved" => {
+                    state
+                        .state_store
+                        .release_credential_profile_reservation(&reservation.reservation_id)?;
+                    "reservation_released"
+                }
+                "released" => "already_released",
+                "consumed" => bail!("aborted target placement already consumed its reservation"),
+                other => bail!("unknown target credential reservation state {other:?}"),
+            }
         }
     } else {
         "already_released"
@@ -1500,6 +1845,7 @@ fn target_worker_is_attached(
     state: &AppState,
     operation: &WorkerSessionHandoffJobOperation,
     placement: &WorkerPlacementAdmissionEvidence,
+    placement_attestation_hash: &str,
 ) -> Result<bool> {
     let Some(session) = state
         .state_store
@@ -1520,6 +1866,25 @@ fn target_worker_is_attached(
             )
     {
         bail!("attached target worker contradicts its placement admission");
+    }
+    let remote = state
+        .state_store
+        .remote_continuation_authority(
+            &operation.chain_root_id,
+            &operation.successor_placement_thread_id,
+        )?
+        .context("attached target worker has no signed remote-continuation authority")?;
+    if remote.operation_id != operation.operation_id
+        || remote.preflight_id != operation.preflight_id
+        || remote.preflight_attestation_hash != operation.preflight_attestation_hash
+        || remote.target_placement_attestation_hash != placement_attestation_hash
+        || remote.target_launch_capsule_hash != placement.target_launch_capsule_hash
+        || remote.target_runtime_seed_hash != placement.target_runtime_seed_hash
+        || remote.source_site_id != operation.source_site_id
+        || remote.target_site_id != operation.target_site_id
+        || remote.successor_thread_id != operation.successor_placement_thread_id
+    {
+        bail!("attached target worker remote continuation differs from its durable operation");
     }
     let Some(worker_id) = session.worker_instance_id.as_deref() else {
         return Ok(false);
@@ -1793,16 +2158,15 @@ async fn prepare_after_staging(
         subject_digest: reserved.subject_digest,
     };
 
-    let target_ledger_epoch = req.source_accounting_frontier.as_ref().and_then(|_| {
+    let target_ledger_identity = req.source_accounting_frontier.as_ref().and_then(|_| {
         state
             .accounting
             .as_ref()
-            .map(|ledger| ledger.site_identity().1)
+            .map(|ledger| ledger.site_identity())
     });
     let accounting = ryeos_app::worker_handoff::build_target_accounting_conservation(
         req.source_accounting_frontier.as_ref(),
-        &req.target_site_id,
-        target_ledger_epoch,
+        target_ledger_identity,
         &req.operation_id,
     )?;
     if source.launch_metadata.accounting_scope != accounting.source_scope {
@@ -1824,8 +2188,8 @@ async fn prepare_after_staging(
     let resume_rebind = RemoteResumeContextRebind {
         source_site_id: req.source_site_id.clone(),
         target_site_id: req.target_site_id.clone(),
-        target_project_context: ryeos_engine::contracts::ProjectContext::SnapshotHash {
-            hash: candidate.to_owned(),
+        target_project_context: ryeos_engine::contracts::ProjectContext::LocalPath {
+            path: target_project_path.to_path_buf(),
         },
         target_project_authority: project_rebind.target_authority.clone(),
         target_stable_project_identity: Some(target_identity),
@@ -1842,13 +2206,14 @@ async fn prepare_after_staging(
         &source.manifest.successor_placement_thread_id,
         &source.manifest.source_placement_thread_id,
         &source.launch_metadata,
+        &source.launch_capsule,
         source_resume,
         &target_resume,
         &resume_rebind,
         accounting.target_scope.clone(),
     )
     .await
-    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    .map_err(|error| anyhow::anyhow!(format!("{error:#}")))?;
     let target_metadata = prepared.launch_metadata().clone();
     let target_capsule = target_metadata
         .admitted_launch_capsule()?
@@ -1867,10 +2232,14 @@ async fn prepare_after_staging(
     }
     if target_programs != preflight.persistent_dependency_programs
         || target_sessions != preflight.target_persistent_session_capsules
-        || target_capsule.execution_realization_hash != preflight.target_execution_realization_hash
     {
         bail!("final target program/substrate admission differs from preflight");
     }
+    ryeos_app::worker_handoff::validate_target_realization_after_preflight(
+        &state.state_store.pinned_state_authority()?.cas_store()?,
+        &preflight.target_execution_realization_hash,
+        &target_capsule.execution_realization_hash,
+    )?;
     let target_isolation_digest =
         ryeos_state::objects::canonical_value_digest(&serde_json::to_value(
             target_metadata
@@ -2072,8 +2441,8 @@ async fn preflight_after_staging(
     let resume_rebind = RemoteResumeContextRebind {
         source_site_id: req.source_site_id.clone(),
         target_site_id: req.target_site_id.clone(),
-        target_project_context: ryeos_engine::contracts::ProjectContext::SnapshotHash {
-            hash: target_head.clone(),
+        target_project_context: ryeos_engine::contracts::ProjectContext::LocalPath {
+            path: target_project_path.clone(),
         },
         target_project_authority: project_rebind.target_authority,
         target_stable_project_identity: Some(target_identity),
@@ -2090,13 +2459,14 @@ async fn preflight_after_staging(
         &req.successor_placement_thread_id,
         &req.source_placement_thread_id,
         &source.launch_metadata,
+        &source.launch_capsule,
         source_resume,
         &target_resume,
         &resume_rebind,
         None,
     )
     .await
-    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    .map_err(|error| anyhow::anyhow!(format!("{error:#}")))?;
     let target_metadata = prepared.launch_metadata();
     let target_capsule = target_metadata
         .admitted_launch_capsule()?
@@ -2322,6 +2692,8 @@ fn load_source_placement_operands(
         || restore.source_position.placement_thread_id != manifest.source_placement_thread_id
         || restore.source_launch_capsule_hash != manifest.source_launch_capsule_hash
         || restore.source_site_id != manifest.source_site_id
+        || restore.project_candidate_snapshot_hash.as_deref()
+            != Some(manifest.project_candidate_snapshot_hash.as_str())
     {
         bail!("worker restore document contradicts transfer source");
     }
@@ -2472,6 +2844,71 @@ struct TargetAdoptionAttempt {
     job_id: String,
     attempt_id: String,
     active: bool,
+}
+
+struct TargetPreflightAttempt {
+    state: Arc<AppState>,
+    job_id: String,
+    attempt_id: String,
+    active: bool,
+}
+
+impl TargetPreflightAttempt {
+    fn begin(state: Arc<AppState>, job_id: &str) -> Result<Self> {
+        let attempt_id = begin_target_handoff_attempt(
+            &state,
+            job_id,
+            "target_preflight",
+            "target-handoff-preflight",
+        )?;
+        Ok(Self {
+            state,
+            job_id: job_id.to_owned(),
+            attempt_id,
+            active: true,
+        })
+    }
+
+    fn complete(
+        &mut self,
+        attestation: &ryeos_state::objects::Attestation,
+        result: Value,
+    ) -> Result<String> {
+        let stored = self.state.state_store.complete_worker_handoff_preflight(
+            &self.job_id,
+            &self.attempt_id,
+            attestation,
+            result,
+        )?;
+        self.active = false;
+        Ok(stored)
+    }
+}
+
+impl Drop for TargetPreflightAttempt {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let error = "target preflight attempt returned before settlement".to_owned();
+        if let Err(settle_error) = settle_target_handoff_attempt(
+            &self.state,
+            &self.job_id,
+            &self.attempt_id,
+            ryeos_state::SyncJobAttemptState::Failed,
+            ryeos_state::SyncJobState::Retryable,
+            "target_preflight_failed",
+            Some(error),
+            None,
+        ) {
+            tracing::error!(
+                job_id = %self.job_id,
+                attempt_id = %self.attempt_id,
+                error = %settle_error,
+                "failed to settle target preflight attempt on handler exit"
+            );
+        }
+    }
 }
 
 impl TargetAdoptionAttempt {
@@ -2705,6 +3142,26 @@ mod authority_tests {
                 require_authenticated_source_node(&rejected, "site:source", "fp:source-node")
                     .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn every_proved_pre_attachment_terminal_can_release_its_reservation() {
+        use ryeos_state::objects::ThreadStatus;
+
+        for status in [
+            ThreadStatus::Completed,
+            ThreadStatus::Failed,
+            ThreadStatus::Cancelled,
+            ThreadStatus::Killed,
+            ThreadStatus::TimedOut,
+            ThreadStatus::Continued,
+        ] {
+            assert!(is_settleable_pre_attachment_terminal(status, false));
+            assert!(!is_settleable_pre_attachment_terminal(status, true));
+        }
+        for status in [ThreadStatus::Created, ThreadStatus::Running] {
+            assert!(!is_settleable_pre_attachment_terminal(status, false));
         }
     }
 }

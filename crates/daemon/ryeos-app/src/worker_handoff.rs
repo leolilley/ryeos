@@ -510,9 +510,6 @@ impl WorkerPlacementPrepareRequest {
         }
         if let Some(frontier) = &self.source_accounting_frontier {
             frontier.source_scope.validate()?;
-            if frontier.source_scope.budget_authority_site_id != self.source_site_id {
-                bail!("source accounting frontier belongs to another site");
-            }
         }
         if let Some(digest) = &self.follow_delivery_reservation_attestation_hash {
             hash("follow delivery reservation", digest)?;
@@ -1237,13 +1234,6 @@ impl WorkerPlacementAdmissionEvidence {
         self.credential_reservation.validate()?;
         self.project_rebind.validate()?;
         self.accounting.validate()?;
-        if let (Some(source), Some(target)) =
-            (&self.accounting.source_scope, &self.accounting.target_scope)
-            && (source.budget_authority_site_id != self.source_site_id
-                || target.budget_authority_site_id != self.target_site_id)
-        {
-            bail!("accounting scopes do not belong to their admitted source and target sites");
-        }
         Ok(())
     }
 
@@ -1311,6 +1301,7 @@ pub fn prepare_placement_transfer_manifest(
     source_chain_head_hash: &str,
     source_last_event_hash: &str,
     checkpoint_manifest_hash: &str,
+    project_candidate_snapshot_hash: &str,
     source_launch_capsule_hash: &str,
     source_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
 ) -> anyhow::Result<PreparedPlacementTransferManifest> {
@@ -1339,6 +1330,7 @@ pub fn prepare_placement_transfer_manifest(
         source_chain_head_hash.to_owned(),
         source_last_event_hash.to_owned(),
         checkpoint_manifest_hash.to_owned(),
+        project_candidate_snapshot_hash.to_owned(),
         source_launch_capsule_hash.to_owned(),
         lillux::sha256_hex(&canonical),
         size,
@@ -1481,6 +1473,22 @@ impl RemoteResumeContextRebind {
             bail!("credential reservation owner differs from the source session owner");
         }
         self.target_project_authority.validate()?;
+        match (&self.target_project_authority, &self.target_project_context) {
+            (
+                ExecutionProjectAuthority::PinnedGeneration {
+                    display_path: Some(display_path),
+                    realization: ryeos_state::objects::PinnedProjectRealization::Cow { .. },
+                    ..
+                },
+                ryeos_engine::contracts::ProjectContext::LocalPath { path },
+            ) if path == display_path => {}
+            (ExecutionProjectAuthority::PinnedGeneration { .. }, _) => {
+                bail!(
+                    "remote worker adoption requires a writable pinned-COW authority resolved through its exact admitted target workspace path"
+                )
+            }
+            _ => bail!("remote worker adoption requires a pinned-COW target project authority"),
+        }
         if let Some(identity) = &self.target_stable_project_identity {
             identity.validate()?;
         }
@@ -1869,13 +1877,12 @@ pub fn build_remote_project_rebind(
 
 pub fn build_target_accounting_conservation(
     source: Option<&crate::accounting_db::AccountingHandoffFrontier>,
-    target_site_id: &str,
-    target_ledger_epoch: Option<u64>,
+    target_ledger_identity: Option<(String, u64)>,
     operation_id: &str,
 ) -> anyhow::Result<AccountingConservation> {
     hash("accounting handoff operation", operation_id)?;
     let Some(source) = source else {
-        if target_ledger_epoch.is_some() {
+        if target_ledger_identity.is_some() {
             bail!("accounting-free placement unexpectedly selected a target ledger");
         }
         return Ok(AccountingConservation {
@@ -1889,11 +1896,11 @@ pub fn build_target_accounting_conservation(
             target_directive_cap_usd_nanos: None,
         });
     };
-    let epoch = target_ledger_epoch
-        .filter(|epoch| *epoch > 0)
+    let (target_budget_authority_site_id, epoch) = target_ledger_identity
+        .filter(|(site_id, epoch)| !site_id.is_empty() && *epoch > 0)
         .ok_or_else(|| anyhow::anyhow!("accounted placement has no target accounting ledger"))?;
     let target_scope = AdmittedAccountingScope {
-        budget_authority_site_id: target_site_id.to_owned(),
+        budget_authority_site_id: target_budget_authority_site_id,
         ledger_epoch: epoch,
         execution_budget_id: format!("worker-handoff:{operation_id}"),
         directive_budget_id: source
@@ -1915,6 +1922,39 @@ pub fn build_target_accounting_conservation(
     };
     conservation.validate()?;
     Ok(conservation)
+}
+
+/// Prove that final target admission retained the exact execution substrate
+/// qualified by preflight. The full realization hash must change when the
+/// final launch authority gains its settled accounting scope; every
+/// substrate, contract, component, closure, and isolation property remains
+/// byte-exact.
+pub fn validate_target_realization_after_preflight(
+    cas: &lillux::CasStore,
+    preflight_hash: &str,
+    final_hash: &str,
+) -> anyhow::Result<()> {
+    hash("preflight target realization", preflight_hash)?;
+    hash("final target realization", final_hash)?;
+    let load =
+        |digest: &str| -> anyhow::Result<ryeos_state::objects::AdmittedExecutionRealization> {
+            let value = cas
+                .get_object(digest)?
+                .with_context(|| format!("target execution realization {digest} is absent"))?;
+            let realization =
+                ryeos_state::objects::AdmittedExecutionRealization::from_current_value(&value)?;
+            if realization.content_hash()? != digest {
+                bail!("target execution realization changed content hash");
+            }
+            Ok(realization)
+        };
+    let mut preflight = load(preflight_hash)?;
+    let final_realization = load(final_hash)?;
+    preflight.launch_authority_digest = final_realization.launch_authority_digest.clone();
+    if preflight != final_realization {
+        bail!("final target execution substrate differs from preflight");
+    }
+    Ok(())
 }
 
 impl AccountingConservation {
@@ -2119,6 +2159,82 @@ mod tests {
         assert!(value.validate().is_err());
         value.target_cap_usd_nanos = Some(10);
         assert!(value.validate().is_ok());
+    }
+
+    #[test]
+    fn handoff_accounting_uses_ledger_identity_not_placement_site_identity() {
+        let frontier = crate::accounting_db::AccountingHandoffFrontier {
+            source_scope: AdmittedAccountingScope {
+                budget_authority_site_id: "S-source-ledger".into(),
+                ledger_epoch: 7,
+                execution_budget_id: "budget:source".into(),
+                directive_budget_id: Some("directive:source".into()),
+            },
+            financial_high_water: 9,
+            charged_usd_nanos: 3,
+            remaining_cap_usd_nanos: Some(17),
+            remaining_directive_cap_usd_nanos: Some(11),
+        };
+        let conservation = build_target_accounting_conservation(
+            Some(&frontier),
+            Some(("S-target-ledger".into(), 12)),
+            &"a".repeat(64),
+        )
+        .unwrap();
+
+        assert_eq!(
+            conservation
+                .source_scope
+                .as_ref()
+                .unwrap()
+                .budget_authority_site_id,
+            "S-source-ledger"
+        );
+        let target = conservation.target_scope.as_ref().unwrap();
+        assert_eq!(target.budget_authority_site_id, "S-target-ledger");
+        assert_eq!(target.ledger_epoch, 12);
+        conservation.validate().unwrap();
+    }
+
+    #[test]
+    fn final_target_realization_may_change_only_launch_authority_after_preflight() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas = lillux::CasStore::new(temp.path().join("cas"));
+        let preflight = ryeos_state::objects::AdmittedExecutionRealization {
+            schema: ryeos_state::objects::EXECUTION_REALIZATION_SCHEMA_VERSION,
+            kind: ryeos_state::objects::ADMITTED_EXECUTION_REALIZATION_KIND.to_owned(),
+            substrate_identity_hash: "1".repeat(64),
+            substrate_attestation_hash: "2".repeat(64),
+            launch_authority_digest: "3".repeat(64),
+            effective_definition_digest: "4".repeat(64),
+            artifact_identity_digest: "5".repeat(64),
+            execution_closure_digest: "6".repeat(64),
+            contract_ref: "runtime:test".to_owned(),
+            contract_digest: "7".repeat(64),
+            components: Vec::new(),
+            properties: BTreeMap::new(),
+        };
+        let preflight_hash = cas.store_object(&preflight.to_value().unwrap()).unwrap();
+        let mut final_realization = preflight.clone();
+        final_realization.launch_authority_digest = "8".repeat(64);
+        let final_hash = cas
+            .store_object(&final_realization.to_value().unwrap())
+            .unwrap();
+
+        validate_target_realization_after_preflight(&cas, &preflight_hash, &final_hash).unwrap();
+
+        final_realization.substrate_identity_hash = "9".repeat(64);
+        let changed_substrate_hash = cas
+            .store_object(&final_realization.to_value().unwrap())
+            .unwrap();
+        assert!(
+            validate_target_realization_after_preflight(
+                &cas,
+                &preflight_hash,
+                &changed_substrate_hash,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2344,9 +2460,7 @@ mod tests {
         RemoteResumeContextRebind {
             source_site_id: "site:a".into(),
             target_site_id: "site:b".into(),
-            target_project_context: ProjectContext::SnapshotHash {
-                hash: candidate.clone(),
-            },
+            target_project_context: ProjectContext::LocalPath { path: path.clone() },
             target_project_authority: pinned_authority(
                 "site:b",
                 "/target/project",
@@ -2396,6 +2510,18 @@ mod tests {
             drifted
                 .validate_remote_worker_adoption_from(&source, &rebind)
                 .is_err()
+        );
+
+        let mut snapshot_only = remote_rebind();
+        snapshot_only.target_project_context = ProjectContext::SnapshotHash {
+            hash: "2".repeat(64),
+        };
+        assert!(
+            source
+                .for_remote_worker_adoption(&snapshot_only)
+                .unwrap_err()
+                .to_string()
+                .contains("exact admitted target workspace path")
         );
 
         let project_rebind = ProjectAuthorityRebind {

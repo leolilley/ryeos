@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const PLACEMENT_TRANSFER_MANIFEST_KIND: &str = "placement_transfer_manifest";
-pub const PLACEMENT_TRANSFER_MANIFEST_SCHEMA: u32 = 1;
+pub const PLACEMENT_TRANSFER_MANIFEST_SCHEMA: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,6 +28,7 @@ pub struct PlacementTransferManifest {
     pub source_chain_head_hash: String,
     pub source_last_event_hash: String,
     pub checkpoint_manifest_hash: String,
+    pub project_candidate_snapshot_hash: String,
     pub source_launch_capsule_hash: String,
     pub source_launch_metadata_blob_hash: String,
     pub source_launch_metadata_size_bytes: u64,
@@ -47,6 +48,7 @@ impl PlacementTransferManifest {
         source_chain_head_hash: String,
         source_last_event_hash: String,
         checkpoint_manifest_hash: String,
+        project_candidate_snapshot_hash: String,
         source_launch_capsule_hash: String,
         source_launch_metadata_blob_hash: String,
         source_launch_metadata_size_bytes: u64,
@@ -65,6 +67,7 @@ impl PlacementTransferManifest {
             source_chain_head_hash,
             source_last_event_hash,
             checkpoint_manifest_hash,
+            project_candidate_snapshot_hash,
             source_launch_capsule_hash,
             source_launch_metadata_blob_hash,
             source_launch_metadata_size_bytes,
@@ -118,6 +121,10 @@ impl PlacementTransferManifest {
             (
                 "checkpoint manifest",
                 self.checkpoint_manifest_hash.as_str(),
+            ),
+            (
+                "project candidate snapshot",
+                self.project_candidate_snapshot_hash.as_str(),
             ),
             (
                 "source launch capsule",
@@ -179,6 +186,7 @@ mod tests {
             "4".repeat(64),
             "5".repeat(64),
             "6".repeat(64),
+            "7".repeat(64),
             4096,
         )
         .unwrap();

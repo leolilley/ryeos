@@ -519,6 +519,10 @@ fn links_placement_transfer_manifest(value: &Value) -> Result<ContractLinks, Str
             ExpectedObject::Kind(crate::objects::STATE_MANIFEST_KIND),
         ),
         (
+            &manifest.project_candidate_snapshot_hash,
+            ExpectedObject::Kind("project_snapshot"),
+        ),
+        (
             &manifest.source_launch_capsule_hash,
             ExpectedObject::Kind("admitted_launch_capsule"),
         ),
@@ -1024,5 +1028,33 @@ mod tests {
 
         assert_eq!(links.object_edges.len(), 1);
         assert_eq!(links.object_edges[0].hash, "a".repeat(64));
+    }
+
+    #[test]
+    fn placement_transfer_roots_its_project_candidate() {
+        let candidate = "7".repeat(64);
+        let manifest = crate::objects::PlacementTransferManifest::new(
+            "1".repeat(64),
+            "owner".into(),
+            "T-root".into(),
+            "site:a".into(),
+            "site:a".into(),
+            "site:b".into(),
+            "T-source".into(),
+            "T-target".into(),
+            "2".repeat(64),
+            "3".repeat(64),
+            "4".repeat(64),
+            candidate.clone(),
+            "5".repeat(64),
+            "6".repeat(64),
+            4096,
+        )
+        .unwrap();
+
+        let links = links_placement_transfer_manifest(&manifest.to_value().unwrap()).unwrap();
+        assert!(links.object_edges.iter().any(|edge| {
+            edge.hash == candidate && edge.expected == ExpectedObject::Kind("project_snapshot")
+        }));
     }
 }
