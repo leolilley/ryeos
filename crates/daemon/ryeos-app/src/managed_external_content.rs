@@ -134,7 +134,8 @@ impl ManagedExternalContentActivation {
             validate_hash("activation archive digest", &source.sha256)?;
             if source.maximum_compressed_bytes == 0
                 || source.maximum_expanded_bytes == 0
-                || source.maximum_compressed_bytes > source.maximum_expanded_bytes
+                || source.maximum_compressed_bytes
+                    > ryeos_state::objects::MAX_LARGE_CONTENT_TOTAL_BYTES
                 || source.maximum_expanded_bytes
                     > ryeos_state::objects::MAX_LARGE_CONTENT_TOTAL_BYTES
             {
@@ -596,6 +597,14 @@ mod tests {
             ManagedExternalContentActivation::from_value(&document_value("foreign.example.test"))
                 .unwrap();
         assert!(document.admit(&policy(), &declarations(), true).is_err());
+    }
+
+    #[test]
+    fn compressed_and_expanded_archive_bounds_are_independent() {
+        let mut value = document_value("releases.example.test");
+        value["sources"][0]["maximum_compressed_bytes"] = Value::from(4096u64);
+        value["sources"][0]["maximum_expanded_bytes"] = Value::from(2048u64);
+        ManagedExternalContentActivation::from_value(&value).unwrap();
     }
 
     #[test]

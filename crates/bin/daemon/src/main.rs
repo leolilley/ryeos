@@ -1916,6 +1916,14 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
             "settled sync-job attempts interrupted by the previous daemon process"
         );
     }
+    if let Err(error) =
+        ryeos_api::handlers::external_content_activate::recover_durable_activations(&state).await
+    {
+        tracing::error!(
+            error = %error,
+            "initial managed external-content recovery failed; durable jobs remain inspectable"
+        );
+    }
     match state.threads.reconcile_remote_follow_terminal_deliveries() {
         Ok(rebuilt) if rebuilt != 0 => tracing::warn!(
             rebuilt,
@@ -1993,6 +2001,16 @@ async fn run_cache_metric_flush_loop() -> Result<()> {
 }
 
 async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
+    let recovered_activations =
+        ryeos_api::handlers::external_content_activate::recover_durable_activations(state)
+            .await
+            .context("periodic managed external-content recovery")?;
+    if recovered_activations != 0 {
+        tracing::info!(
+            recovered_activations,
+            "periodic recovery completed managed external-content activations"
+        );
+    }
     let recovered_source_handoffs =
         ryeos_api::handlers::dedicated_sessions::recover_durable_source_handoffs(state)
             .await

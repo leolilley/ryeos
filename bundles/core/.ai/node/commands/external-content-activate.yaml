@@ -1,0 +1,15 @@
+# ryeos:signed:2026-08-27T06:55:10Z:2716845803b3af9ec52928ada6e4a0870767c943d27fc0a8e757c1be4c01ba80:VrKPxu7X9cH2KIb7n1V1z007XX5SL4y+GXa0eNGZUy0QWwLdZmWo8mLEIoZlFT8hv1WZGqkSifRCbpYdItVHAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, activate]
+description: Activate a trusted installed-bundle external-content acquisition recipe
+help:
+  usage: "ryeos external-content activate <config-ref> <online|offline>"
+  examples:
+    - "ryeos external-content activate config:codex/activation online"
+    - "ryeos external-content activate config:codex/activation offline"
+forms:
+  - slots:
+      - field: activation_ref
+      - field: mode
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/activate
