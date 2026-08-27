@@ -1667,8 +1667,10 @@ impl RecoveryStore {
     /// Settle every retained upload for one exact, already-proved
     /// publication. The caller must first verify that `admitted_target_hash`
     /// is the authoritative current target for this owner/publication key
-    /// while holding the same CAS guard. This closes duplicate retry stages
-    /// without age-based retirement or touching unrelated uploads.
+    /// while holding the same CAS guard and the publication barrier that
+    /// serializes upload creation and head advance. This closes duplicate
+    /// retry stages without age-based retirement or touching unrelated
+    /// uploads.
     pub fn settle_durable_cas_uploads_for_existing_publication(
         &self,
         cas_mutation_guard: &CasMutationGuard,

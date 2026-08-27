@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-27T12:50:47Z:97e2a81fcce4aa51770e782b4a4f2bec19ef91e6d095ac91feb2c00a45894dd1:b99XKFAZNcrM6CvkscIvNZFVfj5twNoaezwSZceqCFBkdOGYn1Zk+PArkx1ZfT8rTzhtLEsjBPczLZmPZKcnDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-27T14:27:06Z:3f260d93508341872f76024fbf5df9c6838b3d8155a911550b5043825bb21c86:4OFbm83+33FeCrn300w3MkWDa/Jv55zckwG6MKjLFelz408VsDN4GQeMHNW3bs8F3Kf6bo2VhjCBJpXppeCLBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -98,8 +98,9 @@ knowledge bundle.
 
    The generic service downloads or reuses the exact pinned archive, refuses
    redirects, enforces compressed/expanded/member bounds, and verifies every
-   selected digest and executable mode. The first recipe imports the four
-   worker file realizations. The second creates only the signed environment's
+   selected digest and executable mode. The first recipe imports the five
+   worker file realizations, including the package's workload-owned command
+   sandbox companion. The second creates only the signed environment's
    descriptor-rooted `bin/{zsh,rg}` tree through Lillux, captures it through
    the existing manifest importer, and binds it to
    `config:codex/environments/default`. Each recipe records one compact node-
