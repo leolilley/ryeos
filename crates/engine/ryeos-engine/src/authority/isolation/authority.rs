@@ -324,6 +324,7 @@ pub struct IsolationLaunchContext<'a> {
     pub live_access: Option<&'a IsolationLiveAccessAuthority>,
     pub state_root: Option<&'a Path>,
     pub checkpoint_dir: Option<&'a Path>,
+    pub checkpoint_authority: Option<&'a lillux::PinnedDirectory>,
     pub daemon_socket_path: Option<&'a Path>,
     pub bundle_roots: &'a [PathBuf],
     pub node_trusted_keys_dir: Option<&'a Path>,

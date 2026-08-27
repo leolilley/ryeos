@@ -43,6 +43,8 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub cas_root: &'a Path,
     /// Daemon-allocated checkpoint dir for a replay-aware runtime.
     pub checkpoint_dir: Option<&'a Path>,
+    /// Exact descriptor authority paired with `checkpoint_dir`.
+    pub checkpoint_authority: Option<&'a lillux::PinnedDirectory>,
     /// Whether the replay-aware runtime should load that checkpoint.
     pub is_resume: bool,
     /// Clear the predecessor-to-successor auto-launch counter only after the
@@ -161,6 +163,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         source_closure,
         cas_root,
         checkpoint_dir,
+        checkpoint_authority,
         is_resume,
         rearm_native_resume_budget_after_attach,
     } = params;
@@ -295,6 +298,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
                 live_access: live_access.as_ref(),
                 state_root,
                 checkpoint_dir,
+                checkpoint_authority,
                 daemon_socket_path: isolation_daemon_socket_path,
                 bundle_roots: &envelope.roots.bundle_roots,
                 node_trusted_keys_dir: Some(&envelope.roots.node_trusted_keys_dir),

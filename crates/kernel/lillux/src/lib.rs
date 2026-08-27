@@ -10,15 +10,17 @@ pub mod time;
 pub mod vault;
 
 pub use exec::retain_fork_sensitive_descriptors;
+pub use exec::take_inherited_duplex_channel_from_env;
 pub use exec::{
-    AbortedProcess, AttachmentAbortError, AttachmentReleaseError, DEFAULT_MAX_CAPTURE_BYTES,
-    ForkSensitiveDescriptorLease, InheritedDescriptorAuthority, OutputLimitExceeded,
+    AbortedProcess, AttachmentAbortError, AttachmentReleaseError, CooperativeChildTermination,
+    DEFAULT_MAX_CAPTURE_BYTES, ForkSensitiveDescriptorLease, InheritedDescriptorAuthority,
+    InheritedDuplexChannel, OutputLimitExceeded, PendingCooperativeChildTermination,
     ProcessAwaitingAttachment, RunningProcess, SpawnResult, SubprocessLimits, SubprocessRequest,
     SubprocessResult, SupervisedLauncherAttachmentStatusPipe, SupervisedLauncherStatusPipe,
-    SupervisedProcessStatus, configure_inherited_descriptor_authorities, configure_inherited_fds,
-    configure_owner_private_creation_mask, configure_subprocess_limits, disable_process_core_dumps,
-    protect_descriptor_from_exec, sealed_executable_memfd, sealed_memfd,
-    supervised_launcher_attachment_status_pipe, supervised_launcher_status_pipe,
+    SupervisedProcessStatus, configure_command_argv0, configure_inherited_descriptor_authorities,
+    configure_inherited_fds, configure_owner_private_creation_mask, configure_subprocess_limits,
+    disable_process_core_dumps, protect_descriptor_from_exec, sealed_executable_memfd,
+    sealed_memfd, supervised_launcher_attachment_status_pipe, supervised_launcher_status_pipe,
     validate_subprocess_limits,
 };
 

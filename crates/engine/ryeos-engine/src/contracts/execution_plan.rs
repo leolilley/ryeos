@@ -188,6 +188,11 @@ pub struct EngineContext {
     pub isolation_live_access_authority: Option<crate::isolation::IsolationLiveAccessAuthority>,
     pub isolation_state_root: Option<PathBuf>,
     pub isolation_checkpoint_dir: Option<PathBuf>,
+    /// Exact daemon-created checkpoint directory paired with
+    /// `isolation_checkpoint_dir`. Isolation validates this descriptor against
+    /// the app-root-relative authority and mounts this inode, never a reopened
+    /// pathname substitute.
+    pub isolation_checkpoint_authority: Option<Arc<lillux::PinnedDirectory>>,
     /// Typed callback-socket fact paired with this plan's daemon callback env.
     pub isolation_daemon_socket_path: Option<PathBuf>,
     pub isolation_bundle_roots: Vec<PathBuf>,

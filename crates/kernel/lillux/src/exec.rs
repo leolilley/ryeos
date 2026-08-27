@@ -578,6 +578,280 @@ pub fn protect_descriptor_from_exec<T: std::os::fd::AsRawFd>(descriptor: &T) -> 
     Ok(())
 }
 
+/// Typed connected inherited byte-stream channel. Platform socket and
+/// descriptor mechanics remain private to Lillux.
+pub struct InheritedDuplexChannel {
+    #[cfg(unix)]
+    stream: std::os::unix::net::UnixStream,
+}
+
+impl InheritedDuplexChannel {
+    pub fn try_clone(&self) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            let stream = self.stream.try_clone()?;
+            protect_descriptor_from_exec(&stream).map_err(std::io::Error::other)?;
+            Ok(Self { stream })
+        }
+        #[cfg(not(unix))]
+        {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "inherited duplex channels are unavailable on this platform",
+            ))
+        }
+    }
+}
+
+impl Read for InheritedDuplexChannel {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        #[cfg(unix)]
+        {
+            self.stream.read(buffer)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = buffer;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "inherited duplex channels are unavailable on this platform",
+            ))
+        }
+    }
+}
+
+impl Write for InheritedDuplexChannel {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        #[cfg(unix)]
+        {
+            self.stream.write(buffer)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = buffer;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "inherited duplex channels are unavailable on this platform",
+            ))
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            self.stream.flush()
+        }
+        #[cfg(not(unix))]
+        {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "inherited duplex channels are unavailable on this platform",
+            ))
+        }
+    }
+}
+
+/// Consume one connected duplex descriptor named by the inherited process
+/// environment and immediately protect it from further inheritance.
+///
+/// Parsing, descriptor ownership conversion, and `FD_CLOEXEC` manipulation
+/// stay within Lillux. The returned stream is a typed IPC byte channel rather
+/// than ambient descriptor authority.
+///
+/// # Safety
+///
+/// The typed launch/isolation authority must attest that the descriptor is one
+/// end of a connected Unix stream and grant this process unique ownership of
+/// it. No other owning Rust handle may exist for the same descriptor. Socket
+/// validation happens while minting that authority because the target sandbox
+/// deliberately does not admit socket-inspection syscalls.
+#[cfg(unix)]
+pub unsafe fn take_inherited_duplex_channel_from_env(
+    name: &str,
+) -> Result<InheritedDuplexChannel, String> {
+    let encoded = std::env::var(name)
+        .map_err(|error| format!("missing inherited descriptor {name}: {error}"))?;
+    // SAFETY: the caller's ownership guarantee applies to the descriptor
+    // encoded by this exact inherited environment binding.
+    unsafe { take_inherited_duplex_channel(name, &encoded) }
+}
+
+#[cfg(not(unix))]
+pub unsafe fn take_inherited_duplex_channel_from_env(
+    _name: &str,
+) -> Result<InheritedDuplexChannel, String> {
+    Err("inherited duplex channels are unavailable on this platform".to_owned())
+}
+
+#[cfg(unix)]
+unsafe fn take_inherited_duplex_channel(
+    name: &str,
+    encoded: &str,
+) -> Result<InheritedDuplexChannel, String> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+
+    if encoded.is_empty() || encoded.len() > 4096 || encoded.chars().any(char::is_control) {
+        return Err(format!(
+            "inherited descriptor {name} is not canonical and bounded"
+        ));
+    }
+    let descriptor = encoded
+        .parse::<std::os::fd::RawFd>()
+        .map_err(|error| format!("parse inherited descriptor {name}: {error}"))?;
+    if descriptor <= libc::STDERR_FILENO {
+        return Err(format!("inherited descriptor {name} overlaps standard I/O"));
+    }
+    // SAFETY: the caller guarantees unique ownership of this live descriptor.
+    // Adopt it before any fallible inspection so every error path closes it.
+    let owned = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    let descriptor = owned.as_raw_fd();
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(format!(
+            "inherited descriptor {name} cannot be inspected: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if flags & libc::FD_CLOEXEC == 0
+        && unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0
+    {
+        return Err(format!(
+            "inherited descriptor {name} cannot be protected from exec: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(InheritedDuplexChannel {
+        stream: std::os::unix::net::UnixStream::from(owned),
+    })
+}
+
+#[cfg(all(test, unix))]
+mod inherited_unix_stream_tests {
+    use super::*;
+    use std::os::fd::IntoRawFd as _;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn inherited_stream_is_immediately_close_on_exec() {
+        let (source, _peer) = UnixStream::pair().unwrap();
+        let encoded = source.into_raw_fd().to_string();
+        // SAFETY: `into_raw_fd` transferred the sole source ownership into
+        // this call, and no other owning handle exists for it.
+        let inherited = unsafe { take_inherited_duplex_channel("TEST_SESSION_FD", &encoded) }
+            .expect("consume connected inherited stream");
+
+        let flags = unsafe { libc::fcntl(inherited.stream.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
+    }
+
+    #[test]
+    fn inherited_stream_rejects_noncanonical_and_stdio_descriptors() {
+        let noncanonical = unsafe { take_inherited_duplex_channel("TEST_SESSION_FD", "3\n") }
+            .err()
+            .expect("control characters must be rejected");
+        assert!(noncanonical.contains("not canonical"), "{noncanonical}");
+        let stdio = unsafe { take_inherited_duplex_channel("TEST_SESSION_FD", "2") }
+            .err()
+            .expect("standard I/O descriptors must be rejected");
+        assert!(stdio.contains("overlaps standard I/O"), "{stdio}");
+    }
+}
+
+/// One-shot authority to request cooperative termination of an exact owned
+/// child. Requesting termination sends one `SIGTERM`; it never waits, sends
+/// `SIGKILL`, or installs an escalation policy.
+pub struct CooperativeChildTermination {
+    #[cfg(target_os = "linux")]
+    pidfd: OwnedFd,
+}
+
+/// Exact child identity after its one cooperative termination request has
+/// been sent. Callers may poll for natural exit without gaining signal or
+/// escalation authority.
+pub struct PendingCooperativeChildTermination {
+    #[cfg(target_os = "linux")]
+    pidfd: OwnedFd,
+}
+
+impl CooperativeChildTermination {
+    /// Pin the identity of a child that remains owned and unreaped by the
+    /// caller. Linux retains a pidfd so the later request cannot target a
+    /// recycled numeric PID. Platforms without pidfds fail closed.
+    pub fn for_child(child: &process::Child) -> Result<Self, String> {
+        #[cfg(target_os = "linux")]
+        {
+            Ok(Self {
+                pidfd: open_pidfd(child.id())?,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = child;
+            Err("exact cooperative child termination requires Linux pidfds".to_owned())
+        }
+    }
+
+    /// Consume this one-shot authority and send one cooperative termination
+    /// request. An already-exited child is treated as success.
+    pub fn request(self) -> Result<PendingCooperativeChildTermination, String> {
+        #[cfg(target_os = "linux")]
+        {
+            match pidfd_send_signal_io(self.pidfd.as_raw_fd(), libc::SIGTERM) {
+                Ok(()) => Ok(PendingCooperativeChildTermination { pidfd: self.pidfd }),
+                Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
+                    Ok(PendingCooperativeChildTermination { pidfd: self.pidfd })
+                }
+                Err(error) => Err(format!("request cooperative child termination: {error}")),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err("exact cooperative child termination requires Linux pidfds".to_owned())
+        }
+    }
+}
+
+impl PendingCooperativeChildTermination {
+    /// Report whether the exact child has exited, without reaping it or
+    /// changing its lifecycle. The original `Child` owner remains responsible
+    /// for reaping.
+    pub fn has_exited(&self) -> Result<bool, String> {
+        #[cfg(target_os = "linux")]
+        {
+            loop {
+                let mut pollfd = libc::pollfd {
+                    fd: self.pidfd.as_raw_fd(),
+                    events: libc::POLLIN | libc::POLLHUP,
+                    revents: 0,
+                };
+                let ready = unsafe { libc::poll(&mut pollfd, 1, 0) };
+                if ready < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(format!("poll cooperatively terminated child: {error}"));
+                }
+                if ready == 0 {
+                    return Ok(false);
+                }
+                if pollfd.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+                    return Err(format!(
+                        "poll cooperatively terminated child returned unexpected events {:#x}",
+                        pollfd.revents
+                    ));
+                }
+                return Ok(pollfd.revents & (libc::POLLIN | libc::POLLHUP) != 0);
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err("exact cooperative child termination requires Linux pidfds".to_owned())
+        }
+    }
+}
+
 /// Disable core dumps for this process and all subsequently spawned
 /// descendants.
 #[cfg(unix)]
@@ -606,6 +880,22 @@ pub fn configure_owner_private_creation_mask(command: &mut process::Command) {
             libc::umask(0o077);
             Ok(())
         });
+    }
+}
+
+/// Set an explicit child `argv[0]` without exposing platform command
+/// extensions to the caller.
+pub fn configure_command_argv0(command: &mut process::Command, argv0: &str) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.arg0(argv0);
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (command, argv0);
+        Err("explicit child argv[0] is unavailable on this platform".to_owned())
     }
 }
 

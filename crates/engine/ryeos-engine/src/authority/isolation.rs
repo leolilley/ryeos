@@ -1884,6 +1884,7 @@ impl IsolationRuntime {
             if context.live_access.is_some()
                 || context.state_root.is_some()
                 || context.checkpoint_dir.is_some()
+                || context.checkpoint_authority.is_some()
                 || context.daemon_socket_path.is_some()
                 || !context.bundle_roots.is_empty()
                 || context.node_trusted_keys_dir.is_some()
@@ -2494,10 +2495,12 @@ impl IsolationRuntime {
         } else {
             None
         };
-        let canonical_checkpoint_dir = context
-            .checkpoint_dir
-            .map(|path| canonicalize_context_mount("checkpoint directory", path))
-            .transpose()?;
+        if context.checkpoint_dir.is_some() != context.checkpoint_authority.is_some() {
+            return Err(refused(
+                "checkpoint path and pinned authority must be supplied together".to_string(),
+            ));
+        }
+        let canonical_checkpoint_dir = context.checkpoint_dir.map(Path::to_path_buf);
         let mut checkpoint_source_handle = None;
         if let Some(checkpoint_dir) = &canonical_checkpoint_dir {
             let expected = self
@@ -2516,13 +2519,11 @@ impl IsolationRuntime {
                 &["threads", context.thread_id, "checkpoints"],
                 "daemon checkpoint directory",
             )?;
-            let requested_authority = lillux::PinnedDirectory::open(checkpoint_dir)
-                .map_err(|error| {
-                    refused(format!("checkpoint directory cannot be pinned: {error}"))
-                })?
-                .ok_or_else(|| refused("checkpoint directory disappeared".to_string()))?;
+            let requested_authority = context
+                .checkpoint_authority
+                .expect("checkpoint path/authority presence checked");
             if !expected_authority
-                .is_same_directory(&requested_authority)
+                .is_same_directory(requested_authority)
                 .map_err(|error| {
                     refused(format!("checkpoint identity cannot be compared: {error}"))
                 })?
@@ -2539,9 +2540,11 @@ impl IsolationRuntime {
                 )));
             }
             checkpoint_source_handle = Some(Arc::new(
-                expected_authority.try_clone_descriptor().map_err(|error| {
-                    refused(format!("checkpoint authority cannot be cloned: {error}"))
-                })?,
+                requested_authority
+                    .try_clone_descriptor()
+                    .map_err(|error| {
+                        refused(format!("checkpoint authority cannot be cloned: {error}"))
+                    })?,
             ));
         }
         let writable_resolution = WritableMountResolution {
@@ -5636,6 +5639,7 @@ mod tests {
                     live_access: None,
                     state_root: None,
                     checkpoint_dir: None,
+                    checkpoint_authority: None,
                     daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
@@ -5713,6 +5717,7 @@ mod tests {
                     live_access: None,
                     state_root: None,
                     checkpoint_dir: None,
+                    checkpoint_authority: None,
                     daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
@@ -5777,6 +5782,7 @@ mod tests {
                     live_access: None,
                     state_root: None,
                     checkpoint_dir: None,
+                    checkpoint_authority: None,
                     daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
@@ -5875,6 +5881,7 @@ mod tests {
                     live_access: Some(&live_access),
                     state_root: None,
                     checkpoint_dir: None,
+                    checkpoint_authority: None,
                     daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
@@ -5982,6 +5989,7 @@ mod tests {
                     live_access: None,
                     state_root: None,
                     checkpoint_dir: None,
+                    checkpoint_authority: None,
                     daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
@@ -6062,6 +6070,7 @@ mod tests {
                     live_access: Some(&live_access),
                     state_root: None,
                     checkpoint_dir: None,
+                    checkpoint_authority: None,
                     daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
@@ -6177,6 +6186,7 @@ mod tests {
                 live_access: None,
                 state_root: None,
                 checkpoint_dir: None,
+                checkpoint_authority: None,
                 daemon_socket_path: None,
                 bundle_roots: &[],
                 node_trusted_keys_dir: None,
@@ -6229,6 +6239,7 @@ mod tests {
                 live_access: None,
                 state_root: None,
                 checkpoint_dir: None,
+                checkpoint_authority: None,
                 daemon_socket_path: None,
                 bundle_roots: &[],
                 node_trusted_keys_dir: None,
@@ -6279,6 +6290,7 @@ mod tests {
                 live_access: None,
                 state_root: None,
                 checkpoint_dir: None,
+                checkpoint_authority: None,
                 daemon_socket_path: None,
                 bundle_roots: &[],
                 node_trusted_keys_dir: None,
@@ -6367,6 +6379,7 @@ mod tests {
                     live_access: None,
                     state_root: None,
                     checkpoint_dir: None,
+                    checkpoint_authority: None,
                     daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
@@ -6408,6 +6421,7 @@ mod tests {
             live_access: Some(&live_access),
             state_root: None,
             checkpoint_dir: None,
+            checkpoint_authority: None,
             daemon_socket_path: None,
             bundle_roots: &[],
             node_trusted_keys_dir: None,
@@ -6461,6 +6475,7 @@ mod tests {
             live_access: Some(&live_access),
             state_root: None,
             checkpoint_dir: None,
+            checkpoint_authority: None,
             daemon_socket_path: None,
             bundle_roots: &[],
             node_trusted_keys_dir: None,
@@ -6506,6 +6521,7 @@ mod tests {
             live_access,
             state_root: None,
             checkpoint_dir: None,
+            checkpoint_authority: None,
             daemon_socket_path: None,
             bundle_roots: &[],
             node_trusted_keys_dir: None,
@@ -6579,6 +6595,7 @@ mod tests {
                     live_access: None,
                     state_root: None,
                     checkpoint_dir: None,
+                    checkpoint_authority: None,
                     daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,

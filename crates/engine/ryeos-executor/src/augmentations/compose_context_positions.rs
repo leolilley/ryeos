@@ -805,6 +805,7 @@ pub async fn run(
                     live_access: live_access.as_ref(),
                     state_root: provenance.state_root_override(),
                     checkpoint_dir: None,
+                    checkpoint_authority: None,
                     daemon_socket_path: callback_ipc_requested
                         .then_some(state.config.uds_path.as_path()),
                     bundle_roots: &bundle_roots,

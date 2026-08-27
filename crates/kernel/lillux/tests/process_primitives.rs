@@ -10,9 +10,10 @@
 #![cfg(unix)]
 
 use lillux::{
-    OutputLimitExceeded, SubprocessLimits, SubprocessRequest, configure_subprocess_limits,
-    is_alive, kill, run, run_inherited_stdio, sealed_executable_memfd, sealed_memfd, spawn,
-    spawn_detached, supervised_launcher_status_pipe, validate_subprocess_limits,
+    CooperativeChildTermination, OutputLimitExceeded, SubprocessLimits, SubprocessRequest,
+    configure_subprocess_limits, is_alive, kill, run, run_inherited_stdio, sealed_executable_memfd,
+    sealed_memfd, spawn, spawn_detached, supervised_launcher_status_pipe,
+    validate_subprocess_limits,
 };
 
 /// A `/bin/sh -c <args>` request with a generous default timeout and an
@@ -745,4 +746,81 @@ fn is_alive_false_for_unused_pid() {
 fn kill_reports_already_dead_for_unused_pid() {
     let method = kill(2_000_000_000, 0.1).expect("kill");
     assert_eq!(method, "already_dead");
+}
+
+#[test]
+fn cooperative_child_termination_sends_sigterm_without_escalation() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    struct ChildCleanup(std::process::Child);
+    impl Drop for ChildCleanup {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let mut child = ChildCleanup(
+        std::process::Command::new("/bin/sh")
+            .args(["-c", "while :; do :; done"])
+            .spawn()
+            .expect("spawn cooperative-termination fixture"),
+    );
+    let authority =
+        CooperativeChildTermination::for_child(&child.0).expect("pin exact child identity");
+
+    let pending = authority
+        .request()
+        .expect("request cooperative termination");
+    let status = child.0.wait().expect("reap terminated child");
+
+    assert_eq!(status.signal(), Some(libc::SIGTERM));
+    assert!(pending.has_exited().expect("observe exact child exit"));
+}
+
+#[test]
+fn cooperative_child_termination_exposes_natural_exit_without_forcing_it() {
+    use std::io::BufRead as _;
+
+    struct ChildCleanup(std::process::Child);
+    impl Drop for ChildCleanup {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let mut child = ChildCleanup(
+        std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                "trap 'sleep 0.25; exit 0' TERM; echo ready; while :; do :; done",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn delayed cooperative-termination fixture"),
+    );
+    let mut ready = String::new();
+    std::io::BufReader::new(child.0.stdout.take().expect("fixture stdout"))
+        .read_line(&mut ready)
+        .expect("read fixture readiness");
+    assert_eq!(ready, "ready\n");
+    let authority =
+        CooperativeChildTermination::for_child(&child.0).expect("pin exact child identity");
+
+    let started = std::time::Instant::now();
+    let pending = authority
+        .request()
+        .expect("request delayed cooperative termination");
+    assert!(
+        !pending
+            .has_exited()
+            .expect("observe live terminating child")
+    );
+    std::thread::sleep(std::time::Duration::from_millis(75));
+    assert!(!pending.has_exited().expect("preserve cooperative grace"));
+    child.0.wait().expect("reap cooperatively terminated child");
+
+    assert!(started.elapsed() >= std::time::Duration::from_millis(200));
+    assert!(pending.has_exited().expect("observe natural child exit"));
 }
