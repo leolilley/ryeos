@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-08-10T03:16:08Z:e871c62a534fb7fd6da32e665ccb499c45648620779f4400dfb53b90a870b2c5:3Hux5jSwjSEELJNsLaN/A2L9JQISSAglJyqrhtEPHct6V0C2uQhKFzD2MyW8AGRSKYG5e77ovB91nBdDsNwcBA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-27T04:21:35Z:4f89670b8917c00d286b170e4d977c113875a54e3837b2a4870e171d9bfcdf07:ADpT8KsORqPCj/akGwUYl3wO7direO4/kVxJNRcWABPq4YHSTnu+nTv6M785AFps0jrxoOuVwokL6/AjjHLZDA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/future
 name: chat-latency-investigation
 title: Chat Latency Investigation and Optimization Order
 description: Measurement contract, observed RyeOS latency boundaries, implemented safeguards, and evidence gates for future work
 entry_type: design
-version: "0.4.0"
+version: "0.5.0"
 ```
 
 # Chat Latency Investigation and Optimization Order
@@ -71,9 +71,12 @@ milestones use the generic `observation` event with namespaced payload kinds
 not provider-specific variants in the engine event vocabulary. A client must
 not relabel runtime readiness as model activity.
 
-Reasoning milestones expose timing only. Hidden chain-of-thought remains hidden
-and is replayed internally only where a provider's tool-continuation contract
-requires it.
+For remote providers, reasoning milestones expose only the data the provider
+contract actually returns. Hidden chain-of-thought remains hidden and is
+replayed internally only where a provider's tool-continuation contract requires
+it. A local profile may separately retain exposed reasoning text, token IDs, or
+selected diagnostic traces under its signed trace policy; those are explicit
+local outputs, not a reconstruction of frontier hidden reasoning.
 
 ## Measured latency model
 
@@ -209,7 +212,7 @@ Apply changes in descending expected impact:
 ## Workers and chat
 
 The generic `worker` kind and a fixed persistent-session class now exist. The
-landed standard worker is a content-addressed local-provider vessel: its
+landed local-inference fixture is a content-addressed local-provider vessel: its
 executable closure, realizations, isolation ceiling, and request protocol are
 fixed before boot. It is not the deferred chat-latency worker and it must not be
 widened into one merely because the process/session mechanics are reusable.
@@ -232,6 +235,26 @@ measurement gate.
 
 See `knowledge:ryeos/future/content-addressed-managed-runtime-workers` for the
 authority and isolation design.
+
+## Serious local-model measurements
+
+The Qwen3-0.6B CPU route is a contract fixture, not a production latency
+baseline. The first serious remote tinygrad profile must retain separately:
+
+- placement and session cold/warm time;
+- model-load and compiler/artifact preparation time;
+- request preparation and prompt-token count;
+- prefill time/rate and decode time/rate;
+- first token, first visible text, and terminal latency;
+- device memory, host memory, utilization, and throttling facts;
+- recorded-bank versus effect-record replay; and
+- trace-capture overhead by enabled trace tier.
+
+Do not compare a local model's first token with a remote provider sample without
+also reporting model/profile, device, context, output, sampling, warm state,
+and whether compilation or record replay was involved. Training throughput and
+checkpoint publication have their own measurement series and must not be
+reported as inference latency.
 
 ## Benchmark discipline
 

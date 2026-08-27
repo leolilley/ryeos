@@ -1,203 +1,179 @@
-<!-- ryeos:signed:2026-08-12T07:28:15Z:4d1b9effb1491583a5e45aafef2346280a6b6785085da129d4e7ed6299fd382a:5M+LLB1HqmiHy3M1VZmjolmC5ob+8KA77ZVqIh+k3tv1NOS4eXPDMLLDk6L7wuPQ86oXKrM/BuCiXqMb5GL/Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-27T04:21:34Z:96e730d98c7a7fa7db70cdfc018d0f6fd84d0989324a135b76c2b325001e03f5:/xmQRgaSrrNcxTYDDGM+XR4HAt6c4fdOB6hAL2ig7Nmhguw2eMk/YvY/8D5542CW961pYnIegJA65xSP4ixtCw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/future
 name: substrate-growth-roadmap
 title: RyeOS Substrate Growth Roadmap
-description: Boundary map from current single-node execution acceptance through managed workers, portable evidence, hosted nodes, and federation
+description: Boundary map from landed exact execution and portable hosted-worker placement through local inference, self-hosted implementation, broader federation, and deployment
 entry_type: reference
-version: "0.1.0"
+version: "0.2.0"
 ```
 
 # RyeOS substrate growth roadmap
 
-This note connects the active execution work to the larger deferred RyeOS
+This note connects the current execution substrate to the next RyeOS
 directions. It is a sequencing and ownership map, not an implementation plan.
-The linked owner documents remain authoritative for each deferred boundary.
+The linked owner documents remain authoritative for each boundary.
 
-## Current horizon: complete one-node truth
+## Landed horizon
 
-The current acceptance workloads exercise two complementary shapes:
+RyeOS no longer stops at single-node execution. The common substrate now
+includes:
 
-- deep, cost-bearing agent execution: provider evidence and replay, pinned
-  continuation, project observations, execution identity, comparison, and
-  explanation of a run as it unfolds;
-- broad execution: parallel follow cohorts, recorded subprocess effects,
-  cumulative collection, restart recovery, cache reuse, and state-lock
-  contention.
+- signed programs, exact project/content authority, admitted launch capsules,
+  durable consequences, restart recovery, and rebuildable projections;
+- immutable recorded effects with first-bank versus replay evidence;
+- deep continuation and bounded follow cohorts under pinned project authority;
+- hosted structured worker executions with private homes, credential
+  generations, typed commands/effects/approvals, candidate publication, and
+  root-chain authority;
+- portable worker environments and checkpoints;
+- a stable `chain_root_id` for the execution lineage, distinct current
+  `placement_thread_id`, and boot-epoch fencing;
+- staged placement-transfer authority, remote admission, and durable cross-site
+  worker handoff; and
+- verification and recovery checks that preserve source/target chain-writer
+  authority rather than discovering state sideways.
 
-Together they establish whether one RyeOS node can execute real projects while
-remaining exact, recoverable, observable, and efficient. The immediate loop is
-complete only when:
-
-1. both workloads finish representative runs without project-side substrate
-   workarounds;
-2. first execution and replay retain their distinct authoritative evidence;
-3. remaining RyeOS-owned contention and cache misses are measured before being
-   optimized;
-4. a complete cost-bearing run pair passes the landed execution-comparison
-   contract; and
-5. the web and terminal execution field show the same project, run, definition,
-   cost, decision, and replay facts from durable evidence.
-
-This is the shared foundation for every direction below. Managed workers and
-federation must extend it rather than creating parallel execution systems.
+This is not yet a general scheduler, public federation fabric, or hostile
+multi-tenant cloud. It is the narrower portable hosted-execution path required
+to place one admitted worker on an explicitly selected site and retain one
+authoritative chain.
 
 ## Growth map
 
 ```text
-representative deep + broad workloads
+exact single-node execution + recorded evidence
     |
-    v
-single-node execution truth
-  identity + realization + capsules + effects + continuation + field
+    +-- hosted worker execution (landed)
+    |     `-- portable checkpoint + explicit cross-site placement (landed)
     |
-    +---------------- local execution ----------------+
-    |                                                 |
-    |  fixed persistent worker (landed)               |
-    |    -> sealed local qualification                 |
-    |    -> generation-state capsules, when needed    |
-    |    -> leased warm workers, when measured         |
-    |                                                 |
-    +---------------- portability --------------------+
-    |                                                 |
-    |  verification-only evidence export              |
-    |    -> hosted principal/job boundary              |
-    |    -> durable remote jobs and staged transfer    |
-    |    -> cross-node continuation and federation     |
-    +-------------------------------------------------+
+    +-- local inference (active next branch)
+    |     |-- serious recorded remote tinygrad profile
+    |     |-- traces + corpus + recorded training
+    |     |-- sealed qualification, when proved
+    |     `-- generation-state capsules, when measured
+    |
+    +-- self-hosted implementation campaigns
+    |     `-- frozen candidate + checks + explicit publication
+    |
+    +-- verification/certification export
+    |
+    `-- broader federation and hosted multitenancy
+          `-- scheduling, delegation, repair, distributed retention
 ```
 
-The two branches interact but are not one feature. A managed runtime worker
-changes how an admitted invocation is hosted inside a node. Portability and
-federation change where authority, content, evidence, and continuation may
-travel.
+The branches compose through the same identity, content, consequence, and
+lineage contracts. They do not justify parallel model, worker, checkpoint, or
+federation substrates.
 
-## Local execution branch
+## Active local-inference branch
 
-The generic signed `worker` kind and its fixed persistent-session lifecycle are
-landed. A worker is a mechanical execution vessel, not a synonym for a model,
-latency reuse, or hostile-workload isolation.
+The offline-model requirement and a capable remote site now satisfy the pull-
+forward gate. The next path is not “seal the CPU fixture” and not “build a
+general scheduler.” It is:
 
-The deferred progression is deliberately gated:
+1. prove ordinary disabled-isolation local inference through the existing
+   daemon-owned private workspace;
+2. compose the reusable tinygrad worker with one explicit signed serious
+   model/runtime/target profile;
+3. place it on the selected capable site and bank/replay a real request;
+4. retain bounded performance, trace, and artifact evidence;
+5. admit provenance-complete corpora and recorded tinygrad training when that
+   evidence exposes a useful learning loop;
+6. qualify a sealed scope only after closed observed-artifact promotion and a
+   two-process byte proof; and
+7. export the selected execution closure for network-independent acceptance.
 
-1. **Sealed local inference.** Qualify one exact local realization only when
-   its retained numerics, sampler, compiled artifacts, and independent runs
-   justify a sealed claim. Recorded remains an honest final class when they do
-   not.
-2. **Generation-state capsules.** Add opaque, content-addressed KV/token/sampler
-   lineage only after sealed qualification and a real workload needs exact
-   park, resume, or fork.
-3. **Leased managed runtimes.** Extend the same `worker` kind with a separately
-   admitted single-use invocation lease only when measurements show material
-   RyeOS-owned cold-start or connection cost after workflow and provider work.
+Recorded generation capsules may support honest prefix/resume/fork before
+sealed qualification. Exact equivalence remains a separately earned claim.
+Owner: `knowledge:ryeos/future/local-execution-roadmap`.
 
-Search and inference workloads may pull forward local hypothesis forks and
-resumable generation. Evaluator or simulation workloads may justify warm
-vessels only if their own measurements show setup cost rather than useful work
-is the bottleneck. No project should be rewritten around workers merely
-because the mechanism exists.
+## Self-hosted implementation branch
 
-Owner: `knowledge:ryeos/future/local-execution-roadmap` and its linked worker,
-sealed-inference, and generation-capsule documents.
+The hosted-worker substrate can now be qualified as an implementation vessel.
+The first campaign shape is one owner-issued, bounded, disconnect-safe turn in
+a private RyeOS candidate workspace. The installed host generation remains the
+authority; the candidate can edit, build, test, and return evidence but cannot
+sign, install, restart, or publish itself.
 
-## Portability branch
+Local inference expands that campaign after the recorded serious route exists:
+cheap retrieval, review, test generation, failure clustering, and repeated
+hypothesis evaluation can run as admitted child executions. Frontier hosted
+coding remains useful during bootstrap and is not part of the final offline
+execution closure.
 
-The four local layers are present: signed capability, admitted invocation,
-durable consequence, and rebuildable projection. What remains portable is an
-independently verifiable chain leaving its producing node.
+Owner: `knowledge:ryeos/future/self-hosted-implementation-campaigns`.
 
-The first step is verification-only export:
+## Portability and evidence branch
 
-- the exact capsule and content-complete CAS/effect/evidence closure;
-- a deterministic verification profile; and
-- a node-signed statement binding the export to an exact chain head.
+Cross-site worker placement has landed for one admitted lineage. Portable
+evidence remains a distinct problem: an external verifier should receive the
+exact capsule and content/effect/evidence closure plus a deterministic
+verification profile and signed chain-head statement. Verification does not
+grant continuation authority.
 
-A completed execution proof intended for independent review is the preferred
-first consumer because it makes the completeness and disclosure boundaries
-concrete. Verification-only export does not grant continuation authority and
-does not require federation.
+Certification adds named retention and disclosure policy; it is not “keep
+every cache forever.” Offline model acceptance is the first concrete consumer
+of a content-complete verification closure.
 
-Owner: `knowledge:ryeos/future/portable-execution-graph-advanced-path`.
+Owner: `knowledge:ryeos/future/portable-execution-graph-advanced-path` and
+`knowledge:ryeos/future/provider-call-effect-records`.
 
-## Hosted-node branch
+## Broader hosted and federation branch
 
-Before unrelated principals share a node, RyeOS needs a deployment-shaped
-trust boundary:
+The landed placement path deliberately precedes broad federation. Later work
+still includes:
 
-- principal and job identity carried from admission through execution;
-- principal-scoped project state, caches, secrets, network policy, audit, and
-  cleanup;
-- cgroup-backed aggregate CPU, memory, PID, and workload-lifetime ownership;
-- a VM, microVM, dedicated worker, or equivalent outer isolation boundary
-  selected by the threat model; and
-- principal-aware resolution, quota, retention, and UI/project registry.
+- multi-principal project, cache, credential, quota, audit, and cleanup
+  boundaries;
+- threat-model-selected outer containment for unrelated or hostile tenants;
+- node inventory and policy publication suitable for selection;
+- generic placement policy and scheduler leases beyond explicit target choice;
+- key succession, revocation, delegation, audience binding, and replay
+  protection;
+- distributed retention, repair, mirrored heads, and availability policy; and
+- public or third-party admission boundaries.
 
-The hosted outer worker is not the signed RyeOS `worker` kind. The signed item
-is an application execution vessel. The outer worker/cgroup/VM is a kernel and
-tenant containment boundary. A hosted deployment may place a signed worker
-inside that boundary, but their identities and lifecycle claims remain
-separate.
-
-Owner: `knowledge:ryeos/future/hosted-node-trust-boundaries` and
-`knowledge:ryeos/future/ryeos-ui-local-project-registry-and-multitenancy`.
-
-## Federation branch
-
-Federation is not daemon forwarding added to local execution. It begins only
-after the portable evidence and hosted-principal boundaries are explicit. Its
-initial substrate is:
-
-1. bounded closure transfer and staged imports;
-2. durable remote jobs and CAS attribution;
-3. typed principal-aware handler context;
-4. generic signed heads and policy admission;
-5. key succession, revocation, delegation, audience binding, and replay
-   protection; and then
-6. remote execution, mirrored heads, cross-node continuation, repair, and
-   distributed retention.
-
-The local capsule, effect record, pinned generation, follow identity, and field
-projection remain the model. Federation transports and re-admits those facts;
-it must not invent a looser distributed identity system.
+Federation transports and re-admits existing objects and consequences. It must
+not replace `chain_root_id`, project authority, effect identity, placement
+threads, or launch capsules with a looser distributed identity.
 
 Owners: `knowledge:ryeos/future/distributed-substrate-deferred-advanced`,
-`knowledge:ryeos/future/key-lifecycle`, and
-`knowledge:ryeos/future/mcp-server-auth`.
+`knowledge:ryeos/future/hosted-node-trust-boundaries`, and
+`knowledge:ryeos/future/key-lifecycle`.
 
 ## Pull-forward order
 
-1. Finish representative deep and broad single-node workloads and
-   execution-field acceptance.
-2. Use the resulting evidence to decide whether sealed local inference has
-   immediate workload value.
-3. Implement verification-only execution-proof export when evidence must leave the
-   node.
-4. Establish hosted principal/job isolation before accepting untrusted remote
-   execution.
-5. Pull durable remote jobs, staged transfer, attribution, and signed heads as
-   the first distributed substrate.
-6. Design key lifecycle and delegation before cross-node continuation.
-7. Activate federation only when admission, isolation, evidence, and retention
-   compose across sites.
+1. Qualify the landed hosted-worker and explicit cross-site placement path.
+2. Activate one serious recorded tinygrad model on the selected remote site.
+3. Use a bounded hosted implementation campaign to complete and qualify the
+   missing RyeOS local-inference path, with operator-controlled publication.
+4. Shift useful project work to the admitted local route, retaining traces and
+   comparisons.
+5. Add corpus building and recorded training when a concrete local learning
+   opportunity is measured.
+6. Complete offline verification/export for the selected final execution.
+7. Pull sealed qualification and generation-state exactness only where their
+   stronger claims provide measured value.
+8. Add general scheduling, hostile multitenancy, and broader federation only
+   after explicit placement becomes the limiting operation.
 
-Generation capsules and leased workers stay on their own evidence gates; they
-are not prerequisites for portability or federation. Reflexive deployment,
-distributed scheduler leases, and broader family analytics should be pulled
-forward only when the corresponding activation, placement, or analysis problem
-is real.
+Reflexive deployment remains separate throughout. A successful implementation
+worker or candidate-node probe cannot activate its own candidate.
 
 ## Decision rule
 
-The next ambitious mechanism is chosen by observed need:
-
-| Evidence from current work | Pull forward |
+| Observed need | Pull forward |
 |---|---|
-| Local inference can be independently reproduced byte-for-byte | sealed local qualification |
-| An admitted search needs exact prefix park/resume/fork | generation-state capsules |
-| RyeOS-owned warm-start cost remains materially high | leased managed runtimes |
-| A completed execution must be verified outside its node | verification-only export |
-| Another principal's work must run on the node | hosted principal/job boundary |
-| Content, heads, or execution must move between nodes | durable jobs and federation substrate |
+| Capable remote device is known and selected | explicit serious local-inference profile |
+| Repeated work exposes useful trajectory/outcome data | admitted corpus and recorded tinygrad training |
+| Same-scope clean processes reproduce canonical bytes | sealed local qualification |
+| Prefill/recovery/search cost is material | recorded generation capsules; exact semantics after proof |
+| One hosted turn cannot meet mechanical acceptance | bounded evidence-gated campaign controller |
+| A completed run must be audited elsewhere | verification/certification export |
+| Explicit target choice becomes operationally limiting | inventory-driven placement and scheduler policy |
+| Unrelated principals share infrastructure | hosted tenant boundary and stronger containment |
+| Authority/content must move among independent sites | broader federation, key lifecycle, repair, retention |
 
-Landing a generic mechanism is not evidence that its most ambitious consumer
-should be implemented next.
+Landing a mechanism is not evidence that its broadest consumer should be built
+next.

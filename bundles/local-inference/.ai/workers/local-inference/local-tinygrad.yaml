@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-13T03:35:01Z:6730ba008755a8a84467a8630ebdcebdbe3eb43f13ea35639eb66ec0849bee25:XmziLktWIBDr9tWNj8jWV+sBQmGDT26M67F9cz/UT25k/WPb8e9Vz/BNqElW61WrxVvrI+1Y7QZGaCIC81QiDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-27T04:22:27Z:eb66253a0dc271aa6f50c715db4f901d8cb26b0a8e0a62344295a9cc943d3435:IaphkpuzlJPLfB3i700X1+aDGNcA9qRDYPgMfKxyqQLCdvAI8VC8tSTCNfenhCW2HJm3NK7Um6+tnK/bLbYdDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "local-inference"
 version: "1.0.0"
 executor_id: "@subprocess"

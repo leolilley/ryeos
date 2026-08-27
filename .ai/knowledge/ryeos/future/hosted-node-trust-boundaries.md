@@ -1,10 +1,10 @@
-<!-- ryeos:signed:2026-08-12T07:28:15Z:16e7c053ffca08a6f7c0b201f2c72e3dbe6e5d38c0fae7ea110dc6343d54ff9c:vDEUYKciaa/wopenKAO/1Z8uZVRR0YL+T45F47XF5DnVDxOZ/4lDq1KkzIrm7Xyb4TYm30niP2shMwtw0DA+Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-27T04:21:36Z:900b03977a013ae3347dde0312a3e8041339a970bf8694b7787a139296bbded6:16cGcmzpsU8zG2F3nrN1JraKgboOxi2uR7XbhPZT1PU5kg3GmaMLY/XBs6pMcMXo33mgVZYwPMb92vqJveN3Aw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/future
 name: hosted-node-trust-boundaries
 title: Hosted-Node Trust Boundaries
 entry_type: implementation_guide
-version: "0.6.1"
+version: "0.7.0"
 description: The remaining trust boundaries for hosting other principals, including deployment-grade isolation around typed signed backends.
 tags:
   - hosted-node
@@ -17,22 +17,28 @@ tags:
 
 ## Status
 
+RyeOS now has a hosted structured-worker application boundary for trusted
+owner-configured workloads, including private homes, credential generations,
+typed approvals/effects, restart recovery, portable checkpoints, and explicit
+cross-site placement. That application/session substrate is not the hostile
+multi-tenant boundary owned by this note.
+
 The node-owned RyeOS process-isolation boundary is implemented as optional
-Linux groundwork and remains disabled by default. When enabled, it gives RyeOS
+Linux hardening and remains disabled by default. When enabled, it gives RyeOS
 one immutable, node-owned launch boundary where
 verified code identity, descriptor-pinned filesystem authority, environment,
 network posture, bounded stdout/stderr retention, target-process-group
 supervision, and enforceable per-process limits meet. That is the right
 foundation for extracting a backend-neutral isolation plan because later
 isolation can wrap or further narrow one explicit boundary instead of finding
-and replacing scattered spawn paths. It is not itself the portable or hosted
-backend architecture.
+and replacing scattered spawn paths. When disabled, trusted signed launches may
+still receive exact admitted inputs through a daemon-owned private workspace;
+RyeOS reports honestly that kernel confinement was not enforced.
 
 It is not yet a hostile multi-tenant boundary. The current policy is node-wide,
 not principal-specific; CPU, memory, and process-count cgroup quotas are
-deferred; host PIDs remain visible to syscalls; same-UID signal isolation is not
-claimed; and transitive imports, libraries, and assets remain live read-only
-views rather than content-pinned artifacts. A deployment that runs hostile
+deferred; host PIDs remain visible to syscalls; and same-UID signal isolation is
+not claimed. A deployment that runs hostile
 workloads must still add cgroups plus a VM, microVM, or dedicated outer worker.
 
 Attachment-before-execution now closes the local creation-to-publication crash
@@ -46,7 +52,7 @@ must own quotas and whole-workload teardown across descendants that escape the
 local process group, hostile same-UID behavior, and worker/kernel failure. It is
 not a substitute for the local durable attachment boundary.
 
-The complete hosted-node boundary remains deployment-shaped:
+The complete multi-principal hosted-node boundary remains deployment-shaped:
 principal-specific identity and isolation, authenticated network peers,
 multi-principal resolution, storage and secret partitioning, quotas, audit, and
 distributed retention only become concrete when a node hosts other principals

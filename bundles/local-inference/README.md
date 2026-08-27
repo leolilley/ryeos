@@ -1,22 +1,28 @@
 # Local inference bundle
 
-Local-model execution content for RyeOS. The bundle owns concrete
-worker definitions, their adjacent source, provider routes, activation data,
-and acceptance probes. The generic `worker` kind remains part of the platform.
+Local-model execution content for RyeOS. The bundle owns concrete worker
+programs, their adjacent source, provider routes, activation fixtures,
+acceptance probes, and model-domain knowledge. The generic `worker` kind,
+persistent-session protocol, content stores, effect records, and execution
+identity remain platform-owned.
 
-This bundle does not own an isolation backend. Recorded local execution
-requires the separately authored Bubblewrap bundle with isolated-network
-capability; live execution may use the generic disabled-isolation path.
-
-See `knowledge:local-inference/activation` after installing the bundle.
-
-The ordinary full source-checkout install publishes this bundle without an
-isolation backend:
+The ordinary full source installation includes this bundle:
 
 ```text
 sudo scripts/pkg/install-local-direct.sh --populate --all --trust-source-publishers
 ```
 
-If recorded local execution is activated later, build and install a compatible
-isolation backend separately. Installing this bundle does not select or require
-Bubblewrap.
+Local inference does not require Bubblewrap. On the default trusted single-user
+node, RyeOS delivers the exact signed source and external realizations through a
+daemon-owned private workspace and runs the persistent worker under disabled
+OS isolation. An installed isolation backend is optional hardening; RyeOS
+records whether confinement and isolated networking were actually enforced.
+
+Installing the bundle does not import or activate model content. Follow
+`knowledge:local-inference/activation` to configure node bounds, import and bind
+the exact runtime/model realizations, validate the route, and prove first-bank
+versus zero-contact replay.
+
+The shipped Qwen3-0.6B CPU route is a bounded recorded-class contract fixture.
+It is not a sealed qualification and does not define the future production
+model, device, context, trace, or training architecture.

@@ -1,142 +1,140 @@
-<!-- ryeos:signed:2026-08-13T03:35:01Z:fc1aed0d2a10de23dbdc2b996918e4b7ccecb1ac0b9a38e5d7828b87a046ce98:rE7ahh88/sqU1GBOIhX5Wy+tvqjMmWXRUppdFjsvGnWlYTwH0rj2pwahSPzO27dnGF9Z9XCBN+rP9h2BsheXBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-27T04:21:31Z:3db6d1ce55c5946df0f5e02d8195222162f87389717fb6365fd10e24b54b219c:YeF/vgHETq99ZA0wPheVu0eKHr0/iLTWmpZKRz4wGO+hg4Q/KLZlZNRiEUhhdyqymrlgB+B2gHZhk9Q6EHshBQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/future
 name: local-execution-roadmap
 title: Local Execution Roadmap
-description: Landed local-execution foundation and the deferred boundaries for sealed inference, generation capsules, and leased latency workers
+description: Current recorded local-model foundation and the scheduled path through serious remote inference, traces, training, sealed qualification, generation capsules, and offline export
 entry_type: reference
-version: "0.2.0"
+version: "0.3.0"
 ```
 
 # Local execution roadmap
 
-This note is the boundary map for the local-execution work. It is not another
-implementation plan and it does not replace the current operating contract in
-`knowledge:local-inference/activation`.
-
-Its place in the larger RyeOS sequence is defined by
-`knowledge:ryeos/future/substrate-growth-roadmap`. The local worker track is
-one branch after single-node execution truth; it is not the route by which
-hosted-node isolation or federation is implemented.
+This note is the ownership and sequencing map for local execution. The current
+operating contract is `knowledge:local-inference/activation`; implementation
+details are planned separately. Local execution remains one consumer of generic
+RyeOS execution, content, evidence, and placement authority rather than a
+model-specific engine subsystem.
 
 ## Landed foundation
 
-RyeOS now has the mechanical substrate required to run a local model without
-making model meaning part of the engine:
+RyeOS has:
 
-- operator-owned external-content import and exact consumer binding;
-- content and large-content realization manifests, closure traversal, scrub,
-  retention, and fail-closed recovery from captured bytes;
-- stable node execution identity and attestation, plus per-launch admitted and
-  optional observed execution realizations;
-- immutable provider-call records, daemon-owned local observations, publication
-  proof, restart repair, and zero-contact replay;
-- one generic signed `worker` item kind compiled through the persistent-session
-  execution contract;
-- an identity-keyed, bounded daemon persistent-session pool with cancellation,
-  restart, target-channel isolation, and resource admission;
-- the optional local-inference bundle's Tinygrad/Qwen worker and
-  `admitted_local_worker` provider route;
-  and
-- a recorded-class local inference path. It is optional node policy, not a
-  required default-node service.
+- a generic signed `worker` kind and fixed persistent-session lifecycle;
+- an `admitted_local_worker` provider transport;
+- exact source closure and content/large-content realizations;
+- a daemon-owned private realization view for trusted disabled-isolation
+  execution, with optional enforced isolation as separate node hardening;
+- stable node identity plus admitted and optional observed execution
+  realizations;
+- daemon-owned local observations, immutable provider-call records, crash
+  repair, and zero-contact replay;
+- bounded persistent pools, cancellation, restart recovery, target-channel
+  ownership, and resource admission; and
+- the local-inference bundle's hermetic Qwen3-0.6B CPU recorded route.
 
-The `worker` kind names a mechanical execution vessel. It is not synonymous
-with model inference and it is not synonymous with latency reuse.
+The fixture proves the contract. It does not define the serious model, device,
+context, trace, training, or offline deployment architecture.
 
-## One kind, one current lifecycle and one deferred lifecycle
+## Scheduled local-inference path
 
-The current local-provider worker and the future latency worker remain the same
-signed `worker` kind. The fixed lifecycle exists today; the leased lifecycle is
-deferred. They differ by admitted protocol and lifecycle:
+An offline-model requirement and an available capable remote execution site
+now satisfy the old pull-forward trigger. The next local-execution work is:
 
-1. **Fixed persistent session — current lifecycle.** The worker's executable closure,
-   external realizations, isolation ceiling, provider role, and request
-   protocol are fixed before it starts. It serves bounded local-provider
-   requests, creates fresh request execution state, and returns daemon-observed
-   terminal evidence. It receives no general invocation capability, project
-   handle, callback token, secret set, or mutable item resolver.
-2. **Leased managed runtime — deferred lifecycle.** A warm vessel accepts a separately
-   admitted, single-use invocation lease containing one capsule, callback and
-   accounting authority, deadline, cancellation identity, and bounded dynamic
-   bindings. Settlement revokes those authorities and a reset acknowledgement
-   is required before reuse.
+1. **Ordinary-node activation.** Prove the recorded fixture under default
+   disabled isolation using exact daemon-private input delivery. Bubblewrap is
+   optional and its absence is not a degraded provider class.
+2. **Profile composition.** Separate reusable tinygrad worker implementation
+   from a concrete, signed model/runtime/target policy without adding model
+   vocabulary to engine code or caller-selectable mutable profiles.
+3. **Serious remote model.** Admit one explicit model and hardware profile on
+   the intended remote target. Keep CPU Qwen3-0.6B as a cheap fixture.
+4. **Recorded production execution.** Bank and replay a real model request,
+   retain cold/warm/prefill/decode/resource evidence, and expose it through the
+   execution field.
+5. **Trace and corpus evidence.** Retain bounded agent trajectory, exposed
+   reasoning, token, kernel, and generation-state references under explicit
+   privacy and corpus-admission policy.
+6. **Tinygrad training.** Consume exact corpus/base-model/program realizations,
+   publish immutable candidate weights, evaluate separately, and promote only
+   through explicit authority.
+7. **Sealed qualification.** Promote an observed closed artifact/numerics set
+   only after two clean processes reproduce canonical bytes under one exact
+   execution identity.
+8. **Generation-state capsules.** Recorded capsules may provide honest prefix,
+   park/resume, and fork behavior before sealed qualification; only a qualified
+   capsule may claim equivalence to uninterrupted generation.
+9. **Offline export.** Rehydrate and verify the complete selected
+   project/model/runtime closure in a network-independent environment.
 
-The second class extends the worker protocol and durable lifecycle. It must not
-be implemented by widening the fixed local worker or by introducing another
-kind whose only difference is a consumer name.
+Recorded inference, useful solve work, trace collection, and recorded training
+do not wait for sealed qualification. Sealed remains an earned stronger claim,
+not a deadline or prerequisite imposed on the useful path.
 
-## Deferred tracks
+## Worker lifecycles
 
-### Sealed local inference
+The current fixed local-provider session and any future leased general runtime
+remain the same `worker` kind but different admitted protocol/lifecycle classes:
 
-The local route is `recorded`, not `sealed`. Promotion requires a node-signed
-qualification over an exact admitted realization, deterministic request and
-sampler contract, retained compiled artifacts/numerics policy, and two clean
-processes producing byte-identical answers. The first execution that discovers
-new JIT artifacts remains recorded; qualification names a later, closed
-realization. If the target cannot meet that bar, recorded is the correct final
-class.
+- **Fixed persistent provider session — current.** Program, realizations,
+  provider role, protocol, resources, and target are fixed before boot. It
+  accepts bounded provider requests and receives no project resolver, general
+  invocation capability, callback token, secret set, or mutable item lookup.
+- **Leased managed runtime — deferred.** A reusable vessel receives one
+  separately admitted invocation lease with bounded authority and must prove
+  reset before reuse.
 
-Owner: `knowledge:ryeos/future/sealed-local-inference`.
+Do not widen the fixed local-model worker merely to obtain general warm-runtime
+latency reuse. `knowledge:ryeos/future/content-addressed-managed-runtime-workers`
+owns that separate measured boundary.
 
-### Generation-state capsules
+## Trace and training boundary
 
-KV state, tokens, sampler state, and model-specific resume validation remain
-provider-owned. The shared substrate may own only opaque capsule coordinates,
-payload and lineage hashes, staging, immutable indexes, tenant scopes, leases,
-budgets, and retention. This begins only after a positive sealed
-qualification; a recorded terminal replay is not a proof that in-flight state
-can resume bit-identically.
+RyeOS core owns content refs, events, artifacts, identities, lineage,
+retention, effects, and comparisons. The local-inference bundle or project owns
+tokens, logits, model reasoning, datasets, adapters, optimizer state, metrics,
+and promotion semantics.
 
-Owner: `knowledge:ryeos/future/generation-state-capsules`.
-
-### Leased latency workers
-
-The process/session mechanics are landed, but general warm invocation reuse is
-not. Remaining work is the durable invocation lease, boot-attested worker
-instance, per-invocation authority handoff, authenticated callback binding,
-reset acknowledgement, recovery reconciliation, and bounded operational pool.
-The 2 August measurements still do not justify pulling this track ahead of
-workflow/provider improvements for chat.
-
-Owner: `knowledge:ryeos/future/content-addressed-managed-runtime-workers`.
-
-### Certification, retention, and export
-
-Provider and dispatch records replay locally today. Certification needs an
-explicit retention lane and an independently verifiable export closure containing the
-capsule, realization/effect closure, chain history, signer evidence, and a node
-attestation of the exported head. Cross-node continuation remains separate.
-
-Owners: `knowledge:ryeos/future/provider-call-effect-records` and
-`knowledge:ryeos/future/portable-execution-graph-advanced-path`.
-
-### Aggregate hostile-workload resource enforcement
-
-Current pool ceilings are node admission budgets around trusted signed workers.
-Per-process limits do not prove aggregate CPU, memory, or PID containment for a
-hostile descendant tree. That stronger claim requires cgroup-backed ownership
-or an equivalent kernel boundary and belongs with hosted-node trust work, not
-inside the worker kind.
-
-Owner: `knowledge:ryeos/future/hosted-node-trust-boundaries`.
+Observable tool trajectories and explicit model/provider outputs may become
+training examples only through an admitted corpus builder. Hidden frontier
+chain-of-thought is not inferred or claimed. Credentials, private profile
+state, withheld evaluation inputs, and sources without permitted-use policy do
+not enter a training realization.
 
 ## Pull-forward order
 
-1. Complete representative deep and broad runs without project-side substrate
-   workarounds, then make the web and terminal execution field show the same
-   durable facts their project evidence exposes.
-2. Complete the landed two-run comparison against a real cost-bearing pair
-   and retain first-bank versus replay evidence distinctly.
-3. Use that evidence to decide whether sealed local qualification has immediate
-   workload value on the available hardware.
-4. Pull generation capsules only after qualification is positive and a search
-   workload needs prefix, park/resume, or fork.
-5. Pull leased latency workers only when a new latency distribution passes the
-   existing measurement gate.
-6. Pull portable export when a solve must be independently verified outside
-   the producing node.
+1. Pass ordinary-node fixture bank/replay acceptance without Bubblewrap.
+2. Land profile composition and one serious remote target/model.
+3. Complete recorded production inference and bounded trace evidence.
+4. Shift hosted project work onto that route once one network-independent
+   end-to-end probe passes.
+5. Add corpus building and recorded tinygrad training when retained traces show
+   a concrete learning opportunity.
+6. Qualify one sealed inference scope when observed artifacts and numerics can
+   be closed.
+7. Pull recorded generation capsules when prefix/recovery/search economics are
+   material; add exact-resume claims only after qualification.
+8. Export a complete offline verification closure for independent acceptance.
 
-This order is evidence-driven. Landing a generic mechanism does not, by itself,
-make its most ambitious consumer the next implementation.
+General scheduling, broad federation, sealed training, and hostile multi-tenant
+containment retain their own evidence gates.
+
+## Owners
+
+- Sealed qualification: `knowledge:ryeos/future/sealed-local-inference`.
+- Generation state: `knowledge:ryeos/future/generation-state-capsules`.
+- Execution scope: `knowledge:ryeos/future/execution-identity`.
+- Large artifacts: `knowledge:ryeos/future/large-content-realization-follow-ons`.
+- Provider evidence/export: `knowledge:ryeos/future/provider-call-effect-records`.
+- General leased workers:
+  `knowledge:ryeos/future/content-addressed-managed-runtime-workers`.
+
+## Non-goals
+
+- no second model/worker/federation substrate;
+- no multi-backend fallback around tinygrad;
+- no model, tokenizer, weights, dataset, LoRA, or KV variants in generic state;
+- no automatic model/device selection;
+- no requirement that normal local inference use Bubblewrap; and
+- no claim that local or sealed model output is correct merely because it is
+  reproducible.

@@ -1,12 +1,12 @@
-<!-- ryeos:signed:2026-08-10T03:16:08Z:3e4a70556b796331ce2caeee4fc9ca00eb260621c0fed83d02b47d8bd0cf860e:k5GygGaKt2ZyQiR0BEVMj7LT5oCfGDTi5aMMXFf5G3pe7BmW9sUTCsFCwfhAStMGH6E5/yN5PnYgnGYR8PHnDA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-08-27T04:21:33Z:c6e69e518a4dbd6c22682379ca8844afd6338446969fa694e499c23e27b61851:2CK0VG0xgMo2jvUtPhKHK+QrziAb48PKEGznzisZBOHLGa2kIVgGLrDcQvD2DX9CIJRlc/wJSEinbqOpP1OSDw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
-tags: [future, realization, large-content, storage, inference, checkpoint]
-version: "0.1.0"
-status: deferred
+tags: [future, realization, large-content, storage, inference, training, trace, checkpoint]
+version: "0.2.0"
+status: scheduled
 description: >
   Deferred follow-ons for RyeOS's landed semantically blind large-content
-  realization tier: measured composition, compiled-artifact reuse, operational
-  policy, and future checkpoint consumers.
+  realization tier: measured composition, compiled artifacts, traces, corpora,
+  training outputs, operational policy, and generation-state consumers.
 ---
 
 # Large-content realization follow-ons
@@ -17,7 +17,7 @@ The large-content tier is implemented. It is not a weights kind and the shared
 wire contains no model vocabulary. Operator-owned import produces current
 content or large-content manifest objects; exact consumer binding grants mount
 authority; closure traversal, scrub, staging, retention, and restart recovery
-operate over those objects. The standard local worker uses it for model and
+operate over those objects. The local-inference fixture uses it for model and
 toolchain bytes.
 
 The mechanical distinction is storage behavior:
@@ -27,9 +27,10 @@ The mechanical distinction is storage behavior:
 - large content is immutable contiguous storage with chunked verification,
   leases, budget sweep, and read-only binding suitable for very large files.
 
-Consumer meaning remains item-authored data. Model weights, a runtime image, a
-checkpoint tensor set, and a future training corpus do not create Rust variants
-merely because they use the same storage mechanics.
+Consumer meaning remains item-authored data. Model weights, token/logit/kernel
+traces, a runtime image, a corpus, an adapter, optimizer state, a checkpoint
+tensor set, and a generation capsule do not create Rust variants merely
+because they use the same storage mechanics.
 
 ## Standing decisions
 
@@ -52,7 +53,7 @@ merely because they use the same storage mechanics.
    file identity, manifest bytes, and declared bounds may move a digest;
    absolute installation/import paths may not.
 
-## Deferred work
+## Scheduled work
 
 ### Composition and deduplication
 
@@ -71,6 +72,29 @@ retention but does not decide whether an artifact is a kernel, whether it is
 complete, or whether its numerics are deterministic. Those proofs belong to
 the provider qualification contract.
 
+### Trace and corpus payloads
+
+Bounded events carry hashes and summaries; large token, selected-logit,
+compiler/kernel, agent-trajectory, and diagnostic payloads use ordinary or
+large content according to their mechanical size and access pattern. Corpus
+builders consume exact retained inputs under explicit privacy, permitted-use,
+deduplication, split, and filtering policy, then publish an immutable corpus
+manifest. The generic tier never decides that an event is a rationale, a
+training example, or safe to disclose.
+
+Credentials, private hosted-worker homes, withheld evaluation inputs, and
+sources without admitted permitted-use policy must not enter a corpus closure.
+Hidden provider chain-of-thought is not a capturable large-content class.
+
+### Training outputs
+
+Tinygrad training may publish immutable candidate weights, adapters, optimizer
+state, and checkpoints through the same realization machinery. The training
+program owns those meanings and the exact base-model/corpus/recipe coordinate.
+An adapter or base-plus-overlay representation is permitted only when a signed
+consumer contract proves its mechanical composition. The large-content store
+does not promote a candidate model; evaluation and explicit promotion do.
+
 ### Generation-state payloads
 
 Generation-state capsules may reference large payload hashes, but the generic
@@ -81,16 +105,18 @@ evidence-bearing external realizations.
 
 ### Operational policy from measurements
 
-Current file, launch, node-budget, and scrub defaults were chosen for the first
-worker. Revisit them with retained measurements from larger models and capsule
-payloads:
+Current file, launch, node-budget, and scrub defaults were chosen for the
+fixture worker. Revisit them with retained measurements from a serious remote
+model, trace capture, recorded training, and capsule payloads:
 
 - ingest throughput and resumability;
 - scrub duration and corruption detection;
 - active lease pressure and free-space behavior;
 - mmap/read patterns under inference;
-- orphan/stage reclamation; and
-- manifest entry/size distributions.
+- orphan/stage reclamation;
+- manifest entry/size distributions;
+- corpus/checkpoint write amplification and retirement pressure; and
+- training/inference concurrency under node storage budgets.
 
 Node policy remains expressed as bounds and named authorities, never as a
 model-specific exception.
@@ -98,6 +124,8 @@ model-specific exception.
 ## Triggers to revisit
 
 - observed-artifact promotion begins for sealed local qualification;
+- a serious remote model or recorded tinygrad training run is activated;
+- retained trace/corpus payloads exercise certification and disclosure policy;
 - a second large-content consumer exposes an overly consumer-shaped contract;
 - generation capsules need multi-gigabyte payload retention;
 - real checkpoint/model churn shows whole-object deduplication is materially

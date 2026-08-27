@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-12T07:28:15Z:3dbf0f4eb7ddbdbc159997a135c941db8cc368be534d49acc2d94cd96fe90747:YSKkVbZxrRo5Sb6q5a8Kh4Uu93iB57Jvpl7az3pL0TGr9UaVTlKNI19+oLRSbBqcwU3NdDG8wNKgAI6VkgW1Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-27T04:21:33Z:e833de52830050871feec08a7b150e83a409e74f6cbce5269215686a7a80809f:znxT+fwDdLA44xKbfpW0FmnjwJcct1/CHQ6lTX/u9trvPQKQD8FNh9bm5bOlBxSe96V74wgQE7TdMzyx2+hZAw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, replay, provider, directive, evidence, certification]
-version: "0.2.1"
-status: deferred
+version: "0.3.0"
+status: scheduled
 description: >
   Deferred measurement, certification, retention, and export work over the
   landed provider-call effect-record boundary.
@@ -33,9 +33,12 @@ For a signed directive that admits a durable provider effect, RyeOS now:
 
 Corrupt or contradictory indexed evidence is an integrity failure, not a live
 miss. One identity has one answer; an exact duplicate folds and divergence
-fails closed. Remote provider evidence is `recorded`. The standard local worker
-is also currently `recorded`, with a daemon-owned local observation and an
-admitted execution realization; it is not upgraded to sealed by configuration.
+fails closed. Remote provider evidence is `recorded`. The local-inference
+fixture is also currently `recorded`, with a daemon-owned local observation and
+an admitted execution realization; it is not upgraded to sealed by
+configuration. Its normal disabled-isolation launch receives exact inputs
+through a daemon-owned private workspace; an optional isolation backend does
+not change effect identity or grant a stronger class.
 
 ## Standing semantics
 
@@ -84,9 +87,9 @@ without claiming the original provider emitted those replayed chunks live.
 
 ## Deferred work
 
-### 1. End-to-end replay measurement
+### 1. Serious local bank/replay measurement
 
-Run one completed cost-bearing execution twice under an unchanged effective
+Run one serious local-model execution twice under an unchanged effective
 program and retain:
 
 - provider calls executed, banked, folded, and replayed;
@@ -96,11 +99,22 @@ program and retain:
 - agreement between graph-owned proof rows, provider turn evidence, and the
   execution field.
 
-This is the next acceptance slice. It must distinguish outer graph-effect
-replay from inner provider-turn replay and must not require a project tool to
-read receipts or threads sideways.
+It must distinguish outer graph-effect replay from inner provider-turn replay
+and must not require a project tool to read receipts or threads sideways. The
+first execution also retains cold/warm, prefill/decode, device/resource, and
+trace-reference evidence without embedding large traces in terminal events.
 
-### 2. Certification retention
+### 2. Trace and corpus evidence
+
+An effect record retains the canonical semantic request/answer and refs to
+bounded exposed-reasoning, token, selected-logit, compiler/kernel, and agent-
+trajectory artifacts when the signed profile requests them. Hidden frontier
+chain-of-thought is neither present nor inferred. Turning retained material
+into training data is a separate admitted corpus-building consequence with
+privacy and permitted-use policy; the provider record is evidence, not an
+implicit dataset.
+
+### 3. Certification retention
 
 Ordinary replay retention is an operational cache policy. Certification needs
 an explicit evidence lane that guarantees the capsule, provider record, first
@@ -109,15 +123,19 @@ chain events remain reachable through a named certification root. Eviction from
 the ordinary cache stays honest loss; certification is an operator/project
 decision with a bounded quota, not an implicit forever-store.
 
-### 3. Verification/export profile
+### 4. Verification/export profile
 
 Portable evidence must include the provider record and its transitive closure
 inside the execution export format. A verifier recomputes the coordinate and
 record hash, checks observation/accounting/publication provenance, validates
 the containing capsule/effective program and chain, and reports what is absent.
-Verification-only import comes before any cross-node continuation.
+Verification-only import comes before any cross-node continuation. The final
+offline profile includes the exact project, model, tokenizer/template,
+tinygrad/runtime, provider record, traces required by the declared proof, and
+their transitive closure; it excludes remote provider credentials and hosted
+coding-worker state.
 
-### 4. Sealed local qualification
+### 5. Sealed local qualification
 
 The same record/index machinery can serve as a derivation cache after a local
 route earns sealed qualification. Qualification is owned by
@@ -136,6 +154,7 @@ store does not infer or grant that class.
 ## Triggers to revisit
 
 - a representative acceptance run produces its first measured bank/replay set;
+- a retained trace must enter an admitted training corpus;
 - a solve must be certified or exported beyond the producing node;
 - ordinary record eviction prevents a required audit; or
 - sealed local qualification begins.

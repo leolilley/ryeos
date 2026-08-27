@@ -1,12 +1,12 @@
-<!-- ryeos:signed:2026-08-12T07:28:15Z:51d18dd4f4578f249d4967f822d2f836ff5c88bbbd1855725ab71addddf66d5f:m3EHORhEIUo56i4DFU71056TzKKkdV18gXXxT4bdp5smfRZ4L/9TrrvTG+W8UOsiFAT5n5/zMFnTPeaLVi7aBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-27T04:21:36Z:a5cb1aea0a7298504d22b8290a3cd16214e5744846d249ab7cdd30e7924aca67:QUnC1oww6IUlCGCLU5NdRXcMDO7VGuJIbOwbocrjD/5T9Yiv6YCXgmwkt8IAgoFEMz+B5ThONV+Ca6wlirnGDQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, portable-execution, execution-graph, architecture, export]
-version: "0.3.1"
-status: deferred
+version: "0.4.0"
+status: scheduled
 description: >
-  Remaining deferred scope for portable execution: capsule/evidence export and
-  attestation. The identity and projection layers this note originally
-  deferred were implemented in 2026-08.
+  Remaining scope for portable execution: independently complete capsule and
+  evidence export plus attestation. Hosted-worker checkpoint transfer and
+  explicit cross-site continuation are already implemented.
 ---
 
 # Portable execution: deferred export/attestation path
@@ -28,8 +28,11 @@ until "stable identity breadcrumbs" existed, and described a
   evidence; `admitted_launch_capsule_hash` is invocation authority. See
   `bundles/standard/.ai/knowledge/ryeos/core/engine/effective-programs.md`.
 
-What remains deferred is only the word **portable**: a chain leaving its node.
-Its place between single-node acceptance and hosted/federated continuation is
+Portable hosted-worker environments, checkpoints, staged transfer, remote
+admission, and cross-site continuation now exist for one explicitly selected
+placement. What remains here is a different claim: an independently complete,
+disclosure-scoped export that a verifier can authenticate without continuation
+authority. Its place beside hosted placement and before broader federation is
 summarized by `knowledge:ryeos/future/substrate-growth-roadmap`.
 
 ## Remaining scope
@@ -56,10 +59,12 @@ identity-shaped:
 3. **Attestation statement.** A signed claim by the exporting node binding
    the export to its head state ("this is the complete history of chain X
    through seq N as of T"), so partial or pruned exports are detectable.
-4. **Continuation across nodes** — explicitly out of scope here; owned by
-   `distributed-substrate-deferred-advanced.md` (closure transfer, hosted
-   isolation handoff) and gated on `key-lifecycle.md` (a traveling capsule
-   makes signer succession the importer's problem too).
+4. **Continuation relationship.** The landed hosted-worker handoff already
+   transports the exact private environment/checkpoint and preserves one chain
+   root across placement threads. That operational transfer is not an
+   independently publishable execution proof. Broader graph continuation,
+   third-party import, and federation policy remain owned by
+   `distributed-substrate-deferred-advanced.md` and `key-lifecycle.md`.
 
 The preferred first consumer is a completed execution proof exported for
 independent verification. That keeps the first portable slice read-only and
@@ -68,9 +73,11 @@ acceptance case before remote continuation is authorized.
 
 ## Guardrails (carried forward)
 
-- No export API until the format/profile above are contracts.
+- No public or certification export API until the format/profile above are
+  contracts.
 - No trust or authorization semantics derived from hashes alone.
-- Verification-only import first; continuation is a separate, later contract.
+- Verification-only import grants no continuation authority. Existing hosted-
+  worker continuation remains governed by its placement-transfer contract.
 
 ## Triggers to revisit
 

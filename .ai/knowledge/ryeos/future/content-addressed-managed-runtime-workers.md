@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-13T03:35:01Z:649703427300f8423bad6052d8d3507302920039ddf0eacdb1b8ae06e5105431:Gu7ef+kNtSAqr7f4pfyhH7CkFfqAotMPbye5hrEyKjxGIC0S1qO6doYL4Vh5NX2OoauAPhPOeQfFPioJu4m3DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-27T04:21:37Z:5171ba55f5f7274f3128ecf829989f25475c771122c590973a9978728db47a41:i4Gz/YfpDPwaPbhhK164iFMl3gx/6UnD3HKCvL8z9t1psYJNOW+nYfBWoOBou/WFg36gI9aPrx1V+y1Iqt0ECA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/future
 name: content-addressed-managed-runtime-workers
@@ -719,7 +719,7 @@ longer owned by this future note:
 - one active request per fixed local-provider session;
 - enforced-isolation target-channel plumbing, cancellation, teardown, restart,
   and no-contact terminal replay; and
-- the standard Tinygrad/Qwen recorded local-provider worker.
+- the local-inference bundle's Tinygrad/Qwen recorded provider fixture.
 
 These mechanics are reusable by the leased class, but none of them constitute
 an invocation lease or authorize a worker to execute arbitrary admitted items.

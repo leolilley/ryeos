@@ -1,178 +1,171 @@
-<!-- ryeos:signed:2026-08-13T03:35:01Z:e49a5508295598745eb438bca961633b1d2c6742b895972781e4fcf27887c3d5:lx7l/dmz2AvWSnJexbfhsqF3VPVrsnuaprZJh2Eh4499TL0ZB6ba8UC41DxNEDuVXEyzQCZJtHiCfMhB6EsWDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-27T04:21:32Z:4d9c8fe38c5fdbab424b3fba7f2445ba42f4c1ed76889a597ad452fe58a0a12b:uoY1JnjbslyCPKrGqYvEoRSLn2y6lTGmIAXqzdP1cjM2cOI0cMuXP6Tw13Fs59KLY9yujioIvSXo1QPoP9N5BQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [future, determinism, inference, tinygrad, sealed, replay]
-version: "0.2.1"
-status: deferred
+version: "0.3.0"
+status: scheduled
 description: >
-  The destination for LLM execution in ryeos: local inference on tinygrad as
-  sealed-class computation — weights, kernels, and sampler state as admitted
-  content — completing "the graph is the program" down through the model.
+  Qualification of an exact tinygrad local-model profile from recorded
+  evidence to sealed re-derivation, scoped honestly to program, artifacts,
+  numerics, sampler, and execution identity.
 ---
 
 # Sealed local inference
 
 ## Current boundary
 
-The recorded local foundation has landed. RyeOS can import and bind exact
-runtime/model/toolchain content, admit a signed `worker`, run Tinygrad/Qwen
-through an isolated persistent session, retain a daemon observation, publish a
-provider-call record, repair crash boundaries, and replay after restart without
-model contact. Node execution identity, admitted execution realization, large
-content, and provider-effect evidence are current contracts; see
-`knowledge:local-inference/activation`.
+The recorded local foundation is implemented. RyeOS can admit exact worker
+source and runtime/model/toolchain realizations, deliver them through a
+daemon-owned private workspace under disabled isolation or optional enforced
+isolation, run a persistent tinygrad worker, retain a daemon observation,
+publish a provider-call record, repair crash boundaries, and replay without
+model contact.
 
-The route is intentionally **recorded**, not sealed. No observed realization or
-sealed qualification currently proves that the compiled artifact set,
-numerics, sampler, and two clean processes reproduce the same bytes. This note
-owns that promotion boundary and nothing in the landed worker kind implicitly
-crosses it.
+The route remains `recorded`. No qualification currently proves that its
+compiled artifact set, device/numerics, request rendering, sampler, and two
+clean processes reproduce the same canonical bytes. An optional sandbox does
+not provide that proof and is not a qualification prerequisite.
 
-Remote provider calls cap out at `recorded`: the sample from the
-distribution is irreproducible (provider batching, MoE routing, silent
-model updates — temp=0 is not bit-stable remotely), so the record is the
-only evidence there will ever be. Local inference under full execution
-control inverts the class. When the substrate seals every input that
-selects the output — weights, kernels, sampler state, device — an LLM call
-becomes a pure function of admitted content: **sealed**. Re-derivation must
-reproduce it bit-for-bit, and a mismatch is a substrate-integrity finding,
-not the world moving. The record store stops being evidence of last resort
-and becomes a derivation cache; certification upgrades from replay to proof
-by recomputation.
+Remote provider effects remain recorded because their complete execution
+identity and model behavior are not under RyeOS control. Local tinygrad can
+earn a stronger class only where every output-selecting input and observed
+artifact can be closed and independently tested.
 
-**Substrate decision (Leo, 2026-08-07): the local inference backend is
-tinygrad.** Not incidental: tinygrad's static computation graph and
-deterministic linearized kernel schedule are what make the sealed claim
-implementable — kernels are compiled artifacts that can be content-
-addressed, and there is no library-side algorithm roulette to launder
-nondeterminism through. The codebase is small enough to realize whole.
+## Why tinygrad
 
-## The sealed identity
+Tinygrad is the chosen inference and training substrate because its runtime and
+compiler surface is small enough to capture, inspect, and promote as exact
+content. This makes sealed qualification feasible; it does not make every
+tinygrad execution deterministic by assertion. The qualification evidence is
+the authority.
 
-An inference call's digest decomposes into named tranches, every one
-admitted content:
+## Qualified identity
 
-- **weights** — a realization: content-addressed manifest over the
-  safetensors, pinned by digest, inherited by descendants, GC'd by
-  manifest reachability. A model version is a realization version.
-- **kernels** — the compiled kernel set for (graph, device class),
-  captured as artifacts; the BEAM search cache is pinned as a realization
-  so kernel *selection* is sealed, not just kernel source.
-- **runtime** — the tinygrad tree itself under a realization mount
-  (whole-runtime tree realization is already proven), plus the inference
-  server as a managed runtime on the
-  existing framed-streaming protocol surface.
-- **sampler** — RNG seed and sampler config in the action identity, like
-  any other param.
-- **device** — named in the execution identity, a content-addressed
-  coordinate *beside* the program digest
-  (`knowledge:ryeos/future/execution-identity`). Float non-associativity
-  means bit-stability does not transfer across hardware; `sealed` is
-  scoped to (program, execution identity), and on foreign hardware sealed
-  evidence degrades to recorded — still replayable, no longer
-  re-derivable there — never a false "sealed everywhere."
+A sealed call is scoped to a portable program plus an exact execution identity.
+The program/profile commits to:
 
-What stays `recorded` even locally: effects crossing outside the sealed
-set — live retrieval, user interaction — and sampling on any execution
-identity not yet sealed. What stays `live`: what is live everywhere.
+- model weights and quantization;
+- model config, tokenizer, normalization, special tokens, template, tools, and
+  stop behavior;
+- tinygrad and worker source;
+- hermetic interpreter/runtime/compiler closure;
+- context, output, batching, sampling, seed, and trace policy; and
+- the closed compiled-artifact/selection plan.
 
-## Interior structure: the turn stops being atomic
+The execution realization additionally commits to:
 
-Generation state is tensors — KV cache, RNG state, tokens so far — and
-tensors checkpoint. The park/resume machinery the substrate already has
-for graphs extends down into the model:
+- device class/topology and codegen-relevant features;
+- driver/compiler target facts;
+- dtype, accumulation, fast-math, TF32-like, and reduction policy;
+- exact admitted isolation provenance and runtime resource contract where they
+  can affect behavior; and
+- the node attestation that made those facts admission authority.
 
-- **Canceled turns are parked computations.** Interrupt → checkpoint
-  capsule at a token boundary → resume later, bit-identical to the
-  uninterrupted run under the sealed identity. Native-resume inside a
-  turn; a crash mid-turn re-pays tokens since the last checkpoint, not
-  the turn.
-- **Fork at token k.** Branch a generation with different seeds or
-  injected continuations — tree search over reasoning with sealed
-  provenance per branch, the graph runtime's fanout at token granularity.
-  Rejected branches remain re-derivable evidence.
-- **KV-prefix reuse as CAS.** The KV cache for a shared prefix is a
-  derived artifact keyed by (weights, kernels, prefix tokens): shared
-  prefixes share computation across runs and callers, not just storage.
+Host paths, pool slots, process IDs, and import locations remain diagnostic.
+Changing the program/profile is a new program. Changing only the qualified
+target is a new execution scope. A sealed result remains replayable elsewhere
+but can be re-derived only where both scopes match.
 
-Checkpoint economics are real: KV tensors run to gigabytes at long
-context. Checkpoints land at declared segment boundaries (the
-`segment_steps` idea, not per-token), with the same retention-lane
-honesty as every other cache here.
+## Qualification flow
 
-## What this enables for search and evaluation
+1. Run a recorded discovery execution through the exact target profile.
+2. Retain the observed compiler inputs/outputs, kernels, selection cache,
+   numerical facts, sampler policy, and bounded diagnostics.
+3. Review and promote that observed set into a closed read-only pre-admission
+   realization. The discovery run remains recorded.
+4. Start two fresh processes under the same admitted program and execution
+   identity.
+5. Run a bounded acceptance corpus covering greedy and seeded generation,
+   tokenizer/template/tool routing, stops, context edges, and selected numeric
+   golden points.
+6. Require byte-identical canonical terminal answers and the required
+   diagnostic agreement.
+7. Publish a node-signed qualification linking the program, execution
+   realization, closed artifact set, acceptance evidence, and qualification
+   policy.
 
-- **Hosted-to-local movement becomes an identity change.** A workflow may keep
-  the same sealed program while replacing a remote provider route with exact
-  weights, kernels, and runtime realizations. The resulting difference is
-  explicit in the admitted identity rather than hidden behind an API choice.
-- **Search becomes a native execution shape.** Fork + prefix-KV make wide
-  deliberate search and speculative evaluation cheaper, while the search tree
-  itself remains auditable evidence.
-- **The banked corpus becomes a flywheel.** Sealed solve traces are
-  training data with exact provenance; tinygrad trains as well as it
-  infers. Solve → bank → distill → new weights = new realization = new
-  digest → evaluation re-run → typed divergence report as the model-iteration
-  scorecard. The same execution instrument remains the controlled-experiment
-  harness for self-improvement.
-- **Certification by recomputation.** A blind evaluation plus sealed inference
-  can prove that the digest decomposes into named realizations that exclude
-  withheld inputs and that the result re-derives bit-for-bit on a clean node.
+Provider admission derives its maximum class from the current matching
+qualification. An authored `effects: sealed` string cannot upgrade a recorded
+route. A new JIT artifact, moved numeric fact, missing evidence, or changed
+target refuses sealed execution rather than silently compiling or downgrading
+under the old coordinate.
 
-## What this means for ryeos
+Bubblewrap may contribute stronger containment provenance when installed, but
+the qualification asks whether the admitted computation re-derives. Normal
+disabled-isolation execution can qualify when its complete behavior-bearing
+program and execution scope pass the same proof. It must still report that OS
+confinement was not enforced.
 
-"The graph is the program" currently carries an asterisk: cognition
-bottoms out in an unownable remote effect. This removes the asterisk —
-program includes the model — and the substrate's claim becomes
-whole-agent reproducibility: re-derive an entire agent run bit-for-bit or
-receive a typed proof naming which tranche moved. The execution instrument is
-the proving ground, while portable execution eventually becomes "export the
-complete authenticated capsule closure, re-derive where the execution identity
-matches, recorded-replay where it doesn't." That independently complete export
-is deferred in `portable-execution-graph-advanced-path.md`; a retained local
-capsule alone is not yet a portable artifact. Chat-product reuse is the same
-record store plus cross-caller KV-prefix sharing.
+## Records, traces, and divergence
 
-## Remaining implementation, in dependency order
+Provider-call records remain useful after qualification: they become a
+derivation cache and retain first-execution evidence. Replaying a record is not
+the same as re-deriving it.
 
-The former prerequisites — provider-call records, semantically blind large
-content, execution identity/realizations, and a realized Tinygrad worker — are
-landed foundation. The remaining work is narrower and evidence-gated:
+Trace evidence may include canonical request/answer, exposed reasoning,
+token IDs, selected logits, kernel/compiler refs, timings, and resource facts.
+Hidden frontier chain-of-thought is outside this contract. Large traces remain
+content-addressed artifacts referenced by bounded events.
 
-1. **Qualification contract.** Add a node-signed sealed qualification linking
-   the exact admitted realization, target identity/attestation, deterministic
-   request and sampler policy, and retained compiled-artifact/numerics plan.
-   Provider admission derives its class ceiling from this object; an authored
-   `effects: sealed` declaration cannot upgrade a recorded route.
-2. **Observed-artifact promotion.** A discovery run records the exact kernels,
-   compiler products, selection cache, and numerics facts it observed. It stays
-   recorded. Promotion creates a new closed admitted realization; any new JIT
-   artifact during a qualified run is an integrity failure.
-3. **Two-process byte proof.** Run a bounded acceptance corpus in two clean
-   processes under the same realization and require byte-identical canonical
-   terminal answers. Changed target/realization moves identity rather than
-   serving old proof.
-4. **Divergence projection.** Distinguish different program, different
-   realization/target scope, and same-scope byte divergence. Only the last is a
-   substrate-integrity finding.
-5. **Generation-state capsules.** Only after positive qualification, implement
-   `knowledge:ryeos/future/generation-state-capsules`; a recorded terminal
-   replay does not prove an in-flight tensor checkpoint resumable.
-6. **Sealed training runs** (later) — data manifests as realizations, seeded
-   runs, repeated evaluation; parallelism nondeterminism honestly classed
-   (`sealed` single-device or deterministic-reduction, `recorded` otherwise).
+Divergence reports distinguish:
+
+- different program/profile;
+- same program but different execution/qualification scope;
+- same scope with different canonical bytes;
+- missing/corrupt qualification evidence; and
+- replay without re-derivation.
+
+Only same-scope byte divergence is a sealed substrate-integrity finding.
+
+## Generation state and search
+
+Recorded prefix, park/resume, and fork capsules may exist before sealed
+qualification as integrity-checked continuation state. Their results remain
+recorded and make no uninterrupted-equivalence claim.
+
+After qualification, an interrupted-versus-uninterrupted proof may upgrade a
+matching capsule contract to exact resume/fork. The generic state substrate
+remains opaque; the tinygrad provider owns tokens, KV layout, RNG/sampler state,
+compatibility, and semantic validation.
+
+Sealed state enables reproducible prefix reuse, token-boundary search, bounded
+forks, and independent recomputation of selected branches. It does not turn a
+branch score or model rationale into correctness authority.
+
+## Distillation and training
+
+Observable solve trajectories, exposed reasoning, tool actions, outcomes, and
+local token traces may be admitted into provenance-complete corpora. Tinygrad
+training consumes exact base-model, dataset, program, recipe, and execution
+realizations and publishes new immutable weights for separate evaluation and
+explicit promotion.
+
+Recorded training is useful and may precede sealed inference. Sealed training
+is a later claim requiring deterministic single-device execution or a proved
+reduction policy. Model iteration is:
+
+```text
+solve -> retain -> admit corpus -> distill/train -> new weight realization
+      -> held-out evaluation -> typed comparison -> explicit promotion
+```
+
+## Remaining increments
+
+1. Serious model/profile and target activation under recorded execution.
+2. Bounded observed-artifact and diagnostic-trace capture.
+3. Closed artifact promotion and qualification object.
+4. Two-process byte proof and divergence projection.
+5. Portable target matching and verification-only export.
+6. Exact generation-state qualification where recorded capsule measurements
+   justify it.
+7. Sealed training only after recorded training exposes concrete value and a
+   defensible deterministic policy.
 
 ## Non-goals
 
-- No multi-backend hedging: tinygrad is the decision, not a candidate.
-- No cross-device sealed claims, ever — scoped identity or nothing.
-- No semantic caching, no cross-digest reuse: unchanged from every other
-  record surface.
-
-## Triggers to revisit
-
-- a representative measurement of turns replayed, spend saved, and first
-  divergence is in hand;
-- an available CPU/device target can retain and close its full compiled
-  artifact/numerics set;
-- an offline or independently reproducible deployment becomes a scheduled
-  requirement.
+- no automatic determinism claim from tinygrad, temperature zero, locality, or
+  OS isolation;
+- no cross-device sealed claim;
+- no semantic or cross-coordinate cache reuse;
+- no hidden chain-of-thought capture; and
+- no requirement that useful local inference, traces, solve work, or recorded
+  training wait for sealed qualification.
