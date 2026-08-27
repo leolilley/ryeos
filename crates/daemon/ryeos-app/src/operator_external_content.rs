@@ -560,7 +560,13 @@ pub async fn bind(
     request: BindRequest,
 ) -> anyhow::Result<BindResponse> {
     let operator_fingerprint = require_local_operator(&state, &context)?;
-    bind_authorized(state, operator_fingerprint, request).await
+    bind_authorized(
+        state,
+        operator_fingerprint,
+        "external-content-import",
+        request,
+    )
+    .await
 }
 
 /// Bind one component after a managed-activation caller has authenticated the
@@ -578,12 +584,19 @@ pub async fn bind_managed_activation_component(
     {
         bail!("managed external-content binding authority is inconsistent");
     }
-    bind_authorized(state, operator_fingerprint, request).await
+    bind_authorized(
+        state,
+        operator_fingerprint,
+        "managed-external-content-import",
+        request,
+    )
+    .await
 }
 
 async fn bind_authorized(
     state: Arc<AppState>,
     operator_fingerprint: String,
+    upload_purpose: &'static str,
     request: BindRequest,
 ) -> anyhow::Result<BindResponse> {
     if !lillux::valid_hash(&request.request_digest) || !lillux::valid_hash(&request.manifest_hash) {
@@ -633,9 +646,24 @@ async fn bind_authorized(
     )?;
     let publication_key =
         ryeos_state::DurableCasPublicationKey::external_content_import(&request.request_digest)?;
-    let mut stage = authority
-        .require_recovery()?
-        .open_durable_cas_upload_admitted(&guard, &request.staging_id, &operator_fingerprint)?;
+    let recovery = authority.require_recovery()?;
+    // Take the generic publication barrier before the per-stage lock and keep
+    // that order through the complete bind. Imports use the same order while
+    // creating/capturing a stage. Besides fencing the binding head used by the
+    // idempotent proof below, this prevents duplicate bind retries from each
+    // retaining one stage lock while waiting on the other's publication
+    // permit.
+    let _publication_permit = state
+        .write_barrier
+        .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
+        .map_err(|error| {
+            anyhow::anyhow!("cannot acquire external-content binding write permit: {error}")
+        })?;
+    let mut stage = recovery.open_durable_cas_upload_admitted(
+        &guard,
+        &request.staging_id,
+        &operator_fingerprint,
+    )?;
     stage.ensure_publication_contract(&publication_key, None)?;
 
     if let Some(current) = state
@@ -679,6 +707,14 @@ async fn bind_authorized(
                     tracing::warn!(%error, staging_id = %request.staging_id, "idempotent binding was current while import receipt remained retryable");
                 }
             }
+            drop(stage);
+            recovery.settle_durable_cas_uploads_for_existing_publication(
+                &guard,
+                &operator_fingerprint,
+                upload_purpose,
+                &publication_key,
+                &current.target_hash,
+            )?;
             return Ok(BindResponse {
                 binding_id,
                 binding_hash: current.target_hash,
@@ -689,7 +725,6 @@ async fn bind_authorized(
             });
         }
     }
-
     if let Some(binding_hash) = stage.admitted_target_hash() {
         let current = state
             .state_store
@@ -792,12 +827,6 @@ async fn bind_authorized(
     }
     debug_assert!(closure.object_hashes.contains(&request.manifest_hash));
 
-    let _permit = state
-        .write_barrier
-        .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| {
-            anyhow::anyhow!("cannot acquire external-content write permit: {error}")
-        })?;
     let signer = crate::state_store::NodeIdentitySigner::from_identity(&state.identity);
     state.state_store.with_state_db(|db| {
         db.ensure_current_external_content_binding_epoch(&guard)?;

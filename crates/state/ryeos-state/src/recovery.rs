@@ -1664,6 +1664,119 @@ impl RecoveryStore {
         })
     }
 
+    /// Settle every retained upload for one exact, already-proved
+    /// publication. The caller must first verify that `admitted_target_hash`
+    /// is the authoritative current target for this owner/publication key
+    /// while holding the same CAS guard. This closes duplicate retry stages
+    /// without age-based retirement or touching unrelated uploads.
+    pub fn settle_durable_cas_uploads_for_existing_publication(
+        &self,
+        cas_mutation_guard: &CasMutationGuard,
+        owner_principal: &str,
+        purpose: &str,
+        publication_key: &DurableCasPublicationKey,
+        admitted_target_hash: &str,
+    ) -> Result<usize> {
+        validate_upload_owner(owner_principal)?;
+        validate_staging_purpose(purpose)?;
+        publication_key.validate()?;
+        validate_hash(
+            "existing durable upload publication target",
+            admitted_target_hash,
+        )?;
+        self.ensure_guard(cas_mutation_guard)?;
+        let Some(directory) = self.open_child_directory("durable-cas-uploads")? else {
+            return Ok(0);
+        };
+        let mut records = Vec::new();
+        let mut locks = BTreeMap::new();
+        for entry in directory.regular_files()? {
+            match entry.path.extension().and_then(|value| value.to_str()) {
+                Some("json") => records.push(entry),
+                Some("lock") => {
+                    locks.insert(entry.name.clone(), entry);
+                }
+                _ => anyhow::bail!(
+                    "unexpected durable CAS upload entry: {}",
+                    entry.path.display()
+                ),
+            }
+        }
+
+        let mut settled = 0;
+        for record_entry in records {
+            let observed =
+                self.read_durable_upload_file(record_entry.file.try_clone()?, &record_entry.path)?;
+            // Upload identity is immutable after creation. Filter on the
+            // enumerated inode before taking a stage lock so this exact
+            // publication cannot block behind unrelated project/import work.
+            // The current inode is still reopened and checked below before a
+            // matching stage is settled.
+            if observed.owner_principal != owner_principal
+                || observed.purpose != purpose
+                || observed.publication_key != *publication_key
+            {
+                let lock_name = std::ffi::OsString::from(format!("{}.lock", observed.staging_id));
+                locks.remove(&lock_name).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "durable CAS upload {} has no lock file",
+                        observed.staging_id
+                    )
+                })?;
+                continue;
+            }
+            let lock_name = std::ffi::OsString::from(format!("{}.lock", observed.staging_id));
+            let lock_entry = locks.remove(&lock_name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "durable CAS upload {} has no lock file",
+                    observed.staging_id
+                )
+            })?;
+            lock_exclusive(
+                &lock_entry.file,
+                "lock durable upload for publication settlement",
+            )?;
+            // The record is atomically replaced as it advances. Re-open it
+            // only after acquiring the stage lock so settlement never acts on
+            // the stale inode observed during namespace enumeration.
+            let current_file = directory
+                .open_regular(&record_entry.name, false)?
+                .ok_or_else(|| anyhow::anyhow!("durable CAS upload record disappeared"))?;
+            let record = self.read_durable_upload_file(current_file, &record_entry.path)?;
+            if record.owner_principal != owner_principal
+                || record.purpose != purpose
+                || record.publication_key != *publication_key
+            {
+                continue;
+            }
+            if let Some(target) = record.admitted_target_hash.as_deref() {
+                if target != admitted_target_hash {
+                    anyhow::bail!(
+                        "matching durable upload receipt contradicts the existing publication target"
+                    );
+                }
+                continue;
+            }
+            let mut stage = DurableCasUploadStage {
+                recovery: self.clone(),
+                directory: directory.try_clone()?,
+                record,
+                lock_file: Some(lock_entry.file),
+            };
+            stage.protect_cas_closure(
+                cas_mutation_guard,
+                std::iter::once(admitted_target_hash),
+                std::iter::empty(),
+            )?;
+            stage.finish_admitted(cas_mutation_guard, admitted_target_hash)?;
+            settled += 1;
+        }
+        if let Some((_name, orphan)) = locks.into_iter().next() {
+            anyhow::bail!("orphan durable CAS upload lock: {}", orphan.path.display());
+        }
+        Ok(settled)
+    }
+
     /// Retire abandoned durable upload stages selected by an authoritative
     /// maintenance policy. There is deliberately no built-in age: callers must
     /// pass the signed policy's canonical cutoff, and omission means retain.
@@ -2691,6 +2804,125 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("admitted receipt")
+        );
+    }
+
+    #[test]
+    fn existing_publication_settles_only_its_exact_duplicate_uploads() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard =
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime(store.runtime_directory())
+                .unwrap();
+        let owner = hash("a");
+        let publication_key =
+            DurableCasPublicationKey::external_content_import(&hash("b")).unwrap();
+        let other_key = DurableCasPublicationKey::external_content_import(&hash("c")).unwrap();
+        let target_hash = hash("d");
+        let first = store
+            .begin_durable_cas_upload_admitted(
+                &guard,
+                &owner,
+                "managed-external-content-import",
+                &publication_key,
+                None,
+            )
+            .unwrap();
+        let first_id = first.staging_id().to_owned();
+        drop(first);
+        let second = store
+            .begin_durable_cas_upload_admitted(
+                &guard,
+                &owner,
+                "managed-external-content-import",
+                &publication_key,
+                None,
+            )
+            .unwrap();
+        let second_id = second.staging_id().to_owned();
+        drop(second);
+        let other = store
+            .begin_durable_cas_upload_admitted(
+                &guard,
+                &owner,
+                "managed-external-content-import",
+                &other_key,
+                None,
+            )
+            .unwrap();
+        let other_id = other.staging_id().to_owned();
+        drop(other);
+
+        assert_eq!(
+            store
+                .settle_durable_cas_uploads_for_existing_publication(
+                    &guard,
+                    &owner,
+                    "managed-external-content-import",
+                    &publication_key,
+                    &target_hash,
+                )
+                .unwrap(),
+            2
+        );
+        for staging_id in [first_id, second_id] {
+            let stage = store
+                .open_durable_cas_upload_admitted(&guard, &staging_id, &owner)
+                .unwrap();
+            assert_eq!(stage.admitted_target_hash(), Some(target_hash.as_str()));
+        }
+        let other = store
+            .open_durable_cas_upload_admitted(&guard, &other_id, &owner)
+            .unwrap();
+        assert_eq!(other.admitted_target_hash(), None);
+    }
+
+    #[test]
+    fn existing_publication_refuses_a_contradictory_duplicate_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard =
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime(store.runtime_directory())
+                .unwrap();
+        let owner = hash("a");
+        let publication_key =
+            DurableCasPublicationKey::external_content_import(&hash("b")).unwrap();
+        let admitted_target = hash("c");
+        let requested_target = hash("d");
+        let mut stage = store
+            .begin_durable_cas_upload_admitted(
+                &guard,
+                &owner,
+                "managed-external-content-import",
+                &publication_key,
+                None,
+            )
+            .unwrap();
+        stage
+            .protect_cas_closure(
+                &guard,
+                std::iter::once(admitted_target.as_str()),
+                std::iter::empty(),
+            )
+            .unwrap();
+        stage.finish_admitted(&guard, &admitted_target).unwrap();
+        drop(stage);
+
+        let error = store
+            .settle_durable_cas_uploads_for_existing_publication(
+                &guard,
+                &owner,
+                "managed-external-content-import",
+                &publication_key,
+                &requested_target,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("contradicts the existing publication target")
         );
     }
 
