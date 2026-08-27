@@ -124,7 +124,16 @@ pub struct ResolvedManagedExternalContentActivation {
 impl ManagedExternalContentActivation {
     /// Compile the portable signed recipe without consulting this node.
     pub fn from_value(value: &Value) -> anyhow::Result<Self> {
-        let document: Self = serde_json::from_value(value.clone())
+        let mut payload = value.clone();
+        if let Some(category) = payload
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("managed external-content config must be an object"))?
+            .remove("category")
+            && !category.is_string()
+        {
+            bail!("managed external-content config category must be a string");
+        }
+        let document: Self = serde_json::from_value(payload)
             .context("parse managed external-content acquisition config")?;
         document.validate_portable()?;
         Ok(document)
@@ -775,6 +784,16 @@ mod tests {
                 .admit(&policy(), &import_limits(), &declarations(), true)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn portable_compilation_accepts_the_generic_config_category_envelope() {
+        let mut value = document_value("releases.example.test");
+        value["category"] = Value::String("fixture".to_owned());
+        ManagedExternalContentActivation::from_value(&value).unwrap();
+
+        value["category"] = Value::Bool(true);
+        assert!(ManagedExternalContentActivation::from_value(&value).is_err());
     }
 
     #[test]

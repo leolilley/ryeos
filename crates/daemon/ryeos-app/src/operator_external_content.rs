@@ -654,10 +654,30 @@ async fn bind_authorized(
             && current_binding.consumer_ref == consumer.consumer_ref
             && current_binding.publisher_fingerprint == consumer.publisher_fingerprint
         {
-            if stage.admitted_target_hash().is_none()
-                && let Err(error) = stage.finish_admitted(&guard, &current.target_hash)
-            {
-                tracing::warn!(%error, staging_id = %request.staging_id, "idempotent binding was current while import receipt remained retryable");
+            if let Some(admitted_target_hash) = stage.admitted_target_hash() {
+                if admitted_target_hash != current.target_hash {
+                    bail!(
+                        "external-content import receipt target contradicts the current idempotent binding"
+                    );
+                }
+            } else {
+                // A retry may open a fresh durable upload after the exact
+                // binding head is already current. The head object was not
+                // uploaded by that fresh stage. While the shared CAS guard
+                // pins the current head and its object, durably protect that
+                // exact root before recording the already-satisfied
+                // publication. GC expands protected object roots through the
+                // typed closure, so copying every transitive edge here would
+                // add no authority. Merely calling `finish_admitted` would
+                // leave the recovery record permanently retryable.
+                stage.protect_cas_closure(
+                    &guard,
+                    std::iter::once(current.target_hash.as_str()),
+                    std::iter::empty(),
+                )?;
+                if let Err(error) = stage.finish_admitted(&guard, &current.target_hash) {
+                    tracing::warn!(%error, staging_id = %request.staging_id, "idempotent binding was current while import receipt remained retryable");
+                }
             }
             return Ok(BindResponse {
                 binding_id,

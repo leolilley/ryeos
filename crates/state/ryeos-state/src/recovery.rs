@@ -2617,6 +2617,7 @@ mod tests {
             "created_at": "2026-07-14T12:00:00Z",
             "object_hashes": [],
             "blob_hashes": [],
+            "large_object_hashes": [],
         })
     }
 
@@ -2642,6 +2643,55 @@ mod tests {
         wire["publication_key"] =
             serde_json::Value::String(format!("project-head:{}:{}", hash("a"), hash("b")));
         assert!(serde_json::from_value::<DurableCasUploadRecord>(wire).is_err());
+    }
+
+    #[test]
+    fn durable_upload_can_settle_an_already_current_publication_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard =
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime(store.runtime_directory())
+                .unwrap();
+        let publication_key =
+            DurableCasPublicationKey::external_content_import(&hash("a")).unwrap();
+        let target_hash = hash("b");
+        let mut stage = store
+            .begin_durable_cas_upload_admitted(
+                &guard,
+                &hash("c"),
+                "idempotent-publication",
+                &publication_key,
+                None,
+            )
+            .unwrap();
+        let staging_id = stage.staging_id().to_owned();
+
+        assert!(stage.finish_admitted(&guard, &target_hash).is_err());
+        stage
+            .protect_cas_closure(
+                &guard,
+                std::iter::once(target_hash.as_str()),
+                std::iter::empty(),
+            )
+            .unwrap();
+        stage.finish_admitted(&guard, &target_hash).unwrap();
+        drop(stage);
+
+        let reopened = store
+            .open_durable_cas_upload_admitted(&guard, &staging_id, &hash("c"))
+            .unwrap();
+        reopened
+            .ensure_publication_contract(&publication_key, None)
+            .unwrap();
+        assert_eq!(reopened.admitted_target_hash(), Some(target_hash.as_str()));
+        assert!(
+            reopened
+                .ensure_protects_object(&target_hash)
+                .unwrap_err()
+                .to_string()
+                .contains("admitted receipt")
+        );
     }
 
     #[test]
