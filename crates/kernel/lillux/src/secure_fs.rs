@@ -2360,6 +2360,106 @@ impl PinnedDirectory {
         }
     }
 
+    /// Stream and publish one bounded regular file without replacing an
+    /// existing entry. The temporary inode is created relative to this pinned
+    /// directory, fsynced, and renamed without replacement. A body exceeding
+    /// `maximum_bytes` is rejected before namespace publication.
+    pub fn atomic_create_regular_from_reader<R: Read>(
+        &self,
+        name: &OsStr,
+        reader: &mut R,
+        maximum_bytes: u64,
+        mode: u32,
+    ) -> Result<Option<(File, u64)>> {
+        #[cfg(not(unix))]
+        {
+            let _ = (name, reader, maximum_bytes, mode);
+            anyhow::bail!("secure streamed atomic creation is unavailable on this platform");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            if maximum_bytes == 0 {
+                anyhow::bail!("secure streamed atomic creation requires a positive byte bound");
+            }
+            validate_child_name(name)?;
+            if self.open_regular(name, false)?.is_some() {
+                return Ok(None);
+            }
+            let name_c = std::ffi::CString::new(name.as_bytes())?;
+            let sequence = crate::atomic_fs::next_temp_sequence();
+            let temp_name =
+                std::ffi::CString::new(format!(".secure.tmp.{}.{}", std::process::id(), sequence))?;
+            let descriptor = unsafe {
+                libc::openat(
+                    self.directory.as_raw_fd(),
+                    temp_name.as_ptr(),
+                    libc::O_RDWR
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC,
+                    mode,
+                )
+            };
+            if descriptor < 0 {
+                return Err(std::io::Error::last_os_error()).with_context(|| {
+                    format!("create secure streamed temp in {}", self.path.display())
+                });
+            }
+            let mut temp = unsafe { File::from_raw_fd(descriptor) };
+            let result = (|| -> Result<Option<u64>> {
+                let sentinel_bound = maximum_bytes
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("streamed byte bound overflow"))?;
+                let copied = std::io::copy(&mut reader.take(sentinel_bound), &mut temp)?;
+                if copied > maximum_bytes {
+                    anyhow::bail!(
+                        "secure streamed regular file exceeds the {maximum_bytes}-byte bound"
+                    );
+                }
+                temp.set_permissions(std::fs::Permissions::from_mode(mode))?;
+                temp.sync_all()?;
+                match publish_temp_without_replacement(
+                    &self.directory,
+                    &temp_name,
+                    &name_c,
+                    &self.path.join(name),
+                ) {
+                    Ok(()) => {
+                        self.directory.sync_all()?;
+                        Ok(Some(copied))
+                    }
+                    Err(error)
+                        if self.open_regular(name, false)?.is_some()
+                            && error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                                error.kind() == std::io::ErrorKind::AlreadyExists
+                            }) =>
+                    {
+                        Ok(None)
+                    }
+                    Err(error) => Err(error),
+                }
+            })();
+            match result {
+                Ok(Some(copied)) => Ok(Some((temp, copied))),
+                Ok(None) => {
+                    unsafe {
+                        libc::unlinkat(self.directory.as_raw_fd(), temp_name.as_ptr(), 0);
+                    }
+                    Ok(None)
+                }
+                Err(error) => {
+                    unsafe {
+                        libc::unlinkat(self.directory.as_raw_fd(), temp_name.as_ptr(), 0);
+                    }
+                    Err(error)
+                }
+            }
+        }
+    }
+
     /// Open or create one regular child while retaining this directory inode.
     pub fn open_regular_create(
         &self,

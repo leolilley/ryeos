@@ -91,8 +91,7 @@ pub use execution_realization::{
 pub use external_content_activation::{
     EXTERNAL_CONTENT_ACTIVATION_HEAD_NAMESPACE, EXTERNAL_CONTENT_ACTIVATION_KIND,
     EXTERNAL_CONTENT_ACTIVATION_SCHEMA, ExternalContentActivationComponentReceipt,
-    ExternalContentActivationReceipt, ExternalContentActivationSourceReceipt,
-    MAX_EXTERNAL_CONTENT_ACTIVATION_COMPONENTS, MAX_EXTERNAL_CONTENT_ACTIVATION_SOURCES,
+    ExternalContentActivationReceipt, MAX_EXTERNAL_CONTENT_ACTIVATION_COMPONENTS,
 };
 pub use external_content_binding::{
     EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE, EXTERNAL_CONTENT_BINDING_KIND,

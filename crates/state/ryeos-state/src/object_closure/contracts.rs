@@ -1092,20 +1092,9 @@ mod tests {
             "b".repeat(64),
             "c".repeat(64),
             "d".repeat(64),
-            vec![crate::objects::ExternalContentActivationSourceReceipt {
-                id: "package".to_owned(),
-                archive_sha256: "e".repeat(64),
-            }],
             vec![crate::objects::ExternalContentActivationComponentReceipt {
                 id: "runtime".to_owned(),
-                source_id: "package".to_owned(),
-                member_sha256: "f".repeat(64),
-                manifest_hash: "1".repeat(64),
-                manifest_kind: crate::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND.to_owned(),
-                binding_id: "2".repeat(64),
                 binding_hash: "3".repeat(64),
-                shape: "file".to_owned(),
-                storage: "large_content".to_owned(),
             }],
             "4".repeat(64),
         )

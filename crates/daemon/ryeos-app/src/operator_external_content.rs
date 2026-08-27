@@ -285,7 +285,7 @@ pub async fn import(
     let response = match request.storage {
         ImportStorage::Content => capture_content_import(
             &request,
-            policy,
+            &policy.limits,
             &source_root,
             root_device,
             state.ignore_matcher.as_ref(),
@@ -296,7 +296,7 @@ pub async fn import(
         )?,
         ImportStorage::LargeContent => capture_large_import(
             &request,
-            policy,
+            &policy.limits,
             &source_root,
             root_device,
             state.ignore_matcher.as_ref(),
@@ -314,12 +314,191 @@ pub async fn import(
     Ok(response)
 }
 
+/// Import one already-verified managed-activation member from a node-owned
+/// descriptor-pinned staging directory. The caller must have resolved the
+/// signed activation config and authenticated the configured operator; this
+/// helper accepts no ambient root name, host path, or caller-selected limit.
+pub fn import_managed_activation_component(
+    state: &AppState,
+    operator_fingerprint: &str,
+    activation: &crate::managed_external_content::ResolvedManagedExternalContentActivation,
+    component: &crate::managed_external_content::ResolvedManagedActivationComponent,
+    member: &crate::managed_external_content::ManagedActivationMember,
+    source_root: &lillux::PinnedDirectory,
+    staged_name: &str,
+) -> anyhow::Result<ImportResponse> {
+    use crate::managed_external_content::{ManagedComponentStorage, ManagedMemberDisposition};
+
+    if !lillux::valid_hash(operator_fingerprint)
+        || component.recipe.source.is_empty()
+        || component.recipe.member != member.path
+        || member.disposition != ManagedMemberDisposition::Import
+        || component.declaration_kind != ryeos_engine::external_content::ExternalContentKind::File
+        || activation
+            .component(&component.recipe.id)?
+            .expected_manifest_hash
+            != component.expected_manifest_hash
+    {
+        bail!("managed external-content import authority is inconsistent");
+    }
+    validate_relative_path(staged_name)?;
+    let policy = state
+        .node_config
+        .external_content_import_policy
+        .as_ref()
+        .and_then(|policy| policy.managed_activation.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("node has no managed external-content activation policy"))?;
+    activation.document.validate_portable()?;
+    let request = ImportRequest {
+        root: "managed-activation-staging".to_owned(),
+        path: staged_name.to_owned(),
+        shape: ImportShape::File,
+        storage: match component.recipe.storage {
+            ManagedComponentStorage::Content => ImportStorage::Content,
+            ManagedComponentStorage::LargeContent => ImportStorage::LargeContent,
+        },
+        maximum_bytes: member.maximum_bytes,
+        expected_file_sha256: Some(member.sha256.clone()),
+    };
+    let limits = crate::node_config::sections::external_content::ExternalContentImportLimits {
+        max_depth: 1,
+        max_entries: 1,
+        max_file_bytes: member.maximum_bytes,
+        max_total_bytes: member.maximum_bytes,
+        store_budget_bytes: policy.store_budget_bytes,
+        minimum_free_bytes: policy.minimum_free_bytes,
+    };
+    let policy_digest =
+        ryeos_state::objects::canonical_value_digest(&serde_json::to_value(policy)?)?;
+    let request_digest = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+        "schema":"ryeos.managed_external_content_import.v1",
+        "activation_program_digest":activation.activation_program_digest,
+        "consumer_ref":activation.document.consumer_ref,
+        "component":component.recipe,
+        "derived_consumer_authority":{
+            "kind":component.declaration_kind,
+            "manifest_hash":component.expected_manifest_hash,
+            "manifest_kind":component.expected_manifest_kind,
+        },
+        "member":member,
+        "policy_digest":policy_digest,
+        "capture_floor_rules":ryeos_state::project_sync::durable_content_capture_floor_rules(),
+        "configured_ignore_patterns":state.ignore_matcher.canonical_patterns(),
+    }))?;
+    let publication_key =
+        ryeos_state::DurableCasPublicationKey::external_content_import(&request_digest)?;
+    let (root_device, _) = source_root.device_inode()?;
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    let cas = authority.cas_store()?;
+    let large_store = authority.large_object_store()?;
+    let required_free = policy
+        .minimum_free_bytes
+        .checked_add(member.maximum_bytes)
+        .ok_or_else(|| {
+            anyhow::anyhow!("managed external-content free-space requirement overflow")
+        })?;
+    let capacity = large_store.filesystem_capacity()?;
+    if capacity.available_bytes < required_free {
+        bail!(
+            "managed external-content import requires {required_free} available bytes, observed {}",
+            capacity.available_bytes
+        );
+    }
+    if request.storage == ImportStorage::LargeContent
+        && large_store
+            .total_stored_bytes()?
+            .checked_add(member.maximum_bytes)
+            .ok_or_else(|| anyhow::anyhow!("managed external-content store budget overflow"))?
+            > policy.store_budget_bytes
+    {
+        bail!("managed external-content import would exceed the node large-store budget");
+    }
+
+    let _permit = state
+        .write_barrier
+        .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
+        .map_err(|error| {
+            anyhow::anyhow!("cannot acquire managed external-content write permit: {error}")
+        })?;
+    let mut stage = authority
+        .require_recovery()?
+        .begin_durable_cas_upload_admitted(
+            &guard,
+            operator_fingerprint,
+            "managed-external-content-import",
+            &publication_key,
+            None,
+        )?;
+    let response = match request.storage {
+        ImportStorage::Content => capture_content_import(
+            &request,
+            &limits,
+            source_root,
+            root_device,
+            state.ignore_matcher.as_ref(),
+            &guard,
+            &cas,
+            &mut stage,
+            request_digest,
+        )?,
+        ImportStorage::LargeContent => capture_large_import(
+            &request,
+            &limits,
+            source_root,
+            root_device,
+            state.ignore_matcher.as_ref(),
+            &guard,
+            &cas,
+            &large_store,
+            &mut stage,
+            request_digest,
+        )?,
+    };
+    if response.manifest_hash != component.expected_manifest_hash
+        || response.manifest_kind != component.expected_manifest_kind
+    {
+        bail!("managed external-content component differs from its signed manifest commitment");
+    }
+    source_root.ensure_path_binding()?;
+    drop(stage);
+    drop(_permit);
+    drop(guard);
+    Ok(response)
+}
+
 pub async fn bind(
     state: Arc<AppState>,
     context: HandlerContext,
     request: BindRequest,
 ) -> anyhow::Result<BindResponse> {
     let operator_fingerprint = require_local_operator(&state, &context)?;
+    bind_authorized(state, operator_fingerprint, request).await
+}
+
+/// Bind one component after a managed-activation caller has authenticated the
+/// configured operator and retained the exact signed activation program. This
+/// is not an API authorization boundary; it is the shared state transition
+/// behind the separately authorized generic activation service.
+pub async fn bind_managed_activation_component(
+    state: Arc<AppState>,
+    operator_fingerprint: String,
+    activation: &crate::managed_external_content::ResolvedManagedExternalContentActivation,
+    request: BindRequest,
+) -> anyhow::Result<BindResponse> {
+    if !lillux::valid_hash(&operator_fingerprint)
+        || request.consumer_ref != activation.document.consumer_ref
+    {
+        bail!("managed external-content binding authority is inconsistent");
+    }
+    bind_authorized(state, operator_fingerprint, request).await
+}
+
+async fn bind_authorized(
+    state: Arc<AppState>,
+    operator_fingerprint: String,
+    request: BindRequest,
+) -> anyhow::Result<BindResponse> {
     if !lillux::valid_hash(&request.request_digest) || !lillux::valid_hash(&request.manifest_hash) {
         bail!("external-content bind request contains a non-canonical digest");
     }
@@ -371,6 +550,38 @@ pub async fn bind(
         .require_recovery()?
         .open_durable_cas_upload_admitted(&guard, &request.staging_id, &operator_fingerprint)?;
     stage.ensure_publication_contract(&publication_key, None)?;
+
+    if let Some(current) = state
+        .state_store
+        .with_state_db(|db| db.read_generic_head_ref(BINDING_HEAD_NAMESPACE, &binding_id))?
+    {
+        let current_value = cas
+            .get_object(&current.target_hash)?
+            .ok_or_else(|| anyhow::anyhow!("current external-content binding is absent"))?;
+        let current_binding =
+            ryeos_state::objects::ExternalContentBinding::from_value(&current_value)?;
+        if current_binding.state == ryeos_state::objects::ExternalContentBindingState::Active
+            && current_binding.binding_id == binding_id
+            && current_binding.manifest_hash == request.manifest_hash
+            && current_binding.manifest_kind == manifest_kind
+            && current_binding.consumer_ref == consumer.consumer_ref
+            && current_binding.publisher_fingerprint == consumer.publisher_fingerprint
+        {
+            if stage.admitted_target_hash().is_none()
+                && let Err(error) = stage.finish_admitted(&guard, &current.target_hash)
+            {
+                tracing::warn!(%error, staging_id = %request.staging_id, "idempotent binding was current while import receipt remained retryable");
+            }
+            return Ok(BindResponse {
+                binding_id,
+                binding_hash: current.target_hash,
+                manifest_hash: request.manifest_hash,
+                consumer_ref: consumer.consumer_ref,
+                publisher_fingerprint: consumer.publisher_fingerprint,
+                idempotent: true,
+            });
+        }
+    }
 
     if let Some(binding_hash) = stage.admitted_target_hash() {
         let current = state
@@ -781,7 +992,7 @@ struct ResolvedConsumer {
 #[allow(clippy::too_many_arguments)]
 fn capture_content_import(
     request: &ImportRequest,
-    policy: &crate::node_config::sections::external_content::ExternalContentImportPolicyRecord,
+    limits: &crate::node_config::sections::external_content::ExternalContentImportLimits,
     source_root: &lillux::PinnedDirectory,
     root_device: u64,
     configured_ignore: &ryeos_state::ignore::IgnoreMatcher,
@@ -791,13 +1002,9 @@ fn capture_content_import(
     request_digest: String,
 ) -> anyhow::Result<ImportResponse> {
     let mut budget = ryeos_state::LaunchCaptureBudget::bounded(
-        policy.limits.max_depth.min(ryeos_state::MAX_CAPTURE_DEPTH),
-        policy
-            .limits
-            .max_entries
-            .min(ryeos_state::MAX_CAPTURE_ENTRIES),
-        policy
-            .limits
+        limits.max_depth.min(ryeos_state::MAX_CAPTURE_DEPTH),
+        limits.max_entries.min(ryeos_state::MAX_CAPTURE_ENTRIES),
+        limits
             .max_file_bytes
             .min(request.maximum_bytes)
             .min(ryeos_state::MAX_CAPTURE_FILE_BYTES),
@@ -866,7 +1073,7 @@ fn capture_content_import(
 #[allow(clippy::too_many_arguments)]
 fn capture_large_import(
     request: &ImportRequest,
-    policy: &crate::node_config::sections::external_content::ExternalContentImportPolicyRecord,
+    limits: &crate::node_config::sections::external_content::ExternalContentImportLimits,
     source_root: &lillux::PinnedDirectory,
     root_device: u64,
     configured_ignore: &ryeos_state::ignore::IgnoreMatcher,
@@ -877,12 +1084,11 @@ fn capture_large_import(
     request_digest: String,
 ) -> anyhow::Result<ImportResponse> {
     let bounds = ryeos_state::LargeContentCaptureBounds {
-        max_depth: policy.limits.max_depth,
-        max_entries: policy
-            .limits
+        max_depth: limits.max_depth,
+        max_entries: limits
             .max_entries
             .min(ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_ENTRIES),
-        max_file_bytes: policy.limits.max_file_bytes.min(request.maximum_bytes),
+        max_file_bytes: limits.max_file_bytes.min(request.maximum_bytes),
         max_total_bytes: request.maximum_bytes,
     };
     let capture_policy = ryeos_state::LargeContentCapturePolicy::new(

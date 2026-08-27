@@ -1,9 +1,8 @@
 //! Node-signed completion receipt for one declarative external-content activation.
 //!
-//! The receipt does not replace external-content manifests or consumer
-//! bindings. It roots the exact complete set produced from one retained signed
-//! activation program so restart recovery and operators can distinguish a
-//! settled activation from a partially published set of bindings.
+//! Existing manifests and consumer bindings remain launch authority. This
+//! compact receipt roots the exact complete binding set produced from one
+//! signed acquisition program without restating the program or binding facts.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,28 +10,13 @@ use serde_json::Value;
 pub const EXTERNAL_CONTENT_ACTIVATION_KIND: &str = "external_content_activation";
 pub const EXTERNAL_CONTENT_ACTIVATION_SCHEMA: &str = "ryeos.external_content_activation.v1";
 pub const EXTERNAL_CONTENT_ACTIVATION_HEAD_NAMESPACE: &str = "external-content-activations";
-pub const MAX_EXTERNAL_CONTENT_ACTIVATION_SOURCES: usize = 8;
 pub const MAX_EXTERNAL_CONTENT_ACTIVATION_COMPONENTS: usize = 64;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExternalContentActivationSourceReceipt {
-    pub id: String,
-    pub archive_sha256: String,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalContentActivationComponentReceipt {
     pub id: String,
-    pub source_id: String,
-    pub member_sha256: String,
-    pub manifest_hash: String,
-    pub manifest_kind: String,
-    pub binding_id: String,
     pub binding_hash: String,
-    pub shape: String,
-    pub storage: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,7 +31,6 @@ pub struct ExternalContentActivationReceipt {
     pub publisher_fingerprint: String,
     pub node_fingerprint: String,
     pub policy_digest: String,
-    pub sources: Vec<ExternalContentActivationSourceReceipt>,
     pub components: Vec<ExternalContentActivationComponentReceipt>,
     pub activated_by: String,
     pub recorded_at: String,
@@ -62,7 +45,6 @@ impl ExternalContentActivationReceipt {
         publisher_fingerprint: String,
         node_fingerprint: String,
         policy_digest: String,
-        sources: Vec<ExternalContentActivationSourceReceipt>,
         components: Vec<ExternalContentActivationComponentReceipt>,
         activated_by: String,
     ) -> anyhow::Result<Self> {
@@ -81,7 +63,6 @@ impl ExternalContentActivationReceipt {
             publisher_fingerprint,
             node_fingerprint,
             policy_digest,
-            sources,
             components,
             activated_by,
             recorded_at: lillux::time::iso8601_now(),
@@ -140,50 +121,28 @@ impl ExternalContentActivationReceipt {
             validate_hash(label, hash)?;
         }
         super::parse_canonical_timestamp(&self.recorded_at)?;
-        if self.sources.is_empty()
-            || self.sources.len() > MAX_EXTERNAL_CONTENT_ACTIVATION_SOURCES
-            || self.components.is_empty()
+        if self.components.is_empty()
             || self.components.len() > MAX_EXTERNAL_CONTENT_ACTIVATION_COMPONENTS
         {
-            anyhow::bail!("external-content activation receipt has an invalid set size");
-        }
-        let mut source_ids = std::collections::BTreeSet::new();
-        for source in &self.sources {
-            validate_id("activation source id", &source.id)?;
-            validate_hash("activation source archive", &source.archive_sha256)?;
-            if !source_ids.insert(source.id.as_str()) {
-                anyhow::bail!("external-content activation receipt repeats a source id");
-            }
+            anyhow::bail!("external-content activation receipt has an invalid component set");
         }
         let mut component_ids = std::collections::BTreeSet::new();
-        let mut binding_ids = std::collections::BTreeSet::new();
+        let mut binding_hashes = std::collections::BTreeSet::new();
         for component in &self.components {
             validate_id("activation component id", &component.id)?;
-            validate_id("activation component source id", &component.source_id)?;
-            if !source_ids.contains(component.source_id.as_str()) {
-                anyhow::bail!("activation component names an absent source");
-            }
-            for (label, hash) in [
-                ("activation member digest", &component.member_sha256),
-                ("activation manifest hash", &component.manifest_hash),
-                ("activation binding id", &component.binding_id),
-                ("activation binding hash", &component.binding_hash),
-            ] {
-                validate_hash(label, hash)?;
-            }
-            if !matches!(
-                component.manifest_kind.as_str(),
-                super::EXTERNAL_CONTENT_MANIFEST_KIND | super::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND
-            ) || !matches!(component.shape.as_str(), "file" | "tree")
-                || !matches!(component.storage.as_str(), "content" | "large_content")
-            {
-                anyhow::bail!("activation component has an unsupported shape or storage kind");
-            }
+            validate_hash("activation component binding", &component.binding_hash)?;
             if !component_ids.insert(component.id.as_str())
-                || !binding_ids.insert(component.binding_id.as_str())
+                || !binding_hashes.insert(component.binding_hash.as_str())
             {
                 anyhow::bail!("external-content activation receipt repeats a component");
             }
+        }
+        if !self
+            .components
+            .windows(2)
+            .all(|pair| pair[0].id < pair[1].id)
+        {
+            anyhow::bail!("external-content activation receipt components are not canonical");
         }
         let expected = Self::derive_activation_id(
             &self.activation_program_digest,
@@ -237,20 +196,9 @@ mod tests {
             "b".repeat(64),
             "c".repeat(64),
             "d".repeat(64),
-            vec![ExternalContentActivationSourceReceipt {
-                id: "package".to_owned(),
-                archive_sha256: "e".repeat(64),
-            }],
             vec![ExternalContentActivationComponentReceipt {
                 id: "runtime".to_owned(),
-                source_id: "package".to_owned(),
-                member_sha256: "f".repeat(64),
-                manifest_hash: "1".repeat(64),
-                manifest_kind: super::super::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND.to_owned(),
-                binding_id: "2".repeat(64),
                 binding_hash: "3".repeat(64),
-                shape: "file".to_owned(),
-                storage: "large_content".to_owned(),
             }],
             "4".repeat(64),
         )
@@ -267,14 +215,20 @@ mod tests {
     }
 
     #[test]
-    fn activation_receipt_rejects_an_unretained_source_or_duplicate_binding() {
+    fn activation_receipt_requires_a_canonical_unique_component_set() {
         let mut receipt = fixture();
-        receipt.components[0].source_id = "missing".to_owned();
+        receipt
+            .components
+            .push(ExternalContentActivationComponentReceipt {
+                id: "another".to_owned(),
+                binding_hash: "5".repeat(64),
+            });
         assert!(receipt.validate().is_err());
 
-        let mut receipt = fixture();
-        let duplicate = receipt.components[0].clone();
-        receipt.components.push(duplicate);
+        receipt
+            .components
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        receipt.components[1].binding_hash = receipt.components[0].binding_hash.clone();
         assert!(receipt.validate().is_err());
     }
 }

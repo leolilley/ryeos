@@ -59,6 +59,7 @@ pub struct ManagedExternalContentActivationPolicy {
     pub max_member_bytes: u64,
     pub max_concurrent_activations: usize,
     pub cache_budget_bytes: u64,
+    pub store_budget_bytes: u64,
     pub minimum_free_bytes: u64,
     pub max_attempts: u64,
 }
@@ -184,7 +185,11 @@ impl ManagedExternalContentActivationPolicy {
         {
             bail!("managed external-content byte ceilings are incoherent");
         }
-        if self.cache_budget_bytes == 0 || self.minimum_free_bytes == 0 {
+        if self.cache_budget_bytes == 0
+            || self.store_budget_bytes == 0
+            || self.max_expanded_bytes > self.store_budget_bytes
+            || self.minimum_free_bytes == 0
+        {
             bail!("managed external-content storage reserve is incoherent");
         }
         if self.max_concurrent_activations == 0 || self.max_concurrent_activations > 16 {
@@ -281,6 +286,7 @@ mod tests {
             max_member_bytes: 1024,
             max_concurrent_activations: 1,
             cache_budget_bytes: 4096,
+            store_budget_bytes: 8192,
             minimum_free_bytes: 1024,
             max_attempts: 3,
         };

@@ -15,13 +15,14 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 form_urlencoded = { workspace = true }
+flate2 = { workspace = true }
 glob = { workspace = true }
 hmac = { workspace = true }
 lillux = { workspace = true }
 libc = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
-reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls"] }
 rmp-serde = { workspace = true }
 ryeos-accounting = { workspace = true }
 ryeos-app = { workspace = true }
@@ -43,6 +44,7 @@ serde_yaml = { workspace = true }
 toml = { workspace = true }
 sha2 = { workspace = true }
 subtle = { workspace = true }
+tar = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "net", "time", "process"] }
