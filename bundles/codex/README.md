@@ -38,35 +38,33 @@ workload may rewrite that seed, but it is neither retained policy nor a
 same-UID integrity boundary. When a generic RyeOS isolation backend is enabled
 it also overlays that file read-only, but Codex activation does not require
 RyeOS's optional Bubblewrap isolation bundle or any other RyeOS isolation
-backend. The official Codex package's own private `codex-resources/bwrap` is a
-separately pinned workload resource used by Codex to enforce the narrower
-model-command permission profile; it is not a RyeOS launch backend. There is no
-custom credential bridge, token injection, local-LLM route, worker pool, or
-cross-session process reuse.
+backend. This activation does not acquire or provide Bubblewrap or BusyBox.
+There is no custom credential bridge, token injection, local-LLM route, worker
+pool, or cross-session process reuse.
 
 The exact Codex executable, same-version code-mode host, and the package's
-`bwrap`, `zsh`, and `rg` runtime resources are assembled from OpenAI's pinned
-standalone package with the installed
-`/usr/share/ryeos/codex/assemble.py` operator tool. Its exact pin contract is
-installed at `/usr/share/doc/ryeos/codex/PINNED-CODEX.md`. Import and bind all five files through
-the ordinary `external-content import`/`external-content bind` ceremony. Their
-expected manifest hashes and individual file checksums are fixed in
-the activation declaration at `.ai/config/codex/activation.yaml`, which is the
-machine-readable source of the import bounds and checksums.
+`zsh` and `rg` runtime resources are selected from OpenAI's pinned standalone
+package by the signed `config:codex/activation` acquisition recipe. The generic
+`external-content activate` service downloads or reuses the exact archive,
+verifies its archive and member digests under node policy, imports the four
+existing worker realizations, publishes their ordinary consumer bindings, and
+records one compact node-signed completion receipt. There is no public
+assembly directory, installed assembler, manually authored manifest, or
+second realization authority.
 
-Persistent subprocesses and external import are deliberately disabled when
-their node-owned policies are absent. Before starting the daemon, apply both
-the named `codex-assembly` external-content root and the exact
-`persistent_session_policy` limits with `ryeos node policy-apply
-external_content ...` and `ryeos node policy-apply persistent_sessions ...`.
-The complete typed YAML and path/device/inode measurement ceremony live in
-`knowledge:codex/hosted-activation`. A bundle never silently enables an import
-root or node-wide worker capacity.
+Persistent subprocesses and managed acquisition are deliberately disabled
+when their node-owned policies are absent. Before starting the daemon, apply
+an external-content policy with no named roots and an explicit managed
+activation host/resource ceiling, plus the exact persistent-session limits.
+Then, while the configured operator is still local to that node, run `ryeos
+external-content activate config:codex/activation online`. The complete typed
+YAML and ceremony live in `knowledge:codex/hosted-activation`. A bundle never
+silently enables network acquisition, storage, or node-wide worker capacity.
 
 ## Operator flow
 
 This workflow is intended for a dedicated hosted endpoint. Complete Codex
-external-content import/bind and node policy setup while the hosted configured
+managed activation and node policy setup while the hosted configured
 operator is still a `local_client`. Provision the same configured-operator key
 at the source and hosted nodes. Separately admit the source node key on the
 hosted target as `remote_node` with only the generic forwarding-attestation
@@ -120,7 +118,7 @@ quiesced class-transition ceremony: finish or terminate hosted sessions, stop
 the hosted daemon, and run:
 
 ```sh
-MAINTENANCE_SCOPES='ryeos.execute.service.external-content/import,ryeos.execute.service.external-content/bind,ryeos.execute.service.external-content/release,ryeos.execute.service.external-content/scrub'
+MAINTENANCE_SCOPES='ryeos.execute.service.external-content/activate,ryeos.execute.service.external-content/release,ryeos.execute.service.external-content/scrub'
 RYEOS_APP_ROOT=/path/to/hosted-app-root ryeos authorize-client \
   --public-key "<configured_operator_raw_ed25519_base64>" \
   --label "hosted operator local maintenance" \

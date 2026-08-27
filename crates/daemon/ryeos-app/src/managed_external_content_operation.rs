@@ -29,6 +29,7 @@ pub struct ManagedActivationJobOperation {
     pub consumer_ref: String,
     pub publisher_fingerprint: String,
     pub operator_fingerprint: String,
+    pub operator_authority_digest: String,
     pub policy_digest: String,
     pub acquisition_mode: AcquisitionMode,
 }
@@ -45,6 +46,7 @@ impl ManagedActivationJobOperation {
     pub fn new(
         activation: &ResolvedManagedExternalContentActivation,
         operator_fingerprint: String,
+        operator_authority_digest: String,
         policy: &ManagedExternalContentActivationPolicy,
         acquisition_mode: AcquisitionMode,
     ) -> anyhow::Result<Self> {
@@ -62,6 +64,7 @@ impl ManagedActivationJobOperation {
             consumer_ref: activation.document.consumer_ref.clone(),
             publisher_fingerprint: activation.publisher_fingerprint.clone(),
             operator_fingerprint,
+            operator_authority_digest,
             policy_digest: managed_policy_digest(policy)?,
             acquisition_mode,
         };
@@ -100,6 +103,10 @@ impl ManagedActivationJobOperation {
                 &self.publisher_fingerprint,
             ),
             ("activation operation operator", &self.operator_fingerprint),
+            (
+                "activation operation operator authority",
+                &self.operator_authority_digest,
+            ),
             ("activation operation policy", &self.policy_digest),
         ] {
             validate_hash(label, digest)?;
@@ -120,11 +127,13 @@ impl ManagedActivationJobOperation {
         &self,
         activation: &ResolvedManagedExternalContentActivation,
         policy: &ManagedExternalContentActivationPolicy,
+        operator_authority_digest: &str,
     ) -> anyhow::Result<()> {
         self.validate()?;
         let current = Self::new(
             activation,
             self.operator_fingerprint.clone(),
+            operator_authority_digest.to_owned(),
             policy,
             self.acquisition_mode,
         )?;
@@ -158,6 +167,10 @@ pub fn publish_activation_receipt(
             .ok_or_else(|| {
                 anyhow::anyhow!("node has no managed external-content activation policy")
             })?,
+        &crate::operator_external_content::configured_operator_authority_digest(
+            state,
+            &operation.operator_fingerprint,
+        )?,
     )?;
     components.sort_by(|left, right| left.id.cmp(&right.id));
     let receipt = ryeos_state::objects::ExternalContentActivationReceipt::new(
@@ -185,9 +198,11 @@ pub fn publish_activation_receipt(
             .get_object(&current.target_hash)?
             .ok_or_else(|| anyhow::anyhow!("managed activation head target is absent"))?;
         let retained = ryeos_state::objects::ExternalContentActivationReceipt::from_value(&value)?;
-        let mut expected = receipt.clone();
-        expected.recorded_at = retained.recorded_at.clone();
-        if retained != expected {
+        // This head identifies the exact activated realization, not the latest
+        // invocation. A later activation under a narrower/current node policy
+        // may reuse the already-bound bytes; its sync job retains that newer
+        // policy/operator while the first completion receipt remains immutable.
+        if !same_activated_realization(&retained, &receipt) {
             bail!("managed activation head contradicts the exact requested realization");
         }
         return Ok(ManagedActivationPublication {
@@ -242,6 +257,19 @@ pub fn publish_activation_receipt(
     })
 }
 
+fn same_activated_realization(
+    retained: &ryeos_state::objects::ExternalContentActivationReceipt,
+    expected: &ryeos_state::objects::ExternalContentActivationReceipt,
+) -> bool {
+    retained.activation_id == expected.activation_id
+        && retained.activation_ref == expected.activation_ref
+        && retained.activation_program_digest == expected.activation_program_digest
+        && retained.consumer_ref == expected.consumer_ref
+        && retained.publisher_fingerprint == expected.publisher_fingerprint
+        && retained.node_fingerprint == expected.node_fingerprint
+        && retained.components == expected.components
+}
+
 fn validate_hash(label: &str, value: &str) -> anyhow::Result<()> {
     if !lillux::valid_hash(value) || value.bytes().any(|byte| byte.is_ascii_uppercase()) {
         bail!("{label} is not a canonical sha256 digest");
@@ -264,4 +292,42 @@ fn validate_canonical_ref(label: &str, value: &str) -> anyhow::Result<()> {
         bail!("{label} is not canonical");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn receipt(
+        policy: char,
+        operator: char,
+    ) -> ryeos_state::objects::ExternalContentActivationReceipt {
+        ryeos_state::objects::ExternalContentActivationReceipt::new(
+            "config:fixture/activation".to_owned(),
+            "a".repeat(64),
+            "worker:fixture/hosted".to_owned(),
+            "b".repeat(64),
+            "c".repeat(64),
+            policy.to_string().repeat(64),
+            vec![
+                ryeos_state::objects::ExternalContentActivationComponentReceipt {
+                    id: "runtime".to_owned(),
+                    binding_hash: "d".repeat(64),
+                },
+            ],
+            operator.to_string().repeat(64),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn immutable_activation_head_can_satisfy_a_later_narrower_invocation() {
+        let first = receipt('e', 'f');
+        let later = receipt('1', '2');
+        assert!(same_activated_realization(&first, &later));
+
+        let mut different = later;
+        different.components[0].binding_hash = "3".repeat(64);
+        assert!(!same_activated_realization(&first, &different));
+    }
 }

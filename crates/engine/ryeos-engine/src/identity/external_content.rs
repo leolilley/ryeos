@@ -199,13 +199,13 @@ impl ExternalContentDeclaration {
 
 pub fn declarations_from_authored_pin_draft(
     authored: &serde_json::Value,
-    contract: Option<&crate::kind_registry::ExecutionExternalContentDecl>,
+    contract: Option<&crate::kind_registry::KindExternalContentDecl>,
     declarer: DeclaringAuthority<'_>,
 ) -> anyhow::Result<Vec<ExternalContentDeclaration>> {
     let Some(contract) = contract else {
         if authored.get("external_content").is_some() {
             anyhow::bail!(
-                "item declares `external_content` but its signed kind has no execution.external_content contract"
+                "item declares `external_content` but its signed kind has no external-content contract"
             );
         }
         anyhow::bail!("item has no kind-owned external-content contract");
@@ -269,14 +269,14 @@ fn validate_declaration_collection(
 
 pub fn declarations_from_composed(
     composed: &serde_json::Value,
-    contract: Option<&crate::kind_registry::ExecutionExternalContentDecl>,
+    contract: Option<&crate::kind_registry::KindExternalContentDecl>,
     declarer: DeclaringAuthority<'_>,
 ) -> anyhow::Result<Option<Vec<ExternalContentDeclaration>>> {
     let authored = composed.get("external_content");
     let Some(contract) = contract else {
         if authored.is_some() {
             anyhow::bail!(
-                "item declares `external_content` but its signed kind has no execution.external_content contract"
+                "item declares `external_content` but its signed kind has no external-content contract"
             );
         }
         return Ok(None);
@@ -303,7 +303,7 @@ pub fn declarations_from_composed(
 
 fn validate_kind_contract(
     declarations: &[ExternalContentDeclaration],
-    contract: &crate::kind_registry::ExecutionExternalContentDecl,
+    contract: &crate::kind_registry::KindExternalContentDecl,
 ) -> anyhow::Result<()> {
     if declarations.len() > contract.max_declarations {
         anyhow::bail!(
@@ -401,8 +401,8 @@ fn path_contains(parent: &str, child: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn contract(roots: &[&str], max: usize) -> crate::kind_registry::ExecutionExternalContentDecl {
-        crate::kind_registry::ExecutionExternalContentDecl {
+    fn contract(roots: &[&str], max: usize) -> crate::kind_registry::KindExternalContentDecl {
+        crate::kind_registry::KindExternalContentDecl {
             realization_derived: EXTERNAL_REALIZATIONS_DERIVED_KEY.to_owned(),
             allowed_roots: roots.iter().map(|value| (*value).to_owned()).collect(),
             max_declarations: max,
@@ -455,6 +455,43 @@ mod tests {
                 &value,
                 Some(&contract(&["node_files"], 1)),
                 DeclaringAuthority::Project
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn empty_allowed_roots_accepts_only_locator_free_pins() {
+        let digest = "a".repeat(64);
+        let locator_free = serde_json::json!({"external_content": [{
+            "id": "fixture",
+            "kind": "file",
+            "mode": "pinned",
+            "digest": digest,
+            "mount": "bin/fixture"
+        }]});
+        assert!(
+            declarations_from_composed(
+                &locator_free,
+                Some(&contract(&[], 1)),
+                DeclaringAuthority::Bundle("fixture")
+            )
+            .is_ok()
+        );
+
+        let locator_backed = serde_json::json!({"external_content": [{
+            "id": "fixture",
+            "kind": "file",
+            "locator": {"root": "bundle:fixture", "path": "bin/fixture"},
+            "mode": "pinned",
+            "digest": "a".repeat(64),
+            "mount": "bin/fixture"
+        }]});
+        assert!(
+            declarations_from_composed(
+                &locator_backed,
+                Some(&contract(&[], 1)),
+                DeclaringAuthority::Bundle("fixture")
             )
             .is_err()
         );

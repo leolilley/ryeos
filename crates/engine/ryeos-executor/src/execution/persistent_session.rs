@@ -337,7 +337,7 @@ fn admit_or_verify_content_dependencies(
             }
             realization_set(&resolution)?
         };
-        validate_dependency_search(name, dependency, &realized)?;
+        validate_dependency_search(state, name, dependency, &realized)?;
         for target in &dependency.targets {
             entries_by_target
                 .entry(target.clone())
@@ -392,6 +392,7 @@ fn realization_set(
 }
 
 fn validate_dependency_search(
+    state: &AppState,
     name: &str,
     dependency: &PreparedContentDependency,
     realized: &ryeos_engine::external_realization::RealizedExternalContentSet,
@@ -412,8 +413,89 @@ fn validate_dependency_search(
                 search.realization_id
             );
         }
+        let cas_read = state.acquire_cas_read()?;
+        let object = cas_read
+            .cas()
+            .get_object(&entry.manifest_hash)?
+            .ok_or_else(|| {
+                anyhow!(
+                    "content dependency `{name}` executable search realization `{}` has no retained manifest",
+                    search.realization_id
+                )
+            })?;
+        let manifest_kind = object
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                anyhow!(
+                    "content dependency `{name}` executable search realization `{}` manifest has no kind",
+                    search.realization_id
+                )
+            })?;
+        let directory_exists = match manifest_kind {
+            ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND => {
+                let manifest =
+                    ryeos_state::objects::ExternalContentManifestObject::from_value(&object)?;
+                manifest_materializes_directory(
+                    &search.relative_directory,
+                    manifest
+                        .entries
+                        .iter()
+                        .map(|entry| (entry.path.as_str(), entry.kind)),
+                )
+            }
+            ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND => {
+                let manifest =
+                    ryeos_state::objects::ExternalLargeContentManifestObject::from_value(&object)?;
+                manifest_materializes_directory(
+                    &search.relative_directory,
+                    manifest
+                        .entries
+                        .iter()
+                        .map(|entry| (entry.path.as_str(), entry.kind)),
+                )
+            }
+            other => bail!(
+                "content dependency `{name}` executable search realization `{}` names unsupported manifest kind `{other}`",
+                search.realization_id
+            ),
+        };
+        if !directory_exists {
+            bail!(
+                "content dependency `{name}` executable search directory `{}` is absent from realization `{}`",
+                search.relative_directory,
+                search.realization_id
+            );
+        }
     }
     Ok(())
+}
+
+fn manifest_materializes_directory<'a>(
+    relative_directory: &str,
+    entries: impl IntoIterator<
+        Item = (
+            &'a str,
+            ryeos_state::objects::ExternalContentManifestEntryKind,
+        ),
+    >,
+) -> bool {
+    if relative_directory == "." {
+        return true;
+    }
+    let child_prefix = format!("{relative_directory}/");
+    for (path, kind) in entries {
+        if path == relative_directory {
+            return kind == ryeos_state::objects::ExternalContentManifestEntryKind::Dir;
+        }
+        // Materialization creates canonical parents before publishing each
+        // entry, so a retained descendant is also exact evidence that the
+        // requested directory will exist.
+        if path.starts_with(&child_prefix) {
+            return true;
+        }
+    }
+    false
 }
 
 fn session_contract(
@@ -943,7 +1025,9 @@ fn prepare_structured_session_baseline(
     let current_matches = incumbent
         .as_ref()
         .map(|entry| {
-            Ok(entry.permission_mode()? == 0o400 && entry.read_bounded(64 * 1024)? == bytes)
+            Ok::<bool, anyhow::Error>(
+                entry.permission_mode()? == 0o400 && entry.read_bounded(64 * 1024)? == bytes,
+            )
         })
         .transpose()?
         .unwrap_or(false);
@@ -1499,6 +1583,30 @@ fn canonical_hash(value: &Value) -> Result<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn executable_search_requires_a_materialized_directory() {
+        use ryeos_state::objects::ExternalContentManifestEntryKind::{Dir, File, Symlink};
+
+        assert!(manifest_materializes_directory(".", [("bin/tool", File)]));
+        assert!(manifest_materializes_directory(
+            "bin",
+            [("bin", Dir), ("bin/tool", File)]
+        ));
+        assert!(manifest_materializes_directory(
+            "libexec",
+            [("libexec/tool", File)]
+        ));
+        assert!(!manifest_materializes_directory(
+            "bin",
+            [("bin", File), ("bin/tool", File)]
+        ));
+        assert!(!manifest_materializes_directory("bin", [("bin", Symlink)]));
+        assert!(!manifest_materializes_directory(
+            "bin",
+            [("sbin/tool", File)]
+        ));
+    }
+
     fn resource_override_declaration() -> PersistentSessionDecl {
         PersistentSessionDecl {
             target_path: vec!["supported_target".to_owned()],
@@ -1752,7 +1860,7 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let view = create_node_owned_runtime_view(workspace.path()).unwrap();
         assert_eq!(
-            view.strip_prefix(workspace.path()).unwrap(),
+            view.path().strip_prefix(workspace.path()).unwrap(),
             std::path::Path::new(".ai/cache/ryeos-runtime")
         );
         assert!(
@@ -1764,7 +1872,10 @@ mod tests {
         let colliding_workspace = tempfile::tempdir().unwrap();
         symlink("/tmp", colliding_workspace.path().join(".ai")).unwrap();
         let error = create_node_owned_runtime_view(colliding_workspace.path()).unwrap_err();
-        assert!(error.to_string().contains("collides with a non-directory"));
+        assert!(
+            format!("{error:#}").contains("runtime-view component `.ai`"),
+            "got {error:#}"
+        );
     }
 
     #[test]

@@ -377,8 +377,7 @@ pub fn resolve_activation(
         .engine
         .kinds
         .get(&consumer.kind)
-        .and_then(|kind| kind.execution.as_ref())
-        .and_then(|execution| execution.external_content.as_ref())
+        .and_then(|kind| kind.external_content_contract())
         .ok_or_else(|| {
             anyhow::anyhow!("managed activation consumer kind has no external-content contract")
         })?;

@@ -782,6 +782,7 @@ mod tests {
             extraction_rules: std::collections::HashMap::new(),
             resolution: Vec::new(),
             effective_trust: crate::kind_registry::EffectiveTrustPolicy::default(),
+            content: None,
             execution: Some(crate::kind_registry::ExecutionSchema {
                 effect_class_ceiling: None,
                 aliases: std::collections::HashMap::new(),

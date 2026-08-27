@@ -1366,8 +1366,7 @@ pub(crate) fn sealed_dependency_bytes_for_child_dispatch(
     let contract = engine
         .kinds
         .get(&params.resolved.kind)
-        .and_then(|schema| schema.execution.as_ref())
-        .and_then(|execution| execution.external_content.as_ref());
+        .and_then(|schema| schema.external_content_contract());
     let declarer = ryeos_engine::external_content::declaring_authority(resolution)?;
     if ryeos_engine::external_content::declarations_from_composed(
         &resolution.composed.composed,

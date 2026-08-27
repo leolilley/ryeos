@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-08-26T23:06:47Z:6509318e8b642b71a4c65969f71749924508311343e33192c6863ab768ad905a:iedIOIPY3CySlt9+eUqWb39pYFIxv/sxKM/isJZs5OjtxtRSj+iysCQLneV9DgYrDeXckPZYePfDIBmTpzqVCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-27T08:43:19Z:c948e965cf21356938c03fa22b542ec96b610edd7f448c8c9a8bda65378e7f30:UaI8VbwCakGcCZ+2wftMgeORhV0uFFwJrrcfVywk28HwixjD3y9BzjBYwq//dBhEyTorH55BuCO7gd8ZlHt+Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
 title: "Worker-Hosted Execution"
 description: "Implemented authority, protocol, lifecycle, recovery, and publication contracts for session-bound hosted workers"
 entry_type: reference
-version: "1.2.0"
+version: "1.3.0"
 ```
 
 # Worker-Hosted Execution
@@ -89,6 +89,39 @@ ryeos.execute.service.federation/follow-terminal-deliver
 
 Deployment may narrow a one-way peer to the subset it receives. These scopes
 belong to the peer node key, not the configured-operator grant.
+
+## Managed external-content activation
+
+Large or third-party workload bytes remain outside signed bundles. A trusted
+installed-bundle `config` may carry the closed
+`ryeos.external_content_activation.v1` acquisition recipe: exact HTTPS archive
+URLs and digests, archive/member bounds, selected regular-member digests, a
+consumer ref, component-to-member mapping, and storage tiers. The recipe does
+not carry commands, scripts, host paths, policy, credentials, component kind,
+manifest schema/hash, or mount authority.
+
+`ryeos external-content activate <config-ref> <online|offline>` resolves and
+retains that signed recipe and its trusted consumer. The consumer's existing
+external-content declarations remain authoritative for component IDs, kinds,
+pinned manifest hashes, and mounts. Node policy independently owns whether
+online acquisition is enabled, the exact HTTPS host allowlist, byte/member/
+concurrency ceilings, cache/store budgets, free-space floor, and retries.
+Acquisition stages only verified selected regular files through Lillux's
+descriptor-relative filesystem boundary, imports existing content manifests,
+and publishes existing consumer binding heads.
+
+The existing durable sync-job/attempt machinery owns retry and restart
+recovery. The durable operation freezes the exact node-signed configured-
+operator grant digest; revocation, scope replacement, or local/remote class
+conversion terminalizes recovery instead of silently preserving authority.
+Completion publishes one compact node-signed receipt containing the activation/
+program/policy/node/operator identities and sorted component-to-binding hashes.
+That receipt is audit/recovery testimony; manifests and binding heads remain
+launch authority. No public assembly directory, workload-named app root,
+named-root placeholder, shell extractor, or second realization format is
+introduced. The exact configured operator may invoke activation locally or
+through the origin-constrained configured-operator forwarding path; arbitrary
+named-root import remains a separate local maintenance surface.
 
 ## Portable environment selection
 

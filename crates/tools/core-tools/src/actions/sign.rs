@@ -413,10 +413,7 @@ pub(crate) fn validate_authored_external_content(
     kind_schema: &KindSchema,
     declarer: ryeos_engine::external_content::DeclaringAuthority<'_>,
 ) -> Result<()> {
-    let contract = kind_schema
-        .execution
-        .as_ref()
-        .and_then(|execution| execution.external_content.as_ref());
+    let contract = kind_schema.external_content_contract();
     ryeos_engine::external_content::declarations_from_composed(parsed, contract, declarer)?;
     Ok(())
 }
@@ -1212,6 +1209,7 @@ mod tests {
             extraction_rules: Default::default(),
             resolution: Vec::new(),
             effective_trust: Default::default(),
+            content: None,
             execution: None,
             composed_value_contract: ryeos_engine::contracts::ValueShape::any_mapping(),
             composer: "handler:ryeos/core/identity".to_owned(),
@@ -1232,6 +1230,33 @@ mod tests {
                 .unwrap()
                 .starts_with("# ryeos:signed:")
         );
+
+        let content_schema = KindSchema {
+            content: Some(ryeos_engine::kind_registry::KindContentSchema {
+                external_content: ryeos_engine::kind_registry::KindExternalContentDecl {
+                    realization_derived: ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY
+                        .to_owned(),
+                    allowed_roots: Vec::new(),
+                    max_declarations: 1,
+                    large_content: None,
+                },
+            }),
+            ..schema.clone()
+        };
+        validate_authored_external_content(
+            &serde_json::json!({
+                "external_content": [{
+                    "id": "runtime",
+                    "kind": "file",
+                    "mode": "pinned",
+                    "digest": "a".repeat(64),
+                    "mount": "runtime"
+                }]
+            }),
+            &content_schema,
+            ryeos_engine::external_content::DeclaringAuthority::Project,
+        )
+        .expect("signing honors a non-executable kind-owned content contract");
     }
 
     #[test]

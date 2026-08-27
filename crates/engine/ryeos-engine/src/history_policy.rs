@@ -852,6 +852,7 @@ mod tests {
             extraction_rules: HashMap::new(),
             resolution: Vec::new(),
             effective_trust: Default::default(),
+            content: None,
             execution: Some(ExecutionSchema {
                 effect_class_ceiling: None,
                 aliases: HashMap::new(),

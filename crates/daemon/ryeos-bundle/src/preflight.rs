@@ -2554,6 +2554,7 @@ strict_fields: warn
             effective_trust: ryeos_engine::kind_registry::EffectiveTrustPolicy {
                 include_references: false,
             },
+            content: None,
             execution: None,
             composed_value_contract: shape_from_yaml(contract_yaml),
             composer: IDENTITY_COMPOSER.to_string(),

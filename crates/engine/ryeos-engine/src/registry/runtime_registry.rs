@@ -211,14 +211,14 @@ impl LaunchContentExternalPolicy {
     /// Adapt the launch policy to the existing external-content declaration
     /// compiler. Content dependencies deliberately grant no named-root
     /// authority: every declaration must already be locator-free and pinned.
-    pub fn declaration_contract(&self) -> crate::kind_registry::ExecutionExternalContentDecl {
-        crate::kind_registry::ExecutionExternalContentDecl {
+    pub fn declaration_contract(&self) -> crate::kind_registry::KindExternalContentDecl {
+        crate::kind_registry::KindExternalContentDecl {
             realization_derived: crate::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY
                 .to_owned(),
             allowed_roots: Vec::new(),
             max_declarations: usize::from(self.max_declarations),
             large_content: self.large_content_max_total_bytes.map(|maximum| {
-                crate::kind_registry::ExecutionLargeContentGrant {
+                crate::kind_registry::KindLargeContentGrant {
                     max_total_bytes: Some(maximum),
                 }
             }),
@@ -1420,6 +1420,13 @@ mod tests {
                     allowed_spaces: vec![],
                     allowed_trust: vec![],
                 },
+                content_dependencies: LaunchContentDependencyPolicy {
+                    max_dependencies: 0,
+                    allowed_bindings: vec![],
+                    max_targets_per_dependency: 0,
+                    max_executable_search_entries: 0,
+                    external_content: None,
+                },
                 financial_authority: FinancialAuthorityDecl::None,
                 external_effect_authority: ExternalEffectAuthorityDecl::None,
             },
@@ -1458,6 +1465,12 @@ mod tests {
         "    allowed_kinds: []\n",
         "    allowed_spaces: []\n",
         "    allowed_trust: []\n",
+        "  content_dependencies:\n",
+        "    max_dependencies: 0\n",
+        "    allowed_bindings: []\n",
+        "    max_targets_per_dependency: 0\n",
+        "    max_executable_search_entries: 0\n",
+        "    external_content: null\n",
         "  financial_authority:\n",
         "    kind: none\n",
         "  external_effect_authority:\n",

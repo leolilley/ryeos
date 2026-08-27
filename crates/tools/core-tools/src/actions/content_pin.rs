@@ -168,10 +168,7 @@ fn run_content_pin_prepared(
         &project_path.join(&item_relative),
     )
     .map_err(|error| anyhow!("path-anchoring validator refused item: {error}"))?;
-    let contract = schema
-        .execution
-        .as_ref()
-        .and_then(|execution| execution.external_content.as_ref());
+    let contract = schema.external_content_contract();
     let declarations = ryeos_engine::external_content::declarations_from_authored_pin_draft(
         &parsed,
         contract,

@@ -65,7 +65,17 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     if req.mode == AcquisitionMode::Online && !policy.allow_online {
         bail!("node policy does not permit online managed external-content acquisition");
     }
-    let operation = ManagedActivationJobOperation::new(&activation, operator, policy, req.mode)?;
+    let operator_authority_digest =
+        ryeos_app::operator_external_content::configured_operator_authority_digest(
+            &state, &operator,
+        )?;
+    let operation = ManagedActivationJobOperation::new(
+        &activation,
+        operator,
+        operator_authority_digest,
+        policy,
+        req.mode,
+    )?;
     Ok(serde_json::to_value(
         execute_operation(state, activation, operation, true).await?,
     )?)
@@ -78,14 +88,7 @@ async fn execute_operation(
     create_if_absent: bool,
 ) -> Result<Response> {
     let operation_digest = ryeos_state::objects::canonical_value_digest(&operation.to_value()?)?;
-    let job_id = format!(
-        "external-content-activation:{}:{}",
-        operation.activation_id,
-        match operation.acquisition_mode {
-            AcquisitionMode::Online => "online",
-            AcquisitionMode::Offline => "offline",
-        }
-    );
+    let job_id = activation_job_id(&operation_digest);
     let directories = tokio::task::spawn_blocking({
         let state = Arc::clone(&state);
         move || open_activation_directories(&state, &operation_digest)
@@ -119,6 +122,7 @@ async fn execute_operation(
                 .result
                 .ok_or_else(|| anyhow::anyhow!("completed activation job has no result"))?,
         )?;
+        validate_completed_activation(&state, &activation, &operation, &job_id, &response)?;
         response.idempotent = true;
         return Ok(response);
     }
@@ -135,7 +139,39 @@ async fn execute_operation(
                 .unwrap_or_else(|| "no retained diagnostic".to_owned())
         );
     }
-    operation.validate_current(&activation, managed_policy(&state)?)?;
+    if let Err(error) = (|| {
+        let operator_authority_digest =
+            ryeos_app::operator_external_content::configured_operator_authority_digest(
+                &state,
+                &operation.operator_fingerprint,
+            )?;
+        operation.validate_current(
+            &activation,
+            managed_policy(&state)?,
+            &operator_authority_digest,
+        )
+    })() {
+        let detail = bounded_error(&format!(
+            "retained managed activation no longer matches current signed or node authority: {error:#}"
+        ));
+        state.state_store.with_state_db(|db| {
+            db.update_sync_job(
+                &job_id,
+                &ryeos_state::SyncJobUpdate {
+                    state: ryeos_state::SyncJobState::Failed,
+                    phase: "authority_changed".to_owned(),
+                    roots: None,
+                    heads: None,
+                    uploaded_hashes: existing.uploaded_hashes.clone(),
+                    fetched_hashes: existing.fetched_hashes.clone(),
+                    last_error: Some(detail),
+                    result: existing.result.clone(),
+                },
+            )
+        })?;
+        cleanup_terminal_staging(directories, &job_id).await;
+        return Err(error);
+    }
 
     let attempt_id = format!(
         "external-content-activation-attempt:{}",
@@ -154,6 +190,7 @@ async fn execute_operation(
             .state_store
             .with_state_db(|db| db.get_sync_job(&job_id))?
             .context("managed activation job disappeared")?;
+        let mut terminalized = false;
         if latest.attempt_count >= latest.max_attempts
             && latest.state == ryeos_state::SyncJobState::Retryable
         {
@@ -174,6 +211,10 @@ async fn execute_operation(
                     },
                 )
             })?;
+            terminalized = true;
+        }
+        if terminalized {
+            cleanup_terminal_staging(directories, &job_id).await;
         }
         return Err(error);
     }
@@ -231,9 +272,98 @@ async fn execute_operation(
                 Some(detail),
                 latest.result,
             )?;
+            if terminal {
+                cleanup_terminal_staging(directories, &job_id).await;
+            }
             Err(error)
         }
     }
+}
+
+fn activation_job_id(operation_digest: &str) -> String {
+    format!("external-activation:{operation_digest}")
+}
+
+fn validate_completed_activation(
+    state: &AppState,
+    activation: &ResolvedManagedExternalContentActivation,
+    operation: &ManagedActivationJobOperation,
+    job_id: &str,
+    response: &Response,
+) -> Result<()> {
+    if response.job_id != job_id
+        || response.activation_id != operation.activation_id
+        || response.consumer_ref != activation.document.consumer_ref
+        || response.state != "completed"
+        || !lillux::valid_hash(&response.receipt_hash)
+    {
+        bail!("completed managed activation result contradicts its durable operation");
+    }
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    let _permit = state
+        .write_barrier
+        .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
+        .map_err(|error| {
+            anyhow::anyhow!("cannot verify completed activation under write barrier: {error}")
+        })?;
+    let cas = authority.cas_store()?;
+    let head = state
+        .state_store
+        .with_state_db(|db| {
+            db.read_generic_head_ref(
+                ryeos_state::objects::EXTERNAL_CONTENT_ACTIVATION_HEAD_NAMESPACE,
+                &operation.activation_id,
+            )
+        })?
+        .ok_or_else(|| anyhow::anyhow!("completed managed activation head is absent"))?;
+    if head.target_hash != response.receipt_hash {
+        bail!("completed managed activation result is not the current receipt head");
+    }
+    let receipt_value = cas
+        .get_object(&head.target_hash)?
+        .ok_or_else(|| anyhow::anyhow!("completed managed activation receipt is absent"))?;
+    let receipt =
+        ryeos_state::objects::ExternalContentActivationReceipt::from_value(&receipt_value)?;
+    if receipt.activation_id != operation.activation_id
+        || receipt.activation_ref != activation.activation_ref
+        || receipt.activation_program_digest != activation.activation_program_digest
+        || receipt.consumer_ref != activation.document.consumer_ref
+        || receipt.publisher_fingerprint != activation.publisher_fingerprint
+        || receipt.node_fingerprint != state.identity.fingerprint()
+    {
+        bail!("completed managed activation receipt contradicts current exact authority");
+    }
+    let receipt_components = receipt
+        .components
+        .iter()
+        .map(|component| component.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let expected_components = activation
+        .components
+        .iter()
+        .map(|component| component.recipe.id.as_str())
+        .collect::<BTreeSet<_>>();
+    if receipt_components != expected_components {
+        bail!("completed managed activation receipt has a different component set");
+    }
+    for component in &activation.components {
+        ryeos_app::operator_external_content::require_active_binding(
+            state,
+            &cas,
+            &component.expected_manifest_hash,
+            &activation.document.consumer_ref,
+            &activation.publisher_fingerprint,
+        )
+        .with_context(|| {
+            format!(
+                "completed managed activation component `{}` is no longer active",
+                component.recipe.id
+            )
+        })?;
+    }
+    authority.ensure_guard(&guard)?;
+    Ok(())
 }
 
 async fn run_attempt(
@@ -298,7 +428,16 @@ fn acquire_and_import(
     cache: &lillux::PinnedDirectory,
     staging: &lillux::PinnedDirectory,
 ) -> Result<Vec<ImportedComponent>> {
-    operation.validate_current(activation, managed_policy(state)?)?;
+    let operator_authority_digest =
+        ryeos_app::operator_external_content::configured_operator_authority_digest(
+            state,
+            &operation.operator_fingerprint,
+        )?;
+    operation.validate_current(
+        activation,
+        managed_policy(state)?,
+        &operator_authority_digest,
+    )?;
     for source in &activation.document.sources {
         let archive = obtain_archive(
             cache,
@@ -378,6 +517,18 @@ fn cleanup_staging(directories: ActivationDirectories) -> Result<()> {
     Ok(())
 }
 
+async fn cleanup_terminal_staging(directories: ActivationDirectories, job_id: &str) {
+    match tokio::task::spawn_blocking(move || cleanup_staging(directories)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%error, %job_id, "terminal managed activation retained bounded staging")
+        }
+        Err(error) => {
+            tracing::warn!(%error, %job_id, "terminal managed activation cleanup task panicked")
+        }
+    }
+}
+
 fn obtain_archive(
     cache: &lillux::PinnedDirectory,
     source: &ManagedActivationSource,
@@ -386,14 +537,28 @@ fn obtain_archive(
 ) -> Result<std::fs::File> {
     let name = OsStr::new(&source.sha256);
     if let Some(mut existing) = cache.open_regular(name, false)? {
-        verify_open_file(
+        let verified = verify_open_file(
             &mut existing,
             source.maximum_compressed_bytes,
             &source.sha256,
             "cached managed activation archive",
-        )?;
-        cache.ensure_path_binding()?;
-        return Ok(existing);
+        );
+        match verified {
+            Ok(_) => {
+                cache.ensure_path_binding()?;
+                return Ok(existing);
+            }
+            Err(error) => {
+                cache
+                    .remove_if_same(name, &existing)
+                    .context("remove invalid managed activation cache entry")?;
+                if mode == AcquisitionMode::Offline {
+                    return Err(error).context(
+                        "offline managed activation cache entry failed exact verification",
+                    );
+                }
+            }
+        }
     }
     if mode == AcquisitionMode::Offline {
         bail!(
@@ -726,7 +891,26 @@ pub async fn recover_durable_activations(state: &AppState) -> Result<usize> {
         let operation = match ManagedActivationJobOperation::from_value(job.operation.clone()) {
             Ok(operation) => operation,
             Err(error) => {
-                tracing::error!(job_id = %job.job_id, %error, "invalid managed activation operation retained for operator inspection");
+                let detail = bounded_error(&format!(
+                    "retained managed activation operation is invalid: {error:#}"
+                ));
+                state.state_store.with_state_db(|db| {
+                    db.update_sync_job(
+                        &job.job_id,
+                        &ryeos_state::SyncJobUpdate {
+                            state: ryeos_state::SyncJobState::Failed,
+                            phase: "operation_invalid".to_owned(),
+                            roots: None,
+                            heads: None,
+                            uploaded_hashes: job.uploaded_hashes.clone(),
+                            fetched_hashes: job.fetched_hashes.clone(),
+                            last_error: Some(detail),
+                            result: job.result.clone(),
+                        },
+                    )
+                })?;
+                tracing::error!(job_id = %job.job_id, %error, "invalid managed activation operation terminalized");
+                cleanup_retained_terminal_staging(state, &job.job_id, &job.operation).await;
                 continue;
             }
         };
@@ -754,6 +938,7 @@ pub async fn recover_durable_activations(state: &AppState) -> Result<usize> {
                         },
                     )
                 })?;
+                cleanup_retained_terminal_staging(state, &job.job_id, &job.operation).await;
                 continue;
             }
         };
@@ -765,6 +950,37 @@ pub async fn recover_durable_activations(state: &AppState) -> Result<usize> {
         }
     }
     Ok(recovered)
+}
+
+async fn cleanup_retained_terminal_staging(state: &AppState, job_id: &str, operation: &Value) {
+    let operation_digest = match ryeos_state::objects::canonical_value_digest(operation) {
+        Ok(digest) if activation_job_id(&digest) == job_id => digest,
+        Ok(_) => {
+            tracing::warn!(%job_id, "terminal managed activation job identity does not authorize staging cleanup");
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %job_id, "terminal managed activation operation cannot authorize staging cleanup");
+            return;
+        }
+    };
+    let state = state.clone();
+    let directories = match tokio::task::spawn_blocking(move || {
+        open_activation_directories(&state, &operation_digest)
+    })
+    .await
+    {
+        Ok(Ok(directories)) => directories,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, %job_id, "terminal managed activation staging could not be opened for cleanup");
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %job_id, "terminal managed activation staging cleanup task panicked");
+            return;
+        }
+    };
+    cleanup_terminal_staging(directories, job_id).await;
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -786,6 +1002,98 @@ mod tests {
     use ryeos_app::managed_external_content::{
         ManagedActivationMember, ManagedComponentStorage, ResolvedManagedActivationComponent,
     };
+
+    fn test_policy()
+    -> ryeos_app::node_config::sections::external_content::ManagedExternalContentActivationPolicy
+    {
+        ryeos_app::node_config::sections::external_content::ManagedExternalContentActivationPolicy {
+            allow_online: false,
+            allowed_https_hosts: vec!["releases.example.test".to_owned()],
+            max_archives: 1,
+            max_compressed_bytes: 4096,
+            max_expanded_bytes: 4096,
+            max_members: 8,
+            max_member_bytes: 1024,
+            max_concurrent_activations: 1,
+            cache_budget_bytes: 8192,
+            store_budget_bytes: 8192,
+            minimum_free_bytes: 1,
+            max_attempts: 2,
+        }
+    }
+
+    fn test_activation(
+        source: ManagedActivationSource,
+    ) -> ResolvedManagedExternalContentActivation {
+        ResolvedManagedExternalContentActivation {
+            activation_ref: "config:fixture/activation".to_owned(),
+            activation_program_digest: "b".repeat(64),
+            publisher_fingerprint: "c".repeat(64),
+            document: ryeos_app::managed_external_content::ManagedExternalContentActivation {
+                schema: ryeos_app::managed_external_content::MANAGED_ACTIVATION_SCHEMA.to_owned(),
+                consumer_ref: "worker:fixture/hosted".to_owned(),
+                sources: vec![source],
+                components: vec![
+                    ryeos_app::managed_external_content::ManagedActivationComponent {
+                        id: "runtime".to_owned(),
+                        source: "package".to_owned(),
+                        member: "bin/runtime".to_owned(),
+                        storage: ManagedComponentStorage::LargeContent,
+                    },
+                ],
+            },
+            components: vec![ResolvedManagedActivationComponent {
+                recipe: ryeos_app::managed_external_content::ManagedActivationComponent {
+                    id: "runtime".to_owned(),
+                    source: "package".to_owned(),
+                    member: "bin/runtime".to_owned(),
+                    storage: ManagedComponentStorage::LargeContent,
+                },
+                expected_manifest_hash: "d".repeat(64),
+                expected_manifest_kind: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND
+                    .to_owned(),
+                declaration_kind: ryeos_engine::external_content::ExternalContentKind::File,
+            }],
+        }
+    }
+
+    #[test]
+    fn durable_job_identity_includes_invocation_authority() {
+        let program_digest = "b".repeat(64);
+        let consumer_ref = "worker:fixture/hosted".to_owned();
+        let publisher_fingerprint = "c".repeat(64);
+        let activation_id =
+            ryeos_state::objects::ExternalContentActivationReceipt::derive_activation_id(
+                &program_digest,
+                &consumer_ref,
+                &publisher_fingerprint,
+            )
+            .unwrap();
+        let mut operation = ManagedActivationJobOperation {
+            operation_type: MANAGED_ACTIVATION_OPERATION.to_owned(),
+            schema: "ryeos.external_content_activation_operation.v1".to_owned(),
+            activation_ref: "config:fixture/activation".to_owned(),
+            activation_program_digest: program_digest,
+            activation_id: activation_id.clone(),
+            consumer_ref,
+            publisher_fingerprint,
+            operator_fingerprint: "d".repeat(64),
+            operator_authority_digest: "4".repeat(64),
+            policy_digest: "e".repeat(64),
+            acquisition_mode: AcquisitionMode::Online,
+        };
+        let first_digest =
+            ryeos_state::objects::canonical_value_digest(&operation.to_value().unwrap()).unwrap();
+        let first = activation_job_id(&first_digest);
+        operation.policy_digest = "f".repeat(64);
+        let later_digest =
+            ryeos_state::objects::canonical_value_digest(&operation.to_value().unwrap()).unwrap();
+        let later = activation_job_id(&later_digest);
+
+        assert_ne!(first, later);
+        assert!(first.len() <= 128);
+        assert!(first.ends_with(&first_digest));
+    }
 
     #[test]
     fn selected_archive_members_are_bounded_and_staged_by_consumer_id() {
@@ -822,51 +1130,8 @@ mod tests {
                 executable: true,
             }],
         };
-        let activation = ResolvedManagedExternalContentActivation {
-            activation_ref: "config:fixture/activation".to_owned(),
-            activation_program_digest: "b".repeat(64),
-            publisher_fingerprint: "c".repeat(64),
-            document: ryeos_app::managed_external_content::ManagedExternalContentActivation {
-                schema: ryeos_app::managed_external_content::MANAGED_ACTIVATION_SCHEMA.to_owned(),
-                consumer_ref: "worker:fixture/hosted".to_owned(),
-                sources: vec![source.clone()],
-                components: vec![
-                    ryeos_app::managed_external_content::ManagedActivationComponent {
-                        id: "runtime".to_owned(),
-                        source: "package".to_owned(),
-                        member: "bin/runtime".to_owned(),
-                        storage: ManagedComponentStorage::LargeContent,
-                    },
-                ],
-            },
-            components: vec![ResolvedManagedActivationComponent {
-                recipe: ryeos_app::managed_external_content::ManagedActivationComponent {
-                    id: "runtime".to_owned(),
-                    source: "package".to_owned(),
-                    member: "bin/runtime".to_owned(),
-                    storage: ManagedComponentStorage::LargeContent,
-                },
-                expected_manifest_hash: "d".repeat(64),
-                expected_manifest_kind: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND
-                    .to_owned(),
-                declaration_kind: ryeos_engine::external_content::ExternalContentKind::File,
-            }],
-        };
-        let policy =
-            ryeos_app::node_config::sections::external_content::ManagedExternalContentActivationPolicy {
-                allow_online: false,
-                allowed_https_hosts: vec!["releases.example.test".to_owned()],
-                max_archives: 1,
-                max_compressed_bytes: 4096,
-                max_expanded_bytes: 4096,
-                max_members: 8,
-                max_member_bytes: 1024,
-                max_concurrent_activations: 1,
-                cache_budget_bytes: 8192,
-                store_budget_bytes: 8192,
-                minimum_free_bytes: 1,
-                max_attempts: 2,
-            };
+        let activation = test_activation(source.clone());
+        let policy = test_policy();
         let archive = std::fs::File::open(&archive_path).unwrap();
         extract_selected_members(archive, &source, &activation, &staging, &policy).unwrap();
         let mut staged = staging
@@ -874,5 +1139,116 @@ mod tests {
             .unwrap()
             .unwrap();
         verify_open_file(&mut staged, 64, &digest, "fixture").unwrap();
+    }
+
+    #[test]
+    fn selected_archive_refuses_links_and_executable_mode_drift() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let bytes = b"runtime".to_vec();
+        let digest = lillux::sha256_hex(&bytes);
+        let source = ManagedActivationSource {
+            id: "package".to_owned(),
+            url: "https://releases.example.test/fixture.tar.gz".to_owned(),
+            archive_format: ryeos_app::managed_external_content::MANAGED_ACTIVATION_ARCHIVE_FORMAT
+                .to_owned(),
+            sha256: "a".repeat(64),
+            maximum_compressed_bytes: 4096,
+            maximum_expanded_bytes: 4096,
+            members: vec![ManagedActivationMember {
+                path: "bin/runtime".to_owned(),
+                disposition: ManagedMemberDisposition::Import,
+                sha256: digest,
+                maximum_bytes: 64,
+                executable: true,
+            }],
+        };
+        let activation = test_activation(source.clone());
+        let policy = test_policy();
+
+        let link_archive = root.path().join("link.tar.gz");
+        {
+            let file = std::fs::File::create(&link_archive).unwrap();
+            let gzip = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            let mut tar = tar::Builder::new(gzip);
+            let mut header = tar::Header::new_gnu();
+            header.set_path("bin/runtime").unwrap();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_link_name("../outside").unwrap();
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_cksum();
+            tar.append(&header, std::io::empty()).unwrap();
+            tar.into_inner().unwrap().finish().unwrap();
+        }
+        let error = extract_selected_members(
+            std::fs::File::open(&link_archive).unwrap(),
+            &source,
+            &activation,
+            &staging,
+            &policy,
+        )
+        .expect_err("managed activation must reject archive links");
+        assert!(error.to_string().contains("link or special entry"));
+
+        let mode_archive = root.path().join("mode.tar.gz");
+        {
+            let file = std::fs::File::create(&mode_archive).unwrap();
+            let gzip = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            let mut tar = tar::Builder::new(gzip);
+            let mut header = tar::Header::new_gnu();
+            header.set_path("bin/runtime").unwrap();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append(&header, bytes.as_slice()).unwrap();
+            tar.into_inner().unwrap().finish().unwrap();
+        }
+        let error = extract_selected_members(
+            std::fs::File::open(&mode_archive).unwrap(),
+            &source,
+            &activation,
+            &staging,
+            &policy,
+        )
+        .expect_err("managed activation must reject selected-member mode drift");
+        assert!(error.to_string().contains("executable mode changed"));
+    }
+
+    #[test]
+    fn invalid_cached_archive_is_removed_and_offline_activation_refuses() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let expected = b"expected archive";
+        let digest = lillux::sha256_hex(expected);
+        std::fs::write(root.path().join(&digest), b"corrupt archive").unwrap();
+        let source = ManagedActivationSource {
+            id: "package".to_owned(),
+            url: "https://releases.example.test/fixture.tar.gz".to_owned(),
+            archive_format: ryeos_app::managed_external_content::MANAGED_ACTIVATION_ARCHIVE_FORMAT
+                .to_owned(),
+            sha256: digest.clone(),
+            maximum_compressed_bytes: 4096,
+            maximum_expanded_bytes: 4096,
+            members: vec![ManagedActivationMember {
+                path: "bin/runtime".to_owned(),
+                disposition: ManagedMemberDisposition::Import,
+                sha256: "a".repeat(64),
+                maximum_bytes: 64,
+                executable: true,
+            }],
+        };
+        let policy = test_policy();
+
+        let error = obtain_archive(&cache, &source, AcquisitionMode::Offline, &policy)
+            .expect_err("offline activation must refuse corrupt cache content");
+        assert!(format!("{error:#}").contains("failed exact verification"));
+        assert!(
+            cache
+                .open_regular(OsStr::new(&digest), false)
+                .unwrap()
+                .is_none(),
+            "invalid cache coordinate must be reusable by a later online retry"
+        );
     }
 }

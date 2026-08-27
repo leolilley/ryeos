@@ -56,8 +56,7 @@ pub fn preview_external_content_pins(
     let contract = engine
         .kinds
         .get(kind)
-        .and_then(|schema| schema.execution.as_ref())
-        .and_then(|execution| execution.external_content.as_ref());
+        .and_then(|schema| schema.external_content_contract());
     let declarer = ryeos_engine::external_content::declaring_authority(resolution)?;
     let Some(declarations) = ryeos_engine::external_content::declarations_from_composed(
         &resolution.composed.composed,
@@ -199,8 +198,7 @@ pub fn admit_external_realizations_in_publication(
     let contract = engine
         .kinds
         .get(kind)
-        .and_then(|schema| schema.execution.as_ref())
-        .and_then(|execution| execution.external_content.as_ref());
+        .and_then(|schema| schema.external_content_contract());
     let declarer = ryeos_engine::external_content::declaring_authority(resolution)?;
     let Some(declarations) = ryeos_engine::external_content::declarations_from_composed(
         &resolution.composed.composed,
@@ -274,7 +272,7 @@ fn admit_declarations_in_publication(
     engine: Option<&ryeos_engine::engine::Engine>,
     roots: Option<&ryeos_engine::item_resolution::ResolutionRoots>,
     resolution: &mut ryeos_engine::resolution::ResolutionOutput,
-    contract: Option<&ryeos_engine::kind_registry::ExecutionExternalContentDecl>,
+    contract: Option<&ryeos_engine::kind_registry::KindExternalContentDecl>,
     declarations: Vec<ExternalContentDeclaration>,
     inherited: Option<&RealizedExternalContentSet>,
     publication: &mut Option<PendingCasPublication>,
@@ -619,7 +617,7 @@ fn seal_pinned_large_realization(
     declaration: &ExternalContentDeclaration,
     digest: &str,
     manifest: ryeos_state::objects::ExternalLargeContentManifestObject,
-    contract: Option<&ryeos_engine::kind_registry::ExecutionExternalContentDecl>,
+    contract: Option<&ryeos_engine::kind_registry::KindExternalContentDecl>,
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
     cas: &lillux::CasStore,

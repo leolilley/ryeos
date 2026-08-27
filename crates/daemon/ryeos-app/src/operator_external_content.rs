@@ -168,6 +168,35 @@ pub fn require_configured_operator(
     authenticated_configured_operator_fingerprint(context, &operator)
 }
 
+/// Resolve the exact current node-signed grant behind a configured-operator
+/// durable operation. Retaining this digest prevents restart recovery from
+/// silently surviving revocation, scope replacement, or a local/remote class
+/// transition of the same key.
+pub fn configured_operator_authority_digest(
+    state: &AppState,
+    operator_fingerprint: &str,
+) -> anyhow::Result<String> {
+    let operator = crate::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+        .context("load configured operator identity")?;
+    if operator.fingerprint() != operator_fingerprint {
+        bail!("durable operation no longer belongs to the configured operator");
+    }
+    let grant = crate::identity::load_verified_authorized_key(
+        operator_fingerprint,
+        &state.config.authorized_keys_dir,
+        &state.identity,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("configured operator grant was revoked"))?;
+    if !matches!(
+        grant.principal_class,
+        crate::identity::AuthorizedKeyPrincipalClass::LocalClient
+            | crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator
+    ) {
+        bail!("configured operator grant changed to an ineligible principal class");
+    }
+    Ok(grant.source_file_hash)
+}
+
 fn authenticated_configured_operator_fingerprint(
     context: &HandlerContext,
     operator: &crate::identity::NodeIdentity,
@@ -1261,8 +1290,7 @@ fn resolve_external_content_consumer(
         .engine
         .kinds
         .get(&effective.kind)
-        .and_then(|kind| kind.execution.as_ref())
-        .and_then(|execution| execution.external_content.as_ref())
+        .and_then(|kind| kind.external_content_contract())
         .ok_or_else(|| anyhow::anyhow!("consumer kind has no signed external-content contract"))?;
     let grant_max_total_bytes = match manifest_kind {
         ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND => None,

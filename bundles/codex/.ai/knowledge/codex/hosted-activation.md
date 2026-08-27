@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-26T23:06:53Z:cf766bb4c976319e5c395761e8aa395ef9254c5b6a897b9345333c1690bd8c82:YCDMTqEXn/cur0T/MD9b+NJclP7D1ayabQ8JJHdweiba5493wsGZ3lWTafkPUlK3c38g/7x/GCfEPVbs9BJDBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-27T08:43:19Z:906cc660ffbd7ac99eae83ce23725a78c404b5a9c9599671f2766fb7508b532c:MEy9xxbfPwfDfAMbpvzCHpGWKpDDRWDGjn2EDRMycWPUTrkTu4rBFW4osR7QTTK17d1604H1zNgUhSHsBDOaBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
-version: "1.2.0"
+version: "1.3.0"
 description: >
   Activation, credential ceremony, command routes, and release acceptance for
   the pinned Codex structured-session workload.
@@ -29,43 +29,36 @@ knowledge bundle.
    `standard`, `hosted-node`, and `codex`. Generic worker-execution runtime/preparer
    binaries belong to `core`; the generic knowledge kind belongs to
    `standard`; bridge/profile and all Codex-specific data belong to `codex`.
-2. Assemble the exact realization with the installed operator tool, choosing
-   an output that does not already exist and a cache controlled by the local
-   operator:
-
-   ```text
-   /usr/share/ryeos/codex/assemble.py \
-     --cache /absolute/codex-download-cache \
-     --output /absolute/codex-assembly
-   ```
-
-   The assembler verifies the pinned archive and every extracted executable,
-   stages beside the output, and publishes the complete directory with one
-   same-filesystem rename. The human-readable pin contract is installed at
-   `/usr/share/doc/ryeos/codex/PINNED-CODEX.md`. Then import and bind the five
-   exact files declared by `.ai/config/codex/activation.yaml`. Repeat that
-   assembly/import/bind activation independently on every node that may become
-   a placement target. Paths and node-signed realization capsules are local;
-   the verified file content and portable exact-program identity must agree.
-3. Before starting the hosted daemon, author both node-owned policies outside
-   the live node namespace. Measure the assembled realization root with
-   `stat -c '%d %i' /absolute/codex-assembly` and replace only the path/device/
-   inode placeholders below:
+2. Before starting the hosted daemon, author both node-owned policies outside
+   the live node namespace. Managed activation requires no named filesystem
+   root: the daemon acquires exact signed bytes into its typed private runtime
+   root and feeds them through the existing import and consumer-binding
+   authorities. The external-content policy must explicitly grant the one
+   HTTPS host and finite acquisition/storage ceilings:
 
    ```yaml
    schema: 1
-   roots:
-     codex-assembly:
-       path: /absolute/codex-assembly
-       containing_device: 0
-       root_inode: 0
+   roots: {}
    limits:
      max_depth: 8
-     max_entries: 32
+     max_entries: 64
      max_file_bytes: 268435456
      max_total_bytes: 536870912
      store_budget_bytes: 1073741824
      minimum_free_bytes: 1073741824
+   managed_activation:
+     allow_online: true
+     allowed_https_hosts: [releases.openai.com]
+     max_archives: 1
+     max_compressed_bytes: 134217728
+     max_expanded_bytes: 335544320
+     max_members: 64
+     max_member_bytes: 268435456
+     max_concurrent_activations: 1
+     cache_budget_bytes: 536870912
+     store_budget_bytes: 1073741824
+     minimum_free_bytes: 1073741824
+     max_attempts: 3
    ```
 
    ```yaml
@@ -93,7 +86,24 @@ knowledge bundle.
    The resulting node-signed files are
    `<system>/.ai/node/external_content/policy.yaml` and
    `<system>/.ai/node/persistent_sessions/policy.yaml`. Absence of either is a
-   refusal; bundles never enable import roots or worker capacity themselves.
+   refusal; bundles never enable acquisition, storage, or worker capacity
+   themselves.
+3. Start the node while the configured operator still has its ordinary local
+   grant, then activate the signed recipe:
+
+   ```text
+   ryeos external-content activate config:codex/activation online
+   ```
+
+   The generic service downloads or reuses the exact pinned archive, refuses
+   redirects, enforces compressed/expanded/member bounds, verifies every
+   selected digest and executable mode, imports the four file realizations,
+   publishes the existing `worker:codex/hosted` consumer bindings, and records
+   one compact node-signed receipt. It creates no public assembly directory
+   and accepts no caller-authored manifest or mount. Repeat this activation
+   independently on every node that may become a placement target. `offline`
+   is accepted only when the exact archive is already present in that node's
+   private managed cache.
 4. Provision the same configured-operator identity at the operator endpoint
    and a dedicated hosted node. First admit the source node key on the target
    as `remote_node` with only
@@ -165,8 +175,9 @@ External-content maintenance after activation requires a quiesced class
 transition, not another identity. Finish or terminate hosted executions, stop
 the daemon, run offline `authorize-client` without `--origin-site-id`, with
 `--allow-semantic-conversion`, and with only the required local maintenance
-scopes. Start the daemon and perform import/bind/scrub/release; stop it again;
-then reinstall the exact `remote_operator` grant with
+scopes (`external-content/activate` plus `release` or `scrub` only when that
+operation is actually required). Start the daemon and perform exact managed
+activation or cleanup; stop it again; then reinstall the exact `remote_operator` grant with
 `--allow-semantic-conversion`. Never use `--merge-scopes` across either
 transition. A separate key cannot pass the exact configured-operator check.
 
@@ -199,9 +210,9 @@ policy. If the node enables a generic enforced isolation backend, RyeOS
 additionally overlays that file read-only, but hosted Codex does not require
 RyeOS's optional Bubblewrap isolation bundle or another RyeOS isolation
 backend. OpenAI's standalone package does include its own private Bubblewrap,
-shell, and `rg` resources; RyeOS pins and materializes those as workload files
-so Codex can enforce the narrower model-command permission profile. They do not
-become a RyeOS launch backend. Immutable CLI overrides fix login, credential
+shell, and `rg` resources, but this activation intentionally selects only the
+exact Codex executable, code-mode host, Zsh, and `rg`; it acquires neither
+Bubblewrap nor BusyBox. Immutable CLI overrides fix login, credential
 store, built-in provider, empty MCP map, approval routing, permission profile,
 command network, shell environment, and disabled helpers for process life.
 Thread start/resume checks supported response fields for effective approval and

@@ -1,11 +1,20 @@
-# ryeos:signed:2026-08-11T02:28:03Z:d73c1cfe214d8c63babf71e4b8efa765be0dd4151bd19f23dfe28af8f3c2b73c:0nUd0zkm3W+CajwTJdgANwx3u0HlTxRCpAkMl3hSVjnRYhRJMNfZk36tExgyZL8GSFOtWkEnjp5ReK4chbczCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-27T08:43:19Z:364d611ccd4a455804b07b7763627b8d07e58fc79490572a5bd09ca79d865861:3oa3pBxuNTFRDPVNhHkIn0FpMfAw6IrbYNzdyqusJOheiWsSH1WbMt3pjoYu4//QLxVGfwRkpfiCJvybsWepAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/config"
-version: "1.0.0"
+version: "1.1.0"
 location:
   directory: config
 effective_trust:
   include_references: false
 resolution: []
+# Config items remain non-executable. This contract only permits an installed,
+# signed config selected by another runtime to pin exact locator-free content.
+content:
+  external_content:
+    realization_derived: effective_external_realizations
+    allowed_roots: []
+    max_declarations: 8
+    large_content:
+      max_total_bytes: 4294967296
 formats:
   - extensions: [".yaml", ".yml"]
     parser: parser:ryeos/core/yaml/yaml

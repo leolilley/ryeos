@@ -916,7 +916,7 @@ pub struct ExecutionHooksDecl {
 /// Signed, kind-owned external-content admission contract.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionExternalContentDecl {
+pub struct KindExternalContentDecl {
     /// Reserved derived slot populated only by launch-time realization.
     pub realization_derived: String,
     /// Named-root classes this kind permits its items to declare.
@@ -927,17 +927,27 @@ pub struct ExecutionExternalContentDecl {
     /// of this kind cannot bind a large-content manifest at all. The grant
     /// is signed schema data — the tier's permission never lives in code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub large_content: Option<ExecutionLargeContentGrant>,
+    pub large_content: Option<KindLargeContentGrant>,
 }
 
 /// Kind-local terms for the large-content grant.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionLargeContentGrant {
+pub struct KindLargeContentGrant {
     /// Per-launch ceiling across this kind's large realizations; bounded by
     /// (and defaulting to) the tier maximum.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_total_bytes: Option<u64>,
+}
+
+/// Content admission owned by an item kind independently of whether that kind
+/// is executable. This lets signed data items contribute exact content only
+/// when a separate runtime selects them, without inventing a dispatch path for
+/// the data kind.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KindContentSchema {
+    pub external_content: KindExternalContentDecl,
 }
 
 /// Signed, kind-owned ceiling for executable source adjacent to an item.
@@ -1083,7 +1093,7 @@ pub struct ExecutionSchema {
     /// Optional external-content realization contract. Absence means an item
     /// of this kind may not declare the top-level `external_content` field.
     #[serde(default)]
-    pub external_content: Option<ExecutionExternalContentDecl>,
+    pub external_content: Option<KindExternalContentDecl>,
     /// Optional executable-source closure ceiling. Absence means adjacent
     /// source cannot enter execution through this kind.
     #[serde(default)]
@@ -1165,6 +1175,10 @@ pub struct KindSchema {
     /// graph. This keeps inheritance trust and reference trust
     /// semantics schema-owned rather than hardcoded in consumers.
     pub effective_trust: EffectiveTrustPolicy,
+    /// Optional content contract for non-executable data and executable kinds
+    /// alike. A kind may declare content here or in its legacy execution
+    /// block, never both.
+    pub content: Option<KindContentSchema>,
     /// Execution configuration (dispatch, methods, aliases).
     /// `None` if this kind is not executable (e.g., config kind).
     pub execution: Option<ExecutionSchema>,
@@ -1364,6 +1378,19 @@ impl KindSchema {
     /// Returns `None` if this kind is not executable.
     pub fn execution(&self) -> Option<&ExecutionSchema> {
         self.execution.as_ref()
+    }
+
+    /// Resolve the one kind-owned external-content contract without coupling
+    /// content authority to dispatchability.
+    pub fn external_content_contract(&self) -> Option<&KindExternalContentDecl> {
+        self.content
+            .as_ref()
+            .map(|content| &content.external_content)
+            .or_else(|| {
+                self.execution
+                    .as_ref()
+                    .and_then(|execution| execution.external_content.as_ref())
+            })
     }
 
     /// Whether this kind is executable (has an `execution` block).
@@ -1741,6 +1768,19 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
     let resolution = parse_top_level_resolution(&data, display)?;
     let effective_trust = parse_effective_trust_policy(&data, display)?;
     let execution = parse_execution_schema(&data, display)?;
+    let content = parse_kind_content_schema(&data, display)?;
+    if content.is_some()
+        && execution
+            .as_ref()
+            .and_then(|execution| execution.external_content.as_ref())
+            .is_some()
+    {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: kind cannot declare external content under both `content` and `execution`"
+            ),
+        });
+    }
 
     let formats_seq = data
         .get("formats")
@@ -1878,6 +1918,7 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         extraction_rules,
         resolution,
         effective_trust,
+        content,
         execution,
         composed_value_contract,
         composer,
@@ -1887,6 +1928,25 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         inventory_schema_keys,
         inventory_policy,
     })
+}
+
+fn parse_kind_content_schema(
+    data: &serde_yaml::Value,
+    display: &str,
+) -> Result<Option<KindContentSchema>, EngineError> {
+    let Some(value) = data.get("content") else {
+        return Ok(None);
+    };
+    let content: KindContentSchema =
+        serde_yaml::from_value(value.clone()).map_err(|error| EngineError::SchemaLoaderError {
+            reason: format!("{display}: invalid kind content declaration: {error}"),
+        })?;
+    validate_execution_external_content_decl(
+        &content.external_content,
+        display,
+        "content.external_content",
+    )?;
+    Ok(Some(content))
 }
 
 fn validate_inventory_policy(policy: &InventoryPolicy, display: &str) -> Result<(), EngineError> {
@@ -2510,13 +2570,17 @@ fn parse_execution_schema(
 
     let external_content = match execution_value.get("external_content") {
         Some(value) => {
-            let declaration = serde_yaml::from_value::<ExecutionExternalContentDecl>(value.clone())
+            let declaration = serde_yaml::from_value::<KindExternalContentDecl>(value.clone())
                 .map_err(|error| EngineError::SchemaLoaderError {
                     reason: format!(
                         "{display}: invalid execution.external_content declaration: {error}"
                     ),
                 })?;
-            validate_execution_external_content_decl(&declaration, display)?;
+            validate_execution_external_content_decl(
+                &declaration,
+                display,
+                "execution.external_content",
+            )?;
             Some(declaration)
         }
         None => None,
@@ -2897,14 +2961,15 @@ fn validate_execution_hooks_decl(
 }
 
 fn validate_execution_external_content_decl(
-    declaration: &ExecutionExternalContentDecl,
+    declaration: &KindExternalContentDecl,
     display: &str,
+    field: &str,
 ) -> Result<(), EngineError> {
     if declaration.realization_derived != crate::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY
     {
         return Err(EngineError::SchemaLoaderError {
             reason: format!(
-                "{display}: execution.external_content.realization_derived must be `{}`",
+                "{display}: {field}.realization_derived must be `{}`",
                 crate::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY
             ),
         });
@@ -2914,15 +2979,8 @@ fn validate_execution_external_content_decl(
     {
         return Err(EngineError::SchemaLoaderError {
             reason: format!(
-                "{display}: execution.external_content.max_declarations must be within 1..={} ",
+                "{display}: {field}.max_declarations must be within 1..={} ",
                 crate::external_content::MAX_DECLARATIONS_PER_ITEM
-            ),
-        });
-    }
-    if declaration.allowed_roots.is_empty() {
-        return Err(EngineError::SchemaLoaderError {
-            reason: format!(
-                "{display}: execution.external_content.allowed_roots must not be empty"
             ),
         });
     }
@@ -2933,7 +2991,7 @@ fn validate_execution_external_content_decl(
     {
         return Err(EngineError::SchemaLoaderError {
             reason: format!(
-                "{display}: execution.external_content.large_content.max_total_bytes must be \
+                "{display}: {field}.large_content.max_total_bytes must be \
                  within 1..={}",
                 ryeos_state::objects::MAX_LARGE_CONTENT_TOTAL_BYTES
             ),
@@ -2944,15 +3002,13 @@ fn validate_execution_external_content_decl(
         if !matches!(root.as_str(), "project_files" | "node_files" | "bundle:own") {
             return Err(EngineError::SchemaLoaderError {
                 reason: format!(
-                    "{display}: execution.external_content.allowed_roots contains unsupported root class `{root}`"
+                    "{display}: {field}.allowed_roots contains unsupported root class `{root}`"
                 ),
             });
         }
         if !seen.insert(root) {
             return Err(EngineError::SchemaLoaderError {
-                reason: format!(
-                    "{display}: execution.external_content.allowed_roots contains duplicate `{root}`"
-                ),
+                reason: format!("{display}: {field}.allowed_roots contains duplicate `{root}`"),
             });
         }
     }
@@ -5640,7 +5696,7 @@ metadata:
         assert!(error.to_string().contains("capability_template"));
     }
 
-    // ── execution.external_content contract parsing ─────────────────────
+    // ── kind-owned external-content contract parsing ────────────────────
 
     fn load_external_content_schema(contract_lines: &[&str]) -> Result<KindRegistry, EngineError> {
         let mut yaml = String::from(
@@ -5673,8 +5729,7 @@ metadata:
         .unwrap();
         let contract = registry
             .get("tool")
-            .and_then(|schema| schema.execution.as_ref())
-            .and_then(|execution| execution.external_content.as_ref())
+            .and_then(KindSchema::external_content_contract)
             .expect("signed contract is exposed on the loaded schema");
         assert_eq!(
             contract.realization_derived,
@@ -5717,18 +5772,22 @@ metadata:
     }
 
     #[test]
-    fn external_content_contract_requires_supported_root_classes() {
-        let error = load_external_content_schema(&[
+    fn external_content_contract_permits_locator_free_content() {
+        let registry = load_external_content_schema(&[
             "realization_derived: effective_external_realizations",
             "allowed_roots: []",
             "max_declarations: 4",
         ])
-        .unwrap_err();
-        assert!(
-            error.to_string().contains("must not be empty"),
-            "got {error}"
-        );
+        .unwrap();
+        let contract = registry
+            .get("tool")
+            .and_then(KindSchema::external_content_contract)
+            .expect("locator-free contract loads");
+        assert!(contract.allowed_roots.is_empty());
+    }
 
+    #[test]
+    fn external_content_contract_requires_supported_root_classes() {
         let error = load_external_content_schema(&[
             "realization_derived: effective_external_realizations",
             "allowed_roots: [\"host_path\"]",
@@ -5738,6 +5797,51 @@ metadata:
         assert!(
             error.to_string().contains("unsupported root class"),
             "got {error}"
+        );
+    }
+
+    #[test]
+    fn non_executable_kind_can_own_an_external_content_contract() {
+        let yaml = r##"
+location:
+  directory: config
+content:
+  external_content:
+    realization_derived: effective_external_realizations
+    allowed_roots: []
+    max_declarations: 8
+    large_content:
+      max_total_bytes: 4294967296
+formats:
+  - extensions: [".yaml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+metadata:
+  rules:
+    name:
+      from: filename
+"##;
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        sign_and_write_schema(&tmp, "config", yaml, &sk);
+        let registry = KindRegistry::load_base(std::slice::from_ref(&tmp), &ts).unwrap();
+        let _ = fs::remove_dir_all(&tmp);
+
+        let schema = registry.get("config").expect("config kind loads");
+        assert!(!schema.is_executable());
+        let contract = schema
+            .external_content_contract()
+            .expect("top-level content contract is exposed");
+        assert!(contract.allowed_roots.is_empty());
+        assert_eq!(contract.max_declarations, 8);
+        assert_eq!(
+            contract
+                .large_content
+                .as_ref()
+                .and_then(|grant| grant.max_total_bytes),
+            Some(4_294_967_296)
         );
     }
 
