@@ -15,6 +15,11 @@ BUNDLE = Path(__file__).resolve().parent
 SOURCE = BUNDLE / ".ai/workers/codex/lib/hosted"
 PROFILE_PATH = SOURCE / "structured-session.profile.json"
 WORKER_PATH = BUNDLE / ".ai/workers/codex/hosted.yaml"
+ACTIVATION_PATH = BUNDLE / ".ai/config/codex/activation.yaml"
+ENVIRONMENT_ACTIVATION_PATH = (
+    BUNDLE / ".ai/config/codex/environment-activation.yaml"
+)
+ENVIRONMENT_PATH = BUNDLE / ".ai/config/codex/environments/default.yaml"
 
 
 def source_manifest_digest() -> str:
@@ -56,6 +61,68 @@ class CodexContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.profile = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
         cls.routes = {route["id"]: route for route in cls.profile["routes"]}
+
+    def test_managed_activation_closes_worker_files_and_environment_tree(self) -> None:
+        activation = ACTIVATION_PATH.read_text(encoding="utf-8")
+        environment_activation = ENVIRONMENT_ACTIVATION_PATH.read_text(
+            encoding="utf-8"
+        )
+        environment = ENVIRONMENT_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("schema: ryeos.external_content_activation.v2", activation)
+        self.assertEqual(activation.count("        target: null"), 4)
+        self.assertIn(
+            "schema: ryeos.external_content_activation.v2",
+            environment_activation,
+        )
+        self.assertIn(
+            "consumer_ref: config:codex/environments/default",
+            environment_activation,
+        )
+        for line in (
+            "  - id: developer-tools",
+            "    storage: content",
+            "        member: codex-path/rg",
+            "        target: bin/rg",
+            "        member: codex-resources/zsh/bin/zsh",
+            "        target: bin/zsh",
+        ):
+            self.assertIn(line, environment_activation)
+        expected_manifest = {
+            "schema": "ryeos.external_content.tree.v2",
+            "kind": "external_content_manifest",
+            "entries": [
+                {"path": "bin", "kind": "dir"},
+                {
+                    "path": "bin/rg",
+                    "kind": "file",
+                    "mode": 0o755,
+                    "blob_hash": "e62198eb19b136b88c330af83647b5a962cb99b6b1f066758568f12de1974849",
+                    "size": 5408904,
+                },
+                {
+                    "path": "bin/zsh",
+                    "kind": "file",
+                    "mode": 0o755,
+                    "blob_hash": "67faaaa89242c4a332e16e508a1977cffc24bf7fca31d4411cdfd101f3831ef3",
+                    "size": 898480,
+                },
+            ],
+            "entry_count": 3,
+            "total_bytes": 6307384,
+        }
+        manifest_digest = hashlib.sha256(
+            json.dumps(
+                expected_manifest,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        self.assertEqual(manifest_digest, "f1f39917086d223da68135108afa401fe75d47e2b102ea3f81c699595256bfe5")
+        self.assertIn(f"    digest: {manifest_digest}", environment)
+        self.assertIn("    - realization_id: developer-tools", environment)
+        self.assertIn("      relative_directory: bin", environment)
 
     def test_authority_overrides_are_forbidden_even_when_null(self) -> None:
         for route_id in ("session.start", "session.resume", "turn.start"):

@@ -34,7 +34,7 @@ The current clean-cut execution formats include:
 - admitted launch capsule schema 15;
 - runtime launch metadata epoch 20;
 - the standalone runtime project-authority envelope epoch 3; and
-- the owned runtime SQLite operator schema epoch 16 (encoded in the RyeOS
+- the owned runtime SQLite operator schema epoch 17 (encoded in the RyeOS
   `PRAGMA application_id` family).
 
 The numbers identify independently evolving contracts. A change to a nested
@@ -59,7 +59,7 @@ the exact current envelopes stored in its JSON columns. Normal open never
 migrates or normalizes a predecessor. Any mismatch leaves the file untouched
 and requires the explicit operator-confirmed thread-history/project-head reset.
 
-Runtime epoch 16 includes the epoch-8 hosted-worker substrate,
+Runtime epoch 17 includes the epoch-8 hosted-worker substrate,
 credential-generation fencing, command/approval contact ledgers, observation
 frontier with a cross-epoch cumulative event ceiling, candidate-disposition,
 and multi-epoch process-history contracts, the epoch-9 exact
@@ -81,8 +81,11 @@ keeps an unconsumed reservation fenced instead of confusing it with an
 abandoned worker lock. Epoch 16 admits launch metadata epoch 20, whose machine
 continuations durably distinguish predecessor-native checkpoint resume from a
 cold runtime start after an authoritative higher layer has already restored
-state. No execution-history reader or migration for epochs 1 through 15
-remains. The
+state. Epoch 17 admits persistent-session capsule schema 5 and makes the
+runtime descriptor's signed content-dependency ceiling explicit. An epoch-16
+descriptor omits that authority and is never normalized to the current empty
+policy during recovery. No execution-history reader or migration for epochs 1
+through 16 remains. The
 explicit reset may extract only the provider-neutral credential-profile table
 from epochs 6 through 11. From epoch 12 onward OperationalDb is the stable
 profile authority, but the exact revisioned runtime projection is folded into

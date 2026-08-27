@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-27T08:43:19Z:906cc660ffbd7ac99eae83ce23725a78c404b5a9c9599671f2766fb7508b532c:MEy9xxbfPwfDfAMbpvzCHpGWKpDDRWDGjn2EDRMycWPUTrkTu4rBFW4osR7QTTK17d1604H1zNgUhSHsBDOaBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-27T11:46:10Z:4af74c0782cf2de9f7c76698587def830b76147522446c1a6a808ee52a4cd24d:A2EonQtZ1nhJs6UIdjytvU5dAFeZ5aoRdRr8JZe+kJumoUsfMqiD2DQVC6MlIu5ti/NUPGSg2k5rLRtzyYwJAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
-version: "1.3.0"
+version: "1.4.0"
 description: >
   Activation, credential ceremony, command routes, and release acceptance for
   the pinned Codex structured-session workload.
@@ -93,17 +93,21 @@ knowledge bundle.
 
    ```text
    ryeos external-content activate config:codex/activation online
+   ryeos external-content activate config:codex/environment-activation online
    ```
 
    The generic service downloads or reuses the exact pinned archive, refuses
-   redirects, enforces compressed/expanded/member bounds, verifies every
-   selected digest and executable mode, imports the four file realizations,
-   publishes the existing `worker:codex/hosted` consumer bindings, and records
-   one compact node-signed receipt. It creates no public assembly directory
-   and accepts no caller-authored manifest or mount. Repeat this activation
-   independently on every node that may become a placement target. `offline`
-   is accepted only when the exact archive is already present in that node's
-   private managed cache.
+   redirects, enforces compressed/expanded/member bounds, and verifies every
+   selected digest and executable mode. The first recipe imports the four
+   worker file realizations. The second creates only the signed environment's
+   descriptor-rooted `bin/{zsh,rg}` tree through Lillux, captures it through
+   the existing manifest importer, and binds it to
+   `config:codex/environments/default`. Each recipe records one compact node-
+   signed receipt. Neither creates a public assembly directory nor accepts a
+   caller-authored manifest or mount. Repeat both activations independently on
+   every node that may become a placement target. `offline` is accepted only
+   when the exact archive is already present in that node's private managed
+   cache.
 4. Provision the same configured-operator identity at the operator endpoint
    and a dedicated hosted node. First admit the source node key on the target
    as `remote_node` with only

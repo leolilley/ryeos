@@ -1199,7 +1199,11 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // abandoned pre-attachment worker start.
 // Epoch 16 admits launch-metadata epoch 20, including the exact durable
 // runtime-state bootstrap for every machine continuation.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 16;
+// Epoch 17 clean-cuts retained managed launches at persistent-session capsule
+// schema 5 and the runtime launch contract that requires an explicit signed
+// content-dependency policy. Predecessor descriptors omit that authority and
+// must not be reinterpreted as the current empty policy during recovery.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 17;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

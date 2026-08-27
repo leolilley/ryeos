@@ -127,13 +127,10 @@ impl ExternalContentActivationReceipt {
             anyhow::bail!("external-content activation receipt has an invalid component set");
         }
         let mut component_ids = std::collections::BTreeSet::new();
-        let mut binding_hashes = std::collections::BTreeSet::new();
         for component in &self.components {
             validate_id("activation component id", &component.id)?;
             validate_hash("activation component binding", &component.binding_hash)?;
-            if !component_ids.insert(component.id.as_str())
-                || !binding_hashes.insert(component.binding_hash.as_str())
-            {
+            if !component_ids.insert(component.id.as_str()) {
                 anyhow::bail!("external-content activation receipt repeats a component");
             }
         }
@@ -228,6 +225,10 @@ mod tests {
         receipt
             .components
             .sort_by(|left, right| left.id.cmp(&right.id));
+        receipt.components[1].binding_hash = receipt.components[0].binding_hash.clone();
+        assert!(receipt.validate().is_ok());
+
+        receipt.components[1].id = receipt.components[0].id.clone();
         receipt.components[1].binding_hash = receipt.components[0].binding_hash.clone();
         assert!(receipt.validate().is_err());
     }

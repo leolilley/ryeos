@@ -5,6 +5,7 @@
 //! system/state-only import policy, and orchestrates meaning-blind state
 //! primitives. No runtime callback or manifest authority reaches this code.
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::sync::Arc;
 
@@ -343,7 +344,7 @@ pub async fn import(
     Ok(response)
 }
 
-/// Import one already-verified managed-activation member from a node-owned
+/// Import one already-verified managed-activation component from a node-owned
 /// descriptor-pinned staging directory. The caller must have resolved the
 /// signed activation config and authenticated the configured operator; this
 /// helper accepts no ambient root name, host path, or caller-selected limit.
@@ -352,17 +353,13 @@ pub fn import_managed_activation_component(
     operator_fingerprint: &str,
     activation: &crate::managed_external_content::ResolvedManagedExternalContentActivation,
     component: &crate::managed_external_content::ResolvedManagedActivationComponent,
-    member: &crate::managed_external_content::ManagedActivationMember,
     source_root: &lillux::PinnedDirectory,
     staged_name: &str,
 ) -> anyhow::Result<ImportResponse> {
     use crate::managed_external_content::{ManagedComponentStorage, ManagedMemberDisposition};
 
     if !lillux::valid_hash(operator_fingerprint)
-        || component.recipe.source.is_empty()
-        || component.recipe.member != member.path
-        || member.disposition != ManagedMemberDisposition::Import
-        || component.declaration_kind != ryeos_engine::external_content::ExternalContentKind::File
+        || component.recipe.members.is_empty()
         || activation
             .component(&component.recipe.id)?
             .expected_manifest_hash
@@ -370,37 +367,98 @@ pub fn import_managed_activation_component(
     {
         bail!("managed external-content import authority is inconsistent");
     }
+    let mut maximum_bytes = 0u64;
+    let mut maximum_file_bytes = 0u64;
+    let mut tree_entries = BTreeSet::new();
+    let mut maximum_depth = 1usize;
+    let mut expected_file_sha256 = None;
+    for mapping in &component.recipe.members {
+        let member = activation.member(&mapping.source, &mapping.member)?;
+        if member.disposition != ManagedMemberDisposition::Import {
+            bail!("managed external-content import names a non-import member");
+        }
+        maximum_bytes = maximum_bytes
+            .checked_add(member.maximum_bytes)
+            .ok_or_else(|| anyhow::anyhow!("managed component byte bound overflow"))?;
+        maximum_file_bytes = maximum_file_bytes.max(member.maximum_bytes);
+        match component.declaration_kind {
+            ryeos_engine::external_content::ExternalContentKind::File => {
+                if component.recipe.members.len() != 1 || mapping.target.is_some() {
+                    bail!("managed file component has an invalid member shape");
+                }
+                expected_file_sha256 = Some(member.sha256.clone());
+            }
+            ryeos_engine::external_content::ExternalContentKind::Tree => {
+                let target = mapping.target.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("managed tree component member has no target")
+                })?;
+                let parts = target.split('/').collect::<Vec<_>>();
+                maximum_depth = maximum_depth.max(parts.len());
+                tree_entries.insert(target.to_owned());
+                let mut parent = String::new();
+                for part in parts.iter().take(parts.len().saturating_sub(1)) {
+                    if !parent.is_empty() {
+                        parent.push('/');
+                    }
+                    parent.push_str(part);
+                    tree_entries.insert(parent.clone());
+                }
+            }
+        }
+    }
     validate_relative_path(staged_name)?;
-    let policy = state
+    let import_policy = state
         .node_config
         .external_content_import_policy
         .as_ref()
-        .and_then(|policy| policy.managed_activation.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("node has no managed external-content activation policy"))?;
+    let policy = import_policy
+        .managed_activation
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("node has no managed external-content activation policy"))?;
     activation.document.validate_portable()?;
     let request = ImportRequest {
         root: "managed-activation-staging".to_owned(),
         path: staged_name.to_owned(),
-        shape: ImportShape::File,
+        shape: match component.declaration_kind {
+            ryeos_engine::external_content::ExternalContentKind::File => ImportShape::File,
+            ryeos_engine::external_content::ExternalContentKind::Tree => ImportShape::Tree,
+        },
         storage: match component.recipe.storage {
             ManagedComponentStorage::Content => ImportStorage::Content,
             ManagedComponentStorage::LargeContent => ImportStorage::LargeContent,
         },
-        maximum_bytes: member.maximum_bytes,
-        expected_file_sha256: Some(member.sha256.clone()),
+        maximum_bytes,
+        expected_file_sha256,
     };
+    if maximum_depth > import_policy.limits.max_depth
+        || tree_entries.len().max(1) > import_policy.limits.max_entries
+        || maximum_file_bytes > import_policy.limits.max_file_bytes
+        || maximum_bytes > import_policy.limits.max_total_bytes
+    {
+        bail!("managed external-content component exceeds current node import policy");
+    }
     let limits = crate::node_config::sections::external_content::ExternalContentImportLimits {
-        max_depth: 1,
-        max_entries: 1,
-        max_file_bytes: member.maximum_bytes,
-        max_total_bytes: member.maximum_bytes,
-        store_budget_bytes: policy.store_budget_bytes,
-        minimum_free_bytes: policy.minimum_free_bytes,
+        max_depth: maximum_depth,
+        max_entries: match component.declaration_kind {
+            ryeos_engine::external_content::ExternalContentKind::File => 1,
+            ryeos_engine::external_content::ExternalContentKind::Tree => tree_entries.len(),
+        },
+        max_file_bytes: maximum_file_bytes,
+        max_total_bytes: maximum_bytes,
+        store_budget_bytes: policy
+            .store_budget_bytes
+            .min(import_policy.limits.store_budget_bytes),
+        minimum_free_bytes: policy
+            .minimum_free_bytes
+            .max(import_policy.limits.minimum_free_bytes),
     };
-    let policy_digest =
-        ryeos_state::objects::canonical_value_digest(&serde_json::to_value(policy)?)?;
+    let policy_digest = crate::managed_external_content_operation::managed_policy_digest(
+        &import_policy.limits,
+        policy,
+    )?;
     let request_digest = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
-        "schema":"ryeos.managed_external_content_import.v1",
+        "schema":"ryeos.managed_external_content_import.v2",
         "activation_program_digest":activation.activation_program_digest,
         "consumer_ref":activation.document.consumer_ref,
         "component":component.recipe,
@@ -409,7 +467,7 @@ pub fn import_managed_activation_component(
             "manifest_hash":component.expected_manifest_hash,
             "manifest_kind":component.expected_manifest_kind,
         },
-        "member":member,
+        "members":component.recipe.members,
         "policy_digest":policy_digest,
         "capture_floor_rules":ryeos_state::project_sync::durable_content_capture_floor_rules(),
         "configured_ignore_patterns":state.ignore_matcher.canonical_patterns(),
@@ -421,9 +479,9 @@ pub fn import_managed_activation_component(
     let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
     let large_store = authority.large_object_store()?;
-    let required_free = policy
+    let required_free = limits
         .minimum_free_bytes
-        .checked_add(member.maximum_bytes)
+        .checked_add(maximum_bytes)
         .ok_or_else(|| {
             anyhow::anyhow!("managed external-content free-space requirement overflow")
         })?;
@@ -437,9 +495,9 @@ pub fn import_managed_activation_component(
     if request.storage == ImportStorage::LargeContent
         && large_store
             .total_stored_bytes()?
-            .checked_add(member.maximum_bytes)
+            .checked_add(maximum_bytes)
             .ok_or_else(|| anyhow::anyhow!("managed external-content store budget overflow"))?
-            > policy.store_budget_bytes
+            > limits.store_budget_bytes
     {
         bail!("managed external-content import would exceed the node large-store budget");
     }

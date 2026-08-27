@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::managed_external_content::ResolvedManagedExternalContentActivation;
-use crate::node_config::sections::external_content::ManagedExternalContentActivationPolicy;
+use crate::node_config::sections::external_content::{
+    ExternalContentImportPolicyRecord, ManagedExternalContentActivationPolicy,
+};
 
 pub const MANAGED_ACTIVATION_OPERATION: &str = "external_content_activation";
 
@@ -47,12 +49,15 @@ impl ManagedActivationJobOperation {
         activation: &ResolvedManagedExternalContentActivation,
         operator_fingerprint: String,
         operator_authority_digest: String,
-        policy: &ManagedExternalContentActivationPolicy,
+        policy: &ExternalContentImportPolicyRecord,
         acquisition_mode: AcquisitionMode,
     ) -> anyhow::Result<Self> {
+        let managed = policy.managed_activation.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("node has no managed external-content activation policy")
+        })?;
         let operation = Self {
             operation_type: MANAGED_ACTIVATION_OPERATION.to_owned(),
-            schema: "ryeos.external_content_activation_operation.v1".to_owned(),
+            schema: "ryeos.external_content_activation_operation.v2".to_owned(),
             activation_ref: activation.activation_ref.clone(),
             activation_program_digest: activation.activation_program_digest.clone(),
             activation_id:
@@ -65,7 +70,7 @@ impl ManagedActivationJobOperation {
             publisher_fingerprint: activation.publisher_fingerprint.clone(),
             operator_fingerprint,
             operator_authority_digest,
-            policy_digest: managed_policy_digest(policy)?,
+            policy_digest: managed_policy_digest(&policy.limits, managed)?,
             acquisition_mode,
         };
         operation.validate()?;
@@ -86,7 +91,7 @@ impl ManagedActivationJobOperation {
 
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.operation_type != MANAGED_ACTIVATION_OPERATION
-            || self.schema != "ryeos.external_content_activation_operation.v1"
+            || self.schema != "ryeos.external_content_activation_operation.v2"
         {
             bail!("managed activation operation schema or type is not current");
         }
@@ -126,7 +131,7 @@ impl ManagedActivationJobOperation {
     pub fn validate_current(
         &self,
         activation: &ResolvedManagedExternalContentActivation,
-        policy: &ManagedExternalContentActivationPolicy,
+        policy: &ExternalContentImportPolicyRecord,
         operator_authority_digest: &str,
     ) -> anyhow::Result<()> {
         self.validate()?;
@@ -145,10 +150,16 @@ impl ManagedActivationJobOperation {
 }
 
 pub fn managed_policy_digest(
-    policy: &ManagedExternalContentActivationPolicy,
+    limits: &crate::node_config::sections::external_content::ExternalContentImportLimits,
+    managed: &ManagedExternalContentActivationPolicy,
 ) -> anyhow::Result<String> {
-    policy.validate()?;
-    ryeos_state::objects::canonical_value_digest(&serde_json::to_value(policy)?)
+    limits.validate()?;
+    managed.validate()?;
+    ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+        "schema":"ryeos.managed_external_content_node_policy.v1",
+        "import_limits":limits,
+        "managed_activation":managed,
+    }))
 }
 
 pub fn publish_activation_receipt(
@@ -163,7 +174,6 @@ pub fn publish_activation_receipt(
             .node_config
             .external_content_import_policy
             .as_ref()
-            .and_then(|policy| policy.managed_activation.as_ref())
             .ok_or_else(|| {
                 anyhow::anyhow!("node has no managed external-content activation policy")
             })?,
@@ -298,6 +308,35 @@ fn validate_canonical_ref(label: &str, value: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    fn managed_policy() -> ManagedExternalContentActivationPolicy {
+        ManagedExternalContentActivationPolicy {
+            allow_online: true,
+            allowed_https_hosts: vec!["releases.example.test".to_owned()],
+            max_archives: 1,
+            max_compressed_bytes: 4096,
+            max_expanded_bytes: 8192,
+            max_members: 8,
+            max_member_bytes: 4096,
+            max_concurrent_activations: 1,
+            cache_budget_bytes: 16384,
+            store_budget_bytes: 32768,
+            minimum_free_bytes: 4096,
+            max_attempts: 3,
+        }
+    }
+
+    fn import_limits() -> crate::node_config::sections::external_content::ExternalContentImportLimits
+    {
+        crate::node_config::sections::external_content::ExternalContentImportLimits {
+            max_depth: 8,
+            max_entries: 64,
+            max_file_bytes: 8192,
+            max_total_bytes: 16384,
+            store_budget_bytes: 32768,
+            minimum_free_bytes: 4096,
+        }
+    }
+
     fn receipt(
         policy: char,
         operator: char,
@@ -329,5 +368,26 @@ mod tests {
         let mut different = later;
         different.components[0].binding_hash = "3".repeat(64);
         assert!(!same_activated_realization(&first, &different));
+    }
+
+    #[test]
+    fn durable_policy_digest_includes_import_and_acquisition_ceilings() {
+        let managed = managed_policy();
+        let limits = import_limits();
+        let baseline = managed_policy_digest(&limits, &managed).unwrap();
+
+        let mut narrower_import = limits.clone();
+        narrower_import.max_entries -= 1;
+        assert_ne!(
+            baseline,
+            managed_policy_digest(&narrower_import, &managed).unwrap()
+        );
+
+        let mut narrower_acquisition = managed;
+        narrower_acquisition.max_members -= 1;
+        assert_ne!(
+            baseline,
+            managed_policy_digest(&limits, &narrower_acquisition).unwrap()
+        );
     }
 }

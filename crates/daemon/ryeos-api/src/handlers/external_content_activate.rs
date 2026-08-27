@@ -73,7 +73,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         &activation,
         operator,
         operator_authority_digest,
-        policy,
+        external_content_policy(&state)?,
         req.mode,
     )?;
     Ok(serde_json::to_value(
@@ -124,19 +124,29 @@ async fn execute_operation(
         )?;
         validate_completed_activation(&state, &activation, &operation, &job_id, &response)?;
         response.idempotent = true;
+        if let Err(error) = tokio::task::spawn_blocking(move || cleanup_staging(directories))
+            .await
+            .context("completed activation cleanup task panicked")?
+        {
+            tracing::warn!(%error, %job_id, "idempotent managed activation retained rebuildable staging");
+        }
         return Ok(response);
     }
     if matches!(
         existing.state,
         ryeos_state::SyncJobState::Failed | ryeos_state::SyncJobState::Cancelled
     ) {
+        let state_name = existing.state.as_str().to_owned();
+        let diagnostic = existing
+            .last_error
+            .clone()
+            .unwrap_or_else(|| "no retained diagnostic".to_owned());
+        cleanup_terminal_staging(directories, &job_id).await;
         bail!(
             "managed activation job {} is terminal in state {}: {}",
             job_id,
-            existing.state.as_str(),
-            existing
-                .last_error
-                .unwrap_or_else(|| "no retained diagnostic".to_owned())
+            state_name,
+            diagnostic
         );
     }
     if let Err(error) = (|| {
@@ -147,7 +157,7 @@ async fn execute_operation(
             )?;
         operation.validate_current(
             &activation,
-            managed_policy(&state)?,
+            external_content_policy(&state)?,
             &operator_authority_digest,
         )
     })() {
@@ -348,7 +358,7 @@ fn validate_completed_activation(
         bail!("completed managed activation receipt has a different component set");
     }
     for component in &activation.components {
-        ryeos_app::operator_external_content::require_active_binding(
+        let binding = ryeos_app::operator_external_content::require_active_binding(
             state,
             &cas,
             &component.expected_manifest_hash,
@@ -361,6 +371,20 @@ fn validate_completed_activation(
                 component.recipe.id
             )
         })?;
+        let receipt_component = receipt
+            .components
+            .iter()
+            .find(|candidate| candidate.id == component.recipe.id)
+            .expect("component set equality checked above");
+        let binding_hash = ryeos_state::objects::canonical_value_digest(&binding.to_value()?)?;
+        if binding_hash != receipt_component.binding_hash
+            || binding.manifest_kind != component.expected_manifest_kind
+        {
+            bail!(
+                "completed managed activation component `{}` contradicts its receipt or consumer storage grant",
+                component.recipe.id
+            );
+        }
     }
     authority.ensure_guard(&guard)?;
     Ok(())
@@ -435,7 +459,7 @@ fn acquire_and_import(
         )?;
     operation.validate_current(
         activation,
-        managed_policy(state)?,
+        external_content_policy(state)?,
         &operator_authority_digest,
     )?;
     for source in &activation.document.sources {
@@ -449,13 +473,11 @@ fn acquire_and_import(
     }
     let mut imported = Vec::with_capacity(activation.components.len());
     for component in &activation.components {
-        let member = activation.member(component)?;
         let response = ryeos_app::operator_external_content::import_managed_activation_component(
             state,
             &operation.operator_fingerprint,
             activation,
             component,
-            member,
             staging,
             &component.recipe.id,
         )?;
@@ -505,8 +527,9 @@ fn cleanup_staging(directories: ActivationDirectories) -> Result<()> {
     directories
         .job
         .remove_contents_recursive_bounded(lillux::DirectoryTraversalBudget {
-            max_depth: 1,
-            max_entries: CACHE_ENTRY_LIMIT,
+            max_depth: ryeos_state::external_content::MAX_CAPTURE_DEPTH,
+            max_entries:
+                ryeos_app::managed_external_content::MAX_MANAGED_ACTIVATION_STAGING_ENTRIES,
         })?;
     if !directories
         .staging
@@ -655,8 +678,14 @@ fn extract_selected_members(
     let imported = activation
         .components
         .iter()
-        .filter(|component| component.recipe.source == source.id)
-        .map(|component| (component.recipe.member.as_str(), component))
+        .flat_map(|component| {
+            component
+                .recipe
+                .members
+                .iter()
+                .filter(|mapping| mapping.source == source.id)
+                .map(move |mapping| (mapping.member.as_str(), (component, mapping)))
+        })
         .collect::<BTreeMap<_, _>>();
     let mut seen_paths = BTreeSet::new();
     let mut seen_selected = BTreeSet::new();
@@ -720,21 +749,44 @@ fn extract_selected_members(
             )?;
             continue;
         }
-        let component = imported.get(path).ok_or_else(|| {
+        let (component, mapping) = imported.get(path).copied().ok_or_else(|| {
             anyhow::anyhow!("imported managed activation member has no resolved consumer component")
         })?;
         let mode = if member.executable { 0o755 } else { 0o644 };
-        let name = OsStr::new(&component.recipe.id);
-        let created = staging.atomic_create_regular_from_reader(
-            name,
+        let (destination, name) = match component.declaration_kind {
+            ryeos_engine::external_content::ExternalContentKind::File => {
+                if mapping.target.is_some() {
+                    bail!("managed file component member unexpectedly has a target");
+                }
+                (staging.try_clone()?, component.recipe.id.as_str())
+            }
+            ryeos_engine::external_content::ExternalContentKind::Tree => {
+                let target = mapping.target.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("managed tree component member has no target")
+                })?;
+                let parts = target.split('/').collect::<Vec<_>>();
+                let name = parts
+                    .last()
+                    .copied()
+                    .ok_or_else(|| anyhow::anyhow!("managed tree target is empty"))?;
+                let mut destination =
+                    staging.open_or_create_child(OsStr::new(&component.recipe.id), 0o755)?;
+                for part in parts.iter().take(parts.len().saturating_sub(1)) {
+                    destination = destination.open_or_create_child(OsStr::new(part), 0o755)?;
+                }
+                (destination, name)
+            }
+        };
+        let created = destination.atomic_create_regular_from_reader(
+            OsStr::new(name),
             &mut entry,
             member.maximum_bytes,
             mode,
         )?;
         let mut file = match created {
             Some((file, _)) => file,
-            None => staging
-                .open_regular(name, false)?
+            None => destination
+                .open_regular(OsStr::new(name), false)?
                 .ok_or_else(|| anyhow::anyhow!("managed activation staged member disappeared"))?,
         };
         verify_open_file(
@@ -746,6 +798,7 @@ fn extract_selected_members(
         if lillux::normalized_portable_regular_mode(&file.metadata()?)? != mode {
             bail!("managed activation staged member mode changed");
         }
+        destination.ensure_path_binding()?;
     }
     let mut bounded = archive.into_inner();
     std::io::copy(&mut bounded, &mut std::io::sink())
@@ -858,6 +911,17 @@ fn managed_policy(
         .as_ref()
         .and_then(|policy| policy.managed_activation.as_ref())
         .ok_or_else(|| anyhow::anyhow!("node has no managed external-content activation policy"))
+}
+
+fn external_content_policy(
+    state: &AppState,
+) -> Result<&ryeos_app::node_config::sections::external_content::ExternalContentImportPolicyRecord>
+{
+    state
+        .node_config
+        .external_content_import_policy
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("node has no external-content import policy"))
 }
 
 fn bounded_error(value: &str) -> String {
@@ -1000,7 +1064,8 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 mod tests {
     use super::*;
     use ryeos_app::managed_external_content::{
-        ManagedActivationMember, ManagedComponentStorage, ResolvedManagedActivationComponent,
+        ManagedActivationComponentMember, ManagedActivationMember, ManagedComponentStorage,
+        ResolvedManagedActivationComponent,
     };
 
     fn test_policy()
@@ -1036,18 +1101,24 @@ mod tests {
                 components: vec![
                     ryeos_app::managed_external_content::ManagedActivationComponent {
                         id: "runtime".to_owned(),
-                        source: "package".to_owned(),
-                        member: "bin/runtime".to_owned(),
                         storage: ManagedComponentStorage::LargeContent,
+                        members: vec![ManagedActivationComponentMember {
+                            source: "package".to_owned(),
+                            member: "bin/runtime".to_owned(),
+                            target: None,
+                        }],
                     },
                 ],
             },
             components: vec![ResolvedManagedActivationComponent {
                 recipe: ryeos_app::managed_external_content::ManagedActivationComponent {
                     id: "runtime".to_owned(),
-                    source: "package".to_owned(),
-                    member: "bin/runtime".to_owned(),
                     storage: ManagedComponentStorage::LargeContent,
+                    members: vec![ManagedActivationComponentMember {
+                        source: "package".to_owned(),
+                        member: "bin/runtime".to_owned(),
+                        target: None,
+                    }],
                 },
                 expected_manifest_hash: "d".repeat(64),
                 expected_manifest_kind: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND
@@ -1071,7 +1142,7 @@ mod tests {
             .unwrap();
         let mut operation = ManagedActivationJobOperation {
             operation_type: MANAGED_ACTIVATION_OPERATION.to_owned(),
-            schema: "ryeos.external_content_activation_operation.v1".to_owned(),
+            schema: "ryeos.external_content_activation_operation.v2".to_owned(),
             activation_ref: "config:fixture/activation".to_owned(),
             activation_program_digest: program_digest,
             activation_id: activation_id.clone(),
@@ -1139,6 +1210,70 @@ mod tests {
             .unwrap()
             .unwrap();
         verify_open_file(&mut staged, 64, &digest, "fixture").unwrap();
+    }
+
+    #[test]
+    fn selected_archive_members_build_a_descriptor_rooted_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let bytes = b"runtime".to_vec();
+        let digest = lillux::sha256_hex(&bytes);
+        let archive_file = root.path().join("tree.tar.gz");
+        {
+            let file = std::fs::File::create(&archive_file).unwrap();
+            let gzip = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            let mut tar = tar::Builder::new(gzip);
+            let mut header = tar::Header::new_gnu();
+            header.set_path("bin/runtime").unwrap();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            tar.append(&header, bytes.as_slice()).unwrap();
+            tar.into_inner().unwrap().finish().unwrap();
+        }
+        let source = ManagedActivationSource {
+            id: "package".to_owned(),
+            url: "https://releases.example.test/tree.tar.gz".to_owned(),
+            archive_format: ryeos_app::managed_external_content::MANAGED_ACTIVATION_ARCHIVE_FORMAT
+                .to_owned(),
+            sha256: "a".repeat(64),
+            maximum_compressed_bytes: 4096,
+            maximum_expanded_bytes: 4096,
+            members: vec![ManagedActivationMember {
+                path: "bin/runtime".to_owned(),
+                disposition: ManagedMemberDisposition::Import,
+                sha256: digest.clone(),
+                maximum_bytes: 64,
+                executable: true,
+            }],
+        };
+        let mut activation = test_activation(source.clone());
+        activation.document.components[0].members[0].target = Some("tools/runtime".to_owned());
+        activation.components[0].recipe = activation.document.components[0].clone();
+        activation.components[0].declaration_kind =
+            ryeos_engine::external_content::ExternalContentKind::Tree;
+        let policy = test_policy();
+        extract_selected_members(
+            std::fs::File::open(&archive_file).unwrap(),
+            &source,
+            &activation,
+            &staging,
+            &policy,
+        )
+        .unwrap();
+        let component = staging
+            .open_child_directory(OsStr::new("runtime"))
+            .unwrap()
+            .unwrap();
+        let tools = component
+            .open_child_directory(OsStr::new("tools"))
+            .unwrap()
+            .unwrap();
+        let mut staged = tools
+            .open_regular(OsStr::new("runtime"), false)
+            .unwrap()
+            .unwrap();
+        verify_open_file(&mut staged, 64, &digest, "tree fixture").unwrap();
     }
 
     #[test]

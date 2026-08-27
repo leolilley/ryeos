@@ -1,6 +1,6 @@
-# ryeos:signed:2026-08-27T07:02:41Z:95e5f0956f3f804ce7699bc2946cbf1187571a89fb7283a944939669905e7255:sJhjsc/2bFFGsQaYyLbTX4vvX1FsTwsk1JQ0enkkt3pcjoW/81g2Nzag1L1St+5atQe7FUv3W4KrXuhhAwQTAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-27T11:46:10Z:ece2be2a150d1def82a64017f4d484a987901cb76f7fc28984bf71bbbae3a27b:WvtFZPU00/ww63OB7cIeKTWEk1k8Wu1UoW9dHPYkFB7FqmmQ6bP1NXyTOi+nu6x2uFICwGvMoS3VZ77SqiLEAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
-schema: ryeos.external_content_activation.v1
+schema: ryeos.external_content_activation.v2
 consumer_ref: worker:codex/hosted
 sources:
   - id: codex-package
@@ -37,18 +37,26 @@ sources:
         executable: true
 components:
   - id: codex
-    source: codex-package
-    member: bin/codex
     storage: large_content
+    members:
+      - source: codex-package
+        member: bin/codex
+        target: null
   - id: codex-code-mode-host
-    source: codex-package
-    member: bin/codex-code-mode-host
     storage: large_content
+    members:
+      - source: codex-package
+        member: bin/codex-code-mode-host
+        target: null
   - id: codex-zsh
-    source: codex-package
-    member: codex-resources/zsh/bin/zsh
     storage: large_content
+    members:
+      - source: codex-package
+        member: codex-resources/zsh/bin/zsh
+        target: null
   - id: codex-rg
-    source: codex-package
-    member: codex-path/rg
     storage: large_content
+    members:
+      - source: codex-package
+        member: codex-path/rg
+        target: null

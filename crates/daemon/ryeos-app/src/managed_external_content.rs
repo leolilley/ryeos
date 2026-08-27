@@ -13,12 +13,27 @@ use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::node_config::sections::external_content::ManagedExternalContentActivationPolicy;
+use crate::node_config::sections::external_content::{
+    ExternalContentImportLimits, ManagedExternalContentActivationPolicy,
+};
 
-pub const MANAGED_ACTIVATION_SCHEMA: &str = "ryeos.external_content_activation.v1";
+pub const MANAGED_ACTIVATION_SCHEMA: &str = "ryeos.external_content_activation.v2";
 pub const MANAGED_ACTIVATION_ARCHIVE_FORMAT: &str = "tar_gzip";
 const MAX_PORTABLE_ARCHIVES: usize = 8;
 const MAX_PORTABLE_MEMBERS: usize = 1024;
+pub const MAX_MANAGED_ACTIVATION_STAGING_ENTRIES: usize = MAX_PORTABLE_MEMBERS
+    * (ryeos_state::external_content::MAX_CAPTURE_DEPTH + 1)
+    + ryeos_state::objects::MAX_EXTERNAL_CONTENT_ACTIVATION_COMPONENTS;
+
+fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,16 +71,28 @@ pub struct ManagedActivationSource {
     pub members: Vec<ManagedActivationMember>,
 }
 
-/// One acquisition member mapped to an existing consumer external-content ID.
-/// Kind, pinned manifest digest, schema, and mount are deliberately absent:
-/// admission derives them from the resolved consumer.
+/// One selected archive member placed into a consumer realization. File-shaped
+/// consumers require exactly one mapping with no target. Tree-shaped consumers
+/// require a canonical target for every mapping; acquisition creates only
+/// those regular files and their parent directories.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedActivationComponentMember {
+    pub source: String,
+    pub member: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub target: Option<String>,
+}
+
+/// Selected acquisition members mapped to one existing consumer
+/// external-content ID. Kind, pinned manifest digest, schema, and mount are
+/// deliberately absent: admission derives them from the resolved consumer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedActivationComponent {
     pub id: String,
-    pub source: String,
-    pub member: String,
     pub storage: ManagedComponentStorage,
+    pub members: Vec<ManagedActivationComponentMember>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,26 +201,73 @@ impl ManagedExternalContentActivation {
         let mut consumed_imports = BTreeSet::new();
         for component in &self.components {
             validate_id("activation component id", &component.id)?;
-            validate_id("activation component source", &component.source)?;
-            validate_member_path(&component.member)?;
             if !component_ids.insert(component.id.as_str()) {
                 bail!("managed activation repeats a component id");
             }
-            let Some(member) =
-                source_members.get(&(component.source.as_str(), component.member.as_str()))
-            else {
-                bail!("activation component names an absent source member");
-            };
-            if member.disposition != ManagedMemberDisposition::Import {
-                bail!("activation component does not name an imported source member");
+            if component.members.is_empty() || component.members.len() > MAX_PORTABLE_MEMBERS {
+                bail!("managed activation component member count is outside the portable contract");
+            }
+            let tree_candidate = component
+                .members
+                .iter()
+                .any(|mapping| mapping.target.is_some());
+            if tree_candidate
+                && component
+                    .members
+                    .iter()
+                    .any(|mapping| mapping.target.is_none())
+            {
+                bail!("tree-shaped activation component has a member without a target");
+            }
+            if !tree_candidate && component.members.len() != 1 {
+                bail!("file-shaped activation component candidate must select exactly one member");
+            }
+            let mut targets = BTreeSet::new();
+            let mut tree_entries = BTreeSet::new();
+            let mut component_maximum_bytes = 0u64;
+            for mapping in &component.members {
+                validate_id("activation component source", &mapping.source)?;
+                validate_member_path(&mapping.member)?;
+                if let Some(target) = &mapping.target {
+                    validate_member_path(target)?;
+                    if target.split('/').count() > ryeos_state::external_content::MAX_CAPTURE_DEPTH
+                    {
+                        bail!("activation tree target exceeds the portable depth bound");
+                    }
+                    if !targets.insert(target.as_str()) {
+                        bail!("activation tree component repeats a target path");
+                    }
+                    insert_tree_namespace(target, &mut tree_entries);
+                    if tree_entries.len() > ryeos_state::objects::MAX_EXTERNAL_CONTENT_ENTRIES {
+                        bail!("activation tree component exceeds the portable entry bound");
+                    }
+                }
+                let Some(member) =
+                    source_members.get(&(mapping.source.as_str(), mapping.member.as_str()))
+                else {
+                    bail!("activation component names an absent source member");
+                };
+                if member.disposition != ManagedMemberDisposition::Import {
+                    bail!("activation component does not name an imported source member");
+                }
+                component_maximum_bytes = component_maximum_bytes
+                    .checked_add(member.maximum_bytes)
+                    .ok_or_else(|| anyhow::anyhow!("activation component byte bound overflow"))?;
+                if component.storage == ManagedComponentStorage::Content
+                    && member.maximum_bytes > ryeos_state::objects::MAX_EXTERNAL_CONTENT_FILE_BYTES
+                {
+                    bail!("ordinary-content activation member has a large-content byte bound");
+                }
+                if !consumed_imports.insert((mapping.source.as_str(), mapping.member.as_str())) {
+                    bail!("an imported activation member is consumed more than once");
+                }
             }
             if component.storage == ManagedComponentStorage::Content
-                && member.maximum_bytes > ryeos_state::objects::MAX_EXTERNAL_CONTENT_FILE_BYTES
+                && component_maximum_bytes > ryeos_state::objects::MAX_EXTERNAL_CONTENT_TOTAL_BYTES
             {
-                bail!("ordinary-content activation component has a large-content byte bound");
-            }
-            if !consumed_imports.insert((component.source.as_str(), component.member.as_str())) {
-                bail!("an imported activation member is consumed more than once");
+                bail!(
+                    "ordinary-content activation component has an excessive aggregate byte bound"
+                );
             }
         }
         if consumed_imports != imported_members {
@@ -208,11 +282,13 @@ impl ManagedExternalContentActivation {
     pub fn admit(
         &self,
         policy: &ManagedExternalContentActivationPolicy,
+        import_limits: &ExternalContentImportLimits,
         declarations: &[ryeos_engine::external_content::ExternalContentDeclaration],
         large_content_supported: bool,
     ) -> anyhow::Result<Vec<ResolvedManagedActivationComponent>> {
         self.validate_portable()?;
         policy.validate()?;
+        import_limits.validate()?;
         if self.sources.len() > policy.max_archives {
             bail!("managed activation archive count exceeds node policy");
         }
@@ -271,8 +347,60 @@ impl ManagedExternalContentActivation {
                     component.id
                 )
             })?;
-            if declaration.kind != ryeos_engine::external_content::ExternalContentKind::File {
-                bail!("managed activation v1 can supply only consumer file realizations");
+            let mut maximum_bytes = 0u64;
+            let mut maximum_file_bytes = 0u64;
+            let mut maximum_depth = 1usize;
+            let mut tree_entries = BTreeSet::new();
+            for mapping in &component.members {
+                let member = self.member(&mapping.source, &mapping.member)?;
+                maximum_bytes = maximum_bytes
+                    .checked_add(member.maximum_bytes)
+                    .ok_or_else(|| anyhow::anyhow!("activation component byte bound overflow"))?;
+                maximum_file_bytes = maximum_file_bytes.max(member.maximum_bytes);
+                if let Some(target) = mapping.target.as_deref() {
+                    maximum_depth = maximum_depth.max(target.split('/').count());
+                    insert_tree_namespace(target, &mut tree_entries);
+                }
+            }
+            match declaration.kind {
+                ryeos_engine::external_content::ExternalContentKind::File => {
+                    if component.members.len() != 1 || component.members[0].target.is_some() {
+                        bail!("managed activation file realization requires one untargeted member");
+                    }
+                }
+                ryeos_engine::external_content::ExternalContentKind::Tree => {
+                    if component
+                        .members
+                        .iter()
+                        .any(|mapping| mapping.target.is_none())
+                    {
+                        bail!("managed activation tree realization requires targeted members");
+                    }
+                    let mut targets = component
+                        .members
+                        .iter()
+                        .map(|mapping| mapping.target.as_deref().expect("checked above"))
+                        .collect::<Vec<_>>();
+                    targets.sort_unstable();
+                    for (index, left) in targets.iter().enumerate() {
+                        for right in targets.iter().skip(index + 1) {
+                            if path_contains(left, right) || path_contains(right, left) {
+                                bail!("managed activation tree targets overlap");
+                            }
+                        }
+                    }
+                }
+            }
+            let maximum_entries = match declaration.kind {
+                ryeos_engine::external_content::ExternalContentKind::File => 1,
+                ryeos_engine::external_content::ExternalContentKind::Tree => tree_entries.len(),
+            };
+            if maximum_depth > import_limits.max_depth
+                || maximum_entries > import_limits.max_entries
+                || maximum_file_bytes > import_limits.max_file_bytes
+                || maximum_bytes > import_limits.max_total_bytes
+            {
+                bail!("managed activation component exceeds node import policy");
             }
             let expected_manifest_hash = declaration
                 .digest
@@ -317,14 +445,26 @@ impl ResolvedManagedExternalContentActivation {
             .ok_or_else(|| anyhow::anyhow!("managed activation source {id} is absent"))
     }
 
-    pub fn member(
-        &self,
-        component: &ResolvedManagedActivationComponent,
-    ) -> anyhow::Result<&ManagedActivationMember> {
-        self.source(&component.recipe.source)?
+    pub fn member(&self, source: &str, member: &str) -> anyhow::Result<&ManagedActivationMember> {
+        self.source(source)?
             .members
             .iter()
-            .find(|member| member.path == component.recipe.member)
+            .find(|candidate| candidate.path == member)
+            .ok_or_else(|| anyhow::anyhow!("managed activation component member is absent"))
+    }
+}
+
+impl ManagedExternalContentActivation {
+    fn member(&self, source: &str, member: &str) -> anyhow::Result<&ManagedActivationMember> {
+        self.sources
+            .iter()
+            .find(|candidate| candidate.id == source)
+            .and_then(|candidate| {
+                candidate
+                    .members
+                    .iter()
+                    .find(|candidate| candidate.path == member)
+            })
             .ok_or_else(|| anyhow::anyhow!("managed activation component member is absent"))
     }
 }
@@ -333,11 +473,14 @@ pub fn resolve_activation(
     state: &crate::state::AppState,
     activation_ref: &str,
 ) -> anyhow::Result<ResolvedManagedExternalContentActivation> {
-    let policy = state
+    let import_policy = state
         .node_config
         .external_content_import_policy
         .as_ref()
-        .and_then(|policy| policy.managed_activation.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("node has no managed external-content activation policy"))?;
+    let policy = import_policy
+        .managed_activation
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("node has no managed external-content activation policy"))?;
     let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(activation_ref)
         .map_err(|error| anyhow::anyhow!("invalid activation ref: {error}"))?;
@@ -394,6 +537,7 @@ pub fn resolve_activation(
         .context("parse resolved consumer external-content declarations")?;
     let components = document.admit(
         policy,
+        &import_policy.limits,
         &declarations,
         external_contract.large_content.is_some(),
     )?;
@@ -511,6 +655,23 @@ fn validate_id(label: &str, value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn path_contains(parent: &str, child: &str) -> bool {
+    child
+        .strip_prefix(parent)
+        .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn insert_tree_namespace(target: &str, entries: &mut BTreeSet<String>) {
+    let mut path = String::new();
+    for part in target.split('/') {
+        if !path.is_empty() {
+            path.push('/');
+        }
+        path.push_str(part);
+        entries.insert(path.clone());
+    }
+}
+
 fn validate_canonical_ref(label: &str, value: &str) -> anyhow::Result<()> {
     if value.is_empty()
         || value.len() > 512
@@ -549,6 +710,17 @@ mod tests {
         }
     }
 
+    fn import_limits() -> ExternalContentImportLimits {
+        ExternalContentImportLimits {
+            max_depth: 8,
+            max_entries: 64,
+            max_file_bytes: 8192,
+            max_total_bytes: 16384,
+            store_budget_bytes: 32768,
+            minimum_free_bytes: 4096,
+        }
+    }
+
     fn document_value(host: &str) -> Value {
         serde_json::json!({
             "schema":MANAGED_ACTIVATION_SCHEMA,
@@ -570,9 +742,12 @@ mod tests {
             }],
             "components":[{
                 "id":"runtime",
-                "source":"package",
-                "member":"bin/runtime",
-                "storage":"large_content"
+                "storage":"large_content",
+                "members":[{
+                    "source":"package",
+                    "member":"bin/runtime",
+                    "target":null
+                }]
             }]
         })
     }
@@ -595,7 +770,11 @@ mod tests {
         let document =
             ManagedExternalContentActivation::from_value(&document_value("foreign.example.test"))
                 .unwrap();
-        assert!(document.admit(&policy(), &declarations(), true).is_err());
+        assert!(
+            document
+                .admit(&policy(), &import_limits(), &declarations(), true)
+                .is_err()
+        );
     }
 
     #[test]
@@ -611,7 +790,9 @@ mod tests {
         let document =
             ManagedExternalContentActivation::from_value(&document_value("releases.example.test"))
                 .unwrap();
-        let resolved = document.admit(&policy(), &declarations(), true).unwrap();
+        let resolved = document
+            .admit(&policy(), &import_limits(), &declarations(), true)
+            .unwrap();
         assert_eq!(resolved[0].expected_manifest_hash, "c".repeat(64));
         assert_eq!(
             resolved[0].expected_manifest_kind,
@@ -624,8 +805,66 @@ mod tests {
         let mut value = document_value("releases.example.test");
         value["components"][0]["id"] = Value::String("other".to_owned());
         let document = ManagedExternalContentActivation::from_value(&value).unwrap();
-        assert!(document.admit(&policy(), &declarations(), true).is_err());
+        assert!(
+            document
+                .admit(&policy(), &import_limits(), &declarations(), true)
+                .is_err()
+        );
         value["expected_manifest_hash"] = Value::String("d".repeat(64));
         assert!(ManagedExternalContentActivation::from_value(&value).is_err());
+    }
+
+    #[test]
+    fn tree_realization_is_derived_from_consumer_kind() {
+        let mut value = document_value("releases.example.test");
+        value["components"][0]["members"][0]["target"] = Value::String("bin/runtime".to_owned());
+        let document = ManagedExternalContentActivation::from_value(&value).unwrap();
+        let mut declarations = declarations();
+        declarations[0].kind = ryeos_engine::external_content::ExternalContentKind::Tree;
+        let resolved = document
+            .admit(&policy(), &import_limits(), &declarations, true)
+            .unwrap();
+        assert_eq!(
+            resolved[0].declaration_kind,
+            ryeos_engine::external_content::ExternalContentKind::Tree
+        );
+    }
+
+    #[test]
+    fn file_and_tree_member_shapes_cannot_be_confused() {
+        let mut value = document_value("releases.example.test");
+        value["components"][0]["members"][0]["target"] = Value::String("bin/runtime".to_owned());
+        let document = ManagedExternalContentActivation::from_value(&value).unwrap();
+        assert!(
+            document
+                .admit(&policy(), &import_limits(), &declarations(), true)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn target_is_required_even_when_explicitly_null() {
+        let mut value = document_value("releases.example.test");
+        value["components"][0]["members"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("target");
+        assert!(ManagedExternalContentActivation::from_value(&value).is_err());
+    }
+
+    #[test]
+    fn node_import_limits_fence_managed_tree_capture() {
+        let mut value = document_value("releases.example.test");
+        value["components"][0]["members"][0]["target"] = Value::String("bin/runtime".to_owned());
+        let document = ManagedExternalContentActivation::from_value(&value).unwrap();
+        let mut declarations = declarations();
+        declarations[0].kind = ryeos_engine::external_content::ExternalContentKind::Tree;
+        let mut limits = import_limits();
+        limits.max_depth = 1;
+        assert!(
+            document
+                .admit(&policy(), &limits, &declarations, true)
+                .is_err()
+        );
     }
 }

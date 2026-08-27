@@ -111,7 +111,17 @@ impl ExternalContentImportPolicyRecord {
                 bail!("external-content import root `{name}` has an invalid filesystem identity");
             }
         }
-        let limits = &self.limits;
+        self.limits.validate()?;
+        if let Some(managed) = self.managed_activation.as_ref() {
+            managed.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl ExternalContentImportLimits {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let limits = self;
         if limits.max_depth == 0 || limits.max_depth > 256 {
             bail!("external-content import max_depth is outside the supported range");
         }
@@ -136,9 +146,6 @@ impl ExternalContentImportPolicyRecord {
             || limits.minimum_free_bytes == 0
         {
             bail!("external-content import storage budget is incoherent");
-        }
-        if let Some(managed) = self.managed_activation.as_ref() {
-            managed.validate()?;
         }
         Ok(())
     }

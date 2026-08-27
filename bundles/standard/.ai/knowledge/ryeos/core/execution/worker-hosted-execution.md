@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-08-27T08:43:19Z:c948e965cf21356938c03fa22b542ec96b610edd7f448c8c9a8bda65378e7f30:UaI8VbwCakGcCZ+2wftMgeORhV0uFFwJrrcfVywk28HwixjD3y9BzjBYwq//dBhEyTorH55BuCO7gd8ZlHt+Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-27T11:45:57Z:4e03034ac395093c56e189d0f66c9777fcfa69b12d194ed43ba26f452358724b:Sa8uhOmwRjEsI06IydqD3zQ5mYhePTiwPiK1wkMxAki1HKMsVJeTHIClJkZhZg88Sfm6Y+PVtIJSuVn5Y2ktDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
 title: "Worker-Hosted Execution"
 description: "Implemented authority, protocol, lifecycle, recovery, and publication contracts for session-bound hosted workers"
 entry_type: reference
-version: "1.3.0"
+version: "1.4.0"
 ```
 
 # Worker-Hosted Execution
@@ -94,11 +94,14 @@ belong to the peer node key, not the configured-operator grant.
 
 Large or third-party workload bytes remain outside signed bundles. A trusted
 installed-bundle `config` may carry the closed
-`ryeos.external_content_activation.v1` acquisition recipe: exact HTTPS archive
+`ryeos.external_content_activation.v2` acquisition recipe: exact HTTPS archive
 URLs and digests, archive/member bounds, selected regular-member digests, a
-consumer ref, component-to-member mapping, and storage tiers. The recipe does
-not carry commands, scripts, host paths, policy, credentials, component kind,
-manifest schema/hash, or mount authority.
+consumer ref, component-to-member mappings, optional tree-relative targets,
+and storage tiers. A file consumer requires one untargeted member. A tree
+consumer requires targeted members and may contain only those verified regular
+files plus their required parent directories. The recipe does not carry
+commands, scripts, host paths, policy, credentials, component kind, manifest
+schema/hash, or mount authority.
 
 `ryeos external-content activate <config-ref> <online|offline>` resolves and
 retains that signed recipe and its trusted consumer. The consumer's existing
@@ -106,9 +109,14 @@ external-content declarations remain authoritative for component IDs, kinds,
 pinned manifest hashes, and mounts. Node policy independently owns whether
 online acquisition is enabled, the exact HTTPS host allowlist, byte/member/
 concurrency ceilings, cache/store budgets, free-space floor, and retries.
+Every resulting component capture must also fit the node's ordinary import
+depth, entry, per-file, aggregate-byte, store-budget, and free-space ceilings;
+the durable operation retains both policy tranches as one exact digest.
 Acquisition stages only verified selected regular files through Lillux's
-descriptor-relative filesystem boundary, imports existing content manifests,
-and publishes existing consumer binding heads.
+descriptor-relative filesystem boundary. For a tree consumer it creates only
+canonical declared parent directories and member targets, then feeds that
+pinned tree through the existing content capture. Existing manifests and
+consumer binding heads remain the sole launch authority.
 
 The existing durable sync-job/attempt machinery owns retry and restart
 recovery. The durable operation freezes the exact node-signed configured-

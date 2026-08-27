@@ -44,22 +44,27 @@ pool, or cross-session process reuse.
 
 The exact Codex executable, same-version code-mode host, and the package's
 `zsh` and `rg` runtime resources are selected from OpenAI's pinned standalone
-package by the signed `config:codex/activation` acquisition recipe. The generic
-`external-content activate` service downloads or reuses the exact archive,
-verifies its archive and member digests under node policy, imports the four
-existing worker realizations, publishes their ordinary consumer bindings, and
-records one compact node-signed completion receipt. There is no public
-assembly directory, installed assembler, manually authored manifest, or
-second realization authority.
+package by two signed acquisition recipes. `config:codex/activation` supplies
+the worker's four file realizations. `config:codex/environment-activation`
+supplies the default environment's self-contained `bin/{zsh,rg}` developer-
+tool tree from the same verified archive. The generic `external-content
+activate` service downloads or reuses the exact archive, verifies its archive
+and member digests under node policy, imports through the existing manifest
+authority, publishes ordinary consumer bindings, and records one compact
+node-signed completion receipt per consumer. There is no public assembly
+directory, installed assembler, manually authored manifest, or second
+realization authority.
 
 Persistent subprocesses and managed acquisition are deliberately disabled
 when their node-owned policies are absent. Before starting the daemon, apply
 an external-content policy with no named roots and an explicit managed
 activation host/resource ceiling, plus the exact persistent-session limits.
-Then, while the configured operator is still local to that node, run `ryeos
-external-content activate config:codex/activation online`. The complete typed
-YAML and ceremony live in `knowledge:codex/hosted-activation`. A bundle never
-silently enables network acquisition, storage, or node-wide worker capacity.
+Then, while the configured operator is still local to that node, run both
+`ryeos external-content activate config:codex/activation online` and `ryeos
+external-content activate config:codex/environment-activation online`. The
+complete typed YAML and ceremony live in `knowledge:codex/hosted-activation`.
+A bundle never silently enables network acquisition, storage, or node-wide
+worker capacity.
 
 ## Operator flow
 
