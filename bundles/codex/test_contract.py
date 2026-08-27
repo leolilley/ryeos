@@ -70,7 +70,45 @@ class CodexContractTests(unittest.TestCase):
         environment = ENVIRONMENT_PATH.read_text(encoding="utf-8")
 
         self.assertIn("schema: ryeos.external_content_activation.v2", activation)
-        self.assertEqual(activation.count("        target: null"), 4)
+        self.assertEqual(activation.count("        target: null"), 5)
+        for line in (
+            "      - path: codex-resources/bwrap",
+            "        sha256: 77360cb751ccedc5971391444ac86a8a33c15b04d6b4a6fe45f5d25496e62c4c",
+            "  - id: codex-bwrap",
+            "        member: codex-resources/bwrap",
+        ):
+            self.assertIn(line, activation)
+
+        worker = WORKER_PATH.read_text(encoding="utf-8")
+        bwrap_manifest = {
+            "schema": "ryeos.external_content.large.v2",
+            "kind": "external_large_content_manifest",
+            "entries": [
+                {
+                    "path": "content",
+                    "kind": "file",
+                    "mode": 0o755,
+                    "blob_hash": "77360cb751ccedc5971391444ac86a8a33c15b04d6b4a6fe45f5d25496e62c4c",
+                    "size": 529776,
+                }
+            ],
+            "entry_count": 1,
+            "total_bytes": 529776,
+        }
+        bwrap_manifest_digest = hashlib.sha256(
+            json.dumps(
+                bwrap_manifest,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        self.assertEqual(
+            bwrap_manifest_digest,
+            "5f2c25277b1a2150937372ade46eef46aa2227b749f984bea208b5467540b86f",
+        )
+        self.assertIn(f'    digest: "{bwrap_manifest_digest}"', worker)
+        self.assertIn("    mount: codex-resources/bwrap", worker)
         self.assertIn(
             "schema: ryeos.external_content_activation.v2",
             environment_activation,

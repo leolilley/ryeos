@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-27T11:46:10Z:ece2be2a150d1def82a64017f4d484a987901cb76f7fc28984bf71bbbae3a27b:WvtFZPU00/ww63OB7cIeKTWEk1k8Wu1UoW9dHPYkFB7FqmmQ6bP1NXyTOi+nu6x2uFICwGvMoS3VZ77SqiLEAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-27T12:50:47Z:229a938eda428c3f4e2a9cf7237336cf2d60ebdc7caed1b7eec5c635d1e44136:7pV4GuI8jE9bOl+spJidGViamsNj5K6dmsOHFHhEmP++64yif8OxiVoJhzuvsluZIyjHqO0ZsRVQny3OUJ3cCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 schema: ryeos.external_content_activation.v2
 consumer_ref: worker:codex/hosted
@@ -30,6 +30,11 @@ sources:
         sha256: e62198eb19b136b88c330af83647b5a962cb99b6b1f066758568f12de1974849
         maximum_bytes: 8388608
         executable: true
+      - path: codex-resources/bwrap
+        disposition: import
+        sha256: 77360cb751ccedc5971391444ac86a8a33c15b04d6b4a6fe45f5d25496e62c4c
+        maximum_bytes: 1048576
+        executable: true
       - path: codex-resources/zsh/bin/zsh
         disposition: import
         sha256: 67faaaa89242c4a332e16e508a1977cffc24bf7fca31d4411cdfd101f3831ef3
@@ -47,6 +52,12 @@ components:
     members:
       - source: codex-package
         member: bin/codex-code-mode-host
+        target: null
+  - id: codex-bwrap
+    storage: large_content
+    members:
+      - source: codex-package
+        member: codex-resources/bwrap
         target: null
   - id: codex-zsh
     storage: large_content

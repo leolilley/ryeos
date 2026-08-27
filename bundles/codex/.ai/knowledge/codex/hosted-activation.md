@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-27T11:46:10Z:4af74c0782cf2de9f7c76698587def830b76147522446c1a6a808ee52a4cd24d:A2EonQtZ1nhJs6UIdjytvU5dAFeZ5aoRdRr8JZe+kJumoUsfMqiD2DQVC6MlIu5ti/NUPGSg2k5rLRtzyYwJAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-27T12:50:47Z:97e2a81fcce4aa51770e782b4a4f2bec19ef91e6d095ac91feb2c00a45894dd1:b99XKFAZNcrM6CvkscIvNZFVfj5twNoaezwSZceqCFBkdOGYn1Zk+PArkx1ZfT8rTzhtLEsjBPczLZmPZKcnDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
-version: "1.4.0"
+version: "1.5.0"
 description: >
   Activation, credential ceremony, command routes, and release acceptance for
   the pinned Codex structured-session workload.
@@ -213,10 +213,12 @@ worker generation and never treats workload-authored changes as retained
 policy. If the node enables a generic enforced isolation backend, RyeOS
 additionally overlays that file read-only, but hosted Codex does not require
 RyeOS's optional Bubblewrap isolation bundle or another RyeOS isolation
-backend. OpenAI's standalone package does include its own private Bubblewrap,
-shell, and `rg` resources, but this activation intentionally selects only the
-exact Codex executable, code-mode host, Zsh, and `rg`; it acquires neither
-Bubblewrap nor BusyBox. Immutable CLI overrides fix login, credential
+backend. OpenAI's standalone package requires its own private
+`codex-resources/bwrap` companion for restricted Linux command execution, so
+the activation selects that exact file with the Codex executable, code-mode
+host, Zsh, and `rg`. This is workload-owned pinned content: it does not select
+RyeOS's Bubblewrap isolation backend, discover a host `bwrap`, or acquire
+BusyBox. Immutable CLI overrides fix login, credential
 store, built-in provider, empty MCP map, approval routing, permission profile,
 command network, shell environment, and disabled helpers for process life.
 Thread start/resume checks supported response fields for effective approval and

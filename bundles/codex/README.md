@@ -38,14 +38,19 @@ workload may rewrite that seed, but it is neither retained policy nor a
 same-UID integrity boundary. When a generic RyeOS isolation backend is enabled
 it also overlays that file read-only, but Codex activation does not require
 RyeOS's optional Bubblewrap isolation bundle or any other RyeOS isolation
-backend. This activation does not acquire or provide Bubblewrap or BusyBox.
+backend. OpenAI's pinned standalone package does require its own packaged
+`codex-resources/bwrap` companion for restricted Linux command execution. The
+activation imports that exact workload-owned file beside Codex; it does not
+select RyeOS's isolation backend, install or discover a host `bwrap`, or
+provide BusyBox.
 There is no custom credential bridge, token injection, local-LLM route, worker
 pool, or cross-session process reuse.
 
-The exact Codex executable, same-version code-mode host, and the package's
-`zsh` and `rg` runtime resources are selected from OpenAI's pinned standalone
-package by two signed acquisition recipes. `config:codex/activation` supplies
-the worker's four file realizations. `config:codex/environment-activation`
+The exact Codex executable, same-version code-mode host, packaged command-
+sandbox companion, and the package's `zsh` and `rg` runtime resources are
+selected from OpenAI's pinned standalone package by two signed acquisition
+recipes. `config:codex/activation` supplies the worker's five file
+realizations. `config:codex/environment-activation`
 supplies the default environment's self-contained `bin/{zsh,rg}` developer-
 tool tree from the same verified archive. The generic `external-content
 activate` service downloads or reuses the exact archive, verifies its archive
