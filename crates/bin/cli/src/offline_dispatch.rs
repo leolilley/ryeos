@@ -706,6 +706,7 @@ fn exec_tool(
                 live_access: project_authority.live_access.as_ref(),
                 state_root: None,
                 checkpoint_dir: None,
+                checkpoint_authority: None,
                 daemon_socket_path: None,
                 bundle_roots: std::slice::from_ref(bundle_root),
                 node_trusted_keys_dir: Some(
