@@ -285,6 +285,19 @@ impl ExternalLargeContentManifestObject {
                 self.total_bytes
             );
         }
+        super::validate_internal_symlink_graph(self.entries.iter().filter_map(|entry| {
+            (entry.kind == super::ExternalContentManifestEntryKind::Symlink).then(|| {
+                (
+                    entry.path.as_str(),
+                    entry.target.as_deref().expect("validated target"),
+                )
+            })
+        }))?;
+        super::external_content_manifest::validate_manifest_tree_namespace(
+            self.entries
+                .iter()
+                .map(|entry| (entry.path.as_str(), entry.kind)),
+        )?;
         let canonical = lillux::canonical_json(&serde_json::to_value(self)?)?;
         if canonical.len() > MAX_LARGE_CONTENT_MANIFEST_BYTES {
             anyhow::bail!(
@@ -453,6 +466,33 @@ mod tests {
         let object = manifest(vec![entry("b.bin", 1), entry("a.bin", 1)]);
         let error = object.validate().unwrap_err().to_string();
         assert!(error.contains("strictly ordered"), "got: {error}");
+    }
+
+    #[test]
+    fn large_manifest_tree_requires_explicit_directory_ancestors() {
+        let missing = manifest(vec![entry("models/weights.bin", 1)]);
+        let error = missing.validate().unwrap_err().to_string();
+        assert!(error.contains("absent directory ancestor"), "got: {error}");
+
+        let mut ancestor = entry("models", 1);
+        ancestor.file_sha256 = Some("c".repeat(64));
+        let collision = manifest(vec![ancestor, entry("models/weights.bin", 1)]);
+        let error = collision.validate().unwrap_err().to_string();
+        assert!(error.contains("non-directory ancestor"), "got: {error}");
+
+        let directory = ExternalLargeContentManifestEntry {
+            path: "models".to_owned(),
+            kind: crate::objects::ExternalContentManifestEntryKind::Dir,
+            mode: None,
+            blob_hash: None,
+            file_sha256: None,
+            size: None,
+            chunk_size: None,
+            chunk_hashes: Vec::new(),
+            target: None,
+        };
+        let valid = manifest(vec![directory, entry("models/weights.bin", 1)]);
+        valid.validate().unwrap();
     }
 
     #[test]

@@ -52,11 +52,18 @@ pub struct ManagedExternalContentActivationPolicy {
     pub allow_online: bool,
     #[serde(default)]
     pub allowed_https_hosts: Vec<String>,
+    /// Redirects are denied when older or deliberately strict node policy
+    /// omits this field. Adding the field cannot widen existing authority.
+    #[serde(default)]
+    pub max_redirects: usize,
     pub max_archives: usize,
     pub max_compressed_bytes: u64,
     pub max_expanded_bytes: u64,
     pub max_members: usize,
     pub max_member_bytes: u64,
+    /// V1 deliberately serializes managed activation. The field is retained
+    /// in the node-owned contract so a future protocol can widen it without
+    /// conflating that change with bundle authority.
     pub max_concurrent_activations: usize,
     pub cache_budget_bytes: u64,
     pub store_budget_bytes: u64,
@@ -176,11 +183,16 @@ impl ManagedExternalContentActivationPolicy {
         if self.allow_online && self.allowed_https_hosts.is_empty() {
             bail!("online managed external-content activation requires an HTTPS host allowlist");
         }
+        if self.max_redirects > 4 {
+            bail!("managed external-content max_redirects exceeds 4");
+        }
         if self.max_archives == 0 || self.max_archives > 8 {
             bail!("managed external-content max_archives is outside 1..=8");
         }
-        if self.max_members == 0 || self.max_members > 1024 {
-            bail!("managed external-content max_members is outside 1..=1024");
+        let maximum_archive_entries =
+            (ryeos_state::objects::MAX_EXTERNAL_CONTENT_ENTRIES + 1).saturating_mul(8);
+        if self.max_members == 0 || self.max_members > maximum_archive_entries {
+            bail!("managed external-content max_members is outside 1..={maximum_archive_entries}");
         }
         if self.max_compressed_bytes == 0
             || self.max_expanded_bytes == 0
@@ -199,8 +211,8 @@ impl ManagedExternalContentActivationPolicy {
         {
             bail!("managed external-content storage reserve is incoherent");
         }
-        if self.max_concurrent_activations == 0 || self.max_concurrent_activations > 16 {
-            bail!("managed external-content concurrency is outside 1..=16");
+        if self.max_concurrent_activations != 1 {
+            bail!("managed external-content v1 requires exactly one concurrent activation");
         }
         if self.max_attempts == 0 || self.max_attempts > 16 {
             bail!("managed external-content max_attempts is outside 1..=16");
@@ -286,6 +298,7 @@ mod tests {
         let policy = ManagedExternalContentActivationPolicy {
             allow_online: true,
             allowed_https_hosts: Vec::new(),
+            max_redirects: 0,
             max_archives: 1,
             max_compressed_bytes: 1024,
             max_expanded_bytes: 2048,
@@ -301,5 +314,7 @@ mod tests {
         let mut admitted = policy;
         admitted.allowed_https_hosts = vec!["releases.example.test".to_owned()];
         admitted.validate().unwrap();
+        admitted.max_concurrent_activations = 2;
+        assert!(admitted.validate().is_err());
     }
 }

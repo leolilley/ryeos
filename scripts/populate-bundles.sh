@@ -13,17 +13,16 @@
 #   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|full-sandbox|central-host|standard|hosted-node|hosted-workflow] [--build-profile release|latency-profiling]
 #
 # Bundle sets:
-#   full            core + standard + web + browser + ryeos-ui + hosted-node +
-#                   codex + local-inference (default)
+#   full            core + central-auth + standard + web + browser + ryeos-ui +
+#                   hosted-node + codex + local-inference (default)
 #   full-sandbox    full + the separately authored Linux isolation backend;
 #                   build its payload explicitly first
-#   central-host    core + standard + web — standard node plus the rye/web/search
-#                   tool; the app-hosting image (e.g. tv-tracker) that also serves
-#                   its own central-auth realm
-#   standard        core + standard — scheduler/graph/directive standard node
-#   hosted-node     core + hosted-node — lean remote-admission control plane
-#   hosted-workflow core + standard + hosted-node + codex — hosted node that
-#                   also runs scheduler/graph/directive and hosted Codex workloads
+#   central-host    core + central-auth + standard + web + tv-tracker-authoring —
+#                   standard node plus the rye/web/search tool and app authoring
+#   standard        core + central-auth + standard — scheduler/graph/directive node
+#   hosted-node     core + central-auth + hosted-node — lean remote-admission plane
+#   hosted-workflow core + central-auth + standard + hosted-node + codex — hosted
+#                   node that also runs scheduler/graph/directive and Codex workloads
 #
 # Env:
 #   CARGO              cargo binary (default: cargo from PATH)
@@ -414,13 +413,11 @@ for hosted_execution_binary in ryeos-worker-execution-launch-preparer ryeos-work
   fi
 done
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
-  for codex_binary in ryeos-structured-session-bridge; do
-    if readelf -l "$STATIC_RELEASE/$codex_binary" | grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' \
-        || readelf -d "$STATIC_RELEASE/$codex_binary" | grep -Eq 'NEEDED'; then
-      ryeos_term_fail "$codex_binary is not fully static"
-      exit 2
-    fi
-  done
+  if readelf -l "$STATIC_RELEASE/ryeos-structured-session-bridge" | grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' \
+      || readelf -d "$STATIC_RELEASE/ryeos-structured-session-bridge" | grep -Eq 'NEEDED'; then
+    ryeos_term_fail "ryeos-structured-session-bridge is not fully static"
+    exit 2
+  fi
 fi
 ryeos_term_resume "static worker build complete"
 
@@ -588,6 +585,8 @@ if [[ "$BUNDLE_SET" == "full-sandbox" ]]; then
 fi
 
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "full-sandbox" ]]; then
+  ryeos_term_update "validating local-inference authored contract" "bundle contract tests"
+  python3 "$LOCAL_INFERENCE/test_contract.py"
   ryeos_term_update "publishing local-inference bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$LOCAL_INFERENCE" \
     --registry-root "$CORE" \

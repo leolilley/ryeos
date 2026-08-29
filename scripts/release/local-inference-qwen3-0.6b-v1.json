@@ -1,0 +1,125 @@
+{
+  "corresponding_sources": [
+    {
+      "packages": [
+        "libgcc-14.2.0-r6",
+        "libstdc++-14.2.0-r6"
+      ],
+      "packaging": {
+        "archive": "alpine-aports-fbf60319be3bbaf6dd32ef55cc6fb7189e05c266.tar.gz",
+        "origin_url": "https://github.com/alpinelinux/aports/archive/fbf60319be3bbaf6dd32ef55cc6fb7189e05c266.tar.gz",
+        "sha256": "f18eb64afcfbc1c7c0bf179951541141e6dd557df0f130df27ac933e0b868096",
+        "url": "https://github.com/leolilley/ryeos/releases/download/local-inference-qwen3-0.6b-v1/alpine-aports-fbf60319be3bbaf6dd32ef55cc6fb7189e05c266.tar.gz"
+      },
+      "packaging_commit": "fbf60319be3bbaf6dd32ef55cc6fb7189e05c266",
+      "upstream": {
+        "archive": "gcc-14.2.0.tar.xz",
+        "origin_url": "https://ftp.gnu.org/gnu/gcc/gcc-14.2.0/gcc-14.2.0.tar.xz",
+        "sha256": "a7b39bc69cbf9e25826c5a60ab26477001f7c08d85cec04bc0e29cabed6f3cc9",
+        "url": "https://github.com/leolilley/ryeos/releases/download/local-inference-qwen3-0.6b-v1/gcc-14.2.0.tar.xz"
+      }
+    },
+    {
+      "packages": [
+        "xz-libs-5.8.3-r0"
+      ],
+      "packaging": {
+        "archive": "alpine-aports-57e3e2dd527538456ee622bf3328f2c34575dd65.tar.gz",
+        "origin_url": "https://github.com/alpinelinux/aports/archive/57e3e2dd527538456ee622bf3328f2c34575dd65.tar.gz",
+        "sha256": "a8eb0c86c815899b937ca67293d310163573a5f83c6d646a36f3c473fee79b23",
+        "url": "https://github.com/leolilley/ryeos/releases/download/local-inference-qwen3-0.6b-v1/alpine-aports-57e3e2dd527538456ee622bf3328f2c34575dd65.tar.gz"
+      },
+      "packaging_commit": "57e3e2dd527538456ee622bf3328f2c34575dd65",
+      "upstream": {
+        "archive": "xz-5.8.3.tar.gz",
+        "origin_url": "https://github.com/tukaani-project/xz/releases/download/v5.8.3/xz-5.8.3.tar.gz",
+        "sha256": "8ec1767fa517642ecb4cf08b891ce667ba6f143551e382b07c7ef437bda335e2",
+        "url": "https://github.com/leolilley/ryeos/releases/download/local-inference-qwen3-0.6b-v1/xz-5.8.3.tar.gz"
+      }
+    }
+  ],
+  "realizations": [
+    {
+      "archive": "ryeos-local-inference-qwen3-0.6b-runtime-v1.tar.gz",
+      "bounds": {
+        "maximum_depth": 11,
+        "maximum_entries": 4480,
+        "maximum_file_bytes": 22166488,
+        "maximum_total_bytes": 68732630
+      },
+      "component": "runtime",
+      "format": "tar_gzip",
+      "manifest_entries": 4480,
+      "manifest_hash": "800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf",
+      "maximum_compressed_bytes": 24389591,
+      "maximum_entries": 4481,
+      "maximum_expanded_bytes": 72448000,
+      "prefix": "ryeos-local-inference-qwen3-0.6b-runtime-v1",
+      "sha256": "7d6239902fb584ef27aee8c97f5e9a0e66409750611f74d7e16235ddd4278eef",
+      "storage": "content",
+      "url": "https://github.com/leolilley/ryeos/releases/download/local-inference-qwen3-0.6b-v1/ryeos-local-inference-qwen3-0.6b-runtime-v1.tar.gz"
+    },
+    {
+      "archive": "ryeos-local-inference-qwen3-0.6b-tinygrad-v1.tar.gz",
+      "bounds": {
+        "maximum_depth": 10,
+        "maximum_entries": 276,
+        "maximum_file_bytes": 1540491,
+        "maximum_total_bytes": 17008626
+      },
+      "component": "tinygrad",
+      "format": "tar_gzip",
+      "manifest_entries": 276,
+      "manifest_hash": "e468f263924eb44fc21405dafba8ea27a7cd9e70dd6847822905a652549be21c",
+      "maximum_compressed_bytes": 2616072,
+      "maximum_entries": 277,
+      "maximum_expanded_bytes": 17233920,
+      "prefix": "ryeos-local-inference-qwen3-0.6b-tinygrad-v1",
+      "sha256": "accc141e942323c8b865c776b5c1425792e86a1c4981fdf4d711d80db2ac5780",
+      "storage": "content",
+      "url": "https://github.com/leolilley/ryeos/releases/download/local-inference-qwen3-0.6b-v1/ryeos-local-inference-qwen3-0.6b-tinygrad-v1.tar.gz"
+    },
+    {
+      "archive": "ryeos-local-inference-qwen3-0.6b-toolchain-v1.tar.gz",
+      "bounds": {
+        "maximum_depth": 6,
+        "maximum_entries": 69,
+        "maximum_file_bytes": 178432672,
+        "maximum_total_bytes": 288769924
+      },
+      "component": "toolchain",
+      "format": "tar_gzip",
+      "manifest_entries": 69,
+      "manifest_hash": "0f278c1f855f123cbab94e6c1aa11dc0ae0b64b27a73241a4f67941d12c70e53",
+      "maximum_compressed_bytes": 105775834,
+      "maximum_entries": 70,
+      "maximum_expanded_bytes": 288829440,
+      "prefix": "ryeos-local-inference-qwen3-0.6b-toolchain-v1",
+      "sha256": "5ca0c1141b4400505e46305ba3e620d316aecf17d758e3be406c26da914ebb55",
+      "storage": "large_content",
+      "url": "https://github.com/leolilley/ryeos/releases/download/local-inference-qwen3-0.6b-v1/ryeos-local-inference-qwen3-0.6b-toolchain-v1.tar.gz"
+    },
+    {
+      "archive": "ryeos-local-inference-qwen3-0.6b-model-v1.tar.gz",
+      "bounds": {
+        "maximum_depth": 1,
+        "maximum_entries": 7,
+        "maximum_file_bytes": 1503300328,
+        "maximum_total_bytes": 1514745854
+      },
+      "component": "model",
+      "format": "tar_gzip",
+      "manifest_entries": 7,
+      "manifest_hash": "1a75084b7404ba3409e598a8ee2d09a8d236edf1fa5f33917c3b3a8f0494e35b",
+      "maximum_compressed_bytes": 1196656785,
+      "maximum_entries": 8,
+      "maximum_expanded_bytes": 1514762240,
+      "prefix": "ryeos-local-inference-qwen3-0.6b-model-v1",
+      "sha256": "fe0ace6724a2d8e83f3f051a3b5d8c4c792cdf2108c26be1b6bcca7bfb2d9e20",
+      "storage": "large_content",
+      "url": "https://github.com/leolilley/ryeos/releases/download/local-inference-qwen3-0.6b-v1/ryeos-local-inference-qwen3-0.6b-model-v1.tar.gz"
+    }
+  ],
+  "release_tag": "local-inference-qwen3-0.6b-v1",
+  "schema": "ryeos.local_inference_realization_release.v1"
+}

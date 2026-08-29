@@ -239,7 +239,9 @@ fn translate_result(result: lillux::SubprocessResult) -> ExecutionCompletion {
         };
     }
 
-    // Process-level failure (non-zero exit). stdout+stderr ride in `error`.
+    // Process-level failure (non-zero exit). The actionable exception is
+    // normally at the end of stderr, so retain its bounded tail instead of a
+    // prefix that can stop midway through a traceback.
     if !result.success {
         return ExecutionCompletion {
             status: ThreadTerminalStatus::Failed,
@@ -248,7 +250,7 @@ fn translate_result(result: lillux::SubprocessResult) -> ExecutionCompletion {
             error: Some(serde_json::json!({
                 "exit_code": result.exit_code,
                 "stdout": truncate_for_error(&result.stdout, 2000),
-                "stderr": truncate_for_error(&result.stderr, 2000),
+                "stderr": truncate_tail_for_error(&result.stderr, STDERR_TAIL_CAP),
             })),
             artifacts: Vec::new(),
             final_cost: None,
@@ -915,6 +917,31 @@ mod tests {
         let completion = execute_plan(&plan, &ctx).unwrap();
         assert_eq!(completion.status, ThreadTerminalStatus::Failed);
         assert!(completion.error.is_some());
+    }
+
+    #[test]
+    fn nonzero_exit_retains_the_actionable_stderr_tail() {
+        let stderr = format!("{}FINAL_EXCEPTION", "traceback frame\n".repeat(1024));
+        let completion = translate_result(lillux::SubprocessResult {
+            success: false,
+            stdout: String::new(),
+            stderr,
+            exit_code: 1,
+            duration_ms: 1.0,
+            pid: 42,
+            timed_out: false,
+            launcher_refusal: None,
+            output_limit_exceeded: None,
+            stdout_truncated: false,
+            stderr_truncated: false,
+        });
+
+        let retained = completion.error.unwrap()["stderr"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(retained.starts_with("… (truncated,"));
+        assert!(retained.ends_with("FINAL_EXCEPTION"));
     }
 
     #[test]

@@ -46,6 +46,9 @@ def _verify_loaded_module_origins(*roots: Path) -> None:
 def _prepare_environment() -> tuple[Path, Path, Path, Path]:
     session_fd = os.environ.get("RYEOS_SESSION_FD")
     workspace = Path.cwd().resolve()
+    worker_root = Path(__file__).resolve(strict=True).parent
+    if workspace not in worker_root.parents:
+        raise RuntimeError("local worker source escaped the admitted workspace")
     scratch = workspace / "scratch"
     home = scratch / "home"
     cache = scratch / "cache"
@@ -77,7 +80,7 @@ def _prepare_environment() -> tuple[Path, Path, Path, Path]:
     os.environ.clear()
     os.environ.update(environment)
     sys.path[:] = [
-        str(workspace / "worker"),
+        str(worker_root),
         str(workspace / "tinygrad"),
         *[entry for entry in sys.path if entry and "site-packages" not in entry],
     ]
@@ -95,7 +98,6 @@ def _prepare_environment() -> tuple[Path, Path, Path, Path]:
         resolved = Path(entry).resolve(strict=False)
         if resolved != workspace and workspace not in resolved.parents:
             raise RuntimeError("local worker import path escaped the admitted workspace")
-    worker_root = (workspace / "worker").resolve(strict=True)
     tinygrad_root = (workspace / "tinygrad").resolve(strict=True)
     _verify_loaded_module_origins(runtime_root, worker_root)
     return workspace, runtime_root, worker_root, tinygrad_root

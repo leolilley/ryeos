@@ -1,0 +1,39 @@
+# ryeos:signed:2026-08-29T13:17:36Z:0d392f1d541e6ffde468ce47fe4c94a37ee2f27dd0bf3ea6e881b5e7a3c4070a:prwCg1pJFBgV4y6ZXP1PEVpIiPSYiKBzQtn5S2I2023GJGcQ825K7Q20XuGpXOTY2zF2AgYyB128zLtkzoJYCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- validate
+description: "Resolve and validate an executable item through its complete threadless admission path without creating a thread or contacting its runtime."
+forms:
+- slots:
+  - field: item_ref
+    matcher: canonical_ref
+dispatch:
+  kind: direct_execute_item_ref
+  item_ref_arg: item_ref
+  validate_only: true
+  availability: both
+project:
+  resolution: optional
+  default: discover_upward_ai
+  no_project_flag: true
+  request_project_path: true
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
+control_flags:
+- flag: no-operator-vault
+  help: "Validate without operator-vault exposure in project-environment authority"
+  binding: exclude_operator_vault
+- flag: method
+  help: "Method selector for method-dispatch kinds; sets call.method"
+  binding: call_method
+- flag: args
+  help: "Method args as a JSON object; sets call.args"
+  binding: call_args
+- flag: state-root
+  help: "Resolve runtime state under this path while retaining threadless validation"
+  binding: state_root
+- flag: ref-binding
+  help: "Bind a secondary execution ref as name=canonical-ref; repeat for multiple bindings"
+  binding: ref_binding

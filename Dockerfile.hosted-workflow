@@ -14,7 +14,7 @@
 FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        pkg-config libssl-dev ca-certificates curl xz-utils libcap-dev binutils && \
+        pkg-config libssl-dev ca-certificates curl xz-utils libcap-dev binutils python3 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -44,7 +44,8 @@ FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates python3 tini && \
     rm -rf /var/lib/apt/lists/*
-RUN test -x /usr/bin/tini && test -x /usr/bin/python3
+RUN test -x /usr/bin/tini
+RUN test -x /usr/bin/python3
 
 WORKDIR /app
 

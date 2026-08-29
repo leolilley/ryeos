@@ -11,7 +11,7 @@
 //! traversal, and garbage collection would reclaim blobs a resumable chain
 //! still needs to execute against.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -36,6 +36,10 @@ pub const MAX_REALIZATION_CLAIMED_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 pub const MAX_EXTERNAL_CONTENT_PATH_BYTES: usize = 4096;
 pub const MAX_INLINE_SYMLINK_TARGET_BYTES: usize = 4096;
 pub const MAX_SYMLINK_TARGET_BYTES: u64 = 4096;
+/// Match the kernel's useful symlink-chain ceiling. A realization that needs
+/// more expansions cannot be consumed reliably and is also an avoidable
+/// validation DoS surface.
+pub const MAX_INTERNAL_SYMLINK_EXPANSIONS: usize = 40;
 
 /// Prove that a realization symlink resolves lexically inside its manifest
 /// root. Realizations retain bytes, not ambient filesystem authority: an
@@ -69,6 +73,113 @@ pub fn validate_internal_symlink_target(entry_path: &str, target: &[u8]) -> anyh
                 anyhow::bail!("manifest symlink entry `{entry_path}` has a non-relative target")
             }
         }
+    }
+    Ok(())
+}
+
+/// Prove every retained symlink against the complete symlink namespace.
+///
+/// Checking one target lexically is insufficient: an earlier path component
+/// can itself be a symlink, changing the meaning of a later `..`. Resolve each
+/// link as the kernel would, memoizing complete link targets and refusing
+/// cycles, excessive chains, and any pop above the realization root.
+pub fn validate_internal_symlink_graph<'a>(
+    symlinks: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> anyhow::Result<()> {
+    let mut graph = BTreeMap::<String, String>::new();
+    for (path, target) in symlinks {
+        super::validate_canonical_project_relative_path(path)?;
+        validate_internal_symlink_target(path, target.as_bytes())?;
+        if graph.insert(path.to_owned(), target.to_owned()).is_some() {
+            anyhow::bail!("manifest repeats symlink entry `{path}`");
+        }
+    }
+
+    let mut resolved = BTreeMap::<String, (Vec<String>, usize)>::new();
+    for path in graph.keys() {
+        let mut expansions = 0usize;
+        resolve_internal_symlink(
+            path,
+            &graph,
+            &mut resolved,
+            &mut BTreeSet::new(),
+            &mut expansions,
+        )?;
+    }
+    Ok(())
+}
+
+fn resolve_internal_symlink(
+    path: &str,
+    graph: &BTreeMap<String, String>,
+    resolved: &mut BTreeMap<String, (Vec<String>, usize)>,
+    visiting: &mut BTreeSet<String>,
+    expansions: &mut usize,
+) -> anyhow::Result<Vec<String>> {
+    if let Some((cached, cost)) = resolved.get(path) {
+        charge_internal_symlink_expansions(path, expansions, *cost)?;
+        return Ok(cached.clone());
+    }
+    let initial_expansions = *expansions;
+    charge_internal_symlink_expansions(path, expansions, 1)?;
+    if !visiting.insert(path.to_owned()) {
+        anyhow::bail!("manifest symlink graph contains a cycle at `{path}`");
+    }
+
+    let target = graph
+        .get(path)
+        .ok_or_else(|| anyhow::anyhow!("manifest symlink graph lost entry `{path}`"))?;
+    let mut current = path
+        .rsplit_once('/')
+        .map(|(parent, _)| parent.split('/').map(str::to_owned).collect::<Vec<_>>())
+        .unwrap_or_default();
+    for component in std::path::Path::new(target).components() {
+        match component {
+            std::path::Component::Normal(name) => {
+                let name = name.to_str().ok_or_else(|| {
+                    anyhow::anyhow!("manifest symlink entry `{path}` has a non-UTF-8 target")
+                })?;
+                current.push(name.to_owned());
+                let candidate = current.join("/");
+                if graph.contains_key(&candidate) {
+                    current = resolve_internal_symlink(
+                        &candidate, graph, resolved, visiting, expansions,
+                    )?;
+                }
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if current.pop().is_none() {
+                    anyhow::bail!(
+                        "manifest symlink entry `{path}` escapes the realization root through the symlink graph"
+                    );
+                }
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                anyhow::bail!("manifest symlink entry `{path}` has a non-relative target")
+            }
+        }
+    }
+    visiting.remove(path);
+    let cost = expansions
+        .checked_sub(initial_expansions)
+        .ok_or_else(|| anyhow::anyhow!("manifest symlink expansion accounting underflow"))?;
+    resolved.insert(path.to_owned(), (current.clone(), cost));
+    Ok(current)
+}
+
+fn charge_internal_symlink_expansions(
+    path: &str,
+    expansions: &mut usize,
+    amount: usize,
+) -> anyhow::Result<()> {
+    *expansions = expansions
+        .checked_add(amount)
+        .ok_or_else(|| anyhow::anyhow!("manifest symlink expansion count overflow"))?;
+    if *expansions > MAX_INTERNAL_SYMLINK_EXPANSIONS {
+        anyhow::bail!(
+            "manifest symlink entry `{path}` exceeds the {MAX_INTERNAL_SYMLINK_EXPANSIONS}-link resolution bound"
+        );
     }
     Ok(())
 }
@@ -258,6 +369,33 @@ fn path_contains(parent: &str, child: &str) -> bool {
         .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
+/// Prove that a manifest is one reconstructable tree rather than only a set
+/// of individually valid paths. Every non-root entry must name every ancestor
+/// explicitly, and each such ancestor must be a directory. Materializers can
+/// therefore neither invent uncommitted directories nor collide with a
+/// regular file or symlink while rebuilding the signed namespace.
+pub(super) fn validate_manifest_tree_namespace<'a>(
+    entries: impl IntoIterator<Item = (&'a str, ExternalContentManifestEntryKind)>,
+) -> anyhow::Result<()> {
+    let entries = entries.into_iter().collect::<BTreeMap<_, _>>();
+    for path in entries.keys() {
+        let mut ancestor = *path;
+        while let Some(separator) = ancestor.rfind('/') {
+            ancestor = &ancestor[..separator];
+            match entries.get(ancestor) {
+                Some(ExternalContentManifestEntryKind::Dir) => {}
+                Some(_) => anyhow::bail!(
+                    "external content manifest path `{path}` has non-directory ancestor `{ancestor}`"
+                ),
+                None => anyhow::bail!(
+                    "external content manifest path `{path}` has absent directory ancestor `{ancestor}`"
+                ),
+            }
+        }
+    }
+    Ok(())
+}
+
 impl ExternalContentManifestObject {
     pub fn from_value(value: &Value) -> anyhow::Result<Self> {
         let manifest: Self = serde_json::from_value(value.clone())?;
@@ -396,6 +534,19 @@ impl ExternalContentManifestObject {
                 }
             }
         }
+        validate_internal_symlink_graph(self.entries.iter().filter_map(|entry| {
+            (entry.kind == ExternalContentManifestEntryKind::Symlink).then(|| {
+                (
+                    entry.path.as_str(),
+                    entry.target.as_deref().expect("validated target"),
+                )
+            })
+        }))?;
+        validate_manifest_tree_namespace(
+            self.entries
+                .iter()
+                .map(|entry| (entry.path.as_str(), entry.kind)),
+        )?;
         Ok(())
     }
 
@@ -471,7 +622,97 @@ mod tests {
 
         let mut internal = entry("bin/python", ExternalContentManifestEntryKind::Symlink);
         internal.target = Some("../lib/python3".to_owned());
-        manifest(vec![internal]).validate().unwrap();
+        manifest(vec![
+            entry("bin", ExternalContentManifestEntryKind::Dir),
+            internal,
+        ])
+        .validate()
+        .unwrap();
+    }
+
+    #[test]
+    fn realization_symlink_graph_cannot_turn_a_later_parent_into_an_escape() {
+        let mut redirect = entry("a", ExternalContentManifestEntryKind::Symlink);
+        redirect.target = Some(".".to_owned());
+        let mut escaping = entry("dir/b", ExternalContentManifestEntryKind::Symlink);
+        escaping.target = Some("../a/../outside".to_owned());
+        let error = manifest(vec![redirect, escaping])
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("escapes the realization root through the symlink graph"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn realization_symlink_graph_refuses_cycles_and_accepts_internal_chains() {
+        let mut first = entry("a", ExternalContentManifestEntryKind::Symlink);
+        first.target = Some("b".to_owned());
+        let mut second = entry("b", ExternalContentManifestEntryKind::Symlink);
+        second.target = Some("a".to_owned());
+        let error = manifest(vec![first, second])
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("contains a cycle"), "got: {error}");
+
+        let mut base = entry("a", ExternalContentManifestEntryKind::Symlink);
+        base.target = Some("lib".to_owned());
+        let mut chain = entry("bin/current", ExternalContentManifestEntryKind::Symlink);
+        chain.target = Some("../a/runtime".to_owned());
+        manifest(vec![
+            base,
+            entry("bin", ExternalContentManifestEntryKind::Dir),
+            chain,
+        ])
+        .validate()
+        .unwrap();
+    }
+
+    #[test]
+    fn realization_symlink_graph_counts_sequential_cached_expansions() {
+        let mut symlinks = (0..=MAX_INTERNAL_SYMLINK_EXPANSIONS)
+            .map(|index| (format!("a{index:02}"), "dir".to_owned()))
+            .collect::<Vec<_>>();
+        let target = (0..=MAX_INTERNAL_SYMLINK_EXPANSIONS)
+            .map(|index| format!("a{index:02}/.."))
+            .chain(std::iter::once("final".to_owned()))
+            .collect::<Vec<_>>()
+            .join("/");
+        symlinks.push(("chain".to_owned(), target));
+        let error = validate_internal_symlink_graph(
+            symlinks
+                .iter()
+                .map(|(path, target)| (path.as_str(), target.as_str())),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("link resolution bound"), "got: {error}");
+    }
+
+    #[test]
+    fn realization_symlink_graph_charges_cached_transitive_expansions() {
+        let mut symlinks = (0..39)
+            .map(|index| {
+                let target = if index == 38 {
+                    "dir".to_owned()
+                } else {
+                    format!("a{:02}", index + 1)
+                };
+                (format!("a{index:02}"), target)
+            })
+            .collect::<Vec<_>>();
+        symlinks.push(("chain".to_owned(), "a00/../a00/../final".to_owned()));
+        let error = validate_internal_symlink_graph(
+            symlinks
+                .iter()
+                .map(|(path, target)| (path.as_str(), target.as_str())),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("link resolution bound"), "got: {error}");
     }
 
     #[test]
@@ -484,6 +725,36 @@ mod tests {
         ]);
         let error = object.validate().unwrap_err().to_string();
         assert!(error.contains("strictly ordered"), "got: {error}");
+    }
+
+    #[test]
+    fn manifest_tree_requires_explicit_directory_ancestors() {
+        let mut nested = entry("lib/runtime", ExternalContentManifestEntryKind::File);
+        nested.blob_hash = Some("a".repeat(64));
+        nested.size = Some(1);
+        nested.mode = Some(0o644);
+        let mut missing = manifest(vec![nested.clone()]);
+        missing.total_bytes = 1;
+        let error = missing.validate().unwrap_err().to_string();
+        assert!(error.contains("absent directory ancestor"), "got: {error}");
+
+        let mut collision = entry("lib", ExternalContentManifestEntryKind::Symlink);
+        collision.target = Some("runtime-root".to_owned());
+        let mut colliding = manifest(vec![collision, nested]);
+        colliding.total_bytes = 1;
+        let error = colliding.validate().unwrap_err().to_string();
+        assert!(error.contains("non-directory ancestor"), "got: {error}");
+
+        let mut regular = entry("lib/runtime", ExternalContentManifestEntryKind::File);
+        regular.blob_hash = Some("a".repeat(64));
+        regular.size = Some(1);
+        regular.mode = Some(0o644);
+        let mut valid = manifest(vec![
+            entry("lib", ExternalContentManifestEntryKind::Dir),
+            regular,
+        ]);
+        valid.total_bytes = 1;
+        valid.validate().unwrap();
     }
 
     #[test]

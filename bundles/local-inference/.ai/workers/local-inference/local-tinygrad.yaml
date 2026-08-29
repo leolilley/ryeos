@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-27T04:22:27Z:eb66253a0dc271aa6f50c715db4f901d8cb26b0a8e0a62344295a9cc943d3435:IaphkpuzlJPLfB3i700X1+aDGNcA9qRDYPgMfKxyqQLCdvAI8VC8tSTCNfenhCW2HJm3NK7Um6+tnK/bLbYdDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-29T15:18:03Z:126c09a55e24818225a052cc377e0a1bde2a15e228b63d78eb04c211f08f971b:+Mo6Oozj6iETfAEN7SkI2yeOhv5k0+t+2FLYHz2czymm2WqY3GDgIINbr2sBpBgh9LqjxgMxy4XxgHwMYQr/AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "local-inference"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -8,16 +8,23 @@ supported_target:
   os: linux
   arch: x86_64
 
+# RLIMIT_NPROC is shared by the daemon's real UID rather than scoped to this
+# process tree. The kind-owned compiler caps and freezes this signed override;
+# RyeOS separately limits session groups and total persistent workers. The
+# worker also needs to fork its pinned compiler while serving a request.
+session_resources:
+  real_uid_process_limit: 4096
+
 source:
   root: "lib/local-tinygrad"
   entry: "bootstrap.py"
-  digest: "ca8c7512498889743a91ed91cd697819d65e79db25a96f0afef0c5ca76dd933d"
+  digest: "dc46b484fcc1448205261a9bdff357373323589af71b1c6bd036cc59326ddb7d"
 
 external_content:
   - id: runtime
     kind: tree
     mode: pinned
-    digest: "d7b930b1dcb5076823e515c515348ad9e1c8f9191f065fef243f0ab77f3fea35"
+    digest: "800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf"
     metadata_hint: "python-build-standalone-3.14.7-musl"
     mount: runtime
   - id: tinygrad
@@ -29,13 +36,13 @@ external_content:
   - id: toolchain
     kind: tree
     mode: pinned
-    digest: "606fb7544f54b869d4abaaf298ec4389979a72dfe23c79594ef8099cd3ce6974"
+    digest: "0f278c1f855f123cbab94e6c1aa11dc0ae0b64b27a73241a4f67941d12c70e53"
     metadata_hint: "alpine-v3.22-clang-lld-20.1.8"
     mount: toolchain
   - id: model
     kind: tree
     mode: pinned
-    digest: "b49578842db4c65d14edfeeadddfcab3e9a0f9324a2a6d8d501e90e1146ed7c6"
+    digest: "1a75084b7404ba3409e598a8ee2d09a8d236edf1fa5f33917c3b3a8f0494e35b"
     metadata_hint: "qwen3-0.6b-c1899de289a04d12100db370d81485cdf75e47ca"
     mount: model
 

@@ -69,7 +69,9 @@ class CodexContractTests(unittest.TestCase):
         )
         environment = ENVIRONMENT_PATH.read_text(encoding="utf-8")
 
-        self.assertIn("schema: ryeos.external_content_activation.v2", activation)
+        self.assertIn("schema: ryeos.external_content_activation.v3", activation)
+        self.assertIn("    maximum_entries: 64", activation)
+        self.assertEqual(activation.count("      kind: mapped"), 5)
         self.assertEqual(activation.count("        target: null"), 5)
         for line in (
             "      - path: codex-resources/bwrap",
@@ -110,9 +112,10 @@ class CodexContractTests(unittest.TestCase):
         self.assertIn(f'    digest: "{bwrap_manifest_digest}"', worker)
         self.assertIn("    mount: codex-resources/bwrap", worker)
         self.assertIn(
-            "schema: ryeos.external_content_activation.v2",
+            "schema: ryeos.external_content_activation.v3",
             environment_activation,
         )
+        self.assertIn("      kind: mapped", environment_activation)
         self.assertIn(
             "consumer_ref: config:codex/environments/default",
             environment_activation,
@@ -161,6 +164,121 @@ class CodexContractTests(unittest.TestCase):
         self.assertIn(f"    digest: {manifest_digest}", environment)
         self.assertIn("    - realization_id: developer-tools", environment)
         self.assertIn("      relative_directory: bin", environment)
+
+    def test_every_mapped_codex_file_reconstructs_its_worker_manifest_pin(self) -> None:
+        activation = ACTIVATION_PATH.read_text(encoding="utf-8")
+        worker = WORKER_PATH.read_text(encoding="utf-8")
+        files = {
+            "codex": (
+                "bin/codex",
+                "cb0a15567e9a60a5820d54b0f6ae86d504dc3805c1eab21a47f70e3eb7b73a40",
+                258_278_208,
+                268_435_456,
+                "713c3d1985ca438d8c309631d665c14f8fa0afedfce8b73dc93d0646edfe11ff",
+                [
+                    "89d1c6de1f2f2256926739b728f858de87be112b2be438c35c5e1cf574beaa77",
+                    "b8ae5af9bd92025d7057ac8cc22b8f72aaf9e87e9f8be7c05c69771ee4411058",
+                    "801ca86360d1a317acca723ada194d1078b7f9e8f5e501dc3e24ff69f76c1dec",
+                    "b917dc5e71733ec589d3a665c840d64586172b84eebadcb6e50d1c9c56a49846",
+                ],
+            ),
+            "codex-code-mode-host": (
+                "bin/codex-code-mode-host",
+                "00ecf5d040865b97884c488883abd342581c2a432debe7a54e4646bceee3d2d6",
+                49_682_360,
+                67_108_864,
+                "984168b4c3f0efcbee4d1707fda8f8320bdb08a75cb704a8205f853e79e4dc2d",
+                [
+                    "00ecf5d040865b97884c488883abd342581c2a432debe7a54e4646bceee3d2d6"
+                ],
+            ),
+            "codex-bwrap": (
+                "codex-resources/bwrap",
+                "77360cb751ccedc5971391444ac86a8a33c15b04d6b4a6fe45f5d25496e62c4c",
+                529_776,
+                1_048_576,
+                "5f2c25277b1a2150937372ade46eef46aa2227b749f984bea208b5467540b86f",
+                None,
+            ),
+            "codex-zsh": (
+                "codex-resources/zsh/bin/zsh",
+                "67faaaa89242c4a332e16e508a1977cffc24bf7fca31d4411cdfd101f3831ef3",
+                898_480,
+                2_097_152,
+                "bda40827700404df0317f0e83951a4f6b6fb0933b3eec3af29c1a903c39aa008",
+                None,
+            ),
+            "codex-rg": (
+                "codex-path/rg",
+                "e62198eb19b136b88c330af83647b5a962cb99b6b1f066758568f12de1974849",
+                5_408_904,
+                8_388_608,
+                "a7a1a4fdb45e9231b80a9840c22728b05625ed1e21cc155d3995697eeeec22c0",
+                None,
+            ),
+        }
+        for component_id, (
+            member,
+            file_sha256,
+            size,
+            maximum,
+            expected,
+            chunk_hashes,
+        ) in files.items():
+            file_entry = {
+                "path": "content",
+                "kind": "file",
+                "mode": 0o755,
+                "size": size,
+            }
+            if chunk_hashes is None:
+                file_entry["blob_hash"] = file_sha256
+            else:
+                file_entry["file_sha256"] = file_sha256
+                file_entry["chunk_size"] = 64 * 1024 * 1024
+                file_entry["chunk_hashes"] = chunk_hashes
+            manifest = {
+                "schema": "ryeos.external_content.large.v2",
+                "kind": "external_large_content_manifest",
+                "entries": [file_entry],
+                "entry_count": 1,
+                "total_bytes": size,
+            }
+            observed = hashlib.sha256(
+                json.dumps(
+                    manifest,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest()
+            self.assertEqual(observed, expected, component_id)
+            member_block = (
+                f"      - path: {member}\n"
+                "        disposition: import\n"
+                f"        sha256: {file_sha256}\n"
+                f"        maximum_bytes: {maximum}\n"
+                "        executable: true"
+            )
+            self.assertIn(member_block, activation, component_id)
+            component_block = (
+                f"  - id: {component_id}\n"
+                "    storage: large_content\n"
+                "    shape:\n"
+                "      kind: mapped\n"
+                "      members:\n"
+                "        - source: codex-package\n"
+                f"          member: {member}\n"
+                "          target: null"
+            )
+            self.assertIn(component_block, activation, component_id)
+            declaration = re.compile(
+                rf"(?m)^  - id: {re.escape(component_id)}\n"
+                rf"    kind: file\n"
+                rf"    mode: pinned\n"
+                rf"    digest: \"{expected}\"$"
+            )
+            self.assertRegex(worker, declaration, component_id)
 
     def test_authority_overrides_are_forbidden_even_when_null(self) -> None:
         for route_id in ("session.start", "session.resume", "turn.start"):

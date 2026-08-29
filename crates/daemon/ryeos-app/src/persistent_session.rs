@@ -1942,7 +1942,18 @@ fn validate_stream_owner(owner: &str) -> Result<()> {
 }
 
 fn bounded_stream_error(error: &str) -> String {
-    error.chars().take(2_048).collect()
+    const MAX_CHARS: usize = 2_048;
+    const OMITTED: &str = "… (earlier error text omitted)\n";
+    let character_count = error.chars().count();
+    if character_count <= MAX_CHARS {
+        return error.to_owned();
+    }
+    let retained = MAX_CHARS.saturating_sub(OMITTED.chars().count());
+    let tail = error
+        .chars()
+        .skip(character_count.saturating_sub(retained))
+        .collect::<String>();
+    format!("{OMITTED}{tail}")
 }
 
 fn ready_process(
@@ -2586,6 +2597,15 @@ fn spawn_idle_reaper(inner: Weak<PoolInner>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_stream_error_retains_the_terminal_exception() {
+        let error = format!("{}FINAL_EXCEPTION", "traceback frame\n".repeat(512));
+        let bounded = bounded_stream_error(&error);
+        assert!(bounded.chars().count() <= 2_048);
+        assert!(bounded.starts_with("… (earlier error text omitted)"));
+        assert!(bounded.ends_with("FINAL_EXCEPTION"));
+    }
 
     fn host_executable(name: &str) -> String {
         let search_path = std::env::var_os("PATH").expect("test PATH is set");

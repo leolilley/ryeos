@@ -5,7 +5,6 @@
 //! system/state-only import policy, and orchestrates meaning-blind state
 //! primitives. No runtime callback or manifest authority reaches this code.
 
-use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::sync::Arc;
 
@@ -275,17 +274,26 @@ pub async fn import(
     let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
     let large_store = authority.large_object_store()?;
-    let capacity = large_store.filesystem_capacity()?;
-    let required_free = policy
-        .limits
-        .minimum_free_bytes
-        .checked_add(request.maximum_bytes)
-        .ok_or_else(|| anyhow::anyhow!("external-content free-space requirement overflow"))?;
-    if capacity.available_bytes < required_free {
-        bail!(
-            "external-content import requires {required_free} available bytes, observed {}",
-            capacity.available_bytes
-        );
+    let maximum_entries = if request.shape == ImportShape::File {
+        1
+    } else {
+        policy.limits.max_entries
+    };
+    require_import_store_capacity(
+        "external-content CAS",
+        cas.filesystem_capacity()?,
+        policy.limits.minimum_free_bytes,
+        request.maximum_bytes,
+        maximum_entries,
+    )?;
+    if request.storage == ImportStorage::LargeContent {
+        require_import_store_capacity(
+            "external-content large store",
+            large_store.filesystem_capacity()?,
+            policy.limits.minimum_free_bytes,
+            request.maximum_bytes,
+            maximum_entries,
+        )?;
     }
     if request.storage == ImportStorage::LargeContent {
         let maximum_store_after = large_store
@@ -356,56 +364,21 @@ pub fn import_managed_activation_component(
     source_root: &lillux::PinnedDirectory,
     staged_name: &str,
 ) -> anyhow::Result<ImportResponse> {
-    use crate::managed_external_content::{ManagedComponentStorage, ManagedMemberDisposition};
+    use crate::managed_external_content::ManagedComponentStorage;
 
+    let admitted_component = activation.component(&component.recipe.id)?;
     if !lillux::valid_hash(operator_fingerprint)
-        || component.recipe.members.is_empty()
-        || activation
-            .component(&component.recipe.id)?
-            .expected_manifest_hash
-            != component.expected_manifest_hash
+        || admitted_component.recipe != component.recipe
+        || admitted_component.expected_manifest_hash != component.expected_manifest_hash
+        || admitted_component.capture_bounds != component.capture_bounds
     {
         bail!("managed external-content import authority is inconsistent");
     }
-    let mut maximum_bytes = 0u64;
-    let mut maximum_file_bytes = 0u64;
-    let mut tree_entries = BTreeSet::new();
-    let mut maximum_depth = 1usize;
-    let mut expected_file_sha256 = None;
-    for mapping in &component.recipe.members {
-        let member = activation.member(&mapping.source, &mapping.member)?;
-        if member.disposition != ManagedMemberDisposition::Import {
-            bail!("managed external-content import names a non-import member");
-        }
-        maximum_bytes = maximum_bytes
-            .checked_add(member.maximum_bytes)
-            .ok_or_else(|| anyhow::anyhow!("managed component byte bound overflow"))?;
-        maximum_file_bytes = maximum_file_bytes.max(member.maximum_bytes);
-        match component.declaration_kind {
-            ryeos_engine::external_content::ExternalContentKind::File => {
-                if component.recipe.members.len() != 1 || mapping.target.is_some() {
-                    bail!("managed file component has an invalid member shape");
-                }
-                expected_file_sha256 = Some(member.sha256.clone());
-            }
-            ryeos_engine::external_content::ExternalContentKind::Tree => {
-                let target = mapping.target.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!("managed tree component member has no target")
-                })?;
-                let parts = target.split('/').collect::<Vec<_>>();
-                maximum_depth = maximum_depth.max(parts.len());
-                tree_entries.insert(target.to_owned());
-                let mut parent = String::new();
-                for part in parts.iter().take(parts.len().saturating_sub(1)) {
-                    if !parent.is_empty() {
-                        parent.push('/');
-                    }
-                    parent.push_str(part);
-                    tree_entries.insert(parent.clone());
-                }
-            }
-        }
-    }
+    let maximum_bytes = component.capture_bounds.maximum_total_bytes;
+    let maximum_file_bytes = component.capture_bounds.maximum_file_bytes;
+    let maximum_depth = component.capture_bounds.maximum_depth;
+    let maximum_entries = component.capture_bounds.maximum_entries;
+    let expected_file_sha256 = component.expected_file_sha256.clone();
     validate_relative_path(staged_name)?;
     let import_policy = state
         .node_config
@@ -432,7 +405,7 @@ pub fn import_managed_activation_component(
         expected_file_sha256,
     };
     if maximum_depth > import_policy.limits.max_depth
-        || tree_entries.len().max(1) > import_policy.limits.max_entries
+        || maximum_entries > import_policy.limits.max_entries
         || maximum_file_bytes > import_policy.limits.max_file_bytes
         || maximum_bytes > import_policy.limits.max_total_bytes
     {
@@ -440,10 +413,7 @@ pub fn import_managed_activation_component(
     }
     let limits = crate::node_config::sections::external_content::ExternalContentImportLimits {
         max_depth: maximum_depth,
-        max_entries: match component.declaration_kind {
-            ryeos_engine::external_content::ExternalContentKind::File => 1,
-            ryeos_engine::external_content::ExternalContentKind::Tree => tree_entries.len(),
-        },
+        max_entries: maximum_entries,
         max_file_bytes: maximum_file_bytes,
         max_total_bytes: maximum_bytes,
         store_budget_bytes: policy
@@ -458,7 +428,7 @@ pub fn import_managed_activation_component(
         policy,
     )?;
     let request_digest = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
-        "schema":"ryeos.managed_external_content_import.v2",
+        "schema":"ryeos.managed_external_content_import.v3",
         "activation_program_digest":activation.activation_program_digest,
         "consumer_ref":activation.document.consumer_ref,
         "component":component.recipe,
@@ -467,7 +437,6 @@ pub fn import_managed_activation_component(
             "manifest_hash":component.expected_manifest_hash,
             "manifest_kind":component.expected_manifest_kind,
         },
-        "members":component.recipe.members,
         "policy_digest":policy_digest,
         "capture_floor_rules":ryeos_state::project_sync::durable_content_capture_floor_rules(),
         "configured_ignore_patterns":state.ignore_matcher.canonical_patterns(),
@@ -479,18 +448,21 @@ pub fn import_managed_activation_component(
     let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
     let large_store = authority.large_object_store()?;
-    let required_free = limits
-        .minimum_free_bytes
-        .checked_add(maximum_bytes)
-        .ok_or_else(|| {
-            anyhow::anyhow!("managed external-content free-space requirement overflow")
-        })?;
-    let capacity = large_store.filesystem_capacity()?;
-    if capacity.available_bytes < required_free {
-        bail!(
-            "managed external-content import requires {required_free} available bytes, observed {}",
-            capacity.available_bytes
-        );
+    require_import_store_capacity(
+        "managed external-content CAS",
+        cas.filesystem_capacity()?,
+        limits.minimum_free_bytes,
+        maximum_bytes,
+        maximum_entries,
+    )?;
+    if request.storage == ImportStorage::LargeContent {
+        require_import_store_capacity(
+            "managed external-content large store",
+            large_store.filesystem_capacity()?,
+            limits.minimum_free_bytes,
+            maximum_bytes,
+            maximum_entries,
+        )?;
     }
     if request.storage == ImportStorage::LargeContent
         && large_store
@@ -552,6 +524,46 @@ pub fn import_managed_activation_component(
     drop(_permit);
     drop(guard);
     Ok(response)
+}
+
+// A captured entry can transiently require a staged file plus its immutable
+// object, sidecar, lock, and hash-shard directories. Reserve conservatively on
+// each actual destination filesystem; deduplication only improves the margin.
+const IMPORT_ALLOCATION_UNITS_PER_ENTRY: u64 = 8;
+const IMPORT_FIXED_ALLOCATION_UNITS: u64 = 64;
+
+fn require_import_store_capacity(
+    label: &str,
+    capacity: lillux::FilesystemCapacity,
+    minimum_free_bytes: u64,
+    maximum_bytes: u64,
+    maximum_entries: usize,
+) -> anyhow::Result<()> {
+    let maximum_entries = u64::try_from(maximum_entries)?;
+    let file_identities = maximum_entries
+        .checked_mul(IMPORT_ALLOCATION_UNITS_PER_ENTRY)
+        .and_then(|value| value.checked_add(IMPORT_FIXED_ALLOCATION_UNITS))
+        .ok_or_else(|| anyhow::anyhow!("{label} file-identity reserve overflow"))?;
+    let allocation_overhead = file_identities
+        .checked_mul(capacity.allocation_unit_bytes)
+        .ok_or_else(|| anyhow::anyhow!("{label} allocation reserve overflow"))?;
+    let required_free = minimum_free_bytes
+        .checked_add(maximum_bytes)
+        .and_then(|value| value.checked_add(allocation_overhead))
+        .ok_or_else(|| anyhow::anyhow!("{label} free-space requirement overflow"))?;
+    if capacity.available_bytes < required_free {
+        bail!(
+            "{label} requires {required_free} available bytes, observed {}",
+            capacity.available_bytes
+        );
+    }
+    if capacity.available_files < file_identities {
+        bail!(
+            "{label} requires {file_identities} available file identities, observed {}",
+            capacity.available_files
+        );
+    }
+    Ok(())
 }
 
 pub async fn bind(
@@ -1084,13 +1096,31 @@ pub fn require_active_binding(
     consumer_ref: &str,
     publisher_fingerprint: &str,
 ) -> anyhow::Result<ryeos_state::objects::ExternalContentBinding> {
+    require_active_binding_from_store(
+        &state.state_store,
+        cas,
+        manifest_hash,
+        consumer_ref,
+        publisher_fingerprint,
+    )
+}
+
+/// Verify the exact active binding using only the state authority that owns
+/// it. This keeps recovery validation independent of the broader daemon
+/// composition while preserving the same binding checks used at launch.
+pub fn require_active_binding_from_store(
+    state_store: &crate::state_store::StateStore,
+    cas: &lillux::CasStore,
+    manifest_hash: &str,
+    consumer_ref: &str,
+    publisher_fingerprint: &str,
+) -> anyhow::Result<ryeos_state::objects::ExternalContentBinding> {
     let binding_id = ryeos_state::objects::ExternalContentBinding::derive_binding_id(
         manifest_hash,
         consumer_ref,
         publisher_fingerprint,
     )?;
-    let head = state
-        .state_store
+    let head = state_store
         .with_state_db(|db| db.read_generic_head_ref(BINDING_HEAD_NAMESPACE, &binding_id))?
         .ok_or_else(|| anyhow::anyhow!("external-content consumer has no operator binding"))?;
     let value = cas
@@ -1555,6 +1585,43 @@ mod tests {
                 .to_string()
                 .contains("crossed")
         );
+    }
+
+    #[test]
+    fn import_capacity_reserves_allocation_units_and_file_identities() {
+        let identities = 10 * IMPORT_ALLOCATION_UNITS_PER_ENTRY + IMPORT_FIXED_ALLOCATION_UNITS;
+        let required = 100 + 1_000 + identities * 4_096;
+        require_import_store_capacity(
+            "fixture store",
+            lillux::FilesystemCapacity {
+                total_bytes: required,
+                available_bytes: required,
+                allocation_unit_bytes: 4_096,
+                available_files: identities,
+            },
+            100,
+            1_000,
+            10,
+        )
+        .unwrap();
+        for capacity in [
+            lillux::FilesystemCapacity {
+                total_bytes: required,
+                available_bytes: required - 1,
+                allocation_unit_bytes: 4_096,
+                available_files: identities,
+            },
+            lillux::FilesystemCapacity {
+                total_bytes: required,
+                available_bytes: required,
+                allocation_unit_bytes: 4_096,
+                available_files: identities - 1,
+            },
+        ] {
+            assert!(
+                require_import_store_capacity("fixture store", capacity, 100, 1_000, 10).is_err()
+            );
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-29T09:08:38Z:a287f9d4c60393858fbd4de38a3d38a3cb805852a6c8af1f81b552220709fb68:59+h1UFY9OyreOVB8y9m0hKr4KrR3khDrW84+rPF0MS+vgqwMTZ5pbsbWN5xjFlTFXLTecyCudTB97/8ft+kBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-29T10:19:43Z:0ccb3b7d9f333102c7476c0b9c4f45ef1bc2bdf1eff131438bfa283bfbbef9db:Y9A0FIN164c8GjXDmfeRDK2OwPhuA1GhjYNpuV0iMz0b2J5cYRzT6d7GZ5vUIFj7lWxiSYDiexycOPBY3CFaDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -49,6 +49,7 @@ knowledge bundle.
    managed_activation:
      allow_online: true
      allowed_https_hosts: [releases.openai.com]
+     max_redirects: 0
      max_archives: 1
      max_compressed_bytes: 134217728
      max_expanded_bytes: 335544320

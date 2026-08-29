@@ -7,7 +7,8 @@
 FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        pkg-config libssl-dev ca-certificates curl xz-utils libcap-dev binutils && \
+        pkg-config libssl-dev ca-certificates curl xz-utils libcap-dev binutils \
+        python3 python3-yaml && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -49,6 +50,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates python3 python3-venv python3-pip tini && \
     rm -rf /var/lib/apt/lists/*
 RUN test -x /usr/bin/tini
+RUN test -x /usr/bin/python3
 
 COPY --from=node-runtime /usr/local/ /usr/local/
 
@@ -62,10 +64,14 @@ COPY --from=builder /build/target/release/ryeos-core-tools   /usr/local/bin/ryeo
 # Bundles with rebuilt CAS, baked into /opt (read-only template).
 COPY --from=builder /build/bundles/.ai       /opt/ryeos/.ai
 COPY --from=builder /build/bundles/core      /opt/ryeos/core
+COPY --from=builder /build/bundles/central-auth /opt/ryeos/central-auth
 COPY --from=builder /build/bundles/standard  /opt/ryeos/standard
 COPY --from=builder /build/bundles/web       /opt/ryeos/web
-COPY --from=builder /build/bundles/ryeos-ui   /opt/ryeos/ryeos-ui
+COPY --from=builder /build/bundles/browser   /opt/ryeos/browser
+COPY --from=builder /build/bundles/ryeos-ui  /opt/ryeos/ryeos-ui
 COPY --from=builder /build/bundles/hosted-node /opt/ryeos/hosted-node
+COPY --from=builder /build/bundles/codex     /opt/ryeos/codex
+COPY --from=builder /build/bundles/local-inference /opt/ryeos/local-inference
 
 # Entrypoint runs ryeos init --non-interactive every boot (idempotent) then starts daemon.
 # /data/app persists across redeploys.

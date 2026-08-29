@@ -1,6 +1,6 @@
-# ryeos:signed:2026-08-27T12:50:47Z:229a938eda428c3f4e2a9cf7237336cf2d60ebdc7caed1b7eec5c635d1e44136:7pV4GuI8jE9bOl+spJidGViamsNj5K6dmsOHFHhEmP++64yif8OxiVoJhzuvsluZIyjHqO0ZsRVQny3OUJ3cCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-29T10:19:43Z:611f1f791b146ed9d43a51f704e35d8e367f64a883446f3f5ebf9d6a49153f3d:KU2REscwzBom+0+jfZFY2qPlQOsOgKZ1QaffUmhvFzR5OVxmEGMIJPTSpy+m7inZdWBNnt792qhaC8fC+MrlBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
-schema: ryeos.external_content_activation.v2
+schema: ryeos.external_content_activation.v3
 consumer_ref: worker:codex/hosted
 sources:
   - id: codex-package
@@ -9,6 +9,7 @@ sources:
     sha256: bd758d53d56e41dc65e045f4589df79a038ed197a011adcb52a258e6ad64cfda
     maximum_compressed_bytes: 134217728
     maximum_expanded_bytes: 335544320
+    maximum_entries: 64
     members:
       - path: bin/codex
         disposition: import
@@ -43,31 +44,41 @@ sources:
 components:
   - id: codex
     storage: large_content
-    members:
-      - source: codex-package
-        member: bin/codex
-        target: null
+    shape:
+      kind: mapped
+      members:
+        - source: codex-package
+          member: bin/codex
+          target: null
   - id: codex-code-mode-host
     storage: large_content
-    members:
-      - source: codex-package
-        member: bin/codex-code-mode-host
-        target: null
+    shape:
+      kind: mapped
+      members:
+        - source: codex-package
+          member: bin/codex-code-mode-host
+          target: null
   - id: codex-bwrap
     storage: large_content
-    members:
-      - source: codex-package
-        member: codex-resources/bwrap
-        target: null
+    shape:
+      kind: mapped
+      members:
+        - source: codex-package
+          member: codex-resources/bwrap
+          target: null
   - id: codex-zsh
     storage: large_content
-    members:
-      - source: codex-package
-        member: codex-resources/zsh/bin/zsh
-        target: null
+    shape:
+      kind: mapped
+      members:
+        - source: codex-package
+          member: codex-resources/zsh/bin/zsh
+          target: null
   - id: codex-rg
     storage: large_content
-    members:
-      - source: codex-package
-        member: codex-path/rg
-        target: null
+    shape:
+      kind: mapped
+      members:
+        - source: codex-package
+          member: codex-path/rg
+          target: null

@@ -260,16 +260,10 @@ pub(super) fn handle_provider_attempt_prepare(
         ryeos_provider_contract::PreparedTransportIntent::AdmittedLocalWorker {
             execute, ..
         } => {
-            if sealed
-                .external_effect_authority
-                .admitted_effect_class
-                .is_some()
-                && !state.isolation.admits_recorded_local_worker()
-            {
-                anyhow::bail!(
-                    "recorded local-provider execution requires enforced isolation with a backend capable of the per-launch isolated-network ceiling"
-                );
-            }
+            admit_local_worker_effect_class(
+                sealed.external_effect_authority.admitted_effect_class,
+                state.isolation.enforces_isolated_network(),
+            )?;
             let capsule_hash = sealed.admitted_sessions.get(&execute).ok_or_else(|| {
                 anyhow!(
                     "provider requested worker {execute}, but the launch did not admit that session"
@@ -412,6 +406,18 @@ pub(super) fn handle_provider_attempt_prepare(
         },
     };
     Ok(serde_json::to_value(response)?)
+}
+
+fn admit_local_worker_effect_class(
+    effect_class: Option<EffectClass>,
+    isolated_network_enforced: bool,
+) -> Result<()> {
+    if effect_class == Some(EffectClass::Sealed) && !isolated_network_enforced {
+        anyhow::bail!(
+            "sealed local-provider execution requires enforced isolation with a backend capable of the per-launch isolated-network ceiling"
+        );
+    }
+    Ok(())
 }
 
 pub(super) fn handle_provider_attempt_mark_issued(
@@ -1510,6 +1516,25 @@ mod tests {
             .unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn recorded_local_worker_does_not_require_os_isolation() {
+        admit_local_worker_effect_class(Some(EffectClass::Recorded), false)
+            .expect("recording trusted local execution must not claim or require OS confinement");
+    }
+
+    #[test]
+    fn sealed_local_worker_still_requires_isolated_network_enforcement() {
+        let error = admit_local_worker_effect_class(Some(EffectClass::Sealed), false)
+            .expect_err("sealed local execution must prove its isolation prerequisite");
+        assert!(
+            error
+                .to_string()
+                .contains("sealed local-provider execution requires enforced isolation")
+        );
+        admit_local_worker_effect_class(Some(EffectClass::Sealed), true)
+            .expect("the isolated-network prerequisite is sufficient at this boundary");
     }
 
     #[test]

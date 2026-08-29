@@ -1123,10 +1123,12 @@ impl PinnedDirectory {
                     .context("read descriptor-relative filesystem capacity");
             }
             let stats = unsafe { stats.assume_init() };
-            let fragment_size = stats.f_frsize as u64;
+            let fragment_size = (stats.f_frsize as u64).max(1);
             Ok(FilesystemCapacity {
                 total_bytes: (stats.f_blocks as u64).saturating_mul(fragment_size),
                 available_bytes: (stats.f_bavail as u64).saturating_mul(fragment_size),
+                allocation_unit_bytes: fragment_size,
+                available_files: stats.f_favail as u64,
             })
         }
     }
@@ -4019,6 +4021,10 @@ impl PinnedDirectory {
 pub struct FilesystemCapacity {
     pub total_bytes: u64,
     pub available_bytes: u64,
+    /// Smallest allocation unit reported for this exact filesystem.
+    pub allocation_unit_bytes: u64,
+    /// File identities available to an unprivileged writer on this filesystem.
+    pub available_files: u64,
 }
 
 #[cfg(target_os = "linux")]

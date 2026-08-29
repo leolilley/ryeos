@@ -417,6 +417,19 @@ impl CasStore {
         &self.root
     }
 
+    /// Capacity observed through the exact CAS root descriptor. Storage
+    /// policy remains caller-owned; this preserves descriptor authority when
+    /// a caller must reserve bytes and file identities before publication.
+    pub fn filesystem_capacity(&self) -> Result<crate::FilesystemCapacity> {
+        let root = match self.pinned_root.as_ref() {
+            Some(root) => root.try_clone()?,
+            None => crate::secure_fs::PinnedDirectory::open(&self.root)?.ok_or_else(|| {
+                anyhow::anyhow!("CAS root is unavailable: {}", self.root.display())
+            })?,
+        };
+        root.filesystem_capacity()
+    }
+
     /// Reclaim exact interrupted streaming-capture files.
     ///
     /// The caller must exclude concurrent CAS mutation for the full call. An

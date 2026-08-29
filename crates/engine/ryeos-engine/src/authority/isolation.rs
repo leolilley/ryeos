@@ -1454,10 +1454,10 @@ impl IsolationRuntime {
         self.state == IsolationRuntimeState::Enforced
     }
 
-    /// Recorded local-worker evidence requires an enforced backend capable of
-    /// removing host networking. The per-launch network ceiling performs that
-    /// narrowing; unrelated tools may retain the node policy's host mode.
-    pub fn admits_recorded_local_worker(&self) -> bool {
+    /// Whether this runtime can enforce an isolated-network launch ceiling.
+    /// This is an OS-enforcement fact, not an effect-class or worker-kind
+    /// policy decision.
+    pub fn enforces_isolated_network(&self) -> bool {
         self.is_enforced()
             && self
                 .inspection

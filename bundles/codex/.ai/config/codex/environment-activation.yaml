@@ -1,6 +1,6 @@
-# ryeos:signed:2026-08-27T11:46:10Z:419742f612d47c3d2bfe98e1eaa9d519e0d0644f9b09a5ec6b5c8956787e3411:ld69hwCwm2XVbr091d4ZFzqFubXIUQJ1byZOwD86ObMfDDoOWFjJqUmP81d/CQua221LAsCDLQDwrYisTtlNBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-29T10:19:43Z:c8ef51d37ce3fab7efa015531642068cb69b3f1873267d9bf3a1f0eedf600fc9:af4KrASsgYqCeUG7gNghKjO5hbKV3W3/GbbYXj8zkTebqBpbD2IIsBHWYDcfmGH+8gvM2ydge4htJeqr64lLCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
-schema: ryeos.external_content_activation.v2
+schema: ryeos.external_content_activation.v3
 consumer_ref: config:codex/environments/default
 sources:
   - id: codex-package
@@ -9,6 +9,7 @@ sources:
     sha256: bd758d53d56e41dc65e045f4589df79a038ed197a011adcb52a258e6ad64cfda
     maximum_compressed_bytes: 134217728
     maximum_expanded_bytes: 335544320
+    maximum_entries: 64
     members:
       - path: codex-package.json
         disposition: verify_only
@@ -28,10 +29,12 @@ sources:
 components:
   - id: developer-tools
     storage: content
-    members:
-      - source: codex-package
-        member: codex-path/rg
-        target: bin/rg
-      - source: codex-package
-        member: codex-resources/zsh/bin/zsh
-        target: bin/zsh
+    shape:
+      kind: mapped
+      members:
+        - source: codex-package
+          member: codex-path/rg
+          target: bin/rg
+        - source: codex-package
+          member: codex-resources/zsh/bin/zsh
+          target: bin/zsh

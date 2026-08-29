@@ -80,11 +80,6 @@ package() {
             install -Dm644 "$bundle_dir/PUBLISHER_TRUST.toml" \
                 "$pkgdir/usr/share/ryeos/$name/PUBLISHER_TRUST.toml"
         fi
-        if [[ -f "$bundle_dir/assemble.py" ]]; then
-            install -Dm755 "$bundle_dir/assemble.py" \
-                "$pkgdir/usr/share/ryeos/$name/assemble.py"
-            [[ -x "$pkgdir/usr/share/ryeos/$name/assemble.py" ]] || return 1
-        fi
         if [[ -f "$bundle_dir/README.md" ]]; then
             install -Dm644 "$bundle_dir/README.md" \
                 "$pkgdir/usr/share/doc/$pkgname/$name/README.md"

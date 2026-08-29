@@ -17,13 +17,22 @@ use crate::node_config::sections::external_content::{
     ExternalContentImportLimits, ManagedExternalContentActivationPolicy,
 };
 
-pub const MANAGED_ACTIVATION_SCHEMA: &str = "ryeos.external_content_activation.v2";
+pub const MANAGED_ACTIVATION_SCHEMA: &str = "ryeos.external_content_activation.v3";
 pub const MANAGED_ACTIVATION_ARCHIVE_FORMAT: &str = "tar_gzip";
 const MAX_PORTABLE_ARCHIVES: usize = 8;
 const MAX_PORTABLE_MEMBERS: usize = 1024;
-pub const MAX_MANAGED_ACTIVATION_STAGING_ENTRIES: usize = MAX_PORTABLE_MEMBERS
+const MAX_PORTABLE_ARCHIVE_ENTRIES: usize = ryeos_state::objects::MAX_EXTERNAL_CONTENT_ENTRIES + 1;
+const MAX_MAPPED_ACTIVATION_STAGING_ENTRIES: usize = MAX_PORTABLE_MEMBERS
     * (ryeos_state::external_content::MAX_CAPTURE_DEPTH + 1)
     + ryeos_state::objects::MAX_EXTERNAL_CONTENT_ACTIVATION_COMPONENTS;
+const MAX_WHOLE_TREE_ACTIVATION_STAGING_ENTRIES: usize = MAX_PORTABLE_ARCHIVES
+    * MAX_PORTABLE_ARCHIVE_ENTRIES
+    + ryeos_state::objects::MAX_EXTERNAL_CONTENT_ACTIVATION_COMPONENTS;
+// One portable document may use mapped and whole-tree shapes on different
+// sources. Cleanup/reset must therefore cover their joint legal namespace,
+// not merely the larger shape in isolation.
+pub const MAX_MANAGED_ACTIVATION_STAGING_ENTRIES: usize =
+    MAX_MAPPED_ACTIVATION_STAGING_ENTRIES + MAX_WHOLE_TREE_ACTIVATION_STAGING_ENTRIES;
 
 fn deserialize_required_nullable<'de, D, T>(
     deserializer: D,
@@ -68,6 +77,8 @@ pub struct ManagedActivationSource {
     pub sha256: String,
     pub maximum_compressed_bytes: u64,
     pub maximum_expanded_bytes: u64,
+    pub maximum_entries: usize,
+    #[serde(default)]
     pub members: Vec<ManagedActivationMember>,
 }
 
@@ -84,6 +95,36 @@ pub struct ManagedActivationComponentMember {
     pub target: Option<String>,
 }
 
+/// Signed capture ceilings for an exact publisher-produced archive subtree.
+/// These are acquisition bounds, not manifest authority: the resolved
+/// consumer still supplies the required manifest kind and digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedActivationComponentBounds {
+    pub maximum_entries: usize,
+    pub maximum_depth: usize,
+    pub maximum_file_bytes: u64,
+    pub maximum_total_bytes: u64,
+}
+
+/// The two deliberately closed ways acquisition may materialize one existing
+/// consumer declaration. `Mapped` selects exact regular members. A
+/// `WholeArchiveTree` strips one canonical archive prefix and admits only its
+/// already-final directory, regular-file, and internal-relative-symlink
+/// entries. Neither shape can run a transform or author bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ManagedActivationComponentShape {
+    Mapped {
+        members: Vec<ManagedActivationComponentMember>,
+    },
+    WholeArchiveTree {
+        source: String,
+        prefix: String,
+        bounds: ManagedActivationComponentBounds,
+    },
+}
+
 /// Selected acquisition members mapped to one existing consumer
 /// external-content ID. Kind, pinned manifest digest, schema, and mount are
 /// deliberately absent: admission derives them from the resolved consumer.
@@ -92,7 +133,27 @@ pub struct ManagedActivationComponentMember {
 pub struct ManagedActivationComponent {
     pub id: String,
     pub storage: ManagedComponentStorage,
-    pub members: Vec<ManagedActivationComponentMember>,
+    pub shape: ManagedActivationComponentShape,
+}
+
+impl ManagedActivationComponent {
+    pub fn mapped_members(&self) -> Option<&[ManagedActivationComponentMember]> {
+        match &self.shape {
+            ManagedActivationComponentShape::Mapped { members } => Some(members),
+            ManagedActivationComponentShape::WholeArchiveTree { .. } => None,
+        }
+    }
+
+    pub fn whole_archive_tree(&self) -> Option<(&str, &str, &ManagedActivationComponentBounds)> {
+        match &self.shape {
+            ManagedActivationComponentShape::WholeArchiveTree {
+                source,
+                prefix,
+                bounds,
+            } => Some((source, prefix, bounds)),
+            ManagedActivationComponentShape::Mapped { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +171,8 @@ pub struct ResolvedManagedActivationComponent {
     pub expected_manifest_hash: String,
     pub expected_manifest_kind: String,
     pub declaration_kind: ryeos_engine::external_content::ExternalContentKind,
+    pub capture_bounds: ManagedActivationComponentBounds,
+    pub expected_file_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -177,8 +240,9 @@ impl ManagedExternalContentActivation {
             {
                 bail!("managed activation archive bounds exceed the portable contract");
             }
-            if source.members.is_empty() {
-                bail!("managed activation source declares no selected members");
+            if source.maximum_entries == 0 || source.maximum_entries > MAX_PORTABLE_ARCHIVE_ENTRIES
+            {
+                bail!("managed activation archive entry bound exceeds the portable contract");
             }
             total_members = total_members
                 .checked_add(source.members.len())
@@ -208,75 +272,53 @@ impl ManagedExternalContentActivation {
 
         let mut component_ids = BTreeSet::new();
         let mut consumed_imports = BTreeSet::new();
+        let mut mapped_sources = BTreeSet::new();
+        let mut whole_tree_sources = BTreeSet::new();
         for component in &self.components {
             validate_id("activation component id", &component.id)?;
             if !component_ids.insert(component.id.as_str()) {
                 bail!("managed activation repeats a component id");
             }
-            if component.members.is_empty() || component.members.len() > MAX_PORTABLE_MEMBERS {
-                bail!("managed activation component member count is outside the portable contract");
-            }
-            let tree_candidate = component
-                .members
-                .iter()
-                .any(|mapping| mapping.target.is_some());
-            if tree_candidate
-                && component
-                    .members
-                    .iter()
-                    .any(|mapping| mapping.target.is_none())
-            {
-                bail!("tree-shaped activation component has a member without a target");
-            }
-            if !tree_candidate && component.members.len() != 1 {
-                bail!("file-shaped activation component candidate must select exactly one member");
-            }
-            let mut targets = BTreeSet::new();
-            let mut tree_entries = BTreeSet::new();
-            let mut component_maximum_bytes = 0u64;
-            for mapping in &component.members {
-                validate_id("activation component source", &mapping.source)?;
-                validate_member_path(&mapping.member)?;
-                if let Some(target) = &mapping.target {
-                    validate_member_path(target)?;
-                    if target.split('/').count() > ryeos_state::external_content::MAX_CAPTURE_DEPTH
-                    {
-                        bail!("activation tree target exceeds the portable depth bound");
+            match &component.shape {
+                ManagedActivationComponentShape::Mapped { members } => {
+                    validate_mapped_component(
+                        component,
+                        members,
+                        &source_members,
+                        &mut consumed_imports,
+                        &mut mapped_sources,
+                    )?;
+                }
+                ManagedActivationComponentShape::WholeArchiveTree {
+                    source,
+                    prefix,
+                    bounds,
+                } => {
+                    validate_id("whole-tree activation source", source)?;
+                    validate_member_path(prefix)?;
+                    if prefix.len() > ryeos_state::objects::MAX_EXTERNAL_CONTENT_PATH_BYTES {
+                        bail!("whole-tree activation prefix exceeds the portable path bound");
                     }
-                    if !targets.insert(target.as_str()) {
-                        bail!("activation tree component repeats a target path");
+                    validate_component_bounds(bounds, component.storage)?;
+                    let source_recipe = self.source_by_id(source)?;
+                    if !source_recipe.members.is_empty() {
+                        bail!("whole-tree activation source cannot also select members");
                     }
-                    insert_tree_namespace(target, &mut tree_entries);
-                    if tree_entries.len() > ryeos_state::objects::MAX_EXTERNAL_CONTENT_ENTRIES {
-                        bail!("activation tree component exceeds the portable entry bound");
+                    if source_recipe.maximum_entries < bounds.maximum_entries.saturating_add(1) {
+                        bail!("whole-tree activation source entry bound cannot contain its tree");
+                    }
+                    if !whole_tree_sources.insert(source.as_str()) {
+                        bail!("whole-tree activation source is consumed more than once");
                     }
                 }
-                let Some(member) =
-                    source_members.get(&(mapping.source.as_str(), mapping.member.as_str()))
-                else {
-                    bail!("activation component names an absent source member");
-                };
-                if member.disposition != ManagedMemberDisposition::Import {
-                    bail!("activation component does not name an imported source member");
-                }
-                component_maximum_bytes = component_maximum_bytes
-                    .checked_add(member.maximum_bytes)
-                    .ok_or_else(|| anyhow::anyhow!("activation component byte bound overflow"))?;
-                if component.storage == ManagedComponentStorage::Content
-                    && member.maximum_bytes > ryeos_state::objects::MAX_EXTERNAL_CONTENT_FILE_BYTES
-                {
-                    bail!("ordinary-content activation member has a large-content byte bound");
-                }
-                if !consumed_imports.insert((mapping.source.as_str(), mapping.member.as_str())) {
-                    bail!("an imported activation member is consumed more than once");
-                }
             }
-            if component.storage == ManagedComponentStorage::Content
-                && component_maximum_bytes > ryeos_state::objects::MAX_EXTERNAL_CONTENT_TOTAL_BYTES
-            {
-                bail!(
-                    "ordinary-content activation component has an excessive aggregate byte bound"
-                );
+        }
+        if !mapped_sources.is_disjoint(&whole_tree_sources) {
+            bail!("managed activation source cannot mix mapped and whole-tree consumption");
+        }
+        for source in &self.sources {
+            if source.members.is_empty() && !whole_tree_sources.contains(source.id.as_str()) {
+                bail!("managed activation source has neither selected members nor a whole tree");
             }
         }
         if consumed_imports != imported_members {
@@ -303,7 +345,7 @@ impl ManagedExternalContentActivation {
         }
         let mut total_compressed = 0u64;
         let mut total_expanded = 0u64;
-        let mut total_members = 0usize;
+        let mut total_entries = 0usize;
         for source in &self.sources {
             admit_source_url(&source.url, policy)?;
             if source.maximum_compressed_bytes > policy.max_compressed_bytes
@@ -317,9 +359,9 @@ impl ManagedExternalContentActivation {
             total_expanded = total_expanded
                 .checked_add(source.maximum_expanded_bytes)
                 .ok_or_else(|| anyhow::anyhow!("activation expanded byte ceiling overflow"))?;
-            total_members = total_members
-                .checked_add(source.members.len())
-                .ok_or_else(|| anyhow::anyhow!("activation member ceiling overflow"))?;
+            total_entries = total_entries
+                .checked_add(source.maximum_entries)
+                .ok_or_else(|| anyhow::anyhow!("activation archive entry ceiling overflow"))?;
             if source
                 .members
                 .iter()
@@ -330,7 +372,7 @@ impl ManagedExternalContentActivation {
         }
         if total_compressed > policy.max_compressed_bytes
             || total_expanded > policy.max_expanded_bytes
-            || total_members > policy.max_members
+            || total_entries > policy.max_members
         {
             bail!("managed activation aggregate bounds exceed node policy");
         }
@@ -356,58 +398,25 @@ impl ManagedExternalContentActivation {
                     component.id
                 )
             })?;
-            let mut maximum_bytes = 0u64;
-            let mut maximum_file_bytes = 0u64;
-            let mut maximum_depth = 1usize;
-            let mut tree_entries = BTreeSet::new();
-            for mapping in &component.members {
-                let member = self.member(&mapping.source, &mapping.member)?;
-                maximum_bytes = maximum_bytes
-                    .checked_add(member.maximum_bytes)
-                    .ok_or_else(|| anyhow::anyhow!("activation component byte bound overflow"))?;
-                maximum_file_bytes = maximum_file_bytes.max(member.maximum_bytes);
-                if let Some(target) = mapping.target.as_deref() {
-                    maximum_depth = maximum_depth.max(target.split('/').count());
-                    insert_tree_namespace(target, &mut tree_entries);
+            let (capture_bounds, expected_file_sha256) = match &component.shape {
+                ManagedActivationComponentShape::Mapped { members } => {
+                    derive_mapped_capture_bounds(self, members, declaration.kind)?
                 }
-            }
-            match declaration.kind {
-                ryeos_engine::external_content::ExternalContentKind::File => {
-                    if component.members.len() != 1 || component.members[0].target.is_some() {
-                        bail!("managed activation file realization requires one untargeted member");
-                    }
-                }
-                ryeos_engine::external_content::ExternalContentKind::Tree => {
-                    if component
-                        .members
-                        .iter()
-                        .any(|mapping| mapping.target.is_none())
+                ManagedActivationComponentShape::WholeArchiveTree { bounds, .. } => {
+                    if declaration.kind != ryeos_engine::external_content::ExternalContentKind::Tree
                     {
-                        bail!("managed activation tree realization requires targeted members");
+                        bail!("whole-archive-tree activation requires a tree consumer");
                     }
-                    let mut targets = component
-                        .members
-                        .iter()
-                        .map(|mapping| mapping.target.as_deref().expect("checked above"))
-                        .collect::<Vec<_>>();
-                    targets.sort_unstable();
-                    for (index, left) in targets.iter().enumerate() {
-                        for right in targets.iter().skip(index + 1) {
-                            if path_contains(left, right) || path_contains(right, left) {
-                                bail!("managed activation tree targets overlap");
-                            }
-                        }
-                    }
+                    (bounds.clone(), None)
                 }
-            }
-            let maximum_entries = match declaration.kind {
-                ryeos_engine::external_content::ExternalContentKind::File => 1,
-                ryeos_engine::external_content::ExternalContentKind::Tree => tree_entries.len(),
             };
-            if maximum_depth > import_limits.max_depth
-                || maximum_entries > import_limits.max_entries
-                || maximum_file_bytes > import_limits.max_file_bytes
-                || maximum_bytes > import_limits.max_total_bytes
+            if capture_bounds.maximum_file_bytes > policy.max_member_bytes {
+                bail!("managed activation component file bound exceeds node policy");
+            }
+            if capture_bounds.maximum_depth > import_limits.max_depth
+                || capture_bounds.maximum_entries > import_limits.max_entries
+                || capture_bounds.maximum_file_bytes > import_limits.max_file_bytes
+                || capture_bounds.maximum_total_bytes > import_limits.max_total_bytes
             {
                 bail!("managed activation component exceeds node import policy");
             }
@@ -431,11 +440,176 @@ impl ManagedExternalContentActivation {
                 expected_manifest_hash,
                 expected_manifest_kind: expected_manifest_kind.to_owned(),
                 declaration_kind: declaration.kind,
+                capture_bounds,
+                expected_file_sha256,
             });
         }
         resolved.sort_by(|left, right| left.recipe.id.cmp(&right.recipe.id));
         Ok(resolved)
     }
+
+    fn source_by_id(&self, id: &str) -> anyhow::Result<&ManagedActivationSource> {
+        self.sources
+            .iter()
+            .find(|source| source.id == id)
+            .ok_or_else(|| anyhow::anyhow!("managed activation component names an absent source"))
+    }
+}
+
+fn validate_mapped_component<'a>(
+    component: &'a ManagedActivationComponent,
+    members: &'a [ManagedActivationComponentMember],
+    source_members: &BTreeMap<(&'a str, &'a str), &'a ManagedActivationMember>,
+    consumed_imports: &mut BTreeSet<(&'a str, &'a str)>,
+    mapped_sources: &mut BTreeSet<&'a str>,
+) -> anyhow::Result<()> {
+    if members.is_empty() || members.len() > MAX_PORTABLE_MEMBERS {
+        bail!("managed activation component member count is outside the portable contract");
+    }
+    let tree_candidate = members.iter().any(|mapping| mapping.target.is_some());
+    if tree_candidate && members.iter().any(|mapping| mapping.target.is_none()) {
+        bail!("tree-shaped activation component has a member without a target");
+    }
+    if !tree_candidate && members.len() != 1 {
+        bail!("file-shaped activation component candidate must select exactly one member");
+    }
+    let mut targets = BTreeSet::new();
+    let mut tree_entries = BTreeSet::new();
+    let mut component_maximum_bytes = 0u64;
+    for mapping in members {
+        validate_id("activation component source", &mapping.source)?;
+        validate_member_path(&mapping.member)?;
+        mapped_sources.insert(mapping.source.as_str());
+        if let Some(target) = &mapping.target {
+            validate_member_path(target)?;
+            if target.len() > ryeos_state::objects::MAX_EXTERNAL_CONTENT_PATH_BYTES {
+                bail!("activation tree target exceeds the portable path bound");
+            }
+            if target.split('/').count() > ryeos_state::external_content::MAX_CAPTURE_DEPTH {
+                bail!("activation tree target exceeds the portable depth bound");
+            }
+            if !targets.insert(target.as_str()) {
+                bail!("activation tree component repeats a target path");
+            }
+            insert_tree_namespace(target, &mut tree_entries);
+            if tree_entries.len() > ryeos_state::objects::MAX_EXTERNAL_CONTENT_ENTRIES {
+                bail!("activation tree component exceeds the portable entry bound");
+            }
+        }
+        let Some(member) = source_members.get(&(mapping.source.as_str(), mapping.member.as_str()))
+        else {
+            bail!("activation component names an absent source member");
+        };
+        if member.disposition != ManagedMemberDisposition::Import {
+            bail!("activation component does not name an imported source member");
+        }
+        component_maximum_bytes = component_maximum_bytes
+            .checked_add(member.maximum_bytes)
+            .ok_or_else(|| anyhow::anyhow!("activation component byte bound overflow"))?;
+        if component.storage == ManagedComponentStorage::Content
+            && member.maximum_bytes > ryeos_state::objects::MAX_EXTERNAL_CONTENT_FILE_BYTES
+        {
+            bail!("ordinary-content activation member has a large-content byte bound");
+        }
+        if !consumed_imports.insert((mapping.source.as_str(), mapping.member.as_str())) {
+            bail!("an imported activation member is consumed more than once");
+        }
+    }
+    if component.storage == ManagedComponentStorage::Content
+        && component_maximum_bytes > ryeos_state::objects::MAX_EXTERNAL_CONTENT_TOTAL_BYTES
+    {
+        bail!("ordinary-content activation component has an excessive aggregate byte bound");
+    }
+    Ok(())
+}
+
+fn validate_component_bounds(
+    bounds: &ManagedActivationComponentBounds,
+    storage: ManagedComponentStorage,
+) -> anyhow::Result<()> {
+    let (maximum_entries, maximum_file_bytes, maximum_total_bytes) = match storage {
+        ManagedComponentStorage::Content => (
+            ryeos_state::objects::MAX_EXTERNAL_CONTENT_ENTRIES,
+            ryeos_state::objects::MAX_EXTERNAL_CONTENT_FILE_BYTES,
+            ryeos_state::objects::MAX_EXTERNAL_CONTENT_TOTAL_BYTES,
+        ),
+        ManagedComponentStorage::LargeContent => (
+            ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_ENTRIES,
+            ryeos_state::objects::MAX_LARGE_CONTENT_FILE_BYTES,
+            ryeos_state::objects::MAX_LARGE_CONTENT_TOTAL_BYTES,
+        ),
+    };
+    if bounds.maximum_entries == 0
+        || bounds.maximum_entries > maximum_entries
+        || bounds.maximum_depth == 0
+        || bounds.maximum_depth > ryeos_state::external_content::MAX_CAPTURE_DEPTH
+        || bounds.maximum_file_bytes == 0
+        || bounds.maximum_file_bytes > maximum_file_bytes
+        || bounds.maximum_total_bytes == 0
+        || bounds.maximum_total_bytes > maximum_total_bytes
+        || bounds.maximum_file_bytes > bounds.maximum_total_bytes
+    {
+        bail!("whole-tree activation bounds exceed the portable storage contract");
+    }
+    Ok(())
+}
+
+fn derive_mapped_capture_bounds(
+    document: &ManagedExternalContentActivation,
+    members: &[ManagedActivationComponentMember],
+    declaration_kind: ryeos_engine::external_content::ExternalContentKind,
+) -> anyhow::Result<(ManagedActivationComponentBounds, Option<String>)> {
+    let mut maximum_total_bytes = 0u64;
+    let mut maximum_file_bytes = 0u64;
+    let mut maximum_depth = 1usize;
+    let mut tree_entries = BTreeSet::new();
+    for mapping in members {
+        let member = document.member(&mapping.source, &mapping.member)?;
+        maximum_total_bytes = maximum_total_bytes
+            .checked_add(member.maximum_bytes)
+            .ok_or_else(|| anyhow::anyhow!("activation component byte bound overflow"))?;
+        maximum_file_bytes = maximum_file_bytes.max(member.maximum_bytes);
+        if let Some(target) = mapping.target.as_deref() {
+            maximum_depth = maximum_depth.max(target.split('/').count());
+            insert_tree_namespace(target, &mut tree_entries);
+        }
+    }
+    let (maximum_entries, expected_file_sha256) = match declaration_kind {
+        ryeos_engine::external_content::ExternalContentKind::File => {
+            if members.len() != 1 || members[0].target.is_some() {
+                bail!("managed activation file realization requires one untargeted member");
+            }
+            let member = document.member(&members[0].source, &members[0].member)?;
+            (1, Some(member.sha256.clone()))
+        }
+        ryeos_engine::external_content::ExternalContentKind::Tree => {
+            if members.iter().any(|mapping| mapping.target.is_none()) {
+                bail!("managed activation tree realization requires targeted members");
+            }
+            let mut targets = members
+                .iter()
+                .map(|mapping| mapping.target.as_deref().expect("checked above"))
+                .collect::<Vec<_>>();
+            targets.sort_unstable();
+            for (index, left) in targets.iter().enumerate() {
+                for right in targets.iter().skip(index + 1) {
+                    if path_contains(left, right) || path_contains(right, left) {
+                        bail!("managed activation tree targets overlap");
+                    }
+                }
+            }
+            (tree_entries.len(), None)
+        }
+    };
+    Ok((
+        ManagedActivationComponentBounds {
+            maximum_entries,
+            maximum_depth,
+            maximum_file_bytes,
+            maximum_total_bytes,
+        },
+        expected_file_sha256,
+    ))
 }
 
 impl ResolvedManagedExternalContentActivation {
@@ -706,6 +880,7 @@ mod tests {
         ManagedExternalContentActivationPolicy {
             allow_online: true,
             allowed_https_hosts: vec!["releases.example.test".to_owned()],
+            max_redirects: 0,
             max_archives: 2,
             max_compressed_bytes: 4096,
             max_expanded_bytes: 8192,
@@ -741,6 +916,7 @@ mod tests {
                 "sha256":"a".repeat(64),
                 "maximum_compressed_bytes":4096,
                 "maximum_expanded_bytes":8192,
+                "maximum_entries":8,
                 "members":[{
                     "path":"bin/runtime",
                     "disposition":"import",
@@ -752,11 +928,14 @@ mod tests {
             "components":[{
                 "id":"runtime",
                 "storage":"large_content",
-                "members":[{
-                    "source":"package",
-                    "member":"bin/runtime",
-                    "target":null
-                }]
+                "shape":{
+                    "kind":"mapped",
+                    "members":[{
+                        "source":"package",
+                        "member":"bin/runtime",
+                        "target":null
+                    }]
+                }
             }]
         })
     }
@@ -772,6 +951,37 @@ mod tests {
             metadata_hint: None,
             mount: "bin/runtime".to_owned(),
         }]
+    }
+
+    fn whole_tree_document_value() -> Value {
+        serde_json::json!({
+            "schema":MANAGED_ACTIVATION_SCHEMA,
+            "consumer_ref":"worker:fixture/hosted",
+            "sources":[{
+                "id":"runtime-package",
+                "url":"https://releases.example.test/runtime.tar.gz",
+                "archive_format":MANAGED_ACTIVATION_ARCHIVE_FORMAT,
+                "sha256":"a".repeat(64),
+                "maximum_compressed_bytes":4096,
+                "maximum_expanded_bytes":8192,
+                "maximum_entries":8
+            }],
+            "components":[{
+                "id":"runtime",
+                "storage":"content",
+                "shape":{
+                    "kind":"whole_archive_tree",
+                    "source":"runtime-package",
+                    "prefix":"runtime-root",
+                    "bounds":{
+                        "maximum_entries":7,
+                        "maximum_depth":4,
+                        "maximum_file_bytes":4096,
+                        "maximum_total_bytes":8192
+                    }
+                }
+            }]
+        })
     }
 
     #[test]
@@ -836,7 +1046,8 @@ mod tests {
     #[test]
     fn tree_realization_is_derived_from_consumer_kind() {
         let mut value = document_value("releases.example.test");
-        value["components"][0]["members"][0]["target"] = Value::String("bin/runtime".to_owned());
+        value["components"][0]["shape"]["members"][0]["target"] =
+            Value::String("bin/runtime".to_owned());
         let document = ManagedExternalContentActivation::from_value(&value).unwrap();
         let mut declarations = declarations();
         declarations[0].kind = ryeos_engine::external_content::ExternalContentKind::Tree;
@@ -852,7 +1063,8 @@ mod tests {
     #[test]
     fn file_and_tree_member_shapes_cannot_be_confused() {
         let mut value = document_value("releases.example.test");
-        value["components"][0]["members"][0]["target"] = Value::String("bin/runtime".to_owned());
+        value["components"][0]["shape"]["members"][0]["target"] =
+            Value::String("bin/runtime".to_owned());
         let document = ManagedExternalContentActivation::from_value(&value).unwrap();
         assert!(
             document
@@ -864,7 +1076,7 @@ mod tests {
     #[test]
     fn target_is_required_even_when_explicitly_null() {
         let mut value = document_value("releases.example.test");
-        value["components"][0]["members"][0]
+        value["components"][0]["shape"]["members"][0]
             .as_object_mut()
             .unwrap()
             .remove("target");
@@ -874,7 +1086,8 @@ mod tests {
     #[test]
     fn node_import_limits_fence_managed_tree_capture() {
         let mut value = document_value("releases.example.test");
-        value["components"][0]["members"][0]["target"] = Value::String("bin/runtime".to_owned());
+        value["components"][0]["shape"]["members"][0]["target"] =
+            Value::String("bin/runtime".to_owned());
         let document = ManagedExternalContentActivation::from_value(&value).unwrap();
         let mut declarations = declarations();
         declarations[0].kind = ryeos_engine::external_content::ExternalContentKind::Tree;
@@ -884,6 +1097,71 @@ mod tests {
             document
                 .admit(&policy(), &limits, &declarations, true)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn whole_archive_tree_is_compact_and_consumer_derived() {
+        let value = whole_tree_document_value();
+        assert!(serde_json::to_vec(&value).unwrap().len() < 1024);
+        let document = ManagedExternalContentActivation::from_value(&value).unwrap();
+        let mut declarations = declarations();
+        declarations[0].kind = ryeos_engine::external_content::ExternalContentKind::Tree;
+        let resolved = document
+            .admit(&policy(), &import_limits(), &declarations, true)
+            .unwrap();
+        assert_eq!(resolved[0].capture_bounds.maximum_entries, 7);
+        assert_eq!(resolved[0].expected_manifest_hash, "c".repeat(64));
+        assert!(resolved[0].expected_file_sha256.is_none());
+    }
+
+    #[test]
+    fn whole_archive_tree_cannot_supply_a_file_or_mix_selected_members() {
+        let value = whole_tree_document_value();
+        let document = ManagedExternalContentActivation::from_value(&value).unwrap();
+        assert!(
+            document
+                .admit(&policy(), &import_limits(), &declarations(), true)
+                .is_err()
+        );
+
+        let mut mixed = value;
+        mixed["sources"][0]["members"] = serde_json::json!([{
+            "path":"runtime-root/bin/runtime",
+            "disposition":"verify_only",
+            "sha256":"b".repeat(64),
+            "maximum_bytes":4096,
+            "executable":true
+        }]);
+        assert!(ManagedExternalContentActivation::from_value(&mixed).is_err());
+    }
+
+    #[test]
+    fn whole_archive_tree_refuses_transform_vocabulary_and_incoherent_bounds() {
+        let mut value = whole_tree_document_value();
+        value["components"][0]["shape"]["command"] = Value::String("strip".to_owned());
+        assert!(ManagedExternalContentActivation::from_value(&value).is_err());
+
+        let mut value = whole_tree_document_value();
+        value["sources"][0]["maximum_entries"] = Value::from(7);
+        assert!(ManagedExternalContentActivation::from_value(&value).is_err());
+    }
+
+    #[test]
+    fn staging_cleanup_budget_covers_every_portable_whole_tree_entry() {
+        assert!(
+            MAX_MANAGED_ACTIVATION_STAGING_ENTRIES
+                >= MAX_PORTABLE_ARCHIVES * MAX_PORTABLE_ARCHIVE_ENTRIES
+                    + ryeos_state::objects::MAX_EXTERNAL_CONTENT_ACTIVATION_COMPONENTS
+        );
+    }
+
+    #[test]
+    fn staging_cleanup_budget_covers_mixed_mapped_and_whole_tree_shapes() {
+        assert!(
+            MAX_MANAGED_ACTIVATION_STAGING_ENTRIES
+                >= MAX_MAPPED_ACTIVATION_STAGING_ENTRIES
+                    + MAX_WHOLE_TREE_ACTIVATION_STAGING_ENTRIES
         );
     }
 }

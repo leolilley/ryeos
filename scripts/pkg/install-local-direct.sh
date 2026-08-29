@@ -49,9 +49,9 @@ Options:
   --bundle-set SET      Bundle set to populate/install: full,
                         full-sandbox (full plus the separately built optional
                         isolation backend), standard
-                        (core+standard), hosted-node
+                        (core+central-auth+standard), hosted-node
                         (core+central-auth+hosted-node), or hosted-workflow
-                        (core+standard+hosted-node+codex)
+                        (core+central-auth+standard+hosted-node+codex)
                         (default: full)
   --jobs N              Cap cargo build parallelism during --populate (cargo -j N).
                         Use a smaller N if a full release build exhausts memory.
@@ -853,14 +853,6 @@ for name in "${bundle_names[@]}"; do
     if [[ -f "$bundle_dir/PUBLISHER_TRUST.toml" ]]; then
         sudo install -Dm644 "$bundle_dir/PUBLISHER_TRUST.toml" \
             "$share_dir/$name/PUBLISHER_TRUST.toml"
-    fi
-    if [[ -f "$bundle_dir/assemble.py" ]]; then
-        command -v python3 >/dev/null 2>&1 || \
-            die "$name operator assembler requires python3"
-        sudo install -Dm755 "$bundle_dir/assemble.py" \
-            "$share_dir/$name/assemble.py"
-        [[ -x "$share_dir/$name/assemble.py" ]] || \
-            die "failed to install $name operator assembler"
     fi
     if [[ -f "$bundle_dir/README.md" ]]; then
         sudo install -Dm644 "$bundle_dir/README.md" \

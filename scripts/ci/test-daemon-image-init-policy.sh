@@ -101,40 +101,63 @@ for image in "${daemon_images[@]}"; do
     fi
 done
 
-# The hosted-workflow image promises one exact source bundle set to init.
-# Keep its runtime COPY inventory mechanically identical to the shared
-# authoring/install bundle-set definition: publishing a bundle in the builder
-# but omitting it from /opt/ryeos makes a green image that cannot install the
-# advertised workload.
+# Images that promise an exact source bundle set must copy that same set into
+# their final stage. Publishing a bundle in the builder but omitting it from
+# /opt/ryeos makes a green image that cannot install the advertised workload.
 # shellcheck source=scripts/pkg/bundle-sets.sh
 source "$root/scripts/pkg/bundle-sets.sh"
-hosted_workflow_instructions="$(dockerfile_instructions "$root/Dockerfile.hosted-workflow")"
-hosted_workflow_final_stage="$(awk '
-    tolower($1) == "from" { stage = "" }
-    { stage = stage $0 ORS }
-    END { printf "%s", stage }
-' <<<"$hosted_workflow_instructions")"
-
-expected_hosted_workflow_bundles="$(ryeos_bundle_set_names hosted-workflow | sort)"
-actual_hosted_workflow_bundles="$(sed -nE \
-    's#^COPY --from=builder /build/bundles/([^/.][^ /]*) /opt/ryeos/([^ /]+)$#\1 \2#p' \
-    <<<"$hosted_workflow_final_stage" | awk '
+assert_runtime_bundle_inventory() {
+    local image="$1" bundle_set="$2" instructions final_stage expected_bundles actual_bundles
+    instructions="$(dockerfile_instructions "$root/$image")"
+    final_stage="$(awk '
+        tolower($1) == "from" { stage = "" }
+        { stage = stage $0 ORS }
+        END { printf "%s", stage }
+    ' <<<"$instructions")"
+    expected_bundles="$(ryeos_bundle_set_names "$bundle_set" | sort)"
+    actual_bundles="$(sed -nE \
+        -e 's#^COPY --from=builder /build/bundles/([^/.][^ /]*) /opt/ryeos/([^ /]+)$#\1 \2#p' \
+        -e 's#^COPY bundles/([^/.][^ /]*) /opt/ryeos/([^ /]+)$#\1 \2#p' \
+        <<<"$final_stage" | awk '
         $1 != $2 {
-            print "hosted-workflow bundle COPY changes the bundle name: " $1 " -> " $2 > "/dev/stderr"
+            print "bundle COPY changes the bundle name: " $1 " -> " $2 > "/dev/stderr"
             failed = 1
             next
         }
         { print $1 }
         END { if (failed) exit 1 }
     ' | sort)"
-if [[ "$actual_hosted_workflow_bundles" != "$expected_hosted_workflow_bundles" ]]; then
-    echo "Dockerfile.hosted-workflow runtime bundle inventory does not match bundle set" >&2
-    echo "expected:" >&2
-    printf '%s\n' "$expected_hosted_workflow_bundles" >&2
-    echo "actual:" >&2
-    printf '%s\n' "$actual_hosted_workflow_bundles" >&2
-    exit 1
-fi
+    if [[ "$actual_bundles" != "$expected_bundles" ]]; then
+        echo "$image runtime bundle inventory does not match $bundle_set bundle set" >&2
+        echo "expected:" >&2
+        printf '%s\n' "$expected_bundles" >&2
+        echo "actual:" >&2
+        printf '%s\n' "$actual_bundles" >&2
+        exit 1
+    fi
+}
+
+assert_runtime_bundle_inventory Dockerfile full
+assert_runtime_bundle_inventory Dockerfile.dev full
+assert_runtime_bundle_inventory Dockerfile.standard standard
+assert_runtime_bundle_inventory Dockerfile.hosted-node hosted-node
+assert_runtime_bundle_inventory Dockerfile.hosted-workflow hosted-workflow
+assert_runtime_bundle_inventory Dockerfile.central-host central-host
+
+# central-auth owns Python-authored support and every runtime set that includes
+# it must mechanically prove the interpreter is present in the final image.
+for image in "${daemon_images[@]}"; do
+    instructions="$(dockerfile_instructions "$root/$image")"
+    final_stage="$(awk '
+        tolower($1) == "from" { stage = "" }
+        { stage = stage $0 ORS }
+        END { printf "%s", stage }
+    ' <<<"$instructions")"
+    if [[ "$(grep -Eic '^run test -x /usr/bin/python3$' <<<"$final_stage")" -ne 1 ]]; then
+        echo "$image final stage must prove /usr/bin/python3 is executable" >&2
+        exit 1
+    fi
+done
 
 release_bundle_instructions="$(dockerfile_instructions "$root/Dockerfile.release-bundles")"
 if grep -Eqi '^run .*apt-get .*install .*tini([[:space:]]|$)|^copy .* /usr/bin/tini([[:space:]]|$)|^entrypoint ' <<<"$release_bundle_instructions"; then

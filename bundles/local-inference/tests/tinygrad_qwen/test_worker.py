@@ -13,6 +13,10 @@ import unittest
 import unicodedata
 from pathlib import Path
 
+# The test imports the exact signed worker source from its staged workspace.
+# Never mutate that source closure with interpreter-owned cache artifacts.
+sys.dont_write_bytecode = True
+
 
 WORKSPACE = Path(os.environ["RYEOS_LOCAL_WORKER_TEST_WORKSPACE"]).resolve(strict=True)
 RUN_MODEL_GOLDENS = os.environ.get("RYEOS_RUN_MODEL_GOLDENS") == "1"
@@ -21,7 +25,7 @@ os.environ["DEVICE"] = "HOST-SHOULD-NOT-SELECT-A-BACKEND"
 os.chdir(WORKSPACE)
 sys.path[:0] = [str(WORKSPACE / "worker"), str(WORKSPACE / "tinygrad")]
 
-from session import OutputRouter, Worker, _read_frame, _validate_request  # noqa: E402
+from session import WORKER_ROOT, OutputRouter, Worker, _read_frame, _validate_request  # noqa: E402
 from model import QwenModel  # noqa: E402
 from tinygrad import Tensor  # noqa: E402
 from tokenizer import QwenTokenizer, render_chat  # noqa: E402
@@ -32,6 +36,10 @@ class WorkerContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.model_root = WORKSPACE / "model"
         cls.tokenizer = QwenTokenizer(cls.model_root)
+
+    def test_worker_source_root_is_derived_from_the_admitted_entrypoint(self) -> None:
+        self.assertEqual(WORKER_ROOT, Path(__import__("session").__file__).resolve().parent)
+        self.assertIn(WORKSPACE, WORKER_ROOT.parents)
 
     def test_tokenizer_matches_independent_reference_ids(self) -> None:
         cases = {

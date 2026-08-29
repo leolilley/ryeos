@@ -3712,9 +3712,13 @@ fn cas_entry_transition_allowed(current: CasEntryState, next: CasEntryState) -> 
 fn validate_sync_job_transition(from: SyncJobState, to: SyncJobState) -> Result<()> {
     use SyncJobState::*;
     let allowed = match from {
-        Planned => matches!(to, Planned | Running | Failed | Cancelled),
+        // A durable external authority may prove completion before the local
+        // attempt is settled (for example, a receipt/head publication followed
+        // by daemon death). Direct completion remains guarded by the absence
+        // of running attempts in `update_sync_job`.
+        Planned => matches!(to, Planned | Running | Completed | Failed | Cancelled),
         Running => matches!(to, Running | Completed | Failed | Retryable | Cancelled),
-        Retryable => matches!(to, Retryable | Running | Failed | Cancelled),
+        Retryable => matches!(to, Retryable | Running | Completed | Failed | Cancelled),
         Completed | Failed | Cancelled => false,
     };
     if !allowed {
@@ -5370,6 +5374,58 @@ mod tests {
             phase: "target_prepare".to_owned(),
         })
         .unwrap();
+    }
+
+    #[test]
+    fn authoritative_result_can_complete_an_exhausted_interrupted_job() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("operational.sqlite3");
+        let db = OperationalDb::open(&path).unwrap();
+        db.create_sync_job(&NewSyncJob {
+            job_id: "job:authoritative-recovery".to_owned(),
+            operation_type: "external_content_activation".to_owned(),
+            operation: serde_json::json!({
+                "schema": 1,
+                "operation_type": "external_content_activation"
+            }),
+            peer: None,
+            roots: vec![],
+            heads: vec![],
+            max_attempts: 1,
+        })
+        .unwrap();
+        db.create_sync_job_attempt(&NewSyncJobAttempt {
+            attempt_id: "attempt:authoritative-recovery".to_owned(),
+            job_id: "job:authoritative-recovery".to_owned(),
+            worker_id: None,
+            phase: "publish".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(db.reconcile_interrupted_sync_job_attempts().unwrap(), 1);
+
+        let receipt_hash = "a".repeat(64);
+        db.update_sync_job(
+            "job:authoritative-recovery",
+            &SyncJobUpdate {
+                state: SyncJobState::Completed,
+                phase: "completed_from_authoritative_result".to_owned(),
+                roots: Some(vec![receipt_hash.clone()]),
+                heads: None,
+                uploaded_hashes: Vec::new(),
+                fetched_hashes: Vec::new(),
+                last_error: None,
+                result: Some(serde_json::json!({"receipt_hash": receipt_hash})),
+            },
+        )
+        .unwrap();
+
+        let job = db
+            .get_sync_job("job:authoritative-recovery")
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.state, SyncJobState::Completed);
+        assert_eq!(job.attempt_count, 1);
+        assert_eq!(job.roots, vec!["a".repeat(64)]);
     }
 
     #[test]

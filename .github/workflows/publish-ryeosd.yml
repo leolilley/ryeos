@@ -47,6 +47,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Resolve and validate version
         id: release
@@ -64,6 +65,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
           ref: refs/tags/v${{ steps.release.outputs.version }}
 
       - name: Resolve and verify source revision
@@ -99,9 +101,22 @@ jobs:
           echo "Tag commit: $TAG_COMMIT"
           echo "Build date: $BUILD_DATE"
 
+  qualify-local-inference:
+    name: Qualify local inference against this release source
+    needs: qualify
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/qualify-local-inference-source.yml
+    with:
+      source_sha: ${{ needs.qualify.outputs.source_sha }}
+      require_promoted_release: true
+
   publish:
     name: Publish release artifacts
-    needs: qualify
+    needs:
+      - qualify
+      - qualify-local-inference
     runs-on: ubuntu-latest
     permissions:
       contents: write # immutable bundle assets on the GitHub release
@@ -111,6 +126,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
           ref: ${{ needs.qualify.outputs.source_sha }}
 
       - name: Verify release source revision

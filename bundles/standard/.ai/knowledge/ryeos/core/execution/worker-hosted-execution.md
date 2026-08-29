@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-29T09:08:38Z:5c3129dc1030acf339c6027649e8e323eb7fbbbfe8ca08295c88c1300a301288:7N+MxGGcrtQ3VA7sVNSR6ljJCadn2Qykks2sLPWaiajZwO8hC1PPoNN4YeLczXgPajj1v5O/09FzEQQrrm++CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-29T15:11:16Z:08f0c10bdeb45510b98a45b21d80684b9630eda288b8ed093000a3e91c2d0e80:dFQ6HP7lsvY7kvSDzWg/vS0sZN3g6PYl+cEJsptDb04YeBC03BE7ZwfWQvXzfklN3SqoyMqb2etCYu7x1lpJCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -94,29 +94,35 @@ belong to the peer node key, not the configured-operator grant.
 
 Large or third-party workload bytes remain outside signed bundles. A trusted
 installed-bundle `config` may carry the closed
-`ryeos.external_content_activation.v2` acquisition recipe: exact HTTPS archive
-URLs and digests, archive/member bounds, selected regular-member digests, a
-consumer ref, component-to-member mappings, optional tree-relative targets,
-and storage tiers. A file consumer requires one untargeted member. A tree
-consumer requires targeted members and may contain only those verified regular
-files plus their required parent directories. The recipe does not carry
-commands, scripts, host paths, policy, credentials, component kind, manifest
-schema/hash, or mount authority.
+`ryeos.external_content_activation.v3` acquisition recipe: exact HTTPS archive
+URLs and digests, signed archive entry/byte bounds, a consumer ref, closed
+component shapes, and storage tiers. The `mapped` shape supplies exact selected
+regular members: a file consumer requires one untargeted member, while a tree
+consumer requires canonical targets and contains only those files plus their
+required parents. The `whole_archive_tree` shape strips one canonical prefix
+from an already-final publisher archive and admits only bounded directories,
+regular files, and internal relative symlinks. Hardlinks, sparse files, special
+entries, collisions, escaping paths, and undeclared transforms are refused.
+The resulting existing manifest must still match the consumer's signed pin.
+The recipe does not carry commands, scripts, host paths, policy, credentials,
+component kind, manifest schema/hash, or mount authority.
 
 `ryeos external-content activate <config-ref> <online|offline>` resolves and
 retains that signed recipe and its trusted consumer. The consumer's existing
 external-content declarations remain authoritative for component IDs, kinds,
 pinned manifest hashes, and mounts. Node policy independently owns whether
-online acquisition is enabled, the exact HTTPS host allowlist, byte/member/
-concurrency ceilings, cache/store budgets, free-space floor, and retries.
+online acquisition is enabled, the exact HTTPS host allowlist, redirect,
+byte/archive-entry/concurrency ceilings, cache/store budgets, free-space floor,
+and retries. Redirects are disabled at a zero ceiling or followed only through
+canonical HTTPS destinations whose hosts are separately admitted by that same
+node policy; every final byte remains bound to the source's signed digest.
 Every resulting component capture must also fit the node's ordinary import
 depth, entry, per-file, aggregate-byte, store-budget, and free-space ceilings;
 the durable operation retains both policy tranches as one exact digest.
-Acquisition stages only verified selected regular files through Lillux's
-descriptor-relative filesystem boundary. For a tree consumer it creates only
-canonical declared parent directories and member targets, then feeds that
-pinned tree through the existing content capture. Existing manifests and
-consumer binding heads remain the sole launch authority.
+Acquisition stages mapped members or a closed archive subtree through Lillux's
+descriptor-relative filesystem boundary, then feeds the result through the
+existing content capture. Existing manifests and consumer binding heads remain
+the sole launch authority.
 
 The existing durable sync-job/attempt machinery owns retry and restart
 recovery. The durable operation freezes the exact node-signed configured-
@@ -263,7 +269,13 @@ override path; admission rejects unknown fields or values above the kind cap
 and freezes the effective limit into the subordinate capsule. On Unix,
 `real_uid_process_limit` becomes `RLIMIT_NPROC`, which is shared across the
 daemon's real UID and is not a per-worker descendant quota. Session-group and
-node-wide worker counts remain separate RyeOS controls.
+node-wide worker counts remain separate RyeOS controls. Linux does not enforce
+`RLIMIT_NPROC` for real UID 0, so a root-run node records and applies the
+configured value but cannot claim it as an effective fork ceiling. Deployments
+that require mechanical process containment must run the daemon under a
+non-root service UID or use a separately proven cgroup/process-isolation
+boundary; disabled isolation with a root daemon remains trusted signed
+execution, not hostile-worker containment.
 
 Public commands contain an admitted route ID and schema-validated payload.
 Direction, audience, effect class, fixed/workspace parameters, forbidden

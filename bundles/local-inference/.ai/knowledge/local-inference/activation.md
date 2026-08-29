@@ -1,113 +1,111 @@
-<!-- ryeos:signed:2026-08-27T04:20:18Z:3900703768eea447981501d07fec23b52ad8c786c224a94f598a0a16150050ed:O1Daa6KePacRWnZYasNo1awCdBkEofX3C+uHrnXEUP3e6f8jmdMkUpb5s2OPsJDRBGleITLPS0jDStFuebzcBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-29T15:44:54Z:c2ea79b99182f1bf68d807c26133621a78d2e733908a2d404f5de05cf9e2500f:tp1gBzJaYz0luenZMzEgv4Ac4ReK325Hx9xILYM2aQJpjPHWJhweo4+UTPQwnJZtts9mdzKEaORN5hJg9BidAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: local-inference
-tags: [execution, external-content, persistent-session, local-model, replay]
-version: "1.2.0"
+tags: [execution, managed-activation, persistent-session, local-model, replay]
+version: "1.3.0"
 description: >
-  Operator activation, evidence, and recovery contract for admitted local
-  model workers on ordinary or optionally isolated RyeOS nodes.
+  Node policy, managed activation, execution evidence, and recovery contract
+  for the admitted Qwen3 tinygrad fixture.
 ---
 
 # Admitted local model workers
 
 RyeOS runs a local model as admitted RyeOS content, not as an ambient HTTP
-sidecar. A signed worker identifies the executable program and declares its
-exact external realizations. The node imports those realizations into durable
-content-addressed storage, binds them to the exact trusted consumer, and
-launches the worker through the generic persistent-session contract.
+sidecar. The signed worker owns its executable source and exact external
+realization manifest pins. The signed activation declaration says how to
+acquire already-final publisher artifacts. Existing manifest and consumer-
+binding authorities remain launch authority; the node-local activation receipt
+is historical settlement evidence only.
 
-The ordinary full source installation includes the concrete worker/provider
-content:
+The ordinary full source installation includes the local-inference bundle:
 
-```text
+~~~text
 sudo scripts/pkg/install-local-direct.sh --populate --all --trust-source-publishers
-```
+~~~
 
-That installation includes no isolation backend and does not import model
-bytes. Neither is an error. Bubblewrap is optional node hardening, not a local-
-inference activation prerequisite.
+Installation does not acquire model/runtime bytes and does not silently grant
+node acquisition or persistent-process capacity. Bubblewrap is optional node
+hardening and is not an activation prerequisite.
 
-The shipped `worker:local-inference/local-tinygrad` and
-`provider:local-tinygrad` are the current Qwen3-0.6B CPU acceptance fixture.
-They are deliberately `recorded`, not `sealed`: no node qualification currently
-proves a closed compiled-artifact/numerics set and two clean processes producing
-the same canonical bytes.
+The shipped worker:local-inference/local-tinygrad and
+provider:local-tinygrad are the bounded Qwen3-0.6B CPU fixture. They are
+recorded, not sealed.
 
 ## Exact execution boundary
 
-The worker's publisher-authored source lives adjacent to its descriptor under
-`.ai/workers/local-inference/lib/local-tinygrad/`. The signed descriptor binds
-the source root, entry, and aggregate source-manifest digest. RyeOS admits that
-source closure from the exact installed bundle generation.
+The worker's signed source lives under
+.ai/workers/local-inference/lib/local-tinygrad/. Its four locator-free pinned
+realizations are:
 
-The following are operator-imported external realizations:
+- the hermetic Python runtime and dynamic loader;
+- the exact tinygrad source tree;
+- the exact compiler/linker closure; and
+- the exact model, tokenizer, configuration, template, and provenance bytes.
 
-- hermetic Python runtime and dynamic loader;
-- exact tinygrad source tree;
-- exact compiler/linker/toolchain closure; and
-- model weights, tokenizer, configuration, template, and origin metadata.
+config:ryeos-runtime/local-tinygrad-activation uses the generic
+ryeos.external_content_activation.v3 whole-archive-tree shape. Each signed
+source is an immutable, publisher-produced final tree. Node activation performs
+no package installation, stripping, patching, template expansion, generated
+metadata, or arbitrary command. It descriptor-safely scans and materializes
+only canonical directories, regular files, and non-escaping relative symlinks,
+then requires the resulting existing manifest digest to equal the worker's
+signed pin.
 
-When node isolation is disabled, RyeOS materializes the admitted source and
-external realizations into a daemon-owned private workspace before process
-start. The worker receives logical paths inside that private view, bounded
-scratch/home/cache/tmp directories, and one daemon-owned session socket. It
-does not execute from the assembly directory, live bundle source, a vendor
-checkout, or a mutable model cache.
+When isolation is disabled, RyeOS materializes admitted source and realizations
+into a daemon-owned private session workspace and launches the worker from
+retained exact command authority. It provides bounded private scratch, home,
+cache, and temporary directories plus the daemon-owned session channel. The
+worker does not execute from a release archive, mutable cache, vendor checkout,
+or public assembly directory.
 
-Disabled isolation is not OS confinement. A trusted signed process still has
-the ambient host visibility allowed by the operating system. RyeOS therefore
-reports isolation as disabled and makes no claim that filesystem or network
-access was kernel-blocked. Signature, trust, capability, exact-input,
-attachment-before-execution, process ownership, resource, cancellation,
-observation, recording, and replay checks remain active.
-
-With an enforced compatible isolation backend, the same worker may additionally
-receive read-only mounts, private scratch, and isolated networking. That
-stronger launch provenance does not change recorded provider semantics or make
-the backend a dependency of the route.
+Disabled isolation is trusted signed local execution, not OS confinement.
+RyeOS reports it honestly. A separately installed compatible backend may
+enforce stronger filesystem/network isolation without changing the recorded
+provider contract.
 
 ## Node policy
 
-Persistent sessions are unavailable when their node-owned policy is absent.
-External import is unavailable without a node-owned named-root policy. Both
-policies are validated and node-signed through their registered node-config
-sections:
+Apply node policy while the daemon is stopped. Managed activation needs no
+named filesystem root. The following is the exact minimum shape for this
+fixture; operators may grant larger storage reserves deliberately, but must
+not reduce the signed acquisition or import bounds:
 
-- `<system>/.ai/node/persistent_sessions/policy.yaml`
-- `<system>/.ai/node/external_content/policy.yaml`
-
-The external root identity is not a path string alone. Open the intended
-assembly directory and record its current device and root inode:
-
-```text
-stat -c '%d %i' /absolute/operator-owned/assembly
-```
-
-Example source policy:
-
-```yaml
+~~~yaml
 schema: 1
-roots:
-  local-model-assembly:
-    path: /absolute/operator-owned/assembly
-    containing_device: 66306
-    root_inode: 1745406
+roots: {}
 limits:
-  max_depth: 64
-  max_entries: 10000
-  max_file_bytes: 2147483648
-  max_total_bytes: 2147483648
+  max_depth: 11
+  max_entries: 4480
+  max_file_bytes: 1503300328
+  max_total_bytes: 1514745854
   store_budget_bytes: 4294967296
-  minimum_free_bytes: 4294967296
-```
+  minimum_free_bytes: 8589934592
+managed_activation:
+  allow_online: true
+  allowed_https_hosts:
+    - github.com
+    - release-assets.githubusercontent.com
+  max_redirects: 2
+  max_archives: 4
+  max_compressed_bytes: 1329438282
+  max_expanded_bytes: 1893273600
+  max_members: 4836
+  max_member_bytes: 1503300328
+  max_concurrent_activations: 1
+  cache_budget_bytes: 2147483648
+  store_budget_bytes: 4294967296
+  minimum_free_bytes: 8589934592
+  max_attempts: 3
+~~~
 
-The numbers are examples except where the publisher-signed activation fixture
-requires a minimum bound. Measure the actual root identity; never copy the
-example device or inode.
+The two HTTPS hosts are separately node-admitted because an immutable GitHub
+release URL redirects to GitHub's release-asset host. RyeOS follows at most the
+node-owned redirect ceiling, rechecks canonical HTTPS and the host allowlist on
+every hop, and still requires the exact signed archive digest.
 
-Example persistent-session source policy:
+The persistent worker also requires a separate node-owned session policy:
 
-```yaml
+~~~yaml
 schema: 1
 limits:
   max_pool_groups: 4
@@ -119,143 +117,124 @@ limits:
   max_active_streams_per_subject: 1
   max_stream_backlog_bytes: 16777216
   max_total_backlog_bytes: 16777216
-```
+~~~
 
-The aggregate address-space and CPU ceilings must cover the worker lifecycle
-reservation. A smaller pool is refused before spawn.
+Author both files outside the live node namespace, then atomically validate and
+apply them through their registered sections:
 
-Author policy sources outside the live `.ai/node` namespace and apply them
-through the typed node-policy command:
-
-```text
+~~~text
 ryeos node policy-apply external_content /path/to/external-content-policy.yaml
 ryeos node policy-apply persistent_sessions /path/to/persistent-session-policy.yaml
-```
+~~~
 
-Follow the command's maintenance requirement for the installed generation. Do
-not edit or separately sign live node-policy files. Absence or invalid policy
-is a refusal, not permission to use compiled defaults.
+Do not hand-edit or separately sign files under .ai/node. Policy absence or
+invalid bounds are refusals.
 
-## Optional isolation hardening
+## One-command activation
 
-An operator who needs per-process OS confinement may separately install a
-compatible isolation backend and apply an enforced isolation policy. The
-backend bundle, build, installation, and node policy belong to
-`knowledge:ryeos/core/node/execution-isolation`; they are not repeated here.
+Start the node, then run as its configured local operator:
 
-For this worker, an enforced launch should narrow the process to its admitted
-source, external realizations, daemon-owned scratch, target channel, declared
-environment, and isolated network. Doctor must report the backend and required
-capabilities as available before such a launch.
+~~~text
+ryeos external-content activate config:ryeos-runtime/local-tinygrad-activation online
+~~~
 
-The ordinary acceptance in this document deliberately runs without that
-backend. A second optional acceptance may prove enforced-path parity and record
-the stronger provenance.
+The generic durable job:
 
-## Exact acceptance realization
+1. resolves the exact trusted signed declaration and worker;
+2. admits URLs, redirects, archive counts, bytes, entries, and storage against
+   current node policy;
+3. downloads or reuses the four exact archives in the node-private cache;
+4. scans and stages them outside state-store mutation locks;
+5. imports ordinary content/large-content manifests;
+6. proves all four manifest hashes equal the worker declarations;
+7. publishes bindings owned by that exact worker; and
+8. publishes one compact node-signed completion receipt only after the whole
+   set settles.
 
-Construct the four operator-owned fixture inputs from exact upstream archives
-into a new assembly directory. The helper is authoring/activation tooling, not
-worker content. It verifies every downloaded artifact and refuses an existing
-output path:
+The operation is idempotent and restart-recoverable. A completed retry verifies
+the current receipt, manifest objects, and binding heads. A failed or
+interrupted attempt retains its canonical operation and can only resume within
+the admitted retry ceiling.
 
-```text
-python3 bundles/local-inference/assemble.py \
-  --cache /absolute/operator-owned/download-cache \
-  --output /absolute/operator-owned/assembly
-```
+Use the offline spelling only when the exact archive digests are already in
+that node's managed cache from a successful prior online activation or a later
+supported offline-export import:
 
-`--offline` forbids downloads when the exact cache is already populated. The
-helper does not mint RyeOS identity. The import service constructs canonical
-manifests, and the publisher-signed fixture is the authority for their expected
-hashes.
+~~~text
+ryeos external-content activate config:ryeos-runtime/local-tinygrad-activation offline
+~~~
 
-`config:ryeos-runtime/local-tinygrad-activation` contains the path, storage
-tier, shape, bound, and expected manifest hash for each component. Import each
-component as the configured local operator, for example:
+Offline mode never downloads and refuses a missing or wrong cache entry. It is
+not permission to copy files into an ambient assembly directory or revive the
+retired named-root import ceremony.
 
-```text
-ryeos execute service:external-content/import --no-stream \
-  '{"root":"local-model-assembly","path":"runtime","shape":"tree","storage":"content","maximum_bytes":104857600}'
-```
+## Validation, bank, restart, and replay
 
-Repeat with the fixture's exact values. Compare every returned `manifest_hash`
-with `expected_manifest_hash`; any difference stops activation. Tree imports
-intentionally use the canonical manifest hash rather than an author-supplied
-single-file digest.
+Validate the signed fixture threadlessly, then execute:
 
-Each import returns `staging_id`, `request_digest`, and `manifest_hash`. Bind
-that exact tuple before staging authority expires:
+~~~text
+ryeos validate directive:local-inference/examples/tinygrad_smoke \
+  --ref-binding model=directive:local-inference/examples/tinygrad_smoke \
+  '{}'
 
-```text
-ryeos execute service:external-content/bind --no-stream \
-  '{"staging_id":"<from-import>","request_digest":"<from-import>","manifest_hash":"<from-import>","consumer_ref":"worker:local-inference/local-tinygrad"}'
-```
+ryeos execute directive:local-inference/examples/tinygrad_smoke \
+  --ref-binding model=directive:local-inference/examples/tinygrad_smoke \
+  --no-stream '{}'
+~~~
 
-The bind must report the installed bundle publisher and exact consumer. Knowing
-a manifest hash is not mount authority; project content, another publisher, or
-another consumer cannot reuse the binding implicitly.
-
-## Activation sequence
-
-1. Assemble the exact fixture inputs and measure the assembly root identity.
-2. Install the ordinary full current RyeOS bundle set.
-3. Apply external-content and persistent-session policies through the typed
-   node-policy command.
-4. Run `ryeos node doctor`. Require initialized/trusted bundle state, adequate
-   storage, and valid node policies. No isolation backend is expected for the
-   primary acceptance.
-5. Start the daemon if the policy command required maintenance/offline mode.
-6. Import and bind the four exact realizations.
-7. Validate the smoke directive/provider/worker without execution and require
-   every expected/observed realization digest to match.
-8. Run the first-bank and restart/replay acceptance below.
-
-Do not perform historical schema resets from an old version of this document.
-Clean-cut retirement is generation-specific: run only the exact reset command
-named by current startup or snapshot-status evidence, inspect its dry run, and
-follow the current node-operation knowledge. Activation is not general
-permission to retire thread history, replay indexes, bindings, or node state.
-
-## Bank and replay acceptance
-
-Execute:
-
-```text
-ryeos execute directive:local-inference/examples/tinygrad_smoke --no-stream '{}'
-```
+The directive runtime requires its signed model declaration as the `model`
+launch binding. This binding selects the same trusted directive; it is not a
+caller-selected provider, model name, worker, or realization.
 
 The first run must:
 
-- resolve `provider:local-tinygrad` and the exact admitted worker;
-- execute under disabled isolation from the daemon-owned private realization
-  view;
-- settle an `ExplicitlyFree` attempt at exactly zero;
-- retain the daemon-owned terminal observation;
-- publish or fold one provider-call record; and
-- confirm publication proof before the directive succeeds.
+- resolve provider:local-tinygrad and the exact admitted worker;
+- launch from the daemon-owned private view under the reported isolation mode;
+- settle an ExplicitlyFree attempt at exactly zero;
+- retain the daemon-owned terminal observation; and
+- publish and confirm one complete provider-call record.
 
-Stop and restart the daemon, then execute the identical directive again. The
-second run must return from `effect_record` with publication
-`not_applicable`, no worker lease/contact, no model execution, and no new
-reservation.
+Stop and restart the node, then execute the identical directive. The second run
+must replay from the durable provider-call effect record with no worker lease,
+process, model, device contact, or new reservation. Its projected provider
+observation reports `source: replay` and `publication: not_applicable`; the
+effect record remains the replay authority rather than an observation-source
+label.
 
-Changing the worker source, runtime, tinygrad tree, toolchain, model,
-tokenizer/template, provider config, request, sampler, admitted execution
-realization, or relevant authority moves the coordinate. Missing, corrupt, or
-contradictory indexed evidence fails closed; it never falls back to a model
-call under the old identity.
+Changing worker source, runtime, tinygrad, toolchain, model/tokenizer/template,
+provider config, request, sampler, target execution identity, or relevant
+authority moves the coordinate. Missing, corrupt, or contradictory indexed
+evidence fails closed; it never silently contacts the model under the old
+identity.
+
+## Publisher boundary
+
+Node operators never run the realization authoring utility. Release maintainers
+use scripts/release/author-local-inference-realizations.py in a reviewed
+publisher workflow. It verifies exact upstream inputs, authors canonical final
+archives in a sibling staging directory, reproduces the existing signed worker
+manifest pins, compares every result with
+scripts/release/local-inference-qwen3-0.6b-v1.json, and atomically publishes
+the completed local artifact directory. The release workflow never overwrites
+an existing asset.
+
+Jobs that extract or execute third-party runtime/model bytes have read-only
+repository authority, no release/package/OIDC authority, and no persisted Git
+credential. Fresh write-authorized jobs check out the exact immutable tag,
+revalidate the complete regular-file asset set and every source-owned digest,
+and only then publish or promote; they never execute the subject. The online
+disabled-isolation run is functional/recovery conformance over exact bytes the
+publisher contract already trusts. Its same-UID database and process
+observations do not qualify malicious code or claim an OS security boundary.
 
 ## Current scope and future profiles
 
 The fixture uses CPU, Qwen3-0.6B, 2,048 tokens of context, 256 output tokens,
-one active stream, and disabled mutable compiler caches. It is the contract
-probe for model mapping, tokenizer/template behavior, sampling, streaming,
-cancellation, persistent lifecycle, recording, and replay.
+one active stream, and disabled mutable compiler caches. It proves model
+mapping, tokenizer/template behavior, sampling, streaming, cancellation,
+persistent lifecycle, recording, and replay.
 
-A serious model/device route must use a separate signed profile that binds its
-exact model/tokenizer/runtime/compiler content, backend/device requirements,
-numerics, quantization, context, resources, sampler, and trace policy. It must
-not mutate this fixture or auto-select ambient hardware. Qualification,
-generation-state capsules, traces, distillation, training, and offline export
-are owned by the linked future local-execution knowledge until implemented.
+A serious model/device route uses a separate signed profile that binds exact
+model/runtime/compiler content, backend/device requirements, numerics,
+quantization, context, resources, sampler, and trace policy. It never mutates
+this fixture or auto-selects ambient hardware.

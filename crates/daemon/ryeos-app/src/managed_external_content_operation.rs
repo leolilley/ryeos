@@ -312,6 +312,7 @@ mod tests {
         ManagedExternalContentActivationPolicy {
             allow_online: true,
             allowed_https_hosts: vec!["releases.example.test".to_owned()],
+            max_redirects: 0,
             max_archives: 1,
             max_compressed_bytes: 4096,
             max_expanded_bytes: 8192,
