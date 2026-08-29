@@ -7,6 +7,7 @@ use axum::serve;
 use clap::Parser;
 use tokio::net::{TcpListener, UnixListener};
 
+use ryeos_api::handlers::remote_reconcile_project_head::recover_durable_project_head_reconciliations;
 use ryeos_app::callback_token::CallbackCapabilityStore;
 use ryeos_app::command_service::CommandService;
 use ryeos_app::event_store_service::EventStoreService;
@@ -1924,10 +1925,16 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
             "initial managed external-content recovery failed; durable jobs remain inspectable"
         );
     }
+    if let Err(error) = recover_durable_project_head_reconciliations(&state).await {
+        tracing::error!(
+            error = %error,
+            "initial remote project-head reconciliation failed; durable jobs remain retryable"
+        );
+    }
     match state.threads.reconcile_remote_follow_terminal_deliveries() {
-        Ok(rebuilt) if rebuilt != 0 => tracing::warn!(
-            rebuilt,
-            "rebuilt remote follow-terminal delivery jobs from authoritative terminals"
+        Ok(reconciled) if reconciled != 0 => tracing::info!(
+            reconciled,
+            "verified or rebuilt remote follow-terminal delivery jobs from authoritative terminals"
         ),
         Ok(_) => {}
         Err(error) => tracing::error!(
@@ -2009,6 +2016,15 @@ async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
         tracing::info!(
             recovered_activations,
             "periodic recovery completed managed external-content activations"
+        );
+    }
+    let recovered_project_heads = recover_durable_project_head_reconciliations(state)
+        .await
+        .context("periodic remote project-head reconciliation")?;
+    if recovered_project_heads != 0 {
+        tracing::info!(
+            recovered_project_heads,
+            "periodic recovery completed remote project-head reconciliations"
         );
     }
     let recovered_source_handoffs =

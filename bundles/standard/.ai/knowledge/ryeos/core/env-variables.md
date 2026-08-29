@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-18T22:04:48Z:728ea73d17fde437211d3ce9e94023847a3ffbcb0d7180d7848af77aa52ccf97:nLYWstL1k6JDEO5NkPiAy/NbpzWd3LZA0d00quTugVfglm67L3jKAB5fhKS5SILr+roL/5deiA/mnoyfyW1eAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-29T09:08:38Z:caf9eecbe5d3b5a51fec59e50700fdabbaa683f9a5547b23c0cee3941f81b34b:VWQoFYWO0g8aQWB+a5OOk6NCVbgyfFfm/K6aXm4501yqJdB53SNE8e0LKsJE7CfZyPzZruEKyOlS8NvR0sCDAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, env, daemon, cli, runtimes, lifecycle]
@@ -14,7 +14,13 @@ description: >
 
 | Variable | Description |
 |---|---|
-| `HOSTNAME` | Node identity for thread isolation. Must be non-empty. |
+| `HOSTNAME` | Canonical node site name used to form `site:<HOSTNAME>` for thread and remote-origin isolation. It must be non-empty and stable across daemon restarts. |
+
+Origin-bound remote grants must name the exact `site_id` reported by the
+running source node. A supervisor must therefore start that node with the same
+canonical host identity used when the grant was issued; changing `HOSTNAME`
+does not rename a node or migrate its retained chains and instead causes exact
+site-bound operations to fail closed.
 
 ## Local lifecycle and daemon configuration
 

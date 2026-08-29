@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-24T11:56:58Z:f0d7334ea801ceaa21a8590a259f755bf876ce52354c63238dedbb2c48d07d1d:lcnWdSGPCBPOnj0mYPk+qrtENURyqKHjFJmmvm4CbwqGGv52gswLv4qePEOX3g0cW1GhP8So+PnsqoEqTJo8CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-08-29T09:08:38Z:2466c76e8dc42e313f07f0ca6584898ffdb61dcd13e248ccf5d6368a3ab44959:cz/FG+anUCk3/kSyKRmJ80Fi9Yj71rzJqp70LKtpXwxzCrJNXvzpqwRgE8uHTpFh6BlEJuJ3+ffvb8UXwq7cBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - execute
 description: "Execute an item (tool, directive, service, graph). On a terminal, streams the live execution log then prints the final result; --no-stream/--json print only the buffered JSON result (also the default when piped), and --stream forces streaming even when piped."
@@ -42,6 +42,12 @@ control_flags:
 - flag: current-head
   help: "Execute from the current principal project HEAD in a retained daemon-owned copy-on-write generation"
   binding: pin_current_head_at_admission
+- flag: retain-child-results
+  help: "Give project-backed child roots independent copy-on-write generations retained for explicit owner disposition"
+  binding: retain_child_results
+- flag: no-operator-vault
+  help: "Do not expose the operator vault through the execution's project-environment authority"
+  binding: exclude_operator_vault
 - flag: method
   help: "Method selector for method-dispatch kinds (e.g. knowledge query); sets call.method"
   binding: call_method

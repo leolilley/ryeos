@@ -255,100 +255,155 @@ async fn deliver_locked(
             .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
         return serde_json::to_value(response).map_err(internal);
     }
-    let authority = state
-        .state_store
-        .pinned_state_authority()
-        .map_err(internal)?;
-    let guard = authority.acquire_shared_guard().map_err(internal)?;
-    ryeos_state::sync::verify_chain_closure_anchored_pinned(
-        &authority.cas_store().map_err(internal)?,
-        &req.child_chain_root_id,
-        &req.target_chain_head_hash,
-        &source_head.target_hash,
-    )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    drop(guard);
-
-    let fact_payload = serde_json::json!({
-        "schema":"ryeos.remote_follow_terminal_delivery.v1",
-        "operation_id":req.operation_id,
-        "reservation_attestation_hash":req.reservation_attestation_hash,
-        "terminal_attestation_hash":req.terminal_attestation_hash,
-        "child_chain_root_id":req.child_chain_root_id,
-        "child_terminal_thread_id":terminal.child_terminal_thread_id,
-        "terminal_status":terminal.terminal_status,
-        "terminal_envelope_digest":terminal.terminal_envelope_digest,
-        "target_site_id":req.target_site_id,
-        "target_chain_head_hash":req.target_chain_head_hash,
-        "target_last_event_hash":terminal.target_last_event_hash,
-    });
-    ryeos_app::authoritative_root_fact::append_once_to_created_thread(
-        &state,
-        &reservation.parent_successor_thread_id,
-        DELIVERY_EVENT,
-        &req.operation_id,
-        fact_payload,
-    )
-    .map_err(internal)?;
-    if let Some(waiter) = state
-        .state_store
-        .get_follow_waiter_by_child_chain(&req.child_chain_root_id)
-        .map_err(internal)?
-    {
-        validate_waiter_tuple(&state, &reservation, &terminal, &waiter).map_err(internal)?;
-        state
-            .state_store
-            .mark_follow_child_terminal(
-                &req.child_chain_root_id,
-                &terminal.child_terminal_thread_id,
-                &terminal.terminal_status,
-                &terminal.terminal_envelope,
-            )
-            .map_err(internal)?;
-    } else {
-        let successor = state
-            .state_store
-            .get_thread(&reservation.parent_successor_thread_id)
-            .map_err(internal)?
-            .ok_or_else(|| internal("remote follow parent successor disappeared"))?;
-        if successor.status == ryeos_state::objects::ThreadStatus::Created.as_str() {
-            return Err(internal(
-                "remote follow waiter disappeared before its successor was launched",
-            ));
-        }
+    if job.attempt_count >= job.max_attempts {
+        terminalize_exhausted_delivery_job(&state, &job).map_err(internal)?;
+        return Err(internal(
+            "remote follow parent delivery exhausted its admitted attempts",
+        ));
     }
-    ryeos_executor::execution::launch::kick_follow_resume_if_ready(
-        &state,
-        &req.child_chain_root_id,
-    );
-    let response = RemoteFollowTerminalDeliveryResponse {
-        operation_id: req.operation_id.clone(),
-        child_chain_root_id: req.child_chain_root_id.clone(),
-        parent_chain_root_id: reservation.parent_chain_root_id.clone(),
-        parent_successor_thread_id: reservation.parent_successor_thread_id.clone(),
-        delivery: "settled".to_owned(),
-    };
-    response.validate_against(&req).map_err(internal)?;
-    let response_value = serde_json::to_value(&response).map_err(internal)?;
+    let attempt_id = format!("remote-follow-parent-attempt:{}", uuid::Uuid::new_v4());
     state
         .state_store
         .with_state_db(|db| {
-            db.update_sync_job(
-                &job_id,
-                &ryeos_state::SyncJobUpdate {
-                    state: ryeos_state::SyncJobState::Completed,
-                    phase: "settled".to_owned(),
-                    roots: None,
-                    heads: None,
-                    uploaded_hashes: Vec::new(),
-                    fetched_hashes: vec![req.target_chain_head_hash],
-                    last_error: None,
-                    result: Some(response_value.clone()),
-                },
-            )
+            db.create_sync_job_attempt(&ryeos_state::NewSyncJobAttempt {
+                attempt_id: attempt_id.clone(),
+                job_id: job_id.clone(),
+                worker_id: Some("remote-follow-parent-delivery".to_owned()),
+                phase: "settling_parent".to_owned(),
+            })?;
+            Ok(())
         })
         .map_err(internal)?;
-    Ok(response_value)
+
+    let outcome = (|| -> Result<Value, HandlerError> {
+        let authority = state
+            .state_store
+            .pinned_state_authority()
+            .map_err(internal)?;
+        let guard = authority.acquire_shared_guard().map_err(internal)?;
+        ryeos_state::sync::verify_chain_closure_anchored_pinned(
+            &authority.cas_store().map_err(internal)?,
+            &req.child_chain_root_id,
+            &req.target_chain_head_hash,
+            &source_head.target_hash,
+        )
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        drop(guard);
+
+        let fact_payload = serde_json::json!({
+            "schema":"ryeos.remote_follow_terminal_delivery.v1",
+            "operation_id":req.operation_id,
+            "reservation_attestation_hash":req.reservation_attestation_hash,
+            "terminal_attestation_hash":req.terminal_attestation_hash,
+            "child_chain_root_id":req.child_chain_root_id,
+            "child_terminal_thread_id":terminal.child_terminal_thread_id,
+            "terminal_status":terminal.terminal_status,
+            "terminal_envelope_digest":terminal.terminal_envelope_digest,
+            "target_site_id":req.target_site_id,
+            "target_chain_head_hash":req.target_chain_head_hash,
+            "target_last_event_hash":terminal.target_last_event_hash,
+        });
+        ryeos_app::authoritative_root_fact::append_once_to_created_thread(
+            &state,
+            &reservation.parent_successor_thread_id,
+            DELIVERY_EVENT,
+            &req.operation_id,
+            fact_payload,
+        )
+        .map_err(internal)?;
+        if let Some(waiter) = state
+            .state_store
+            .get_follow_waiter_by_child_chain(&req.child_chain_root_id)
+            .map_err(internal)?
+        {
+            validate_waiter_tuple(&state, &reservation, &terminal, &waiter).map_err(internal)?;
+            state
+                .state_store
+                .mark_follow_child_terminal(
+                    &req.child_chain_root_id,
+                    &terminal.child_terminal_thread_id,
+                    &terminal.terminal_status,
+                    &terminal.terminal_envelope,
+                )
+                .map_err(internal)?;
+        } else {
+            let successor = state
+                .state_store
+                .get_thread(&reservation.parent_successor_thread_id)
+                .map_err(internal)?
+                .ok_or_else(|| internal("remote follow parent successor disappeared"))?;
+            if successor.status == ryeos_state::objects::ThreadStatus::Created.as_str() {
+                return Err(internal(
+                    "remote follow waiter disappeared before its successor was launched",
+                ));
+            }
+        }
+        ryeos_executor::execution::launch::kick_follow_resume_if_ready(
+            &state,
+            &req.child_chain_root_id,
+        );
+        let response = RemoteFollowTerminalDeliveryResponse {
+            operation_id: req.operation_id.clone(),
+            child_chain_root_id: req.child_chain_root_id.clone(),
+            parent_chain_root_id: reservation.parent_chain_root_id.clone(),
+            parent_successor_thread_id: reservation.parent_successor_thread_id.clone(),
+            delivery: "settled".to_owned(),
+        };
+        response.validate_against(&req).map_err(internal)?;
+        serde_json::to_value(response).map_err(internal)
+    })();
+
+    match outcome {
+        Ok(response_value) => {
+            state
+                .state_store
+                .with_state_db(|db| {
+                    let latest = db
+                        .get_sync_job(&job_id)?
+                        .context("remote follow parent delivery job disappeared")?;
+                    let mut fetched_hashes = latest.fetched_hashes;
+                    fetched_hashes.push(req.target_chain_head_hash);
+                    fetched_hashes.sort();
+                    fetched_hashes.dedup();
+                    db.finish_sync_job_attempt_and_update_job(
+                        &attempt_id,
+                        &ryeos_state::FinishSyncJobAttempt {
+                            state: ryeos_state::SyncJobAttemptState::Completed,
+                            phase: "settled".to_owned(),
+                            error: None,
+                            result: Some(response_value.clone()),
+                        },
+                        &job_id,
+                        &ryeos_state::SyncJobUpdate {
+                            state: ryeos_state::SyncJobState::Completed,
+                            phase: "settled".to_owned(),
+                            roots: None,
+                            heads: None,
+                            uploaded_hashes: latest.uploaded_hashes,
+                            fetched_hashes,
+                            last_error: None,
+                            result: Some(response_value.clone()),
+                        },
+                    )
+                })
+                .map_err(internal)?;
+            Ok(response_value)
+        }
+        Err(error) => {
+            settle_attempt(
+                &state,
+                &job,
+                &attempt_id,
+                ryeos_state::SyncJobAttemptState::Failed,
+                ryeos_state::SyncJobState::Retryable,
+                "settlement_retryable",
+                Some(bounded_error(&error.to_string())),
+                None,
+            )
+            .map_err(internal)?;
+            Err(error)
+        }
+    }
 }
 
 fn validate_parent_waiter(
@@ -473,26 +528,53 @@ pub async fn recover_durable_remote_follow_deliveries(state: &AppState) -> Resul
     })?;
     let mut recovered = 0usize;
     for job in jobs {
+        if job.state == ryeos_state::SyncJobState::Running {
+            continue;
+        }
         let operation = match RemoteFollowDeliveryJobOperation::from_value(job.operation.clone()) {
             Ok(operation) if operation.role == RemoteFollowDeliveryJobRole::Target => operation,
             Ok(_) => continue,
             Err(error) => {
-                tracing::error!(job_id = %job.job_id, error = %error, "invalid remote follow delivery job retained for operator inspection");
+                terminalize_invalid_delivery_job(state, &job, &error)?;
                 continue;
             }
         };
+        if job.attempt_count >= job.max_attempts {
+            terminalize_exhausted_delivery_job(state, &job)?;
+            continue;
+        }
         let Some(request_value) = job.result.clone() else {
             continue;
         };
-        let request: RemoteFollowTerminalDeliveryRequest = serde_json::from_value(request_value)?;
-        request.validate()?;
+        let request: RemoteFollowTerminalDeliveryRequest = match serde_json::from_value(
+            request_value,
+        )
+        .and_then(|request: RemoteFollowTerminalDeliveryRequest| {
+            request.validate().map_err(serde::de::Error::custom)?;
+            Ok(request)
+        }) {
+            Ok(request) => request,
+            Err(error) => {
+                terminalize_invalid_delivery_job(state, &job, &anyhow::Error::new(error))?;
+                continue;
+            }
+        };
         if request.operation_id != operation.operation_id
             || request.reservation_attestation_hash != operation.reservation_attestation_hash
             || request.child_chain_root_id != operation.child_chain_root_id
             || request.parent_site_id != operation.parent_site_id
             || request.target_site_id != operation.target_site_id
         {
-            bail!("remote follow delivery job request changed coordinates");
+            terminalize_invalid_delivery_job(
+                state,
+                &job,
+                &anyhow::anyhow!("remote follow delivery job request changed coordinates"),
+            )?;
+            continue;
+        }
+        if let Err(error) = validate_target_delivery_job_binding(&job, &operation, &request) {
+            terminalize_invalid_delivery_job(state, &job, &error)?;
+            continue;
         }
         let remotes = config::load_remotes_layered(&state.config.app_root, None)?;
         let parent_remote = config::resolve_remote_by_site_id(&remotes, &operation.parent_site_id)?;
@@ -567,24 +649,122 @@ fn settle_attempt(
         let latest = db
             .get_sync_job(&job.job_id)?
             .context("remote follow delivery job disappeared")?;
+        let exhausted =
+            retry_would_exhaust_delivery(job_state, latest.attempt_count, latest.max_attempts);
+        let settled_job_state = if exhausted {
+            ryeos_state::SyncJobState::Failed
+        } else {
+            job_state
+        };
+        let settled_phase = if exhausted {
+            "attempts_exhausted"
+        } else {
+            phase
+        };
+        let settled_error = if exhausted {
+            error.clone().or_else(|| {
+                Some("remote follow delivery exhausted its admitted attempts".to_owned())
+            })
+        } else {
+            error.clone()
+        };
         db.finish_sync_job_attempt_and_update_job(
             attempt_id,
             &ryeos_state::FinishSyncJobAttempt {
                 state: attempt_state,
-                phase: phase.to_owned(),
-                error: error.clone(),
+                phase: settled_phase.to_owned(),
+                error: settled_error.clone(),
                 result: result.clone(),
             },
             &job.job_id,
             &ryeos_state::SyncJobUpdate {
-                state: job_state,
-                phase: phase.to_owned(),
+                state: settled_job_state,
+                phase: settled_phase.to_owned(),
                 roots: None,
                 heads: None,
                 uploaded_hashes: latest.uploaded_hashes,
                 fetched_hashes: latest.fetched_hashes,
-                last_error: error,
+                last_error: settled_error,
                 result: result.or(latest.result),
+            },
+        )
+    })
+}
+
+fn retry_would_exhaust_delivery(
+    requested_state: ryeos_state::SyncJobState,
+    attempt_count: u64,
+    max_attempts: u64,
+) -> bool {
+    requested_state == ryeos_state::SyncJobState::Retryable && attempt_count >= max_attempts
+}
+
+fn validate_target_delivery_job_binding(
+    job: &ryeos_state::SyncJobRecord,
+    operation: &RemoteFollowDeliveryJobOperation,
+    request: &RemoteFollowTerminalDeliveryRequest,
+) -> Result<()> {
+    if job.operation_type != REMOTE_FOLLOW_DELIVERY_OPERATION
+        || job.job_id != format!("remote-follow-terminal-target:{}", operation.operation_id)
+        || job.peer.as_deref() != Some(operation.parent_site_id.as_str())
+        || job.roots
+            != vec![
+                request.reservation_attestation_hash.clone(),
+                request.terminal_attestation_hash.clone(),
+                request.target_chain_head_hash.clone(),
+            ]
+        || job.heads != vec![request.target_chain_head_hash.clone()]
+        || job.max_attempts != 16
+        || job.attempt_count > job.max_attempts
+    {
+        bail!("remote follow delivery job changed its retained authority");
+    }
+    Ok(())
+}
+
+fn terminalize_exhausted_delivery_job(
+    state: &AppState,
+    job: &ryeos_state::SyncJobRecord,
+) -> Result<()> {
+    terminalize_delivery_job(
+        state,
+        job,
+        "attempts_exhausted",
+        "remote follow delivery exhausted its admitted attempts".to_owned(),
+    )
+}
+
+fn terminalize_invalid_delivery_job(
+    state: &AppState,
+    job: &ryeos_state::SyncJobRecord,
+    error: &anyhow::Error,
+) -> Result<()> {
+    terminalize_delivery_job(
+        state,
+        job,
+        "authority_invalid",
+        bounded_error(&format!("{error:#}")),
+    )
+}
+
+fn terminalize_delivery_job(
+    state: &AppState,
+    job: &ryeos_state::SyncJobRecord,
+    phase: &str,
+    error: String,
+) -> Result<()> {
+    state.state_store.with_state_db(|db| {
+        db.update_sync_job(
+            &job.job_id,
+            &ryeos_state::SyncJobUpdate {
+                state: ryeos_state::SyncJobState::Failed,
+                phase: phase.to_owned(),
+                roots: None,
+                heads: None,
+                uploaded_hashes: job.uploaded_hashes.clone(),
+                fetched_hashes: job.fetched_hashes.clone(),
+                last_error: Some(error),
+                result: job.result.clone(),
             },
         )
     })
@@ -662,5 +842,73 @@ mod authority_tests {
             assert!(authenticated_target_node(&rejected, "site:target").is_err());
         }
         assert!(authenticated_target_node(&admitted, "site:other").is_err());
+    }
+
+    #[test]
+    fn target_delivery_job_retains_exact_network_and_closure_authority() {
+        let operation = RemoteFollowDeliveryJobOperation::new(
+            RemoteFollowDeliveryJobRole::Target,
+            "1".repeat(64),
+            "2".repeat(64),
+            "fp:owner".to_owned(),
+            "T-child".to_owned(),
+            "site:parent".to_owned(),
+            "site:target".to_owned(),
+        )
+        .unwrap();
+        let request = RemoteFollowTerminalDeliveryRequest {
+            operation_id: operation.operation_id.clone(),
+            reservation_attestation_hash: operation.reservation_attestation_hash.clone(),
+            terminal_attestation_hash: "3".repeat(64),
+            child_chain_root_id: operation.child_chain_root_id.clone(),
+            target_chain_head_hash: "4".repeat(64),
+            parent_site_id: operation.parent_site_id.clone(),
+            target_site_id: operation.target_site_id.clone(),
+        };
+        let mut job = ryeos_state::SyncJobRecord {
+            job_id: format!("remote-follow-terminal-target:{}", operation.operation_id),
+            operation_type: REMOTE_FOLLOW_DELIVERY_OPERATION.to_owned(),
+            operation: operation.to_value().unwrap(),
+            peer: Some(operation.parent_site_id.clone()),
+            state: ryeos_state::SyncJobState::Retryable,
+            phase: "delivery_retryable".to_owned(),
+            roots: vec![
+                request.reservation_attestation_hash.clone(),
+                request.terminal_attestation_hash.clone(),
+                request.target_chain_head_hash.clone(),
+            ],
+            heads: vec![request.target_chain_head_hash.clone()],
+            uploaded_hashes: Vec::new(),
+            fetched_hashes: Vec::new(),
+            attempt_count: 1,
+            max_attempts: 16,
+            last_error: None,
+            result: Some(serde_json::to_value(&request).unwrap()),
+            created_at: "2026-08-29T00:00:00Z".to_owned(),
+            updated_at: "2026-08-29T00:00:00Z".to_owned(),
+            finished_at: None,
+        };
+        validate_target_delivery_job_binding(&job, &operation, &request).unwrap();
+        job.peer = Some("site:other".to_owned());
+        assert!(validate_target_delivery_job_binding(&job, &operation, &request).is_err());
+    }
+
+    #[test]
+    fn final_failed_delivery_attempt_terminalizes_instead_of_sticking_retryable() {
+        assert!(!retry_would_exhaust_delivery(
+            ryeos_state::SyncJobState::Retryable,
+            15,
+            16,
+        ));
+        assert!(retry_would_exhaust_delivery(
+            ryeos_state::SyncJobState::Retryable,
+            16,
+            16,
+        ));
+        assert!(!retry_would_exhaust_delivery(
+            ryeos_state::SyncJobState::Completed,
+            16,
+            16,
+        ));
     }
 }

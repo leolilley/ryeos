@@ -83,6 +83,7 @@ pub fn map_remote_call_error(
 /// keep enough to diagnose without bloating logs and error chains.
 const ERROR_BODY_EXCERPT_MAX: usize = 16 * 1024;
 const DEFAULT_JSON_RESPONSE_MAX_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CLOSURE_RESPONSE_BYTES: u64 = 1024 * 1024 * 1024;
 
 fn truncate_error_body(body: &str) -> String {
     if body.len() <= ERROR_BODY_EXCERPT_MAX {
@@ -303,6 +304,44 @@ impl RemoteClient {
             NodeIdentity::load(&state.config.operator_signing_key_path)
                 .context("load configured operator identity for remote execution")?,
         );
+        let mut client = Self::new(&remote.url, &remote.principal_id, identity);
+        let site_id = state.threads.site_id().to_string();
+        client.origin_site_id = Some(site_id.clone());
+        client.required_forwarding_origin_site_id = Some(site_id);
+        client.forwarding_identity = Some(state.identity.clone());
+        Ok(client)
+    }
+
+    /// Re-open the configured-operator transport for one already-authorized
+    /// durable operation.
+    ///
+    /// The caller must retain both the exact configured-operator fingerprint
+    /// and the node-signed grant digest in its immutable job operation. This
+    /// constructor revalidates those facts before loading the key, so daemon
+    /// recovery cannot survive grant replacement/revocation or use the
+    /// operator identity for a newly invented request.
+    pub fn from_remote_cfg_as_retained_configured_operator(
+        state: &AppState,
+        remote: &super::config::RemoteConfig,
+        operator_fingerprint: &str,
+        operator_authority_digest: &str,
+    ) -> Result<Self> {
+        let current = ryeos_app::operator_external_content::configured_operator_authority_digest(
+            state,
+            operator_fingerprint,
+        )?;
+        if current != operator_authority_digest {
+            anyhow::bail!(
+                "retained configured-operator operation no longer has its exact node-signed grant"
+            );
+        }
+        let identity = Arc::new(
+            NodeIdentity::load(&state.config.operator_signing_key_path)
+                .context("load configured operator identity for durable remote operation")?,
+        );
+        if identity.fingerprint() != operator_fingerprint {
+            anyhow::bail!("retained remote operation belongs to another configured operator");
+        }
         let mut client = Self::new(&remote.url, &remote.principal_id, identity);
         let site_id = state.threads.site_id().to_string();
         client.origin_site_id = Some(site_id.clone());
@@ -776,8 +815,11 @@ impl RemoteClient {
         roots: &[String],
         options: ObjectsClosureRequestOptions,
     ) -> Result<ObjectsClosureGetResponse> {
+        let response_limit = closure_response_limit(&options)?;
         let body = closure_request_body(roots, &options);
-        let resp = self.signed_post("/objects/closure/get", &body).await?;
+        let resp = self
+            .signed_post_with_response_limit("/objects/closure/get", &body, response_limit)
+            .await?;
         let response: ObjectsClosureGetResponse =
             serde_json::from_value(resp).context("failed to parse objects/closure/get response")?;
         response.validate_against_request(roots, options.allow_untransported_large_objects)?;
@@ -2158,6 +2200,19 @@ pub struct ObjectsClosureRequestOptions {
     pub allow_untransported_large_objects: bool,
 }
 
+fn closure_response_limit(options: &ObjectsClosureRequestOptions) -> Result<usize> {
+    let requested = options
+        .max_response_bytes
+        .unwrap_or(u64::try_from(DEFAULT_JSON_RESPONSE_MAX_BYTES)?);
+    if requested == 0 || requested > MAX_CLOSURE_RESPONSE_BYTES {
+        anyhow::bail!(
+            "objects/closure/get response limit must be between 1 and {MAX_CLOSURE_RESPONSE_BYTES} bytes"
+        );
+    }
+    usize::try_from(requested)
+        .context("objects/closure/get response limit does not fit this platform")
+}
+
 fn closure_request_body(roots: &[String], options: &ObjectsClosureRequestOptions) -> Value {
     let mut body = serde_json::json!({ "roots": roots });
     if let Some(limit) = options.max_objects {
@@ -3475,5 +3530,29 @@ mod tests {
             }
             other => panic!("unexpected mapped error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn closure_transport_enforces_the_exact_signed_response_budget() {
+        let default = ObjectsClosureRequestOptions::default();
+        assert_eq!(
+            closure_response_limit(&default).unwrap(),
+            DEFAULT_JSON_RESPONSE_MAX_BYTES
+        );
+
+        let explicit = ObjectsClosureRequestOptions {
+            max_response_bytes: Some(1024 * 1024 * 1024),
+            ..ObjectsClosureRequestOptions::default()
+        };
+        assert_eq!(
+            closure_response_limit(&explicit).unwrap(),
+            1024 * 1024 * 1024
+        );
+
+        let excessive = ObjectsClosureRequestOptions {
+            max_response_bytes: Some(MAX_CLOSURE_RESPONSE_BYTES + 1),
+            ..ObjectsClosureRequestOptions::default()
+        };
+        assert!(closure_response_limit(&excessive).is_err());
     }
 }

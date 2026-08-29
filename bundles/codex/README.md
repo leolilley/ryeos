@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-08-29T09:08:38Z:bbfde9417d7964151356e0e9dfc47b44c78aec3621693ddb8ebc0cd7dc6d71ac:2YkPiUrSkGQoUBi9fyZLcm4gKKJxL7OakqKdXzyRab5pOTL9zY1yoTT1FsoN/A9rrKlJ80vc447oycp/gjORBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # RyeOS Codex
 
 First-class signed integration for hosting the pinned Codex App Server on a
@@ -259,7 +260,7 @@ ryeos remote run hosted worker_execution:codex/session \
     "target": {"kind": "here"},
     "environment": {
       "kind": "project_overlay",
-      "include_operator_vault": true,
+      "include_operator_vault": false,
       "name_policy": {"kind": "declared_required"}
     },
     "project": {
@@ -273,6 +274,30 @@ ryeos remote run hosted worker_execution:codex/session \
     }
   }'
 ```
+
+The signed Codex environment declares only its exact non-secret developer-tool
+tree. Authentication comes from the selected credential profile's private
+home, so this launch must keep `include_operator_vault: false`; the worker has
+no operator-vault dependency or access.
+
+If a later handoff preflight reports that the peer's owner project HEAD is not
+the placement base, stop before handoff and explicitly converge the two valid
+project histories. Supply both observed hashes and choose which generation's
+tree/policy wins; RyeOS publishes a two-parent generation remote-first and
+then locally under a durable recovery job:
+
+```sh
+ryeos remote reconcile-project-head hosted \
+  --project /local/project \
+  --expected-local-head '<local-head>' \
+  --expected-remote-head '<hosted-head>' \
+  --winner remote
+```
+
+This is ordinary provider-neutral project synchronization. It neither adds a
+handoff override nor broadens the hosted operator grant: the target-side calls
+reuse its existing object upload/HEAD scopes, and the peer node's bounded
+closure-read authority supplies the exact remote generation.
 
 The same configured-operator key must exist at both operator endpoints and use
 the origin-bound hosted grant above. The operator-owned push and launch

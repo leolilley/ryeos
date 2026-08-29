@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T16:46:35Z:b77ba554061061fe3d9b937a752b38dc8d62bae1dba5a8f593bf606d5bb4e4ca:xuOzqUz3nccuZK63LFFpMfRfNQ9l5mklYjiTVDjAVQTteuusVkWHQvlsRsCHTzDbq+1Nl5lNvyTCLW/by23LCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-29T09:08:38Z:fd3e43e2a4f08ab349332577c3c1ce5f2b07776c8db7806d5ce27e64bc146d2a:8ZVF8/HnD2UBQ7o3RYdpqKzYxpp197BB5u6JM9naWTOxNLbEdcUdCZ4x0UaW+pQxqjuBs7FVXcDchzf9DG0oCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -164,6 +164,7 @@ conversion and refuses if the daemon is live.
    | Operation | Remote scopes on target |
    |-----------|-------------------------|
    | `remote push` | `ryeos.execute.service.objects/has`, `ryeos.execute.service.objects/put`, `ryeos.execute.service.system/push-head` |
+   | `remote reconcile-project-head` | configured operator: push scopes; peer node: `ryeos.execute.service.objects/closure/get` |
    | `remote pull` | `ryeos.execute.service.objects/get` |
    | `remote execute` | push scopes + `ryeos.execute.service.objects/get` + whatever caps the executed item requires |
    | `remote authorize` | `ryeos.execute.service.identity/authorize-key` |

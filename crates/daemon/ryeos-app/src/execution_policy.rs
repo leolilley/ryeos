@@ -129,6 +129,10 @@ pub enum ChildProjectPolicy {
 pub enum PinnedChildRealization {
     ReadOnly,
     CowDiscard,
+    /// Retain the child's private terminal generation without granting it a
+    /// project-HEAD destination. Publication or discard remains an explicit
+    /// owner operation.
+    CowRetainResult,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -240,6 +244,46 @@ impl ExecutionPolicy {
             project: ProjectExecutionPolicy::Projectless,
             ..Self::local_live(response)
         }
+    }
+
+    /// Authorize project-backed child roots to capture one exact generation
+    /// at spawn and retain an independent private COW result. The retained
+    /// result carries no project-HEAD publication destination; a specialized
+    /// child may therefore wait for its ordinary owner-authorized publish or
+    /// discard operation without inheriting the parent's publication grant.
+    pub fn retain_child_results(mut self) -> anyhow::Result<Self> {
+        let child_policy = ChildProjectPolicy::PinAtSpawn {
+            realization: PinnedChildRealization::CowRetainResult,
+        };
+        match &mut self.project {
+            ProjectExecutionPolicy::LiveDirect {
+                child_policy: slot, ..
+            }
+            | ProjectExecutionPolicy::Pinned {
+                child_policy: slot, ..
+            } => *slot = child_policy,
+            ProjectExecutionPolicy::Projectless => {
+                anyhow::bail!("retained child results require project-backed execution")
+            }
+        }
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Narrow a project-overlay environment so it cannot resolve names from
+    /// the operator vault. Project files (including an admitted project
+    /// environment) retain their existing authority; this method only removes
+    /// the node-private vault leg and can never widen another environment
+    /// policy.
+    pub fn exclude_operator_vault(mut self) -> Self {
+        if let ExecutionEnvironmentPolicy::ProjectOverlay {
+            include_operator_vault,
+            ..
+        } = &mut self.environment
+        {
+            *include_operator_vault = false;
+        }
+        self
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -404,6 +448,9 @@ impl ExecutionPolicy {
                         }
                         PinnedChildRealization::CowDiscard => {
                             ryeos_state::objects::PinnedChildProjectRealization::CowDiscard
+                        }
+                        PinnedChildRealization::CowRetainResult => {
+                            ryeos_state::objects::PinnedChildProjectRealization::CowRetainResult
                         }
                     },
                 }

@@ -72,6 +72,7 @@ pub mod remote_list;
 pub mod remote_project_status;
 pub mod remote_pull;
 pub mod remote_push;
+pub mod remote_reconcile_project_head;
 pub mod remote_run;
 pub mod remote_status;
 pub mod remote_sync_admitted_heads;
@@ -219,6 +220,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     remote_list::DESCRIPTOR,
     remote_status::DESCRIPTOR,
     remote_push::DESCRIPTOR,
+    remote_reconcile_project_head::DESCRIPTOR,
     remote_sync_project_ai::DESCRIPTOR,
     remote_project_status::DESCRIPTOR,
     remote_pull::DESCRIPTOR,

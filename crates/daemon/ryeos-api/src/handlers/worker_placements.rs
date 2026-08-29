@@ -726,7 +726,7 @@ pub async fn abort(
     let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote);
     let closure = source_client
         .objects_closure_get(
-            &[req.abort_chain_head_hash.clone()],
+            std::slice::from_ref(&req.abort_chain_head_hash),
             ObjectsClosureRequestOptions {
                 max_objects: Some(16_384),
                 max_blobs: Some(16_384),
@@ -769,7 +769,7 @@ pub async fn abort(
             },
             &job_id,
             progress.phase.as_str(),
-            &[req.abort_chain_head_hash.clone()],
+            std::slice::from_ref(&req.abort_chain_head_hash),
             Some(progress.to_value().map_err(internal)?),
         )
         .map_err(internal)?;
@@ -961,7 +961,7 @@ async fn adopt_authorized(
         let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote);
         let closure = source_client
             .objects_closure_get(
-                &[req.target_chain_head_hash.clone()],
+                std::slice::from_ref(&req.target_chain_head_hash),
                 ObjectsClosureRequestOptions {
                     max_objects: Some(16_384),
                     max_blobs: Some(16_384),
@@ -1068,36 +1068,58 @@ async fn adopt_authorized(
     // import. Worker observations may have advanced the target-signed chain
     // beyond `target_chain_head_hash`, so retrying the raw import comparison
     // would reject a successful adoption as an unrelated local advance.
-    if target_worker_is_attached(
+    if let Some(response) = complete_if_target_worker_attached(
         &state,
+        &job_id,
+        &req,
         &operation,
         &placement,
-        &req.placement_attestation_hash,
+        &source_committed,
+        &mut adoption_attempt,
     )
-    .map_err(internal)?
+    .await?
     {
-        let _profile_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
-            &placement.credential_reservation.profile_id,
+        return Ok(response);
+    }
+
+    // A launch claim is the durable/process-local seam that distinguishes an
+    // unlaunched successor from one whose exact execution task is already in
+    // flight. Do not schedule a second launch merely because the dedicated
+    // worker projection has not appeared yet. In particular, the worker's
+    // start callback must be able to acquire the credential-profile operation
+    // lock while this handler waits for attachment.
+    let launch_claim = state
+        .state_store
+        .get_launch_claim(&operation.successor_placement_thread_id)
+        .map_err(internal)?;
+    let launch_owner_active = launch_claim
+        .as_ref()
+        .is_some_and(|claim| state.state_store.is_launch_owner_active(&claim.claimed_by));
+    if classify_target_launch_claim(launch_claim.is_some(), launch_owner_active)
+        .map_err(internal)?
+        == TargetLaunchClaimDisposition::AwaitExisting
+    {
+        let _ = ryeos_app::dedicated_session_service::wait_for_worker_attachment_projection(
+            &state,
+            &operation.successor_placement_thread_id,
+            std::time::Duration::from_secs(60),
         )
         .await
         .map_err(internal)?;
-        if target_worker_is_attached(
+        if let Some(response) = complete_if_target_worker_attached(
             &state,
+            &job_id,
+            &req,
             &operation,
             &placement,
-            &req.placement_attestation_hash,
+            &source_committed,
+            &mut adoption_attempt,
         )
-        .map_err(internal)?
+        .await?
         {
-            return complete_target_adoption(
-                &state,
-                &job_id,
-                &req,
-                &operation,
-                &mut adoption_attempt,
-            )
-            .map_err(internal);
+            return Ok(response);
         }
+        return Err(worker_attachment_pending());
     }
 
     let current_head = state
@@ -1113,13 +1135,6 @@ async fn adopt_authorized(
             .recover_remote_adoption_runtime(&transition)
             .map_err(internal)?;
     } else {
-        if let Some(head) = current_head
-            && head.target_hash != placement.source_chain_head_hash
-        {
-            return Err(HandlerError::BadRequest(
-                "local chain advanced beyond the admitted handoff source".into(),
-            ));
-        }
         let authority = state
             .state_store
             .pinned_state_authority()
@@ -1128,6 +1143,11 @@ async fn adopt_authorized(
         let staged = ryeos_state::sync::stage_chain_import_pinned(&authority, &payload, &guard)
             .map_err(internal)?;
         drop(guard);
+        // The state publication boundary verifies the exact current signed
+        // head as an ancestor of the admitted source frontier. That permits a
+        // chain to return to a node holding its older local mirror while still
+        // rejecting forks and rollbacks under the chain lock. Requiring exact
+        // equality here would incorrectly make one-way placement permanent.
         state
             .state_store
             .finalize_remote_adoption_import(staged, &transition)
@@ -1142,21 +1162,22 @@ async fn adopt_authorized(
     )
     .map_err(internal)?;
 
-    let _profile_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
+    let profile_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
         &placement.credential_reservation.profile_id,
     )
     .await
     .map_err(internal)?;
-    if target_worker_is_attached(
+    if let Some(response) = complete_if_target_worker_attached_under_profile_lock(
         &state,
+        &job_id,
+        &req,
         &operation,
         &placement,
+        &source_committed,
         &req.placement_attestation_hash,
-    )
-    .map_err(internal)?
-    {
-        return complete_target_adoption(&state, &job_id, &req, &operation, &mut adoption_attempt)
-            .map_err(internal);
+        &mut adoption_attempt,
+    )? {
+        return Ok(response);
     }
     let transfer =
         load_transfer_manifest(&state, &operation.transfer_manifest_hash).map_err(internal)?;
@@ -1195,6 +1216,12 @@ async fn adopt_authorized(
     )
     .map_err(internal)?;
 
+    // The worker start callback uses the same profile-operation lock to
+    // atomically consume the exact credential reservation and attach its
+    // process identity. Holding this guard through launch would deadlock that
+    // callback until the attachment wait timed out.
+    drop(profile_operation);
+
     let launch_metadata = state
         .state_store
         .get_launch_metadata(&operation.successor_placement_thread_id)
@@ -1229,34 +1256,20 @@ async fn adopt_authorized(
     )
     .await
     .map_err(internal)?;
-    if !target_worker_is_attached(
-        &state,
-        &operation,
-        &placement,
-        &req.placement_attestation_hash,
-    )
-    .map_err(internal)?
-    {
-        return Err(HandlerError::Structured {
-            code: "worker_attachment_pending".to_owned(),
-            status: 503,
-            body: serde_json::json!({
-                "code":"worker_attachment_pending",
-                "error":"target worker launch was scheduled but exact attachment was not observed before the bounded deadline",
-                "retryable":true,
-            }),
-        });
-    }
-    update_target_progress(
+    if let Some(response) = complete_if_target_worker_attached(
         &state,
         &job_id,
-        WorkerHandoffPhase::ProcessAttached,
+        &req,
+        &operation,
+        &placement,
         &source_committed,
-        ryeos_state::SyncJobState::Running,
+        &mut adoption_attempt,
     )
-    .map_err(internal)?;
-    complete_target_adoption(&state, &job_id, &req, &operation, &mut adoption_attempt)
-        .map_err(internal)
+    .await?
+    {
+        return Ok(response);
+    }
+    Err(worker_attachment_pending())
 }
 
 /// Resume target-local post-cut work from durable job and signed-chain
@@ -1839,6 +1852,103 @@ fn load_portable_predecessor(
             &restore.upstream_session_id,
         )?,
     ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetLaunchClaimDisposition {
+    Launch,
+    AwaitExisting,
+}
+
+fn classify_target_launch_claim(
+    claim_present: bool,
+    launch_owner_active: bool,
+) -> Result<TargetLaunchClaimDisposition> {
+    match (claim_present, launch_owner_active) {
+        (false, false) => Ok(TargetLaunchClaimDisposition::Launch),
+        (true, true) => Ok(TargetLaunchClaimDisposition::AwaitExisting),
+        (true, false) => {
+            bail!("target successor has a retained launch claim without an active owner")
+        }
+        (false, true) => bail!("target successor launch owner has no durable claim"),
+    }
+}
+
+async fn complete_if_target_worker_attached(
+    state: &Arc<AppState>,
+    job_id: &str,
+    request: &WorkerPlacementAdoptRequest,
+    operation: &WorkerSessionHandoffJobOperation,
+    placement: &WorkerPlacementAdmissionEvidence,
+    progress: &WorkerSessionHandoffProgress,
+    attempt: &mut TargetAdoptionAttempt,
+) -> Result<Option<Value>, HandlerError> {
+    if !target_worker_is_attached(
+        state,
+        operation,
+        placement,
+        &request.placement_attestation_hash,
+    )
+    .map_err(internal)?
+    {
+        return Ok(None);
+    }
+    let _profile_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
+        &placement.credential_reservation.profile_id,
+    )
+    .await
+    .map_err(internal)?;
+    complete_if_target_worker_attached_under_profile_lock(
+        state,
+        job_id,
+        request,
+        operation,
+        placement,
+        progress,
+        &request.placement_attestation_hash,
+        attempt,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn complete_if_target_worker_attached_under_profile_lock(
+    state: &AppState,
+    job_id: &str,
+    request: &WorkerPlacementAdoptRequest,
+    operation: &WorkerSessionHandoffJobOperation,
+    placement: &WorkerPlacementAdmissionEvidence,
+    progress: &WorkerSessionHandoffProgress,
+    placement_attestation_hash: &str,
+    attempt: &mut TargetAdoptionAttempt,
+) -> Result<Option<Value>, HandlerError> {
+    if !target_worker_is_attached(state, operation, placement, placement_attestation_hash)
+        .map_err(internal)?
+    {
+        return Ok(None);
+    }
+    update_target_progress(
+        state,
+        job_id,
+        WorkerHandoffPhase::ProcessAttached,
+        progress,
+        ryeos_state::SyncJobState::Running,
+    )
+    .map_err(internal)?;
+    complete_target_adoption(state, job_id, request, operation, attempt)
+        .map(Some)
+        .map_err(internal)
+}
+
+fn worker_attachment_pending() -> HandlerError {
+    HandlerError::Structured {
+        code: "worker_attachment_pending".to_owned(),
+        status: 503,
+        body: serde_json::json!({
+            "code":"worker_attachment_pending",
+            "error":"target worker launch was scheduled but exact attachment was not observed before the bounded deadline",
+            "retryable":true,
+        }),
+    }
 }
 
 fn target_worker_is_attached(
@@ -3163,5 +3273,19 @@ mod authority_tests {
         for status in [ThreadStatus::Created, ThreadStatus::Running] {
             assert!(!is_settleable_pre_attachment_terminal(status, false));
         }
+    }
+
+    #[test]
+    fn target_adoption_never_relaunches_behind_an_active_launch_claim() {
+        assert_eq!(
+            classify_target_launch_claim(false, false).unwrap(),
+            TargetLaunchClaimDisposition::Launch
+        );
+        assert_eq!(
+            classify_target_launch_claim(true, true).unwrap(),
+            TargetLaunchClaimDisposition::AwaitExisting
+        );
+        assert!(classify_target_launch_claim(true, false).is_err());
+        assert!(classify_target_launch_claim(false, true).is_err());
     }
 }

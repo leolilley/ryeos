@@ -317,6 +317,12 @@ pub enum ControlFlagBinding {
     /// Presence → resolve the caller's already-published principal project
     /// HEAD at admission and run from a daemon-owned copy-on-write generation.
     PinCurrentHeadAtAdmission,
+    /// Presence → authorize project-backed child roots to receive independent
+    /// private COW generations retained for explicit owner disposition.
+    RetainChildResults,
+    /// Presence → exclude the operator vault from an otherwise ordinary
+    /// project-environment overlay.
+    ExcludeOperatorVault,
     /// Takes a value → request `call.method` (string).
     CallMethod,
     /// Takes a value → request `call.args` (parsed JSON object).

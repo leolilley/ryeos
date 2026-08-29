@@ -319,6 +319,9 @@ fn resolve_project_authority(
                         ryeos_app::execution_policy::PinnedChildRealization::CowDiscard => {
                             PinnedChildProjectRealization::CowDiscard
                         }
+                        ryeos_app::execution_policy::PinnedChildRealization::CowRetainResult => {
+                            PinnedChildProjectRealization::CowRetainResult
+                        }
                     },
                 }
             }

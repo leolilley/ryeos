@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-24T15:37:11Z:efa182aeca77d1da29d1da476fe8baf3174a50e282fe081d29c7bc7777c6384b:gagSCE48YLaDwIKsUa6UqUgHOAen14Dwesv9e2RBKtaTiGXMPceFYIEQpMPXv9vpeF7D5d1z6X0SFZ8zDIzqAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-29T09:08:38Z:1bb8806ec72dd18fa964f2b4784895f3fa0b45ee9e4bd7860c05a4f2674d3d01:HBn9pWFiARVkqtMHLWG3d0gRx4KXzF5hMPGurchFzFur7HVNbhbfxlHpYOa55ojV47psi2VjXpyMxjANAH+qDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, remote, pushed-head, transfer, capabilities]
@@ -28,6 +28,7 @@ The authoritative matrix is in
 | `remote/doctor` | `remote.doctor` | `ryeos.execute.service.remote/doctor` |
 | `remote/admit` | `remote.admit` | `ryeos.execute.service.remote/admit` |
 | `remote/push` | `remote.push` | `ryeos.execute.service.remote/push` |
+| `remote/reconcile-project-head` | `remote.reconcile-project-head` | `ryeos.execute.service.remote/reconcile-project-head` |
 | `remote/pull` | `remote.pull` | `ryeos.execute.service.objects/get` |
 | `remote/execute` | `remote.execute` | `ryeos.execute.service.remote/admin` |
 | `remote/authorize` | `remote.authorize` | `ryeos.execute.service.remote/admin` |
@@ -64,6 +65,11 @@ The authoritative matrix is in
   checks, and next-step commands.
 - `remote push` and `remote execute` use the target node's ingest-ignore
   rules, not local ignore rules, when building a pushed manifest.
+- `remote reconcile-project-head` is the explicit full-project DAG convergence
+  operation. It requires exact expected local and remote configured-operator
+  HEADs plus an explicit `local` or `remote` content winner. It creates one
+  two-parent generation, publishes remote-first, and advances the local HEAD
+  through a durable recovery job. It never silently rebases a handoff.
 - `remote execute` is synchronous in v1: push, execute, pull, apply.
 - `remote bundle-install` is live daemon-side installation; local
   `bundle install/remove` require stopped-node authority.

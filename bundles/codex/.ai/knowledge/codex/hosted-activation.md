@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-27T14:27:06Z:3f260d93508341872f76024fbf5df9c6838b3d8155a911550b5043825bb21c86:4OFbm83+33FeCrn300w3MkWDa/Jv55zckwG6MKjLFelz408VsDN4GQeMHNW3bs8F3Kf6bo2VhjCBJpXppeCLBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-29T09:08:38Z:a287f9d4c60393858fbd4de38a3d38a3cb805852a6c8af1f81b552220709fb68:59+h1UFY9OyreOVB8y9m0hKr4KrR3khDrW84+rPF0MS+vgqwMTZ5pbsbWN5xjFlTFXLTecyCudTB97/8ft+kBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
-version: "1.5.0"
+version: "1.6.0"
 description: >
   Activation, credential ceremony, command routes, and release acceptance for
   the pinned Codex structured-session workload.
@@ -161,9 +161,11 @@ knowledge bundle.
    one returned remote thread; cross-thread targeting is rejected.
    Before cross-site handoff, the destination's configured-operator project
    HEAD must already be the source placement's exact base snapshot. Preserve
-   that origin HEAD or reconcile it through ordinary full-project
-   synchronization while no handoff is in progress. Handoff deliberately
-   refuses a missing or divergent destination HEAD instead of overwriting it.
+   that origin HEAD or use `remote reconcile-project-head` with both observed
+   HEADs and an explicit content winner while no handoff is in progress. That
+   provider-neutral operation creates one two-parent generation and publishes
+   remote-first under durable recovery. Handoff deliberately refuses a missing
+   or divergent destination HEAD instead of overwriting it.
 7. Resolve digest-fenced pending approvals. This release exposes bounded
    command/cwd for review but makes command-execution, file, and permission
    requests deny-only. Accepting an upstream sandbox-escalation request could
@@ -295,6 +297,19 @@ and prove:
 - Codex-absent `standard` and `central-host` publication still stage generic
   core worker-execution binaries; and
 - signatures plus clean install/boot inventory resolution.
+
+The 2026-08-29 epoch-17 reference qualification exercised two independently
+activated dedicated nodes and independently authenticated matching credential
+subjects. A real configured-operator Codex placement moved from the hosted
+target back to the source and then to the hosted target again, retained the
+same upstream workload thread, survived daemon restarts, rejected stale
+placement control, and completed candidate validation plus explicit
+publication. A separate graph-followed Codex child moved cross-site, explicitly
+discarded its candidate, recovered terminal delivery across target and parent
+restarts, and appended exactly one delivery, graph completion, and parent
+completion. No token/profile home or absolute realization path crossed nodes.
+This is reference evidence for those exact paths, not a substitute for running
+the remaining fault-injection matrix on a new release target.
 
 Environmental inability to run a probe is not passing evidence and does not
 justify changing the live local installation.

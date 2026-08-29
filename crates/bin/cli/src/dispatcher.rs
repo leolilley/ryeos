@@ -259,6 +259,8 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
             resolved.async_launch,
             resolved.pin_project_at_admission,
             resolved.pin_current_head_at_admission,
+            resolved.retain_child_results,
+            resolved.exclude_operator_vault,
         ),
     });
     if let Some(project_path) = &resolved.project_path {
@@ -496,6 +498,8 @@ fn execution_policy_value(
     accepted: bool,
     pin_project_at_admission: bool,
     pin_current_head_at_admission: bool,
+    retain_child_results: bool,
+    exclude_operator_vault: bool,
 ) -> Value {
     let response = if accepted {
         ryeos_app::execution_policy::ExecutionResponse::Accepted
@@ -510,6 +514,18 @@ fn execution_policy_value(
         ryeos_app::execution_policy::ExecutionPolicy::local_live(response)
     } else {
         ryeos_app::execution_policy::ExecutionPolicy::projectless(response)
+    };
+    let policy = if retain_child_results {
+        policy
+            .retain_child_results()
+            .expect("CLI validates retained child results require a project")
+    } else {
+        policy
+    };
+    let policy = if exclude_operator_vault {
+        policy.exclude_operator_vault()
+    } else {
+        policy
     };
     serde_json::to_value(policy).expect("typed execution policy serialization cannot fail")
 }
@@ -734,6 +750,11 @@ struct CliResolvedExecute {
     /// Resolve the caller's principal project HEAD at admission and execute
     /// from a retained daemon-owned COW generation.
     pin_current_head_at_admission: bool,
+    /// Give project-backed child roots independent COW generations retained
+    /// for explicit owner disposition.
+    retain_child_results: bool,
+    /// Exclude the operator vault from project-environment resolution.
+    exclude_operator_vault: bool,
     /// Typed command-dispatch intent. Validation uses the existing no-spawn
     /// execution boundary and is never inferred from item parameters.
     validate_only: bool,
@@ -765,6 +786,8 @@ struct ResolvedControlFlags {
     async_launch: bool,
     pin_project_at_admission: bool,
     pin_current_head_at_admission: bool,
+    retain_child_results: bool,
+    exclude_operator_vault: bool,
     stream: Option<bool>,
     debug_raw: bool,
     call_method: Option<String>,
@@ -880,6 +903,12 @@ fn resolve_command_for_daemon_with_commands(
                     .to_string(),
         });
     }
+    if control.retain_child_results && project_path.is_none() {
+        return Err(CliError::Local {
+            detail: "--retain-child-results requires a project root; it cannot be combined with --no-project"
+                .to_string(),
+        });
+    }
     if control.pin_project_at_admission && control.pin_current_head_at_admission {
         return Err(CliError::Local {
             detail: "capture-live and current-HEAD project sources are mutually exclusive"
@@ -920,6 +949,8 @@ fn resolve_command_for_daemon_with_commands(
         async_launch: control.async_launch,
         pin_project_at_admission: control.pin_project_at_admission,
         pin_current_head_at_admission: control.pin_current_head_at_admission,
+        retain_child_results: control.retain_child_results,
+        exclude_operator_vault: control.exclude_operator_vault,
         validate_only,
         direct_execute,
         stream: control.stream,
@@ -1112,6 +1143,8 @@ fn strip_declared_control_flags(
                 Bind::LaunchModeAccepted => flags.async_launch = true,
                 Bind::PinProjectAtAdmission => flags.pin_project_at_admission = true,
                 Bind::PinCurrentHeadAtAdmission => flags.pin_current_head_at_admission = true,
+                Bind::RetainChildResults => flags.retain_child_results = true,
+                Bind::ExcludeOperatorVault => flags.exclude_operator_vault = true,
                 Bind::DebugRaw => flags.debug_raw = true,
                 Bind::StreamOn => {
                     if flags.stream == Some(false) {
@@ -1904,11 +1937,15 @@ mod tests {
         let mut tail = vec![
             "item:x".to_string(),
             "--async".to_string(),
+            "--retain-child-results".to_string(),
+            "--no-operator-vault".to_string(),
             "--no-stream".to_string(),
             "--keep".to_string(),
         ];
         let flags = strip_declared_control_flags(&mut tail, &cf).unwrap();
         assert!(flags.async_launch);
+        assert!(flags.retain_child_results);
+        assert!(flags.exclude_operator_vault);
         assert_eq!(flags.stream, Some(false));
         // Non-control tokens survive untouched.
         assert_eq!(tail, vec!["item:x".to_string(), "--keep".to_string()]);
@@ -2187,6 +2224,21 @@ mod tests {
                 aliases: vec![],
             },
             F {
+                flag: "retain-child-results".into(),
+                help: "Retain independent private COW results for project-backed child roots"
+                    .into(),
+                binding: B::RetainChildResults,
+                ref_binding_name: None,
+                aliases: vec![],
+            },
+            F {
+                flag: "no-operator-vault".into(),
+                help: "Exclude the operator vault from project-environment authority".into(),
+                binding: B::ExcludeOperatorVault,
+                ref_binding_name: None,
+                aliases: vec![],
+            },
+            F {
                 flag: "method".into(),
                 help: "Method selector for method-dispatch kinds (call.method)".into(),
                 binding: B::CallMethod,
@@ -2354,12 +2406,12 @@ mod tests {
 
     #[test]
     fn live_project_execute_is_daemon_owned_and_restart_recoverable() {
-        let wait = execution_policy_value(true, false, false, false);
-        let accepted = execution_policy_value(true, true, false, false);
+        let wait = execution_policy_value(true, false, false, false, false, false);
+        let accepted = execution_policy_value(true, true, false, false, false, false);
         for policy in [&wait, &accepted] {
             assert_eq!(policy["ownership"], "daemon_owned");
             assert_eq!(policy["recovery"], "restart_recoverable");
-            assert_eq!(policy["project"]["kind"], "live_authority");
+            assert_eq!(policy["project"]["kind"], "live_direct");
         }
         assert_eq!(wait["response"], "wait");
         assert_eq!(accepted["response"], "accepted");
@@ -2368,8 +2420,8 @@ mod tests {
 
     #[test]
     fn projectless_execute_can_be_restart_recoverable() {
-        let wait = execution_policy_value(false, false, false, false);
-        let accepted = execution_policy_value(false, true, false, false);
+        let wait = execution_policy_value(false, false, false, false, false, false);
+        let accepted = execution_policy_value(false, true, false, false, false, false);
         for policy in [&wait, &accepted] {
             assert_eq!(policy["ownership"], "daemon_owned");
             assert_eq!(policy["recovery"], "restart_recoverable");
@@ -2381,7 +2433,7 @@ mod tests {
 
     #[test]
     fn pinned_local_execute_captures_to_cow_and_retains_result() {
-        let policy = execution_policy_value(true, false, true, false);
+        let policy = execution_policy_value(true, false, true, false, false, false);
         assert_eq!(policy["ownership"], "daemon_owned");
         assert_eq!(policy["recovery"], "restart_recoverable");
         assert_eq!(policy["project"]["kind"], "pinned");
@@ -2396,7 +2448,7 @@ mod tests {
 
     #[test]
     fn pinned_current_head_execute_retains_exact_publication_boundary() {
-        let policy = execution_policy_value(true, true, false, true);
+        let policy = execution_policy_value(true, true, false, true, false, false);
         assert_eq!(policy["ownership"], "daemon_owned");
         assert_eq!(policy["recovery"], "restart_recoverable");
         assert_eq!(policy["response"], "accepted");
@@ -2407,6 +2459,27 @@ mod tests {
             policy["project"]["realization"]["terminal_publication"]["kind"],
             "retain_current_head"
         );
+    }
+
+    #[test]
+    fn retained_child_results_compile_to_private_cow_without_head_grant() {
+        let policy = execution_policy_value(true, true, false, true, true, false);
+        assert_eq!(policy["project"]["child_policy"]["kind"], "pin_at_spawn");
+        assert_eq!(
+            policy["project"]["child_policy"]["realization"],
+            "cow_retain_result"
+        );
+        assert_eq!(
+            policy["project"]["realization"]["terminal_publication"]["kind"],
+            "retain_current_head"
+        );
+    }
+
+    #[test]
+    fn operator_vault_can_be_explicitly_removed_from_project_environment() {
+        let policy = execution_policy_value(true, true, false, true, true, true);
+        assert_eq!(policy["environment"]["kind"], "project_overlay");
+        assert_eq!(policy["environment"]["include_operator_vault"], false);
     }
 
     #[test]

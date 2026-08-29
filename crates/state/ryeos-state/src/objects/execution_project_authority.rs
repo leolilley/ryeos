@@ -157,6 +157,10 @@ pub enum ChildProjectAuthorityPolicy {
 pub enum PinnedChildProjectRealization {
     ReadOnly,
     CowDiscard,
+    /// Give the child root an independent private COW generation whose
+    /// terminal result remains retained for explicit owner disposition. This
+    /// never inherits or manufactures a project-HEAD publication grant.
+    CowRetainResult,
 }
 
 /// Explicit project-authority transitions over one chain's private operational

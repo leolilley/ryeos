@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-08-27T11:45:57Z:4e03034ac395093c56e189d0f66c9777fcfa69b12d194ed43ba26f452358724b:Sa8uhOmwRjEsI06IydqD3zQ5mYhePTiwPiK1wkMxAki1HKMsVJeTHIClJkZhZg88Sfm6Y+PVtIJSuVn5Y2ktDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-29T09:08:38Z:5c3129dc1030acf339c6027649e8e323eb7fbbbfe8ca08295c88c1300a301288:7N+MxGGcrtQ3VA7sVNSR6ljJCadn2Qykks2sLPWaiajZwO8hC1PPoNN4YeLczXgPajj1v5O/09FzEQQrrm++CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
 title: "Worker-Hosted Execution"
 description: "Implemented authority, protocol, lifecycle, recovery, and publication contracts for session-bound hosted workers"
 entry_type: reference
-version: "1.4.0"
+version: "1.5.0"
 ```
 
 # Worker-Hosted Execution
@@ -214,8 +214,11 @@ Every possible target must independently activate the exact non-secret worker
 realization before preflight; equal program identity does not make source-local
 realization paths portable. The owner principal's target project HEAD must
 already equal the source placement's immutable base generation. Ordinarily the
-origin retains that base; otherwise an operator reconciles it through standard
-project synchronization before attempting handoff. Placement preflight never
+origin retains that base. When two configured-operator HEADs are valid but
+divergent, `remote reconcile-project-head` requires both exact observed hashes
+and an explicit content winner, then publishes one two-parent generation to
+both nodes through a durable remote-first job. Launch the new placement from
+that shared generation before attempting handoff. Placement preflight never
 overwrites or silently rebases a divergent target HEAD. Each target also
 selects an independently authenticated node-local credential profile. Only the
 signed subject digest crosses sites.
@@ -414,6 +417,15 @@ keeps the credential lock fenced.
 ## Workspace and publication
 
 Project sessions require root-capsule `PinnedGeneration` plus `Cow` authority.
+When a project-backed parent will spawn independently dispositioned child roots,
+its signed execution policy may select `cow_retain_result` for child
+realization (`ryeos execute --retain-child-results`). Each child then receives
+its own private pinned-CoW result with no inherited project-HEAD destination;
+validation and publication/discard still require an explicit owner operation.
+The separate generic `--no-operator-vault` control narrows a project-overlay
+environment by removing its node-private operator-vault leg. Neither control
+names or detects a worker kind, provider, graph, or workload profile.
+
 An execution that will explicitly publish a retained result starts from the
 owner's existing principal-scoped project `HEAD`; this preserves the exact CAS
 boundary later consumed by publication. Capture-live pinning remains a valid

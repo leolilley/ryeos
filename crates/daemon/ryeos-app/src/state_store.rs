@@ -3154,6 +3154,60 @@ pub struct RemoteAdoptionPublication {
     pub target_runtime_seed_hash: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetainedRemoteFollowTerminalJobResult {
+    Pending,
+    Completed,
+    RepairMissingRequest,
+}
+
+fn classify_retained_remote_follow_terminal_job_result(
+    job: &ryeos_state::SyncJobRecord,
+    request: &crate::federated_follow::RemoteFollowTerminalDeliveryRequest,
+) -> Result<RetainedRemoteFollowTerminalJobResult> {
+    request.validate()?;
+    if let Some(result) = &job.result {
+        return match job.state {
+            ryeos_state::SyncJobState::Planned
+            | ryeos_state::SyncJobState::Running
+            | ryeos_state::SyncJobState::Retryable => {
+                let retained_request: crate::federated_follow::RemoteFollowTerminalDeliveryRequest =
+                    serde_json::from_value(result.clone())?;
+                retained_request.validate()?;
+                if retained_request != *request {
+                    bail!("remote follow terminal job retained another delivery request");
+                }
+                Ok(RetainedRemoteFollowTerminalJobResult::Pending)
+            }
+            ryeos_state::SyncJobState::Completed => {
+                let response: crate::federated_follow::RemoteFollowTerminalDeliveryResponse =
+                    serde_json::from_value(result.clone())?;
+                response.validate_against(request)?;
+                Ok(RetainedRemoteFollowTerminalJobResult::Completed)
+            }
+            ryeos_state::SyncJobState::Failed | ryeos_state::SyncJobState::Cancelled => {
+                bail!("remote follow terminal delivery ended without settlement")
+            }
+        };
+    }
+
+    // `create_sync_job` and the request-retaining update are two SQLite
+    // transactions. A process death between them leaves exactly this pristine
+    // planned record. Any attempt or other progress without a request is
+    // contradictory rather than grounds for guessed recovery.
+    if job.state != ryeos_state::SyncJobState::Planned
+        || job.phase != "planned"
+        || job.attempt_count != 0
+        || !job.uploaded_hashes.is_empty()
+        || !job.fetched_hashes.is_empty()
+        || job.last_error.is_some()
+        || job.finished_at.is_some()
+    {
+        bail!("remote follow terminal job made progress without its delivery request");
+    }
+    Ok(RetainedRemoteFollowTerminalJobResult::RepairMissingRequest)
+}
+
 fn retained_remote_follow_reservation(
     state_authority: &ryeos_state::PinnedStateAuthority,
     inner: &Inner,
@@ -13344,9 +13398,67 @@ impl StateStore {
         if let Some(existing) = g.state_db.get_sync_job(&job_id)? {
             if existing.operation_type != crate::federated_follow::REMOTE_FOLLOW_DELIVERY_OPERATION
                 || existing.operation != operation.to_value()?
-                || existing.heads != vec![target_head.target_hash]
+                || existing.peer.as_deref() != Some(reservation.parent_site_id.as_str())
+                || existing.heads != vec![target_head.target_hash.clone()]
+                || existing.roots.len() != 3
+                || existing.roots[0] != reservation_hash
+                || existing.roots[2] != target_head.target_hash
+                || existing.max_attempts != 16
             {
                 bail!("remote follow terminal job identity is already bound to another delivery");
+            }
+
+            // The target receipt is deliberately non-deterministic because its
+            // signed issuance time is part of the attestation. Once the job
+            // exists, its retained receipt is therefore the only receipt that
+            // may be recovered; minting another one would change the delivery
+            // request for the same operation identity.
+            let terminal_attestation_hash = &existing.roots[1];
+            let attestation_value = self
+                .state_authority
+                .cas_store()?
+                .get_object(terminal_attestation_hash)?
+                .ok_or_else(|| anyhow!("retained remote follow terminal receipt is absent"))?;
+            if ryeos_state::objects::canonical_value_digest(&attestation_value)?
+                != *terminal_attestation_hash
+            {
+                bail!("retained remote follow terminal receipt changed digest");
+            }
+            let attestation = ryeos_state::objects::Attestation::from_value(&attestation_value)?;
+            attestation.verify_with_key(&g.signer.verifying_key())?;
+            let retained_evidence =
+                crate::federated_follow::RemoteFollowTerminalEvidence::from_attestation(
+                    &attestation,
+                )?;
+            if retained_evidence != evidence {
+                bail!("retained remote follow terminal receipt contradicts the chain tip");
+            }
+            let request = crate::federated_follow::RemoteFollowTerminalDeliveryRequest {
+                operation_id: evidence.operation_id.clone(),
+                reservation_attestation_hash: reservation_hash,
+                terminal_attestation_hash: terminal_attestation_hash.clone(),
+                child_chain_root_id: child_chain_root_id.to_owned(),
+                target_chain_head_hash: target_head.target_hash,
+                parent_site_id: reservation.parent_site_id,
+                target_site_id: terminal.current_site_id,
+            };
+            request.validate()?;
+            if classify_retained_remote_follow_terminal_job_result(&existing, &request)?
+                == RetainedRemoteFollowTerminalJobResult::RepairMissingRequest
+            {
+                g.state_db.update_sync_job(
+                    &job_id,
+                    &ryeos_state::SyncJobUpdate {
+                        state: ryeos_state::SyncJobState::Planned,
+                        phase: "delivery_pending".to_owned(),
+                        roots: None,
+                        heads: None,
+                        uploaded_hashes: existing.uploaded_hashes,
+                        fetched_hashes: existing.fetched_hashes,
+                        last_error: None,
+                        result: Some(serde_json::to_value(request)?),
+                    },
+                )?;
             }
             return Ok(Some(job_id));
         }
@@ -13398,7 +13510,7 @@ impl StateStore {
         g.state_db.update_sync_job(
             &job_id,
             &ryeos_state::SyncJobUpdate {
-                state: ryeos_state::SyncJobState::Retryable,
+                state: ryeos_state::SyncJobState::Planned,
                 phase: "delivery_pending".to_owned(),
                 roots: None,
                 heads: None,
@@ -14438,6 +14550,105 @@ mod tests {
     use super::*;
     use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
     use tempfile::tempdir;
+
+    fn remote_follow_delivery_request()
+    -> crate::federated_follow::RemoteFollowTerminalDeliveryRequest {
+        crate::federated_follow::RemoteFollowTerminalDeliveryRequest {
+            operation_id: "1".repeat(64),
+            reservation_attestation_hash: "2".repeat(64),
+            terminal_attestation_hash: "3".repeat(64),
+            child_chain_root_id: "T-child".to_owned(),
+            target_chain_head_hash: "4".repeat(64),
+            parent_site_id: "site:parent".to_owned(),
+            target_site_id: "site:target".to_owned(),
+        }
+    }
+
+    fn remote_follow_delivery_job(
+        state: ryeos_state::SyncJobState,
+        phase: &str,
+        result: Option<Value>,
+    ) -> ryeos_state::SyncJobRecord {
+        ryeos_state::SyncJobRecord {
+            job_id: format!("remote-follow-terminal-target:{}", "1".repeat(64)),
+            operation_type: crate::federated_follow::REMOTE_FOLLOW_DELIVERY_OPERATION.to_owned(),
+            operation: json!({
+                "operation_type":crate::federated_follow::REMOTE_FOLLOW_DELIVERY_OPERATION
+            }),
+            peer: Some("site:parent".to_owned()),
+            state,
+            phase: phase.to_owned(),
+            roots: vec!["2".repeat(64), "3".repeat(64), "4".repeat(64)],
+            heads: vec!["4".repeat(64)],
+            uploaded_hashes: Vec::new(),
+            fetched_hashes: Vec::new(),
+            attempt_count: 0,
+            max_attempts: 16,
+            last_error: None,
+            result,
+            created_at: "2026-08-29T00:00:00Z".to_owned(),
+            updated_at: "2026-08-29T00:00:00Z".to_owned(),
+            finished_at: None,
+        }
+    }
+
+    #[test]
+    fn remote_follow_terminal_job_distinguishes_pending_request_and_completed_response() {
+        let request = remote_follow_delivery_request();
+        let pending = remote_follow_delivery_job(
+            ryeos_state::SyncJobState::Retryable,
+            "delivery_retryable",
+            Some(serde_json::to_value(&request).unwrap()),
+        );
+        assert_eq!(
+            classify_retained_remote_follow_terminal_job_result(&pending, &request).unwrap(),
+            RetainedRemoteFollowTerminalJobResult::Pending
+        );
+
+        let response = crate::federated_follow::RemoteFollowTerminalDeliveryResponse {
+            operation_id: request.operation_id.clone(),
+            child_chain_root_id: request.child_chain_root_id.clone(),
+            parent_chain_root_id: "T-parent".to_owned(),
+            parent_successor_thread_id: "T-parent-successor".to_owned(),
+            delivery: "settled".to_owned(),
+        };
+        let completed = remote_follow_delivery_job(
+            ryeos_state::SyncJobState::Completed,
+            "settled",
+            Some(serde_json::to_value(response).unwrap()),
+        );
+        assert_eq!(
+            classify_retained_remote_follow_terminal_job_result(&completed, &request).unwrap(),
+            RetainedRemoteFollowTerminalJobResult::Completed
+        );
+
+        let completed_with_request = remote_follow_delivery_job(
+            ryeos_state::SyncJobState::Completed,
+            "settled",
+            Some(serde_json::to_value(&request).unwrap()),
+        );
+        assert!(
+            classify_retained_remote_follow_terminal_job_result(&completed_with_request, &request)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn remote_follow_terminal_job_repairs_only_pristine_missing_request() {
+        let request = remote_follow_delivery_request();
+        let pristine =
+            remote_follow_delivery_job(ryeos_state::SyncJobState::Planned, "planned", None);
+        assert_eq!(
+            classify_retained_remote_follow_terminal_job_result(&pristine, &request).unwrap(),
+            RetainedRemoteFollowTerminalJobResult::RepairMissingRequest
+        );
+
+        let mut progressed = pristine;
+        progressed.attempt_count = 1;
+        assert!(
+            classify_retained_remote_follow_terminal_job_result(&progressed, &request).is_err()
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn blocking_store_wait_does_not_starve_unrelated_async_work() {

@@ -295,6 +295,12 @@ pub(crate) fn derive_pinned_child_authority(
                     terminal_publication: ryeos_state::objects::PinnedTerminalPublication::Discard,
                 }
             }
+            ryeos_state::objects::PinnedChildProjectRealization::CowRetainResult => {
+                ryeos_state::objects::PinnedProjectRealization::Cow {
+                    terminal_publication:
+                        ryeos_state::objects::PinnedTerminalPublication::RetainResult,
+                }
+            }
         },
         environment,
         capability_ceiling,
@@ -1473,5 +1479,40 @@ mod pinned_child_authority_tests {
             panic!("pin-at-spawn must produce pinned authority");
         };
         assert_eq!(capability_ceiling, vec!["sealed.project.cap".to_string()]);
+    }
+
+    #[test]
+    fn pin_at_spawn_can_retain_a_private_child_result_without_head_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = ExecutionProjectAuthority::live(
+            root.path().canonicalize().unwrap(),
+            "project:test".to_string(),
+            LiveProjectAccess::ReadWrite,
+            LiveFilesystemConfinement::standard_descriptor_rooted(),
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+
+        let child = derive_pinned_child_authority(
+            &parent,
+            "a".repeat(64),
+            PinnedChildProjectRealization::CowRetainResult,
+        )
+        .unwrap();
+        let ExecutionProjectAuthority::PinnedGeneration {
+            realization:
+                ryeos_state::objects::PinnedProjectRealization::Cow {
+                    terminal_publication,
+                },
+            ..
+        } = child
+        else {
+            panic!("retained child policy must produce a private COW authority");
+        };
+        assert_eq!(
+            terminal_publication,
+            ryeos_state::objects::PinnedTerminalPublication::RetainResult
+        );
     }
 }

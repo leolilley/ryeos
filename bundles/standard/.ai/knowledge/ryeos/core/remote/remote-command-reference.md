@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-26T09:50:51Z:adbe8e8a41178b40e02f1e00a54881bf3e22ae59eea00066d68f08b703c0d851:cSaZS3Dz//fkosF1Qv3ewursrlEHpfupuEjMEMrpcjxoDm8t2Dl7OcDFIUoOhENVi9CF/m80jQM0Wd1kM8bjAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-08-29T09:08:38Z:bb521c1a78af3b59ae626ca8efdcc4999330fdefc0b202a210584cbaea969dff:NRcaXqwO7Zql5acrc3XVlDtVDj2yjMfj0dL3ihJwO7IHNk+goIfz7AA9Ig4IHd5yjKqbzDeH4Ms8FBybwr7kDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -25,8 +25,9 @@ A remote command can require authority in two places:
 
 Remote HTTP requests are normally signed with the caller **node key**. Share
 `ryeos identity` output with the remote operator when requesting ordinary
-remote access. The generic `remote/push` and `remote/run` services additionally
-support an explicit configured-operator continuity mode for durable workflows:
+remote access. The generic `remote/push`, `remote/reconcile-project-head`, and
+`remote/run` services additionally support an explicit configured-operator
+continuity mode for durable workflows:
 the local request must already be signed by the configured operator, and the
 target must separately authorize that same operator key as `remote_operator`,
 bound by the target node to the source's canonical `site:` ID and exact scopes.
@@ -50,6 +51,7 @@ to delegated callers.
 | `ryeos remote doctor` | `ryeos.execute.service.remote/doctor` | signed auth probe; project status if `--project` is supplied | `GET /health`, `GET /public-key`, `GET /threads?limit=1`, optionally `POST /project/status` |
 | `ryeos remote authorize` | `ryeos.execute.service.remote/admin` | `ryeos.execute.service.identity/authorize-key` | `POST /authorize-key` |
 | `ryeos remote push` / `service:remote/push` | `ryeos.execute.service.remote/push` | `ryeos.execute.service.objects/has`, `ryeos.execute.service.objects/put`, `ryeos.execute.service.system/push-head` | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head` |
+| `ryeos remote reconcile-project-head` | `ryeos.execute.service.remote/reconcile-project-head` | configured operator: push scopes; peer node: `ryeos.execute.service.objects/closure/get` | `POST /objects/put`, `POST /objects/closure/get`, `POST /objects/has`, `POST /push-head` |
 | `ryeos remote pull` | `ryeos.execute.service.objects/get` | `ryeos.execute.service.objects/get` | `POST /objects/get` |
 | `ryeos remote execute` | `ryeos.execute.service.remote/admin` | push scopes + `ryeos.execute.service.objects/get` + caps required by the executed item | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head`, `POST /execute`, `POST /objects/get` |
 | `ryeos remote run` | `ryeos.execute.service.remote/admin` | caps required by the executed item; accepted/recoverable orchestration also needs `ryeos.execute.service.launch/status` and `ryeos.execute.service.launch/cancel` | `POST /execute`, or `POST /execute/launch` followed by exact launch status/cancel control when required |
@@ -223,7 +225,11 @@ RYEOS_APP_ROOT=/path/to/target-app-root ryeos authorize-client \
 
 Before that conversion, admit the source node key with the exact
 `ryeos.attest.request.forwarded-operator` scope. The source site ID is the
-canonical `site_id` reported by its RyeOS identity. The target-signed operator
+canonical `site_id` reported by its running RyeOS identity. Confirm it after
+starting the source through its normal supervisor: the daemon forms this ID
+from the node's stable host identity, and a later process started under a
+different `HOSTNAME` is a different site for origin-bound authorization. The
+target-signed operator
 grant constrains the permitted forwarding site; callers cannot create origin
 authority in request data. The separately admitted source node co-signs the
 method, path, body hash, timestamp, nonce, target audience, primary operator
@@ -279,6 +285,36 @@ Failure modes:
   canonicalizable project root on the target node
 - missing remote ignore rules fail closed if they cannot be fetched
 - object upload or pushed-head write errors abort the push
+
+## `ryeos remote reconcile-project-head`
+
+Converge two existing configured-operator full-project HEADs without erasing
+either history:
+
+```bash
+ryeos remote reconcile-project-head prod \
+  --project /absolute/path/to/project \
+  --expected-local-head '<sha256>' \
+  --expected-remote-head '<sha256>' \
+  --winner remote
+```
+
+Both expected hashes and the `local` or `remote` content winner are mandatory.
+Use the exact divergent HEADs retained by the failed handoff/publication or
+reported by its push conflict; this command is an explicit recovery action,
+not a mutable-HEAD discovery endpoint. Its operation identity commits both
+hashes, the route, endpoint, sites, configured-operator grant, and winner.
+The service verifies and imports the exact remote closure, creates a canonical
+two-parent generation using the selected tree and policy, publishes it on the
+remote first, then advances the local operator HEAD. Its durable sync job
+recovers the remote-published/local-pending crash gap. Repeating the identical
+operation returns its verified completed result, including after daemon
+restart; a later local HEAD is accepted only when it still descends from that
+result. A mismatched HEAD,
+changed remote identity/endpoint/binding, replaced operator grant, malformed
+closure, or non-`full_project` generation fails closed. The operation never
+deploys either generation into a live filesystem and never runs during
+handoff.
 
 ## `ryeos remote pull`
 
