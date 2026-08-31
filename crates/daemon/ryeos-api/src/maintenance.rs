@@ -309,10 +309,18 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
         .send(GcWorkerCommand::Run(write_barrier_resume))
         .context("GC guard worker stopped before run command")?;
     drop(command_tx);
-    let mut gc_result = gc_worker
-        .await
-        .context("GC blocking task panicked")??
-        .ok_or_else(|| anyhow::anyhow!("GC guard worker aborted before running"))?;
+    let worker_result = gc_worker.await.context("GC blocking task panicked")?;
+    let mut gc_result = match worker_result {
+        Ok(Some(result)) => result,
+        Ok(None) => anyhow::bail!("GC guard worker aborted before running"),
+        Err(error) => {
+            tracing::error!(
+                error = %format!("{error:#}"),
+                "maintenance GC pipeline failed"
+            );
+            return Err(error);
+        }
+    };
     gc_result.reaped_seats = reaped_seats;
     gc_result.terminal_chain_candidates = terminal_chain_candidates;
     gc_result.retired_terminal_chains = retired_terminal_chains;

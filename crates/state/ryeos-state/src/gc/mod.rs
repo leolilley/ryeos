@@ -510,6 +510,11 @@ pub fn run_gc_with_pinned_authority(
             operational_roots.iter().cloned(),
         )?;
         if !closure.is_complete() {
+            if let Some(incompatible) = closure.decisive_incompatible_current_schema() {
+                return Err(anyhow::anyhow!(incompatible.clone())).context(
+                    "additional GC root closure contains an incompatible object contract",
+                );
+            }
             anyhow::bail!(
                 "additional GC root closure is incomplete: missing_objects={}, missing_blobs={}, malformed_objects={}, unsupported_objects={}",
                 closure.missing_objects.len(),

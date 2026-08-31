@@ -16,7 +16,14 @@ use crate::sqlite_schema;
 
 const OPERATIONAL_APP_ID: i32 = 0x5259_4f50; // "RYOP"
 const OPERATIONAL_SCHEMA_VERSION: i32 = 6;
-const REPLAY_INDEX_EPOCH: i32 = 4;
+// Dispatch-effect records retain the complete admitted execution closure,
+// including the exact admitted-launch-capsule contract. Epoch 5 is the
+// clean-cut activation for launch-capsule schema 15: predecessor effect rows
+// must be retired rather than keeping schema-13/14 capsules as GC roots.
+// Provider-call records do not carry that dependency and remain current.
+const REPLAY_INDEX_EPOCH: i32 = 5;
+#[cfg(test)]
+const DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA: u32 = 15;
 pub const OPERATIONAL_DB_FILENAME: &str = "operational.sqlite3";
 pub(crate) const OPERATIONAL_INITIALIZED_FILENAME: &str = "operational.initialized";
 const OPERATIONAL_INITIALIZED_CONTENT: &[u8] = b"ryeos-operational-v1\n";
@@ -125,7 +132,7 @@ CREATE TABLE replay_index_epoch (
     epoch INTEGER NOT NULL CHECK (epoch > 0)
 );
 
-INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 4);
+INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 5);
 
 CREATE TABLE credential_profiles (
     profile_id TEXT PRIMARY KEY,
@@ -283,14 +290,15 @@ CREATE TABLE replay_index_epoch (
     epoch INTEGER NOT NULL CHECK (epoch > 0)
 );
 
-INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 3);
+INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 4);
 "#;
 
-/// Exact epoch-3 → epoch-4 cut: only dispatch-effect keys changed. Provider
-/// call evidence remains current and must survive this activation.
+/// Exact epoch-4 → epoch-5 cut: the dispatch-effect closure contract changed
+/// with admitted-launch-capsule schema 15. Provider-call evidence remains
+/// current and must survive this activation.
 const REPLAY_INDEX_RESET_DDL: &str = r#"
 DELETE FROM replay_records WHERE namespace = 'dispatch.effect';
-UPDATE replay_index_epoch SET epoch = 4 WHERE singleton = 1;
+UPDATE replay_index_epoch SET epoch = 5 WHERE singleton = 1;
 "#;
 
 /// A store upgraded directly from the pre-unified operational layout has no
@@ -314,7 +322,7 @@ CREATE INDEX idx_replay_records_retention
     ON replay_records(namespace, last_replayed_at, produced_at, cache_key);
 CREATE INDEX idx_replay_records_record_hash ON replay_records(record_hash);
 
-UPDATE replay_index_epoch SET epoch = 4 WHERE singleton = 1;
+UPDATE replay_index_epoch SET epoch = 5 WHERE singleton = 1;
 "#;
 
 fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
@@ -4147,8 +4155,19 @@ mod tests {
     #[test]
     fn fresh_schema_declares_only_the_current_replay_epoch() {
         assert!(SCHEMA_SQL.contains("answer_digest TEXT NOT NULL"));
-        assert!(SCHEMA_SQL.contains("VALUES (1, 4)"));
-        assert!(!SCHEMA_SQL.contains("VALUES (1, 3)"));
+        assert!(SCHEMA_SQL.contains("VALUES (1, 5)"));
+        assert!(!SCHEMA_SQL.contains("VALUES (1, 4)"));
+    }
+
+    #[test]
+    fn replay_epoch_fences_the_current_dispatch_effect_capsule_contract() {
+        assert_eq!(REPLAY_INDEX_EPOCH, 5);
+        assert_eq!(DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA, 15);
+        assert_eq!(
+            DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA,
+            crate::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
+            "a launch-capsule schema change requires an explicit replay-index epoch decision",
+        );
     }
 
     #[test]
@@ -4323,7 +4342,7 @@ mod tests {
     }
 
     #[test]
-    fn effect_key_cut_preserves_current_provider_replay_rows() {
+    fn dispatch_closure_cut_preserves_current_provider_replay_rows() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join(OPERATIONAL_DB_FILENAME);
         {
@@ -4346,7 +4365,7 @@ mod tests {
                         '2026-01-01T00:00:00Z',
                         '2026-01-01T00:00:00Z'
                      );
-                     UPDATE replay_index_epoch SET epoch = 3 WHERE singleton = 1;",
+                     UPDATE replay_index_epoch SET epoch = 4 WHERE singleton = 1;",
                 )
                 .unwrap();
         }

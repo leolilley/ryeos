@@ -111,6 +111,24 @@ atomically rebuilds the table into the same column order and SQL as a fresh v6
 store. The exact appended-column intermediate produced by the original v6
 migrator is also recognized and repaired; no unknown layout is modified.
 
+Replay indexes inside that stable database have their own clean-cut epoch.
+They are not authority-compatible merely because the surrounding SQLite schema
+is current: a dispatch-effect record retains its complete admitted execution
+closure, including the exact admitted-launch-capsule schema. When that closure
+contract changes, ordinary open refuses the predecessor replay epoch and names
+the explicit offline activation command:
+
+```bash
+ryeos node reset replay-indexes --confirm
+```
+
+That operation retires only predecessor `dispatch.effect` rows. It preserves
+current provider-call evidence, credential profiles, sync state, admission
+attestations, accounting state, signed heads, and CAS bytes. The next ordinary
+GC reclaims objects that are no longer rooted. Launch-capsule schema changes
+must therefore make an explicit replay-epoch decision; they must never leave
+predecessor effect rows silently pinning an undecodable closure.
+
 ## Rebuildable SQLite projections
 
 Thread and scheduler projections are derived views. Their schema can move by

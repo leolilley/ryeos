@@ -6,7 +6,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 
 use crate::object_closure::collect_object_closure;
 use crate::refs::{
@@ -211,6 +211,11 @@ pub(crate) fn collect_chain_reachable_from_head_with_cas(
 fn merge_object_closure(cas_root: &Path, roots: Vec<String>, set: &mut ReachableSet) -> Result<()> {
     let closure = collect_object_closure(cas_root, roots)?;
     if !closure.is_complete() {
+        if let Some(incompatible) = closure.decisive_incompatible_current_schema() {
+            return Err(anyhow::anyhow!(incompatible.clone())).context(
+                "authoritative reachable closure contains an incompatible object contract",
+            );
+        }
         anyhow::bail!(
             "reachable closure incomplete: missing={}, missing_blobs={}, malformed={}, unsupported={}",
             closure.missing_objects.len(),
@@ -232,6 +237,11 @@ fn merge_object_closure_with_cas(
 ) -> Result<()> {
     let closure = crate::object_closure::collect_object_closure_with_cas(cas, roots)?;
     if !closure.is_complete() {
+        if let Some(incompatible) = closure.decisive_incompatible_current_schema() {
+            return Err(anyhow::anyhow!(incompatible.clone())).context(
+                "authoritative reachable closure contains an incompatible object contract",
+            );
+        }
         anyhow::bail!(
             "reachable closure incomplete: missing={}, missing_blobs={}, malformed={}, unsupported={}",
             closure.missing_objects.len(),
