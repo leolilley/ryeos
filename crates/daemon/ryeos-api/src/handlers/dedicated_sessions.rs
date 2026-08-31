@@ -215,7 +215,63 @@ async fn status(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
-    serde_json::to_value(owned_session(&state, &ctx, &req.chain_root_id)?).map_err(internal)
+    let session = owned_session(&state, &ctx, &req.chain_root_id)?;
+    let mut result = serde_json::to_value(&session).map_err(internal)?;
+    let jobs = state
+        .state_store
+        .with_state_db(|db| db.list_sync_jobs_by_state(None, 500))
+        .map_err(internal)?;
+    let handoff = jobs.into_iter().find_map(|job| {
+        if job.operation_type != ryeos_app::worker_handoff::WORKER_SESSION_HANDOFF_OPERATION {
+            return None;
+        }
+        let operation = ryeos_app::worker_handoff::WorkerSessionHandoffJobOperation::from_value(
+            job.operation.clone(),
+        )
+        .ok()?;
+        if operation.chain_root_id != req.chain_root_id {
+            return None;
+        }
+        let progress = job.result.clone().and_then(|value| {
+            ryeos_app::worker_handoff::WorkerSessionHandoffProgress::from_value(value).ok()
+        });
+        let recovery_required = matches!(
+            job.state,
+            ryeos_state::SyncJobState::Planned
+                | ryeos_state::SyncJobState::Running
+                | ryeos_state::SyncJobState::Retryable
+        );
+        let operator_action = match job.state {
+            ryeos_state::SyncJobState::Retryable => "retry_exact_operation",
+            ryeos_state::SyncJobState::Failed => "inspect_terminal_failure",
+            _ => "none",
+        };
+        Some(json!({
+            "schema":"ryeos.worker_handoff_status.v1",
+            "operation_id":operation.operation_id,
+            "role":operation.role,
+            "source_placement_thread_id":operation.source_placement_thread_id,
+            "successor_placement_thread_id":operation.successor_placement_thread_id,
+            "source_site_id":operation.source_site_id,
+            "target_site_id":operation.target_site_id,
+            "state":job.state.as_str(),
+            "phase":job.phase,
+            "durable_progress":progress,
+            "attempt_count":job.attempt_count,
+            "max_attempts":job.max_attempts,
+            "last_error":job.last_error,
+            "recovery_required":recovery_required,
+            "operator_action":operator_action,
+            "terminal_disposition":match job.state {
+                ryeos_state::SyncJobState::Completed => Some("completed"),
+                ryeos_state::SyncJobState::Cancelled => Some("aborted"),
+                ryeos_state::SyncJobState::Failed => Some("failed"),
+                _ => None,
+            },
+        }))
+    });
+    result["handoff"] = handoff.unwrap_or(Value::Null);
+    Ok(result)
 }
 
 fn load_persistent_session_capsule(
@@ -1502,6 +1558,20 @@ fn source_preflight_job_id(preflight_id: &str) -> String {
     format!("worker-handoff-preflight-source:{preflight_id}")
 }
 
+#[cfg(any(test, feature = "handoff-test-support"))]
+fn reach_source_handoff_phase_cut(
+    state: &AppState,
+    boundary: ryeos_app::worker_handoff::test_support::HandoffCrashBoundary,
+) -> anyhow::Result<()> {
+    if let Some(gate) = state
+        .extensions
+        .get::<ryeos_app::worker_handoff::test_support::HandoffPhaseGate>()
+    {
+        gate.reach(boundary)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HandoffRequest {
@@ -1517,6 +1587,8 @@ async fn handoff(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    let qualification_started = std::time::Instant::now();
     if let Some(recovered) = resume_committed_handoff(&req, &ctx, &state).await? {
         return Ok(recovered);
     }
@@ -1571,8 +1643,13 @@ async fn handoff(
             "handoff requires proof that the exact source worker was reaped".into(),
         ));
     }
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    let checkpoint_started = std::time::Instant::now();
     let checkpoint = load_worker_checkpoint(&state, &source.chain_root_id, &req.manifest_ref)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    let checkpoint_load_ms =
+        u64::try_from(checkpoint_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     if checkpoint.restore.project_candidate_snapshot_hash != source.candidate_snapshot_hash {
         return Err(HandlerError::BadRequest(
             "handoff checkpoint candidate differs from the frozen source".into(),
@@ -1719,6 +1796,8 @@ async fn handoff(
         .pinned_state_authority()
         .map_err(internal)?;
     let guard = authority.acquire_shared_guard().map_err(internal)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    let closure_verification_started = std::time::Instant::now();
     ryeos_state::sync::verify_chain_closure_anchored_pinned(
         &authority.cas_store().map_err(internal)?,
         &source.chain_root_id,
@@ -1727,6 +1806,9 @@ async fn handoff(
     )
     .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     drop(guard);
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    let closure_verification_ms =
+        u64::try_from(closure_verification_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.worker_session_handoff_operation.v1",
         "preflight_id":req.preflight_id,
@@ -1813,6 +1895,17 @@ async fn handoff(
     )
     .map_err(internal)?;
     let job_id = format!("worker-handoff-source:{operation_id}");
+    let exported_progress =
+        ryeos_app::worker_handoff::WorkerSessionHandoffProgress::source_exported(
+            operation_id.clone(),
+        )
+        .map_err(internal)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_source_handoff_phase_cut(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::SourceBeforeExportPublication,
+    )
+    .map_err(internal)?;
     state
         .state_store
         .create_worker_handoff_source_job(
@@ -1838,8 +1931,15 @@ async fn handoff(
                 heads: vec![source_head.target_hash.clone()],
                 max_attempts: 16,
             },
+            &exported_progress,
         )
         .map_err(internal)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_source_handoff_phase_cut(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::SourceExportPublished,
+    )
+    .map_err(internal)?;
 
     let prepare_request = ryeos_app::worker_handoff::WorkerPlacementPrepareRequest {
         preflight_id: req.preflight_id.clone(),
@@ -1862,6 +1962,8 @@ async fn handoff(
         crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config);
     let prepare_attempt =
         begin_worker_handoff_attempt(&state, &job_id, "target_prepare", "source-handoff")?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    let target_prepare_started = std::time::Instant::now();
     let prepared_result: Result<
         ryeos_app::worker_handoff::WorkerPlacementPrepareResponse,
         HandlerError,
@@ -1938,6 +2040,12 @@ async fn handoff(
             credential_reservation_id: Some(prepared.credential_reservation.reservation_id.clone()),
             abort_chain_head_hash: None,
         };
+        #[cfg(any(test, feature = "handoff-test-support"))]
+        reach_source_handoff_phase_cut(
+            &state,
+            ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::SourceBeforePreparedEvidenceProjection,
+        )
+        .map_err(internal)?;
         state
             .state_store
             .stage_sync_payload_for_existing_job(
@@ -1953,6 +2061,12 @@ async fn handoff(
                 Some(progress.to_value().map_err(internal)?),
             )
             .map_err(internal)?;
+        #[cfg(any(test, feature = "handoff-test-support"))]
+        reach_source_handoff_phase_cut(
+            &state,
+            ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::SourcePreparedEvidenceProjected,
+        )
+        .map_err(internal)?;
         verify_target_placement_attestation(&state, &loaded_remote.config, &prepared)
             .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
         Ok(prepared)
@@ -1987,6 +2101,9 @@ async fn handoff(
             return Err(error);
         }
     };
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    let target_prepare_ms =
+        u64::try_from(target_prepare_started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
     let target_authority = &prepared.placement.project_rebind.target_authority;
     let target_overlay_root = matches!(
@@ -2061,6 +2178,14 @@ async fn handoff(
         usage_subject_asserted_by: None,
         captured_history_policy: None,
     };
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_source_handoff_phase_cut(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::SourceBeforeWriterCut,
+    )
+    .map_err(internal)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    let source_publication_started = std::time::Instant::now();
     let publication = state
         .state_store
         .create_remote_adoption_successor(
@@ -2080,6 +2205,15 @@ async fn handoff(
             },
         )
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    let source_publication_ms =
+        u64::try_from(source_publication_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_source_handoff_phase_cut(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::SourceWriterCutPublished,
+    )
+    .map_err(internal)?;
     let target_chain_head = state
         .state_store
         .with_state_db(|db| db.read_generic_head_ref("chains", &source.chain_root_id))
@@ -2114,6 +2248,12 @@ async fn handoff(
             )
         })
         .map_err(internal)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_source_handoff_phase_cut(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::SourceCommitProjected,
+    )
+    .map_err(internal)?;
     let adopt_request = ryeos_app::worker_handoff::WorkerPlacementAdoptRequest {
         operation_id: operation_id.clone(),
         chain_root_id: source.chain_root_id.clone(),
@@ -2123,6 +2263,8 @@ async fn handoff(
     };
     let adopt_attempt =
         begin_worker_handoff_attempt(&state, &job_id, "target_adopt", "source-handoff")?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    let target_adoption_started = std::time::Instant::now();
     let adopted_result: Result<
         ryeos_app::worker_handoff::WorkerPlacementAdoptResponse,
         HandlerError,
@@ -2158,6 +2300,12 @@ async fn handoff(
     .await;
     let adopted = match adopted_result {
         Ok(adopted) => {
+            #[cfg(any(test, feature = "handoff-test-support"))]
+            reach_source_handoff_phase_cut(
+                &state,
+                ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::SourceBeforeCompletion,
+            )
+            .map_err(internal)?;
             settle_worker_handoff_attempt(
                 &state,
                 &job_id,
@@ -2168,6 +2316,12 @@ async fn handoff(
                 None,
                 Some(serde_json::to_value(&adopted).map_err(internal)?),
             )?;
+            #[cfg(any(test, feature = "handoff-test-support"))]
+            reach_source_handoff_phase_cut(
+                &state,
+                ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::SourceCompletedBeforeResponse,
+            )
+            .map_err(internal)?;
             adopted
         }
         Err(error) => {
@@ -2185,7 +2339,10 @@ async fn handoff(
             return Err(error);
         }
     };
-    Ok(json!({
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    let target_adoption_ms =
+        u64::try_from(target_adoption_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let response = json!({
         "operation_id":operation_id,
         "chain_root_id":source.chain_root_id,
         "source_placement_thread_id":source_thread_id,
@@ -2193,7 +2350,23 @@ async fn handoff(
         "current_site_id":target_site_id,
         "target_chain_head_hash":target_chain_head.target_hash,
         "delivery":adopted.delivery,
-    }))
+    });
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    let response = {
+        let mut response = response;
+        response["qualification_measurements"] = json!({
+            "schema":"ryeos.worker_handoff_stage_measurements.v1",
+            "checkpoint_load_ms":checkpoint_load_ms,
+            "closure_verification_ms":closure_verification_ms,
+            "target_prepare_ms":target_prepare_ms,
+            "source_publication_ms":source_publication_ms,
+            "target_adoption_ms":target_adoption_ms,
+            "total_handoff_ms":u64::try_from(qualification_started.elapsed().as_millis())
+                .unwrap_or(u64::MAX),
+        });
+        response
+    };
+    Ok(response)
 }
 
 async fn resume_committed_handoff(
@@ -2268,7 +2441,7 @@ async fn resume_committed_handoff(
         .transpose()
         .map_err(internal)?
         .ok_or_else(|| internal("committed handoff job has no durable progress"))?;
-    if progress.phase < ryeos_app::worker_handoff::WorkerHandoffPhase::SourceCommitted
+    if progress.phase.source_is_only_authorized_writer()
         || progress.operation_id != operation.operation_id
         || progress.placement_attestation_hash.as_deref()
             != Some(remote_authority.target_placement_attestation_hash.as_str())
@@ -2454,7 +2627,7 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
         let current_placement = state
             .state_store
             .current_chain_placement_thread_id(&operation.chain_root_id)?;
-        if progress.phase < ryeos_app::worker_handoff::WorkerHandoffPhase::SourceCommitted
+        if progress.phase.source_is_only_authorized_writer()
             && current_placement.as_deref()
                 == Some(operation.successor_placement_thread_id.as_str())
         {
@@ -2513,7 +2686,7 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
                 )
             })?;
         }
-        if progress.phase < ryeos_app::worker_handoff::WorkerHandoffPhase::SourceCommitted {
+        if progress.phase.source_is_only_authorized_writer() {
             if recover_pre_cut_source_handoff_abort(state, &latest_job, &operation, &progress)
                 .await?
             {
@@ -2682,6 +2855,11 @@ async fn recover_pre_cut_source_handoff_abort(
     if current_head.signer != state.identity.fingerprint() {
         anyhow::bail!("pre-cut handoff source head is not locally owned");
     }
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_source_handoff_phase_cut(
+        state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::SourceBeforeAbortPublication,
+    )?;
     let abort_head_hash =
         if progress.phase == ryeos_app::worker_handoff::WorkerHandoffPhase::AbortAuthorized {
             let expected = progress
@@ -2734,6 +2912,11 @@ async fn recover_pre_cut_source_handoff_abort(
             // exact current head must itself be the immediate abort successor.
             current_head.target_hash.clone()
         };
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_source_handoff_phase_cut(
+        state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::SourceAbortPublished,
+    )?;
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
     ryeos_app::worker_handoff::validate_handoff_abort_authority(
@@ -2761,6 +2944,11 @@ async fn recover_pre_cut_source_handoff_abort(
             },
         )
     })?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_source_handoff_phase_cut(
+        state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::SourceAbortProjected,
+    )?;
 
     let report = crate::remote::config::load_remotes_layered_report(
         &state.config.app_root,

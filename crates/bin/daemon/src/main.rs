@@ -191,12 +191,51 @@ fn main() -> Result<()> {
     result
 }
 
+#[cfg(feature = "handoff-test-support")]
+fn build_handoff_phase_gate(
+    cli: &Cli,
+) -> Result<Option<Arc<ryeos_app::worker_handoff::test_support::HandoffPhaseGate>>> {
+    use std::os::fd::FromRawFd;
+    use std::str::FromStr as _;
+
+    use ryeos_app::worker_handoff::test_support::{HandoffCrashBoundary, HandoffPhaseGate};
+
+    let configured = (
+        cli.handoff_phase_cut_fd,
+        cli.handoff_phase_cut_boundary.as_deref(),
+    );
+    let (Some(fd), Some(boundary)) = configured else {
+        if configured.0.is_some() || configured.1.is_some() {
+            anyhow::bail!("all handoff phase-cut arguments must be supplied together");
+        }
+        return Ok(None);
+    };
+    if fd < 3 {
+        anyhow::bail!("handoff phase-cut descriptor must not replace stdin/stdout/stderr");
+    }
+    // SAFETY: this feature-only CLI accepts a descriptor inherited from the
+    // test parent. `fcntl(F_GETFD)` proves it is open in this process, and the
+    // returned File becomes its sole owner in the child daemon.
+    if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("inspect handoff phase-cut descriptor");
+    }
+    let writer = unsafe { std::fs::File::from_raw_fd(fd) };
+    Ok(Some(Arc::new(HandoffPhaseGate::new(
+        HandoffCrashBoundary::from_str(boundary)?,
+        writer,
+    ))))
+}
+
 async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<()> {
     // Capture process start before any configuration, verification, or state
     // opening so every lifecycle surface reports the same wall/monotonic origin.
     let process_started = Instant::now();
     let process_started_at = lillux::time::iso8601_now();
     let cli = Cli::parse();
+
+    #[cfg(feature = "handoff-test-support")]
+    let handoff_phase_gate = build_handoff_phase_gate(&cli)?;
 
     if let Some(config::DaemonCommand::BuildInfo {
         revision,
@@ -773,6 +812,10 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                     ext.insert(route_diagnostics);
                     ext.insert(prospective_node_config_validator);
                     ext.insert(node_execution_identity);
+                    #[cfg(feature = "handoff-test-support")]
+                    if let Some(gate) = handoff_phase_gate.clone() {
+                        ext.insert(gate);
+                    }
                     Arc::new(ext)
                 },
                 write_barrier: Arc::new(write_barrier),

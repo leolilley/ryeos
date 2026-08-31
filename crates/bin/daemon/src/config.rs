@@ -41,6 +41,16 @@ pub struct Cli {
     /// Resolve stored config conflicts in favor of explicit CLI values.
     #[arg(long)]
     pub force: bool,
+
+    /// Test-only inherited pipe descriptor used to report and park at one
+    /// exact worker-handoff boundary.
+    #[cfg(feature = "handoff-test-support")]
+    #[arg(long, hide = true)]
+    pub handoff_phase_cut_fd: Option<i32>,
+
+    #[cfg(feature = "handoff-test-support")]
+    #[arg(long, hide = true)]
+    pub handoff_phase_cut_boundary: Option<String>,
 }
 
 impl Cli {

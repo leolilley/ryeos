@@ -32,6 +32,20 @@ use ryeos_executor::executor::ServiceAvailability;
 
 const MAX_HANDOFF_CLOSURE_BYTES: u64 = 48 * 1024 * 1024;
 
+#[cfg(any(test, feature = "handoff-test-support"))]
+fn reach_target_handoff_crash_boundary(
+    state: &AppState,
+    boundary: ryeos_app::worker_handoff::test_support::HandoffCrashBoundary,
+) -> anyhow::Result<()> {
+    if let Some(gate) = state
+        .extensions
+        .get::<ryeos_app::worker_handoff::test_support::HandoffPhaseGate>()
+    {
+        gate.reach(boundary)?;
+    }
+    Ok(())
+}
+
 fn authenticated_remote_node_site(ctx: &HandlerContext) -> Result<&str, HandlerError> {
     if !ctx.verified
         || ctx.authorized_key_class
@@ -716,7 +730,7 @@ pub async fn abort(
         .map_err(internal)?;
     if existing_progress
         .as_ref()
-        .is_some_and(|progress| progress.phase >= WorkerHandoffPhase::SourceCommitted)
+        .is_some_and(|progress| progress.phase.successor_is_only_authorized_writer())
     {
         return Err(HandlerError::BadRequest(
             "source-committed target placement cannot be aborted".into(),
@@ -758,6 +772,12 @@ pub async fn abort(
     progress.phase = WorkerHandoffPhase::AbortAuthorized;
     progress.abort_chain_head_hash = Some(req.abort_chain_head_hash.clone());
     progress.validate().map_err(internal)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetBeforeAbortEvidenceStage,
+    )
+    .map_err(internal)?;
     state
         .state_store
         .stage_sync_payload_for_existing_job(
@@ -773,6 +793,12 @@ pub async fn abort(
             Some(progress.to_value().map_err(internal)?),
         )
         .map_err(internal)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetAbortEvidenceStaged,
+    )
+    .map_err(internal)?;
     let authority = state
         .state_store
         .pinned_state_authority()
@@ -785,6 +811,12 @@ pub async fn abort(
     )
     .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     drop(guard);
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetAbortEvidenceVerified,
+    )
+    .map_err(internal)?;
 
     let reservation = state
         .state_store
@@ -823,6 +855,12 @@ pub async fn abort(
     } else {
         "already_released"
     };
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetAbortReservationReleased,
+    )
+    .map_err(internal)?;
     let response = WorkerPlacementAbortResponse {
         operation_id: req.operation_id.clone(),
         chain_root_id: req.chain_root_id.clone(),
@@ -847,6 +885,12 @@ pub async fn abort(
             )
         })
         .map_err(internal)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetAbortCompletedBeforeResponse,
+    )
+    .map_err(internal)?;
     serde_json::to_value(response).map_err(internal)
 }
 
@@ -927,7 +971,9 @@ async fn adopt_authorized(
         .principal_id
         .strip_prefix("fp:")
         .ok_or_else(|| internal("configured source principal is not a fingerprint"))?;
-    let staged_final_closure = prepared_progress.phase >= WorkerHandoffPhase::SourceCommitted
+    let staged_final_closure = prepared_progress
+        .phase
+        .successor_is_only_authorized_writer()
         && [
             &req.target_chain_head_hash,
             &req.writer_grant_hash,
@@ -1002,6 +1048,12 @@ async fn adopt_authorized(
         credential_reservation_id: prepared_progress.credential_reservation_id.clone(),
         abort_chain_head_hash: None,
     };
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetBeforeSourceCommitEvidenceStage,
+    )
+    .map_err(internal)?;
     state
         .state_store
         .stage_sync_payload_for_existing_job(
@@ -1022,6 +1074,12 @@ async fn adopt_authorized(
             Some(source_committed.to_value().map_err(internal)?),
         )
         .map_err(internal)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetSourceCommitEvidenceStaged,
+    )
+    .map_err(internal)?;
 
     let placement = load_local_placement(&state, &req.placement_attestation_hash)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
@@ -1062,6 +1120,12 @@ async fn adopt_authorized(
         source_node_verifying_key: source_key,
         target_node_verifying_key: *state.identity.verifying_key(),
     };
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetSourceCommitEvidenceVerified,
+    )
+    .map_err(internal)?;
 
     // Once the exact admitted worker is attached, its retained remote
     // continuation edge proves that this node already finalized the chain
@@ -1122,6 +1186,12 @@ async fn adopt_authorized(
         return Err(worker_attachment_pending());
     }
 
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetBeforeAdoptionPublication,
+    )
+    .map_err(internal)?;
     let current_head = state
         .state_store
         .with_state_db(|db| db.read_generic_head_ref("chains", &req.chain_root_id))
@@ -1153,12 +1223,24 @@ async fn adopt_authorized(
             .finalize_remote_adoption_import(staged, &transition)
             .map_err(internal)?;
     }
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetAdoptionPublished,
+    )
+    .map_err(internal)?;
     update_target_progress(
         &state,
         &job_id,
         WorkerHandoffPhase::TargetAdopted,
         &source_committed,
         ryeos_state::SyncJobState::Running,
+    )
+    .map_err(internal)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetAdoptionProjected,
     )
     .map_err(internal)?;
 
@@ -1198,6 +1280,12 @@ async fn adopt_authorized(
             "target credential generation or reservation changed before state install".into(),
         ));
     }
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetBeforeStateInstall,
+    )
+    .map_err(internal)?;
     let _install = ryeos_app::private_artifact_home::install_portable_state_conditionally(
         &state.config.runtime_state_dir(),
         &profile.home_id,
@@ -1207,12 +1295,24 @@ async fn adopt_authorized(
         &operands.portable_tree,
     )
     .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetStateInstalled,
+    )
+    .map_err(internal)?;
     update_target_progress(
         &state,
         &job_id,
         WorkerHandoffPhase::StateInstalled,
         &source_committed,
         ryeos_state::SyncJobState::Running,
+    )
+    .map_err(internal)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetStateInstallProjected,
     )
     .map_err(internal)?;
 
@@ -1335,7 +1435,7 @@ pub async fn recover_durable_target_handoffs(state: &AppState) -> Result<usize> 
             }
             continue;
         }
-        if progress.phase < WorkerHandoffPhase::SourceCommitted
+        if progress.phase.source_is_only_authorized_writer()
             || progress.placement_attestation_hash.is_none()
             || progress.writer_grant_hash.is_none()
             || progress.target_chain_head_hash.is_none()
@@ -1462,7 +1562,7 @@ fn settle_pre_attachment_target_terminal(
     operation: &WorkerSessionHandoffJobOperation,
     progress: &WorkerSessionHandoffProgress,
 ) -> Result<bool> {
-    if progress.phase < WorkerHandoffPhase::SourceCommitted {
+    if progress.phase.source_is_only_authorized_writer() {
         return Ok(false);
     }
     let Some(successor) = state
@@ -1926,12 +2026,24 @@ fn complete_if_target_worker_attached_under_profile_lock(
     {
         return Ok(None);
     }
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetProcessAttachmentObserved,
+    )
+    .map_err(internal)?;
     update_target_progress(
         state,
         job_id,
         WorkerHandoffPhase::ProcessAttached,
         progress,
         ryeos_state::SyncJobState::Running,
+    )
+    .map_err(internal)?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetProcessAttachmentProjected,
     )
     .map_err(internal)?;
     complete_target_adoption(state, job_id, request, operation, attempt)
@@ -2425,6 +2537,11 @@ async fn prepare_after_staging(
         credential_reservation_id: Some(credential_reservation.reservation_id.clone()),
         abort_chain_head_hash: None,
     };
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetBeforePreparationPublication,
+    )?;
     let admission = state.state_store.publish_worker_placement_preparation(
         job_id,
         &source.manifest.content_hash()?,
@@ -2432,6 +2549,11 @@ async fn prepare_after_staging(
         &prepared_seed,
         &attestation,
         &progress,
+    )?;
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_target_handoff_crash_boundary(
+        state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetPreparationPublished,
     )?;
     if admission.attestation_hash != attestation_hash {
         let value = authority
@@ -3035,6 +3157,11 @@ impl TargetAdoptionAttempt {
 
     fn complete(&mut self, result: Value) -> Result<()> {
         let response: WorkerPlacementAdoptResponse = serde_json::from_value(result.clone())?;
+        #[cfg(any(test, feature = "handoff-test-support"))]
+        reach_target_handoff_crash_boundary(
+            &self.state,
+            ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetBeforeCompletion,
+        )?;
         self.state.state_store.with_state_db(|db| {
             let latest = db
                 .get_sync_job(&self.job_id)?
@@ -3060,6 +3187,11 @@ impl TargetAdoptionAttempt {
                 },
             )
         })?;
+        #[cfg(any(test, feature = "handoff-test-support"))]
+        reach_target_handoff_crash_boundary(
+            &self.state,
+            ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::TargetCompletedBeforeResponse,
+        )?;
         self.active = false;
         Ok(())
     }

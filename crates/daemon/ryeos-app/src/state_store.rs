@@ -5639,13 +5639,24 @@ impl StateStore {
         &self,
         prepared: &crate::worker_handoff::PreparedPlacementTransferManifest,
         job: &ryeos_state::NewSyncJob,
+        progress: &crate::worker_handoff::WorkerSessionHandoffProgress,
     ) -> Result<ryeos_state::SyncJobRecord> {
         prepared.object.validate()?;
+        progress.validate()?;
         let manifest_hash = prepared.object_hash()?;
         if job.operation_type != crate::worker_handoff::WORKER_SESSION_HANDOFF_OPERATION
             || !job.roots.iter().any(|hash| hash == &manifest_hash)
+            || progress.phase != crate::worker_handoff::WorkerHandoffPhase::SourceExported
         {
-            bail!("worker handoff sync job does not pin its transfer manifest");
+            bail!("source-exported worker handoff job does not pin its transfer manifest");
+        }
+        let operation = crate::worker_handoff::WorkerSessionHandoffJobOperation::from_value(
+            job.operation.clone(),
+        )?;
+        if operation.role != crate::worker_handoff::WorkerHandoffJobRole::Source
+            || operation.operation_id != progress.operation_id
+        {
+            bail!("source-exported progress belongs to another handoff operation");
         }
         let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
@@ -5689,7 +5700,13 @@ impl StateStore {
                 job_id: Some(job.job_id.clone()),
                 state: ryeos_state::CasEntryState::Local,
             })?;
-        g.state_db.create_sync_job(job)
+        let progress_value = progress.to_value()?;
+        g.state_db.create_sync_job_with_initial_progress(
+            job,
+            ryeos_state::SyncJobState::Running,
+            progress.phase.as_str(),
+            Some(&progress_value),
+        )
     }
 
     /// Complete a non-authoritative worker-placement preflight. The signed

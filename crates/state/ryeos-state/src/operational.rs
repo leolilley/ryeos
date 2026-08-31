@@ -3144,8 +3144,25 @@ impl OperationalDb {
     }
 
     pub fn create_sync_job(&self, job: &NewSyncJob) -> Result<SyncJobRecord> {
+        self.create_sync_job_with_initial_progress(job, SyncJobState::Planned, "planned", None)
+    }
+
+    /// Create a job whose first row already records a completed durable
+    /// boundary. This avoids manufacturing a crash window by inserting a
+    /// generic `planned` row and updating it in a second transaction.
+    pub fn create_sync_job_with_initial_progress(
+        &self,
+        job: &NewSyncJob,
+        state: SyncJobState,
+        phase: &str,
+        result: Option<&serde_json::Value>,
+    ) -> Result<SyncJobRecord> {
         validate_sync_job_id(&job.job_id)?;
         validate_non_empty_label("operation_type", &job.operation_type)?;
+        validate_non_empty_label("phase", phase)?;
+        if !matches!(state, SyncJobState::Planned | SyncJobState::Running) {
+            anyhow::bail!("a newly created sync job must be planned or running");
+        }
         let operation = job
             .operation
             .as_object()
@@ -3169,6 +3186,16 @@ impl OperationalDb {
         if operation_json.len() > 256 * 1024 {
             anyhow::bail!("sync job operation exceeds the 256 KiB maximum");
         }
+        let result_json = result
+            .map(serde_json::to_vec)
+            .transpose()
+            .context("failed to serialize initial sync job result")?;
+        if result_json
+            .as_ref()
+            .is_some_and(|value| value.len() > 256 * 1024)
+        {
+            anyhow::bail!("sync job result exceeds the 256 KiB maximum");
+        }
         let empty_hashes = serde_json::to_vec(&Vec::<String>::new())?;
         self.conn
             .execute(
@@ -3176,17 +3203,20 @@ impl OperationalDb {
                     job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
                     uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
                     last_error, result_json, created_at, updated_at, finished_at
-                 ) VALUES (?, ?, ?, ?, 'planned', 'planned', ?, ?, ?, ?, 0, ?, NULL, NULL, ?, ?, NULL)",
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?, ?, NULL)",
                 rusqlite::params![
                     &job.job_id,
                     &job.operation_type,
                     operation_json,
                     &job.peer,
+                    state.as_str(),
+                    phase,
                     roots_json,
                     heads_json,
                     empty_hashes,
                     empty_hashes,
                     max_attempts,
+                    result_json,
                     &now,
                     &now,
                 ],
@@ -5203,6 +5233,43 @@ mod tests {
         assert_eq!(completed_jobs.len(), 1);
         assert_eq!(completed_jobs[0].job_id, "job:alpha");
         assert_eq!(db.count_active_sync_jobs().unwrap(), 0);
+    }
+
+    #[test]
+    fn sync_job_can_begin_at_an_already_durable_boundary() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let db = OperationalDb::open(&tempdir.path().join("operational.sqlite3")).unwrap();
+        let progress = serde_json::json!({
+            "schema":"ryeos.worker_session_handoff_progress.v1",
+            "operation_id":"11".repeat(32),
+            "phase":"source_exported",
+        });
+
+        let created = db
+            .create_sync_job_with_initial_progress(
+                &NewSyncJob {
+                    job_id: "job:source-exported".to_owned(),
+                    operation_type: "worker_session_handoff".to_owned(),
+                    operation: serde_json::json!({
+                        "schema":1,
+                        "operation_type":"worker_session_handoff",
+                    }),
+                    peer: Some("site:b".to_owned()),
+                    roots: vec!["22".repeat(32)],
+                    heads: vec!["33".repeat(32)],
+                    max_attempts: 3,
+                },
+                SyncJobState::Running,
+                "source_exported",
+                Some(&progress),
+            )
+            .unwrap();
+
+        assert_eq!(created.state, SyncJobState::Running);
+        assert_eq!(created.phase, "source_exported");
+        assert_eq!(created.result, Some(progress));
+        assert_eq!(created.attempt_count, 0);
+        assert!(created.finished_at.is_none());
     }
 
     #[test]

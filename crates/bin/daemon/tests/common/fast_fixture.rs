@@ -266,8 +266,20 @@ pub fn install_signed_bundle_binary(
 /// Does NOT install bundles. Tests that need the standard bundle
 /// installed call `register_standard_bundle()` separately.
 pub fn populate_initialized_state(state_path: &Path, _home_dir: &Path) -> Result<FastFixture> {
+    populate_initialized_state_with_node_key(state_path, _home_dir, node_signing_key())
+}
+
+/// Populate the fast fixture with an explicitly selected node identity.
+///
+/// Cross-site integration tests need independently authenticated nodes while
+/// retaining the same deterministic publisher and operator authorities. The
+/// ordinary fixture continues to use [`node_signing_key`].
+pub fn populate_initialized_state_with_node_key(
+    state_path: &Path,
+    _home_dir: &Path,
+    node: SigningKey,
+) -> Result<FastFixture> {
     let publisher = publisher_signing_key();
-    let node = node_signing_key();
     let user = user_signing_key();
     let vault = vault_secret_key();
 

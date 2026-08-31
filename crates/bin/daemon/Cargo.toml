@@ -19,6 +19,7 @@ default = []
 # Propagate release-equivalent latency instrumentation and make the compiled
 # artifact profile observable through daemon build info.
 latency-profiling = ["ryeos-app/latency-profiling", "ryeos-engine/latency-profiling"]
+handoff-test-support = ["ryeos-api/handoff-test-support", "ryeos-app/test-support"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -69,6 +70,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ryeos-api = { workspace = true, features = ["handoff-test-support"] }
 ryeos-app = { workspace = true, features = ["test-support"] }
 ryeos-engine = { workspace = true, features = ["test-support"] }
 ryeos-core-tools = { workspace = true, features = ["test-support"] }

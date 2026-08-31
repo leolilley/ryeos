@@ -6,6 +6,10 @@ description = "ryeos-api: HTTP routes, service handlers, remote client, and API 
 license.workspace = true
 repository = "https://github.com/leolilley/ryeos"
 
+[features]
+default = []
+handoff-test-support = ["ryeos-app/test-support"]
+
 [dependencies]
 anyhow = { workspace = true }
 arc-swap = { workspace = true }

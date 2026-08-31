@@ -5722,6 +5722,17 @@ impl StateDb {
         self.operational()?.create_sync_job(job)
     }
 
+    pub fn create_sync_job_with_initial_progress(
+        &self,
+        job: &NewSyncJob,
+        state: SyncJobState,
+        phase: &str,
+        result: Option<&serde_json::Value>,
+    ) -> anyhow::Result<SyncJobRecord> {
+        self.operational()?
+            .create_sync_job_with_initial_progress(job, state, phase, result)
+    }
+
     pub fn update_sync_job(&self, job_id: &str, update: &SyncJobUpdate) -> anyhow::Result<()> {
         self.operational()?.update_sync_job(job_id, update)
     }

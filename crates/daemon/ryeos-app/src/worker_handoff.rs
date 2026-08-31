@@ -220,6 +220,18 @@ pub enum WorkerHandoffPhase {
 }
 
 impl WorkerHandoffPhase {
+    pub const ALL: [Self; 9] = [
+        Self::Planned,
+        Self::SourceExported,
+        Self::TargetPrepared,
+        Self::AbortAuthorized,
+        Self::SourceCommitted,
+        Self::TargetAdopted,
+        Self::StateInstalled,
+        Self::ProcessAttached,
+        Self::Completed,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Planned => "planned",
@@ -231,6 +243,1572 @@ impl WorkerHandoffPhase {
             Self::StateInstalled => "state_installed",
             Self::ProcessAttached => "process_attached",
             Self::Completed => "completed",
+        }
+    }
+
+    /// Before the source cut, only the source placement may append. Abort is
+    /// deliberately on this side of the cut because it preserves the source
+    /// as the current placement.
+    pub const fn source_is_only_authorized_writer(self) -> bool {
+        matches!(
+            self,
+            Self::Planned | Self::SourceExported | Self::TargetPrepared | Self::AbortAuthorized
+        )
+    }
+
+    /// At and after the source cut, source authority is permanently fenced and
+    /// the exact successor grant is the sole append authority. The target may
+    /// not exercise that grant until adoption verifies it.
+    pub const fn successor_is_only_authorized_writer(self) -> bool {
+        matches!(
+            self,
+            Self::SourceCommitted
+                | Self::TargetAdopted
+                | Self::StateInstalled
+                | Self::ProcessAttached
+                | Self::Completed
+        )
+    }
+
+    pub const fn target_has_adopted_writer_grant(self) -> bool {
+        matches!(
+            self,
+            Self::TargetAdopted | Self::StateInstalled | Self::ProcessAttached | Self::Completed
+        )
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use std::collections::BTreeMap;
+    use std::fmt;
+    use std::io::Write;
+    use std::str::FromStr;
+    use std::sync::Mutex;
+
+    use anyhow::{Context, Result};
+    use serde::{Deserialize, Serialize};
+
+    use super::WorkerHandoffPhase;
+
+    macro_rules! handoff_crash_boundaries {
+        ($($variant:ident => $name:literal),+ $(,)?) => {
+            #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+            #[serde(rename_all = "snake_case")]
+            pub enum HandoffCrashBoundary {
+                $($variant),+
+            }
+
+            impl HandoffCrashBoundary {
+                pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+                pub const fn as_str(self) -> &'static str {
+                    match self {
+                        $(Self::$variant => $name),+
+                    }
+                }
+            }
+
+            impl FromStr for HandoffCrashBoundary {
+                type Err = anyhow::Error;
+
+                fn from_str(value: &str) -> Result<Self> {
+                    match value {
+                        $($name => Ok(Self::$variant)),+,
+                        _ => anyhow::bail!("unknown handoff crash boundary `{value}`"),
+                    }
+                }
+            }
+        };
+    }
+
+    handoff_crash_boundaries! {
+        SourceBeforeExportPublication => "source_before_export_publication",
+        SourceExportPublished => "source_export_published",
+        SourceBeforePreparedEvidenceProjection => "source_before_prepared_evidence_projection",
+        SourcePreparedEvidenceProjected => "source_prepared_evidence_projected",
+        SourceBeforeWriterCut => "source_before_writer_cut",
+        SourceWriterCutPublished => "source_writer_cut_published",
+        SourceCommitProjected => "source_commit_projected",
+        SourceBeforeAbortPublication => "source_before_abort_publication",
+        SourceAbortPublished => "source_abort_published",
+        SourceAbortProjected => "source_abort_projected",
+        SourceBeforeCompletion => "source_before_completion",
+        SourceCompletedBeforeResponse => "source_completed_before_response",
+        TargetBeforePreparationPublication => "target_before_preparation_publication",
+        TargetPreparationPublished => "target_preparation_published",
+        TargetBeforeAbortEvidenceStage => "target_before_abort_evidence_stage",
+        TargetAbortEvidenceStaged => "target_abort_evidence_staged",
+        TargetAbortEvidenceVerified => "target_abort_evidence_verified",
+        TargetAbortReservationReleased => "target_abort_reservation_released",
+        TargetAbortCompletedBeforeResponse => "target_abort_completed_before_response",
+        TargetBeforeSourceCommitEvidenceStage => "target_before_source_commit_evidence_stage",
+        TargetSourceCommitEvidenceStaged => "target_source_commit_evidence_staged",
+        TargetSourceCommitEvidenceVerified => "target_source_commit_evidence_verified",
+        TargetBeforeAdoptionPublication => "target_before_adoption_publication",
+        TargetAdoptionPublished => "target_adoption_published",
+        TargetAdoptionProjected => "target_adoption_projected",
+        TargetBeforeStateInstall => "target_before_state_install",
+        TargetStateInstalled => "target_state_installed",
+        TargetStateInstallProjected => "target_state_install_projected",
+        TargetProcessAttachmentObserved => "target_process_attachment_observed",
+        TargetProcessAttachmentProjected => "target_process_attachment_projected",
+        TargetBeforeCompletion => "target_before_completion",
+        TargetCompletedBeforeResponse => "target_completed_before_response",
+    }
+
+    impl fmt::Display for HandoffCrashBoundary {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str(self.as_str())
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum HandoffNode {
+        Source,
+        Target,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum CrashCutPosition {
+        Before,
+        After,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum HandoffProtocolMilestone {
+        SourceExportPublication,
+        SourcePreparedEvidenceProjection,
+        SourceWriterCutPublication,
+        SourceCommitProjection,
+        SourceAbortPublication,
+        SourceAbortProjection,
+        SourceCompletion,
+        TargetPreparationPublication,
+        TargetAbortEvidenceStage,
+        TargetAbortAuthorityVerification,
+        TargetCredentialReservationRelease,
+        TargetAbortCompletion,
+        TargetSourceCommitEvidenceStage,
+        TargetSourceCommitAuthorityVerification,
+        TargetAdoptionPublication,
+        TargetAdoptionProjection,
+        TargetPortableStateInstall,
+        TargetStateInstallProjection,
+        TargetProcessAttachment,
+        TargetProcessAttachmentProjection,
+        TargetCompletion,
+    }
+
+    /// One exact instrumentation seam. This inventory is deliberately
+    /// separate from the acceptance cases: the same seam can be exercised by
+    /// multiple durable starting states and therefore cannot itself be the
+    /// recovery oracle.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    pub struct HandoffCrashBoundarySpec {
+        pub boundary: HandoffCrashBoundary,
+        pub interrupted_node: HandoffNode,
+        pub milestone: HandoffProtocolMilestone,
+        pub position: CrashCutPosition,
+    }
+
+    macro_rules! boundary_spec {
+        ($boundary:ident, $node:ident, $milestone:ident, $position:ident) => {
+            HandoffCrashBoundarySpec {
+                boundary: HandoffCrashBoundary::$boundary,
+                interrupted_node: HandoffNode::$node,
+                milestone: HandoffProtocolMilestone::$milestone,
+                position: CrashCutPosition::$position,
+            }
+        };
+    }
+
+    pub const HANDOFF_CRASH_BOUNDARY_SPECS: &[HandoffCrashBoundarySpec] = &[
+        boundary_spec!(
+            SourceBeforeExportPublication,
+            Source,
+            SourceExportPublication,
+            Before
+        ),
+        boundary_spec!(
+            SourceExportPublished,
+            Source,
+            SourceExportPublication,
+            After
+        ),
+        boundary_spec!(
+            SourceBeforePreparedEvidenceProjection,
+            Source,
+            SourcePreparedEvidenceProjection,
+            Before
+        ),
+        boundary_spec!(
+            SourcePreparedEvidenceProjected,
+            Source,
+            SourcePreparedEvidenceProjection,
+            After
+        ),
+        boundary_spec!(
+            SourceBeforeWriterCut,
+            Source,
+            SourceWriterCutPublication,
+            Before
+        ),
+        boundary_spec!(
+            SourceWriterCutPublished,
+            Source,
+            SourceWriterCutPublication,
+            After
+        ),
+        boundary_spec!(SourceCommitProjected, Source, SourceCommitProjection, After),
+        boundary_spec!(
+            SourceBeforeAbortPublication,
+            Source,
+            SourceAbortPublication,
+            Before
+        ),
+        boundary_spec!(SourceAbortPublished, Source, SourceAbortPublication, After),
+        boundary_spec!(SourceAbortProjected, Source, SourceAbortProjection, After),
+        boundary_spec!(SourceBeforeCompletion, Source, SourceCompletion, Before),
+        boundary_spec!(
+            SourceCompletedBeforeResponse,
+            Source,
+            SourceCompletion,
+            After
+        ),
+        boundary_spec!(
+            TargetBeforePreparationPublication,
+            Target,
+            TargetPreparationPublication,
+            Before
+        ),
+        boundary_spec!(
+            TargetPreparationPublished,
+            Target,
+            TargetPreparationPublication,
+            After
+        ),
+        boundary_spec!(
+            TargetBeforeAbortEvidenceStage,
+            Target,
+            TargetAbortEvidenceStage,
+            Before
+        ),
+        boundary_spec!(
+            TargetAbortEvidenceStaged,
+            Target,
+            TargetAbortEvidenceStage,
+            After
+        ),
+        boundary_spec!(
+            TargetAbortEvidenceVerified,
+            Target,
+            TargetAbortAuthorityVerification,
+            After
+        ),
+        boundary_spec!(
+            TargetAbortReservationReleased,
+            Target,
+            TargetCredentialReservationRelease,
+            After
+        ),
+        boundary_spec!(
+            TargetAbortCompletedBeforeResponse,
+            Target,
+            TargetAbortCompletion,
+            After
+        ),
+        boundary_spec!(
+            TargetBeforeSourceCommitEvidenceStage,
+            Target,
+            TargetSourceCommitEvidenceStage,
+            Before
+        ),
+        boundary_spec!(
+            TargetSourceCommitEvidenceStaged,
+            Target,
+            TargetSourceCommitEvidenceStage,
+            After
+        ),
+        boundary_spec!(
+            TargetSourceCommitEvidenceVerified,
+            Target,
+            TargetSourceCommitAuthorityVerification,
+            After
+        ),
+        boundary_spec!(
+            TargetBeforeAdoptionPublication,
+            Target,
+            TargetAdoptionPublication,
+            Before
+        ),
+        boundary_spec!(
+            TargetAdoptionPublished,
+            Target,
+            TargetAdoptionPublication,
+            After
+        ),
+        boundary_spec!(
+            TargetAdoptionProjected,
+            Target,
+            TargetAdoptionProjection,
+            After
+        ),
+        boundary_spec!(
+            TargetBeforeStateInstall,
+            Target,
+            TargetPortableStateInstall,
+            Before
+        ),
+        boundary_spec!(
+            TargetStateInstalled,
+            Target,
+            TargetPortableStateInstall,
+            After
+        ),
+        boundary_spec!(
+            TargetStateInstallProjected,
+            Target,
+            TargetStateInstallProjection,
+            After
+        ),
+        boundary_spec!(
+            TargetProcessAttachmentObserved,
+            Target,
+            TargetProcessAttachment,
+            After
+        ),
+        boundary_spec!(
+            TargetProcessAttachmentProjected,
+            Target,
+            TargetProcessAttachmentProjection,
+            After
+        ),
+        boundary_spec!(TargetBeforeCompletion, Target, TargetCompletion, Before),
+        boundary_spec!(
+            TargetCompletedBeforeResponse,
+            Target,
+            TargetCompletion,
+            After
+        ),
+    ];
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RequestOutcomeAtCut {
+        FailedBeforeResponse,
+        AmbiguousResponse,
+        RecoveryInterrupted,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RecoveryTrigger {
+        RetryOriginalRequest,
+        RestartSource,
+        RestartTargetThenRetrySource,
+        RestartTargetThenSourceRecovery,
+        ObserveOnly,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum AppendAuthorityLane {
+        SourcePlacement,
+        ExactSuccessorGrant,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum ExpectedHeadSigner {
+        SourceNode,
+        TargetNode,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum DurableJobState {
+        Absent,
+        Planned,
+        Running,
+        Retryable,
+        Completed,
+        Cancelled,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum DurableJobPhase {
+        Absent,
+        Planned,
+        SourceExported,
+        TargetPrepare,
+        PlacementAdmission,
+        TargetPrepared,
+        AbortAuthorized,
+        TargetAbort,
+        SourceCommitted,
+        TargetAdopt,
+        TargetAdopted,
+        StateInstalled,
+        ProcessAttached,
+        Completed,
+        Aborted,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case", tag = "kind", content = "phase")]
+    pub enum DurableJobResult {
+        Absent,
+        Progress(WorkerHandoffPhase),
+        AdoptionReceipt,
+        AbortReceipt,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    pub struct DurableJobExpectation {
+        pub state: DurableJobState,
+        pub phase: DurableJobPhase,
+        pub result: DurableJobResult,
+        pub active_attempt: bool,
+    }
+
+    const fn absent_job() -> DurableJobExpectation {
+        DurableJobExpectation {
+            state: DurableJobState::Absent,
+            phase: DurableJobPhase::Absent,
+            result: DurableJobResult::Absent,
+            active_attempt: false,
+        }
+    }
+
+    const fn progress_job(
+        state: DurableJobState,
+        phase: DurableJobPhase,
+        progress: WorkerHandoffPhase,
+        active_attempt: bool,
+    ) -> DurableJobExpectation {
+        DurableJobExpectation {
+            state,
+            phase,
+            result: DurableJobResult::Progress(progress),
+            active_attempt,
+        }
+    }
+
+    const fn no_result_job(
+        state: DurableJobState,
+        phase: DurableJobPhase,
+        active_attempt: bool,
+    ) -> DurableJobExpectation {
+        DurableJobExpectation {
+            state,
+            phase,
+            result: DurableJobResult::Absent,
+            active_attempt,
+        }
+    }
+
+    const fn receipt_job(
+        state: DurableJobState,
+        phase: DurableJobPhase,
+        result: DurableJobResult,
+    ) -> DurableJobExpectation {
+        DurableJobExpectation {
+            state,
+            phase,
+            result,
+            active_attempt: false,
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum SourcePlacementState {
+        CurrentWriter,
+        AbortRecordedCurrentWriter,
+        Fenced,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum SuccessorPlacementState {
+        Absent,
+        PreparedOnly,
+        AuthorizedUnadopted,
+        AdoptedUnattached,
+        Attached,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum CredentialDisposition {
+        NotReserved,
+        Reserved,
+        Released,
+        Consumed,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum StagingRootDisposition {
+        None,
+        ActiveJobOwned,
+        TerminalJobOwned,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum PortableStateDisposition {
+        Absent,
+        Installed,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum WorkspaceDisposition {
+        None,
+        EphemeralPreparation,
+        PreparedReconstructible,
+        Attached,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum ProcessDisposition {
+        None,
+        ExactTargetAttached,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    pub struct HandoffDurableSnapshot {
+        pub source_phase: Option<WorkerHandoffPhase>,
+        pub target_phase: Option<WorkerHandoffPhase>,
+        pub source_job: DurableJobExpectation,
+        pub target_job: DurableJobExpectation,
+        pub append_authority: AppendAuthorityLane,
+        pub head_signer: ExpectedHeadSigner,
+        pub source_placement: SourcePlacementState,
+        pub successor_placement: SuccessorPlacementState,
+        pub target_credential: CredentialDisposition,
+        pub source_staging_roots: StagingRootDisposition,
+        pub target_staging_roots: StagingRootDisposition,
+        pub portable_state: PortableStateDisposition,
+        pub workspace: WorkspaceDisposition,
+        pub process: ProcessDisposition,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RetryDisposition {
+        ReusesExactOperation,
+        ResumesExactOperation,
+        ObservesCompletedReceipt,
+        RejectedByAbortAuthority,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum OperatorOutcome {
+        Completed,
+        AbortedSourceContinues,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    pub struct HandoffAcceptanceCase {
+        pub case_id: &'static str,
+        pub boundary: HandoffCrashBoundary,
+        pub interrupted_node: HandoffNode,
+        pub request_outcome_at_cut: RequestOutcomeAtCut,
+        pub recovery_trigger: RecoveryTrigger,
+        pub at_cut: HandoffDurableSnapshot,
+        pub after_recovery: HandoffDurableSnapshot,
+        pub retry_disposition: RetryDisposition,
+        pub operator_outcome: OperatorOutcome,
+    }
+
+    macro_rules! acceptance_case {
+        ($id:literal, $boundary:ident, $node:ident, $request:ident, $recovery:ident, $cut:expr, $after:expr, $retry:ident, $operator:ident) => {
+            HandoffAcceptanceCase {
+                case_id: $id,
+                boundary: HandoffCrashBoundary::$boundary,
+                interrupted_node: HandoffNode::$node,
+                request_outcome_at_cut: RequestOutcomeAtCut::$request,
+                recovery_trigger: RecoveryTrigger::$recovery,
+                at_cut: $cut,
+                after_recovery: $after,
+                retry_disposition: RetryDisposition::$retry,
+                operator_outcome: OperatorOutcome::$operator,
+            }
+        };
+    }
+
+    macro_rules! snapshot {
+        (
+            $source_phase:expr,
+            $target_phase:expr,
+            $source_job:expr,
+            $target_job:expr,
+            $authority:ident,
+            $signer:ident,
+            $source_placement:ident,
+            $successor_placement:ident,
+            $credential:ident,
+            $source_roots:ident,
+            $target_roots:ident,
+            $portable_state:ident,
+            $workspace:ident,
+            $process:ident
+        ) => {
+            HandoffDurableSnapshot {
+                source_phase: $source_phase,
+                target_phase: $target_phase,
+                source_job: $source_job,
+                target_job: $target_job,
+                append_authority: AppendAuthorityLane::$authority,
+                head_signer: ExpectedHeadSigner::$signer,
+                source_placement: SourcePlacementState::$source_placement,
+                successor_placement: SuccessorPlacementState::$successor_placement,
+                target_credential: CredentialDisposition::$credential,
+                source_staging_roots: StagingRootDisposition::$source_roots,
+                target_staging_roots: StagingRootDisposition::$target_roots,
+                portable_state: PortableStateDisposition::$portable_state,
+                workspace: WorkspaceDisposition::$workspace,
+                process: ProcessDisposition::$process,
+            }
+        };
+    }
+
+    const RECOVERED_COMPLETED: HandoffDurableSnapshot = snapshot!(
+        Some(WorkerHandoffPhase::Completed),
+        Some(WorkerHandoffPhase::Completed),
+        receipt_job(
+            DurableJobState::Completed,
+            DurableJobPhase::Completed,
+            DurableJobResult::AdoptionReceipt,
+        ),
+        receipt_job(
+            DurableJobState::Completed,
+            DurableJobPhase::Completed,
+            DurableJobResult::AdoptionReceipt,
+        ),
+        ExactSuccessorGrant,
+        TargetNode,
+        Fenced,
+        Attached,
+        Consumed,
+        TerminalJobOwned,
+        TerminalJobOwned,
+        Installed,
+        Attached,
+        ExactTargetAttached
+    );
+
+    const RECOVERED_ABORTED_WITH_TARGET: HandoffDurableSnapshot = snapshot!(
+        Some(WorkerHandoffPhase::AbortAuthorized),
+        Some(WorkerHandoffPhase::AbortAuthorized),
+        receipt_job(
+            DurableJobState::Cancelled,
+            DurableJobPhase::Aborted,
+            DurableJobResult::AbortReceipt,
+        ),
+        receipt_job(
+            DurableJobState::Cancelled,
+            DurableJobPhase::Aborted,
+            DurableJobResult::AbortReceipt,
+        ),
+        SourcePlacement,
+        SourceNode,
+        AbortRecordedCurrentWriter,
+        Absent,
+        Released,
+        TerminalJobOwned,
+        TerminalJobOwned,
+        Absent,
+        None,
+        None
+    );
+
+    const RECOVERED_ABORTED_NO_TARGET: HandoffDurableSnapshot = snapshot!(
+        Some(WorkerHandoffPhase::AbortAuthorized),
+        None,
+        receipt_job(
+            DurableJobState::Cancelled,
+            DurableJobPhase::Aborted,
+            DurableJobResult::AbortReceipt,
+        ),
+        absent_job(),
+        SourcePlacement,
+        SourceNode,
+        AbortRecordedCurrentWriter,
+        Absent,
+        NotReserved,
+        TerminalJobOwned,
+        None,
+        Absent,
+        None,
+        None
+    );
+
+    const CUT_SOURCE_BEFORE_EXPORT: HandoffDurableSnapshot = snapshot!(
+        Some(WorkerHandoffPhase::Planned),
+        None,
+        absent_job(),
+        absent_job(),
+        SourcePlacement,
+        SourceNode,
+        CurrentWriter,
+        Absent,
+        NotReserved,
+        None,
+        None,
+        Absent,
+        None,
+        None
+    );
+
+    const CUT_SOURCE_EXPORTED: HandoffDurableSnapshot = snapshot!(
+        Some(WorkerHandoffPhase::SourceExported),
+        None,
+        progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::SourceExported,
+            WorkerHandoffPhase::SourceExported,
+            false,
+        ),
+        absent_job(),
+        SourcePlacement,
+        SourceNode,
+        CurrentWriter,
+        Absent,
+        NotReserved,
+        ActiveJobOwned,
+        None,
+        Absent,
+        None,
+        None
+    );
+
+    const CUT_TARGET_PREPARATION_BEFORE_PUBLICATION: HandoffDurableSnapshot = snapshot!(
+        Some(WorkerHandoffPhase::SourceExported),
+        Some(WorkerHandoffPhase::Planned),
+        progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetPrepare,
+            WorkerHandoffPhase::SourceExported,
+            true,
+        ),
+        no_result_job(
+            DurableJobState::Running,
+            DurableJobPhase::PlacementAdmission,
+            true,
+        ),
+        SourcePlacement,
+        SourceNode,
+        CurrentWriter,
+        PreparedOnly,
+        Reserved,
+        ActiveJobOwned,
+        ActiveJobOwned,
+        Absent,
+        EphemeralPreparation,
+        None
+    );
+
+    const CUT_TARGET_PREPARATION_PUBLISHED: HandoffDurableSnapshot = snapshot!(
+        Some(WorkerHandoffPhase::SourceExported),
+        Some(WorkerHandoffPhase::TargetPrepared),
+        progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetPrepare,
+            WorkerHandoffPhase::SourceExported,
+            true,
+        ),
+        progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetPrepared,
+            WorkerHandoffPhase::TargetPrepared,
+            true,
+        ),
+        SourcePlacement,
+        SourceNode,
+        CurrentWriter,
+        PreparedOnly,
+        Reserved,
+        ActiveJobOwned,
+        ActiveJobOwned,
+        Absent,
+        PreparedReconstructible,
+        None
+    );
+
+    const CUT_SOURCE_BEFORE_PREPARED_PROJECTION: HandoffDurableSnapshot = snapshot!(
+        Some(WorkerHandoffPhase::SourceExported),
+        Some(WorkerHandoffPhase::TargetPrepared),
+        progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetPrepare,
+            WorkerHandoffPhase::SourceExported,
+            true,
+        ),
+        progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetPrepared,
+            WorkerHandoffPhase::TargetPrepared,
+            false,
+        ),
+        SourcePlacement,
+        SourceNode,
+        CurrentWriter,
+        PreparedOnly,
+        Reserved,
+        ActiveJobOwned,
+        ActiveJobOwned,
+        Absent,
+        PreparedReconstructible,
+        None
+    );
+
+    const CUT_SOURCE_PREPARED_PROJECTED_ACTIVE: HandoffDurableSnapshot = snapshot!(
+        Some(WorkerHandoffPhase::TargetPrepared),
+        Some(WorkerHandoffPhase::TargetPrepared),
+        progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetPrepared,
+            WorkerHandoffPhase::TargetPrepared,
+            true,
+        ),
+        progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetPrepared,
+            WorkerHandoffPhase::TargetPrepared,
+            false,
+        ),
+        SourcePlacement,
+        SourceNode,
+        CurrentWriter,
+        PreparedOnly,
+        Reserved,
+        ActiveJobOwned,
+        ActiveJobOwned,
+        Absent,
+        PreparedReconstructible,
+        None
+    );
+
+    const CUT_SOURCE_PREPARED_IDLE: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        source_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetPrepared,
+            WorkerHandoffPhase::TargetPrepared,
+            false,
+        ),
+        ..CUT_SOURCE_PREPARED_PROJECTED_ACTIVE
+    };
+
+    const CUT_SOURCE_WRITER_CUT_PUBLISHED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        append_authority: AppendAuthorityLane::ExactSuccessorGrant,
+        source_placement: SourcePlacementState::Fenced,
+        successor_placement: SuccessorPlacementState::AuthorizedUnadopted,
+        ..CUT_SOURCE_PREPARED_IDLE
+    };
+
+    const CUT_SOURCE_COMMIT_PROJECTED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        source_phase: Some(WorkerHandoffPhase::SourceCommitted),
+        source_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::SourceCommitted,
+            WorkerHandoffPhase::SourceCommitted,
+            false,
+        ),
+        ..CUT_SOURCE_WRITER_CUT_PUBLISHED
+    };
+
+    const CUT_SOURCE_ABORT_BEFORE_NO_TARGET: HandoffDurableSnapshot = CUT_SOURCE_EXPORTED;
+
+    const CUT_SOURCE_ABORT_PUBLISHED_NO_TARGET: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        source_placement: SourcePlacementState::AbortRecordedCurrentWriter,
+        ..CUT_SOURCE_EXPORTED
+    };
+
+    const CUT_SOURCE_ABORT_PROJECTED_NO_TARGET: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        source_phase: Some(WorkerHandoffPhase::AbortAuthorized),
+        source_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::AbortAuthorized,
+            WorkerHandoffPhase::AbortAuthorized,
+            false,
+        ),
+        source_placement: SourcePlacementState::AbortRecordedCurrentWriter,
+        ..CUT_SOURCE_EXPORTED
+    };
+
+    const CUT_SOURCE_ABORT_BEFORE_WITH_TARGET: HandoffDurableSnapshot = CUT_SOURCE_PREPARED_IDLE;
+
+    const CUT_SOURCE_ABORT_PUBLISHED_WITH_TARGET: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        source_placement: SourcePlacementState::AbortRecordedCurrentWriter,
+        ..CUT_SOURCE_PREPARED_IDLE
+    };
+
+    const CUT_SOURCE_ABORT_PROJECTED_WITH_TARGET: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        source_phase: Some(WorkerHandoffPhase::AbortAuthorized),
+        source_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::AbortAuthorized,
+            WorkerHandoffPhase::AbortAuthorized,
+            false,
+        ),
+        source_placement: SourcePlacementState::AbortRecordedCurrentWriter,
+        ..CUT_SOURCE_PREPARED_IDLE
+    };
+
+    const CUT_TARGET_ABORT_BEFORE_STAGE: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        source_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetAbort,
+            WorkerHandoffPhase::AbortAuthorized,
+            true,
+        ),
+        ..CUT_SOURCE_ABORT_PROJECTED_WITH_TARGET
+    };
+
+    const CUT_TARGET_ABORT_STAGED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        target_phase: Some(WorkerHandoffPhase::AbortAuthorized),
+        target_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::AbortAuthorized,
+            WorkerHandoffPhase::AbortAuthorized,
+            false,
+        ),
+        ..CUT_TARGET_ABORT_BEFORE_STAGE
+    };
+
+    const CUT_TARGET_ABORT_RESERVATION_RELEASED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        target_credential: CredentialDisposition::Released,
+        ..CUT_TARGET_ABORT_STAGED
+    };
+
+    const CUT_TARGET_ABORT_COMPLETED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        target_job: receipt_job(
+            DurableJobState::Cancelled,
+            DurableJobPhase::Aborted,
+            DurableJobResult::AbortReceipt,
+        ),
+        successor_placement: SuccessorPlacementState::Absent,
+        target_credential: CredentialDisposition::Released,
+        target_staging_roots: StagingRootDisposition::TerminalJobOwned,
+        workspace: WorkspaceDisposition::None,
+        ..CUT_TARGET_ABORT_STAGED
+    };
+
+    const CUT_TARGET_BEFORE_SOURCE_COMMIT_STAGE: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        source_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetAdopt,
+            WorkerHandoffPhase::SourceCommitted,
+            true,
+        ),
+        target_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetAdopt,
+            WorkerHandoffPhase::TargetPrepared,
+            true,
+        ),
+        ..CUT_SOURCE_COMMIT_PROJECTED
+    };
+
+    const CUT_TARGET_SOURCE_COMMIT_STAGED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        target_phase: Some(WorkerHandoffPhase::SourceCommitted),
+        target_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::SourceCommitted,
+            WorkerHandoffPhase::SourceCommitted,
+            true,
+        ),
+        ..CUT_TARGET_BEFORE_SOURCE_COMMIT_STAGE
+    };
+
+    const CUT_TARGET_ADOPTION_PUBLISHED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        head_signer: ExpectedHeadSigner::TargetNode,
+        successor_placement: SuccessorPlacementState::AdoptedUnattached,
+        ..CUT_TARGET_SOURCE_COMMIT_STAGED
+    };
+
+    const CUT_TARGET_ADOPTION_PROJECTED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        target_phase: Some(WorkerHandoffPhase::TargetAdopted),
+        target_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::TargetAdopted,
+            WorkerHandoffPhase::TargetAdopted,
+            true,
+        ),
+        ..CUT_TARGET_ADOPTION_PUBLISHED
+    };
+
+    const CUT_TARGET_STATE_INSTALLED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        portable_state: PortableStateDisposition::Installed,
+        ..CUT_TARGET_ADOPTION_PROJECTED
+    };
+
+    const CUT_TARGET_STATE_PROJECTED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        target_phase: Some(WorkerHandoffPhase::StateInstalled),
+        target_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::StateInstalled,
+            WorkerHandoffPhase::StateInstalled,
+            true,
+        ),
+        ..CUT_TARGET_STATE_INSTALLED
+    };
+
+    const CUT_TARGET_ATTACHMENT_OBSERVED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        successor_placement: SuccessorPlacementState::Attached,
+        target_credential: CredentialDisposition::Consumed,
+        workspace: WorkspaceDisposition::Attached,
+        process: ProcessDisposition::ExactTargetAttached,
+        ..CUT_TARGET_STATE_PROJECTED
+    };
+
+    const CUT_TARGET_ATTACHMENT_PROJECTED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        target_phase: Some(WorkerHandoffPhase::ProcessAttached),
+        target_job: progress_job(
+            DurableJobState::Running,
+            DurableJobPhase::ProcessAttached,
+            WorkerHandoffPhase::ProcessAttached,
+            true,
+        ),
+        ..CUT_TARGET_ATTACHMENT_OBSERVED
+    };
+
+    const CUT_TARGET_COMPLETED: HandoffDurableSnapshot = HandoffDurableSnapshot {
+        target_phase: Some(WorkerHandoffPhase::Completed),
+        target_job: receipt_job(
+            DurableJobState::Completed,
+            DurableJobPhase::Completed,
+            DurableJobResult::AdoptionReceipt,
+        ),
+        target_staging_roots: StagingRootDisposition::TerminalJobOwned,
+        ..CUT_TARGET_ATTACHMENT_PROJECTED
+    };
+
+    const CUT_SOURCE_COMPLETED: HandoffDurableSnapshot = RECOVERED_COMPLETED;
+
+    /// Executable recovery oracle. Several rows may select the same crash seam
+    /// when distinct durable starting states require distinct assertions.
+    pub const HANDOFF_ACCEPTANCE_MATRIX: &[HandoffAcceptanceCase] = &[
+        acceptance_case!(
+            "source_before_export",
+            SourceBeforeExportPublication,
+            Source,
+            FailedBeforeResponse,
+            RetryOriginalRequest,
+            CUT_SOURCE_BEFORE_EXPORT,
+            RECOVERED_COMPLETED,
+            ReusesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "source_export_published",
+            SourceExportPublished,
+            Source,
+            AmbiguousResponse,
+            RestartSource,
+            CUT_SOURCE_EXPORTED,
+            RECOVERED_ABORTED_NO_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "source_before_prepared_projection",
+            SourceBeforePreparedEvidenceProjection,
+            Source,
+            AmbiguousResponse,
+            RestartSource,
+            CUT_SOURCE_BEFORE_PREPARED_PROJECTION,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "source_prepared_projected",
+            SourcePreparedEvidenceProjected,
+            Source,
+            AmbiguousResponse,
+            RestartSource,
+            CUT_SOURCE_PREPARED_PROJECTED_ACTIVE,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "source_before_writer_cut",
+            SourceBeforeWriterCut,
+            Source,
+            AmbiguousResponse,
+            RestartSource,
+            CUT_SOURCE_PREPARED_IDLE,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "source_writer_cut_published",
+            SourceWriterCutPublished,
+            Source,
+            AmbiguousResponse,
+            RestartSource,
+            CUT_SOURCE_WRITER_CUT_PUBLISHED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "source_commit_projected",
+            SourceCommitProjected,
+            Source,
+            AmbiguousResponse,
+            RestartSource,
+            CUT_SOURCE_COMMIT_PROJECTED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "source_abort_before_no_target",
+            SourceBeforeAbortPublication,
+            Source,
+            RecoveryInterrupted,
+            RestartSource,
+            CUT_SOURCE_ABORT_BEFORE_NO_TARGET,
+            RECOVERED_ABORTED_NO_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "source_abort_before_with_target",
+            SourceBeforeAbortPublication,
+            Source,
+            RecoveryInterrupted,
+            RestartSource,
+            CUT_SOURCE_ABORT_BEFORE_WITH_TARGET,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "source_abort_published_no_target",
+            SourceAbortPublished,
+            Source,
+            RecoveryInterrupted,
+            RestartSource,
+            CUT_SOURCE_ABORT_PUBLISHED_NO_TARGET,
+            RECOVERED_ABORTED_NO_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "source_abort_published_with_target",
+            SourceAbortPublished,
+            Source,
+            RecoveryInterrupted,
+            RestartSource,
+            CUT_SOURCE_ABORT_PUBLISHED_WITH_TARGET,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "source_abort_projected_no_target",
+            SourceAbortProjected,
+            Source,
+            RecoveryInterrupted,
+            RestartSource,
+            CUT_SOURCE_ABORT_PROJECTED_NO_TARGET,
+            RECOVERED_ABORTED_NO_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "source_abort_projected_with_target",
+            SourceAbortProjected,
+            Source,
+            RecoveryInterrupted,
+            RestartSource,
+            CUT_SOURCE_ABORT_PROJECTED_WITH_TARGET,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "source_before_completion",
+            SourceBeforeCompletion,
+            Source,
+            AmbiguousResponse,
+            RestartSource,
+            CUT_TARGET_COMPLETED,
+            RECOVERED_COMPLETED,
+            ObservesCompletedReceipt,
+            Completed
+        ),
+        acceptance_case!(
+            "source_completed_before_response",
+            SourceCompletedBeforeResponse,
+            Source,
+            AmbiguousResponse,
+            ObserveOnly,
+            CUT_SOURCE_COMPLETED,
+            RECOVERED_COMPLETED,
+            ObservesCompletedReceipt,
+            Completed
+        ),
+        acceptance_case!(
+            "target_before_preparation_publication",
+            TargetBeforePreparationPublication,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_PREPARATION_BEFORE_PUBLICATION,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_preparation_published",
+            TargetPreparationPublished,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_PREPARATION_PUBLISHED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_before_abort_stage",
+            TargetBeforeAbortEvidenceStage,
+            Target,
+            RecoveryInterrupted,
+            RestartTargetThenSourceRecovery,
+            CUT_TARGET_ABORT_BEFORE_STAGE,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "target_abort_staged",
+            TargetAbortEvidenceStaged,
+            Target,
+            RecoveryInterrupted,
+            RestartTargetThenSourceRecovery,
+            CUT_TARGET_ABORT_STAGED,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "target_abort_verified",
+            TargetAbortEvidenceVerified,
+            Target,
+            RecoveryInterrupted,
+            RestartTargetThenSourceRecovery,
+            CUT_TARGET_ABORT_STAGED,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "target_abort_reservation_released",
+            TargetAbortReservationReleased,
+            Target,
+            RecoveryInterrupted,
+            RestartTargetThenSourceRecovery,
+            CUT_TARGET_ABORT_RESERVATION_RELEASED,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "target_abort_completed",
+            TargetAbortCompletedBeforeResponse,
+            Target,
+            RecoveryInterrupted,
+            RestartTargetThenSourceRecovery,
+            CUT_TARGET_ABORT_COMPLETED,
+            RECOVERED_ABORTED_WITH_TARGET,
+            RejectedByAbortAuthority,
+            AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "target_before_source_commit_stage",
+            TargetBeforeSourceCommitEvidenceStage,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_BEFORE_SOURCE_COMMIT_STAGE,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_source_commit_staged",
+            TargetSourceCommitEvidenceStaged,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_SOURCE_COMMIT_STAGED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_source_commit_verified",
+            TargetSourceCommitEvidenceVerified,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_SOURCE_COMMIT_STAGED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_before_adoption_publication",
+            TargetBeforeAdoptionPublication,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_SOURCE_COMMIT_STAGED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_adoption_published",
+            TargetAdoptionPublished,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_ADOPTION_PUBLISHED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_adoption_projected",
+            TargetAdoptionProjected,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_ADOPTION_PROJECTED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_before_state_install",
+            TargetBeforeStateInstall,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_ADOPTION_PROJECTED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_state_installed",
+            TargetStateInstalled,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_STATE_INSTALLED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_state_install_projected",
+            TargetStateInstallProjected,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_STATE_PROJECTED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_attachment_observed",
+            TargetProcessAttachmentObserved,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_ATTACHMENT_OBSERVED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_attachment_projected",
+            TargetProcessAttachmentProjected,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_ATTACHMENT_PROJECTED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_before_completion",
+            TargetBeforeCompletion,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_ATTACHMENT_PROJECTED,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
+        ),
+        acceptance_case!(
+            "target_completed_before_response",
+            TargetCompletedBeforeResponse,
+            Target,
+            AmbiguousResponse,
+            RestartTargetThenRetrySource,
+            CUT_TARGET_COMPLETED,
+            RECOVERED_COMPLETED,
+            ObservesCompletedReceipt,
+            Completed
+        ),
+    ];
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct HandoffMeasurementRecord {
+        pub schema: String,
+        pub case_id: String,
+        pub workload_profile_id: String,
+        pub source_site_id: String,
+        pub target_site_id: String,
+        pub object_schema_versions: BTreeMap<String, u32>,
+        pub failure_cut: Option<HandoffCrashBoundary>,
+        pub cache_state: String,
+        pub object_count: u64,
+        pub blob_count: u64,
+        pub link_count: u64,
+        pub total_bytes: u64,
+        pub largest_entry_bytes: u64,
+        pub target_present_entries: u64,
+        pub target_present_bytes: u64,
+        pub observed: HandoffObservedMeasurements,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct HandoffObservedMeasurements {
+        pub closure_calculation_ms: u64,
+        pub staging_and_transfer_ms: u64,
+        pub closure_verification_ms: u64,
+        pub source_publication_ms: u64,
+        pub target_adoption_ms: u64,
+        pub checkpoint_load_ms: u64,
+        pub event_replay_ms: Option<u64>,
+        pub project_materialization_ms: Option<u64>,
+        pub worker_attach_recovery_ms: Option<u64>,
+        pub total_handoff_recovery_ms: u64,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct HandoffMeasurementReport {
+        pub schema: String,
+        pub records: Vec<HandoffMeasurementRecord>,
+    }
+
+    impl HandoffMeasurementReport {
+        pub const MAX_RECORDS: usize = 128;
+        pub const MAX_ENCODED_BYTES: usize = 256 * 1024;
+
+        pub fn validate(&self) -> Result<()> {
+            if self.schema != "ryeos.worker_handoff_qualification_report.v1" {
+                anyhow::bail!("unknown worker handoff qualification report schema");
+            }
+            if self.records.is_empty() || self.records.len() > Self::MAX_RECORDS {
+                anyhow::bail!("worker handoff qualification report has an invalid record count");
+            }
+            for record in &self.records {
+                if record.schema != "ryeos.worker_handoff_qualification_record.v1" {
+                    anyhow::bail!("unknown worker handoff qualification record schema");
+                }
+                for (label, value) in [
+                    ("case id", record.case_id.as_str()),
+                    ("workload profile", record.workload_profile_id.as_str()),
+                    ("source site", record.source_site_id.as_str()),
+                    ("target site", record.target_site_id.as_str()),
+                    ("cache state", record.cache_state.as_str()),
+                ] {
+                    if value.is_empty() || value.len() > 256 {
+                        anyhow::bail!("handoff measurement {label} is empty or unbounded");
+                    }
+                }
+                if record.object_schema_versions.is_empty()
+                    || record.object_schema_versions.len() > 64
+                    || record.total_bytes < record.largest_entry_bytes
+                    || record.target_present_entries > record.object_count + record.blob_count
+                    || record.target_present_bytes > record.total_bytes
+                {
+                    anyhow::bail!("handoff measurement closure summary is inconsistent");
+                }
+            }
+            let encoded = lillux::canonical_json(&serde_json::to_value(self)?)?;
+            if encoded.len() > Self::MAX_ENCODED_BYTES {
+                anyhow::bail!("worker handoff qualification report exceeds its byte bound");
+            }
+            Ok(())
+        }
+
+        pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
+            self.validate()?;
+            Ok(lillux::canonical_json(&serde_json::to_value(self)?)?.into_bytes())
+        }
+    }
+
+    /// A one-shot, test-owned gate. The selected boundary writes one bounded
+    /// record to an inherited pipe and then parks forever so the parent can
+    /// SIGKILL the daemon without running request or attempt destructors.
+    pub struct HandoffPhaseGate {
+        selected: HandoffCrashBoundary,
+        writer: Mutex<std::fs::File>,
+    }
+
+    impl HandoffPhaseGate {
+        pub fn new(selected: HandoffCrashBoundary, writer: std::fs::File) -> Self {
+            Self {
+                selected,
+                writer: Mutex::new(writer),
+            }
+        }
+
+        pub fn reach(&self, boundary: HandoffCrashBoundary) -> Result<()> {
+            if boundary != self.selected {
+                return Ok(());
+            }
+            let mut writer = self
+                .writer
+                .lock()
+                .map_err(|_| anyhow::anyhow!("handoff phase-gate writer lock poisoned"))?;
+            writer
+                .write_all(format!("{boundary}\n").as_bytes())
+                .context("write handoff phase-cut evidence")?;
+            writer.flush().context("flush handoff phase-cut evidence")?;
+            drop(writer);
+            loop {
+                std::thread::park();
+            }
         }
     }
 }
@@ -415,6 +1993,13 @@ impl WorkerSessionHandoffProgress {
         Ok(progress)
     }
 
+    pub fn source_exported(operation_id: String) -> anyhow::Result<Self> {
+        let mut progress = Self::planned(operation_id)?;
+        progress.phase = WorkerHandoffPhase::SourceExported;
+        progress.validate()?;
+        Ok(progress)
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.schema != HANDOFF_PROGRESS_SCHEMA {
             bail!("worker handoff progress is not the exact current contract");
@@ -441,14 +2026,14 @@ impl WorkerSessionHandoffProgress {
             label_value("credential reservation", reservation)?;
         }
         if (self.phase == WorkerHandoffPhase::TargetPrepared
-            || self.phase >= WorkerHandoffPhase::SourceCommitted)
+            || self.phase.successor_is_only_authorized_writer())
             && (self.placement_attestation_hash.is_none()
                 || self.target_runtime_seed_hash.is_none()
                 || self.credential_reservation_id.is_none())
         {
             bail!("target-prepared handoff progress is incomplete");
         }
-        if self.phase >= WorkerHandoffPhase::SourceCommitted
+        if self.phase.successor_is_only_authorized_writer()
             && (self.writer_grant_hash.is_none() || self.target_chain_head_hash.is_none())
         {
             bail!("source-committed handoff progress is incomplete");
@@ -2277,6 +3862,185 @@ mod tests {
     }
 
     #[test]
+    fn source_exported_progress_is_an_exact_pre_cut_boundary() {
+        let progress = WorkerSessionHandoffProgress::source_exported("1".repeat(64)).unwrap();
+        assert_eq!(progress.phase, WorkerHandoffPhase::SourceExported);
+        assert!(progress.placement_attestation_hash.is_none());
+        assert!(progress.writer_grant_hash.is_none());
+        progress.validate().unwrap();
+    }
+
+    #[test]
+    fn every_handoff_phase_has_one_append_authority_lane() {
+        for phase in WorkerHandoffPhase::ALL {
+            assert_ne!(
+                phase.source_is_only_authorized_writer(),
+                phase.successor_is_only_authorized_writer(),
+                "{} must belong to exactly one authority lane",
+                phase.as_str()
+            );
+            if phase.target_has_adopted_writer_grant() {
+                assert!(phase.successor_is_only_authorized_writer());
+            }
+        }
+    }
+
+    #[test]
+    fn crash_boundary_inventory_covers_every_exact_seam_once() {
+        use std::collections::BTreeSet;
+
+        use test_support::{HANDOFF_CRASH_BOUNDARY_SPECS, HandoffCrashBoundary};
+
+        let covered = HANDOFF_CRASH_BOUNDARY_SPECS
+            .iter()
+            .map(|spec| spec.boundary)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(covered.len(), HANDOFF_CRASH_BOUNDARY_SPECS.len());
+        assert_eq!(
+            covered,
+            HandoffCrashBoundary::ALL
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+        );
+        serde_json::to_value(HANDOFF_CRASH_BOUNDARY_SPECS).unwrap();
+    }
+
+    #[test]
+    fn qualification_matrix_covers_every_seam_with_unique_scenarios() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        use test_support::{
+            HANDOFF_ACCEPTANCE_MATRIX, HANDOFF_CRASH_BOUNDARY_SPECS, HandoffCrashBoundary,
+        };
+
+        let specs = HANDOFF_CRASH_BOUNDARY_SPECS
+            .iter()
+            .map(|spec| (spec.boundary, spec.interrupted_node))
+            .collect::<BTreeMap<_, _>>();
+        let mut ids = BTreeSet::new();
+        let mut covered = BTreeSet::new();
+        for case in HANDOFF_ACCEPTANCE_MATRIX {
+            assert!(ids.insert(case.case_id), "duplicate case {}", case.case_id);
+            covered.insert(case.boundary);
+            assert_eq!(
+                specs.get(&case.boundary),
+                Some(&case.interrupted_node),
+                "{} interrupts the wrong node",
+                case.case_id
+            );
+        }
+        assert_eq!(
+            covered,
+            HandoffCrashBoundary::ALL
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+        );
+
+        let encoded = serde_json::to_vec(HANDOFF_ACCEPTANCE_MATRIX).unwrap();
+        assert!(encoded.len() < 128 * 1024, "acceptance oracle is unbounded");
+    }
+
+    #[test]
+    fn qualification_matrix_never_derives_authority_from_progress_testimony() {
+        use test_support::{
+            AppendAuthorityLane, ExpectedHeadSigner, HANDOFF_ACCEPTANCE_MATRIX,
+            SuccessorPlacementState,
+        };
+
+        let mut observed_unadopted_source_commit = false;
+        for case in HANDOFF_ACCEPTANCE_MATRIX {
+            for snapshot in [case.at_cut, case.after_recovery] {
+                if snapshot.head_signer == ExpectedHeadSigner::TargetNode {
+                    assert_eq!(
+                        snapshot.append_authority,
+                        AppendAuthorityLane::ExactSuccessorGrant,
+                        "{}",
+                        case.case_id
+                    );
+                }
+                if snapshot.append_authority == AppendAuthorityLane::SourcePlacement {
+                    assert_eq!(
+                        snapshot.head_signer,
+                        ExpectedHeadSigner::SourceNode,
+                        "{}",
+                        case.case_id
+                    );
+                }
+                if snapshot.successor_placement == SuccessorPlacementState::PreparedOnly {
+                    assert_eq!(
+                        snapshot.append_authority,
+                        AppendAuthorityLane::SourcePlacement,
+                        "preparation must not grant append authority in {}",
+                        case.case_id
+                    );
+                }
+                if snapshot.target_phase == Some(WorkerHandoffPhase::SourceCommitted)
+                    && snapshot.head_signer == ExpectedHeadSigner::SourceNode
+                {
+                    observed_unadopted_source_commit = true;
+                }
+            }
+        }
+        assert!(
+            observed_unadopted_source_commit,
+            "the oracle must prove target progress can testify to a source cut without becoming head authority"
+        );
+    }
+
+    #[test]
+    fn qualification_matrix_jobs_and_terminal_resources_are_exact() {
+        use test_support::{
+            CredentialDisposition, DurableJobExpectation, DurableJobPhase, DurableJobResult,
+            DurableJobState, HANDOFF_ACCEPTANCE_MATRIX, StagingRootDisposition,
+            WorkspaceDisposition,
+        };
+
+        fn validate_job(case_id: &str, job: DurableJobExpectation) {
+            if job.state == DurableJobState::Absent {
+                assert_eq!(job.phase, DurableJobPhase::Absent, "{case_id}");
+                assert_eq!(job.result, DurableJobResult::Absent, "{case_id}");
+                assert!(!job.active_attempt, "{case_id}");
+            }
+            if matches!(
+                job.state,
+                DurableJobState::Completed | DurableJobState::Cancelled
+            ) {
+                assert!(!job.active_attempt, "terminal attempt in {case_id}");
+                assert!(
+                    matches!(
+                        job.result,
+                        DurableJobResult::AdoptionReceipt | DurableJobResult::AbortReceipt
+                    ),
+                    "terminal job has no receipt in {case_id}"
+                );
+            }
+        }
+
+        for case in HANDOFF_ACCEPTANCE_MATRIX {
+            for snapshot in [case.at_cut, case.after_recovery] {
+                validate_job(case.case_id, snapshot.source_job);
+                validate_job(case.case_id, snapshot.target_job);
+            }
+            let settled = case.after_recovery;
+            assert_ne!(settled.target_credential, CredentialDisposition::Reserved);
+            assert_ne!(
+                settled.workspace,
+                WorkspaceDisposition::EphemeralPreparation
+            );
+            assert_ne!(
+                settled.source_staging_roots,
+                StagingRootDisposition::ActiveJobOwned
+            );
+            assert_ne!(
+                settled.target_staging_roots,
+                StagingRootDisposition::ActiveJobOwned
+            );
+        }
+    }
+
+    #[test]
     fn abort_response_is_bound_to_one_operation_and_chain() {
         let request = WorkerPlacementAbortRequest {
             operation_id: "1".repeat(64),
@@ -2548,5 +4312,53 @@ mod tests {
                 .validate_capsule_transition(&source.project_authority)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn qualification_measurement_report_is_bounded_and_canonical() {
+        use crate::worker_handoff::test_support::{
+            HandoffMeasurementRecord, HandoffMeasurementReport, HandoffObservedMeasurements,
+        };
+
+        let report = HandoffMeasurementReport {
+            schema: "ryeos.worker_handoff_qualification_report.v1".into(),
+            records: vec![HandoffMeasurementRecord {
+                schema: "ryeos.worker_handoff_qualification_record.v1".into(),
+                case_id: "portable_success".into(),
+                workload_profile_id: "portable_framed_worker_v1".into(),
+                source_site_id: "site:a".into(),
+                target_site_id: "site:b".into(),
+                object_schema_versions: BTreeMap::from([("worker_state_manifest".into(), 1)]),
+                failure_cut: None,
+                cache_state: "cold".into(),
+                object_count: 3,
+                blob_count: 2,
+                link_count: 4,
+                total_bytes: 4096,
+                largest_entry_bytes: 2048,
+                target_present_entries: 0,
+                target_present_bytes: 0,
+                observed: HandoffObservedMeasurements {
+                    closure_calculation_ms: 1,
+                    staging_and_transfer_ms: 2,
+                    closure_verification_ms: 3,
+                    source_publication_ms: 4,
+                    target_adoption_ms: 5,
+                    checkpoint_load_ms: 1,
+                    event_replay_ms: None,
+                    project_materialization_ms: None,
+                    worker_attach_recovery_ms: None,
+                    total_handoff_recovery_ms: 15,
+                },
+            }],
+        };
+        let first = report.canonical_bytes().unwrap();
+        assert_eq!(first, report.canonical_bytes().unwrap());
+        assert!(first.len() <= HandoffMeasurementReport::MAX_ENCODED_BYTES);
+
+        let mut unbounded = report;
+        unbounded.records =
+            vec![unbounded.records[0].clone(); HandoffMeasurementReport::MAX_RECORDS + 1];
+        assert!(unbounded.validate().is_err());
     }
 }
