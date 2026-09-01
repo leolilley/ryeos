@@ -35,6 +35,8 @@ const MAX_MANAGED_TAR_EXTENSION_BYTES: u64 = ryeos_state::objects::MAX_EXTERNAL_
 pub struct Request {
     pub activation_ref: String,
     pub mode: AcquisitionMode,
+    #[serde(default)]
+    pub offline_archive_root: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,7 +44,8 @@ pub struct Request {
 pub struct Response {
     pub job_id: String,
     pub activation_id: String,
-    pub receipt_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt_hash: Option<String>,
     pub consumer_ref: String,
     pub state: String,
     pub idempotent: bool,
@@ -81,12 +84,11 @@ impl<'a> ActivationReceiptAuthority<'a> {
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     let operator = ryeos_app::operator_external_content::require_configured_operator(&state, &ctx)?;
-    let activation =
-        ryeos_app::managed_external_content::resolve_activation(&state, &req.activation_ref)?;
-    let policy = managed_policy(&state)?;
-    if req.mode == AcquisitionMode::Online && !policy.allow_online {
-        bail!("node policy does not permit online managed external-content acquisition");
-    }
+    let activation = ryeos_app::managed_external_content::resolve_activation(
+        &state,
+        &req.activation_ref,
+        req.mode,
+    )?;
     let operator_authority_digest =
         ryeos_app::operator_external_content::configured_operator_authority_digest(
             &state, &operator,
@@ -97,47 +99,177 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         operator_authority_digest,
         external_content_policy(&state)?,
         req.mode,
+        req.offline_archive_root,
     )?;
-    Ok(serde_json::to_value(
-        execute_operation(state, activation, operation, true).await?,
-    )?)
+    Ok(serde_json::to_value(submit_operation(
+        state, activation, operation,
+    )?)?)
 }
 
-async fn execute_operation(
+struct SubmittedActivation {
+    job: ryeos_state::SyncJobRecord,
+    attempt_id: Option<String>,
+    reused: bool,
+}
+
+fn reserve_activation_job(
+    state_store: &ryeos_app::state_store::StateStore,
+    job_id: &str,
+    operation: &Value,
+    max_attempts: u64,
+) -> Result<(ryeos_state::SyncJobRecord, bool)> {
+    state_store.with_state_db(|db| {
+        let (job, reused) = match db.get_sync_job(job_id)? {
+            Some(existing) => (existing, true),
+            None => (
+                db.create_sync_job(&ryeos_state::NewSyncJob {
+                    job_id: job_id.to_owned(),
+                    operation_type: MANAGED_ACTIVATION_OPERATION.to_owned(),
+                    operation: operation.clone(),
+                    peer: None,
+                    roots: Vec::new(),
+                    heads: Vec::new(),
+                    max_attempts,
+                })?,
+                false,
+            ),
+        };
+        if job.operation != *operation {
+            bail!("managed activation job id is retained for another canonical operation");
+        }
+        Ok((job, reused))
+    })
+}
+
+fn claim_activation_attempt(
+    state_store: &ryeos_app::state_store::StateStore,
+    job_id: &str,
+    operation: &Value,
+    reused: bool,
+) -> Result<SubmittedActivation> {
+    state_store.with_state_db(|db| {
+        let mut job = db
+            .get_sync_job(job_id)?
+            .ok_or_else(|| anyhow::anyhow!("managed activation job disappeared before claim"))?;
+        if job.operation != *operation {
+            bail!("managed activation job changed before attempt claim");
+        }
+        let has_running_attempt = db
+            .list_sync_job_attempts(job_id)?
+            .iter()
+            .any(|attempt| attempt.state == ryeos_state::SyncJobAttemptState::Running);
+        let attempt_id = if matches!(
+            job.state,
+            ryeos_state::SyncJobState::Planned
+                | ryeos_state::SyncJobState::Running
+                | ryeos_state::SyncJobState::Retryable
+        ) && !has_running_attempt
+        {
+            if job.attempt_count >= job.max_attempts {
+                db.update_sync_job(
+                    job_id,
+                    &ryeos_state::SyncJobUpdate {
+                        state: ryeos_state::SyncJobState::Failed,
+                        phase: "attempts_exhausted".to_owned(),
+                        roots: None,
+                        heads: None,
+                        uploaded_hashes: job.uploaded_hashes.clone(),
+                        fetched_hashes: job.fetched_hashes.clone(),
+                        last_error: Some(
+                            "managed activation exhausted its admitted attempts".to_owned(),
+                        ),
+                        result: job.result.clone(),
+                    },
+                )?;
+                job = db
+                    .get_sync_job(job_id)?
+                    .ok_or_else(|| anyhow::anyhow!("terminalized activation disappeared"))?;
+                None
+            } else {
+                let attempt_id = format!(
+                    "external-content-activation-attempt:{}",
+                    uuid::Uuid::new_v4()
+                );
+                db.create_sync_job_attempt(&ryeos_state::NewSyncJobAttempt {
+                    attempt_id: attempt_id.clone(),
+                    job_id: job_id.to_owned(),
+                    worker_id: Some("managed-external-content".to_owned()),
+                    phase: "acquiring".to_owned(),
+                })?;
+                job = db
+                    .get_sync_job(job_id)?
+                    .ok_or_else(|| anyhow::anyhow!("claimed activation disappeared"))?;
+                Some(attempt_id)
+            }
+        } else {
+            None
+        };
+        Ok(SubmittedActivation {
+            job,
+            attempt_id,
+            reused,
+        })
+    })
+}
+
+fn submit_operation(
     state: Arc<AppState>,
     activation: ResolvedManagedExternalContentActivation,
     operation: ManagedActivationJobOperation,
-    create_if_absent: bool,
 ) -> Result<Response> {
-    let operation_digest = ryeos_state::objects::canonical_value_digest(&operation.to_value()?)?;
-    let job_id = activation_job_id(&operation_digest);
-    let directories = tokio::task::spawn_blocking({
-        let state = Arc::clone(&state);
-        move || open_activation_directories(&state, &operation_digest)
-    })
-    .await
-    .context("managed activation directory task panicked")??;
+    Ok(submit_operation_with_status(state, activation, operation)?.response)
+}
 
-    let existing = state.state_store.with_state_db(|db| {
-        if let Some(job) = db.get_sync_job(&job_id)? {
-            return Ok(job);
-        }
-        if !create_if_absent {
-            bail!("managed activation recovery job disappeared");
-        }
-        db.create_sync_job(&ryeos_state::NewSyncJob {
-            job_id: job_id.clone(),
-            operation_type: MANAGED_ACTIVATION_OPERATION.to_owned(),
-            operation: operation.to_value()?,
-            peer: None,
-            roots: Vec::new(),
-            heads: Vec::new(),
-            max_attempts: managed_policy(&state)?.max_attempts,
+struct ActivationSubmission {
+    response: Response,
+    attempt_started: bool,
+}
+
+/// Proof that the retained invocation still agrees with the node's current
+/// configured-operator and external-content policy authority. Receipt folding
+/// accepts this token instead of independently supplied activation/operation
+/// values so no recovery caller can complete an old active job before the
+/// revocation check.
+struct CurrentActivationAuthority<'a> {
+    activation: &'a ResolvedManagedExternalContentActivation,
+    operation: &'a ManagedActivationJobOperation,
+}
+
+impl<'a> CurrentActivationAuthority<'a> {
+    fn validate(
+        state: &AppState,
+        activation: &'a ResolvedManagedExternalContentActivation,
+        operation: &'a ManagedActivationJobOperation,
+    ) -> Result<Self> {
+        let operator_authority_digest =
+            ryeos_app::operator_external_content::configured_operator_authority_digest(
+                state,
+                &operation.operator_fingerprint,
+            )?;
+        operation.validate_current(
+            activation,
+            external_content_policy(state)?,
+            &operator_authority_digest,
+        )?;
+        Ok(Self {
+            activation,
+            operation,
         })
-    })?;
-    if existing.operation != operation.to_value()? {
-        bail!("managed activation job id is retained for another canonical operation");
     }
+}
+
+fn submit_operation_with_status(
+    state: Arc<AppState>,
+    activation: ResolvedManagedExternalContentActivation,
+    operation: ManagedActivationJobOperation,
+) -> Result<ActivationSubmission> {
+    let operation_value = operation.to_value()?;
+    let operation_digest = ryeos_state::objects::canonical_value_digest(&operation_value)?;
+    let job_id = activation_job_id(&operation_digest);
+    let max_attempts = managed_policy(&state)?.max_attempts;
+    let (existing, reused) =
+        reserve_activation_job(&state.state_store, &job_id, &operation_value, max_attempts)?;
+
     if existing.state == ryeos_state::SyncJobState::Completed {
         let mut response: Response = serde_json::from_value(
             existing
@@ -146,122 +278,231 @@ async fn execute_operation(
         )?;
         validate_completed_activation(&state, &activation, &operation, &job_id, &response)?;
         response.idempotent = true;
-        if let Err(error) = tokio::task::spawn_blocking(move || cleanup_staging(directories))
-            .await
-            .context("completed activation cleanup task panicked")?
-        {
-            tracing::warn!(%error, %job_id, "idempotent managed activation retained rebuildable staging");
-        }
-        return Ok(response);
+        return Ok(ActivationSubmission {
+            response,
+            attempt_started: false,
+        });
     }
     if matches!(
         existing.state,
         ryeos_state::SyncJobState::Failed | ryeos_state::SyncJobState::Cancelled
     ) {
-        let state_name = existing.state.as_str().to_owned();
-        let diagnostic = existing
-            .last_error
-            .clone()
-            .unwrap_or_else(|| "no retained diagnostic".to_owned());
-        cleanup_terminal_staging(directories, &job_id).await;
         bail!(
             "managed activation job {} is terminal in state {}: {}",
             job_id,
-            state_name,
-            diagnostic
+            existing.state.as_str(),
+            existing
+                .last_error
+                .as_deref()
+                .unwrap_or("no retained diagnostic")
         );
     }
-    if let Err(error) = (|| {
-        let operator_authority_digest =
-            ryeos_app::operator_external_content::configured_operator_authority_digest(
-                &state,
-                &operation.operator_fingerprint,
-            )?;
-        operation.validate_current(
-            &activation,
-            external_content_policy(&state)?,
-            &operator_authority_digest,
-        )
-    })() {
-        let detail = bounded_error(&format!(
-            "retained managed activation no longer matches current signed or node authority: {error:#}"
-        ));
-        state.state_store.with_state_db(|db| {
-            db.update_sync_job(
-                &job_id,
-                &ryeos_state::SyncJobUpdate {
-                    state: ryeos_state::SyncJobState::Failed,
-                    phase: "authority_changed".to_owned(),
-                    roots: None,
-                    heads: None,
-                    uploaded_hashes: existing.uploaded_hashes.clone(),
-                    fetched_hashes: existing.fetched_hashes.clone(),
-                    last_error: Some(detail),
-                    result: existing.result.clone(),
-                },
-            )
-        })?;
-        cleanup_terminal_staging(directories, &job_id).await;
-        return Err(error);
+
+    let has_running_attempt = state.state_store.with_state_db(|db| {
+        Ok(db
+            .list_sync_job_attempts(&job_id)?
+            .iter()
+            .any(|attempt| attempt.state == ryeos_state::SyncJobAttemptState::Running))
+    })?;
+    if !has_running_attempt {
+        let current = match CurrentActivationAuthority::validate(&state, &activation, &operation) {
+            Ok(current) => current,
+            Err(error) => {
+                let detail = bounded_error(&format!(
+                    "retained managed activation no longer matches current signed or node authority: {error:#}"
+                ));
+                state.state_store.with_state_db(|db| {
+                    let latest = db.get_sync_job(&job_id)?.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "managed activation job disappeared before authority terminalization"
+                        )
+                    })?;
+                    if latest.operation != operation_value {
+                        bail!(
+                            "managed activation operation changed before authority terminalization"
+                        );
+                    }
+                    db.update_sync_job(
+                        &job_id,
+                        &ryeos_state::SyncJobUpdate {
+                            state: ryeos_state::SyncJobState::Failed,
+                            phase: "authority_changed".to_owned(),
+                            roots: None,
+                            heads: None,
+                            uploaded_hashes: latest.uploaded_hashes,
+                            fetched_hashes: latest.fetched_hashes,
+                            last_error: Some(detail),
+                            result: latest.result,
+                        },
+                    )
+                })?;
+                return Err(error);
+            }
+        };
+        if let Some(mut response) = complete_job_from_current_receipt(
+            ActivationReceiptAuthority::from_state(&state),
+            current,
+            &job_id,
+            &existing,
+        )? {
+            response.idempotent = true;
+            return Ok(ActivationSubmission {
+                response,
+                attempt_started: false,
+            });
+        }
     }
 
+    let submitted =
+        claim_activation_attempt(&state.state_store, &job_id, &operation_value, reused)?;
+
+    if submitted.job.state == ryeos_state::SyncJobState::Completed {
+        let mut response: Response = serde_json::from_value(
+            submitted
+                .job
+                .result
+                .ok_or_else(|| anyhow::anyhow!("completed activation job has no result"))?,
+        )?;
+        validate_completed_activation(&state, &activation, &operation, &job_id, &response)?;
+        response.idempotent = true;
+        return Ok(ActivationSubmission {
+            response,
+            attempt_started: false,
+        });
+    }
+    if matches!(
+        submitted.job.state,
+        ryeos_state::SyncJobState::Failed | ryeos_state::SyncJobState::Cancelled
+    ) {
+        bail!(
+            "managed activation job {} is terminal in state {}: {}",
+            job_id,
+            submitted.job.state.as_str(),
+            submitted
+                .job
+                .last_error
+                .as_deref()
+                .unwrap_or("no retained diagnostic")
+        );
+    }
+
+    let response = Response {
+        job_id: job_id.clone(),
+        activation_id: operation.activation_id.clone(),
+        receipt_hash: None,
+        consumer_ref: operation.consumer_ref.clone(),
+        state: submitted.job.state.as_str().to_owned(),
+        idempotent: submitted.reused,
+    };
+    let attempt_started = submitted.attempt_id.is_some();
+    if let Some(attempt_id) = submitted.attempt_id {
+        let task_state = Arc::clone(&state);
+        let task_job_id = job_id.clone();
+        tokio::spawn(async move {
+            if let Err(error) =
+                execute_claimed_operation(task_state, activation, operation, attempt_id).await
+            {
+                tracing::warn!(
+                    job_id = %task_job_id,
+                    %error,
+                    "submitted managed activation attempt did not complete"
+                );
+            }
+        });
+    }
+    Ok(ActivationSubmission {
+        response,
+        attempt_started,
+    })
+}
+
+async fn execute_claimed_operation(
+    state: Arc<AppState>,
+    activation: ResolvedManagedExternalContentActivation,
+    operation: ManagedActivationJobOperation,
+    attempt_id: String,
+) -> Result<Response> {
+    let operation_value = operation.to_value()?;
+    let operation_digest = ryeos_state::objects::canonical_value_digest(&operation_value)?;
+    let job_id = activation_job_id(&operation_digest);
+    let existing = state.state_store.with_state_db(|db| {
+        let job = db
+            .get_sync_job(&job_id)?
+            .ok_or_else(|| anyhow::anyhow!("claimed managed activation job disappeared"))?;
+        if job.operation != operation_value {
+            bail!("claimed managed activation operation changed");
+        }
+        let attempt = db
+            .get_sync_job_attempt(&attempt_id)?
+            .ok_or_else(|| anyhow::anyhow!("claimed managed activation attempt disappeared"))?;
+        if attempt.job_id != job_id
+            || attempt.state != ryeos_state::SyncJobAttemptState::Running
+            || job.state != ryeos_state::SyncJobState::Running
+        {
+            bail!("managed activation task no longer owns its exact running attempt");
+        }
+        Ok(job)
+    })?;
+
+    let current = match CurrentActivationAuthority::validate(&state, &activation, &operation) {
+        Ok(current) => current,
+        Err(error) => {
+            let detail = bounded_error(&format!(
+                "retained managed activation no longer matches current signed or node authority: {error:#}"
+            ));
+            settle_attempt(
+                &state,
+                &job_id,
+                &attempt_id,
+                ryeos_state::SyncJobAttemptState::Failed,
+                ryeos_state::SyncJobState::Failed,
+                "authority_changed",
+                None,
+                Some(detail),
+                existing.result.clone(),
+            )?;
+            cleanup_retained_terminal_staging(&state, &job_id, &operation_value).await;
+            return Err(error);
+        }
+    };
+
     // The realization head is durable authority independent of the local
-    // attempt ledger. Fold an exact current receipt into this job before
-    // creating or exhausting another attempt. This closes the crash window
-    // between head publication and attempt settlement and makes later
-    // policy/operator-keyed invocations genuinely contact-free.
-    if let Some(response) = complete_job_from_current_receipt(
+    // attempt ledger. Fold an exact current receipt into this already-claimed
+    // attempt before any acquisition contact. This closes the crash window
+    // between head publication and attempt settlement; the submission path
+    // performs the same fold before consuming an otherwise exhausted retry.
+    if let Some(response) = complete_claimed_attempt_from_current_receipt(
         ActivationReceiptAuthority::from_state(&state),
-        &activation,
-        &operation,
+        current,
         &job_id,
+        &attempt_id,
         &existing,
     )? {
-        cleanup_terminal_staging(directories, &job_id).await;
+        cleanup_retained_terminal_staging(&state, &job_id, &operation_value).await;
         return Ok(response);
     }
 
-    let attempt_id = format!(
-        "external-content-activation-attempt:{}",
-        uuid::Uuid::new_v4()
-    );
-    if let Err(error) = state.state_store.with_state_db(|db| {
-        db.create_sync_job_attempt(&ryeos_state::NewSyncJobAttempt {
-            attempt_id: attempt_id.clone(),
-            job_id: job_id.clone(),
-            worker_id: Some("managed-external-content".to_owned()),
-            phase: "acquiring".to_owned(),
-        })?;
-        Ok(())
-    }) {
-        let latest = state
-            .state_store
-            .with_state_db(|db| db.get_sync_job(&job_id))?
-            .context("managed activation job disappeared")?;
-        let terminalized = latest.attempt_count >= latest.max_attempts
-            && latest.state == ryeos_state::SyncJobState::Retryable;
-        if terminalized {
-            state.state_store.with_state_db(|db| {
-                db.update_sync_job(
-                    &job_id,
-                    &ryeos_state::SyncJobUpdate {
-                        state: ryeos_state::SyncJobState::Failed,
-                        phase: "attempts_exhausted".to_owned(),
-                        roots: None,
-                        heads: None,
-                        uploaded_hashes: latest.uploaded_hashes,
-                        fetched_hashes: latest.fetched_hashes,
-                        last_error: Some(
-                            "managed activation exhausted its admitted attempts".to_owned(),
-                        ),
-                        result: latest.result,
-                    },
-                )
-            })?;
-            cleanup_terminal_staging(directories, &job_id).await;
+    let directories = match tokio::task::spawn_blocking({
+        let state = Arc::clone(&state);
+        move || open_activation_directories(&state, &operation_digest)
+    })
+    .await
+    .context("managed activation directory task panicked")?
+    {
+        Ok(directories) => directories,
+        Err(error) => {
+            let terminal = settle_retryable_attempt_failure(
+                &state,
+                &job_id,
+                &attempt_id,
+                bounded_error(&format!("{error:#}")),
+            )?;
+            if terminal {
+                cleanup_retained_terminal_staging(&state, &job_id, &operation_value).await;
+            }
+            return Err(error);
         }
-        return Err(error);
-    }
+    };
 
     let run = run_attempt(Arc::clone(&state), &activation, &operation, &directories).await;
     match run {
@@ -269,7 +510,7 @@ async fn execute_operation(
             let response = Response {
                 job_id: job_id.clone(),
                 activation_id: publication.activation_id,
-                receipt_hash: publication.receipt_hash,
+                receipt_hash: Some(publication.receipt_hash.clone()),
                 consumer_ref: activation.document.consumer_ref,
                 state: "completed".to_owned(),
                 idempotent: publication.idempotent,
@@ -282,7 +523,7 @@ async fn execute_operation(
                 ryeos_state::SyncJobAttemptState::Completed,
                 ryeos_state::SyncJobState::Completed,
                 "completed",
-                Some(response.receipt_hash.clone()),
+                Some(publication.receipt_hash),
                 None,
                 Some(result),
             )?;
@@ -294,26 +535,7 @@ async fn execute_operation(
         }
         Err(error) => {
             let detail = bounded_error(&format!("{error:#}"));
-            let latest = state
-                .state_store
-                .with_state_db(|db| db.get_sync_job(&job_id))?
-                .context("managed activation job disappeared before failure settlement")?;
-            let terminal = latest.attempt_count >= latest.max_attempts;
-            settle_attempt(
-                &state,
-                &job_id,
-                &attempt_id,
-                ryeos_state::SyncJobAttemptState::Failed,
-                if terminal {
-                    ryeos_state::SyncJobState::Failed
-                } else {
-                    ryeos_state::SyncJobState::Retryable
-                },
-                if terminal { "failed" } else { "retryable" },
-                None,
-                Some(detail),
-                latest.result,
-            )?;
+            let terminal = settle_retryable_attempt_failure(&state, &job_id, &attempt_id, detail)?;
             if terminal {
                 cleanup_terminal_staging(directories, &job_id).await;
             }
@@ -349,11 +571,14 @@ fn validate_completed_activation_with_authority(
     job_id: &str,
     response: &Response,
 ) -> Result<()> {
+    let Some(receipt_hash) = response.receipt_hash.as_deref() else {
+        bail!("completed managed activation result has no receipt hash");
+    };
     if response.job_id != job_id
         || response.activation_id != operation.activation_id
         || response.consumer_ref != activation.document.consumer_ref
         || response.state != "completed"
-        || !lillux::valid_hash(&response.receipt_hash)
+        || !lillux::valid_hash(receipt_hash)
     {
         bail!("completed managed activation result contradicts its durable operation");
     }
@@ -375,7 +600,7 @@ fn validate_completed_activation_with_authority(
             )
         })?
         .ok_or_else(|| anyhow::anyhow!("completed managed activation head is absent"))?;
-    if head.target_hash != response.receipt_hash {
+    if head.target_hash != receipt_hash {
         bail!("completed managed activation result is not the current receipt head");
     }
     let receipt_value = cas
@@ -440,11 +665,12 @@ fn validate_completed_activation_with_authority(
 
 fn complete_job_from_current_receipt(
     authority: ActivationReceiptAuthority<'_>,
-    activation: &ResolvedManagedExternalContentActivation,
-    operation: &ManagedActivationJobOperation,
+    current: CurrentActivationAuthority<'_>,
     job_id: &str,
     existing: &ryeos_state::SyncJobRecord,
 ) -> Result<Option<Response>> {
+    let activation = current.activation;
+    let operation = current.operation;
     let Some(head) = authority.state_store.with_state_db(|db| {
         db.read_generic_head_ref(
             ryeos_state::objects::EXTERNAL_CONTENT_ACTIVATION_HEAD_NAMESPACE,
@@ -457,7 +683,7 @@ fn complete_job_from_current_receipt(
     let response = Response {
         job_id: job_id.to_owned(),
         activation_id: operation.activation_id.clone(),
-        receipt_hash: head.target_hash,
+        receipt_hash: Some(head.target_hash.clone()),
         consumer_ref: activation.document.consumer_ref.clone(),
         state: "completed".to_owned(),
         idempotent: true,
@@ -472,7 +698,62 @@ fn complete_job_from_current_receipt(
             &ryeos_state::SyncJobUpdate {
                 state: ryeos_state::SyncJobState::Completed,
                 phase: "completed_from_authoritative_receipt".to_owned(),
-                roots: Some(vec![response.receipt_hash.clone()]),
+                roots: Some(vec![head.target_hash]),
+                heads: None,
+                uploaded_hashes: existing.uploaded_hashes.clone(),
+                fetched_hashes: existing.fetched_hashes.clone(),
+                last_error: None,
+                result: Some(result),
+            },
+        )
+    })?;
+    Ok(Some(response))
+}
+
+fn complete_claimed_attempt_from_current_receipt(
+    authority: ActivationReceiptAuthority<'_>,
+    current: CurrentActivationAuthority<'_>,
+    job_id: &str,
+    attempt_id: &str,
+    existing: &ryeos_state::SyncJobRecord,
+) -> Result<Option<Response>> {
+    let activation = current.activation;
+    let operation = current.operation;
+    let Some(head) = authority.state_store.with_state_db(|db| {
+        db.read_generic_head_ref(
+            ryeos_state::objects::EXTERNAL_CONTENT_ACTIVATION_HEAD_NAMESPACE,
+            &operation.activation_id,
+        )
+    })?
+    else {
+        return Ok(None);
+    };
+    let response = Response {
+        job_id: job_id.to_owned(),
+        activation_id: operation.activation_id.clone(),
+        receipt_hash: Some(head.target_hash.clone()),
+        consumer_ref: activation.document.consumer_ref.clone(),
+        state: "completed".to_owned(),
+        idempotent: true,
+    };
+    validate_completed_activation_with_authority(
+        authority, activation, operation, job_id, &response,
+    )?;
+    let result = serde_json::to_value(&response)?;
+    authority.state_store.with_state_db(|db| {
+        db.finish_sync_job_attempt_and_update_job(
+            attempt_id,
+            &ryeos_state::FinishSyncJobAttempt {
+                state: ryeos_state::SyncJobAttemptState::Completed,
+                phase: "completed_from_authoritative_receipt".to_owned(),
+                error: None,
+                result: Some(result.clone()),
+            },
+            job_id,
+            &ryeos_state::SyncJobUpdate {
+                state: ryeos_state::SyncJobState::Completed,
+                phase: "completed_from_authoritative_receipt".to_owned(),
+                roots: Some(vec![head.target_hash]),
                 heads: None,
                 uploaded_hashes: existing.uploaded_hashes.clone(),
                 fetched_hashes: existing.fetched_hashes.clone(),
@@ -558,6 +839,7 @@ fn acquire_and_import(
     )?;
     reset_activation_staging(staging)?;
     reconcile_activation_cache(cache)?;
+    let offline_archive_root = open_offline_archive_root(state, operation)?;
     let mut archives = Vec::with_capacity(activation.document.sources.len());
     for source in &activation.document.sources {
         archives.push(obtain_archive(
@@ -565,6 +847,7 @@ fn acquire_and_import(
             source,
             operation.acquisition_mode,
             managed_policy(state)?,
+            offline_archive_root.as_ref(),
         )?);
     }
     require_staging_capacity(staging, activation, managed_policy(state)?)?;
@@ -587,6 +870,32 @@ fn acquire_and_import(
         });
     }
     Ok(imported)
+}
+
+fn open_offline_archive_root(
+    state: &AppState,
+    operation: &ManagedActivationJobOperation,
+) -> Result<Option<lillux::PinnedDirectory>> {
+    let Some(root_name) = operation.offline_archive_root.as_deref() else {
+        return Ok(None);
+    };
+    if operation.acquisition_mode != AcquisitionMode::Offline {
+        bail!("online managed activation cannot open an offline archive root");
+    }
+    let root_policy = external_content_policy(state)?
+        .roots
+        .get(root_name)
+        .ok_or_else(|| {
+            anyhow::anyhow!("offline managed activation archive root is not admitted")
+        })?;
+    let root = lillux::PinnedDirectory::open(&root_policy.path)?
+        .ok_or_else(|| anyhow::anyhow!("offline managed activation archive root is unavailable"))?;
+    let (device, inode) = root.device_inode()?;
+    if device != root_policy.containing_device || inode != root_policy.root_inode {
+        bail!("offline managed activation archive root filesystem identity changed");
+    }
+    root.ensure_path_binding()?;
+    Ok(Some(root))
 }
 
 fn reconcile_activation_cache(cache: &lillux::PinnedDirectory) -> Result<()> {
@@ -743,11 +1052,12 @@ fn obtain_archive(
     source: &ManagedActivationSource,
     mode: AcquisitionMode,
     policy: &ryeos_app::node_config::sections::external_content::ManagedExternalContentActivationPolicy,
-) -> Result<std::fs::File> {
+    offline_archive_root: Option<&lillux::PinnedDirectory>,
+) -> Result<lillux::PinnedRegularFile> {
     let name = OsStr::new(&source.sha256);
-    if let Some(mut existing) = cache.open_regular(name, false)? {
+    if let Some(mut existing) = cache.open_pinned_regular(name, false)? {
         let verified = verify_open_file(
-            &mut existing,
+            &mut existing.file,
             source.maximum_compressed_bytes,
             &source.sha256,
             "cached managed activation archive",
@@ -759,7 +1069,7 @@ fn obtain_archive(
             }
             Err(error) => {
                 cache
-                    .remove_if_same(name, &existing)
+                    .remove_if_same(name, &existing.file)
                     .context("remove invalid managed activation cache entry")?;
                 if mode == AcquisitionMode::Offline {
                     return Err(error).context(
@@ -770,10 +1080,13 @@ fn obtain_archive(
         }
     }
     if mode == AcquisitionMode::Offline {
-        bail!(
-            "offline managed activation is missing archive {}",
-            source.sha256
-        );
+        let Some(root) = offline_archive_root else {
+            bail!(
+                "offline managed activation is missing cached archive {} and no admitted archive root was selected",
+                source.sha256
+            );
+        };
+        return import_offline_archive(cache, root, source, policy);
     }
     if !policy.allow_online {
         bail!("node policy does not permit online managed activation");
@@ -799,7 +1112,7 @@ fn obtain_archive(
     let mut current_url =
         reqwest::Url::parse(&source.url).context("parse admitted managed activation source URL")?;
     let mut redirect_count = 0usize;
-    let mut response = loop {
+    let response = loop {
         let response = client
             .get(current_url.clone())
             .header(
@@ -807,10 +1120,12 @@ fn obtain_archive(
                 "RyeOS-managed-external-content/1",
             )
             .send()
+            .map_err(reqwest::Error::without_url)
             .context("download managed activation archive")?;
         if !response.status().is_redirection() {
             break response
                 .error_for_status()
+                .map_err(reqwest::Error::without_url)
                 .context("managed activation archive server refused the request")?;
         }
         if redirect_count >= policy.max_redirects {
@@ -835,7 +1150,8 @@ fn obtain_archive(
     {
         bail!("managed activation archive content length exceeds its signed bound");
     }
-    let created = cache.atomic_create_regular_from_reader(
+    let mut response = RedactedHttpBodyReader(response);
+    let created = cache.atomic_create_pinned_regular_from_reader(
         name,
         &mut response,
         source.maximum_compressed_bytes,
@@ -844,7 +1160,7 @@ fn obtain_archive(
     let archive = match created {
         Some((archive, _)) => archive,
         None => cache
-            .open_regular(name, false)?
+            .open_pinned_regular(name, false)?
             .ok_or_else(|| anyhow::anyhow!("managed archive publication winner disappeared"))?,
     };
     retain_verified_archive(
@@ -855,6 +1171,103 @@ fn obtain_archive(
         &source.sha256,
         "downloaded managed activation archive",
     )
+}
+
+/// Reqwest body failures can retain the final request URL in their source
+/// chain. Redirect URLs may legitimately carry short-lived query credentials,
+/// so collapse every streaming failure to its I/O class before it can enter a
+/// durable sync-job diagnostic, log line, or API error.
+struct RedactedHttpBodyReader<R>(R);
+
+impl<R: Read> Read for RedactedHttpBodyReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buffer).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!(
+                    "managed activation archive body read failed ({:?})",
+                    error.kind()
+                ),
+            )
+        })
+    }
+}
+
+fn import_offline_archive(
+    cache: &lillux::PinnedDirectory,
+    root: &lillux::PinnedDirectory,
+    source: &ManagedActivationSource,
+    policy: &ryeos_app::node_config::sections::external_content::ManagedExternalContentActivationPolicy,
+) -> Result<lillux::PinnedRegularFile> {
+    let archive_name = offline_archive_name(source)?;
+    let archive_name = OsStr::new(&archive_name);
+    let mut input = root
+        .open_pinned_regular(archive_name, false)
+        .context("open offline activation archive through admitted root")?
+        .ok_or_else(|| {
+            anyhow::anyhow!("offline activation archive is absent from the admitted root")
+        })?;
+    verify_open_file(
+        &mut input.file,
+        source.maximum_compressed_bytes,
+        &source.sha256,
+        "offline managed activation source archive",
+    )?;
+    input.file.seek(SeekFrom::Start(0))?;
+    root.ensure_path_binding()?;
+
+    reserve_archive_cache(cache, source, policy, CACHE_ENTRY_LIMIT)?;
+    let capacity = cache.filesystem_capacity()?;
+    let required_free = policy
+        .minimum_free_bytes
+        .checked_add(source.maximum_compressed_bytes)
+        .and_then(|total| total.checked_add(capacity.allocation_unit_bytes))
+        .ok_or_else(|| anyhow::anyhow!("managed archive free-space requirement overflow"))?;
+    if capacity.available_bytes < required_free || capacity.available_files == 0 {
+        bail!("managed archive acquisition has insufficient node-private free space");
+    }
+
+    let cache_name = OsStr::new(&source.sha256);
+    let created = cache.atomic_create_pinned_regular_from_reader(
+        cache_name,
+        &mut input.file,
+        source.maximum_compressed_bytes,
+        0o600,
+    )?;
+    root.ensure_path_binding()?;
+    let archive = match created {
+        Some((archive, _)) => archive,
+        None => cache
+            .open_pinned_regular(cache_name, false)?
+            .ok_or_else(|| anyhow::anyhow!("managed archive publication winner disappeared"))?,
+    };
+    retain_verified_archive(
+        cache,
+        cache_name,
+        archive,
+        source.maximum_compressed_bytes,
+        &source.sha256,
+        "offline imported managed activation archive",
+    )
+}
+
+fn offline_archive_name(source: &ManagedActivationSource) -> Result<String> {
+    let url = reqwest::Url::parse(&source.url)
+        .context("parse admitted managed activation source URL for offline archive")?;
+    let name = url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .ok_or_else(|| anyhow::anyhow!("managed activation source URL has no archive filename"))?;
+    if name.is_empty()
+        || name.len() > 255
+        || matches!(name, "." | "..")
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+'))
+    {
+        bail!("managed activation source URL has no canonical offline archive filename");
+    }
+    Ok(name.to_owned())
 }
 
 fn reserve_archive_cache(
@@ -908,14 +1321,14 @@ fn reserve_archive_cache(
 fn retain_verified_archive(
     cache: &lillux::PinnedDirectory,
     name: &OsStr,
-    mut archive: std::fs::File,
+    mut archive: lillux::PinnedRegularFile,
     maximum_bytes: u64,
     expected_sha256: &str,
     label: &str,
-) -> Result<std::fs::File> {
-    if let Err(error) = verify_open_file(&mut archive, maximum_bytes, expected_sha256, label) {
+) -> Result<lillux::PinnedRegularFile> {
+    if let Err(error) = verify_open_file(&mut archive.file, maximum_bytes, expected_sha256, label) {
         cache
-            .remove_if_same(name, &archive)
+            .remove_if_same(name, &archive.file)
             .context("remove invalid newly published managed activation archive")?;
         return Err(error);
     }
@@ -950,14 +1363,14 @@ fn admit_redirect_url(
 }
 
 fn extract_archive(
-    mut archive_file: std::fs::File,
+    mut archive_file: lillux::PinnedRegularFile,
     source: &ManagedActivationSource,
     activation: &ResolvedManagedExternalContentActivation,
     staging: &lillux::PinnedDirectory,
     policy: &ryeos_app::node_config::sections::external_content::ManagedExternalContentActivationPolicy,
 ) -> Result<()> {
-    archive_file.seek(SeekFrom::Start(0))?;
-    let decoder = flate2::read::MultiGzDecoder::new(archive_file);
+    archive_file.file.seek(SeekFrom::Start(0))?;
+    let decoder = flate2::read::MultiGzDecoder::new(archive_file.file);
     let bounded = decoder.take(source.maximum_expanded_bytes.saturating_add(1));
     let mut archive = tar::Archive::new(bounded);
     let selected = source
@@ -1650,6 +2063,35 @@ fn settle_attempt(
     })
 }
 
+fn settle_retryable_attempt_failure(
+    state: &AppState,
+    job_id: &str,
+    attempt_id: &str,
+    detail: String,
+) -> Result<bool> {
+    let latest = state
+        .state_store
+        .with_state_db(|db| db.get_sync_job(job_id))?
+        .context("managed activation job disappeared before failure settlement")?;
+    let terminal = latest.attempt_count >= latest.max_attempts;
+    settle_attempt(
+        state,
+        job_id,
+        attempt_id,
+        ryeos_state::SyncJobAttemptState::Failed,
+        if terminal {
+            ryeos_state::SyncJobState::Failed
+        } else {
+            ryeos_state::SyncJobState::Retryable
+        },
+        if terminal { "failed" } else { "retryable" },
+        None,
+        Some(detail),
+        latest.result,
+    )?;
+    Ok(terminal)
+}
+
 fn managed_policy(
     state: &AppState,
 ) -> Result<
@@ -1698,23 +2140,59 @@ fn bounded_error(value: &str) -> String {
 
 pub async fn recover_durable_activations(state: &AppState) -> Result<usize> {
     reconcile_retained_activation_staging_task(state).await?;
-    let jobs = state.state_store.with_state_db(|db| {
-        db.list_active_sync_jobs_by_operation_type(MANAGED_ACTIVATION_OPERATION, 64)
-    })?;
     let mut recovered = 0usize;
-    for job in jobs {
-        let operation = match ManagedActivationJobOperation::from_value(job.operation.clone()) {
-            Ok(operation) => operation,
-            Err(error) => {
+    let mut after: Option<(String, String)> = None;
+    loop {
+        let jobs = state.state_store.with_state_db(|db| {
+            db.list_active_sync_jobs_by_operation_type_after(
+                MANAGED_ACTIVATION_OPERATION,
+                after
+                    .as_ref()
+                    .map(|(created_at, job_id)| (created_at.as_str(), job_id.as_str())),
+                64,
+            )
+        })?;
+        let Some(last) = jobs.last() else {
+            break;
+        };
+        let next = (last.created_at.clone(), last.job_id.clone());
+        for job in jobs {
+            let operation = match ManagedActivationJobOperation::from_value(job.operation.clone()) {
+                Ok(operation) => operation,
+                Err(error) => {
+                    let detail = bounded_error(&format!(
+                        "retained managed activation operation is invalid: {error:#}"
+                    ));
+                    state.state_store.with_state_db(|db| {
+                        db.update_sync_job(
+                            &job.job_id,
+                            &ryeos_state::SyncJobUpdate {
+                                state: ryeos_state::SyncJobState::Failed,
+                                phase: "operation_invalid".to_owned(),
+                                roots: None,
+                                heads: None,
+                                uploaded_hashes: job.uploaded_hashes.clone(),
+                                fetched_hashes: job.fetched_hashes.clone(),
+                                last_error: Some(detail),
+                                result: job.result.clone(),
+                            },
+                        )
+                    })?;
+                    tracing::error!(job_id = %job.job_id, %error, "invalid managed activation operation terminalized");
+                    cleanup_retained_terminal_staging(state, &job.job_id, &job.operation).await;
+                    continue;
+                }
+            };
+            if let Err(error) = retained_activation_operation_digest(&job.job_id, &job.operation) {
                 let detail = bounded_error(&format!(
-                    "retained managed activation operation is invalid: {error:#}"
+                    "retained managed activation operation identity is invalid: {error:#}"
                 ));
                 state.state_store.with_state_db(|db| {
                     db.update_sync_job(
                         &job.job_id,
                         &ryeos_state::SyncJobUpdate {
                             state: ryeos_state::SyncJobState::Failed,
-                            phase: "operation_invalid".to_owned(),
+                            phase: "operation_identity_invalid".to_owned(),
                             roots: None,
                             heads: None,
                             uploaded_hashes: job.uploaded_hashes.clone(),
@@ -1724,67 +2202,50 @@ pub async fn recover_durable_activations(state: &AppState) -> Result<usize> {
                         },
                     )
                 })?;
-                tracing::error!(job_id = %job.job_id, %error, "invalid managed activation operation terminalized");
-                cleanup_retained_terminal_staging(state, &job.job_id, &job.operation).await;
+                tracing::error!(job_id = %job.job_id, %error, "mismatched managed activation operation terminalized before recovery contact");
                 continue;
             }
-        };
-        if let Err(error) = retained_activation_operation_digest(&job.job_id, &job.operation) {
-            let detail = bounded_error(&format!(
-                "retained managed activation operation identity is invalid: {error:#}"
-            ));
-            state.state_store.with_state_db(|db| {
-                db.update_sync_job(
-                    &job.job_id,
-                    &ryeos_state::SyncJobUpdate {
-                        state: ryeos_state::SyncJobState::Failed,
-                        phase: "operation_identity_invalid".to_owned(),
-                        roots: None,
-                        heads: None,
-                        uploaded_hashes: job.uploaded_hashes.clone(),
-                        fetched_hashes: job.fetched_hashes.clone(),
-                        last_error: Some(detail),
-                        result: job.result.clone(),
-                    },
-                )
-            })?;
-            tracing::error!(job_id = %job.job_id, %error, "mismatched managed activation operation terminalized before recovery contact");
-            continue;
-        }
-        let activation = match ryeos_app::managed_external_content::resolve_activation(
-            state,
-            &operation.activation_ref,
-        ) {
-            Ok(activation) => activation,
-            Err(error) => {
-                let detail = bounded_error(&format!(
-                    "retained managed activation can no longer resolve its exact signed program: {error:#}"
-                ));
-                state.state_store.with_state_db(|db| {
-                    db.update_sync_job(
-                        &job.job_id,
-                        &ryeos_state::SyncJobUpdate {
-                            state: ryeos_state::SyncJobState::Failed,
-                            phase: "program_unavailable".to_owned(),
-                            roots: None,
-                            heads: None,
-                            uploaded_hashes: job.uploaded_hashes.clone(),
-                            fetched_hashes: job.fetched_hashes.clone(),
-                            last_error: Some(detail),
-                            result: job.result.clone(),
-                        },
-                    )
-                })?;
-                cleanup_retained_terminal_staging(state, &job.job_id, &job.operation).await;
-                continue;
-            }
-        };
-        match execute_operation(Arc::new(state.clone()), activation, operation, false).await {
-            Ok(_) => recovered += 1,
-            Err(error) => {
-                tracing::warn!(job_id = %job.job_id, %error, "managed activation recovery attempt did not complete")
+            let activation = match ryeos_app::managed_external_content::resolve_activation(
+                state,
+                &operation.activation_ref,
+                operation.acquisition_mode,
+            ) {
+                Ok(activation) => activation,
+                Err(error) => {
+                    let detail = bounded_error(&format!(
+                        "retained managed activation can no longer resolve its exact signed program: {error:#}"
+                    ));
+                    state.state_store.with_state_db(|db| {
+                        db.update_sync_job(
+                            &job.job_id,
+                            &ryeos_state::SyncJobUpdate {
+                                state: ryeos_state::SyncJobState::Failed,
+                                phase: "program_unavailable".to_owned(),
+                                roots: None,
+                                heads: None,
+                                uploaded_hashes: job.uploaded_hashes.clone(),
+                                fetched_hashes: job.fetched_hashes.clone(),
+                                last_error: Some(detail),
+                                result: job.result.clone(),
+                            },
+                        )
+                    })?;
+                    cleanup_retained_terminal_staging(state, &job.job_id, &job.operation).await;
+                    continue;
+                }
+            };
+            match submit_operation_with_status(Arc::new(state.clone()), activation, operation) {
+                Ok(submission) => {
+                    if submission.attempt_started || submission.response.state == "completed" {
+                        recovered += 1;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(job_id = %job.job_id, %error, "managed activation recovery submission did not complete")
+                }
             }
         }
+        after = Some(next);
     }
     // A malformed retained row may have been terminalized during this pass.
     // Sweep again so its rebuildable tree does not wait for another daemon
@@ -1926,6 +2387,10 @@ mod tests {
         ResolvedManagedActivationComponent,
     };
 
+    fn pinned_archive_fixture(path: &std::path::Path) -> lillux::PinnedRegularFile {
+        lillux::open_pinned_regular_file_no_follow(path).unwrap()
+    }
+
     fn test_policy()
     -> ryeos_app::node_config::sections::external_content::ManagedExternalContentActivationPolicy
     {
@@ -2019,6 +2484,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn redirect_body_failure_drops_credential_bearing_url_chain() {
+        struct CredentialBearingFailure;
+
+        impl Read for CredentialBearingFailure {
+            fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other(
+                    "request failed for https://objects.example.test/archive?token=secret",
+                ))
+            }
+        }
+
+        let mut reader = RedactedHttpBodyReader(CredentialBearingFailure);
+        let error = reader.read(&mut [0u8; 8]).unwrap_err();
+        let retained = format!("{error:#}");
+        assert!(retained.contains("managed activation archive body read failed"));
+        assert!(!retained.contains("token=secret"));
+        assert!(!retained.contains("objects.example.test"));
+    }
+
     fn test_whole_activation(
         source: ManagedActivationSource,
         bounds: ManagedActivationComponentBounds,
@@ -2077,6 +2562,80 @@ mod tests {
         }
     }
 
+    fn test_state_store(root: &std::path::Path) -> ryeos_app::state_store::StateStore {
+        let identity =
+            ryeos_app::identity::NodeIdentity::create(&root.join("identity/node-key.pem")).unwrap();
+        let signer = std::sync::Arc::new(
+            ryeos_app::state_store::NodeIdentitySigner::from_identity(&identity),
+        );
+        let mut trust = ryeos_state::refs::TrustStore::new();
+        trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
+        ryeos_app::state_store::StateStore::new_with_head_trust(
+            root.to_path_buf(),
+            root.join(".ai/state"),
+            root.join("runtime.sqlite3"),
+            signer,
+            ryeos_app::write_barrier::WriteBarrier::new(),
+            std::sync::Arc::new(trust),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn durable_attempt_is_the_submission_lease_and_restart_fence() {
+        let root = tempfile::tempdir().unwrap();
+        let state_store = test_state_store(root.path());
+        let operation = serde_json::json!({
+            "operation_type": MANAGED_ACTIVATION_OPERATION,
+            "schema": "fixture",
+        });
+        let operation_digest = ryeos_state::objects::canonical_value_digest(&operation).unwrap();
+        let job_id = activation_job_id(&operation_digest);
+
+        let (planned, reused) =
+            reserve_activation_job(&state_store, &job_id, &operation, 2).unwrap();
+        assert!(!reused);
+        assert_eq!(planned.state, ryeos_state::SyncJobState::Planned);
+
+        let first = claim_activation_attempt(&state_store, &job_id, &operation, reused).unwrap();
+        assert!(first.attempt_id.is_some());
+        assert_eq!(first.job.state, ryeos_state::SyncJobState::Running);
+        assert_eq!(first.job.attempt_count, 1);
+
+        let concurrent = claim_activation_attempt(&state_store, &job_id, &operation, true).unwrap();
+        assert!(concurrent.attempt_id.is_none());
+        assert_eq!(concurrent.job.attempt_count, 1);
+        assert_eq!(
+            state_store
+                .with_state_db(|db| db.list_sync_job_attempts(&job_id))
+                .unwrap()
+                .len(),
+            1
+        );
+
+        assert_eq!(
+            state_store
+                .with_state_db(|db| db.reconcile_interrupted_sync_job_attempts())
+                .unwrap(),
+            1
+        );
+        let retried = claim_activation_attempt(&state_store, &job_id, &operation, true).unwrap();
+        assert!(retried.attempt_id.is_some());
+        assert_eq!(retried.job.attempt_count, 2);
+
+        assert_eq!(
+            state_store
+                .with_state_db(|db| db.reconcile_interrupted_sync_job_attempts())
+                .unwrap(),
+            1
+        );
+        let exhausted = claim_activation_attempt(&state_store, &job_id, &operation, true).unwrap();
+        assert!(exhausted.attempt_id.is_none());
+        assert_eq!(exhausted.job.state, ryeos_state::SyncJobState::Failed);
+        assert_eq!(exhausted.job.phase, "attempts_exhausted");
+        assert_eq!(exhausted.job.attempt_count, 2);
+    }
+
     #[test]
     fn durable_job_identity_includes_invocation_authority() {
         let program_digest = "b".repeat(64);
@@ -2091,7 +2650,7 @@ mod tests {
             .unwrap();
         let mut operation = ManagedActivationJobOperation {
             operation_type: MANAGED_ACTIVATION_OPERATION.to_owned(),
-            schema: "ryeos.external_content_activation_operation.v2".to_owned(),
+            schema: "ryeos.external_content_activation_operation.v3".to_owned(),
             activation_ref: "config:fixture/activation".to_owned(),
             activation_program_digest: program_digest,
             activation_id: activation_id.clone(),
@@ -2101,6 +2660,8 @@ mod tests {
             operator_authority_digest: "4".repeat(64),
             policy_digest: "e".repeat(64),
             acquisition_mode: AcquisitionMode::Online,
+            offline_archive_root: None,
+            offline_archive_root_authority_digest: None,
         };
         let first_digest =
             ryeos_state::objects::canonical_value_digest(&operation.to_value().unwrap()).unwrap();
@@ -2124,6 +2685,20 @@ mod tests {
         assert_ne!(first, later);
         assert!(first.len() <= 128);
         assert!(first.ends_with(&first_digest));
+
+        operation.offline_archive_root = Some("archives".to_owned());
+        assert!(
+            operation.validate().is_err(),
+            "online acquisition must reject offline root authority"
+        );
+        operation.acquisition_mode = AcquisitionMode::Offline;
+        operation.offline_archive_root_authority_digest = Some("a".repeat(64));
+        operation.validate().unwrap();
+        operation.offline_archive_root = Some("../ambient".to_owned());
+        assert!(
+            operation.validate().is_err(),
+            "offline root name must use the node-policy namespace"
+        );
     }
 
     #[test]
@@ -2194,7 +2769,7 @@ mod tests {
 
         let operation = ManagedActivationJobOperation {
             operation_type: MANAGED_ACTIVATION_OPERATION.to_owned(),
-            schema: "ryeos.external_content_activation_operation.v2".to_owned(),
+            schema: "ryeos.external_content_activation_operation.v3".to_owned(),
             activation_ref: activation.activation_ref.clone(),
             activation_program_digest: activation.activation_program_digest.clone(),
             activation_id:
@@ -2210,6 +2785,8 @@ mod tests {
             operator_authority_digest: "f".repeat(64),
             policy_digest: "1".repeat(64),
             acquisition_mode: AcquisitionMode::Online,
+            offline_archive_root: None,
+            offline_archive_root_authority_digest: None,
         };
         operation.validate().unwrap();
         let receipt = ryeos_state::objects::ExternalContentActivationReceipt::new(
@@ -2277,15 +2854,17 @@ mod tests {
                 write_barrier: &write_barrier,
                 node_fingerprint: identity.fingerprint(),
             },
-            &activation,
-            &operation,
+            CurrentActivationAuthority {
+                activation: &activation,
+                operation: &operation,
+            },
             &job_id,
             &existing,
         )
         .unwrap()
         .expect("authoritative receipt must complete without acquisition");
         assert!(response.idempotent);
-        assert_eq!(response.receipt_hash, receipt_hash);
+        assert_eq!(response.receipt_hash, Some(receipt_hash.clone()));
         let completed = state_store
             .with_state_db(|db| db.get_sync_job(&job_id))
             .unwrap()
@@ -2378,9 +2957,12 @@ mod tests {
         let cache = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
         let digest = "a".repeat(64);
         let name = OsStr::new(&digest);
-        let mut archive = cache.open_regular_create(name, true, true, 0o600).unwrap();
-        std::io::Write::write_all(&mut archive, b"wrong archive bytes").unwrap();
-        archive.sync_all().unwrap();
+        let mut bytes = b"wrong archive bytes".as_slice();
+        let archive = cache
+            .atomic_create_pinned_regular_from_reader(name, &mut bytes, 1024, 0o600)
+            .unwrap()
+            .unwrap()
+            .0;
 
         let error =
             retain_verified_archive(&cache, name, archive, 1024, &digest, "downloaded fixture")
@@ -2471,7 +3053,7 @@ mod tests {
         };
         let activation = test_activation(source.clone());
         let policy = test_policy();
-        let archive = std::fs::File::open(&archive_path).unwrap();
+        let archive = pinned_archive_fixture(&archive_path);
         extract_archive(archive, &source, &activation, &staging, &policy).unwrap();
         let mut staged = staging
             .open_regular(OsStr::new("runtime"), false)
@@ -2530,7 +3112,7 @@ mod tests {
         activation.components[0].capture_bounds.maximum_depth = 2;
         let policy = test_policy();
         extract_archive(
-            std::fs::File::open(&archive_file).unwrap(),
+            pinned_archive_fixture(&archive_file),
             &source,
             &activation,
             &staging,
@@ -2594,7 +3176,7 @@ mod tests {
             tar.into_inner().unwrap().finish().unwrap();
         }
         let error = extract_archive(
-            std::fs::File::open(&link_archive).unwrap(),
+            pinned_archive_fixture(&link_archive),
             &source,
             &activation,
             &staging,
@@ -2617,7 +3199,7 @@ mod tests {
             tar.into_inner().unwrap().finish().unwrap();
         }
         let error = extract_archive(
-            std::fs::File::open(&mode_archive).unwrap(),
+            pinned_archive_fixture(&mode_archive),
             &source,
             &activation,
             &staging,
@@ -2667,7 +3249,7 @@ mod tests {
         let policy = test_policy();
         for _ in 0..2 {
             extract_archive(
-                std::fs::File::open(&archive_path).unwrap(),
+                pinned_archive_fixture(&archive_path),
                 &source,
                 &activation,
                 &staging,
@@ -2739,7 +3321,7 @@ mod tests {
             archive.into_inner().unwrap().finish().unwrap();
         }
         let error = extract_archive(
-            std::fs::File::open(&escaping).unwrap(),
+            pinned_archive_fixture(&escaping),
             &source,
             &activation,
             &staging,
@@ -2771,7 +3353,7 @@ mod tests {
             archive.into_inner().unwrap().finish().unwrap();
         }
         let error = extract_archive(
-            std::fs::File::open(&hardlink).unwrap(),
+            pinned_archive_fixture(&hardlink),
             &source,
             &activation,
             &staging,
@@ -2818,7 +3400,7 @@ mod tests {
         let source = whole_source();
         let activation = test_whole_activation(source.clone(), whole_bounds());
         let error = extract_archive(
-            std::fs::File::open(&archive_path).unwrap(),
+            pinned_archive_fixture(&archive_path),
             &source,
             &activation,
             &staging,
@@ -2859,7 +3441,7 @@ mod tests {
         let source = whole_source();
         let activation = test_whole_activation(source.clone(), whole_bounds());
         let error = extract_archive(
-            std::fs::File::open(&archive_path).unwrap(),
+            pinned_archive_fixture(&archive_path),
             &source,
             &activation,
             &staging,
@@ -2904,7 +3486,7 @@ mod tests {
             archive.into_inner().unwrap().finish().unwrap();
         }
         let error = extract_archive(
-            std::fs::File::open(&sparse).unwrap(),
+            pinned_archive_fixture(&sparse),
             &source,
             &activation,
             &staging,
@@ -2940,7 +3522,7 @@ mod tests {
             extra.finish().unwrap();
         }
         let error = extract_archive(
-            std::fs::File::open(&trailing).unwrap(),
+            pinned_archive_fixture(&trailing),
             &source,
             &activation,
             &staging,
@@ -2986,7 +3568,7 @@ mod tests {
             archive.into_inner().unwrap().finish().unwrap();
 
             let error = extract_archive(
-                std::fs::File::open(&archive_path).unwrap(),
+                pinned_archive_fixture(&archive_path),
                 &source,
                 &activation,
                 &staging,
@@ -3054,7 +3636,7 @@ mod tests {
         let source = whole_source();
         let activation = test_whole_activation(source.clone(), whole_bounds());
         extract_archive(
-            std::fs::File::open(&archive_path).unwrap(),
+            pinned_archive_fixture(&archive_path),
             &source,
             &activation,
             &staging,
@@ -3143,7 +3725,7 @@ mod tests {
                 .unwrap();
             let activation = test_whole_activation(source.clone(), bounds);
             let error = extract_archive(
-                std::fs::File::open(&archive_path).unwrap(),
+                pinned_archive_fixture(&archive_path),
                 &source,
                 &activation,
                 &staging,
@@ -3183,7 +3765,7 @@ mod tests {
         };
         let policy = test_policy();
 
-        let error = obtain_archive(&cache, &source, AcquisitionMode::Offline, &policy)
+        let error = obtain_archive(&cache, &source, AcquisitionMode::Offline, &policy, None)
             .expect_err("offline activation must refuse corrupt cache content");
         assert!(format!("{error:#}").contains("failed exact verification"));
         assert!(
@@ -3193,5 +3775,115 @@ mod tests {
                 .is_none(),
             "invalid cache coordinate must be reusable by a later online retry"
         );
+    }
+
+    #[test]
+    fn admitted_offline_root_populates_only_the_digest_keyed_private_cache() {
+        let cache_root = tempfile::tempdir().unwrap();
+        let source_root = tempfile::tempdir().unwrap();
+        let cache = lillux::PinnedDirectory::open(cache_root.path())
+            .unwrap()
+            .unwrap();
+        let source_directory = lillux::PinnedDirectory::open(source_root.path())
+            .unwrap()
+            .unwrap();
+        let bytes = b"exact offline archive";
+        let digest = lillux::sha256_hex(bytes);
+        std::fs::write(source_root.path().join("fixture.tar.gz"), bytes).unwrap();
+        let source = ManagedActivationSource {
+            id: "package".to_owned(),
+            url: "https://releases.example.test/fixture.tar.gz".to_owned(),
+            archive_format: ryeos_app::managed_external_content::MANAGED_ACTIVATION_ARCHIVE_FORMAT
+                .to_owned(),
+            sha256: digest.clone(),
+            maximum_compressed_bytes: 4096,
+            maximum_expanded_bytes: 4096,
+            maximum_entries: 8,
+            members: Vec::new(),
+        };
+
+        let mut imported = obtain_archive(
+            &cache,
+            &source,
+            AcquisitionMode::Offline,
+            &test_policy(),
+            Some(&source_directory),
+        )
+        .unwrap();
+        let mut observed = Vec::new();
+        imported.file.read_to_end(&mut observed).unwrap();
+        assert_eq!(observed, bytes);
+        assert!(
+            cache
+                .open_regular(OsStr::new(&digest), false)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            cache
+                .open_regular(OsStr::new("fixture.tar.gz"), false)
+                .unwrap()
+                .is_none(),
+            "publisher filename must not become private cache authority"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn admitted_offline_root_refuses_a_symlinked_archive() {
+        use std::os::unix::fs::symlink;
+
+        let cache_root = tempfile::tempdir().unwrap();
+        let source_root = tempfile::tempdir().unwrap();
+        let cache = lillux::PinnedDirectory::open(cache_root.path())
+            .unwrap()
+            .unwrap();
+        let source_directory = lillux::PinnedDirectory::open(source_root.path())
+            .unwrap()
+            .unwrap();
+        let bytes = b"exact offline archive";
+        let digest = lillux::sha256_hex(bytes);
+        std::fs::write(source_root.path().join("target.tar.gz"), bytes).unwrap();
+        symlink("target.tar.gz", source_root.path().join("fixture.tar.gz")).unwrap();
+        let source = ManagedActivationSource {
+            id: "package".to_owned(),
+            url: "https://releases.example.test/fixture.tar.gz".to_owned(),
+            archive_format: ryeos_app::managed_external_content::MANAGED_ACTIVATION_ARCHIVE_FORMAT
+                .to_owned(),
+            sha256: digest,
+            maximum_compressed_bytes: 4096,
+            maximum_expanded_bytes: 4096,
+            maximum_entries: 8,
+            members: Vec::new(),
+        };
+
+        let error = obtain_archive(
+            &cache,
+            &source,
+            AcquisitionMode::Offline,
+            &test_policy(),
+            Some(&source_directory),
+        )
+        .expect_err("offline archive symlink must not be followed");
+        assert!(format!("{error:#}").contains("offline activation archive"));
+    }
+
+    #[test]
+    fn offline_archive_filename_is_exactly_the_signed_canonical_url_leaf() {
+        let mut source = whole_source();
+        source.url = "https://releases.example.test/runtime-v1.tar.gz".to_owned();
+        assert_eq!(offline_archive_name(&source).unwrap(), "runtime-v1.tar.gz");
+
+        for invalid in [
+            "https://releases.example.test/runtime/",
+            "https://releases.example.test/runtime%20v1.tar.gz",
+            "https://releases.example.test/",
+        ] {
+            source.url = invalid.to_owned();
+            assert!(
+                offline_archive_name(&source).is_err(),
+                "offline acquisition accepted ambiguous URL leaf {invalid}"
+            );
+        }
     }
 }

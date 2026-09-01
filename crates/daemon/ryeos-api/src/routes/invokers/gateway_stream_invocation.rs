@@ -534,6 +534,9 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             &project_ctx.effective_path,
             req.ref_bindings,
             resolved_contract.lifecycle_authority,
+            ctx.principal
+                .as_ref()
+                .map(|principal| principal.handler_context()),
         )
         .map_err(|error| {
             RouteDispatchError::Internal(format!(

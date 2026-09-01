@@ -1687,6 +1687,56 @@ impl RootExecutionAdmission {
         Ok(())
     }
 
+    /// Prove that a post-admission dispatch still uses the exact request
+    /// engine and planning authority sealed during root preflight. In-process
+    /// and subprocess terminators share this check;
+    /// neither may silently re-plan a supplied admission under the daemon's
+    /// current request context.
+    pub fn ensure_matches_plan_context(
+        &self,
+        engine: &Arc<Engine>,
+        plan_context: &PlanContext,
+    ) -> Result<()> {
+        self.validate()?;
+        if !Arc::ptr_eq(self.request_engine(), engine) {
+            bail!("dispatch engine differs from the sealed root admission");
+        }
+        if !same_plan_context(&self.plan_context, plan_context) {
+            let mismatches = plan_context_mismatches(&self.plan_context, plan_context);
+            let project_context_detail = if mismatches.contains(&"project_context") {
+                format!(
+                    "; project_context admitted={}, dispatch={}",
+                    project_context_kind(&self.plan_context.project_context),
+                    project_context_kind(&plan_context.project_context)
+                )
+            } else {
+                String::new()
+            };
+            bail!(
+                "dispatch planning authority does not match the sealed root admission (mismatched fields: {}{})",
+                mismatches.join(", "),
+                project_context_detail
+            );
+        }
+        Ok(())
+    }
+
+    /// Prove that usage attribution supplied at the final terminator boundary
+    /// is the attribution sealed by synchronous admission.
+    pub fn ensure_matches_usage_attribution(
+        &self,
+        usage_subject: Option<&UsageSubject>,
+        usage_subject_asserted_by: Option<&str>,
+    ) -> Result<()> {
+        self.validate()?;
+        if self.usage_subject.as_ref() != usage_subject
+            || self.usage_subject_asserted_by.as_deref() != usage_subject_asserted_by
+        {
+            bail!("dispatch usage attribution does not match the sealed root admission");
+        }
+        Ok(())
+    }
+
     pub fn project_root(&self) -> Option<&Path> {
         self.project_authority().project_root_projection()
     }

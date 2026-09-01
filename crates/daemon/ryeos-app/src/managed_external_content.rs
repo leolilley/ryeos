@@ -13,6 +13,7 @@ use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::managed_external_content_operation::AcquisitionMode;
 use crate::node_config::sections::external_content::{
     ExternalContentImportLimits, ManagedExternalContentActivationPolicy,
 };
@@ -332,6 +333,7 @@ impl ManagedExternalContentActivation {
     /// assertions for the import/bind operation.
     pub fn admit(
         &self,
+        acquisition_mode: AcquisitionMode,
         policy: &ManagedExternalContentActivationPolicy,
         import_limits: &ExternalContentImportLimits,
         declarations: &[ryeos_engine::external_content::ExternalContentDeclaration],
@@ -347,7 +349,14 @@ impl ManagedExternalContentActivation {
         let mut total_expanded = 0u64;
         let mut total_entries = 0usize;
         for source in &self.sources {
-            admit_source_url(&source.url, policy)?;
+            if acquisition_mode == AcquisitionMode::Online {
+                if !policy.allow_online {
+                    bail!(
+                        "node policy does not permit online managed external-content acquisition"
+                    );
+                }
+                admit_source_url(&source.url, policy)?;
+            }
             if source.maximum_compressed_bytes > policy.max_compressed_bytes
                 || source.maximum_expanded_bytes > policy.max_expanded_bytes
             {
@@ -655,6 +664,7 @@ impl ManagedExternalContentActivation {
 pub fn resolve_activation(
     state: &crate::state::AppState,
     activation_ref: &str,
+    acquisition_mode: AcquisitionMode,
 ) -> anyhow::Result<ResolvedManagedExternalContentActivation> {
     let import_policy = state
         .node_config
@@ -719,6 +729,7 @@ pub fn resolve_activation(
         )
         .context("parse resolved consumer external-content declarations")?;
     let components = document.admit(
+        acquisition_mode,
         policy,
         &import_policy.limits,
         &declarations,
@@ -985,15 +996,38 @@ mod tests {
     }
 
     #[test]
-    fn portable_compilation_does_not_depend_on_this_node_host_policy() {
+    fn acquisition_mode_selects_transport_policy_without_weakening_portable_validation() {
         let document =
             ManagedExternalContentActivation::from_value(&document_value("foreign.example.test"))
                 .unwrap();
         assert!(
             document
-                .admit(&policy(), &import_limits(), &declarations(), true)
+                .admit(
+                    AcquisitionMode::Online,
+                    &policy(),
+                    &import_limits(),
+                    &declarations(),
+                    true,
+                )
                 .is_err()
         );
+
+        let mut offline_policy = policy();
+        offline_policy.allow_online = false;
+        offline_policy.allowed_https_hosts.clear();
+        document
+            .admit(
+                AcquisitionMode::Offline,
+                &offline_policy,
+                &import_limits(),
+                &declarations(),
+                true,
+            )
+            .unwrap();
+
+        let mut invalid = document_value("foreign.example.test");
+        invalid["sources"][0]["url"] = Value::String("file:///tmp/fixture.tar.gz".to_owned());
+        assert!(ManagedExternalContentActivation::from_value(&invalid).is_err());
     }
 
     #[test]
@@ -1020,7 +1054,13 @@ mod tests {
             ManagedExternalContentActivation::from_value(&document_value("releases.example.test"))
                 .unwrap();
         let resolved = document
-            .admit(&policy(), &import_limits(), &declarations(), true)
+            .admit(
+                AcquisitionMode::Online,
+                &policy(),
+                &import_limits(),
+                &declarations(),
+                true,
+            )
             .unwrap();
         assert_eq!(resolved[0].expected_manifest_hash, "c".repeat(64));
         assert_eq!(
@@ -1036,7 +1076,13 @@ mod tests {
         let document = ManagedExternalContentActivation::from_value(&value).unwrap();
         assert!(
             document
-                .admit(&policy(), &import_limits(), &declarations(), true)
+                .admit(
+                    AcquisitionMode::Online,
+                    &policy(),
+                    &import_limits(),
+                    &declarations(),
+                    true,
+                )
                 .is_err()
         );
         value["expected_manifest_hash"] = Value::String("d".repeat(64));
@@ -1052,7 +1098,13 @@ mod tests {
         let mut declarations = declarations();
         declarations[0].kind = ryeos_engine::external_content::ExternalContentKind::Tree;
         let resolved = document
-            .admit(&policy(), &import_limits(), &declarations, true)
+            .admit(
+                AcquisitionMode::Online,
+                &policy(),
+                &import_limits(),
+                &declarations,
+                true,
+            )
             .unwrap();
         assert_eq!(
             resolved[0].declaration_kind,
@@ -1068,7 +1120,13 @@ mod tests {
         let document = ManagedExternalContentActivation::from_value(&value).unwrap();
         assert!(
             document
-                .admit(&policy(), &import_limits(), &declarations(), true)
+                .admit(
+                    AcquisitionMode::Online,
+                    &policy(),
+                    &import_limits(),
+                    &declarations(),
+                    true,
+                )
                 .is_err()
         );
     }
@@ -1095,7 +1153,13 @@ mod tests {
         limits.max_depth = 1;
         assert!(
             document
-                .admit(&policy(), &limits, &declarations, true)
+                .admit(
+                    AcquisitionMode::Online,
+                    &policy(),
+                    &limits,
+                    &declarations,
+                    true,
+                )
                 .is_err()
         );
     }
@@ -1108,7 +1172,13 @@ mod tests {
         let mut declarations = declarations();
         declarations[0].kind = ryeos_engine::external_content::ExternalContentKind::Tree;
         let resolved = document
-            .admit(&policy(), &import_limits(), &declarations, true)
+            .admit(
+                AcquisitionMode::Online,
+                &policy(),
+                &import_limits(),
+                &declarations,
+                true,
+            )
             .unwrap();
         assert_eq!(resolved[0].capture_bounds.maximum_entries, 7);
         assert_eq!(resolved[0].expected_manifest_hash, "c".repeat(64));
@@ -1121,7 +1191,13 @@ mod tests {
         let document = ManagedExternalContentActivation::from_value(&value).unwrap();
         assert!(
             document
-                .admit(&policy(), &import_limits(), &declarations(), true)
+                .admit(
+                    AcquisitionMode::Online,
+                    &policy(),
+                    &import_limits(),
+                    &declarations(),
+                    true,
+                )
                 .is_err()
         );
 

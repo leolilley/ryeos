@@ -488,6 +488,12 @@ pub(super) struct GateTakenOutcome {
 }
 
 pub(super) enum StepOutcome {
+    /// The daemon may have accepted an action occurrence but its authoritative
+    /// result was not returned. The walker must exit without committing this
+    /// step so native restart re-drives the same operation ID.
+    RecoveryRequired {
+        error: String,
+    },
     ActionOk(Box<ActionOkOutcome>),
     LeafSoftError(LeafSoftErrorOutcome),
     DispatchHardError(DispatchHardErrorOutcome),

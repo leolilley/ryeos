@@ -1217,29 +1217,43 @@ fn bounded_error(value: &str) -> String {
 }
 
 pub async fn recover_durable_project_head_reconciliations(state: &AppState) -> Result<usize> {
-    let jobs = state
-        .state_store
-        .with_state_db(|db| db.list_active_sync_jobs_by_operation_type(OPERATION_TYPE, 64))?;
     let mut recovered = 0usize;
-    for job in jobs {
-        if job.state == SyncJobState::Running {
-            continue;
-        }
-        let operation = match ReconciliationOperation::from_value(job.operation.clone()) {
-            Ok(operation) => operation,
-            Err(error) => {
-                terminalize_without_attempt(state, &job, "operation_invalid", &error)?;
+    let mut after: Option<(String, String)> = None;
+    loop {
+        let jobs = state.state_store.with_state_db(|db| {
+            db.list_active_sync_jobs_by_operation_type_after(
+                OPERATION_TYPE,
+                after
+                    .as_ref()
+                    .map(|(created_at, job_id)| (created_at.as_str(), job_id.as_str())),
+                64,
+            )
+        })?;
+        let Some(last) = jobs.last() else {
+            break;
+        };
+        let next = (last.created_at.clone(), last.job_id.clone());
+        for job in jobs {
+            if job.state == SyncJobState::Running {
                 continue;
             }
-        };
-        match execute_operation(Arc::new(state.clone()), operation, false).await {
-            Ok(_) => recovered += 1,
-            Err(error) => tracing::warn!(
-                job_id = %job.job_id,
-                %error,
-                "durable project-head reconciliation recovery did not complete"
-            ),
+            let operation = match ReconciliationOperation::from_value(job.operation.clone()) {
+                Ok(operation) => operation,
+                Err(error) => {
+                    terminalize_without_attempt(state, &job, "operation_invalid", &error)?;
+                    continue;
+                }
+            };
+            match execute_operation(Arc::new(state.clone()), operation, false).await {
+                Ok(_) => recovered += 1,
+                Err(error) => tracing::warn!(
+                    job_id = %job.job_id,
+                    %error,
+                    "durable project-head reconciliation recovery did not complete"
+                ),
+            }
         }
+        after = Some(next);
     }
     Ok(recovered)
 }

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-29T15:11:16Z:08f0c10bdeb45510b98a45b21d80684b9630eda288b8ed093000a3e91c2d0e80:dFQ6HP7lsvY7kvSDzWg/vS0sZN3g6PYl+cEJsptDb04YeBC03BE7ZwfWQvXzfklN3SqoyMqb2etCYu7x1lpJCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-01T00:15:48Z:82438eeece9459e7704d35026dcce6b7129f3a657e9ec5dfa4705e21b4b760b1:HIQEZ0kBH5IV9b+iz1RjgGwvE8iVCjev7ZUDAY6V597Wzqg/ESOUgy6CzBcrv6y8he5ifDieb9sRMRffINBKBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -107,9 +107,10 @@ The resulting existing manifest must still match the consumer's signed pin.
 The recipe does not carry commands, scripts, host paths, policy, credentials,
 component kind, manifest schema/hash, or mount authority.
 
-`ryeos external-content activate <config-ref> <online|offline>` resolves and
-retains that signed recipe and its trusted consumer. The consumer's existing
-external-content declarations remain authoritative for component IDs, kinds,
+`ryeos external-content activate <config-ref> <online|offline>
+[offline-archive-root]` resolves and retains that signed recipe and its trusted
+consumer. The consumer's existing external-content declarations remain
+authoritative for component IDs, kinds,
 pinned manifest hashes, and mounts. Node policy independently owns whether
 online acquisition is enabled, the exact HTTPS host allowlist, redirect,
 byte/archive-entry/concurrency ceilings, cache/store budgets, free-space floor,
@@ -124,18 +125,37 @@ descriptor-relative filesystem boundary, then feeds the result through the
 existing content capture. Existing manifests and consumer binding heads remain
 the sole launch authority.
 
+Offline activation is explicit and never falls back online. Without a root it
+uses only exact digest-keyed archives already in the node-private managed
+cache. With a root it resolves one named root from node policy, binds that
+root's policy authority digest into the durable operation, verifies the exact
+path/device/inode through Lillux, and opens only each signed URL basename as a
+no-follow regular file. The signed byte bound and digest are verified before an
+atomic digest-keyed cache publication. It does not scan, transform, select an
+alternative, or copy bytes directly into internal state.
+
 The existing durable sync-job/attempt machinery owns retry and restart
 recovery. The durable operation freezes the exact node-signed configured-
 operator grant digest; revocation, scope replacement, or local/remote class
 conversion terminalizes recovery instead of silently preserving authority.
+Submission durably creates the job and its exclusive running attempt before it
+returns. The command therefore returns a prompt `job_id`/`running` coordinate;
+it does not hold an ordinary service execution open while network, archive, or
+import work proceeds. `service:sync/jobs/inspect` observes that coordinate.
+After terminal completion, repeating the same activation returns the verified
+`completed` result and receipt idempotently. A daemon restart settles an
+interrupted running attempt, then the existing recovery owner claims the same
+canonical operation within its admitted attempt ceiling.
 Completion publishes one compact node-signed receipt containing the activation/
 program/policy/node/operator identities and sorted component-to-binding hashes.
 That receipt is audit/recovery testimony; manifests and binding heads remain
 launch authority. No public assembly directory, workload-named app root,
-named-root placeholder, shell extractor, or second realization format is
-introduced. The exact configured operator may invoke activation locally or
+lasting named-root placeholder, shell extractor, or second realization format
+is introduced. The exact configured operator may invoke activation locally or
 through the origin-constrained configured-operator forwarding path; arbitrary
-named-root import remains a separate local maintenance surface.
+named-root import remains a separate local maintenance surface. The optional
+offline archive root is only acquisition authority for the same signed recipe,
+not consumer binding or workload filesystem authority.
 
 ## Portable environment selection
 

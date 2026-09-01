@@ -72,6 +72,10 @@ pub enum ResumeError {
 pub struct ExecutionParams {
     pub resolved: ResolvedExecutionRequest,
     pub acting_principal: String,
+    /// Exact ingress-authenticated handler authority, if the execution entered
+    /// through such a boundary. This is invocation authority, not program
+    /// identity, and remains absent for node-internal launches.
+    pub handler_context: Option<ryeos_app::handler_context::HandlerContext>,
     pub vault_bindings: HashMap<String, String>,
     pub parameters: Value,
     /// Caller-supplied thread id. When `Some(id)`, the new thread row
@@ -1613,17 +1617,11 @@ fn verify_dispatch_effect_record(
                     "admission evidence content hash {observed} contradicts {evidence_hash}"
                 );
             }
-            let (
-                subject_ref,
-                effective_definition_digest,
-                execution_closure_digest,
-                content_identity_digest,
-            ) = dispatch_subject_components_from_capsule(&capsule)?;
+            let (subject_ref, launch_authority_digest, caller_authority_digest) =
+                dispatch_subject_components_from_capsule(&capsule)?;
             if subject_ref != record.identity.subject.subject_ref
-                || effective_definition_digest
-                    != record.identity.subject.effective_definition_digest
-                || execution_closure_digest != record.identity.subject.execution_closure_digest
-                || content_identity_digest != record.identity.subject.content_identity_digest
+                || launch_authority_digest != record.identity.subject.launch_authority_digest
+                || caller_authority_digest != record.identity.subject.caller_authority_digest
             {
                 anyhow::bail!(
                     "dispatch-effect admission evidence contradicts its admitted subject"
@@ -1641,32 +1639,22 @@ fn verify_dispatch_effect_record(
 
 fn dispatch_subject_components_from_capsule(
     capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
-) -> Result<(String, String, String, String)> {
+) -> Result<(String, String, String)> {
+    if capsule.requires_unversioned_secret_input()? {
+        anyhow::bail!(
+            "durable dispatch subject requires late-bound secret input with no sealed generation authority"
+        );
+    }
     let subject_ref = capsule
         .exact_program
         .get("item_ref")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("admitted dispatch capsule has no subject ref"))?
         .to_string();
-    let effective_definition_digest = capsule
-        .exact_program
-        .get("effective_definition_digest")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            anyhow::anyhow!("admitted dispatch capsule has no effective-definition digest")
-        })?
-        .to_string();
-    let execution_closure_digest = ryeos_effect_contract::canonical_value_digest(
-        &serde_json::to_value(&capsule.execution_closure)?,
-    )?;
-    let content_identity_digest = ryeos_effect_contract::canonical_value_digest(
-        &serde_json::to_value(&capsule.artifact_identity)?,
-    )?;
     Ok((
         subject_ref,
-        effective_definition_digest,
-        execution_closure_digest,
-        content_identity_digest,
+        capsule.launch_authority_digest()?,
+        capsule.dispatch_effect_caller_authority_digest()?,
     ))
 }
 
@@ -1675,12 +1663,8 @@ fn admitted_subject_from_capsule(
     capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
     ceiling: ryeos_effect_contract::EffectClass,
 ) -> Result<ryeos_effect_contract::AdmittedDispatchSubject> {
-    let (
-        capsule_subject_ref,
-        effective_definition_digest,
-        execution_closure_digest,
-        content_identity_digest,
-    ) = dispatch_subject_components_from_capsule(capsule)?;
+    let (capsule_subject_ref, launch_authority_digest, caller_authority_digest) =
+        dispatch_subject_components_from_capsule(capsule)?;
     if capsule_subject_ref != resolved.item_ref {
         anyhow::bail!(
             "admitted dispatch capsule subject `{capsule_subject_ref}` contradicts resolved subject `{}`",
@@ -1689,9 +1673,8 @@ fn admitted_subject_from_capsule(
     }
     let subject = ryeos_effect_contract::AdmittedDispatchSubject {
         subject_ref: resolved.item_ref.clone(),
-        effective_definition_digest,
-        execution_closure_digest,
-        content_identity_digest,
+        launch_authority_digest,
+        caller_authority_digest,
         effect_class_ceiling: ceiling,
     };
     subject.validate()?;
@@ -1718,6 +1701,114 @@ fn load_verified_dispatch_effect_record(
             )
         })?;
     ryeos_effect_contract::DispatchEffectRecord::from_current_value(&value)
+}
+
+/// Reconstruct a durable callback answer from one already-terminal child.
+///
+/// The child capsule supplies the exact admitted subject. A previously
+/// published effect is replayed without contacting the callee. If the daemon
+/// died after terminal settlement but before effect publication, the signed
+/// terminal response is sufficient to finish that publication; the action is
+/// never executed again.
+pub(crate) fn recover_terminal_dispatch_effect(
+    state: &AppState,
+    child_thread_id: &str,
+    expected_subject_ref: &str,
+    prepared: &ryeos_effect_contract::PreparedEffectDispatchAuthority,
+    terminal_response: &Value,
+) -> Result<Value> {
+    prepared.validate()?;
+    let capsule = state
+        .state_store
+        .admitted_launch_capsule(child_thread_id)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "terminal durable action child {child_thread_id} has no admitted launch capsule"
+            )
+        })?;
+    let (subject_ref, launch_authority_digest, caller_authority_digest) =
+        dispatch_subject_components_from_capsule(&capsule)?;
+    if subject_ref != expected_subject_ref {
+        anyhow::bail!(
+            "terminal durable action child subject `{subject_ref}` contradicts `{expected_subject_ref}`"
+        );
+    }
+    let subject = ryeos_effect_contract::AdmittedDispatchSubject {
+        subject_ref,
+        launch_authority_digest,
+        caller_authority_digest,
+        effect_class_ceiling: prepared.subject_effect_class_ceiling,
+    };
+    let identity = ryeos_effect_contract::DispatchEffectIdentity {
+        authorization: prepared.authorization.clone(),
+        action_digest: prepared.action_digest.clone(),
+        subject,
+    };
+    identity.validate()?;
+    let cache_key = identity.cache_key()?;
+    let authority = super::pinned_state_authority(state)?;
+    let namespace =
+        ryeos_state::ReplayIndexNamespace::new(ryeos_effect_contract::EFFECT_REPLAY_NAMESPACE)?;
+    match state
+        .state_store
+        .lookup_replay_record(&namespace, &cache_key, |indexed| {
+            verify_dispatch_effect_record(&authority, indexed)
+        })? {
+        ryeos_state::ReplayLookupOutcome::Present(indexed) => {
+            let record = load_verified_dispatch_effect_record(&authority, &indexed)?;
+            if record.identity != identity {
+                anyhow::bail!(
+                    "verified dispatch-effect record {} contradicts recovered child authority",
+                    indexed.record_hash
+                );
+            }
+            let result = record.answer.replay_leaf_envelope(&indexed.record_hash)?;
+            Ok(json!({
+                "thread": null,
+                "result": result,
+                "dispatch": ryeos_runtime::callback_contract::RuntimeDispatchEvidence {
+                    source: ryeos_runtime::callback_contract::RuntimeDispatchSource::EffectRecord,
+                    effect_class: runtime_effect_class(identity.authorization.class),
+                    action_digest: identity.action_digest,
+                    effect_identity: Some(cache_key),
+                    publication: ryeos_runtime::callback_contract::RuntimeDispatchPublication::NotApplicable,
+                    record_hash: Some(indexed.record_hash.clone()),
+                    replayed_from: Some(indexed.record_hash),
+                },
+            }))
+        }
+        ryeos_state::ReplayLookupOutcome::Absent => {
+            let publication = publish_dispatch_effect_record(
+                state,
+                identity.clone(),
+                terminal_response,
+                child_thread_id,
+            )?;
+            let mut response = terminal_response.clone();
+            let object = response.as_object_mut().ok_or_else(|| {
+                anyhow::anyhow!("terminal durable action response is not an object")
+            })?;
+            object.insert(
+                "dispatch".to_string(),
+                serde_json::to_value(ryeos_runtime::callback_contract::RuntimeDispatchEvidence {
+                    source: ryeos_runtime::callback_contract::RuntimeDispatchSource::Executed,
+                    effect_class: runtime_effect_class(identity.authorization.class),
+                    action_digest: identity.action_digest,
+                    effect_identity: Some(cache_key),
+                    publication: publication.publication,
+                    record_hash: Some(publication.record_hash),
+                    replayed_from: None,
+                })?,
+            );
+            Ok(response)
+        }
+        ryeos_state::ReplayLookupOutcome::Unavailable { reason } => {
+            anyhow::bail!("dispatch-effect recovery is unavailable: {reason}")
+        }
+        ryeos_state::ReplayLookupOutcome::IntegrityFailure { reason } => {
+            anyhow::bail!("dispatch-effect recovery integrity failure: {reason}")
+        }
+    }
 }
 
 struct DispatchEffectPublication {
@@ -1902,7 +1993,9 @@ fn build_protocol_launch_env(
     duration_seconds: Option<u64>,
     effective_caps: Vec<String>,
     acting_principal: &str,
-    caller_scopes: Vec<String>,
+    handler_context: Option<&ryeos_app::handler_context::HandlerContext>,
+    current_site_id: &str,
+    origin_site_id: &str,
     provenance: ExecutionProvenance,
     item_ref: &str,
     root_raw_content_digest: String,
@@ -1950,7 +2043,7 @@ fn build_protocol_launch_env(
                     thread_id,
                     callback_project_path.to_path_buf(),
                     ttl,
-                    effective_caps,
+                    effective_caps.clone(),
                     provenance,
                     effective_bundle_id,
                     Some(item_ref.to_string()),
@@ -1971,12 +2064,25 @@ fn build_protocol_launch_env(
             Ok(token)
         })
         .transpose()?;
-    let thread_auth_token = thread_auth_requested.then(|| {
-        state
-            .thread_auth
-            .mint(thread_id, acting_principal.to_string(), caller_scopes, ttl)
-            .token
-    });
+    let callback_handler_context = handler_context
+        .map(|context| {
+            context.narrowed_for_execution(effective_caps.clone(), current_site_id, origin_site_id)
+        })
+        .transpose()?;
+    let thread_auth_token = thread_auth_requested
+        .then(|| {
+            state.thread_auth.mint(
+                thread_id,
+                acting_principal.to_string(),
+                effective_caps,
+                callback_handler_context,
+                current_site_id,
+                origin_site_id,
+                ttl,
+            )
+        })
+        .transpose()?
+        .map(|authority| authority.token);
 
     let isolation_daemon_socket_path =
         callback_ipc_requested.then(|| state.config.uds_path.clone());
@@ -2406,6 +2512,7 @@ fn admitted_root_launch_metadata(
         &params.resolved,
         runtime_ref.clone(),
         &finalized_program,
+        params.handler_context.as_ref(),
     )?;
     let stable_project_identity = match &project_authority {
         ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => None,
@@ -2956,6 +3063,18 @@ pub async fn run_and_wait(
         protocol,
     )?;
     let dispatch_effect_identity = if let Some(prepared) = params.effect_authority.as_ref() {
+        if !params
+            .resolved
+            .resolved_item
+            .metadata
+            .required_secrets
+            .is_empty()
+            || !params.vault_bindings.is_empty()
+        {
+            anyhow::bail!(
+                "durable execution refused: the callee uses late-bound secret values with no sealed generation authority"
+            );
+        }
         if params.provenance.project_source()
             == ryeos_app::execution_provenance::ProjectSourceKind::LiveFs
             && !retained_resolution_has_filesystem_bindings(&wait_external.retained_resolution)?
@@ -3192,7 +3311,9 @@ pub async fn run_and_wait(
         Some(launch_timeout_secs),
         params.effective_caps.clone(),
         &params.acting_principal,
-        vec!["execute".to_string()],
+        params.handler_context.as_ref(),
+        &params.resolved.current_site_id,
+        &params.resolved.origin_site_id,
         child_provenance,
         &params.resolved.item_ref,
         params.resolved.root_raw_content_digest.clone(),
@@ -4015,7 +4136,9 @@ pub async fn run_detached(
         Some(launch_timeout_secs),
         params.effective_caps.clone(),
         &params.acting_principal,
-        vec!["execute".to_string()],
+        params.handler_context.as_ref(),
+        &params.resolved.current_site_id,
+        &params.resolved.origin_site_id,
         child_provenance,
         &params.resolved.item_ref,
         params.resolved.root_raw_content_digest.clone(),
@@ -5604,6 +5727,7 @@ pub fn execution_params_from_sealed_root_request(
         parameters: resolved.parameters.clone(),
         resolved,
         acting_principal,
+        handler_context: sealed.handler_context().cloned(),
         vault_bindings: HashMap::new(),
         pre_minted_thread_id: None,
         effective_caps: operational_resume.effective_caps.clone(),
@@ -5986,7 +6110,9 @@ async fn run_existing_recovered_thread(
         Some(launch_timeout_secs),
         params.effective_caps.clone(),
         &params.acting_principal,
-        vec!["execute".to_string()],
+        params.handler_context.as_ref(),
+        &params.resolved.current_site_id,
+        &params.resolved.origin_site_id,
         child_provenance,
         &params.resolved.item_ref,
         params.resolved.root_raw_content_digest.clone(),

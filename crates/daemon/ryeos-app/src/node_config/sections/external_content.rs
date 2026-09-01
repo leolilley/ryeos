@@ -227,7 +227,7 @@ impl SectionRecord for ExternalContentImportPolicyRecord {
     }
 }
 
-fn validate_root_name(value: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_root_name(value: &str) -> anyhow::Result<()> {
     if value.is_empty()
         || value.len() > 128
         || !value

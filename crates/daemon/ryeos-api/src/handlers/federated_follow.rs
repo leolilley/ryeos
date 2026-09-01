@@ -523,113 +523,131 @@ fn load_local_object(state: &AppState, hash: &str) -> Result<Value> {
 /// or waiter state is present on the target; the admitted operator identity
 /// and source-signed reservation are the complete network authority.
 pub async fn recover_durable_remote_follow_deliveries(state: &AppState) -> Result<usize> {
-    let jobs = state.state_store.with_state_db(|db| {
-        db.list_active_sync_jobs_by_operation_type(REMOTE_FOLLOW_DELIVERY_OPERATION, 64)
-    })?;
     let mut recovered = 0usize;
-    for job in jobs {
-        if job.state == ryeos_state::SyncJobState::Running {
-            continue;
-        }
-        let operation = match RemoteFollowDeliveryJobOperation::from_value(job.operation.clone()) {
-            Ok(operation) if operation.role == RemoteFollowDeliveryJobRole::Target => operation,
-            Ok(_) => continue,
-            Err(error) => {
+    let mut after: Option<(String, String)> = None;
+    loop {
+        let jobs = state.state_store.with_state_db(|db| {
+            db.list_active_sync_jobs_by_operation_type_after(
+                REMOTE_FOLLOW_DELIVERY_OPERATION,
+                after
+                    .as_ref()
+                    .map(|(created_at, job_id)| (created_at.as_str(), job_id.as_str())),
+                64,
+            )
+        })?;
+        let Some(last) = jobs.last() else {
+            break;
+        };
+        let next = (last.created_at.clone(), last.job_id.clone());
+        for job in jobs {
+            if job.state == ryeos_state::SyncJobState::Running {
+                continue;
+            }
+            let operation =
+                match RemoteFollowDeliveryJobOperation::from_value(job.operation.clone()) {
+                    Ok(operation) if operation.role == RemoteFollowDeliveryJobRole::Target => {
+                        operation
+                    }
+                    Ok(_) => continue,
+                    Err(error) => {
+                        terminalize_invalid_delivery_job(state, &job, &error)?;
+                        continue;
+                    }
+                };
+            if job.attempt_count >= job.max_attempts {
+                terminalize_exhausted_delivery_job(state, &job)?;
+                continue;
+            }
+            let Some(request_value) = job.result.clone() else {
+                continue;
+            };
+            let request: RemoteFollowTerminalDeliveryRequest = match serde_json::from_value(
+                request_value,
+            )
+            .and_then(|request: RemoteFollowTerminalDeliveryRequest| {
+                request.validate().map_err(serde::de::Error::custom)?;
+                Ok(request)
+            }) {
+                Ok(request) => request,
+                Err(error) => {
+                    terminalize_invalid_delivery_job(state, &job, &anyhow::Error::new(error))?;
+                    continue;
+                }
+            };
+            if request.operation_id != operation.operation_id
+                || request.reservation_attestation_hash != operation.reservation_attestation_hash
+                || request.child_chain_root_id != operation.child_chain_root_id
+                || request.parent_site_id != operation.parent_site_id
+                || request.target_site_id != operation.target_site_id
+            {
+                terminalize_invalid_delivery_job(
+                    state,
+                    &job,
+                    &anyhow::anyhow!("remote follow delivery job request changed coordinates"),
+                )?;
+                continue;
+            }
+            if let Err(error) = validate_target_delivery_job_binding(&job, &operation, &request) {
                 terminalize_invalid_delivery_job(state, &job, &error)?;
                 continue;
             }
-        };
-        if job.attempt_count >= job.max_attempts {
-            terminalize_exhausted_delivery_job(state, &job)?;
-            continue;
-        }
-        let Some(request_value) = job.result.clone() else {
-            continue;
-        };
-        let request: RemoteFollowTerminalDeliveryRequest = match serde_json::from_value(
-            request_value,
-        )
-        .and_then(|request: RemoteFollowTerminalDeliveryRequest| {
-            request.validate().map_err(serde::de::Error::custom)?;
-            Ok(request)
-        }) {
-            Ok(request) => request,
-            Err(error) => {
-                terminalize_invalid_delivery_job(state, &job, &anyhow::Error::new(error))?;
-                continue;
-            }
-        };
-        if request.operation_id != operation.operation_id
-            || request.reservation_attestation_hash != operation.reservation_attestation_hash
-            || request.child_chain_root_id != operation.child_chain_root_id
-            || request.parent_site_id != operation.parent_site_id
-            || request.target_site_id != operation.target_site_id
-        {
-            terminalize_invalid_delivery_job(
-                state,
-                &job,
-                &anyhow::anyhow!("remote follow delivery job request changed coordinates"),
-            )?;
-            continue;
-        }
-        if let Err(error) = validate_target_delivery_job_binding(&job, &operation, &request) {
-            terminalize_invalid_delivery_job(state, &job, &error)?;
-            continue;
-        }
-        let remotes = config::load_remotes_layered(&state.config.app_root, None)?;
-        let parent_remote = config::resolve_remote_by_site_id(&remotes, &operation.parent_site_id)?;
-        let client = RemoteClient::from_remote_cfg(state, &parent_remote.remote);
-        let attempt_id = format!("remote-follow-attempt:{}", uuid::Uuid::new_v4());
-        state.state_store.with_state_db(|db| {
-            db.create_sync_job_attempt(&ryeos_state::NewSyncJobAttempt {
-                attempt_id: attempt_id.clone(),
-                job_id: job.job_id.clone(),
-                worker_id: Some("remote-follow-delivery".to_owned()),
-                phase: "parent_delivery".to_owned(),
+            let remotes = config::load_remotes_layered(&state.config.app_root, None)?;
+            let parent_remote =
+                config::resolve_remote_by_site_id(&remotes, &operation.parent_site_id)?;
+            let client = RemoteClient::from_remote_cfg(state, &parent_remote.remote);
+            let attempt_id = format!("remote-follow-attempt:{}", uuid::Uuid::new_v4());
+            state.state_store.with_state_db(|db| {
+                db.create_sync_job_attempt(&ryeos_state::NewSyncJobAttempt {
+                    attempt_id: attempt_id.clone(),
+                    job_id: job.job_id.clone(),
+                    worker_id: Some("remote-follow-delivery".to_owned()),
+                    phase: "parent_delivery".to_owned(),
+                })?;
+                Ok(())
             })?;
-            Ok(())
-        })?;
-        let result = client
-            .execute_service_result(
-                REMOTE_FOLLOW_DELIVERY_SERVICE,
-                &BTreeMap::new(),
-                None,
-                &serde_json::to_value(&request)?,
-                &ryeos_app::execution_policy::ExecutionPolicy::projectless(
-                    ryeos_app::execution_policy::ExecutionResponse::Wait,
-                ),
-            )
-            .await;
-        match result {
-            Ok(value) => {
-                let response: RemoteFollowTerminalDeliveryResponse =
-                    serde_json::from_value(value.clone())?;
-                response.validate_against(&request)?;
-                settle_attempt(
-                    state,
-                    &job,
-                    &attempt_id,
-                    ryeos_state::SyncJobAttemptState::Completed,
-                    ryeos_state::SyncJobState::Completed,
-                    "settled",
+            let result = client
+                .execute_service_result(
+                    REMOTE_FOLLOW_DELIVERY_SERVICE,
+                    &BTreeMap::new(),
                     None,
-                    Some(value),
-                )?;
-                recovered += 1;
-            }
-            Err(error) => {
-                settle_attempt(
-                    state,
-                    &job,
-                    &attempt_id,
-                    ryeos_state::SyncJobAttemptState::Failed,
-                    ryeos_state::SyncJobState::Retryable,
-                    "delivery_retryable",
-                    Some(bounded_error(&error.to_string())),
-                    Some(serde_json::to_value(request)?),
-                )?;
+                    &serde_json::to_value(&request)?,
+                    &ryeos_app::execution_policy::ExecutionPolicy::projectless(
+                        ryeos_app::execution_policy::ExecutionResponse::Wait,
+                    ),
+                )
+                .await;
+            match result {
+                Ok(value) => {
+                    let response: RemoteFollowTerminalDeliveryResponse =
+                        serde_json::from_value(value.clone())?;
+                    response.validate_against(&request)?;
+                    settle_attempt(
+                        state,
+                        &job,
+                        &attempt_id,
+                        ryeos_state::SyncJobAttemptState::Completed,
+                        ryeos_state::SyncJobState::Completed,
+                        "settled",
+                        None,
+                        Some(value),
+                    )?;
+                    recovered += 1;
+                }
+                Err(error) => {
+                    settle_attempt(
+                        state,
+                        &job,
+                        &attempt_id,
+                        ryeos_state::SyncJobAttemptState::Failed,
+                        ryeos_state::SyncJobState::Retryable,
+                        "delivery_retryable",
+                        Some(bounded_error(&error.to_string())),
+                        Some(serde_json::to_value(request)?),
+                    )?;
+                }
             }
         }
+        after = Some(next);
     }
     Ok(recovered)
 }

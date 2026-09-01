@@ -69,6 +69,19 @@ impl AuthorityClient {
         assert_eq!(self.follow_handoffs.load(Ordering::SeqCst), 0);
         assert_eq!(self.continuation_handoffs.load(Ordering::SeqCst), 0);
     }
+
+    fn live_dispatch_response(result: Value) -> Value {
+        json!({
+            "thread": {},
+            "result": result,
+            "dispatch": {
+                "source": "executed",
+                "effect_class": "live",
+                "action_digest": "ab".repeat(32),
+                "publication": "not_applicable"
+            }
+        })
+    }
 }
 
 #[async_trait]
@@ -89,7 +102,7 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for AuthorityClient {
                 results.remove(0)
             }
         };
-        Ok(json!({"thread": {}, "result": result}))
+        Ok(Self::live_dispatch_response(result))
     }
 
     async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
@@ -428,12 +441,11 @@ config:
                         "item_refs": ["directive:test/child"],
                     })),
                     Some(json!({
+                        "projection": ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION,
                         "success": true,
                         "child_thread_id": "T-authority-child",
                         "status": ThreadTerminalStatus::Completed.as_str(),
                         "result": {"answer": 42},
-                        "outputs": null,
-                        "warnings": [],
                         "cost": null,
                     })),
                 );
@@ -492,21 +504,19 @@ config:
                         "statuses": [FanoutItemStatus::Completed, FanoutItemStatus::Completed],
                         "items": [
                             {
+                                "projection": ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION,
                                 "success": true,
                                 "child_thread_id": "T-authority-child-1",
                                 "status": RuntimeResultStatus::Completed,
                                 "result": {"answer": 1},
-                                "outputs": null,
-                                "warnings": [],
                                 "cost": null,
                             },
                             {
+                                "projection": ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION,
                                 "success": true,
                                 "child_thread_id": "T-authority-child-2",
                                 "status": RuntimeResultStatus::Completed,
                                 "result": {"answer": 2},
-                                "outputs": null,
-                                "warnings": [],
                                 "cost": null,
                             },
                         ],

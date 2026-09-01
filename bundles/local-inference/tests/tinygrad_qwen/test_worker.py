@@ -241,7 +241,7 @@ class WorkerContractTests(unittest.TestCase):
         RUN_MODEL_GOLDENS,
         "enable the targeted model golden explicitly",
     )
-    def test_first_token_repeatability_and_kv_cache_equivalence(self) -> None:
+    def test_generation_repeatability_and_kv_cache_equivalence(self) -> None:
         prompt = self.tokenizer.encode(
             render_chat([{"role": "user", "content": "Reply OK."}], [])
         )
@@ -273,6 +273,39 @@ class WorkerContractTests(unittest.TestCase):
         self.assertEqual(first, 151667)
         # Independent Transformers full-prefix reference for prompt + first.
         self.assertEqual(cached_second, 198)
+
+        tool_prompt = self.tokenizer.encode(
+            render_chat(
+                [{"role": "user", "content": "Call read with an empty object now."}],
+                [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "description": description,
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": False,
+                            },
+                        },
+                    }
+                    for name, description in (
+                        ("read", "Read the fixed admitted input. Takes no arguments."),
+                        ("mutate", "Create the fixed candidate. Takes no arguments."),
+                        ("verify", "Verify the input and candidate. Takes no arguments."),
+                    )
+                ],
+                enable_thinking=False,
+            )
+        )
+        # Six independent fresh-Transformer full-prefix evaluations. A plain
+        # integer start position can accidentally pass the two-token check but
+        # lets TinyJit reuse the first rollout's KV position thereafter.
+        self.assertEqual(
+            list(model.generate(tool_prompt, 6, 0.0, 0)),
+            [151657, 198, 4913, 606, 788, 330],
+        )
 
     @unittest.skipUnless(
         RUN_MODEL_GOLDENS,

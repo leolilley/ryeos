@@ -678,7 +678,7 @@ async fn pinned_graph_follow_preserves_authority_after_an_ordinary_project_write
 fn plant_failing_child_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 config:
   start: boom
@@ -704,7 +704,7 @@ config:
 fn plant_parent_on_error_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 requires:
   capabilities:
@@ -839,7 +839,7 @@ async fn graph_follow_child_failure_routes_parent_on_error() {
 fn plant_seq_child_a(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 config:
   start: worka
@@ -881,7 +881,7 @@ Reply with a short acknowledgement.
 fn plant_parent_sequential_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 requires:
   capabilities:
@@ -1086,8 +1086,10 @@ fn plant_mock_provider(
     let dir = root.join(".ai/config/ryeos-runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
-        r#"base_url: "{mock_base_url}"
-family: chat_completions
+        r#"family: chat_completions
+transport:
+  kind: remote_http
+  base_url: "{mock_base_url}"
 body_template:
   model: "{{model}}"
   messages: "{{messages}}"
@@ -1151,7 +1153,7 @@ Say hello.
 fn plant_parent_cost_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 requires:
   capabilities:

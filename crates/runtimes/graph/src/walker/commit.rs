@@ -58,6 +58,9 @@ impl Walker {
         };
 
         match outcome {
+            StepOutcome::RecoveryRequired { .. } => {
+                unreachable!("recovery-required outcomes are intercepted before commit")
+            }
             StepOutcome::FollowSuspend(outcome) => {
                 self.commit_follow_suspend(context, outcome).await
             }

@@ -21,7 +21,7 @@ jobs:
   qualify:
     name: Fresh-node activation and replay conformance
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 120
     permissions:
       actions: read
       contents: read
@@ -108,16 +108,70 @@ jobs:
           rm -rf -- target
           df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
 
-      # This is a functional/recovery conformance run over exact bytes already
+      - name: Qualify directive native-resume crash cuts
+        env:
+          CARGO_INCREMENTAL: "0"
+          CARGO_TARGET_DIR: ${{ runner.temp }}/directive-crash-target
+          RYEOS_TEST_SKIP_BUNDLE_REFRESH: "1"
+        run: |
+          cargo test -p ryeosd \
+            --features crash-qualification-test-support \
+            --test directive_crash_recovery_e2e
+          rm -rf -- "$CARGO_TARGET_DIR"
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+
+      - name: Stage exact immutable archives for offline qualification
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CONTRACT="scripts/release/local-inference-qwen3-0.6b-v1.json"
+          RELEASE_TAG="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_tag"])' "$CONTRACT")"
+          OFFLINE_ROOT="$RUNNER_TEMP/local-inference-offline-archives"
+          mkdir "$OFFLINE_ROOT"
+          python3 - "$CONTRACT" <<'PY' | while IFS= read -r archive; do
+          import json
+          from pathlib import Path
+          import sys
+
+          contract = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          for realization in contract["realizations"]:
+              print(realization["archive"])
+          PY
+            gh release download "$RELEASE_TAG" \
+              --pattern "$archive" \
+              --dir "$OFFLINE_ROOT"
+          done
+
+      # These are functional/recovery conformance runs over exact bytes already
       # trusted by the RyeOS publisher's signed contract. Disabled isolation
       # is intentionally honest: same-UID worker observations are not evidence
-      # that adversarial third-party code is harmless. This job has no write
-      # token or release authority, and runs on a disposable hosted runner.
-      - name: Qualify fresh-node activation, bank, restart, and replay
+      # that adversarial third-party code is harmless. Offline acquisition is
+      # selected explicitly and has no online fallback; the second run proves
+      # the separately selected signed HTTPS distribution path. This job has
+      # no write token or release authority, and runs on a disposable runner.
+      - name: Qualify offline fresh-node activation, bank, restart, and replay
         run: |
           scripts/release/qualify-local-inference-node.sh \
             --release-contract scripts/release/local-inference-qwen3-0.6b-v1.json \
             --bundle-source bundles \
             --ryeos-bin "$RUNNER_TEMP/local-inference-qualification-bin/ryeos" \
+            --archive-root "$RUNNER_TEMP/local-inference-offline-archives" \
+            --minimum-free-bytes 2147483648 \
+            --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml \
+            --qualification-parent "$RUNNER_TEMP"
+
+      - name: Release offline archive staging before online qualification
+        run: |
+          rm -rf -- "$RUNNER_TEMP/local-inference-offline-archives"
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+
+      - name: Qualify online fresh-node activation, bank, restart, and replay
+        run: |
+          scripts/release/qualify-local-inference-node.sh \
+            --release-contract scripts/release/local-inference-qwen3-0.6b-v1.json \
+            --bundle-source bundles \
+            --ryeos-bin "$RUNNER_TEMP/local-inference-qualification-bin/ryeos" \
+            --online \
+            --minimum-free-bytes 2147483648 \
             --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml \
             --qualification-parent "$RUNNER_TEMP"

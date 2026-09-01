@@ -69,7 +69,10 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
 // continuation, so live launch and crash recovery cannot disagree about
 // whether the managed runtime consumes a predecessor checkpoint or cold-starts
 // after an authority above the runtime has restored its state.
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 20;
+// v21 embeds the exact optional ingress-authenticated handler authority. Its
+// absence is durable and may never be normalized into verified callback
+// authority during recovery.
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 21;
 
 /// Per-thread daemon-owned state directory.
 ///

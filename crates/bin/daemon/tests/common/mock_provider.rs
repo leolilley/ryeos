@@ -53,6 +53,8 @@ use tokio::task::JoinHandle;
 /// One canned LLM response. The mock pops these FIFO.
 #[derive(Debug, Clone)]
 pub enum MockResponse {
+    /// Provider-owned HTTP failure before any response stream begins.
+    HttpError { status: u16, body: String },
     /// Plain assistant text — `finish_reason = "stop"`.
     Text(String),
     /// Tool-call response — `finish_reason = "tool_calls"`. `arguments`
@@ -78,6 +80,9 @@ pub struct MockToolCallSpec {
 impl MockResponse {
     fn into_choice(self) -> Value {
         match self {
+            MockResponse::HttpError { .. } => {
+                unreachable!("HTTP errors are returned before provider-body rendering")
+            }
             MockResponse::Text(text) => json!({
                 "message": {
                     "role": "assistant",
@@ -135,6 +140,9 @@ struct MockState {
     /// Every request body received, in arrival order, so a test can assert
     /// the exact transcript the NEXT turn was given (tool-result ordering).
     captured_bodies: Vec<Value>,
+    /// Lillux wall-clock observation for each accepted request, paired by
+    /// index with `captured_bodies`.
+    captured_request_times_ms: Vec<i64>,
     /// Artificial latency applied before each response is served. Lets a
     /// test keep a thread observably `running` long enough to attach an SSE
     /// subscriber before the thread settles. Zero by default.
@@ -198,6 +206,7 @@ impl MockProvider {
             queue: canned,
             captured_headers: Vec::new(),
             captured_bodies: Vec::new(),
+            captured_request_times_ms: Vec::new(),
             response_delay,
             response_gate,
         }));
@@ -252,6 +261,10 @@ impl MockProvider {
     pub async fn captured_bodies(&self) -> Vec<Value> {
         self.state.lock().await.captured_bodies.clone()
     }
+
+    pub async fn captured_request_times_ms(&self) -> Vec<i64> {
+        self.state.lock().await.captured_request_times_ms.clone()
+    }
 }
 
 impl Drop for MockProvider {
@@ -284,6 +297,8 @@ async fn handle_chat_completions(
         let mut g = state.lock().await;
         g.captured_headers.push(flatten_headers(&headers));
         g.captured_bodies.push(body.clone());
+        g.captured_request_times_ms
+            .push(lillux::time::timestamp_millis());
         if g.queue.is_empty() {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -311,6 +326,13 @@ async fn handle_chat_completions(
             }
         }
     }
+    let next = match next {
+        MockResponse::HttpError { status, body } => {
+            let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            return (status, body).into_response();
+        }
+        response => response,
+    };
     let streaming = body
         .get("stream")
         .and_then(|v| v.as_bool())
@@ -345,6 +367,9 @@ async fn handle_chat_completions(
 /// `finish_reason`. Closes with `data: [DONE]`.
 fn sse_response(resp: MockResponse) -> Response {
     let resp = match resp {
+        MockResponse::HttpError { .. } => {
+            unreachable!("HTTP errors are returned before SSE rendering")
+        }
         // Normalize the single-call form into the list form so the SSE
         // construction below has one shape to build.
         MockResponse::ToolCall {
@@ -359,6 +384,9 @@ fn sse_response(resp: MockResponse) -> Response {
         other => other,
     };
     let (delta_payload, finish_reason) = match resp {
+        MockResponse::HttpError { .. } => {
+            unreachable!("HTTP errors are returned before SSE rendering")
+        }
         MockResponse::Text(text) => (
             json!({
                 "choices": [{

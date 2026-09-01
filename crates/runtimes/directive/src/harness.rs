@@ -290,6 +290,18 @@ impl Harness {
         self.tool_calls_used = tool_calls;
     }
 
+    /// Reconstruct deterministic admission for durable non-lifecycle starts.
+    /// Starts are ordered by the event braid; the signed ceiling admits the
+    /// prefix the live harness would have admitted and refuses the remainder.
+    pub fn recover_admitted_tool_call_count(&self, starts: u32) -> u32 {
+        let limit = self.tool_calls_limit();
+        if limit == 0 {
+            starts
+        } else {
+            starts.min(limit)
+        }
+    }
+
     pub fn turns_used(&self) -> u32 {
         self.turns_used
     }

@@ -65,23 +65,12 @@ pub async fn spawn_detached_child(
     facets: Option<&Value>,
     launch_window: Option<&ryeos_runtime::callback::LaunchWindow>,
     operation_id: &str,
+    request_hash: &str,
 ) -> Result<Value> {
     let parent_thread_id = cap.thread_id.clone();
 
     let child_ref = CanonicalRef::parse(child_item_ref)
         .with_context(|| format!("detach: invalid child item ref '{child_item_ref}'"))?;
-    let request_identity = json!({
-        "item_ref": child_ref.to_string(),
-        "ref_bindings": child_ref_bindings,
-        "parameters": child_parameters,
-        "facets": facets,
-        "launch_window": launch_window,
-    });
-    let request_hash = lillux::sha256_hex(
-        lillux::canonical_json(&request_identity)
-            .context("detach: canonicalize operation request")?
-            .as_bytes(),
-    );
     // Parent thread row → chain root + site identity. Never trust the caller
     // for these. This launch's mode is the daemon-selected detached mode below,
     // not the mode under which the parent itself was launched.
@@ -117,16 +106,17 @@ pub async fn spawn_detached_child(
             width: 1,
         },
     });
-    let child_thread_id = state.state_store.reserve_detached_spawn_intent(
+    let child_thread_id = state.state_store.reserve_runtime_action_intent(
         operation_id,
         &parent_thread_id,
-        &request_hash,
+        ryeos_app::runtime_db::RuntimeActionMode::Detached,
+        request_hash,
         &new_thread_id(),
         None,
     )?;
     let reserved_intent = state
         .state_store
-        .get_detached_spawn_intent(operation_id)?
+        .get_runtime_action_intent(operation_id)?
         .ok_or_else(|| anyhow::anyhow!("detach: reserved operation disappeared: {operation_id}"))?;
 
     // A retry after the child birth transaction must repair lineage and launch
@@ -283,7 +273,7 @@ pub async fn spawn_detached_child(
     }
     state
         .state_store
-        .bind_detached_spawn_project_authority(operation_id, &child_project_authority)?;
+        .bind_detached_action_project_authority(operation_id, &child_project_authority)?;
     // The intent now roots the exact generation. Drop staging leases before
     // resolving the child so retries consume the bound authority and never
     // capture/freeze a second generation.
@@ -374,6 +364,11 @@ pub async fn spawn_detached_child(
         fingerprint: thread_auth.acting_principal.clone(),
         scopes: cap.effective_caps.clone(),
     });
+    let child_handler_context = thread_auth.narrowed_handler_context(
+        cap.effective_caps.clone(),
+        &parent.current_site_id,
+        &parent.origin_site_id,
+    )?;
     let child_project_context = match child_provenance.project_authority() {
         ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => ProjectContext::None,
         ryeos_state::objects::ExecutionProjectAuthority::LiveProject { .. }
@@ -388,7 +383,7 @@ pub async fn spawn_detached_child(
         project_context: child_project_context.clone(),
         subject_resolution_authority: child_provenance.subject_resolution_authority(),
         current_site_id: parent.current_site_id.clone(),
-        origin_site_id: parent.current_site_id.clone(),
+        origin_site_id: parent.origin_site_id.clone(),
         execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
         validate_only: false,
     };
@@ -500,6 +495,7 @@ pub async fn spawn_detached_child(
         child_execution,
         child_provenance,
         launch_parent_context,
+        child_handler_context,
     )
     .await?;
     let mut initial_events = prepared.initial_audit_events()?;
@@ -522,7 +518,7 @@ pub async fn spawn_detached_child(
             });
         }
     }
-    state.state_store.seal_detached_spawn_intent(
+    state.state_store.seal_detached_action_intent(
         operation_id,
         &child_project_authority,
         prepared.launch_metadata(),
@@ -703,8 +699,9 @@ pub async fn spawn_detached_child(
         "detached child spawned; parent continues",
     );
 
-    // Conform to the `CallbackDispatchResponse { thread, result }` envelope the
-    // graph-side client deserializes (deny_unknown_fields — no bare extra keys).
+    // Return the detached child/result body to the generic runtime-dispatch
+    // owner. That boundary adds and validates daemon-owned dispatch evidence
+    // before the strict `CallbackDispatchResponse` crosses UDS.
     // `thread` is the running-child snapshot the walker reads `thread_id` from to
     // emit `child_thread_spawned` + record the dispatch edge; `result` is the bare
     // value a `foreach → launch` body sees (`${result.child_thread_id}`) — there

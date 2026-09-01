@@ -5793,6 +5793,16 @@ impl StateDb {
             .list_active_sync_jobs_by_operation_type(operation_type, limit)
     }
 
+    pub fn list_active_sync_jobs_by_operation_type_after(
+        &self,
+        operation_type: &str,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SyncJobRecord>> {
+        self.operational()?
+            .list_active_sync_jobs_by_operation_type_after(operation_type, after, limit)
+    }
+
     pub fn list_sync_jobs_by_operation_type_and_state(
         &self,
         operation_type: &str,
@@ -5801,6 +5811,17 @@ impl StateDb {
     ) -> anyhow::Result<Vec<SyncJobRecord>> {
         self.operational()?
             .list_sync_jobs_by_operation_type_and_state(operation_type, state, limit)
+    }
+
+    pub fn list_sync_jobs_by_operation_type_and_state_after(
+        &self,
+        operation_type: &str,
+        state: SyncJobState,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SyncJobRecord>> {
+        self.operational()?
+            .list_sync_jobs_by_operation_type_and_state_after(operation_type, state, after, limit)
     }
 
     pub fn count_active_sync_jobs(&self) -> anyhow::Result<u64> {

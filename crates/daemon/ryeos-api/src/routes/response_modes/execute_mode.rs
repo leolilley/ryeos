@@ -1578,6 +1578,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 &project_ctx.effective_path,
                 request.ref_bindings.clone(),
                 lifecycle_authority,
+                Some(principal.handler_context()),
             )
             .map_err(|error| {
                 RouteDispatchError::Internal(format!(

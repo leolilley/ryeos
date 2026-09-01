@@ -1277,155 +1277,65 @@ async fn adopt_authorized(
 /// a remote as the operator: it runs only after the final source closure and
 /// writer grant are already staged under the exact target job.
 pub async fn recover_durable_target_handoffs(state: &AppState) -> Result<usize> {
-    let mut jobs = state.state_store.with_state_db(|db| {
-        db.list_active_sync_jobs_by_operation_type(WORKER_SESSION_HANDOFF_OPERATION, 64)
-    })?;
-    jobs.extend(state.state_store.with_state_db(|db| {
-        db.list_sync_jobs_by_operation_type_and_state(
-            WORKER_SESSION_HANDOFF_OPERATION,
-            ryeos_state::SyncJobState::Failed,
-            64,
-        )
-    })?);
     let mut recovered = 0usize;
-    for job in jobs {
-        let operation = match WorkerSessionHandoffJobOperation::from_value(job.operation.clone()) {
-            Ok(operation) if operation.role == WorkerHandoffJobRole::Target => operation,
-            Ok(_) => continue,
-            Err(error) => {
-                tracing::error!(job_id = %job.job_id, error = %error, "invalid target worker handoff job retained for operator inspection");
+    let mut scan_failed = false;
+    let mut after: Option<(String, String)> = None;
+    loop {
+        let jobs = state.state_store.with_state_db(|db| {
+            let after = after
+                .as_ref()
+                .map(|(created_at, job_id)| (created_at.as_str(), job_id.as_str()));
+            if scan_failed {
+                db.list_sync_jobs_by_operation_type_and_state_after(
+                    WORKER_SESSION_HANDOFF_OPERATION,
+                    ryeos_state::SyncJobState::Failed,
+                    after,
+                    64,
+                )
+            } else {
+                db.list_active_sync_jobs_by_operation_type_after(
+                    WORKER_SESSION_HANDOFF_OPERATION,
+                    after,
+                    64,
+                )
+            }
+        })?;
+        let Some(last) = jobs.last() else {
+            if !scan_failed {
+                scan_failed = true;
+                after = None;
                 continue;
             }
+            break;
         };
-        let Some(progress) = job
-            .result
-            .clone()
-            .map(WorkerSessionHandoffProgress::from_value)
-            .transpose()?
-        else {
-            continue;
-        };
-        if progress.phase == WorkerHandoffPhase::AbortAuthorized {
-            let _operation_guard = target_handoff_operation_lock(&job.job_id)
-                .lock_owned()
-                .await;
-            let latest = state
-                .state_store
-                .with_state_db(|db| db.get_sync_job(&job.job_id))?
-                .context("target worker handoff job disappeared during abort recovery")?;
-            if matches!(
-                latest.state,
-                ryeos_state::SyncJobState::Completed
-                    | ryeos_state::SyncJobState::Failed
-                    | ryeos_state::SyncJobState::Cancelled
+        let next = (last.created_at.clone(), last.job_id.clone());
+        for job in jobs {
+            let operation = match WorkerSessionHandoffJobOperation::from_value(
+                job.operation.clone(),
             ) {
-                continue;
-            }
-            let latest_progress = latest
+                Ok(operation) if operation.role == WorkerHandoffJobRole::Target => operation,
+                Ok(_) => continue,
+                Err(error) => {
+                    tracing::error!(job_id = %job.job_id, error = %error, "invalid target worker handoff job retained for operator inspection");
+                    continue;
+                }
+            };
+            let Some(progress) = job
                 .result
                 .clone()
                 .map(WorkerSessionHandoffProgress::from_value)
                 .transpose()?
-                .context("target abort recovery lost its durable progress")?;
-            if latest_progress.phase != WorkerHandoffPhase::AbortAuthorized {
+            else {
                 continue;
-            }
-            if recover_staged_target_abort(state, &latest, &operation, &latest_progress)? {
-                recovered += 1;
-            }
-            continue;
-        }
-        if progress.phase < WorkerHandoffPhase::SourceCommitted
-            || progress.placement_attestation_hash.is_none()
-            || progress.writer_grant_hash.is_none()
-            || progress.target_chain_head_hash.is_none()
-            || ![
-                progress
-                    .placement_attestation_hash
-                    .as_ref()
-                    .expect("checked"),
-                progress.writer_grant_hash.as_ref().expect("checked"),
-                progress.target_chain_head_hash.as_ref().expect("checked"),
-            ]
-            .into_iter()
-            .all(|hash| job.roots.iter().any(|root| root == hash))
-        {
-            continue;
-        }
-        // The target handoff job is the sole pre-attachment launch owner. If
-        // an older daemon allowed generic continuation recovery to finalize
-        // that exact successor before a dedicated session attached, retain the
-        // signed terminal as the chain outcome and settle the operational job
-        // around it. This is also the fail-closed repair for the crash window
-        // between a pre-attachment terminal commit and reservation cleanup.
-        // A running or formerly attached session never enters this path.
-        {
-            let _operation_guard = target_handoff_operation_lock(&job.job_id)
-                .lock_owned()
-                .await;
-            let latest = state
-                .state_store
-                .with_state_db(|db| db.get_sync_job(&job.job_id))?
-                .context("target worker handoff job disappeared during terminal recovery")?;
-            let failed_pre_attachment_cleanup = latest.state == ryeos_state::SyncJobState::Failed
-                && latest.phase == "target_terminal_before_attachment";
-            if failed_pre_attachment_cleanup
-                || !matches!(
-                    latest.state,
-                    ryeos_state::SyncJobState::Completed
-                        | ryeos_state::SyncJobState::Failed
-                        | ryeos_state::SyncJobState::Cancelled
-                )
-            {
-                let latest_progress = latest
-                    .result
-                    .clone()
-                    .map(WorkerSessionHandoffProgress::from_value)
-                    .transpose()?
-                    .context("target terminal recovery lost its durable progress")?;
-                if settle_pre_attachment_target_terminal(
-                    state,
-                    &latest,
-                    &operation,
-                    &latest_progress,
-                )? {
-                    recovered += 1;
-                    continue;
-                }
-            }
-            if matches!(
-                latest.state,
-                ryeos_state::SyncJobState::Completed
-                    | ryeos_state::SyncJobState::Failed
-                    | ryeos_state::SyncJobState::Cancelled
-            ) {
-                continue;
-            }
-        }
-        let request = WorkerPlacementAdoptRequest {
-            operation_id: operation.operation_id.clone(),
-            chain_root_id: operation.chain_root_id.clone(),
-            target_chain_head_hash: progress.target_chain_head_hash.clone().expect("checked"),
-            placement_attestation_hash: progress
-                .placement_attestation_hash
-                .clone()
-                .expect("checked"),
-            writer_grant_hash: progress.writer_grant_hash.clone().expect("checked"),
-        };
-        match adopt_authorized(
-            request,
-            operation.owner_principal.clone(),
-            operation.source_site_id.clone(),
-            Arc::new(state.clone()),
-        )
-        .await
-        {
-            Ok(_) => recovered += 1,
-            Err(error) => {
+            };
+            if progress.phase == WorkerHandoffPhase::AbortAuthorized {
+                let _operation_guard = target_handoff_operation_lock(&job.job_id)
+                    .lock_owned()
+                    .await;
                 let latest = state
                     .state_store
                     .with_state_db(|db| db.get_sync_job(&job.job_id))?
-                    .context("target worker handoff job disappeared during recovery")?;
+                    .context("target worker handoff job disappeared during abort recovery")?;
                 if matches!(
                     latest.state,
                     ryeos_state::SyncJobState::Completed
@@ -1434,24 +1344,140 @@ pub async fn recover_durable_target_handoffs(state: &AppState) -> Result<usize> 
                 ) {
                     continue;
                 }
-                let detail = bounded_recovery_error(&error.to_string());
-                state.state_store.with_state_db(|db| {
-                    db.update_sync_job(
-                        &job.job_id,
-                        &ryeos_state::SyncJobUpdate {
-                            state: ryeos_state::SyncJobState::Retryable,
-                            phase: latest.phase,
-                            roots: None,
-                            heads: None,
-                            uploaded_hashes: Vec::new(),
-                            fetched_hashes: Vec::new(),
-                            last_error: Some(detail),
-                            result: latest.result,
-                        },
+                let latest_progress = latest
+                    .result
+                    .clone()
+                    .map(WorkerSessionHandoffProgress::from_value)
+                    .transpose()?
+                    .context("target abort recovery lost its durable progress")?;
+                if latest_progress.phase != WorkerHandoffPhase::AbortAuthorized {
+                    continue;
+                }
+                if recover_staged_target_abort(state, &latest, &operation, &latest_progress)? {
+                    recovered += 1;
+                }
+                continue;
+            }
+            if progress.phase < WorkerHandoffPhase::SourceCommitted
+                || progress.placement_attestation_hash.is_none()
+                || progress.writer_grant_hash.is_none()
+                || progress.target_chain_head_hash.is_none()
+                || ![
+                    progress
+                        .placement_attestation_hash
+                        .as_ref()
+                        .expect("checked"),
+                    progress.writer_grant_hash.as_ref().expect("checked"),
+                    progress.target_chain_head_hash.as_ref().expect("checked"),
+                ]
+                .into_iter()
+                .all(|hash| job.roots.iter().any(|root| root == hash))
+            {
+                continue;
+            }
+            // The target handoff job is the sole pre-attachment launch owner. If
+            // an older daemon allowed generic continuation recovery to finalize
+            // that exact successor before a dedicated session attached, retain the
+            // signed terminal as the chain outcome and settle the operational job
+            // around it. This is also the fail-closed repair for the crash window
+            // between a pre-attachment terminal commit and reservation cleanup.
+            // A running or formerly attached session never enters this path.
+            {
+                let _operation_guard = target_handoff_operation_lock(&job.job_id)
+                    .lock_owned()
+                    .await;
+                let latest = state
+                    .state_store
+                    .with_state_db(|db| db.get_sync_job(&job.job_id))?
+                    .context("target worker handoff job disappeared during terminal recovery")?;
+                let failed_pre_attachment_cleanup = latest.state
+                    == ryeos_state::SyncJobState::Failed
+                    && latest.phase == "target_terminal_before_attachment";
+                if failed_pre_attachment_cleanup
+                    || !matches!(
+                        latest.state,
+                        ryeos_state::SyncJobState::Completed
+                            | ryeos_state::SyncJobState::Failed
+                            | ryeos_state::SyncJobState::Cancelled
                     )
-                })?;
+                {
+                    let latest_progress = latest
+                        .result
+                        .clone()
+                        .map(WorkerSessionHandoffProgress::from_value)
+                        .transpose()?
+                        .context("target terminal recovery lost its durable progress")?;
+                    if settle_pre_attachment_target_terminal(
+                        state,
+                        &latest,
+                        &operation,
+                        &latest_progress,
+                    )? {
+                        recovered += 1;
+                        continue;
+                    }
+                }
+                if matches!(
+                    latest.state,
+                    ryeos_state::SyncJobState::Completed
+                        | ryeos_state::SyncJobState::Failed
+                        | ryeos_state::SyncJobState::Cancelled
+                ) {
+                    continue;
+                }
+            }
+            let request = WorkerPlacementAdoptRequest {
+                operation_id: operation.operation_id.clone(),
+                chain_root_id: operation.chain_root_id.clone(),
+                target_chain_head_hash: progress.target_chain_head_hash.clone().expect("checked"),
+                placement_attestation_hash: progress
+                    .placement_attestation_hash
+                    .clone()
+                    .expect("checked"),
+                writer_grant_hash: progress.writer_grant_hash.clone().expect("checked"),
+            };
+            match adopt_authorized(
+                request,
+                operation.owner_principal.clone(),
+                operation.source_site_id.clone(),
+                Arc::new(state.clone()),
+            )
+            .await
+            {
+                Ok(_) => recovered += 1,
+                Err(error) => {
+                    let latest = state
+                        .state_store
+                        .with_state_db(|db| db.get_sync_job(&job.job_id))?
+                        .context("target worker handoff job disappeared during recovery")?;
+                    if matches!(
+                        latest.state,
+                        ryeos_state::SyncJobState::Completed
+                            | ryeos_state::SyncJobState::Failed
+                            | ryeos_state::SyncJobState::Cancelled
+                    ) {
+                        continue;
+                    }
+                    let detail = bounded_recovery_error(&error.to_string());
+                    state.state_store.with_state_db(|db| {
+                        db.update_sync_job(
+                            &job.job_id,
+                            &ryeos_state::SyncJobUpdate {
+                                state: ryeos_state::SyncJobState::Retryable,
+                                phase: latest.phase,
+                                roots: None,
+                                heads: None,
+                                uploaded_hashes: Vec::new(),
+                                fetched_hashes: Vec::new(),
+                                last_error: Some(detail),
+                                result: latest.result,
+                            },
+                        )
+                    })?;
+                }
             }
         }
+        after = Some(next);
     }
     Ok(recovered)
 }

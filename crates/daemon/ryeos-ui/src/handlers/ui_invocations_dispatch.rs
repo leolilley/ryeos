@@ -335,6 +335,7 @@ async fn execute_read_only_service(
             usage_subject_asserted_by: None,
         },
         None,
+        None,
         Some(local_handler_context),
     )
     .await

@@ -19,6 +19,11 @@ pub const BASE_ALLOWLIST_NAMES: &[&str] = &[
     // checkpoint-park node name into the graph runtime subprocess. Prod-inert
     // (unset in every non-test launch), same pattern as RYEOSD_TEST_STDERR_DIR.
     "RYEOS_GRAPH_TEST_BLOCK_AFTER_CHECKPOINT",
+    // Test-only: parks the first directive runtime at an exact durable
+    // event/effect boundary for the native-resume crash matrix. This name is
+    // absent from every production build's host-environment contract.
+    #[cfg(feature = "crash-qualification-test-support")]
+    "RYEOS_DIRECTIVE_TEST_BLOCK_AT",
     "HTTPS_PROXY",
     "HTTP_PROXY",
     "NO_PROXY",
@@ -530,6 +535,37 @@ mod tests {
         assert!(!map.contains_key("RYEOS_BROWSER_INTEGRATION"));
         assert!(!map.contains_key("OPENAI_API_KEY"));
         assert!(!map.contains_key("RYEOSD_THREAD_AUTH_TOKEN"));
+    }
+
+    #[cfg(not(feature = "crash-qualification-test-support"))]
+    #[test]
+    fn production_base_allowlist_excludes_directive_crash_cut() {
+        let env = EnvContractBuilder::new()
+            .with_base_allowlist(host_env(&[(
+                "RYEOS_DIRECTIVE_TEST_BLOCK_AT",
+                "effect_committed",
+            )]))
+            .unwrap()
+            .build();
+        let map: BTreeMap<_, _> = env.into_iter().collect();
+        assert!(!map.contains_key("RYEOS_DIRECTIVE_TEST_BLOCK_AT"));
+    }
+
+    #[cfg(feature = "crash-qualification-test-support")]
+    #[test]
+    fn crash_qualification_build_forwards_exact_directive_cut() {
+        let env = EnvContractBuilder::new()
+            .with_base_allowlist(host_env(&[(
+                "RYEOS_DIRECTIVE_TEST_BLOCK_AT",
+                "effect_committed",
+            )]))
+            .unwrap()
+            .build();
+        let map: BTreeMap<_, _> = env.into_iter().collect();
+        assert_eq!(
+            map.get("RYEOS_DIRECTIVE_TEST_BLOCK_AT").map(String::as_str),
+            Some("effect_committed")
+        );
     }
 
     #[test]

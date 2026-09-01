@@ -62,6 +62,19 @@ impl RoutePrincipal {
             metadata: BTreeMap::new(),
         }
     }
+
+    /// Preserve the verifier's complete authority at execution admission.
+    /// This conversion is mechanical: no class or origin is inferred from the
+    /// principal string.
+    pub fn handler_context(&self) -> ryeos_app::handler_context::HandlerContext {
+        ryeos_app::handler_context::HandlerContext::new_with_authority(
+            self.id.clone(),
+            self.scopes.clone(),
+            self.verified,
+            self.authorized_key_class,
+            self.authenticated_origin_site_id.clone(),
+        )
+    }
 }
 
 /// Select execution origin exclusively from authenticated route authority.

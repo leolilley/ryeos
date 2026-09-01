@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-08-26T23:06:47Z:3bd148e72b3a0f75e00b240db8b69122e9d56638a2f5fc4238efb831155c90e6:xtNfsm0qXBgPWgzSqYEorsDmlcYyOqhUg3qrKMFTR1R6CPx8YoOLz3/8D/e0TvIFD6fyLUOY9Wkz3E0tsl1WBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-01T00:15:48Z:41bd90d54845b0a4ec32d948a538942e5daa2d2923ffc462b8f1b0e5047b26ca:1XFSbPpjTlP9o1ePtb3OQMP5Ji9IA88CkWeC4SHih02c1J3StFlOhhWhLjz7exhy5zK6RmAW/OKpBRW/a4WtDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "persistence-schema-evolution"
 title: "Persistence Schema Evolution"
 description: "Rules for immutable CAS wire identities, retained SQLite migrations, rebuildable projections, and explicit history retirement"
 entry_type: reference
-version: "1.7.0"
+version: "1.9.0"
 ```
 
 # Persistence Schema Evolution
@@ -31,10 +31,10 @@ The current clean-cut execution formats include:
 
 - thread snapshot schema 10;
 - project snapshot schema 5;
-- admitted launch capsule schema 15;
-- runtime launch metadata epoch 20;
+- admitted launch capsule schema 16;
+- runtime launch metadata epoch 21;
 - the standalone runtime project-authority envelope epoch 3; and
-- the owned runtime SQLite operator schema epoch 17 (encoded in the RyeOS
+- the owned runtime SQLite operator schema epoch 19 (encoded in the RyeOS
   `PRAGMA application_id` family).
 
 The numbers identify independently evolving contracts. A change to a nested
@@ -59,7 +59,7 @@ the exact current envelopes stored in its JSON columns. Normal open never
 migrates or normalizes a predecessor. Any mismatch leaves the file untouched
 and requires the explicit operator-confirmed thread-history/project-head reset.
 
-Runtime epoch 17 includes the epoch-8 hosted-worker substrate,
+Runtime epoch 19 retains the epoch-8 hosted-worker substrate,
 credential-generation fencing, command/approval contact ledgers, observation
 frontier with a cross-epoch cumulative event ceiling, candidate-disposition,
 and multi-epoch process-history contracts, the epoch-9 exact
@@ -84,8 +84,21 @@ cold runtime start after an authoritative higher layer has already restored
 state. Epoch 17 admits persistent-session capsule schema 5 and makes the
 runtime descriptor's signed content-dependency ceiling explicit. An epoch-16
 descriptor omits that authority and is never normalized to the current empty
-policy during recovery. No execution-history reader or migration for epochs 1
-through 16 remains. The
+policy during recovery. Epoch 18 cleanly replaces the detached-only spawn
+intent with one generic runtime-action intent. It binds each runtime-asserted
+opaque operation ID to the authoritative chain, first caller, action mode,
+exact daemon-derived request hash, and one daemon-minted child identity before
+contact. Detached project/launch authority remains a mode-constrained extension
+of that same record; inline actions cannot populate it. Epoch 19 admits launch
+metadata epoch 21 and admitted launch capsule schema 16. Their sealed root
+request retains the exact optional ingress-authenticated handler context, and
+callbacks bind that caller/site authority instead of reconstructing transport
+authentication from a principal string. Machine continuations cannot replace
+the principal, operator continuations rebind it only from a fresh authenticated
+handler, and remote placement clears source-node handler authority. There is no
+epoch-18 reader, handler-context reconstruction fallback, alternate inline
+ledger, operation-ID compatibility alias, or migration. No execution-history
+reader or migration for epochs 1 through 18 remains. The
 explicit reset may extract only the provider-neutral credential-profile table
 from epochs 6 through 11. From epoch 12 onward OperationalDb is the stable
 profile authority, but the exact revisioned runtime projection is folded into
@@ -111,7 +124,8 @@ atomically rebuilds the table into the same column order and SQL as a fresh v6
 store. The exact appended-column intermediate produced by the original v6
 migrator is also recognized and repaired; no unknown layout is modified.
 
-Replay indexes inside that stable database have their own clean-cut epoch.
+Replay indexes inside that stable database have their own clean-cut epoch,
+currently epoch 6.
 They are not authority-compatible merely because the surrounding SQLite schema
 is current: a dispatch-effect record retains its complete admitted execution
 closure, including the exact admitted-launch-capsule schema. When that closure

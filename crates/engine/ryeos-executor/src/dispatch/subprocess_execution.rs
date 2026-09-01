@@ -140,6 +140,7 @@ pub(crate) async fn dispatch_subprocess(
         request,
         ctx,
         state,
+        handler_context,
         role,
         root_subject,
         hop_runtime,
@@ -245,6 +246,7 @@ pub(crate) async fn dispatch_subprocess(
                     request,
                     ctx,
                     state,
+                    handler_context,
                     role,
                     root_subject,
                     hop_runtime,
@@ -263,6 +265,7 @@ pub(crate) async fn dispatch_subprocess(
                 request,
                 ctx,
                 state,
+                handler_context,
                 launch_handoff,
             ))
             .await
@@ -283,6 +286,7 @@ async fn dispatch_managed_subprocess(
         request,
         ctx,
         state,
+        handler_context,
         role,
         launch_handoff,
     } = sctx;
@@ -381,6 +385,7 @@ async fn dispatch_managed_subprocess(
         // current default).
         runtime_ref: Some(&runtime_ref),
         acting_principal,
+        handler_context: handler_context.as_ref(),
         resolved: &prepared.resolved,
         project_path,
         provenance: &request.provenance,
@@ -1175,6 +1180,7 @@ async fn dispatch_tool_subprocess(
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
+    handler_context: Option<ryeos_app::handler_context::HandlerContext>,
     launch_handoff: Option<&crate::execution::launch::LaunchHandoff>,
 ) -> Result<Value, DispatchError> {
     let item_ref = current_ref.to_string();
@@ -1277,6 +1283,7 @@ async fn dispatch_tool_subprocess(
             request,
             ctx,
             state,
+            handler_context,
             launch_handoff,
         ))
         .await;
@@ -1406,6 +1413,7 @@ async fn dispatch_tool_subprocess(
     let params = crate::execution::runner::ExecutionParams {
         resolved,
         acting_principal: request.acting_principal.to_string(),
+        handler_context,
         vault_bindings,
         parameters: request.params.clone(),
         pre_minted_thread_id: request.pre_minted_thread_id.clone(),

@@ -649,6 +649,7 @@ pub enum PinnedDirectoryEntry {
 }
 
 /// One regular entry opened from a [`PinnedDirectory`].
+#[derive(Debug)]
 pub struct PinnedRegularFile {
     pub path: PathBuf,
     pub name: OsString,
@@ -2548,6 +2549,34 @@ impl PinnedDirectory {
                 }
             }
         }
+    }
+
+    /// Stream and publish one bounded regular file while retaining its typed
+    /// descriptor authority. This is the pinned counterpart to
+    /// [`Self::atomic_create_regular_from_reader`]; callers that pass the
+    /// result across an authority boundary do not need to erase the exact
+    /// inode into a bare [`File`] or reopen its ambient pathname.
+    pub fn atomic_create_pinned_regular_from_reader<R: Read>(
+        &self,
+        name: &OsStr,
+        reader: &mut R,
+        maximum_bytes: u64,
+        mode: u32,
+    ) -> Result<Option<(PinnedRegularFile, u64)>> {
+        let Some((mut file, copied)) =
+            self.atomic_create_regular_from_reader(name, reader, maximum_bytes, mode)?
+        else {
+            return Ok(None);
+        };
+        file.rewind()?;
+        Ok(Some((
+            PinnedRegularFile {
+                path: self.path.join(name),
+                name: name.to_os_string(),
+                file,
+            },
+            copied,
+        )))
     }
 
     /// Open or create one regular child while retaining this directory inode.
@@ -5518,6 +5547,29 @@ mod tests {
                 .is_err()
         );
         assert_eq!(std::fs::read(&target).unwrap(), b"existing");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streamed_atomic_create_can_retain_typed_file_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = PinnedDirectory::open(dir.path()).unwrap().unwrap();
+        let mut payload = b"pinned payload".as_slice();
+
+        let (pinned, copied) = directory
+            .atomic_create_pinned_regular_from_reader(
+                OsStr::new("payload"),
+                &mut payload,
+                64,
+                0o600,
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(copied, 14);
+        assert_eq!(pinned.name(), OsStr::new("payload"));
+        assert_eq!(pinned.path(), dir.path().join("payload"));
+        assert_eq!(pinned.read_bounded(64).unwrap(), b"pinned payload");
     }
 
     #[cfg(target_os = "linux")]

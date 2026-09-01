@@ -54,7 +54,7 @@ fn plant_vault_with_zen_key(state_path: &Path) -> anyhow::Result<()> {
 fn plant_segment_chain_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 config:
   start: a
@@ -93,7 +93,7 @@ config:
 fn plant_retry_segment_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 config:
   start: flaky

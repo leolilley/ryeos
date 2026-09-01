@@ -258,12 +258,50 @@ class LocalInferenceContractTests(unittest.TestCase):
         self.assertIn("--bundle-set full", source_qualifier)
 
         qualifier = NODE_QUALIFIER_PATH.read_text(encoding="utf-8")
-        self.assertIn("local-tinygrad-activation online", qualifier)
+        self.assertIn("activation_args+=(online)", qualifier)
+        self.assertIn("activation_args+=(offline local-inference-archives)", qualifier)
+        self.assertIn("--online", source_qualifier)
+        self.assertIn("--archive-root", source_qualifier)
+        self.assertEqual(source_qualifier.count("--minimum-free-bytes 2147483648"), 2)
+        self.assertIn("--archive-root", qualifier)
+        self.assertIn('"minimum_free_bytes": int(sys.argv[2])', qualifier)
+        self.assertIn('source "$repository_root/scripts/pkg/bundle-sets.sh"', qualifier)
+        self.assertIn("ryeos_bundle_set_names full", qualifier)
+        self.assertIn('--source "$qualification_source"', qualifier)
+        self.assertNotIn('--source "$bundle_source"', qualifier)
         self.assertNotIn("shutil.copyfile", qualifier)
+        self.assertIn(
+            'python3 - "$qualification_root" "$minimum_free_bytes" <<\'PY\'',
+            qualifier,
+        )
         self.assertIn('max_total_address_space_bytes"] = 1', qualifier)
         self.assertIn("provider_attempt_reservation", qualifier)
         self.assertIn("namespace='provider.call'", qualifier)
         self.assertIn("provider_call_observation_recorded", qualifier)
+        self.assertIn("directive:qualification/live_tool_loop", qualifier)
+        self.assertIn("graph:qualification/live_tool_follow", qualifier)
+        self.assertIn("--pin-project --retain-child-results", qualifier)
+        self.assertIn("tool:qualification/read", qualifier)
+        self.assertIn("tool:qualification/mutate", qualifier)
+        self.assertIn("tool:qualification/verify", qualifier)
+        self.assertGreaterEqual(
+            qualifier.count("- ryeos.execute.tool.qualification/read"), 2,
+            "both the live directive and its follow parent must hold read authority",
+        )
+        self.assertIn(
+            '"cancellation_mode": "graceful"',
+            qualifier,
+            "zero-argument Python tools must distinguish runtime-injected controls",
+        )
+        self.assertIn("tool_concurrency: 1", qualifier)
+        self.assertIn('category: "ryeos-runtime"', qualifier)
+        self.assertIn("config:ryeos-runtime/execution", qualifier)
+        self.assertIn(
+            'expected = ["qualification_read", "qualification_mutate", "qualification_verify"]',
+            qualifier,
+        )
+        self.assertIn("service:threads/tail", qualifier)
+        self.assertNotIn("/state/runtime.sqlite3", qualifier)
 
         publish_position = workflow.index(
             "Publish exact immutable prerelease"

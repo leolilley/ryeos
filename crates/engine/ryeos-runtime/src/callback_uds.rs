@@ -81,6 +81,29 @@ impl UdsRuntimeClient {
     fn serialize_dispatch_action_request(
         request: DispatchActionRequest,
     ) -> Result<(Value, bool), CallbackError> {
+        match (
+            request.hook_dispatch.is_some(),
+            request.action.operation_id.as_deref(),
+        ) {
+            (true, None) => {}
+            (true, Some(_)) => {
+                return Err(CallbackError::Transport(anyhow::anyhow!(
+                    "hook callback action cannot carry an ordinary operation_id"
+                )));
+            }
+            (false, Some(operation_id))
+                if crate::callback::valid_action_operation_id(operation_id) => {}
+            (false, Some(_)) => {
+                return Err(CallbackError::Transport(anyhow::anyhow!(
+                    "ordinary callback action operation_id is not a canonical lowercase SHA-256 digest"
+                )));
+            }
+            (false, None) => {
+                return Err(CallbackError::Transport(anyhow::anyhow!(
+                    "ordinary callback action has no operation_id"
+                )));
+            }
+        }
         let inline = request.action.thread == "inline";
         let params = serde_json::to_value(request).map_err(|error| {
             CallbackError::Transport(anyhow::anyhow!(
@@ -137,6 +160,23 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         self.inject_callback_token(&mut params);
         self.rpc
             .request("runtime.attach_process", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn reach_test_phase_cut(
+        &self,
+        thread_id: &str,
+        phase: &str,
+    ) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id, "phase": phase});
+        self.inject_callback_token(&mut params);
+        // A successful test gate intentionally never responds: the parent
+        // observes its inherited channel and SIGKILLs the daemon. A dedicated
+        // unbounded connection prevents the shared callback lane from being
+        // occupied while the runtime is parked at the crash boundary.
+        self.rpc
+            .request_dedicated("runtime.test_phase_cut", params, None)
             .await
             .map_err(Self::map_rpc_error)
     }
@@ -780,11 +820,11 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_action_omits_hook_identity_for_regular_actions() {
+    fn dispatch_action_retains_operation_id_for_regular_actions() {
         let request = DispatchActionRequest {
             thread_id: "T-1".to_string(),
             action: ActionPayload {
-                operation_id: None,
+                operation_id: Some("1".repeat(64)),
                 item_id: "tool:test/noop".to_string(),
                 ref_bindings: std::collections::BTreeMap::new(),
                 params: json!({}),
@@ -799,5 +839,53 @@ mod tests {
 
         let (params, _) = UdsRuntimeClient::serialize_dispatch_action_request(request).unwrap();
         assert!(params.get("hook_dispatch").is_none());
+        assert_eq!(params["action"]["operation_id"], "1".repeat(64));
+    }
+
+    #[test]
+    fn dispatch_action_rejects_missing_uppercase_and_hook_operation_ids() {
+        let regular = |operation_id| DispatchActionRequest {
+            thread_id: "T-1".to_string(),
+            action: ActionPayload {
+                operation_id,
+                item_id: "tool:test/noop".to_string(),
+                ref_bindings: std::collections::BTreeMap::new(),
+                params: json!({}),
+                thread: "inline".to_string(),
+                call: None,
+                facets: None,
+                launch_window: None,
+            },
+            hook_dispatch: None,
+            effect_dispatch: None,
+        };
+        for request in [regular(None), regular(Some("A".repeat(64)))] {
+            let error = UdsRuntimeClient::serialize_dispatch_action_request(request).unwrap_err();
+            assert!(error.to_string().contains("operation_id"), "{error}");
+        }
+
+        let mut hook = regular(Some("1".repeat(64)));
+        hook.hook_dispatch = Some(HookDispatchIdentity {
+            occurrence: HookDispatchOccurrence::new(
+                "graph",
+                "graph_step_completed",
+                "graph:test/workflow",
+                "a".repeat(64),
+                "b".repeat(64),
+            ),
+            hook_id: "audit".to_string(),
+            layer: crate::hooks_loader::HookLayer::Infrastructure,
+            result_mode: crate::hooks_loader::HookResultMode::Observation,
+            context_contract: ryeos_engine::hooks::HookContextContract {
+                schema: ryeos_engine::hooks::HOOK_CONTEXT_SCHEMA.to_string(),
+                allowed_roots: std::collections::BTreeSet::new(),
+            },
+            context_hash: "c".repeat(64),
+        });
+        let error = UdsRuntimeClient::serialize_dispatch_action_request(hook).unwrap_err();
+        assert!(
+            error.to_string().contains("hook callback action"),
+            "{error}"
+        );
     }
 }

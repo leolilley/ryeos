@@ -11,6 +11,8 @@
 
 pub mod fast_fixture;
 pub mod mock_provider;
+#[cfg(all(unix, feature = "crash-qualification-test-support"))]
+pub mod runtime_phase_cut;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

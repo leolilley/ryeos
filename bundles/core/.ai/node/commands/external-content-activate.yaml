@@ -1,15 +1,20 @@
-# ryeos:signed:2026-08-27T11:45:39Z:5e4cbc68e388a56cbdfd1aab5935b8ba4883abfc7bea88bf93d7ef90367ab0d8:0zxcMLLF5+D5Q1RCmJSTVlH7nPKuTI2YWOJbUyWut6IEzZ6j+q4NrYoMBlndrtM+ghPpzyKjngRbXReANZsaDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-01T00:15:48Z:6fd39e51e2db57e21974f9dc4faccaf71c8e8b32a8afbaaca7d2633c5de90a46:KsnMVaXy+eWGmtNBKRYaJzk0tx9bms8MGVArd/uov0nv2OdyldrY2NfGx+cvC8vrClgheYevree3UDiwJWCQBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [external-content, activate]
-description: Activate a trusted installed-bundle external-content acquisition recipe
+description: Submit durable activation of a trusted installed-bundle external-content acquisition recipe
 help:
-  usage: "ryeos external-content activate <config-ref> <online|offline>"
+  usage: "ryeos external-content activate <config-ref> <online|offline> [offline-archive-root]"
   examples:
     - "ryeos external-content activate config:vendor/runtime-activation online"
     - "ryeos external-content activate config:vendor/runtime-activation offline"
+    - "ryeos external-content activate config:vendor/runtime-activation offline vendor-archives"
 forms:
   - slots:
       - field: activation_ref
       - field: mode
+  - slots:
+      - field: activation_ref
+      - field: mode
+      - field: offline_archive_root
 dispatch:
   kind: execute_ref
   execute: service:external-content/activate

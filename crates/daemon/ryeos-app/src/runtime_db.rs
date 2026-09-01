@@ -146,7 +146,7 @@ pub struct RuntimeThreadHistoryDiscardReport {
     pub in_process_handler_reservations: usize,
     pub thread_commands: usize,
     pub hook_dispatch_ledger: usize,
-    pub detached_spawn_intents: usize,
+    pub runtime_action_intents: usize,
     pub recovery_waits: usize,
     pub thread_launch_claims: usize,
     pub thread_launch_epochs: usize,
@@ -165,7 +165,7 @@ impl RuntimeThreadHistoryDiscardReport {
             + self.in_process_handler_reservations
             + self.thread_commands
             + self.hook_dispatch_ledger
-            + self.detached_spawn_intents
+            + self.runtime_action_intents
             + self.recovery_waits
             + self.thread_launch_claims
             + self.thread_launch_epochs
@@ -374,10 +374,35 @@ pub struct CompletedHookDispatch {
     pub response_hash: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeActionMode {
+    Inline,
+    Detached,
+}
+
+impl RuntimeActionMode {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Inline => "inline",
+            Self::Detached => "detached",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "inline" => Ok(Self::Inline),
+            "detached" => Ok(Self::Detached),
+            other => bail!("invalid runtime action mode `{other}`"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
-pub struct DetachedSpawnIntent {
+pub struct RuntimeActionIntent {
     pub operation_id: String,
-    pub parent_thread_id: String,
+    pub chain_root_id: String,
+    pub first_caller_thread_id: String,
+    pub mode: RuntimeActionMode,
     pub request_hash: String,
     pub child_thread_id: String,
     pub child_project_authority: Option<ryeos_state::objects::ExecutionProjectAuthority>,
@@ -396,34 +421,38 @@ pub struct RecoveryWaitDisposition {
     pub deadline_at_ms: i64,
 }
 
-fn decode_detached_spawn_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<DetachedSpawnIntent> {
-    Ok(DetachedSpawnIntent {
+fn decode_runtime_action_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeActionIntent> {
+    Ok(RuntimeActionIntent {
         operation_id: row.get(0)?,
-        parent_thread_id: row.get(1)?,
-        request_hash: row.get(2)?,
-        child_thread_id: row.get(3)?,
+        chain_root_id: row.get(1)?,
+        first_caller_thread_id: row.get(2)?,
+        mode: RuntimeActionMode::parse(row.get::<_, String>(3)?.as_str()).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, error.into())
+        })?,
+        request_hash: row.get(4)?,
+        child_thread_id: row.get(5)?,
         child_project_authority: row
-            .get::<_, Option<String>>(4)?
-            .map(|raw| decode_current_project_authority_column(4, &raw))
-            .transpose()?,
-        admitted_launch_capsule_hash: row.get(5)?,
-        launch_metadata: row
             .get::<_, Option<String>>(6)?
-            .map(|raw| decode_stored_launch_metadata_column(6, &raw))
+            .map(|raw| decode_current_project_authority_column(6, &raw))
+            .transpose()?,
+        admitted_launch_capsule_hash: row.get(7)?,
+        launch_metadata: row
+            .get::<_, Option<String>>(8)?
+            .map(|raw| decode_stored_launch_metadata_column(8, &raw))
             .transpose()?
             .and_then(StoredLaunchMetadata::current),
         incompatible_launch_metadata: row
-            .get::<_, Option<String>>(6)?
-            .map(|raw| decode_stored_launch_metadata_column(6, &raw))
+            .get::<_, Option<String>>(8)?
+            .map(|raw| decode_stored_launch_metadata_column(8, &raw))
             .transpose()?
             .and_then(StoredLaunchMetadata::incompatible),
         initial_events: row
-            .get::<_, Option<String>>(7)?
+            .get::<_, Option<String>>(9)?
             .map(|raw| serde_json::from_str(&raw))
             .transpose()
             .map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    7,
+                    9,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
@@ -510,6 +539,18 @@ pub struct LaunchClaim {
     pub lease_expires_at_ms: i64,
     pub claimed_by: String,
     pub owner: LaunchOwner,
+}
+
+#[derive(Debug, Clone)]
+pub enum RuntimeRecoveryClaimRotation {
+    Rotated {
+        claim: LaunchClaim,
+        next_attempt: u32,
+    },
+    Exhausted {
+        attempts: u32,
+    },
+    LostOwner,
 }
 
 /// Canonical durable fencing identity for one launch attempt. The JSON form is
@@ -841,17 +882,31 @@ CREATE TABLE IF NOT EXISTS hook_dispatch_ledger (
 CREATE INDEX IF NOT EXISTS idx_hook_dispatch_ledger_chain_root
     ON hook_dispatch_ledger(chain_root_id);
 
-CREATE TABLE IF NOT EXISTS detached_spawn_intent (
+CREATE TABLE IF NOT EXISTS runtime_action_intent (
     operation_id TEXT PRIMARY KEY,
-    parent_thread_id TEXT NOT NULL,
+    chain_root_id TEXT NOT NULL,
+    first_caller_thread_id TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK (mode IN ('inline', 'detached')),
     request_hash TEXT NOT NULL,
     child_thread_id TEXT NOT NULL UNIQUE,
     child_project_authority TEXT,
     admitted_launch_capsule_hash TEXT,
     launch_metadata TEXT,
     initial_events TEXT,
-    created_at_ms INTEGER NOT NULL
+    created_at_ms INTEGER NOT NULL,
+    CHECK (
+        mode = 'detached'
+        OR (
+            child_project_authority IS NULL
+            AND admitted_launch_capsule_hash IS NULL
+            AND launch_metadata IS NULL
+            AND initial_events IS NULL
+        )
+    )
 );
+
+CREATE INDEX IF NOT EXISTS idx_runtime_action_intent_chain_root
+    ON runtime_action_intent(chain_root_id);
 
 CREATE TABLE IF NOT EXISTS thread_recovery_wait (
     thread_id TEXT PRIMARY KEY,
@@ -867,7 +922,8 @@ CREATE TABLE IF NOT EXISTS thread_launch_claim (
     claim_id TEXT NOT NULL,
     claimed_at_ms INTEGER NOT NULL,
     lease_expires_at_ms INTEGER NOT NULL,
-    claimed_by TEXT NOT NULL
+    claimed_by TEXT NOT NULL,
+    rearm_resume_budget_if_stale INTEGER NOT NULL CHECK (rearm_resume_budget_if_stale IN (0, 1))
 );
 
 CREATE TABLE IF NOT EXISTS thread_launch_epoch (
@@ -1203,7 +1259,13 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // schema 5 and the runtime launch contract that requires an explicit signed
 // content-dependency policy. Predecessor descriptors omit that authority and
 // must not be reinterpreted as the current empty policy during recovery.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 17;
+// Epoch 18 replaces the detached-only action reservation with one chain-bound
+// runtime-action intent shared by inline and detached callbacks. Epoch 17 rows
+// cannot prove the new action mode or authoritative chain scope.
+// Epoch 19 admits launch-metadata epoch 21 and sealed-request schema 11, which
+// retain optional ingress-authenticated handler authority without reconstructing
+// it from a principal string during callbacks or recovery.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 19;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -1459,7 +1521,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 ],
             },
             sqlite_schema::TableSpec {
-                name: "detached_spawn_intent",
+                name: "runtime_action_intent",
                 columns: &[
                     sqlite_schema::ColumnSpec {
                         name: "operation_id",
@@ -1468,7 +1530,19 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         not_null: true,
                     },
                     sqlite_schema::ColumnSpec {
-                        name: "parent_thread_id",
+                        name: "chain_root_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "first_caller_thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "mode",
                         col_type: "TEXT",
                         pk: false,
                         not_null: true,
@@ -1582,6 +1656,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec {
                         name: "claimed_by",
                         col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "rearm_resume_budget_if_stale",
+                        col_type: "INTEGER",
                         pk: false,
                         not_null: true,
                     },
@@ -2697,6 +2777,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 unique: false,
             },
             sqlite_schema::IndexSpec {
+                name: "idx_runtime_action_intent_chain_root",
+                table: "runtime_action_intent",
+                columns: &["chain_root_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
                 name: "idx_follow_waiter_successor",
                 table: "follow_waiter",
                 columns: &["parent_successor_thread_id"],
@@ -3123,12 +3209,12 @@ fn reject_newer_runtime_execution_epochs(conn: &Connection) -> Result<()> {
     launch_rows.extend(
         optional_runtime_text_rows(
             conn,
-            "detached_spawn_intent",
+            "runtime_action_intent",
             "operation_id",
             "launch_metadata",
         )?
         .into_iter()
-        .map(|(owner_id, raw)| ("detached_spawn_intent", owner_id, raw)),
+        .map(|(owner_id, raw)| ("runtime_action_intent", owner_id, raw)),
     );
     launch_rows.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
     for (owner, owner_id, raw) in launch_rows {
@@ -3173,12 +3259,12 @@ fn reject_newer_runtime_execution_epochs(conn: &Connection) -> Result<()> {
     authority_rows.extend(
         optional_runtime_text_rows(
             conn,
-            "detached_spawn_intent",
+            "runtime_action_intent",
             "operation_id",
             "child_project_authority",
         )?
         .into_iter()
-        .map(|(owner_id, raw)| ("detached_spawn_intent", owner_id, raw)),
+        .map(|(owner_id, raw)| ("runtime_action_intent", owner_id, raw)),
     );
     authority_rows.extend(
         optional_runtime_text_rows(
@@ -3259,8 +3345,8 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path) -> Result<()> 
             "SELECT 'thread_runtime', thread_id, launch_metadata
                FROM thread_runtime WHERE launch_metadata IS NOT NULL
              UNION ALL
-             SELECT 'detached_spawn_intent', operation_id, launch_metadata
-               FROM detached_spawn_intent WHERE launch_metadata IS NOT NULL",
+             SELECT 'runtime_action_intent', operation_id, launch_metadata
+               FROM runtime_action_intent WHERE launch_metadata IS NOT NULL",
         )?;
         // Preserve statement/query temporary drop order under Edition 2024.
         #[allow(clippy::let_and_return)]
@@ -3330,8 +3416,8 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path) -> Result<()> 
     }
     let authorities = {
         let mut statement = tx.prepare(
-            "SELECT 'detached_spawn_intent', operation_id, child_project_authority
-               FROM detached_spawn_intent WHERE child_project_authority IS NOT NULL
+            "SELECT 'runtime_action_intent', operation_id, child_project_authority
+               FROM runtime_action_intent WHERE child_project_authority IS NOT NULL
              UNION ALL
              SELECT 'follow_waiter', follow_key, child_project_authority
                FROM follow_waiter WHERE child_project_authority IS NOT NULL",
@@ -4064,35 +4150,53 @@ fn validate_new_hook_dispatch(seed: &NewHookDispatch) -> Result<()> {
     Ok(())
 }
 
-fn validate_detached_spawn_intent(
+fn validate_runtime_action_intent(
     operation_id: &str,
-    parent_thread_id: &str,
+    chain_root_id: &str,
+    first_caller_thread_id: &str,
+    mode: &RuntimeActionMode,
     request_hash: &str,
     child_thread_id: &str,
 ) -> Result<()> {
-    validate_sha256("detached operation_id", operation_id)?;
-    validate_sha256("detached request_hash", request_hash)?;
+    validate_sha256("runtime action operation_id", operation_id)?;
+    validate_sha256("runtime action request_hash", request_hash)?;
     for (field, value) in [
-        ("parent_thread_id", parent_thread_id),
+        ("chain_root_id", chain_root_id),
+        ("first_caller_thread_id", first_caller_thread_id),
         ("child_thread_id", child_thread_id),
     ] {
         if value.is_empty() {
-            bail!("detached spawn {field} cannot be empty");
+            bail!("runtime action {field} cannot be empty");
         }
         if value.len() > 4 * 1024 {
-            bail!("detached spawn {field} exceeds 4096 byte limit");
+            bail!("runtime action {field} exceeds 4096 byte limit");
         }
     }
+    RuntimeActionMode::parse(mode.as_str())?;
     Ok(())
 }
 
-fn validate_detached_spawn_intent_record(intent: &DetachedSpawnIntent) -> Result<()> {
-    validate_detached_spawn_intent(
+fn validate_runtime_action_intent_record(intent: &RuntimeActionIntent) -> Result<()> {
+    validate_runtime_action_intent(
         &intent.operation_id,
-        &intent.parent_thread_id,
+        &intent.chain_root_id,
+        &intent.first_caller_thread_id,
+        &intent.mode,
         &intent.request_hash,
         &intent.child_thread_id,
     )?;
+    if matches!(intent.mode, RuntimeActionMode::Inline)
+        && (intent.child_project_authority.is_some()
+            || intent.admitted_launch_capsule_hash.is_some()
+            || intent.launch_metadata.is_some()
+            || intent.incompatible_launch_metadata.is_some()
+            || intent.initial_events.is_some())
+    {
+        bail!(
+            "inline runtime action `{}` contains detached launch authority",
+            intent.operation_id
+        );
+    }
     if let Some(authority) = &intent.child_project_authority {
         authority.validate()?;
     }
@@ -4104,7 +4208,9 @@ fn validate_detached_spawn_intent_record(intent: &DetachedSpawnIntent) -> Result
     let unsealed_fields_empty = intent.admitted_launch_capsule_hash.is_none()
         && intent.launch_metadata.is_none()
         && intent.initial_events.is_none();
-    if (sealed && !sealed_fields_complete) || (!sealed && !unsealed_fields_empty) {
+    if matches!(intent.mode, RuntimeActionMode::Detached)
+        && ((sealed && !sealed_fields_complete) || (!sealed && !unsealed_fields_empty))
+    {
         bail!(
             "detached operation `{}` has an incomplete sealed authority",
             intent.operation_id
@@ -8231,7 +8337,7 @@ impl RuntimeDb {
                 )?,
                 thread_commands: count(&self.conn, "thread_commands")?,
                 hook_dispatch_ledger: count(&self.conn, "hook_dispatch_ledger")?,
-                detached_spawn_intents: count(&self.conn, "detached_spawn_intent")?,
+                runtime_action_intents: count(&self.conn, "runtime_action_intent")?,
                 recovery_waits: count(&self.conn, "thread_recovery_wait")?,
                 thread_launch_claims: count(&self.conn, "thread_launch_claim")?,
                 thread_launch_epochs: count(&self.conn, "thread_launch_epoch")?,
@@ -8260,7 +8366,7 @@ impl RuntimeDb {
             seat_leases: conn.execute("DELETE FROM seat_lease", [])?,
             launch_planning: conn.execute("DELETE FROM launch_planning", [])?,
             hook_dispatch_ledger: conn.execute("DELETE FROM hook_dispatch_ledger", [])?,
-            detached_spawn_intents: conn.execute("DELETE FROM detached_spawn_intent", [])?,
+            runtime_action_intents: conn.execute("DELETE FROM runtime_action_intent", [])?,
             recovery_waits: conn.execute("DELETE FROM thread_recovery_wait", [])?,
             thread_runtime: conn.execute("DELETE FROM thread_runtime", [])?,
         };
@@ -8388,33 +8494,43 @@ impl RuntimeDb {
         Ok(reservation)
     }
 
-    /// Bind one logical detached action to exactly one child identity. The
-    /// binding precedes every workspace freeze and child-row mutation, so a
-    /// callback retry after any crash boundary reuses the same identity.
-    pub fn reserve_detached_spawn_intent(
+    /// Bind one runtime-asserted logical action to exactly one daemon-minted
+    /// child. This precedes child-row mutation or detached workspace capture,
+    /// so retries after any crash boundary reuse the same execution identity.
+    pub fn reserve_runtime_action_intent(
         &self,
         operation_id: &str,
-        parent_thread_id: &str,
+        chain_root_id: &str,
+        caller_thread_id: &str,
+        mode: RuntimeActionMode,
         request_hash: &str,
         proposed_child_thread_id: &str,
         child_project_authority: Option<&ryeos_state::objects::ExecutionProjectAuthority>,
     ) -> Result<String> {
-        validate_detached_spawn_intent(
+        if matches!(mode, RuntimeActionMode::Inline) && child_project_authority.is_some() {
+            bail!("inline runtime action cannot carry detached project authority");
+        }
+        validate_runtime_action_intent(
             operation_id,
-            parent_thread_id,
+            chain_root_id,
+            caller_thread_id,
+            &mode,
             request_hash,
             proposed_child_thread_id,
         )?;
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         tx.execute(
-            "INSERT INTO detached_spawn_intent(
-                operation_id, parent_thread_id, request_hash, child_thread_id,
+            "INSERT INTO runtime_action_intent(
+                operation_id, chain_root_id, first_caller_thread_id, mode,
+                request_hash, child_thread_id,
                 child_project_authority, created_at_ms
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(operation_id) DO NOTHING",
             params![
                 operation_id,
-                parent_thread_id,
+                chain_root_id,
+                caller_thread_id,
+                mode.as_str(),
                 request_hash,
                 proposed_child_thread_id,
                 child_project_authority
@@ -8423,20 +8539,36 @@ impl RuntimeDb {
                 lillux::time::timestamp_millis(),
             ],
         )?;
-        let (stored_parent, stored_request, child_thread_id, stored_authority): (
-            String,
-            String,
-            String,
-            Option<String>,
-        ) = tx.query_row(
-            "SELECT parent_thread_id, request_hash, child_thread_id, child_project_authority
-                   FROM detached_spawn_intent WHERE operation_id=?1",
+        let (
+            stored_chain,
+            stored_caller,
+            stored_mode,
+            stored_request,
+            child_thread_id,
+            stored_authority,
+        ): (String, String, String, String, String, Option<String>) = tx.query_row(
+            "SELECT chain_root_id, first_caller_thread_id, mode, request_hash,
+                    child_thread_id, child_project_authority
+                   FROM runtime_action_intent WHERE operation_id=?1",
             params![operation_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
         )?;
-        if stored_parent != parent_thread_id || stored_request != request_hash {
+        if stored_chain != chain_root_id
+            || stored_caller != caller_thread_id
+            || stored_mode != mode.as_str()
+            || stored_request != request_hash
+        {
             bail!(
-                "detached operation `{operation_id}` was reused with different parent or request authority"
+                "runtime action `{operation_id}` was reused with different chain, caller, mode, or request authority"
             );
         }
         let stored_authority = stored_authority
@@ -8445,9 +8577,7 @@ impl RuntimeDb {
             .transpose()?;
         if child_project_authority.is_some() && stored_authority.as_ref() != child_project_authority
         {
-            bail!(
-                "detached operation `{operation_id}` was reused with different project authority"
-            );
+            bail!("runtime action `{operation_id}` was reused with different project authority");
         }
         tx.commit()?;
         Ok(child_thread_id)
@@ -8459,7 +8589,7 @@ impl RuntimeDb {
     /// capture starts, while the capture itself is not authoritative until its
     /// exact snapshot authority is sealed here. Concurrent retries may bind the
     /// same value; a different value is an authority conflict.
-    pub fn bind_detached_spawn_project_authority(
+    pub fn bind_detached_action_project_authority(
         &self,
         operation_id: &str,
         child_project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
@@ -8467,14 +8597,16 @@ impl RuntimeDb {
         let encoded = encode_current_project_authority(child_project_authority)?;
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let changed = tx.execute(
-            "UPDATE detached_spawn_intent
+            "UPDATE runtime_action_intent
                 SET child_project_authority=?2
-              WHERE operation_id=?1 AND child_project_authority IS NULL",
+              WHERE operation_id=?1 AND mode='detached'
+                AND child_project_authority IS NULL",
             params![operation_id, encoded],
         )?;
         let stored: Option<String> = tx
             .query_row(
-                "SELECT child_project_authority FROM detached_spawn_intent WHERE operation_id=?1",
+                "SELECT child_project_authority FROM runtime_action_intent
+                  WHERE operation_id=?1 AND mode='detached'",
                 params![operation_id],
                 |row| row.get(0),
             )
@@ -8495,7 +8627,7 @@ impl RuntimeDb {
         Ok(())
     }
 
-    pub fn seal_detached_spawn_intent(
+    pub fn seal_detached_action_intent(
         &self,
         operation_id: &str,
         child_project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
@@ -8523,10 +8655,10 @@ impl RuntimeDb {
         let events = serde_json::to_string(initial_events)?;
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         tx.execute(
-            "UPDATE detached_spawn_intent
+            "UPDATE runtime_action_intent
              SET child_project_authority=?2, admitted_launch_capsule_hash=?3,
                  launch_metadata=?4, initial_events=?5
-             WHERE operation_id=?1 AND launch_metadata IS NULL",
+             WHERE operation_id=?1 AND mode='detached' AND launch_metadata IS NULL",
             params![
                 operation_id,
                 authority,
@@ -8537,12 +8669,13 @@ impl RuntimeDb {
         )?;
         let persisted = tx
             .query_row(
-                "SELECT operation_id, parent_thread_id, request_hash, child_thread_id,
+                "SELECT operation_id, chain_root_id, first_caller_thread_id, mode,
+                        request_hash, child_thread_id,
                         child_project_authority, admitted_launch_capsule_hash,
                         launch_metadata, initial_events
-                 FROM detached_spawn_intent WHERE operation_id=?1",
+                 FROM runtime_action_intent WHERE operation_id=?1 AND mode='detached'",
                 params![operation_id],
-                decode_detached_spawn_intent,
+                decode_runtime_action_intent,
             )
             .optional()?
             .ok_or_else(|| anyhow!("detached operation `{operation_id}` is not reserved"))?;
@@ -8576,50 +8709,44 @@ impl RuntimeDb {
         Ok(())
     }
 
-    pub fn get_detached_spawn_intent(
+    pub fn get_runtime_action_intent(
         &self,
         operation_id: &str,
-    ) -> Result<Option<DetachedSpawnIntent>> {
+    ) -> Result<Option<RuntimeActionIntent>> {
         let row = self
             .conn
             .query_row(
-                "SELECT operation_id, parent_thread_id, request_hash, child_thread_id,
+                "SELECT operation_id, chain_root_id, first_caller_thread_id, mode,
+                        request_hash, child_thread_id,
                         child_project_authority, admitted_launch_capsule_hash,
                         launch_metadata, initial_events
-                   FROM detached_spawn_intent WHERE operation_id=?1",
+                   FROM runtime_action_intent WHERE operation_id=?1",
                 params![operation_id],
-                decode_detached_spawn_intent,
+                decode_runtime_action_intent,
             )
             .optional()?;
         if let Some(intent) = &row {
-            validate_detached_spawn_intent_record(intent)?;
+            validate_runtime_action_intent_record(intent)?;
         }
         Ok(row)
     }
 
-    pub fn detached_spawn_intents(&self) -> Result<Vec<DetachedSpawnIntent>> {
+    pub fn runtime_action_intents(&self) -> Result<Vec<RuntimeActionIntent>> {
         let mut statement = self.conn.prepare(
-            "SELECT operation_id, parent_thread_id, request_hash, child_thread_id,
+            "SELECT operation_id, chain_root_id, first_caller_thread_id, mode,
+                    request_hash, child_thread_id,
                     child_project_authority, admitted_launch_capsule_hash,
                     launch_metadata, initial_events
-               FROM detached_spawn_intent ORDER BY created_at_ms, operation_id",
+               FROM runtime_action_intent ORDER BY created_at_ms, operation_id",
         )?;
         let intents = statement
-            .query_map([], decode_detached_spawn_intent)?
+            .query_map([], decode_runtime_action_intent)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(anyhow::Error::from)?;
         for intent in &intents {
-            validate_detached_spawn_intent_record(intent)?;
+            validate_runtime_action_intent_record(intent)?;
         }
         Ok(intents)
-    }
-
-    pub fn abort_unsealed_detached_spawn_intent(&self, operation_id: &str) -> Result<bool> {
-        Ok(self.conn.execute(
-            "DELETE FROM detached_spawn_intent
-             WHERE operation_id=?1 AND launch_metadata IS NULL",
-            params![operation_id],
-        )? > 0)
     }
 
     /// CAS objects referenced by durable handoff intents before their child
@@ -8628,7 +8755,7 @@ impl RuntimeDb {
     /// authority sealing and child birth.
     pub fn handoff_cas_object_roots(&self) -> Result<Vec<String>> {
         let mut roots = BTreeSet::new();
-        for intent in self.detached_spawn_intents()? {
+        for intent in self.runtime_action_intents()? {
             if let Some(hash) = intent.admitted_launch_capsule_hash {
                 roots.insert(hash);
             }
@@ -10110,6 +10237,10 @@ impl RuntimeDb {
                 "DELETE FROM hook_dispatch_ledger WHERE chain_root_id=?1",
                 params![chain_root_id],
             )?;
+            deleted += self.conn.execute(
+                "DELETE FROM runtime_action_intent WHERE chain_root_id=?1",
+                params![chain_root_id],
+            )?;
             // Signed chain truth supplies the authoritative members. Include
             // any runtime row structurally attributed to the same chain so a
             // replay after the head-removal boundary cannot leave orphaned
@@ -10131,10 +10262,6 @@ impl RuntimeDb {
                 // cache and must not expire while that root can still exist.
                 deleted += self.conn.execute(
                     "DELETE FROM launch_planning WHERE reserved_thread_id=?1",
-                    params![&thread_id],
-                )?;
-                deleted += self.conn.execute(
-                    "DELETE FROM detached_spawn_intent WHERE parent_thread_id=?1",
                     params![&thread_id],
                 )?;
                 deleted += self.conn.execute(
@@ -10750,8 +10877,9 @@ impl RuntimeDb {
         let owner_json = lillux::canonical_json(&serde_json::to_value(&owner)?)?;
         let changed = tx.execute(
             "INSERT INTO thread_launch_claim
-                 (thread_id, claim_id, claimed_at_ms, lease_expires_at_ms, claimed_by)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+                 (thread_id, claim_id, claimed_at_ms, lease_expires_at_ms, claimed_by,
+                  rearm_resume_budget_if_stale)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1)
              ON CONFLICT(thread_id) DO NOTHING",
             params![thread_id, claim_id, now_ms, i64::MAX, owner_json],
         )?;
@@ -10778,18 +10906,21 @@ impl RuntimeDb {
         current_daemon_generation_id: &str,
     ) -> Result<Vec<StaleLaunchClaimCleared>> {
         let tx = self.conn.unchecked_transaction()?;
-        let mut rows: Vec<(String, String, String)> = Vec::new();
+        let mut rows: Vec<(String, String, String, bool)> = Vec::new();
         {
-            let mut statement =
-                tx.prepare("SELECT thread_id, claim_id, claimed_by FROM thread_launch_claim")?;
-            let mapped =
-                statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            let mut statement = tx.prepare(
+                "SELECT thread_id, claim_id, claimed_by, rearm_resume_budget_if_stale
+                   FROM thread_launch_claim",
+            )?;
+            let mapped = statement.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
             for row in mapped {
                 rows.push(row?);
             }
         }
         let mut cleared = Vec::new();
-        for (thread_id, claim_id, claimed_by) in rows {
+        for (thread_id, claim_id, claimed_by, rearm_resume_budget_if_stale) in rows {
             let parsed_owner = match serde_json::from_str::<LaunchOwner>(&claimed_by) {
                 Ok(owner) if owner.daemon_generation_id == current_daemon_generation_id => {
                     continue;
@@ -10828,7 +10959,8 @@ impl RuntimeDb {
                 params![thread_id, claim_id],
             )?;
             if removed > 0 {
-                let resume_budget_rearmed = proved_unattached
+                let resume_budget_rearmed = rearm_resume_budget_if_stale
+                    && proved_unattached
                     && tx.execute(
                         "UPDATE thread_runtime SET resume_attempts = 0
                            WHERE thread_id = ?1 AND resume_attempts != 0",
@@ -10856,6 +10988,106 @@ impl RuntimeDb {
             params![thread_id, claim_id],
         )?;
         Ok(removed > 0)
+    }
+
+    /// Consume one completed runtime-recovery attempt and rotate its active
+    /// launch owner without an unclaimed visibility gap. Counter advancement,
+    /// owner fencing, and the startup rearm posture are one transaction: a
+    /// daemon death after this commit must retain the attempt consumed by the
+    /// process that already returned an unknown outcome.
+    pub fn rotate_thread_launch_claim_after_runtime_recovery(
+        &self,
+        thread_id: &str,
+        expected_claimed_by: &str,
+        next_claim_id: &str,
+        daemon_generation_id: &str,
+        max_attempts: u32,
+    ) -> Result<RuntimeRecoveryClaimRotation> {
+        let now_ms = lillux::time::timestamp_millis();
+        let tx = self.conn.unchecked_transaction()?;
+        let current: Option<(String, i64)> = tx
+            .query_row(
+                "SELECT claim.claimed_by, runtime.resume_attempts
+                   FROM thread_launch_claim AS claim
+                   JOIN thread_runtime AS runtime ON runtime.thread_id = claim.thread_id
+                  WHERE claim.thread_id = ?1",
+                params![thread_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((current_owner, attempts)) = current else {
+            tx.rollback()?;
+            return Ok(RuntimeRecoveryClaimRotation::LostOwner);
+        };
+        if current_owner != expected_claimed_by {
+            tx.rollback()?;
+            return Ok(RuntimeRecoveryClaimRotation::LostOwner);
+        }
+        if attempts < 0 {
+            bail!("resume_attempts is negative ({attempts}) for thread {thread_id}");
+        }
+        let attempts = u32::try_from(attempts).context("resume attempt counter exceeds u32")?;
+        if attempts >= max_attempts {
+            tx.rollback()?;
+            return Ok(RuntimeRecoveryClaimRotation::Exhausted { attempts });
+        }
+        let next_attempt = attempts
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("resume attempt counter overflow for thread {thread_id}"))?;
+        let bumped = tx.execute(
+            "UPDATE thread_runtime SET resume_attempts = ?2
+              WHERE thread_id = ?1 AND resume_attempts = ?3",
+            params![thread_id, i64::from(next_attempt), i64::from(attempts)],
+        )?;
+        if bumped != 1 {
+            tx.rollback()?;
+            return Ok(RuntimeRecoveryClaimRotation::LostOwner);
+        }
+        let next_epoch: i64 = tx.query_row(
+            "INSERT INTO thread_launch_epoch(thread_id,last_epoch) VALUES (?1,1)
+             ON CONFLICT(thread_id) DO UPDATE SET last_epoch=last_epoch+1
+             RETURNING last_epoch",
+            params![thread_id],
+            |row| row.get(0),
+        )?;
+        let owner = LaunchOwner {
+            thread_id: thread_id.to_string(),
+            monotonic_launch_epoch: u64::try_from(next_epoch)
+                .context("launch epoch cannot be represented")?,
+            unpredictable_nonce: next_claim_id.to_string(),
+            daemon_generation_id: daemon_generation_id.to_string(),
+        };
+        let claimed_by = lillux::canonical_json(&serde_json::to_value(&owner)?)?;
+        let changed = tx.execute(
+            "UPDATE thread_launch_claim
+                SET claim_id=?2, claimed_at_ms=?3, lease_expires_at_ms=?4, claimed_by=?5,
+                    rearm_resume_budget_if_stale=0
+              WHERE thread_id=?1 AND claimed_by=?6",
+            params![
+                thread_id,
+                next_claim_id,
+                now_ms,
+                i64::MAX,
+                claimed_by,
+                expected_claimed_by,
+            ],
+        )?;
+        if changed != 1 {
+            tx.rollback()?;
+            return Ok(RuntimeRecoveryClaimRotation::LostOwner);
+        }
+        tx.commit()?;
+        Ok(RuntimeRecoveryClaimRotation::Rotated {
+            claim: LaunchClaim {
+                thread_id: thread_id.to_string(),
+                claim_id: next_claim_id.to_string(),
+                claimed_at_ms: now_ms,
+                lease_expires_at_ms: i64::MAX,
+                claimed_by,
+                owner,
+            },
+            next_attempt,
+        })
     }
 
     /// Read the current launch claim for a thread, if any. The reconciler uses
@@ -15494,10 +15726,10 @@ mod tests {
         ] {
             db.conn
                 .execute(
-                    "INSERT INTO detached_spawn_intent(
-                         operation_id, parent_thread_id, request_hash, child_thread_id,
+                    "INSERT INTO runtime_action_intent(
+                         operation_id, chain_root_id, first_caller_thread_id, mode, request_hash, child_thread_id,
                          child_project_authority, created_at_ms
-                     ) VALUES (?1, 'T-parent', ?1, ?1, ?2, 1)",
+                     ) VALUES (?1, 'T-chain', 'T-parent', 'detached', ?1, ?1, ?2, 1)",
                     params![operation_id, authority],
                 )
                 .unwrap();
@@ -15520,7 +15752,7 @@ mod tests {
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let retained: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM detached_spawn_intent
+                "SELECT COUNT(*) FROM runtime_action_intent
                   WHERE operation_id IN ('a-predecessor', 'z-newer')",
                 [],
                 |row| row.get(0),
@@ -15542,10 +15774,13 @@ mod tests {
         .unwrap();
         db.conn
             .execute(
-                "INSERT INTO detached_spawn_intent(
-                     operation_id, parent_thread_id, request_hash, child_thread_id,
+                "INSERT INTO runtime_action_intent(
+                     operation_id, chain_root_id, first_caller_thread_id, mode, request_hash, child_thread_id,
                      child_project_authority, created_at_ms
-                 ) VALUES ('a-predecessor', 'T-parent', 'request', 'T-child', ?1, 1)",
+                 ) VALUES (
+                     'a-predecessor', 'T-chain', 'T-parent', 'detached',
+                     'request', 'T-child', ?1, 1
+                 )",
                 params![predecessor],
             )
             .unwrap();
@@ -15602,10 +15837,10 @@ mod tests {
         ] {
             db.conn
                 .execute(
-                    "INSERT INTO detached_spawn_intent(
-                         operation_id, parent_thread_id, request_hash, child_thread_id,
+                    "INSERT INTO runtime_action_intent(
+                         operation_id, chain_root_id, first_caller_thread_id, mode, request_hash, child_thread_id,
                          child_project_authority, created_at_ms
-                     ) VALUES (?1, 'T-parent', ?1, ?1, ?2, 1)",
+                     ) VALUES (?1, 'T-chain', 'T-parent', 'detached', ?1, ?1, ?2, 1)",
                     params![operation_id, authority],
                 )
                 .unwrap();
@@ -15628,7 +15863,7 @@ mod tests {
         let retained: i64 = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap()
             .query_row(
-                "SELECT COUNT(*) FROM detached_spawn_intent
+                "SELECT COUNT(*) FROM runtime_action_intent
                   WHERE operation_id IN ('a-predecessor', 'z-unrecognized')",
                 [],
                 |row| row.get(0),
@@ -15650,10 +15885,13 @@ mod tests {
         .unwrap();
         db.conn
             .execute(
-                "INSERT INTO detached_spawn_intent(
-                     operation_id, parent_thread_id, request_hash, child_thread_id,
+                "INSERT INTO runtime_action_intent(
+                     operation_id, chain_root_id, first_caller_thread_id, mode, request_hash, child_thread_id,
                      child_project_authority, created_at_ms
-                 ) VALUES ('op-newer', 'T-parent', 'request', 'T-child', ?1, 1)",
+                 ) VALUES (
+                     'op-newer', 'T-chain', 'T-parent', 'detached',
+                     'request', 'T-child', ?1, 1
+                 )",
                 params![newer],
             )
             .unwrap();
@@ -15672,7 +15910,7 @@ mod tests {
         let retained: String = conn
             .query_row(
                 "SELECT child_project_authority
-                   FROM detached_spawn_intent
+                   FROM runtime_action_intent
                   WHERE operation_id='op-newer'",
                 [],
                 |row| row.get(0),
@@ -15694,10 +15932,13 @@ mod tests {
         .unwrap();
         db.conn
             .execute(
-                "INSERT INTO detached_spawn_intent(
-                     operation_id, parent_thread_id, request_hash, child_thread_id,
+                "INSERT INTO runtime_action_intent(
+                     operation_id, chain_root_id, first_caller_thread_id, mode, request_hash, child_thread_id,
                      child_project_authority, created_at_ms
-                 ) VALUES ('op-predecessor', 'T-parent', 'request', 'T-child', ?1, 1)",
+                 ) VALUES (
+                     'op-predecessor', 'T-chain', 'T-parent', 'detached',
+                     'request', 'T-child', ?1, 1
+                 )",
                 params![predecessor],
             )
             .unwrap();
@@ -15728,7 +15969,7 @@ mod tests {
         let retained: String = conn
             .query_row(
                 "SELECT child_project_authority
-                   FROM detached_spawn_intent
+                   FROM runtime_action_intent
                   WHERE operation_id='op-predecessor'",
                 [],
                 |row| row.get(0),
@@ -15972,10 +16213,21 @@ mod tests {
     }
 
     fn hook_response() -> Value {
-        serde_json::json!({
-            "thread": {"id": "T-hook", "status": "completed"},
-            "result": {"accepted": true, "cost": 7}
+        serde_json::to_value(ryeos_runtime::callback_contract::CallbackDispatchResponse {
+            thread: serde_json::json!({"id": "T-hook", "status": "completed"}),
+            result: serde_json::json!({"accepted": true, "cost": 7}),
+            dispatch: ryeos_runtime::callback_contract::RuntimeDispatchEvidence {
+                source: ryeos_runtime::callback_contract::RuntimeDispatchSource::Executed,
+                effect_class: ryeos_runtime::callback_contract::RuntimeDispatchEffectClass::Live,
+                action_digest: "7".repeat(64),
+                effect_identity: None,
+                publication:
+                    ryeos_runtime::callback_contract::RuntimeDispatchPublication::NotApplicable,
+                record_hash: None,
+                replayed_from: None,
+            },
         })
+        .expect("serialize test hook response")
     }
 
     #[test]
@@ -16013,14 +16265,16 @@ mod tests {
     }
 
     #[test]
-    fn detached_spawn_intent_reuses_one_child_and_rejects_request_drift() {
+    fn runtime_action_intent_reuses_one_child_and_rejects_caller_or_request_drift() {
         let db = RuntimeDb::new_in_memory().unwrap();
         let operation_id = "d".repeat(64);
         let request_hash = "e".repeat(64);
         assert_eq!(
-            db.reserve_detached_spawn_intent(
+            db.reserve_runtime_action_intent(
                 &operation_id,
+                "T-chain",
                 "T-parent",
+                RuntimeActionMode::Inline,
                 &request_hash,
                 "T-child-first",
                 None,
@@ -16028,10 +16282,24 @@ mod tests {
             .unwrap(),
             "T-child-first"
         );
-        assert_eq!(
-            db.reserve_detached_spawn_intent(
+        assert!(
+            db.reserve_runtime_action_intent(
                 &operation_id,
+                "T-chain",
+                "T-successor",
+                RuntimeActionMode::Inline,
+                &request_hash,
+                "T-child-retry",
+                None,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            db.reserve_runtime_action_intent(
+                &operation_id,
+                "T-chain",
                 "T-parent",
+                RuntimeActionMode::Inline,
                 &request_hash,
                 "T-child-retry",
                 None,
@@ -16040,15 +16308,48 @@ mod tests {
             "T-child-first"
         );
         assert!(
-            db.reserve_detached_spawn_intent(
+            db.reserve_runtime_action_intent(
                 &operation_id,
+                "T-chain",
                 "T-parent",
+                RuntimeActionMode::Inline,
                 &"f".repeat(64),
                 "T-child-retry",
                 None,
             )
             .is_err()
         );
+        assert!(
+            db.reserve_runtime_action_intent(
+                &operation_id,
+                "T-other-chain",
+                "T-parent",
+                RuntimeActionMode::Inline,
+                &request_hash,
+                "T-child-retry",
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            db.reserve_runtime_action_intent(
+                &operation_id,
+                "T-chain",
+                "T-parent",
+                RuntimeActionMode::Detached,
+                &request_hash,
+                "T-child-retry",
+                None,
+            )
+            .is_err()
+        );
+        let retained = db
+            .get_runtime_action_intent(&operation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.chain_root_id, "T-chain");
+        assert_eq!(retained.first_caller_thread_id, "T-parent");
+        assert!(matches!(retained.mode, RuntimeActionMode::Inline));
     }
 
     #[test]
@@ -16153,10 +16454,8 @@ mod tests {
         let response = hook_response();
         db.complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &response)
             .unwrap();
-        let divergent = serde_json::json!({
-            "thread": {"id": "T-hook", "status": "completed"},
-            "result": {"accepted": false}
-        });
+        let mut divergent = hook_response();
+        divergent["result"] = serde_json::json!({"accepted": false});
         assert!(
             db.complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &divergent)
                 .is_err()
@@ -16176,10 +16475,9 @@ mod tests {
             )
             .is_err()
         );
-        let oversize = serde_json::json!({
-            "thread": {},
-            "result": {"body": "x".repeat(MAX_HOOK_DISPATCH_RESPONSE_BYTES)}
-        });
+        let mut oversize = hook_response();
+        oversize["result"] =
+            serde_json::json!({"body": "x".repeat(MAX_HOOK_DISPATCH_RESPONSE_BYTES)});
         assert!(
             db.complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &oversize)
                 .is_err()
@@ -16715,7 +17013,7 @@ mod tests {
     fn empty_installed_schema_with_unset_authority_columns_remains_current() {
         let (tmp, db) = fresh_db();
         let path = tmp.path().join("runtime.db");
-        for table in ["detached_spawn_intent", "follow_waiter"] {
+        for table in ["runtime_action_intent", "follow_waiter"] {
             let mut statement = db
                 .conn
                 .prepare(&format!("PRAGMA table_info({table})"))
@@ -17056,10 +17354,13 @@ mod tests {
         .unwrap();
         db.conn
             .execute(
-                "INSERT INTO detached_spawn_intent(
-                     operation_id, parent_thread_id, request_hash, child_thread_id,
+                "INSERT INTO runtime_action_intent(
+                     operation_id, chain_root_id, first_caller_thread_id, mode, request_hash, child_thread_id,
                      child_project_authority, created_at_ms
-                 ) VALUES ('op-former', 'T-parent', 'request', 'T-child', ?1, 1)",
+                 ) VALUES (
+                     'op-former', 'T-chain', 'T-parent', 'detached',
+                     'request', 'T-child', ?1, 1
+                 )",
                 params![predecessor],
             )
             .unwrap();
@@ -17077,7 +17378,7 @@ mod tests {
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let retained: String = conn
             .query_row(
-                "SELECT child_project_authority FROM detached_spawn_intent WHERE operation_id='op-former'",
+                "SELECT child_project_authority FROM runtime_action_intent WHERE operation_id='op-former'",
                 [],
                 |row| row.get(0),
             )
@@ -17407,18 +17708,19 @@ mod tests {
     fn all_thread_history_discard_clears_every_runtime_table_and_preserves_schema() {
         let (tmp, db) = fresh_db();
         db.conn
-            .execute_batch(
+            .execute_batch(&format!(
                 "INSERT INTO thread_commands
                      (thread_id, command_type, status, created_at)
                      VALUES ('T-root', 'cancel', 'pending', '2026-07-15T00:00:00Z');
                  INSERT INTO hook_dispatch_ledger
                      (dispatch_key, seed_version, chain_root_id, caller_thread_id, event, hook_id,
                       request_hash, status, created_at_ms)
-                     VALUES ('dispatch-1', 2, 'T-root', 'T-root', 'completed', 'hook-1',
+                     VALUES ('dispatch-1', {HOOK_DISPATCH_SEED_VERSION}, 'T-root', 'T-root', 'completed', 'hook-1',
                              'request-1', 'pending', 1);
                  INSERT INTO thread_launch_claim
-                     (thread_id, claim_id, claimed_at_ms, lease_expires_at_ms, claimed_by)
-                     VALUES ('T-root', 'claim-1', 1, 2, 'test');
+                     (thread_id, claim_id, claimed_at_ms, lease_expires_at_ms, claimed_by,
+                      rearm_resume_budget_if_stale)
+                     VALUES ('T-root', 'claim-1', 1, 2, 'test', 1);
                  INSERT INTO thread_launch_epoch (thread_id, last_epoch)
                      VALUES ('T-root', 1);
                  INSERT INTO execution_workspace
@@ -17435,7 +17737,7 @@ mod tests {
                      (follow_key, item_index, item_ref, spec_hash, child_thread_id,
                       child_chain_root_id, sealed_root_request, created_at_ms, updated_at_ms)
                      VALUES ('follow-1', 0, 'directive:test/child', 'spec-1', 'T-child',
-                             'T-child', '{}', 1, 1);
+                             'T-child', '{{}}', 1, 1);
                  INSERT INTO thread_child_link
                      (child_thread_id, parent_thread_id, relation, created_at_ms)
                      VALUES ('T-child', 'T-root', 'follow', 1);
@@ -17444,8 +17746,8 @@ mod tests {
                      VALUES ('T-child', 'window-1', 1, 1);
                  INSERT INTO seat_lease
                      (seat_thread_id, owner, surface, client_ref, last_seen_at_ms)
-                     VALUES ('T-seat', 'owner', 'terminal', 'client', 1);",
-            )
+                     VALUES ('T-seat', 'owner', 'terminal', 'client', 1);"
+            ))
             .unwrap();
         db.reserve_in_process_handler_birth("T-root", "T-root", &in_process_launch_metadata())
             .unwrap();
@@ -17865,8 +18167,9 @@ mod tests {
         db.conn
             .execute(
                 "INSERT INTO thread_launch_claim
-                     (thread_id, claim_id, claimed_at_ms, lease_expires_at_ms, claimed_by)
-                 VALUES ('t-junk', 'c-junk', 0, 9223372036854775807, 'not json')",
+                     (thread_id, claim_id, claimed_at_ms, lease_expires_at_ms, claimed_by,
+                      rearm_resume_budget_if_stale)
+                 VALUES ('t-junk', 'c-junk', 0, 9223372036854775807, 'not json', 1)",
                 [],
             )
             .unwrap();
@@ -17897,6 +18200,94 @@ mod tests {
         assert!(cleared[0].resume_budget_rearmed);
         assert_eq!(db.get_resume_attempts("t1").unwrap(), 0);
         assert!(db.get_launch_claim("t1").unwrap().is_none());
+    }
+
+    #[test]
+    fn runtime_recovery_rotation_consumes_attempt_and_startup_never_rearms_it() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        assert_eq!(
+            db.claim_thread_launch("t1", "claim-old", "daemon-old")
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
+        );
+        let old_owner = db
+            .get_launch_claim("t1")
+            .unwrap()
+            .expect("old claim")
+            .claimed_by;
+
+        let rotated = db
+            .rotate_thread_launch_claim_after_runtime_recovery(
+                "t1",
+                &old_owner,
+                "claim-recovery",
+                "daemon-old",
+                2,
+            )
+            .unwrap();
+        let RuntimeRecoveryClaimRotation::Rotated {
+            claim,
+            next_attempt,
+        } = rotated
+        else {
+            panic!("runtime recovery must rotate the exact owner");
+        };
+        assert_eq!(next_attempt, 1);
+        assert_eq!(claim.owner.monotonic_launch_epoch, 2);
+        assert_eq!(db.get_resume_attempts("t1").unwrap(), 1);
+
+        let cleared = db.clear_stale_launch_claims("daemon-current").unwrap();
+        assert_eq!(cleared.len(), 1);
+        assert!(!cleared[0].resume_budget_rearmed);
+        assert_eq!(db.get_resume_attempts("t1").unwrap(), 1);
+    }
+
+    #[test]
+    fn runtime_recovery_rotation_exhaustion_and_owner_loss_are_non_mutating() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        assert_eq!(db.bump_resume_attempts("t1").unwrap(), 1);
+        assert_eq!(
+            db.claim_thread_launch("t1", "claim-old", "daemon-old")
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
+        );
+        let old = db.get_launch_claim("t1").unwrap().expect("claim");
+
+        assert!(matches!(
+            db.rotate_thread_launch_claim_after_runtime_recovery(
+                "t1",
+                "wrong-owner",
+                "claim-lost",
+                "daemon-old",
+                2,
+            )
+            .unwrap(),
+            RuntimeRecoveryClaimRotation::LostOwner
+        ));
+        assert_eq!(db.get_resume_attempts("t1").unwrap(), 1);
+        assert_eq!(
+            db.get_launch_claim("t1").unwrap().unwrap().claimed_by,
+            old.claimed_by
+        );
+
+        assert!(matches!(
+            db.rotate_thread_launch_claim_after_runtime_recovery(
+                "t1",
+                &old.claimed_by,
+                "claim-exhausted",
+                "daemon-old",
+                1,
+            )
+            .unwrap(),
+            RuntimeRecoveryClaimRotation::Exhausted { attempts: 1 }
+        ));
+        assert_eq!(db.get_resume_attempts("t1").unwrap(), 1);
+        assert_eq!(
+            db.get_launch_claim("t1").unwrap().unwrap().claim_id,
+            "claim-old"
+        );
     }
 
     #[test]

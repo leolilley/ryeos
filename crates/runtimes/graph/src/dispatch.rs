@@ -12,6 +12,38 @@ use crate::model::FanoutItemStatus;
 use crate::model::GraphRunStatus;
 
 const NATIVE_FAILURE_DIAGNOSTIC_CHARS: usize = 4_096;
+pub(crate) const GRAPH_ACTION_OCCURRENCE_SCHEMA: &str = "ryeos.runtime_action_occurrence.v1";
+
+/// Stable logical identity for one graph action occurrence.
+///
+/// A graph retry advances `step`, so a known-safe authored retry is a new
+/// occurrence. Re-driving the same retained step after process loss derives
+/// the same identity. Foreach members add their ordered item index; no action
+/// behavior or child identity is caller-authored into this coordinate.
+pub(crate) fn graph_action_operation_id(
+    graph_run_id: &str,
+    node: &str,
+    step: u32,
+    item_index: Option<usize>,
+    attempt: Option<u32>,
+) -> String {
+    let mut identity = serde_json::json!({
+        "schema": GRAPH_ACTION_OCCURRENCE_SCHEMA,
+        "owner_kind": "graph",
+        "graph_run_id": graph_run_id,
+        "node": node,
+        "step": step,
+    });
+    if let Some(item_index) = item_index {
+        identity["item_index"] = serde_json::json!(item_index);
+    }
+    if let Some(attempt) = attempt {
+        identity["attempt"] = serde_json::json!(attempt);
+    }
+    let canonical =
+        lillux::canonical_json(&identity).expect("fixed graph action occurrence is canonical JSON");
+    lillux::sha256_hex(canonical.as_bytes())
+}
 
 /// Outcome of dispatching a single graph action leaf, classified from
 /// the daemon execute envelope BEFORE the bare result is unwrapped.
@@ -68,6 +100,11 @@ pub struct ActionFailure {
 pub struct ActionDispatchError {
     pub diagnostic: String,
     pub retryable: bool,
+    /// The callback may have crossed the daemon action boundary without
+    /// returning authoritative settlement. This is neither an authored retry
+    /// nor a terminal leaf failure: native recovery must re-drive the exact
+    /// same operation occurrence.
+    pub outcome_unknown: bool,
 }
 
 impl From<anyhow::Error> for ActionDispatchError {
@@ -75,6 +112,7 @@ impl From<anyhow::Error> for ActionDispatchError {
         Self {
             diagnostic: format!("{error:#}"),
             retryable: false,
+            outcome_unknown: false,
         }
     }
 }
@@ -162,7 +200,7 @@ fn build_action_payload(
     };
     Ok(ryeos_runtime::callback::ActionPayload {
         operation_id: action
-            .get("operation_id")
+            .get(ryeos_runtime::callback::action_keys::OPERATION_ID)
             .and_then(Value::as_str)
             .map(str::to_owned),
         item_id: item_id.to_owned(),
@@ -214,13 +252,14 @@ pub async fn dispatch_action(
         effect_dispatch,
     };
 
-    let response = client
-        .dispatch_action(request)
-        .await
-        .map_err(|error| ActionDispatchError {
+    let response = client.dispatch_action(request).await.map_err(|error| {
+        let outcome_unknown = error.runtime_action_outcome_unknown();
+        ActionDispatchError {
             diagnostic: format!("dispatch failed: {error}"),
-            retryable: error.retryable(),
-        })?;
+            retryable: !outcome_unknown && error.retryable(),
+            outcome_unknown,
+        }
+    })?;
 
     // The typed callback contract puts the leaf-dispatcher value in
     // `response.result`; the wrapping `thread` snapshot is for audit
@@ -241,9 +280,11 @@ pub async fn dispatch_action(
         .map_err(|error| ActionDispatchError {
             diagnostic: format!("invalid daemon dispatch evidence: {error:#}"),
             retryable: false,
+            outcome_unknown: false,
         })?;
     let daemon_dispatch = response.dispatch;
-    match classify_envelope_for_item(response.result, item_id) {
+    let classified_result = classify_callback_result(response.result, item_id, &response.thread);
+    match classified_result {
         ActionOutcome::Failure(mut failure) => {
             failure.dispatch = Some(daemon_dispatch);
             if let Some(error) = child_thread_id_error {
@@ -405,6 +446,19 @@ fn classify_envelope_for_item(value: Value, item_ref: &str) -> ActionOutcome {
         Err(diagnostic) => return malformed_native_runtime_failure(diagnostic, None),
     };
     classify_envelope_with_projection(value, projection)
+}
+
+fn classify_callback_result(value: Value, item_ref: &str, thread: &Value) -> ActionOutcome {
+    if matches!(thread.get("recorded"), Some(Value::Bool(_))) {
+        // In-process service results are ordinary domain values. A service is
+        // allowed to return keys such as `status` or `success`; those names are
+        // native-envelope discriminators only for an actual runtime child.
+        // `thread.recorded` is the daemon-authored terminator discriminator,
+        // independent of whether this particular service normally records.
+        ActionOutcome::Success(ActionSuccess::bare(value))
+    } else {
+        classify_envelope_for_item(value, item_ref)
+    }
 }
 
 fn classify_envelope_with_projection(
@@ -1597,6 +1651,32 @@ mod tests {
 
     fn classify_failure(value: Value) -> String {
         expect_action_failure(classify_envelope(value)).diagnostic
+    }
+
+    #[test]
+    fn service_domain_status_is_not_a_native_runtime_envelope() {
+        let value = json!({
+            "status": "degraded",
+            "missing_services": ["service:example/missing"],
+        });
+        let classified = expect_success(classify_callback_result(
+            value.clone(),
+            "service:health/status",
+            &json!({"recorded": true}),
+        ));
+        assert_eq!(classified, value);
+
+        let failure = expect_action_failure(classify_callback_result(
+            value,
+            "directive:test/child",
+            &json!({"thread_id": "T-child"}),
+        ));
+        assert!(failure.integrity);
+        assert!(
+            failure
+                .diagnostic
+                .contains("malformed native runtime envelope")
+        );
     }
 
     fn canonical_follow_envelope(

@@ -218,7 +218,22 @@ fn main() -> anyhow::Result<()> {
     )
     .with_cancel_flag(cancel_flag);
 
-    let graph_result = rt.block_on(w.execute(params, resolved.graph_run_id));
+    let graph_result = match rt.block_on(w.execute_recoverable(params, resolved.graph_run_id)) {
+        Ok(result) => result,
+        Err(error) => {
+            if let Some(recovery) =
+                ryeos_runtime::process_outcome::recovery_required_in_chain(&error)
+            {
+                println!(
+                    "{}",
+                    serde_json::to_string(&recovery.control())
+                        .expect("typed runtime process-control envelope serializes")
+                );
+                return Ok(());
+            }
+            return Err(error);
+        }
+    };
     // V5.5 P0 #3: pull non-fatal callback drift the walker
     // accumulated during the run. Empty on a clean run.
     let warnings = w.take_warnings();

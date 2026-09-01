@@ -16,6 +16,7 @@ pub struct GuardedBytes {
     pub truncated: bool,
 }
 
+#[derive(Debug)]
 pub struct ResultGuard {
     seen_hashes: HashSet<String>,
 }
@@ -65,6 +66,40 @@ impl ResultGuard {
             duplicate_of: processed.duplicate_of,
             truncated: processed.truncated,
         }
+    }
+
+    /// Rebuild the ordering-sensitive duplicate guard from one exact retained
+    /// model-visible result. Recovery observes the already-guarded bytes, so
+    /// hashing `content` reproduces the live key for both full and truncated
+    /// first occurrences. A duplicate marker is accepted only after its exact
+    /// hash has already appeared and only in the canonical live spelling.
+    pub fn restore_result(
+        &mut self,
+        content: &str,
+        duplicate_of: Option<&str>,
+    ) -> Result<(), String> {
+        if let Some(hash) = duplicate_of {
+            if hash.len() != 64
+                || !hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            {
+                return Err("duplicate result hash is not canonical lowercase SHA-256".to_string());
+            }
+            if !self.seen_hashes.contains(hash) {
+                return Err("duplicate result precedes its retained full result".to_string());
+            }
+            let expected = format!("[duplicate result omitted — hash {}]", &hash[..16]);
+            if content != expected {
+                return Err("duplicate result marker contradicts its retained hash".to_string());
+            }
+            return Ok(());
+        }
+
+        if content.len() >= MIN_DEDUP_BYTES {
+            self.seen_hashes.insert(sha256_hex(content));
+        }
+        Ok(())
     }
 }
 
@@ -163,5 +198,32 @@ mod tests {
         assert_eq!(String::from_utf8(result.bytes).unwrap(), "test data");
         assert!(result.duplicate_of.is_none());
         assert!(!result.truncated);
+    }
+
+    #[test]
+    fn restored_result_preserves_duplicate_decision_across_restart() {
+        let content = "x".repeat(MIN_DEDUP_BYTES);
+        let hash = sha256_hex(&content);
+        let mut guard = ResultGuard::new();
+        guard.restore_result(&content, None).unwrap();
+
+        let duplicate = guard.process(&content);
+        assert_eq!(duplicate.duplicate_of.as_deref(), Some(hash.as_str()));
+        assert_eq!(
+            duplicate.content,
+            format!("[duplicate result omitted — hash {}]", &hash[..16])
+        );
+    }
+
+    #[test]
+    fn restored_duplicate_requires_prior_full_result_and_exact_marker() {
+        let content = "x".repeat(MIN_DEDUP_BYTES);
+        let hash = sha256_hex(&content);
+        let marker = format!("[duplicate result omitted — hash {}]", &hash[..16]);
+        let mut guard = ResultGuard::new();
+        assert!(guard.restore_result(&marker, Some(&hash)).is_err());
+        guard.restore_result(&content, None).unwrap();
+        assert!(guard.restore_result("wrong", Some(&hash)).is_err());
+        guard.restore_result(&marker, Some(&hash)).unwrap();
     }
 }

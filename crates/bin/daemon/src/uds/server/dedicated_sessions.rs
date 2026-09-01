@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
@@ -99,48 +100,6 @@ fn settle_failed_dedicated_worker_start(
         Ok(())
     } else {
         bail!("{}", failures.join("; "))
-    }
-}
-
-fn settle_observation_sink_install_failure(
-    state: &AppState,
-    placement_thread_id: &str,
-    worker_instance_id: &str,
-    boot_epoch: u64,
-    reason: &str,
-) -> Result<()> {
-    let worker = state
-        .state_store
-        .worker_process(worker_instance_id)?
-        .ok_or_else(|| anyhow!("observation-sink failure lost its worker identity"))?;
-    let cleanup_state = ryeos_app::dedicated_session_service::retire_worker_process(
-        state,
-        placement_thread_id,
-        &worker,
-    )?;
-    if cleanup_state == "reaped" {
-        state.state_store.settle_worker_process(
-            worker_instance_id,
-            placement_thread_id,
-            boot_epoch,
-            cleanup_state,
-            reason,
-        )?;
-        state.state_store.terminalize_dedicated_session(
-            placement_thread_id,
-            worker_instance_id,
-            boot_epoch,
-            "cancelled",
-        )?;
-        Ok(())
-    } else {
-        state.state_store.fence_abandoned_worker_process(
-            worker_instance_id,
-            placement_thread_id,
-            boot_epoch,
-            cleanup_state,
-        )?;
-        bail!("worker cleanup remains {cleanup_state}; credential profile is fenced")
     }
 }
 
@@ -913,6 +872,18 @@ pub(super) async fn start(
     let start_workspace = workspace_path.clone();
     let start_state_root = state_root.clone();
     let start_identity = identity.clone();
+    let observation_state = state.clone();
+    let observation_thread_id = identity.placement_thread_id.clone();
+    let observation_boot_epoch = identity.boot_epoch;
+    let observation_sink: ryeos_app::persistent_session::PersistentSessionObservationSink =
+        Arc::new(move |raw| {
+            ryeos_app::dedicated_session_service::ingest_observation_batch(
+                &observation_state,
+                &observation_thread_id,
+                observation_boot_epoch,
+                raw,
+            )
+        });
     let started = tokio::task::spawn_blocking(move || {
         ryeos_executor::execution::persistent_session::start_exclusive_capsule(
             &start_state,
@@ -921,6 +892,7 @@ pub(super) async fn start(
             Some(&start_state_root),
             &runtime_environment,
             &start_identity,
+            observation_sink,
         )
     })
     .await
@@ -945,35 +917,6 @@ pub(super) async fn start(
             Ok(()) => Err(anyhow!(reason)),
             Err(settlement) => Err(anyhow!(
                 "{reason}; explicit failed-start settlement also failed: {settlement:#}"
-            )),
-        };
-    }
-    let observation_state = state.clone();
-    let observation_session_id = request.thread_id.clone();
-    if let Err(error) = state
-        .persistent_sessions
-        .install_exclusive_observation_sink(&request.thread_id, move |body| {
-            ryeos_app::dedicated_session_service::ingest_observation_batch(
-                &observation_state,
-                &observation_session_id,
-                boot_epoch,
-                body,
-            )
-        })
-    {
-        let detail = format!("{error:#}");
-        let reason = bounded_worker_failure_reason("install worker observation sink: ", &detail);
-        let settlement = settle_observation_sink_install_failure(
-            state,
-            &request.thread_id,
-            &worker_instance_id,
-            boot_epoch,
-            &reason,
-        );
-        return match settlement {
-            Ok(()) => Err(anyhow!(reason)),
-            Err(settlement) => Err(anyhow!(
-                "{reason}; explicit observation-sink failure settlement also failed: {settlement:#}"
             )),
         };
     }

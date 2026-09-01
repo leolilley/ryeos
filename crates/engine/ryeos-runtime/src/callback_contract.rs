@@ -118,7 +118,8 @@ impl RuntimeDispatchEvidence {
 /// Daemon → runtime response from `runtime.dispatch_action`.
 ///
 /// Mirrors the shape every leaf dispatcher in `crates/bin/daemon/src/dispatch.rs`
-/// returns at its `Ok(json!({ "thread": ..., "result": ... }))` site:
+/// returns at its
+/// `Ok(json!({ "thread": ..., "result": ..., "dispatch": ... }))` site:
 ///
 /// * service terminator       (`dispatch_service`)
 /// * subprocess terminator    (`dispatch_subprocess` / `dispatch_managed_subprocess`)

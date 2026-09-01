@@ -7,7 +7,7 @@ use super::{
     ExecutionRecoveryAuthority, validate_trimmed_control_free,
 };
 
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 15;
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 16;
 pub const ADMITTED_DIRECT_COMMAND_ROOT: &str = "/ryeos/admitted-direct-command";
 
 const SEALED_ROOT_INVOCATION_FIELDS: &[&str] = &[
@@ -17,6 +17,7 @@ const SEALED_ROOT_INVOCATION_FIELDS: &[&str] = &[
     "execution_hints",
     "executor_ref",
     "executor_route",
+    "handler_context",
     "item_ref",
     "kind",
     "launch_mode",
@@ -48,6 +49,7 @@ const SEALED_ROOT_INVOCATION_FIELDS: &[&str] = &[
 const INVOCATION_ONLY_FIELDS: &[&str] = &[
     "captured_history_policy",
     "current_site_id",
+    "handler_context",
     "launch_mode",
     "origin_site_id",
     "parameters",
@@ -1064,6 +1066,78 @@ impl AdmittedLaunchCapsule {
         self.launch_authority().digest()
     }
 
+    /// Digest the transport-authenticated caller authority that may affect a
+    /// dispatched result without making invocation stimulus part of reusable
+    /// program identity. The sealed request validator binds handler identity,
+    /// scopes, principal class, and remote origin to this principal/site set.
+    pub fn dispatch_effect_caller_authority_digest(&self) -> anyhow::Result<String> {
+        let invocation = self
+            .sealed_invocation
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("sealed invocation must be an object"))?;
+        let field = |name: &str| {
+            invocation
+                .get(name)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("sealed invocation has no {name}"))
+        };
+        let authority = serde_json::json!({
+            "schema": "ryeos.dispatch_effect.caller_authority.v1",
+            "planning_principal": field("planning_principal")?,
+            "handler_context": field("handler_context")?,
+            "current_site_id": field("current_site_id")?,
+            "origin_site_id": field("origin_site_id")?,
+        });
+        Ok(lillux::sha256_hex(
+            lillux::canonical_json(&authority)?.as_bytes(),
+        ))
+    }
+
+    /// Whether this launch can receive secret values whose immutable value or
+    /// generation is not sealed in the capsule. Such a launch is ineligible
+    /// for generic durable-effect replay: a vault or overlay rotation must not
+    /// return an answer produced under different opaque inputs.
+    pub fn requires_unversioned_secret_input(&self) -> anyhow::Result<bool> {
+        let invocation = self
+            .sealed_invocation
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("sealed invocation must be an object"))?;
+        let required = invocation
+            .get("verified_subject")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|subject| subject.get("metadata"))
+            .and_then(serde_json::Value::as_object)
+            .and_then(|metadata| metadata.get("required_secrets"))
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("sealed invocation has no required_secrets array"))?;
+        for value in required {
+            let name = value.as_str().ok_or_else(|| {
+                anyhow::anyhow!("sealed invocation required_secrets entry is not a string")
+            })?;
+            validate_trimmed_control_free("sealed required secret", name, false)?;
+        }
+        if !required.is_empty() {
+            return Ok(true);
+        }
+        let AdmittedExecutionClosure::ManagedRuntime {
+            prepared_runtime_launch,
+            ..
+        } = &self.execution_closure
+        else {
+            return Ok(false);
+        };
+        let prepared = prepared_runtime_launch
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("prepared runtime launch must be an object"))?;
+        let required = prepared
+            .get("required_secrets")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                anyhow::anyhow!("prepared runtime launch has no required_secrets array")
+            })?;
+        Ok(!required.is_empty())
+    }
+
     /// External realization set sealed into this capsule's exact program,
     /// parsed with the shared wire type. `Ok(None)` when the program sealed
     /// no realization slot; malformed derived data is an error, never an
@@ -1639,6 +1713,7 @@ mod tests {
             "launch_mode": "detached",
             "current_site_id": "site:fixture-a",
             "origin_site_id": "site:fixture-a",
+            "handler_context": null,
             "target_site_id": null,
             "requested_by": null,
             "usage_subject": null,
@@ -1991,6 +2066,49 @@ mod tests {
         });
         let decoded = AdmittedLaunchCapsule::from_current_value(expected.to_value()).unwrap();
         assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn dispatch_effect_caller_authority_excludes_stimulus_but_binds_authentication() {
+        let capsule = direct_capsule(DirectExecutableIdentity::CapturedContent {
+            content_hash: "f".repeat(64),
+        });
+        let expected = capsule.dispatch_effect_caller_authority_digest().unwrap();
+
+        let mut changed_stimulus = capsule.clone();
+        changed_stimulus.sealed_invocation["parameters"] = serde_json::json!({"other": true});
+        assert_eq!(
+            changed_stimulus
+                .dispatch_effect_caller_authority_digest()
+                .unwrap(),
+            expected
+        );
+
+        for field in [
+            "planning_principal",
+            "handler_context",
+            "current_site_id",
+            "origin_site_id",
+        ] {
+            let mut changed = capsule.clone();
+            changed.sealed_invocation[field] = serde_json::json!(format!("changed-{field}"));
+            assert_ne!(
+                changed.dispatch_effect_caller_authority_digest().unwrap(),
+                expected,
+                "{field} must move caller authority"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_effect_eligibility_rejects_unversioned_required_secrets() {
+        let mut capsule = direct_capsule(DirectExecutableIdentity::CapturedContent {
+            content_hash: "f".repeat(64),
+        });
+        assert!(!capsule.requires_unversioned_secret_input().unwrap());
+        capsule.sealed_invocation["verified_subject"]["metadata"]["required_secrets"] =
+            serde_json::json!(["OPAQUE_TOKEN"]);
+        assert!(capsule.requires_unversioned_secret_input().unwrap());
     }
 
     #[test]

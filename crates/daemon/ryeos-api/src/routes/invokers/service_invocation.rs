@@ -184,6 +184,7 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
                 usage_subject: usage_subject.as_ref(),
                 usage_subject_asserted_by,
             },
+            None,
             recorded_invocation_id.as_deref(),
             Some(handler_context),
         )

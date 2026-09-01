@@ -299,27 +299,26 @@ fn select_service_handler_context(
             }),
         ryeos_app::service_registry::UiDispatchMode::Verified => {
             if let Some(context) = local_handler_context {
-                let mut expected_scopes = scopes.to_vec();
-                expected_scopes.sort();
-                expected_scopes.dedup();
-                let mut supplied_scopes = context.scopes.clone();
-                supplied_scopes.sort();
-                supplied_scopes.dedup();
-                if context.fingerprint != principal
-                    || supplied_scopes != expected_scopes
-                    || context.execution_origin(current_site_id) != origin_site_id
-                {
-                    bail!(
-                        "trusted service handler context differs from the sealed execution principal/scopes/origin"
-                    );
-                }
+                context
+                    .validate_execution_authority(
+                        principal,
+                        scopes,
+                        current_site_id,
+                        origin_site_id,
+                    )
+                    .context(
+                        "trusted service handler context differs from sealed execution authority",
+                    )?;
                 Ok(context)
             } else {
-                Ok(ryeos_app::handler_context::HandlerContext::new_with_origin(
+                // Node-internal launches have an execution principal but no
+                // cryptographically authenticated handler boundary. Preserve
+                // that distinction; never reconstruct `verified: true` from a
+                // sealed principal string.
+                Ok(ryeos_app::handler_context::HandlerContext::new(
                     principal.to_string(),
                     scopes.to_vec(),
-                    true,
-                    (origin_site_id != current_site_id).then(|| origin_site_id.to_string()),
+                    false,
                 ))
             }
         }
@@ -617,6 +616,7 @@ pub async fn execute_service(
         recording,
         None,
         None,
+        None,
     )
     .await
 }
@@ -634,6 +634,12 @@ pub async fn execute_service(
 /// from the very first lifecycle event onward. When `None`, a fresh
 /// `svc-<ts>-<rand>` id is minted as before.
 ///
+/// `admitted_root`: the exact synchronous root admission produced by generic
+/// dispatch preflight. When the service is recorded, the in-process terminator
+/// verifies and persists that admission; it never recompiles authority from
+/// mutable state. Authored hot-read services do not create a thread and
+/// therefore do not consume a root admission.
+///
 /// `local_handler_context` is trusted out-of-band context supplied by a local
 /// transport. Session-local services require it. Ordinary verified services
 /// may receive it only when its fingerprint/scopes exactly match `ctx`; this
@@ -650,6 +656,7 @@ pub async fn execute_service_verified(
     ctx: &ExecutionContext,
     state: &AppState,
     recording: ServiceRecordingContext<'_>,
+    admitted_root: Option<ryeos_app::thread_lifecycle::RootExecutionAdmission>,
     pre_minted_thread_id: Option<&str>,
     local_handler_context: Option<ryeos_app::handler_context::HandlerContext>,
 ) -> Result<ServiceExecutionResult> {
@@ -742,75 +749,116 @@ pub async fn execute_service_verified(
             )
         })?;
 
-    // Decide recording before deriving persistence-only project authority.
-    // `UnrecordedOnly` is an assertion by the caller, not a way to override a
-    // verified service's recording contract.
-    let project_binding = match (&recording.authority_source, record_thread) {
-        (ServiceRecordingAuthoritySource::Execution { provenance }, true) => Some(
-            ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
-                &ctx.engine,
-                &ctx.plan_ctx,
-                provenance,
-            )?,
-        ),
-        (ServiceRecordingAuthoritySource::Execution { .. }, false) => None,
-        (ServiceRecordingAuthoritySource::ExplicitProjectless, should_record) => {
-            if !matches!(
-                &ctx.plan_ctx.project_context,
-                ryeos_engine::contracts::ProjectContext::None
-            ) {
-                bail!("explicit projectless service authority requires no project context");
+    // A preflighted runtime action carries the exact root admission that
+    // minted its child identity. Consume that authority directly instead of
+    // resolving mutable project/bundle state again at the in-process
+    // terminator. Other service surfaces still compile their admission here.
+    let recorded_root_admission = if !record_thread {
+        None
+    } else if let Some(root_admission) = admitted_root {
+        root_admission.ensure_matches_plan_context(&ctx.engine, &ctx.plan_ctx)?;
+        root_admission.ensure_matches_subject(&ctx.engine, &verified, &thread_profile)?;
+        root_admission.ensure_matches_usage_attribution(
+            recording.usage_subject,
+            recording.usage_subject_asserted_by,
+        )?;
+        match &recording.authority_source {
+            ServiceRecordingAuthoritySource::Execution { provenance } => {
+                root_admission.ensure_matches_provenance(provenance)?;
             }
-            if should_record {
-                Some(
-                    ryeos_app::thread_lifecycle::AdmittedProjectBinding::explicit_projectless(
-                        &ctx.engine,
+            ServiceRecordingAuthoritySource::ExplicitProjectless => {
+                if !matches!(
+                    &ctx.plan_ctx.project_context,
+                    ryeos_engine::contracts::ProjectContext::None
+                ) {
+                    bail!("explicit projectless service authority requires no project context");
+                }
+            }
+            ServiceRecordingAuthoritySource::UnrecordedOnly => {
+                return Err(recording_integrity(format!(
+                    "caller asserted unrecorded-only execution for admitted service root `{service_ref}`"
+                )));
+            }
+        }
+        Some(root_admission)
+    } else {
+        // Decide recording before deriving persistence-only project authority.
+        // `UnrecordedOnly` is an assertion by the caller, not a way to
+        // override a verified service's recording contract.
+        let project_binding = match (&recording.authority_source, record_thread) {
+            (ServiceRecordingAuthoritySource::Execution { provenance }, true) => Some(
+                ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
+                    &ctx.engine,
+                    &ctx.plan_ctx,
+                    provenance,
+                )?,
+            ),
+            (ServiceRecordingAuthoritySource::Execution { .. }, false) => None,
+            (ServiceRecordingAuthoritySource::ExplicitProjectless, should_record) => {
+                if !matches!(
+                    &ctx.plan_ctx.project_context,
+                    ryeos_engine::contracts::ProjectContext::None
+                ) {
+                    bail!("explicit projectless service authority requires no project context");
+                }
+                if should_record {
+                    Some(
+                        ryeos_app::thread_lifecycle::AdmittedProjectBinding::explicit_projectless(
+                            &ctx.engine,
+                            &ctx.plan_ctx,
+                        )?,
+                    )
+                } else {
+                    None
+                }
+            }
+            (ServiceRecordingAuthoritySource::UnrecordedOnly, true) => {
+                return Err(recording_integrity(format!(
+                    "caller asserted unrecorded-only execution for recorded service `{service_ref}`"
+                )));
+            }
+            (ServiceRecordingAuthoritySource::UnrecordedOnly, false) => None,
+        };
+        match project_binding {
+            Some(project_binding) => {
+                let admitted_request_snapshot =
+                    project_binding.admit_request_authority_snapshot(&ctx.engine, &ctx.plan_ctx)?;
+                let verified_attestation = match admitted_request_snapshot.as_ref() {
+                    Some(authority) => ctx.engine.resolve_attested_under_admitted_authority(
                         &ctx.plan_ctx,
-                    )?,
-                )
-            } else {
-                None
+                        &verified.resolved.canonical_ref,
+                        project_binding.execution_workspace().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "content-addressed recorded service has no execution workspace"
+                            )
+                        })?,
+                        authority,
+                    ),
+                    None => ctx
+                        .engine
+                        .verify_attested(&ctx.plan_ctx, verified.resolved.clone()),
+                }
+                .map_err(|error| {
+                    anyhow::anyhow!("attest recorded service subject before persistence: {error}")
+                })?;
+                Some(ryeos_app::thread_lifecycle::admit_verified_root_execution(
+                    &ctx.engine,
+                    &ctx.plan_ctx,
+                    &ctx.plan_ctx,
+                    project_binding,
+                    verified_attestation,
+                    &state.node_history_policy,
+                    thread_profile,
+                    std::collections::BTreeMap::new(),
+                    recording.usage_subject.cloned(),
+                    recording.usage_subject_asserted_by.map(str::to_owned),
+                )?)
             }
+            None => None,
         }
-        (ServiceRecordingAuthoritySource::UnrecordedOnly, true) => {
-            return Err(recording_integrity(format!(
-                "caller asserted unrecorded-only execution for recorded service `{service_ref}`"
-            )));
-        }
-        (ServiceRecordingAuthoritySource::UnrecordedOnly, false) => None,
     };
 
-    let dispatch_result = if let Some(project_binding) = project_binding {
-        let admitted_request_snapshot =
-            project_binding.admit_request_authority_snapshot(&ctx.engine, &ctx.plan_ctx)?;
-        let verified_attestation = match admitted_request_snapshot.as_ref() {
-            Some(authority) => ctx.engine.resolve_attested_under_admitted_authority(
-                &ctx.plan_ctx,
-                &verified.resolved.canonical_ref,
-                project_binding.execution_workspace().ok_or_else(|| {
-                    anyhow::anyhow!("content-addressed recorded service has no execution workspace")
-                })?,
-                authority,
-            ),
-            None => ctx
-                .engine
-                .verify_attested(&ctx.plan_ctx, verified.resolved.clone()),
-        }
-        .map_err(|error| {
-            anyhow::anyhow!("attest recorded service subject before persistence: {error}")
-        })?;
-        let root_admission = ryeos_app::thread_lifecycle::admit_verified_root_execution(
-            &ctx.engine,
-            &ctx.plan_ctx,
-            &ctx.plan_ctx,
-            project_binding,
-            verified_attestation,
-            &state.node_history_policy,
-            thread_profile,
-            std::collections::BTreeMap::new(),
-            recording.usage_subject.cloned(),
-            recording.usage_subject_asserted_by.map(str::to_owned),
-        )?;
+    let dispatch_result = if let Some(root_admission) = recorded_root_admission {
         let result_policy = root_admission.resolved_result_policy().clone();
         let recorded_admission = ryeos_app::thread_lifecycle::RecordedServiceAdmission::new(
             root_admission,
@@ -1215,5 +1263,23 @@ mod tests {
         assert_eq!(selected.fingerprint, "");
         assert!(selected.scopes.is_empty());
         assert!(!selected.verified);
+    }
+
+    #[test]
+    fn verified_service_without_ingress_context_remains_unverified() {
+        let selected = select_service_handler_context(
+            &HashMap::new(),
+            None,
+            "machine:scheduled",
+            &["service.read".to_string()],
+            "site:local",
+            "site:local",
+        )
+        .expect("node-internal service context");
+        assert_eq!(selected.fingerprint, "machine:scheduled");
+        assert_eq!(selected.scopes, vec!["service.read"]);
+        assert!(!selected.verified);
+        assert!(selected.authorized_key_class.is_none());
+        assert!(selected.authenticated_origin_site_id.is_none());
     }
 }

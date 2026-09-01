@@ -54,6 +54,7 @@ pub async fn run(
     provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
     plan_ctx: &ryeos_engine::contracts::PlanContext,
     principal_fingerprint: &str,
+    handler_context: Option<&ryeos_app::handler_context::HandlerContext>,
     state: &ryeos_app::state::AppState,
     launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
     admitted_request_snapshot: Option<&Arc<ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>>,
@@ -617,14 +618,33 @@ pub async fn run(
                     injection.source
                         == ryeos_engine::protocol_vocabulary::EnvInjectionSource::ThreadAuthToken
                 });
-        let thread_auth = needs_thread_auth.then(|| {
-            state.thread_auth.mint(
+        let thread_auth = if needs_thread_auth {
+            let callback_scopes = Vec::new();
+            let callback_handler_context = handler_context
+                .map(|context| {
+                    context.narrowed_for_execution(
+                        callback_scopes.clone(),
+                        &plan_ctx.current_site_id,
+                        &plan_ctx.origin_site_id,
+                    )
+                })
+                .transpose()
+                .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?;
+            Some(
+                state.thread_auth.mint(
                 &child_thread_id,
                 principal_fingerprint.to_string(),
-                vec!["execute".to_string()],
+                callback_scopes,
+                callback_handler_context,
+                &plan_ctx.current_site_id,
+                &plan_ctx.origin_site_id,
                 ttl,
             )
-        });
+            .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?,
+            )
+        } else {
+            None
+        };
         if let Some(thread_auth) = &thread_auth {
             lifecycle_owner.track_thread_auth_token(thread_auth.token.clone());
         }

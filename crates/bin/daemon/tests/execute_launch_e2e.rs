@@ -187,7 +187,7 @@ fn plant_unsigned_directive(project: &Path, rel_path: &str) -> anyhow::Result<()
 fn plant_smoke_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
-    let body = r#"category: ""
+    let body = r#"category: test
 version: "1.0.0"
 config:
   start: done
@@ -324,8 +324,10 @@ fn plant_mock_provider(
     let dir = project.join(".ai/config/ryeos-runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
-        r#"base_url: "{mock_base_url}"
-family: chat_completions
+        r#"family: chat_completions
+transport:
+  kind: remote_http
+  base_url: "{mock_base_url}"
 body_template:
   model: "{{model}}"
   messages: "{{messages}}"

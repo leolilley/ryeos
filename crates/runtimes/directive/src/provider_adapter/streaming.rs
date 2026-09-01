@@ -470,6 +470,29 @@ pub struct CutAttemptState {
     pub observed_output: ObservedOutput,
 }
 
+/// Provider-neutral partial cognition retained when an interrupt cuts a turn.
+/// This is deliberately not a provider message: RyeOS records it as
+/// `cognition_out`, and only the provider rendering boundary assigns the wire
+/// role required by a later request.
+#[derive(Debug, Clone, Default)]
+pub struct InterruptedCognition {
+    pub content: Option<Value>,
+    pub reasoning_content: Option<String>,
+}
+
+impl InterruptedCognition {
+    pub fn into_provider_message(self) -> ProviderMessage {
+        ProviderMessage {
+            // Explicit provider-wire rendering of a RyeOS cognition output.
+            role: "assistant".to_string(),
+            content: self.content,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: self.reasoning_content,
+        }
+    }
+}
+
 /// How the stream loop terminated. Replaces overloading `Ok(AdapterResponse)`
 /// for partial termination: a cancelled or interrupted stream did NOT complete a
 /// cognition, and the runner must treat each distinctly (finalize cancelled /
@@ -481,14 +504,14 @@ pub enum StreamOutcome {
         events: Vec<StreamEvent>,
     },
     /// A live interrupt (SIGUSR1) cut the in-flight cognition. The partial
-    /// assistant message carries accumulated content/reasoning but NO tool_calls
-    /// — an interrupted cognition didn't complete its tool call, so the folded
-    /// wire history stays well-formed. The runner seals this as
+    /// cognition carries accumulated content/reasoning and cannot carry tool
+    /// calls — an interrupted cognition didn't complete its tool call, so the
+    /// folded history stays well-formed. The runner seals this as
     /// `cognition_out{interrupted:true}` then folds the queued input. `events`
     /// is the partial stream (already persisted live during streaming) — carried
     /// so the runner can still surface any provider `Warning`s from the cut turn.
     Interrupted {
-        partial_message: ProviderMessage,
+        partial_cognition: InterruptedCognition,
         events: Vec<StreamEvent>,
         attempt: CutAttemptState,
     },
@@ -1307,7 +1330,7 @@ pub struct StreamingCallInput<'a> {
     pub cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Optional live-interrupt flag (SIGUSR1). When set mid-stream, the loop
     /// breaks and the call returns [`StreamOutcome::Interrupted`] with the
-    /// partial assistant message accumulated so far.
+    /// partial cognition accumulated so far.
     pub interrupt_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
@@ -1530,13 +1553,7 @@ pub async fn send_prepared_local_streaming(
         };
         return if interrupted {
             Ok(StreamOutcome::Interrupted {
-                partial_message: ProviderMessage {
-                    role: "assistant".to_owned(),
-                    content: None,
-                    tool_calls: None,
-                    tool_call_id: None,
-                    reasoning_content: None,
-                },
+                partial_cognition: InterruptedCognition::default(),
                 events: Vec::new(),
                 attempt,
             })
@@ -1610,11 +1627,8 @@ pub async fn send_prepared_local_streaming(
             };
             return if interrupted {
                 Ok(StreamOutcome::Interrupted {
-                    partial_message: ProviderMessage {
-                        role: "assistant".to_owned(),
+                    partial_cognition: InterruptedCognition {
                         content: (!accumulated_text.is_empty()).then(|| json!(accumulated_text)),
-                        tool_calls: None,
-                        tool_call_id: None,
                         reasoning_content: (!accumulated_reasoning.is_empty())
                             .then_some(accumulated_reasoning),
                     },
@@ -2018,13 +2032,7 @@ async fn send_prepared_streaming_inner(
     }
     if flag_set(&input.interrupt_flag) {
         return Ok(StreamOutcome::Interrupted {
-            partial_message: ProviderMessage {
-                role: "assistant".to_string(),
-                content: None,
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
+            partial_cognition: InterruptedCognition::default(),
             events: Vec::new(),
             attempt: empty_cut_attempt(),
         });
@@ -2050,13 +2058,7 @@ async fn send_prepared_streaming_inner(
         }
         _ = flag_signal(&input.interrupt_flag) => {
             return Ok(StreamOutcome::Interrupted {
-                partial_message: ProviderMessage {
-                    role: "assistant".to_string(),
-                    content: None,
-                    tool_calls: None,
-                    tool_call_id: None,
-                    reasoning_content: None,
-                },
+                partial_cognition: InterruptedCognition::default(),
                 events: Vec::new(),
                 attempt: empty_cut_attempt(),
             });
@@ -2838,17 +2840,14 @@ async fn send_prepared_streaming_inner(
         Some(accumulated_reasoning)
     };
 
-    // Interrupt cut: seal the partial as an assistant message with content +
-    // reasoning only. NO tool_calls — an interrupted cognition didn't complete
+    // Interrupt cut: seal the partial cognition with content + reasoning only.
+    // NO tool_calls — an interrupted cognition didn't complete
     // its tool call, so the folded wire history has no unpaired tool_call → the
     // runner records `cognition_out{interrupted:true}` from this.
     if exit == LoopExit::Interrupted {
         return Ok(StreamOutcome::Interrupted {
-            partial_message: ProviderMessage {
-                role: "assistant".to_string(),
+            partial_cognition: InterruptedCognition {
                 content,
-                tool_calls: None,
-                tool_call_id: None,
                 reasoning_content,
             },
             events: all_events,

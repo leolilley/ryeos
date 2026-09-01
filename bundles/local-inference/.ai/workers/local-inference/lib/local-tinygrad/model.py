@@ -8,7 +8,7 @@ import mmap
 from pathlib import Path
 from typing import Iterator
 
-from tinygrad import Tensor, dtypes, nn
+from tinygrad import Tensor, UOp, dtypes, nn
 from tinygrad.llm.model import Transformer, TransformerConfig
 
 
@@ -237,12 +237,13 @@ class QwenModel:
         # and freshly seeded sampler mutable.
         next_input = list(prompt_tokens)
         start_pos = 0
+        variable_start_pos = UOp.variable("start_pos", 0, MAX_CONTEXT - 1)
         sample_temperature = Tensor([temperature])
         for _ in range(output_limit):
             next_token = int(
                 request_model(
                     Tensor([next_input], dtype="int32"),
-                    start_pos,
+                    variable_start_pos.bind(start_pos),
                     sample_temperature,
                 )
                 .realize()

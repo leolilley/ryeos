@@ -438,7 +438,30 @@ pub struct ThreadAuthState {
     pub thread_id: String,
     pub acting_principal: String,
     pub caller_scopes: Vec<String>,
+    /// Exact ingress-authenticated handler authority retained for callbacks.
+    /// `None` is intentional for node-internal executions that did not enter
+    /// through an authenticated handler boundary; those executions must never
+    /// synthesize transport verification during a callback.
+    handler_context: Option<crate::handler_context::HandlerContext>,
     pub expires_at: Instant,
+}
+
+impl ThreadAuthState {
+    pub fn handler_context(&self) -> Option<&crate::handler_context::HandlerContext> {
+        self.handler_context.as_ref()
+    }
+
+    pub fn narrowed_handler_context(
+        &self,
+        scopes: Vec<String>,
+        current_site_id: &str,
+        origin_site_id: &str,
+    ) -> Result<Option<crate::handler_context::HandlerContext>> {
+        self.handler_context
+            .as_ref()
+            .map(|context| context.narrowed_for_execution(scopes, current_site_id, origin_site_id))
+            .transpose()
+    }
 }
 
 pub struct ThreadAuthStore {
@@ -463,8 +486,19 @@ impl ThreadAuthStore {
         thread_id: &str,
         acting_principal: String,
         caller_scopes: Vec<String>,
+        handler_context: Option<crate::handler_context::HandlerContext>,
+        current_site_id: &str,
+        origin_site_id: &str,
         ttl: Duration,
-    ) -> ThreadAuthState {
+    ) -> Result<ThreadAuthState> {
+        if let Some(context) = handler_context.as_ref() {
+            context.validate_execution_authority(
+                &acting_principal,
+                &caller_scopes,
+                current_site_id,
+                origin_site_id,
+            )?;
+        }
         let random_bytes: [u8; 32] = rand::random();
         let hex = lillux::cas::sha256_hex(&random_bytes);
         let token = format!("tat-{hex}");
@@ -474,11 +508,12 @@ impl ThreadAuthStore {
             thread_id: thread_id.to_string(),
             acting_principal,
             caller_scopes,
+            handler_context,
             expires_at: Instant::now() + ttl,
         };
 
         self.states.lock().unwrap().insert(token, state.clone());
-        state
+        Ok(state)
     }
 
     pub fn validate(&self, token: &str, thread_id: &str) -> Result<ThreadAuthState> {
@@ -952,12 +987,33 @@ mod tests {
 
     // ── ThreadAuthStore ──────────────────────────────────────────────
 
+    fn mint_test(
+        store: &ThreadAuthStore,
+        thread_id: &str,
+        principal: &str,
+        scopes: Vec<String>,
+        ttl: Duration,
+    ) -> ThreadAuthState {
+        store
+            .mint(
+                thread_id,
+                principal.to_string(),
+                scopes,
+                None,
+                "site:test",
+                "site:test",
+                ttl,
+            )
+            .unwrap()
+    }
+
     #[test]
     fn thread_auth_mint_and_validate_round_trip() {
         let store = ThreadAuthStore::new();
-        let state = store.mint(
+        let state = mint_test(
+            &store,
             "T-abc",
-            "fp:user123".to_string(),
+            "fp:user123",
             vec!["execute".to_string()],
             Duration::from_secs(300),
         );
@@ -980,7 +1036,7 @@ mod tests {
     #[test]
     fn thread_auth_rejects_wrong_thread() {
         let store = ThreadAuthStore::new();
-        let state = store.mint("T-1", "fp:u".to_string(), vec![], Duration::from_secs(300));
+        let state = mint_test(&store, "T-1", "fp:u", vec![], Duration::from_secs(300));
         let err = store.validate(&state.token, "T-2").unwrap_err();
         assert!(err.to_string().contains("thread_id"));
     }
@@ -988,7 +1044,7 @@ mod tests {
     #[test]
     fn thread_auth_rejects_expired() {
         let store = ThreadAuthStore::new();
-        let state = store.mint("T-1", "fp:u".to_string(), vec![], Duration::from_secs(0));
+        let state = mint_test(&store, "T-1", "fp:u", vec![], Duration::from_secs(0));
         std::thread::sleep(std::time::Duration::from_millis(10));
         let err = store.validate(&state.token, "T-1").unwrap_err();
         assert!(err.to_string().contains("expired"));
@@ -997,7 +1053,7 @@ mod tests {
     #[test]
     fn thread_auth_invalidate_removes_token() {
         let store = ThreadAuthStore::new();
-        let state = store.mint("T-1", "fp:u".to_string(), vec![], Duration::from_secs(300));
+        let state = mint_test(&store, "T-1", "fp:u", vec![], Duration::from_secs(300));
         store.invalidate(&state.token);
         assert!(store.validate(&state.token, "T-1").is_err());
     }
@@ -1005,8 +1061,8 @@ mod tests {
     #[test]
     fn thread_auth_invalidate_for_thread() {
         let store = ThreadAuthStore::new();
-        let s1 = store.mint("T-1", "fp:u".to_string(), vec![], Duration::from_secs(300));
-        let s2 = store.mint("T-2", "fp:u".to_string(), vec![], Duration::from_secs(300));
+        let s1 = mint_test(&store, "T-1", "fp:u", vec![], Duration::from_secs(300));
+        let s2 = mint_test(&store, "T-2", "fp:u", vec![], Duration::from_secs(300));
         store.invalidate_for_thread("T-1");
         assert!(store.validate(&s1.token, "T-1").is_err());
         assert!(store.validate(&s2.token, "T-2").is_ok());
@@ -1015,10 +1071,47 @@ mod tests {
     #[test]
     fn thread_auth_prune_expired() {
         let store = ThreadAuthStore::new();
-        store.mint("T-1", "fp:u".to_string(), vec![], Duration::from_secs(0));
+        mint_test(&store, "T-1", "fp:u", vec![], Duration::from_secs(0));
         std::thread::sleep(std::time::Duration::from_millis(10));
-        store.mint("T-2", "fp:u".to_string(), vec![], Duration::from_secs(300));
+        mint_test(&store, "T-2", "fp:u", vec![], Duration::from_secs(300));
         let pruned = store.prune_expired();
         assert_eq!(pruned, 1);
+    }
+
+    #[test]
+    fn thread_auth_preserves_and_narrows_remote_operator_authority() {
+        let store = ThreadAuthStore::new();
+        let context = crate::handler_context::HandlerContext::new_with_authority(
+            "fp:operator".to_string(),
+            vec!["cap:a".to_string(), "cap:b".to_string()],
+            true,
+            Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some("site:source".to_string()),
+        );
+        let state = store
+            .mint(
+                "T-remote",
+                "fp:operator".to_string(),
+                vec!["cap:a".to_string(), "cap:b".to_string()],
+                Some(context),
+                "site:target",
+                "site:source",
+                Duration::from_secs(300),
+            )
+            .unwrap();
+
+        let narrowed = state
+            .narrowed_handler_context(vec!["cap:a".to_string()], "site:target", "site:source")
+            .unwrap()
+            .unwrap();
+        assert_eq!(narrowed.scopes, vec!["cap:a"]);
+        assert_eq!(
+            narrowed.authorized_key_class,
+            Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator)
+        );
+        assert_eq!(
+            narrowed.authenticated_origin_site_id.as_deref(),
+            Some("site:source")
+        );
     }
 }

@@ -12,6 +12,17 @@ pub(crate) enum ThreadLaunchClaimOutcome {
     AlreadyClaimed,
 }
 
+pub(crate) enum RuntimeRecoveryClaimRotation {
+    Rotated {
+        claim: ThreadLaunchClaim,
+        next_attempt: u32,
+    },
+    Exhausted {
+        attempts: u32,
+    },
+    LostOwner,
+}
+
 /// Owned authorization to launch one existing thread row.
 ///
 /// The guard deliberately owns an `AppState`: recovery can acquire it on the
@@ -75,6 +86,48 @@ impl ThreadLaunchClaim {
                 "fresh thread ID {thread_id} was already reserved by another launch owner"
             ),
         }
+    }
+
+    /// Move an already-active same-thread launcher to a new monotonic owner
+    /// epoch after its attached process has exited nonterminally. The durable
+    /// claim and process-local owner registry rotate atomically; the older
+    /// guard may later drop safely because release is claim-id-qualified.
+    pub(crate) fn rotate_after_runtime_recovery(
+        state: &AppState,
+        thread_id: &str,
+        expected_launch_owner: &str,
+        max_attempts: u32,
+    ) -> anyhow::Result<RuntimeRecoveryClaimRotation> {
+        let claim_id = ryeos_app::thread_lifecycle::new_thread_id();
+        let outcome = state
+            .state_store
+            .rotate_active_thread_launch_claim_after_runtime_recovery(
+                thread_id,
+                expected_launch_owner,
+                &claim_id,
+                ryeos_app::runtime_db::daemon_generation_id(),
+                max_attempts,
+            )?;
+        Ok(match outcome {
+            ryeos_app::runtime_db::RuntimeRecoveryClaimRotation::Rotated {
+                claim,
+                next_attempt,
+            } => RuntimeRecoveryClaimRotation::Rotated {
+                claim: Self {
+                    state: state.clone(),
+                    thread_id: thread_id.to_string(),
+                    claim_id,
+                    owner: claim.owner,
+                },
+                next_attempt,
+            },
+            ryeos_app::runtime_db::RuntimeRecoveryClaimRotation::Exhausted { attempts } => {
+                RuntimeRecoveryClaimRotation::Exhausted { attempts }
+            }
+            ryeos_app::runtime_db::RuntimeRecoveryClaimRotation::LostOwner => {
+                RuntimeRecoveryClaimRotation::LostOwner
+            }
+        })
     }
 
     pub(crate) fn canonical_owner(&self) -> anyhow::Result<String> {

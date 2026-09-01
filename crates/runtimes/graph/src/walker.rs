@@ -441,7 +441,18 @@ impl Walker {
             thread_id = %self.thread_id,
         )
     )]
+    #[cfg(test)]
     pub async fn execute(&self, params: Value, graph_run_id: Option<String>) -> GraphResult {
+        self.execute_recoverable(params, graph_run_id)
+            .await
+            .expect("test graph execution unexpectedly required native recovery")
+    }
+
+    pub async fn execute_recoverable(
+        &self,
+        params: Value,
+        graph_run_id: Option<String>,
+    ) -> anyhow::Result<GraphResult> {
         tracing::info!(
             graph_id = %self.graph.graph_id,
             version = %self.graph.version,
@@ -510,13 +521,13 @@ impl Walker {
         let inputs = match params.get("inputs") {
             Some(inputs) => {
                 if let Err(error) = validate_runtime_value(inputs, "graph inputs") {
-                    return self
+                    return Ok(self
                         .fail_runtime_preflight(
                             graph_run_id,
                             format!("graph inputs exceeded rye-expr/1 bounds: {error}"),
                             &mut guard,
                         )
-                        .await;
+                        .await);
                 }
                 inputs.clone()
             }
@@ -530,33 +541,33 @@ impl Walker {
 
         if let Some(defaults) = params.get("inject_state") {
             if !defaults.is_object() {
-                return self
+                return Ok(self
                     .fail_runtime_preflight(
                         graph_run_id,
                         "graph inject_state must be a JSON object".to_string(),
                         &mut guard,
                     )
-                    .await;
+                    .await);
             }
             if let Err(error) = validate_runtime_value(defaults, "graph inject_state") {
-                return self
+                return Ok(self
                     .fail_runtime_preflight(
                         graph_run_id,
                         format!("graph inject_state exceeded rye-expr/1 bounds: {error}"),
                         &mut guard,
                     )
-                    .await;
+                    .await);
             }
             merge_into(&mut state, defaults);
         }
         if let Err(error) = validate_runtime_value(&state, "initial graph state") {
-            return self
+            return Ok(self
                 .fail_runtime_preflight(
                     graph_run_id,
                     format!("initial graph state exceeded rye-expr/1 bounds: {error}"),
                     &mut guard,
                 )
-                .await;
+                .await);
         }
 
         let mut current = cfg.start.clone();
@@ -578,26 +589,26 @@ impl Walker {
             let resume = match crate::resume::from_injected_value(resume_val, &self.graph) {
                 Ok(resume) => resume,
                 Err(error) => {
-                    return self
+                    return Ok(self
                         .fail_runtime_preflight(
                             graph_run_id,
                             format!("invalid graph resume_state: {error}"),
                             &mut guard,
                         )
-                        .await;
+                        .await);
                 }
             };
             let restored_accounting =
                 match serde_json::from_value::<GraphAccounting>(resume.accounting.clone()) {
                     Ok(accounting) => accounting,
                     Err(error) => {
-                        return self
+                        return Ok(self
                             .fail_runtime_preflight(
                                 graph_run_id,
                                 format!("invalid graph resume_state accounting: {error}"),
                                 &mut guard,
                             )
-                            .await;
+                            .await);
                     }
                 };
             let restored_errors = match serde_json::from_value::<Vec<ErrorRecord>>(
@@ -605,13 +616,13 @@ impl Walker {
             ) {
                 Ok(errors) => errors,
                 Err(error) => {
-                    return self
+                    return Ok(self
                         .fail_runtime_preflight(
                             graph_run_id,
                             format!("invalid graph resume_state suppressed_errors: {error}"),
                             &mut guard,
                         )
-                        .await;
+                        .await);
                 }
             };
 
@@ -649,13 +660,13 @@ impl Walker {
         // authoritative resume DTO has either restored both histories or left
         // them empty for a fresh run. This avoids rescanning on every step.
         if let Err(error) = self.seed_run_history(&suppressed_errors) {
-            return self
+            return Ok(self
                 .fail_runtime_preflight(
                     graph_run_id,
                     format!("invalid graph resume history: {error}"),
                     &mut guard,
                 )
-                .await;
+                .await);
         }
 
         // GraphStarted belongs to the logical graph run, not to each process
@@ -698,24 +709,26 @@ impl Walker {
                 origin: TerminalOrigin::RunControl,
                 output: None,
             });
-            return match self
-                .commit_step(CommitStepInput {
-                    graph_run_id: &graph_run_id,
-                    step,
-                    current: &current,
-                    state: &mut state,
-                    suppressed_errors: &mut suppressed_errors,
-                    outcome,
-                    guard: &mut guard,
-                    inputs: &inputs,
-                    execution: &execution_context,
-                    cache: &cache,
-                })
-                .await
-            {
-                CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
-                CommitResult::Terminate(result) => *result,
-            };
+            return Ok(
+                match self
+                    .commit_step(CommitStepInput {
+                        graph_run_id: &graph_run_id,
+                        step,
+                        current: &current,
+                        state: &mut state,
+                        suppressed_errors: &mut suppressed_errors,
+                        outcome,
+                        guard: &mut guard,
+                        inputs: &inputs,
+                        execution: &execution_context,
+                        cache: &cache,
+                    })
+                    .await
+                {
+                    CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
+                    CommitResult::Terminate(result) => *result,
+                },
+            );
         }
 
         // ── F3 main loop: run_node_body → commit_step ───────────
@@ -745,24 +758,26 @@ impl Walker {
                     origin: TerminalOrigin::RunControl,
                     output: None,
                 });
-                return match self
-                    .commit_step(CommitStepInput {
-                        graph_run_id: &graph_run_id,
-                        step,
-                        current: &current,
-                        state: &mut state,
-                        suppressed_errors: &mut suppressed_errors,
-                        outcome,
-                        guard: &mut guard,
-                        inputs: &inputs,
-                        execution: &execution_context,
-                        cache: &cache,
-                    })
-                    .await
-                {
-                    CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
-                    CommitResult::Terminate(result) => *result,
-                };
+                return Ok(
+                    match self
+                        .commit_step(CommitStepInput {
+                            graph_run_id: &graph_run_id,
+                            step,
+                            current: &current,
+                            state: &mut state,
+                            suppressed_errors: &mut suppressed_errors,
+                            outcome,
+                            guard: &mut guard,
+                            inputs: &inputs,
+                            execution: &execution_context,
+                            cache: &cache,
+                        })
+                        .await
+                    {
+                        CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
+                        CommitResult::Terminate(result) => *result,
+                    },
+                );
             }
 
             let node = match cfg.nodes.get(&current) {
@@ -792,7 +807,7 @@ impl Walker {
                         .await
                     {
                         CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
-                        CommitResult::Terminate(result) => return *result,
+                        CommitResult::Terminate(result) => return Ok(*result),
                     }
                 }
             };
@@ -811,6 +826,16 @@ impl Walker {
                     retry_attempt,
                 })
                 .await;
+
+            if let StepOutcome::RecoveryRequired { error } = &outcome {
+                tracing::warn!(%error, "graph requires same-thread native recovery");
+                return Err(
+                    ryeos_runtime::process_outcome::RuntimeRecoveryRequired::retained_progress_outcome_unknown(
+                        self.thread_id.clone(),
+                    )
+                    .into(),
+                );
+            }
 
             match self
                 .commit_step(CommitStepInput {
@@ -837,7 +862,7 @@ impl Walker {
                     retry_attempt = next_retry_attempt;
                     steps_this_segment += 1;
                 }
-                CommitResult::Terminate(result) => return *result,
+                CommitResult::Terminate(result) => return Ok(*result),
             }
         }
 
@@ -852,24 +877,26 @@ impl Walker {
                 origin: TerminalOrigin::RunControl,
                 output: None,
             });
-            return match self
-                .commit_step(CommitStepInput {
-                    graph_run_id: &graph_run_id,
-                    step,
-                    current: "",
-                    state: &mut state,
-                    suppressed_errors: &mut suppressed_errors,
-                    outcome,
-                    guard: &mut guard,
-                    inputs: &inputs,
-                    execution: &execution_context,
-                    cache: &cache,
-                })
-                .await
-            {
-                CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
-                CommitResult::Terminate(result) => *result,
-            };
+            return Ok(
+                match self
+                    .commit_step(CommitStepInput {
+                        graph_run_id: &graph_run_id,
+                        step,
+                        current: "",
+                        state: &mut state,
+                        suppressed_errors: &mut suppressed_errors,
+                        outcome,
+                        guard: &mut guard,
+                        inputs: &inputs,
+                        execution: &execution_context,
+                        cache: &cache,
+                    })
+                    .await
+                {
+                    CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
+                    CommitResult::Terminate(result) => *result,
+                },
+            );
         }
 
         // A cancel/kill that arrived during the final segment step (or a SIGTERM
@@ -883,24 +910,26 @@ impl Walker {
                 origin: TerminalOrigin::RunControl,
                 output: None,
             });
-            return match self
-                .commit_step(CommitStepInput {
-                    graph_run_id: &graph_run_id,
-                    step,
-                    current: &current,
-                    state: &mut state,
-                    suppressed_errors: &mut suppressed_errors,
-                    outcome,
-                    guard: &mut guard,
-                    inputs: &inputs,
-                    execution: &execution_context,
-                    cache: &cache,
-                })
-                .await
-            {
-                CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
-                CommitResult::Terminate(result) => *result,
-            };
+            return Ok(
+                match self
+                    .commit_step(CommitStepInput {
+                        graph_run_id: &graph_run_id,
+                        step,
+                        current: &current,
+                        state: &mut state,
+                        suppressed_errors: &mut suppressed_errors,
+                        outcome,
+                        guard: &mut guard,
+                        inputs: &inputs,
+                        execution: &execution_context,
+                        cache: &cache,
+                    })
+                    .await
+                {
+                    CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
+                    CommitResult::Terminate(result) => *result,
+                },
+            );
         }
 
         let (agg_cost, node_costs, hook_costs) = {
@@ -951,24 +980,26 @@ impl Walker {
                 origin: TerminalOrigin::RunControl,
                 output: None,
             });
-            return match self
-                .commit_step(CommitStepInput {
-                    graph_run_id: &graph_run_id,
-                    step,
-                    current: &current,
-                    state: &mut state,
-                    suppressed_errors: &mut suppressed_errors,
-                    outcome,
-                    guard: &mut guard,
-                    inputs: &inputs,
-                    execution: &execution_context,
-                    cache: &cache,
-                })
-                .await
-            {
-                CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
-                CommitResult::Terminate(result) => *result,
-            };
+            return Ok(
+                match self
+                    .commit_step(CommitStepInput {
+                        graph_run_id: &graph_run_id,
+                        step,
+                        current: &current,
+                        state: &mut state,
+                        suppressed_errors: &mut suppressed_errors,
+                        outcome,
+                        guard: &mut guard,
+                        inputs: &inputs,
+                        execution: &execution_context,
+                        cache: &cache,
+                    })
+                    .await
+                {
+                    CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
+                    CommitResult::Terminate(result) => *result,
+                },
+            );
         }
 
         // Handoff accepted: settle `continued` WITHOUT the terminal lifecycle
@@ -976,7 +1007,7 @@ impl Walker {
         // thread to Continued and launches the successor off this status. The
         // checkpoint already written by the last commit_step is the resume point.
         guard.finalized = true;
-        continued_result
+        Ok(continued_result)
     }
 
     /// Drain and settle every operator command queued for this thread between
@@ -1338,6 +1369,7 @@ impl Walker {
                 };
 
                 let foreach::ForeachRun {
+                    recovery_required,
                     results,
                     statuses,
                     total_items,
@@ -1353,6 +1385,9 @@ impl Walker {
                         RuntimeEventType::GraphNodeRetry.as_str(),
                         Err(anyhow::anyhow!(warning)),
                     );
+                }
+                if let Some(error) = recovery_required {
+                    return StepOutcome::RecoveryRequired { error };
                 }
                 let foreach_item_id = node
                     .action
@@ -1736,18 +1771,21 @@ fn compute_cache_key(
     graph_id: &str,
     node_name: &str,
     action: &Value,
-) -> Result<String, lillux::cas::CanonicalJsonError> {
+) -> anyhow::Result<String> {
     // Length-prefix each identity component so concatenation cannot alias.
     // The effective definition digest prevents changed executable behavior
     // from reusing an entry, and
-    // canonical JSON gives object-key ordering one deterministic identity.
+    // The dispatch digest is the existing behavior-only identity and strips
+    // `operation_id`. An occurrence coordinate must never poison reuse of the
+    // same behavior at a later graph step.
     let mut hasher = Sha256::new();
-    let canonical_action = lillux::cas::canonical_json(action)?;
+    let action_digest = crate::dispatch::rendered_action_digest(action)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     for component in [
         effective_definition_digest.as_bytes(),
         graph_id.as_bytes(),
         node_name.as_bytes(),
-        canonical_action.as_bytes(),
+        action_digest.as_bytes(),
     ] {
         hasher.update((component.len() as u64).to_be_bytes());
         hasher.update(component);

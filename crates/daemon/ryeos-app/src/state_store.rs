@@ -5381,6 +5381,12 @@ impl StateStore {
 
     pub fn attach_worker_process(&self, record: &WorkerProcessRecord) -> Result<()> {
         let g = self.lock()?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            anyhow::bail!("worker process attachment admission is closed for daemon shutdown");
+        }
         g.runtime_db.attach_worker_process(record)
     }
 
@@ -12458,6 +12464,44 @@ impl StateStore {
             .release_thread_launch_claim(thread_id, claim_id)
     }
 
+    /// Consume a completed runtime recovery attempt and replace the current
+    /// in-process launch owner as one StateStore-visible operation.
+    pub fn rotate_active_thread_launch_claim_after_runtime_recovery(
+        &self,
+        thread_id: &str,
+        expected_launch_owner: &str,
+        next_claim_id: &str,
+        daemon_generation_id: &str,
+        max_attempts: u32,
+    ) -> Result<runtime_db::RuntimeRecoveryClaimRotation> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
+        let mut active = self
+            .active_launch_owners
+            .lock()
+            .map_err(|_| anyhow!("active launch-owner registry poisoned"))?;
+        if !active.contains(expected_launch_owner) {
+            return Ok(runtime_db::RuntimeRecoveryClaimRotation::LostOwner);
+        }
+        let outcome = g
+            .runtime_db
+            .rotate_thread_launch_claim_after_runtime_recovery(
+                thread_id,
+                expected_launch_owner,
+                next_claim_id,
+                daemon_generation_id,
+                max_attempts,
+            )?;
+        if let runtime_db::RuntimeRecoveryClaimRotation::Rotated { claim, .. } = &outcome {
+            active.remove(expected_launch_owner);
+            if !active.insert(claim.claimed_by.clone()) {
+                bail!("rotated launch owner collides with an active daemon owner");
+            }
+        }
+        Ok(outcome)
+    }
+
     /// Read the current launch claim, if any — distinguishes an unlaunched
     /// successor from one mid-launch for the reconciler.
     pub fn get_launch_claim(&self, thread_id: &str) -> Result<Option<runtime_db::LaunchClaim>> {
@@ -12892,56 +12936,49 @@ impl StateStore {
             .ok_or_else(|| anyhow!("hook outcome append returned no event"))
     }
 
-    /// Reserve the stable child identity for one detached callback operation
-    /// while the authoritative parent chain is still admitted.
-    pub fn reserve_detached_spawn_intent(
+    /// Reserve the stable child identity for one runtime callback occurrence
+    /// while the authoritative caller chain is still admitted.
+    pub fn reserve_runtime_action_intent(
         &self,
         operation_id: &str,
-        parent_thread_id: &str,
+        caller_thread_id: &str,
+        mode: runtime_db::RuntimeActionMode,
         request_hash: &str,
         proposed_child_thread_id: &str,
         child_project_authority: Option<&ryeos_state::objects::ExecutionProjectAuthority>,
     ) -> Result<String> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
-        let parent = g
+        let caller = g
             .state_db
-            .get_thread(parent_thread_id)?
-            .ok_or_else(|| anyhow!("detached parent thread {parent_thread_id} does not exist"))?;
-        let _admission = g.state_db.authorize_runtime_pin(&parent.chain_root_id)?;
-        g.runtime_db.reserve_detached_spawn_intent(
+            .get_thread(caller_thread_id)?
+            .ok_or_else(|| anyhow!("runtime action caller {caller_thread_id} does not exist"))?;
+        let _admission = g.state_db.authorize_runtime_pin(&caller.chain_root_id)?;
+        g.runtime_db.reserve_runtime_action_intent(
             operation_id,
-            parent_thread_id,
+            &caller.chain_root_id,
+            caller_thread_id,
+            mode,
             request_hash,
             proposed_child_thread_id,
             child_project_authority,
         )
     }
 
-    pub fn detached_spawn_intents(&self) -> Result<Vec<runtime_db::DetachedSpawnIntent>> {
-        self.lock()?.runtime_db.detached_spawn_intents()
+    pub fn runtime_action_intents(&self) -> Result<Vec<runtime_db::RuntimeActionIntent>> {
+        self.lock()?.runtime_db.runtime_action_intents()
     }
 
-    pub fn abort_unsealed_detached_spawn_intent(&self, operation_id: &str) -> Result<bool> {
-        let _permit = self.acquire_write_permit()?;
-        let g = self.lock()?;
-        let result = g
-            .runtime_db
-            .abort_unsealed_detached_spawn_intent(operation_id);
-        drop(g);
-        result
-    }
-
-    pub fn get_detached_spawn_intent(
+    pub fn get_runtime_action_intent(
         &self,
         operation_id: &str,
-    ) -> Result<Option<runtime_db::DetachedSpawnIntent>> {
+    ) -> Result<Option<runtime_db::RuntimeActionIntent>> {
         self.lock()?
             .runtime_db
-            .get_detached_spawn_intent(operation_id)
+            .get_runtime_action_intent(operation_id)
     }
 
-    pub fn bind_detached_spawn_project_authority(
+    pub fn bind_detached_action_project_authority(
         &self,
         operation_id: &str,
         child_project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
@@ -12950,12 +12987,12 @@ impl StateStore {
         let g = self.lock()?;
         let result = g
             .runtime_db
-            .bind_detached_spawn_project_authority(operation_id, child_project_authority);
+            .bind_detached_action_project_authority(operation_id, child_project_authority);
         drop(g);
         result
     }
 
-    pub fn seal_detached_spawn_intent(
+    pub fn seal_detached_action_intent(
         &self,
         operation_id: &str,
         child_project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
@@ -12989,7 +13026,7 @@ impl StateStore {
             );
         }
         let g = self.lock()?;
-        let result = g.runtime_db.seal_detached_spawn_intent(
+        let result = g.runtime_db.seal_detached_action_intent(
             operation_id,
             child_project_authority,
             &admitted_launch_capsule_hash,
@@ -16495,6 +16532,19 @@ mod tests {
         }
     }
 
+    fn hook_test_dispatch_evidence() -> ryeos_runtime::callback_contract::RuntimeDispatchEvidence {
+        ryeos_runtime::callback_contract::RuntimeDispatchEvidence {
+            source: ryeos_runtime::callback_contract::RuntimeDispatchSource::Executed,
+            effect_class: ryeos_runtime::callback_contract::RuntimeDispatchEffectClass::Live,
+            action_digest: "7".repeat(64),
+            effect_identity: None,
+            publication:
+                ryeos_runtime::callback_contract::RuntimeDispatchPublication::NotApplicable,
+            record_hash: None,
+            replayed_from: None,
+        }
+    }
+
     #[test]
     fn completed_observation_hook_appends_durable_daemon_evidence_on_replay() {
         let store = test_store();
@@ -16521,7 +16571,8 @@ mod tests {
             "result": {
                 "kind": "build.step_completed",
                 "payload": {"step": 3, "ok": true}
-            }
+            },
+            "dispatch": hook_test_dispatch_evidence()
         });
         store
             .complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &response)
@@ -16714,7 +16765,8 @@ mod tests {
                 &seed.request_hash,
                 &json!({
                     "thread": {"id": "T-hook-child", "status": "completed"},
-                    "result": {"kind": "solve.completed", "payload": {"ok": true}}
+                    "result": {"kind": "solve.completed", "payload": {"ok": true}},
+                    "dispatch": hook_test_dispatch_evidence()
                 }),
             )
             .expect("complete terminal observation");
@@ -16917,6 +16969,44 @@ mod tests {
             .err()
             .expect("shutdown gate must reject a late in-process owner");
         assert!(error.to_string().contains("closed for daemon shutdown"));
+    }
+
+    #[test]
+    fn shutdown_gate_rejects_late_dedicated_worker_attachment() {
+        let store = test_store();
+        store
+            .close_process_attachment_admission()
+            .expect("close shutdown admission");
+        let record = WorkerProcessRecord {
+            worker_instance_id: "worker-after-shutdown".to_owned(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "c".repeat(64),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: crate::process::ExecutionProcessIdentity {
+                schema_version: crate::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                boot_id: "test-boot".to_owned(),
+                target_pid: 12345,
+                target_start_time_ticks: 10,
+                group_leader_pid: 12345,
+                group_leader_start_time_ticks: 10,
+            },
+            control_channel_identity: "fd:test".to_owned(),
+            state: runtime_db::WorkerProcessState::Attached,
+            daemon_generation_id: "daemon:test".to_owned(),
+            placement_thread_id: "T-after-shutdown".to_owned(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        let error = store
+            .attach_worker_process(&record)
+            .expect_err("shutdown gate must reject a late dedicated worker attach");
+        assert!(
+            error
+                .to_string()
+                .contains("attachment admission is closed for daemon shutdown")
+        );
     }
 
     #[test]

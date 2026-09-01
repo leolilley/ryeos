@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-29T15:44:54Z:c2ea79b99182f1bf68d807c26133621a78d2e733908a2d404f5de05cf9e2500f:tp1gBzJaYz0luenZMzEgv4Ac4ReK325Hx9xILYM2aQJpjPHWJhweo4+UTPQwnJZtts9mdzKEaORN5hJg9BidAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-01T00:15:48Z:d9c4715efca4b404d1bacd5340b737aacddf49adc304c753d7b25dba8a6c0e83:DT399IuVKJ73WPT4v0UOFu66sRua3Hr7651Gm1PBMe6CrLhS1LLzHzu7FxNJTYVsjQg0go3qxv50lomtObq9Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: local-inference
 tags: [execution, managed-activation, persistent-session, local-model, replay]
@@ -65,10 +65,11 @@ provider contract.
 
 ## Node policy
 
-Apply node policy while the daemon is stopped. Managed activation needs no
-named filesystem root. The following is the exact minimum shape for this
-fixture; operators may grant larger storage reserves deliberately, but must
-not reduce the signed acquisition or import bounds:
+Apply node policy while the daemon is stopped. Online or cache-only managed
+activation needs no named filesystem root. The following is the recommended
+normal-node online shape for this fixture; operators may choose a different
+residual free-space reserve deliberately, but must not reduce the signed
+acquisition or import bounds:
 
 ~~~yaml
 schema: 1
@@ -102,6 +103,13 @@ The two HTTPS hosts are separately node-admitted because an immutable GitHub
 release URL redirects to GitHub's release-asset host. RyeOS follows at most the
 node-owned redirect ceiling, rechecks canonical HTTPS and the host allowlist on
 every hop, and still requires the exact signed archive digest.
+
+The 8 GiB residual free-space floor above is the normal node recommendation,
+not workload identity. The disposable release qualifier accepts an explicit
+`--minimum-free-bytes` node-policy value and records it in its evidence; its
+storage-constrained hosted runner uses 2 GiB only after deleting every build
+target. This changes local admission testimony, never archive, manifest,
+program, or replay identity.
 
 The persistent worker also requires a separate node-owned session policy:
 
@@ -138,6 +146,20 @@ Start the node, then run as its configured local operator:
 ryeos external-content activate config:ryeos-runtime/local-tinygrad-activation online
 ~~~
 
+The command first returns a durable coordinate such as
+`{"job_id":"external-activation:...","state":"running","idempotent":false}`.
+It does not keep the invoking service thread open for a multi-gigabyte
+download, extraction, or import. Inspect the exact coordinate through the
+ordinary sync-job service:
+
+~~~text
+ryeos execute service:sync/jobs/inspect --no-project --no-stream \
+  --input '{"job_id":"external-activation:..."}'
+~~~
+
+Once that job is `completed`, repeating the activation command returns the
+verified completion result with its `receipt_hash` and `idempotent: true`.
+
 The generic durable job:
 
 1. resolves the exact trusted signed declaration and worker;
@@ -154,19 +176,35 @@ The generic durable job:
 The operation is idempotent and restart-recoverable. A completed retry verifies
 the current receipt, manifest objects, and binding heads. A failed or
 interrupted attempt retains its canonical operation and can only resume within
-the admitted retry ceiling.
+the admitted retry ceiling. The durable running attempt is also the exclusive
+execution lease: concurrent submissions cannot launch duplicate acquisition,
+and daemon startup reconciles an interrupted lease before recovery claims the
+next attempt.
 
-Use the offline spelling only when the exact archive digests are already in
-that node's managed cache from a successful prior online activation or a later
-supported offline-export import:
+Offline activation has two explicit forms. Cache-only activation requires every
+exact digest to have settled previously:
 
 ~~~text
 ryeos external-content activate config:ryeos-runtime/local-tinygrad-activation offline
 ~~~
 
-Offline mode never downloads and refuses a missing or wrong cache entry. It is
-not permission to copy files into an ambient assembly directory or revive the
-retired named-root import ceremony.
+An offline artifact set may instead be supplied through one node-owned
+external-content root, for example `local-inference-archives`, after the
+operator applies its exact path/device/inode policy while the node is stopped:
+
+~~~text
+ryeos external-content activate \
+  config:ryeos-runtime/local-tinygrad-activation \
+  offline local-inference-archives
+~~~
+
+This is the generic offline acquisition boundary, not the retired realization
+assembly/import/bind ceremony. The durable operation binds the selected root's
+node-policy authority digest. RyeOS opens only the signed URL basename as a
+no-follow regular file, verifies its signed byte ceiling and digest, and
+atomically publishes the digest-keyed private cache entry before using the
+normal managed extractor. It never scans for alternatives, transforms bytes,
+or falls back online. A missing, linked, oversized, or wrong archive refuses.
 
 ## Validation, bank, restart, and replay
 
@@ -175,11 +213,11 @@ Validate the signed fixture threadlessly, then execute:
 ~~~text
 ryeos validate directive:local-inference/examples/tinygrad_smoke \
   --ref-binding model=directive:local-inference/examples/tinygrad_smoke \
-  '{}'
+  --no-project --input '{}'
 
 ryeos execute directive:local-inference/examples/tinygrad_smoke \
   --ref-binding model=directive:local-inference/examples/tinygrad_smoke \
-  --no-stream '{}'
+  --no-project --no-stream --input '{}'
 ~~~
 
 The directive runtime requires its signed model declaration as the `model`

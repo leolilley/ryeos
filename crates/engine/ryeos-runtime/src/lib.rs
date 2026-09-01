@@ -11,6 +11,7 @@ pub mod daemon_rpc;
 pub mod effect_answer;
 pub mod envelope;
 pub mod events;
+pub mod process_outcome;
 pub use ryeos_expression as expression;
 pub mod framing;
 pub mod hooks_eval;

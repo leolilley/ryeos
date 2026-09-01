@@ -9,8 +9,8 @@ use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const EFFECT_RECORD_SCHEMA_VERSION: u32 = 3;
-pub const EFFECT_KEY_SCHEMA: &str = "ryeos.dispatch_effect.key.v3";
+pub const EFFECT_RECORD_SCHEMA_VERSION: u32 = 4;
+pub const EFFECT_KEY_SCHEMA: &str = "ryeos.dispatch_effect.key.v4";
 pub const EFFECT_RECORD_KIND: &str = "dispatch_effect_record";
 pub const EFFECT_REPLAY_NAMESPACE: &str = "dispatch.effect";
 pub const EFFECT_AUTHORIZATIONS_DERIVED_KEY: &str = "admitted_effect_authorizations";
@@ -169,16 +169,15 @@ impl AdmittedEffectAuthorization {
 /// Exact behavior-bearing callee identity consumed by a cache miss.
 ///
 /// The substrate prepares this once and uses the same value for lookup and
-/// execution. Per-launch evidence is retained on [`DispatchEffectRecord`], not
-/// in this reusable key: a new thread or unrelated project generation must not
-/// masquerade as a changed admitted program.
+/// execution. The launch-authority digest is the existing complete generic
+/// admission projection; caller authority is separate so invocation stimulus
+/// does not fragment otherwise identical effects.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmittedDispatchSubject {
     pub subject_ref: String,
-    pub effective_definition_digest: String,
-    pub execution_closure_digest: String,
-    pub content_identity_digest: String,
+    pub launch_authority_digest: String,
+    pub caller_authority_digest: String,
     pub effect_class_ceiling: EffectClass,
 }
 
@@ -187,16 +186,12 @@ impl AdmittedDispatchSubject {
         validate_identifier("dispatch subject ref", &self.subject_ref)?;
         for (field, digest) in [
             (
-                "dispatch subject effective-definition digest",
-                &self.effective_definition_digest,
+                "dispatch subject launch-authority digest",
+                &self.launch_authority_digest,
             ),
             (
-                "dispatch subject execution-closure digest",
-                &self.execution_closure_digest,
-            ),
-            (
-                "dispatch subject content-identity digest",
-                &self.content_identity_digest,
+                "dispatch subject caller-authority digest",
+                &self.caller_authority_digest,
             ),
         ] {
             require_hex64(field, digest)?;
@@ -512,9 +507,8 @@ mod tests {
             action_digest: "44".repeat(32),
             subject: AdmittedDispatchSubject {
                 subject_ref: "tool:example/classify".to_string(),
-                effective_definition_digest: "55".repeat(32),
-                execution_closure_digest: "66".repeat(32),
-                content_identity_digest: "88".repeat(32),
+                launch_authority_digest: "55".repeat(32),
+                caller_authority_digest: "66".repeat(32),
                 effect_class_ceiling: EffectClass::Sealed,
             },
         }
@@ -531,7 +525,7 @@ mod tests {
         changed.action_digest = "99".repeat(32);
         assert_ne!(changed.cache_key().unwrap(), expected);
         let mut changed = base;
-        changed.subject.content_identity_digest = "aa".repeat(32);
+        changed.subject.launch_authority_digest = "aa".repeat(32);
         assert_ne!(changed.cache_key().unwrap(), expected);
     }
 
@@ -540,7 +534,7 @@ mod tests {
         let base = identity();
         let expected = base.cache_key().unwrap();
         let mut changed = base;
-        changed.subject.effective_definition_digest = "aa".repeat(32);
+        changed.subject.caller_authority_digest = "aa".repeat(32);
 
         assert_ne!(changed.cache_key().unwrap(), expected);
     }
@@ -582,7 +576,7 @@ mod tests {
         );
 
         let mut predecessor = first.to_value().unwrap();
-        predecessor["schema"] = serde_json::json!(2);
+        predecessor["schema"] = serde_json::json!(3);
         assert!(DispatchEffectRecord::from_current_value(&predecessor).is_err());
     }
 

@@ -40,11 +40,29 @@ fixture with one generic operation:
 ryeos external-content activate config:ryeos-runtime/local-tinygrad-activation online
 ```
 
+Activation submission returns a durable sync-job coordinate promptly. Observe
+it with `service:sync/jobs/inspect`; once complete, repeating the command
+returns the verified node-local receipt idempotently. Acquisition/import is
+daemon-owned and restart-recoverable rather than tied to the CLI connection.
+
 The node downloads exact immutable publisher archives into its private cache,
 reproduces the worker's existing manifest pins, publishes ordinary consumer
-bindings, and records target-local settlement. There is no installed
-assembler, public realization directory, named-root policy, node-side build,
-or manual import/bind loop.
+bindings, and records target-local settlement. The online path needs no
+installed assembler, public realization directory, named-root policy,
+node-side build, or manual import/bind loop.
+
+For a network-independent node, the same operation accepts an explicitly
+selected node-policy archive root:
+
+```text
+ryeos external-content activate \
+  config:ryeos-runtime/local-tinygrad-activation \
+  offline local-inference-archives
+```
+
+That root is removable/offline acquisition authority only. RyeOS verifies the
+same signed archives and then uses its private digest-keyed cache; it is not a
+lasting workload root, assembly directory, or manual binding path.
 
 The shipped Qwen3-0.6B CPU route is a bounded recorded-class contract fixture.
 It is not a sealed qualification and does not define the future production

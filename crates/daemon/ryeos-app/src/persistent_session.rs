@@ -9,7 +9,7 @@ use std::io::Read;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -161,16 +161,27 @@ pub struct StartedPersistentSession {
     /// When present, readiness must echo this exact daemon-minted identity in
     /// `{ "boot_identity": ... }`. Pooled request workers omit it.
     pub expected_boot_identity: Option<String>,
+    /// Optional daemon-owned observation authority installed before the
+    /// post-readiness reader is started. Workers never receive this closure;
+    /// they can only submit bounded protocol frames for it to validate.
+    pub observation_sink: Option<PersistentSessionObservationSink>,
+}
+
+pub type PersistentSessionObservationSink =
+    Arc<dyn Fn(Value) -> Result<Value> + Send + Sync + 'static>;
+
+struct BudgetedSessionFrame {
+    frame: PersistentSessionFrame,
+    _budget: BacklogBytePermit,
 }
 
 struct SessionProcess {
     wire: PersistentSessionWireContract,
     writer: Mutex<UnixStream>,
     reader: Mutex<Option<SessionChannel>>,
-    pending:
-        Mutex<HashMap<String, SyncSender<std::result::Result<PersistentSessionFrame, String>>>>,
-    observation_sender: Mutex<Option<SyncSender<PersistentSessionFrame>>>,
-    buffered_observations: Mutex<VecDeque<PersistentSessionFrame>>,
+    pending: Mutex<HashMap<String, SyncSender<std::result::Result<BudgetedSessionFrame, String>>>>,
+    observation_sender: Mutex<Option<SyncSender<BudgetedSessionFrame>>>,
+    initial_observation_sink: Mutex<Option<PersistentSessionObservationSink>>,
     reader_failure: Mutex<Option<String>>,
     running: Mutex<Option<ryeos_engine::dispatch::RunningExecution>>,
     /// Once ownership was consumed by an abort attempt whose reap proof
@@ -178,12 +189,15 @@ struct SessionProcess {
     cleanup_unproved: Mutex<Option<String>>,
     leased: AtomicBool,
     last_used_ms: AtomicU64,
+    closed: Arc<AtomicBool>,
+    backlog: Arc<BacklogBudget>,
+    /// One maximum wire body is reserved for the reader's raw decode buffer.
+    /// Decoded frames acquire additional exact serialized-byte permits before
+    /// they can leave the reader thread.
+    _reader_budget: BacklogBytePermit,
     _lifelines: Vec<Box<dyn Send + Sync>>,
 }
 
-type ObservationSink = Arc<dyn Fn(Value) -> Result<Value> + Send + Sync + 'static>;
-
-const MAX_BUFFERED_OBSERVATION_BATCHES: usize = 64;
 const MAX_PENDING_SESSION_REQUESTS: usize = 32;
 
 struct SessionChannel {
@@ -201,6 +215,14 @@ struct FrameReader {
 
 impl SessionProcess {
     fn start_reader(self: &Arc<Self>, wire: PersistentSessionWireContract) -> Result<()> {
+        if let Some(sink) = self
+            .initial_observation_sink
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            self.install_observation_sink(sink)?;
+        }
         let channel = self
             .reader
             .lock()
@@ -218,8 +240,11 @@ impl SessionProcess {
     fn register_request(
         &self,
         request_id: &str,
-    ) -> Result<Receiver<std::result::Result<PersistentSessionFrame, String>>> {
-        let (sender, receiver) = sync_channel(64);
+    ) -> Result<Receiver<std::result::Result<BudgetedSessionFrame, String>>> {
+        // One queued response per request is enough to decouple the dedicated
+        // reader without multiplying a signed maximum frame by 64. Every
+        // queued frame is also charged to the shared node byte budget.
+        let (sender, receiver) = sync_channel(1);
         let mut pending = self
             .pending
             .lock()
@@ -261,8 +286,11 @@ impl SessionProcess {
         write_frame(&mut writer, wire, frame, deadline)
     }
 
-    fn install_observation_sink(self: &Arc<Self>, sink: ObservationSink) -> Result<()> {
-        let (sender, receiver) = sync_channel(MAX_BUFFERED_OBSERVATION_BATCHES);
+    fn install_observation_sink(
+        self: &Arc<Self>,
+        sink: PersistentSessionObservationSink,
+    ) -> Result<()> {
+        let (sender, receiver) = sync_channel(1);
         let weak = Arc::downgrade(self);
         std::thread::Builder::new()
             .name("ryeos-persistent-session-observation-ingest".to_owned())
@@ -276,16 +304,6 @@ impl SessionProcess {
             if slot.is_some() {
                 bail!("persistent-session observation sink is already installed");
             }
-            let mut buffered = self
-                .buffered_observations
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            while let Some(frame) = buffered.pop_front() {
-                sender.try_send(frame).map_err(|error| match error {
-                    TrySendError::Full(_) => anyhow!("observation ingest queue is full"),
-                    TrySendError::Disconnected(_) => anyhow!("observation ingest worker stopped"),
-                })?;
-            }
             *slot = Some(sender);
         }
         Ok(())
@@ -293,10 +311,11 @@ impl SessionProcess {
 
     fn deliver_observation(
         &self,
-        frame: PersistentSessionFrame,
-        sink: &ObservationSink,
+        frame: BudgetedSessionFrame,
+        sink: &PersistentSessionObservationSink,
     ) -> Result<()> {
         let body = frame
+            .frame
             .body
             .ok_or_else(|| anyhow!("observation batch has no body"))?;
         let acknowledgement = sink(body)?;
@@ -331,6 +350,12 @@ impl SessionProcess {
     }
 
     fn retire(&self) -> Result<()> {
+        self.closed.store(true, Ordering::Release);
+        self.backlog.changed.notify_all();
+        self.observation_sender
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
         if let Some(reason) = self
             .cleanup_unproved
             .lock()
@@ -360,6 +385,12 @@ impl SessionProcess {
 
 impl Drop for SessionProcess {
     fn drop(&mut self) {
+        self.closed.store(true, Ordering::Release);
+        self.backlog.changed.notify_all();
+        self.observation_sender
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
         if let Some(running) = self
             .running
             .get_mut()
@@ -398,11 +429,34 @@ fn run_session_reader(
         {
             break format!("invalid response frame: {error:#}");
         }
-        match frame.kind {
+        let frame_bytes = match serde_json::to_vec(&frame)
+            .ok()
+            .and_then(|encoded| encoded.len().checked_add(4))
+        {
+            Some(bytes) => bytes,
+            None => break "response frame byte accounting overflowed".to_owned(),
+        };
+        let budget = match BacklogBytePermit::reserve_wait(
+            Arc::clone(&process.backlog),
+            frame_bytes,
+            &process.closed,
+        ) {
+            Ok(budget) => budget,
+            Err(error) => break format!("reserve response frame byte budget: {error:#}"),
+        };
+        let frame = BudgetedSessionFrame {
+            frame,
+            _budget: budget,
+        };
+        match frame.frame.kind {
             PersistentSessionFrameKind::Delta
             | PersistentSessionFrameKind::Final
             | PersistentSessionFrameKind::Error => {
-                let request_id = frame.request_id.clone().expect("validated request id");
+                let request_id = frame
+                    .frame
+                    .request_id
+                    .clone()
+                    .expect("validated request id");
                 let sender = process
                     .pending
                     .lock()
@@ -420,28 +474,13 @@ fn run_session_reader(
                 let sender = process
                     .observation_sender
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if let Some(sender) = sender.as_ref() {
-                    if let Err(error) = sender.try_send(frame) {
-                        break match error {
-                            TrySendError::Full(_) => {
-                                "bounded observation ingest queue is exhausted".to_owned()
-                            }
-                            TrySendError::Disconnected(_) => {
-                                "observation ingest worker stopped".to_owned()
-                            }
-                        };
-                    }
-                } else {
-                    let mut buffered = process
-                        .buffered_observations
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    if buffered.len() >= MAX_BUFFERED_OBSERVATION_BATCHES {
-                        break "observation sink was not installed before backlog exhaustion"
-                            .to_owned();
-                    }
-                    buffered.push_back(frame);
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone();
+                let Some(sender) = sender else {
+                    break "worker emitted an observation without an installed sink".to_owned();
+                };
+                if sender.send(frame).is_err() {
+                    break "observation ingest worker stopped".to_owned();
                 }
             }
             PersistentSessionFrameKind::Ready
@@ -475,8 +514,8 @@ fn run_session_reader(
 
 fn run_observation_ingest(
     process: Weak<SessionProcess>,
-    incoming: Receiver<PersistentSessionFrame>,
-    sink: ObservationSink,
+    incoming: Receiver<BudgetedSessionFrame>,
+    sink: PersistentSessionObservationSink,
 ) {
     while let Ok(frame) = incoming.recv() {
         let Some(process) = process.upgrade() else {
@@ -521,6 +560,10 @@ struct PoolState {
     exclusive: HashMap<String, ExclusiveSessionEntry>,
     exclusive_reservations: HashMap<String, GroupContract>,
     exclusive_failure_cleanup: HashMap<String, &'static str>,
+    /// Starts admitted by `reserve_exclusive` that have not yet completed the
+    /// caller's durable binding publication. Shutdown waits for these exact
+    /// ownership units before snapshotting and reaping the pool.
+    exclusive_starts_in_flight: usize,
     /// Once process-tree cleanup cannot be proved, the pool admits no further
     /// work in this daemon generation. Capacity must never be recycled while
     /// an old ownership unit may still exist.
@@ -537,6 +580,7 @@ struct PoolInner {
     changed: Condvar,
     limits: PersistentSessionPoolLimits,
     enabled: bool,
+    shutdown: Arc<AtomicBool>,
 }
 
 struct ReadyProcessFailure {
@@ -608,6 +652,7 @@ struct StreamRegistry {
     backlog: Arc<BacklogBudget>,
     executor: StreamExecutor,
     enabled: bool,
+    shutdown: Arc<AtomicBool>,
 }
 
 type StreamTask = Box<dyn FnOnce() + Send + 'static>;
@@ -668,6 +713,64 @@ struct BacklogBudget {
     max_bytes: usize,
 }
 
+struct BacklogBytePermit {
+    backlog: Arc<BacklogBudget>,
+    bytes: usize,
+}
+
+impl BacklogBytePermit {
+    fn try_reserve(backlog: Arc<BacklogBudget>, bytes: usize) -> Result<Self> {
+        if bytes == 0 || bytes > backlog.max_bytes {
+            bail!("persistent-session frame exceeds the node IPC byte budget");
+        }
+        let mut retained = backlog
+            .bytes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if retained.saturating_add(bytes) > backlog.max_bytes {
+            bail!("persistent-session node IPC byte budget is exhausted");
+        }
+        *retained += bytes;
+        drop(retained);
+        Ok(Self { backlog, bytes })
+    }
+
+    fn reserve_wait(
+        backlog: Arc<BacklogBudget>,
+        bytes: usize,
+        cancelled: &AtomicBool,
+    ) -> Result<Self> {
+        if bytes == 0 || bytes > backlog.max_bytes {
+            bail!("persistent-session frame exceeds the node IPC byte budget");
+        }
+        let mut retained = backlog
+            .bytes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            if cancelled.load(Ordering::Acquire) {
+                bail!("persistent-session process closed while awaiting IPC byte capacity");
+            }
+            if retained.saturating_add(bytes) <= backlog.max_bytes {
+                *retained += bytes;
+                drop(retained);
+                return Ok(Self { backlog, bytes });
+            }
+            let (next, _) = backlog
+                .changed
+                .wait_timeout(retained, IO_POLL_INTERVAL)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            retained = next;
+        }
+    }
+}
+
+impl Drop for BacklogBytePermit {
+    fn drop(&mut self) {
+        release_backlog_bytes(&self.backlog, self.bytes);
+    }
+}
+
 #[derive(Clone)]
 pub struct PersistentSessionPool {
     inner: Arc<PoolInner>,
@@ -690,8 +793,18 @@ pub enum ExclusiveRetirementOutcome {
 /// worker. The process can never enter a pooled group.
 pub struct ExclusivePersistentSessionReservation {
     inner: Arc<PoolInner>,
+    backlog: Arc<BacklogBudget>,
     session_id: String,
     contract: GroupContract,
+    active: bool,
+    start_guard: Option<ExclusivePersistentSessionStartGuard>,
+}
+
+/// Move-only ownership of one admitted exclusive start. It begins at capacity
+/// reservation and remains live through held spawn, durable attachment,
+/// process release, pool binding, and the caller's durable binding commit.
+pub struct ExclusivePersistentSessionStartGuard {
+    inner: Arc<PoolInner>,
     active: bool,
 }
 
@@ -718,17 +831,20 @@ impl PersistentSessionPool {
 
     fn build(limits: PersistentSessionPoolLimits, enabled: bool) -> Result<Self> {
         limits.validate()?;
+        let shutdown = Arc::new(AtomicBool::new(false));
         let inner = Arc::new(PoolInner {
             state: Mutex::new(PoolState {
                 groups: HashMap::new(),
                 exclusive: HashMap::new(),
                 exclusive_reservations: HashMap::new(),
                 exclusive_failure_cleanup: HashMap::new(),
+                exclusive_starts_in_flight: 0,
                 cleanup_unproved: None,
             }),
             changed: Condvar::new(),
             limits: limits.clone(),
             enabled,
+            shutdown: Arc::clone(&shutdown),
         });
         spawn_idle_reaper(Arc::downgrade(&inner));
         let backlog = Arc::new(BacklogBudget {
@@ -748,6 +864,7 @@ impl PersistentSessionPool {
             backlog,
             executor: stream_executor,
             enabled,
+            shutdown,
         });
         spawn_stream_reaper(Arc::downgrade(&streams));
         Ok(Self { inner, streams })
@@ -765,6 +882,7 @@ impl PersistentSessionPool {
         if !self.inner.enabled {
             bail!("persistent sessions are disabled by node policy");
         }
+        self.ensure_admission_open()?;
         validate_exclusive_session_id(session_id)?;
         lifecycle.validate()?;
         wire.validate()?;
@@ -777,6 +895,7 @@ impl PersistentSessionPool {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_admission_open()?;
         if let Some(reason) = state.cleanup_unproved.as_deref() {
             bail!(
                 "persistent-session ownership is quarantined after unproved process cleanup: {reason}"
@@ -797,14 +916,24 @@ impl PersistentSessionPool {
         {
             bail!("persistent-session node process capacity is exhausted");
         }
+        let exclusive_starts_in_flight = state
+            .exclusive_starts_in_flight
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("exclusive persistent-session start counter overflow"))?;
         state
             .exclusive_reservations
             .insert(session_id.to_owned(), contract.clone());
+        state.exclusive_starts_in_flight = exclusive_starts_in_flight;
         Ok(ExclusivePersistentSessionReservation {
             inner: Arc::clone(&self.inner),
+            backlog: Arc::clone(&self.streams.backlog),
             session_id: session_id.to_owned(),
             contract,
             active: true,
+            start_guard: Some(ExclusivePersistentSessionStartGuard {
+                inner: Arc::clone(&self.inner),
+                active: true,
+            }),
         })
     }
 
@@ -819,6 +948,7 @@ impl PersistentSessionPool {
         C: Fn() -> bool,
         D: FnMut(Value) -> Result<()>,
     {
+        self.ensure_admission_open()?;
         validate_exclusive_session_id(session_id)?;
         let (process, contract) = {
             let state = self
@@ -826,6 +956,7 @@ impl PersistentSessionPool {
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.ensure_admission_open()?;
             let entry = state
                 .exclusive
                 .get(session_id)
@@ -881,6 +1012,7 @@ impl PersistentSessionPool {
         session_id: &str,
         control_body: Value,
     ) -> Result<Value> {
+        self.ensure_admission_open()?;
         validate_exclusive_session_id(session_id)?;
         let (process, contract) = {
             let state = self
@@ -888,6 +1020,7 @@ impl PersistentSessionPool {
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.ensure_admission_open()?;
             let entry = state
                 .exclusive
                 .get(session_id)
@@ -934,31 +1067,6 @@ impl PersistentSessionPool {
             self.inner.changed.notify_all();
         }
         result
-    }
-
-    /// Bind the observation-only sink for one exact exclusive worker. The
-    /// sink is installed once after durable process attachment and must append
-    /// authority-bearing observations before returning an acknowledgement.
-    pub fn install_exclusive_observation_sink<F>(&self, session_id: &str, sink: F) -> Result<()>
-    where
-        F: Fn(Value) -> Result<Value> + Send + Sync + 'static,
-    {
-        validate_exclusive_session_id(session_id)?;
-        let process = {
-            let state = self
-                .inner
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            Arc::clone(
-                &state
-                    .exclusive
-                    .get(session_id)
-                    .ok_or_else(|| anyhow!("exclusive persistent session is not attached"))?
-                    .process,
-            )
-        };
-        process.install_observation_sink(Arc::new(sink))
     }
 
     /// Consume the cleanup proof recorded when an exclusive request failed.
@@ -1043,6 +1151,7 @@ impl PersistentSessionPool {
         if !self.inner.enabled {
             bail!("persistent sessions are disabled by node policy");
         }
+        self.ensure_admission_open()?;
         validate_pool_key(pool_key)?;
         lifecycle.validate()?;
         wire.validate()?;
@@ -1107,6 +1216,9 @@ impl PersistentSessionPool {
         if !self.streams.enabled {
             bail!("persistent sessions are disabled by node policy");
         }
+        if self.streams.shutdown.load(Ordering::Acquire) {
+            bail!("persistent-session admission is closed for daemon shutdown");
+        }
         validate_stream_owner(owner)?;
         validate_stream_owner(quota_subject)?;
         self.sweep_streams();
@@ -1120,6 +1232,9 @@ impl PersistentSessionPool {
             .records
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.streams.shutdown.load(Ordering::Acquire) {
+            bail!("persistent-session admission is closed for daemon shutdown");
+        }
         if records.values().any(|record| record.owner == owner) {
             bail!("persistent-session stream owner already has a current-daemon stream");
         }
@@ -1338,6 +1453,7 @@ impl PersistentSessionPool {
             wire: wire.clone(),
         };
         loop {
+            self.ensure_admission_open()?;
             if cancelled() {
                 self.remove_empty_group(key);
                 bail!("persistent-session request was cancelled before worker contact");
@@ -1351,6 +1467,7 @@ impl PersistentSessionPool {
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.ensure_admission_open()?;
             if let Some(reason) = state.cleanup_unproved.as_deref() {
                 bail!(
                     "persistent-session pool is quarantined after unproved process cleanup: {reason}"
@@ -1402,7 +1519,9 @@ impl PersistentSessionPool {
                 group.spawning += 1;
                 drop(state);
                 let started = match spawn() {
-                    Ok(started) => ready_process(started, wire, lifecycle),
+                    Ok(started) => {
+                        ready_process(started, wire, lifecycle, Arc::clone(&self.streams.backlog))
+                    }
                     Err(error) => Err(ReadyProcessFailure {
                         error,
                         cleanup_unproved: false,
@@ -1413,6 +1532,30 @@ impl PersistentSessionPool {
                     .state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if self.inner.shutdown.load(Ordering::Acquire) {
+                    let group = state.groups.get_mut(key).ok_or_else(|| {
+                        anyhow!("persistent-session group disappeared during shutdown")
+                    })?;
+                    group.spawning = group.spawning.saturating_sub(1);
+                    if group.processes.is_empty() && group.spawning == 0 {
+                        state.groups.remove(key);
+                    }
+                    drop(state);
+                    let cleanup_error = match started {
+                        Ok(process) => process.retire().err(),
+                        Err(failure) if failure.cleanup_unproved => Some(failure.error),
+                        Err(_) => None,
+                    };
+                    if let Some(error) = cleanup_error {
+                        self.poison_after_unproved_cleanup(error.to_string());
+                        self.inner.changed.notify_all();
+                        return Err(anyhow!(
+                            "persistent-session spawn crossed daemon shutdown and cleanup could not be proved: {error}"
+                        ));
+                    }
+                    self.inner.changed.notify_all();
+                    bail!("persistent-session admission is closed for daemon shutdown");
+                }
                 let failure = {
                     let group = state.groups.get_mut(key).ok_or_else(|| {
                         anyhow!("persistent-session group disappeared during spawn")
@@ -1505,16 +1648,204 @@ impl PersistentSessionPool {
         }
         self.inner.changed.notify_all();
     }
+
+    fn ensure_admission_open(&self) -> Result<()> {
+        if self.inner.shutdown.load(Ordering::Acquire) {
+            bail!("persistent-session admission is closed for daemon shutdown");
+        }
+        Ok(())
+    }
+
+    /// Permanently close current-daemon admission and prove every process
+    /// owned by this pool has been reaped. Pooled request workers have no
+    /// durable per-process row, so daemon shutdown must call this before it
+    /// publishes its own exit. Exclusive workers are also reaped here; their
+    /// durable worker epochs remain subject to the separate identity fence.
+    pub fn shutdown_and_reap_all(&self, timeout: Duration) -> Result<usize> {
+        self.inner.shutdown.store(true, Ordering::Release);
+        self.inner.changed.notify_all();
+
+        {
+            let records = self
+                .streams
+                .records
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for record in records.values() {
+                record.cancelled.store(true, Ordering::Release);
+                record.changed.notify_all();
+            }
+        }
+
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .unwrap_or_else(Instant::now);
+        let (pooled, exclusive, prior_unproved) = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            while state.groups.values().any(|group| group.spawning != 0)
+                || state.exclusive_starts_in_flight != 0
+            {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    bail!("persistent-session shutdown timed out waiting for admitted starts");
+                }
+                let (next, wait) = self
+                    .inner
+                    .changed
+                    .wait_timeout(state, remaining)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state = next;
+                if wait.timed_out()
+                    && (state.groups.values().any(|group| group.spawning != 0)
+                        || state.exclusive_starts_in_flight != 0)
+                {
+                    bail!("persistent-session shutdown timed out waiting for admitted starts");
+                }
+            }
+            if !state.exclusive_reservations.is_empty() {
+                bail!("persistent-session shutdown found an ownerless exclusive reservation");
+            }
+            let pooled = state
+                .groups
+                .iter()
+                .flat_map(|(key, group)| {
+                    group
+                        .processes
+                        .iter()
+                        .map(move |process| (key.clone(), Arc::clone(process)))
+                })
+                .collect::<Vec<_>>();
+            let exclusive = state
+                .exclusive
+                .iter()
+                .map(|(session_id, entry)| (session_id.clone(), Arc::clone(&entry.process)))
+                .collect::<Vec<_>>();
+            (pooled, exclusive, state.cleanup_unproved.clone())
+        };
+
+        let mut reaped = 0usize;
+        let mut cleanup_errors = Vec::new();
+        for (key, process) in pooled {
+            match process.retire() {
+                Ok(()) => {
+                    reaped = reaped.saturating_add(1);
+                    self.remove(&key, &process);
+                }
+                Err(error) => cleanup_errors.push(error.to_string()),
+            }
+        }
+        for (session_id, process) in exclusive {
+            match process.retire() {
+                Ok(()) => {
+                    reaped = reaped.saturating_add(1);
+                    let mut state = self
+                        .inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if state
+                        .exclusive
+                        .get(&session_id)
+                        .is_some_and(|entry| Arc::ptr_eq(&entry.process, &process))
+                    {
+                        state.exclusive.remove(&session_id);
+                    }
+                }
+                Err(error) => cleanup_errors.push(error.to_string()),
+            }
+        }
+
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state
+            .groups
+            .retain(|_, group| !group.processes.is_empty() || group.spawning != 0);
+        if let Some(reason) = prior_unproved {
+            cleanup_errors.push(reason);
+        }
+        if !cleanup_errors.is_empty() {
+            let reason = cleanup_errors.join("; ");
+            state.cleanup_unproved.get_or_insert_with(|| reason.clone());
+            bail!("persistent-session shutdown cleanup remains unproved: {reason}");
+        }
+        if state
+            .groups
+            .values()
+            .any(|group| !group.processes.is_empty())
+            || !state.exclusive.is_empty()
+        {
+            bail!("persistent-session shutdown left an owned process in the pool registry");
+        }
+        self.inner.changed.notify_all();
+        Ok(reaped)
+    }
 }
 
 impl ExclusivePersistentSessionReservation {
     /// Complete readiness and publish the process into the exclusive registry.
     /// The caller must already have persisted the exact held-process identity
     /// before supplying a released process here.
-    pub fn bind(mut self, started: StartedPersistentSession) -> Result<()> {
-        let ready = match ready_process(started, &self.contract.wire, &self.contract.lifecycle) {
+    pub fn bind(
+        mut self,
+        started: StartedPersistentSession,
+    ) -> Result<ExclusivePersistentSessionStartGuard> {
+        if self.inner.shutdown.load(Ordering::Acquire) {
+            self.release_reservation();
+            let StartedPersistentSession { running, .. } = started;
+            return match running.abort_and_reap_checked() {
+                Ok(()) => Err(anyhow!(
+                    "persistent-session admission is closed for daemon shutdown"
+                )),
+                Err(cleanup) => {
+                    let reason = format!(
+                        "exclusive process crossed daemon shutdown and cleanup could not be proved: {cleanup}"
+                    );
+                    let mut state = self
+                        .inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state.cleanup_unproved.get_or_insert_with(|| reason.clone());
+                    Err(anyhow!(reason).context(PersistentSessionCleanupUnproved))
+                }
+            };
+        }
+        let ready = match ready_process(
+            started,
+            &self.contract.wire,
+            &self.contract.lifecycle,
+            Arc::clone(&self.backlog),
+        ) {
             Ok(process) => {
                 let process = Arc::new(process);
+                if self.inner.shutdown.load(Ordering::Acquire) {
+                    self.release_reservation();
+                    let cleanup = process.retire().err();
+                    return Err(match cleanup {
+                        Some(cleanup) => {
+                            let reason = format!(
+                                "exclusive process crossed daemon shutdown and cleanup could not be proved: {cleanup}"
+                            );
+                            let mut state = self
+                                .inner
+                                .state
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            state.cleanup_unproved.get_or_insert_with(|| reason.clone());
+                            anyhow!(reason).context(PersistentSessionCleanupUnproved)
+                        }
+                        None => {
+                            anyhow!("persistent-session admission is closed for daemon shutdown")
+                        }
+                    });
+                }
                 if let Err(error) = process.start_reader(self.contract.wire.clone()) {
                     self.release_reservation();
                     let cleanup = process.retire().err();
@@ -1561,10 +1892,45 @@ impl ExclusivePersistentSessionReservation {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let reserved = state
-            .exclusive_reservations
-            .remove(&self.session_id)
-            .ok_or_else(|| anyhow!("exclusive persistent-session reservation was lost"))?;
+        if self.inner.shutdown.load(Ordering::Acquire) {
+            state.exclusive_reservations.remove(&self.session_id);
+            drop(state);
+            let cleanup = ready.retire().err();
+            return Err(match cleanup {
+                Some(cleanup) => {
+                    let reason = format!(
+                        "exclusive process crossed daemon shutdown and cleanup could not be proved: {cleanup}"
+                    );
+                    let mut state = self
+                        .inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state.cleanup_unproved.get_or_insert_with(|| reason.clone());
+                    anyhow!(reason).context(PersistentSessionCleanupUnproved)
+                }
+                None => anyhow!("persistent-session admission is closed for daemon shutdown"),
+            });
+        }
+        let Some(reserved) = state.exclusive_reservations.remove(&self.session_id) else {
+            drop(state);
+            let cleanup = ready.retire().err();
+            return Err(match cleanup {
+                Some(cleanup) => {
+                    let reason = format!(
+                        "exclusive persistent-session reservation was lost; cleanup failed: {cleanup}"
+                    );
+                    let mut state = self
+                        .inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state.cleanup_unproved.get_or_insert_with(|| reason.clone());
+                    anyhow!(reason).context(PersistentSessionCleanupUnproved)
+                }
+                None => anyhow!("exclusive persistent-session reservation was lost"),
+            });
+        };
         if reserved.lifecycle != self.contract.lifecycle || reserved.wire != self.contract.wire {
             drop(state);
             let cleanup = ready.retire().err();
@@ -1612,8 +1978,12 @@ impl ExclusivePersistentSessionReservation {
             }
         }
         self.active = false;
+        let start_guard = self
+            .start_guard
+            .take()
+            .ok_or_else(|| anyhow!("exclusive persistent-session start guard was lost"))?;
         self.inner.changed.notify_all();
-        Ok(())
+        Ok(start_guard)
     }
 
     fn release_reservation(&mut self) {
@@ -1628,6 +1998,28 @@ impl ExclusivePersistentSessionReservation {
         state.exclusive_reservations.remove(&self.session_id);
         self.active = false;
         self.inner.changed.notify_all();
+    }
+}
+
+impl ExclusivePersistentSessionStartGuard {
+    fn release(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.exclusive_starts_in_flight = state.exclusive_starts_in_flight.saturating_sub(1);
+        self.active = false;
+        self.inner.changed.notify_all();
+    }
+}
+
+impl Drop for ExclusivePersistentSessionStartGuard {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -1685,6 +2077,10 @@ impl PersistentSessionStreamReservation {
             + Send
             + 'static,
     {
+        if self.streams.shutdown.load(Ordering::Acquire) {
+            self.release();
+            bail!("persistent-session admission is closed for daemon shutdown");
+        }
         let sequence = STREAM_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let stream_id = lillux::sha256_hex(
             format!("{}\u{1f}{}\u{1f}{sequence}", self.owner, now_ms()).as_bytes(),
@@ -1710,6 +2106,11 @@ impl PersistentSessionStreamReservation {
                 .records
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if self.streams.shutdown.load(Ordering::Acquire) {
+                drop(records);
+                self.release();
+                bail!("persistent-session admission is closed for daemon shutdown");
+            }
             if records
                 .values()
                 .any(|existing| existing.owner == self.owner)
@@ -1960,13 +2361,35 @@ fn ready_process(
     started: StartedPersistentSession,
     wire: &PersistentSessionWireContract,
     lifecycle: &PersistentSessionLifecycleContract,
+    backlog: Arc<BacklogBudget>,
 ) -> std::result::Result<SessionProcess, ReadyProcessFailure> {
     let StartedPersistentSession {
         running,
         mut socket,
         lifelines,
         expected_boot_identity,
+        observation_sink,
     } = started;
+    let reader_budget_bytes = (wire.max_frame_bytes as usize).saturating_add(4);
+    let reader_budget =
+        match BacklogBytePermit::try_reserve(Arc::clone(&backlog), reader_budget_bytes) {
+            Ok(budget) => budget,
+            Err(error) => {
+                let error = attach_running_diagnostic(&running, error);
+                return match running.abort_and_reap_checked() {
+                    Ok(()) => Err(ReadyProcessFailure {
+                        error,
+                        cleanup_unproved: false,
+                    }),
+                    Err(cleanup) => Err(ReadyProcessFailure {
+                        error: error.context(format!(
+                            "persistent-session IPC-budget cleanup could not be proved: {cleanup}"
+                        )),
+                        cleanup_unproved: true,
+                    }),
+                };
+            }
+        };
     let timeout = Duration::from_millis(lifecycle.ready_timeout_ms);
     socket
         .set_nonblocking(true)
@@ -2066,12 +2489,15 @@ fn ready_process(
         reader: Mutex::new(Some(SessionChannel { socket, reader })),
         pending: Mutex::new(HashMap::new()),
         observation_sender: Mutex::new(None),
-        buffered_observations: Mutex::new(VecDeque::new()),
+        initial_observation_sink: Mutex::new(observation_sink),
         reader_failure: Mutex::new(None),
         running: Mutex::new(Some(running)),
         cleanup_unproved: Mutex::new(None),
         leased: AtomicBool::new(false),
         last_used_ms: AtomicU64::new(now_ms()),
+        closed: Arc::new(AtomicBool::new(false)),
+        backlog,
+        _reader_budget: reader_budget,
         _lifelines: lifelines,
     })
 }
@@ -2182,7 +2608,7 @@ where
             let wait = deadline
                 .saturating_duration_since(Instant::now())
                 .min(IO_POLL_INTERVAL);
-            let frame = match receiver.recv_timeout(wait) {
+            let budgeted = match receiver.recv_timeout(wait) {
                 Ok(Ok(frame)) => frame,
                 Ok(Err(reason)) => bail!("persistent-session reader failed: {reason}"),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
@@ -2190,6 +2616,10 @@ where
                     bail!("persistent-session response channel disconnected")
                 }
             };
+            let BudgetedSessionFrame {
+                frame,
+                _budget: _frame_budget,
+            } = budgeted;
             match frame.kind {
                 PersistentSessionFrameKind::Delta => {
                     on_delta(frame.body.expect("delta body validated"))?;
@@ -2618,7 +3048,9 @@ mod tests {
             .into_owned()
     }
 
-    fn fake_framed_session() -> Result<StartedPersistentSession> {
+    fn fake_framed_session_with_observation_sink(
+        observation_sink: Option<PersistentSessionObservationSink>,
+    ) -> Result<StartedPersistentSession> {
         use std::collections::HashMap;
         use std::os::fd::{AsRawFd as _, OwnedFd};
 
@@ -2776,7 +3208,12 @@ while True:
             socket: daemon_socket,
             lifelines: vec![Box::new(app_root), Box::new(worker_file)],
             expected_boot_identity: None,
+            observation_sink,
         })
+    }
+
+    fn fake_framed_session() -> Result<StartedPersistentSession> {
+        fake_framed_session_with_observation_sink(None)
     }
 
     fn narrow_stream_limits() -> PersistentSessionPoolLimits {
@@ -2969,6 +3406,119 @@ while True:
     }
 
     #[test]
+    fn shutdown_reaps_pooled_and_exclusive_processes_and_closes_admission() {
+        let pool = PersistentSessionPool::new();
+        let mut lifecycle = test_lifecycle();
+        lifecycle.ready_timeout_ms = 2_000;
+        lifecycle.request_timeout_ms = 2_000;
+        lifecycle.idle_timeout_ms = 60_000;
+        let wire = test_wire();
+
+        let pooled = pool
+            .execute(
+                &"b".repeat(64),
+                &lifecycle,
+                &wire,
+                serde_json::json!({"message":"pooled"}),
+                fake_framed_session,
+                || false,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(pooled["echo"]["message"], "pooled");
+
+        let session_id = "s".repeat(64);
+        pool.reserve_exclusive(&session_id, &lifecycle, &wire)
+            .unwrap()
+            .bind(fake_framed_session().unwrap())
+            .unwrap();
+
+        assert_eq!(
+            pool.shutdown_and_reap_all(Duration::from_secs(2)).unwrap(),
+            2
+        );
+        assert_eq!(
+            pool.shutdown_and_reap_all(Duration::from_secs(2)).unwrap(),
+            0
+        );
+        assert_eq!(
+            pool.retire_exclusive(&session_id).unwrap(),
+            ExclusiveRetirementOutcome::Absent
+        );
+        let error = pool
+            .execute(
+                &"a".repeat(64),
+                &lifecycle,
+                &wire,
+                serde_json::json!({}),
+                fake_framed_session,
+                || false,
+                |_| Ok(()),
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("admission is closed for daemon shutdown")
+        );
+        assert!(
+            pool.reserve_exclusive(&"n".repeat(64), &lifecycle, &wire)
+                .err()
+                .expect("shutdown must reject exclusive admission")
+                .to_string()
+                .contains("admission is closed for daemon shutdown")
+        );
+    }
+
+    #[test]
+    fn shutdown_waits_for_and_reaps_a_late_exclusive_bind() {
+        let pool = PersistentSessionPool::new();
+        let mut lifecycle = test_lifecycle();
+        lifecycle.ready_timeout_ms = 2_000;
+        let wire = test_wire();
+        let session_id = "l".repeat(64);
+        let reservation = pool
+            .reserve_exclusive(&session_id, &lifecycle, &wire)
+            .unwrap();
+
+        let shutdown_pool = pool.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let shutdown = std::thread::spawn(move || {
+            done_tx
+                .send(shutdown_pool.shutdown_and_reap_all(Duration::from_secs(2)))
+                .unwrap();
+        });
+        while !pool.inner.shutdown.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        assert!(matches!(
+            done_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        let error = reservation
+            .bind(fake_framed_session().unwrap())
+            .err()
+            .expect("late exclusive bind must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("admission is closed for daemon shutdown")
+        );
+        assert_eq!(
+            done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("shutdown must finish after the admitted start settles")
+                .unwrap(),
+            0
+        );
+        shutdown.join().unwrap();
+        assert_eq!(
+            pool.shutdown_and_reap_all(Duration::from_secs(2)).unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn exclusive_session_demultiplexes_observations_and_acks_after_sink_success() {
         let pool = PersistentSessionPool::new();
         let mut lifecycle = test_lifecycle();
@@ -2976,13 +3526,9 @@ while True:
         lifecycle.request_timeout_ms = 2_000;
         let wire = test_wire();
         let session_id = "o".repeat(64);
-        pool.reserve_exclusive(&session_id, &lifecycle, &wire)
-            .unwrap()
-            .bind(fake_framed_session().unwrap())
-            .unwrap();
         let observed = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&observed);
-        pool.install_exclusive_observation_sink(&session_id, move |body| {
+        let observation_sink: PersistentSessionObservationSink = Arc::new(move |body| {
             captured
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -2991,8 +3537,11 @@ while True:
                 "through_sequence": 1,
                 "batch_digest": "fixture-digest"
             }))
-        })
-        .unwrap();
+        });
+        pool.reserve_exclusive(&session_id, &lifecycle, &wire)
+            .unwrap()
+            .bind(fake_framed_session_with_observation_sink(Some(observation_sink)).unwrap())
+            .unwrap();
         let result = pool
             .execute_exclusive(
                 &session_id,

@@ -39,6 +39,9 @@ pub enum CallbackError {
     Transport(#[from] anyhow::Error),
 }
 
+pub const RUNTIME_ACTION_OUTCOME_UNKNOWN_CODE: &str = "runtime_action_outcome_unknown";
+pub const RUNTIME_ACTION_RESULT_UNAVAILABLE_CODE: &str = "runtime_action_result_unavailable";
+
 impl CallbackError {
     pub fn retryable(&self) -> bool {
         match self {
@@ -48,6 +51,21 @@ impl CallbackError {
             // was lost. Until the RPC layer exposes a proven-before-delivery
             // failure, reissuing is unsafe.
             Self::Transport(_) => false,
+        }
+    }
+
+    /// The request may have crossed the daemon's action boundary, but the
+    /// caller did not receive authoritative settlement. Kind runtimes must
+    /// leave the owning thread unfinished and re-drive the same operation ID;
+    /// converting this into an authored retry or ordinary failure could
+    /// duplicate an effect or discard a retained result.
+    pub fn runtime_action_outcome_unknown(&self) -> bool {
+        match self {
+            Self::Transport(_) => true,
+            Self::ActionFailed { code, .. } => {
+                code == RUNTIME_ACTION_OUTCOME_UNKNOWN_CODE
+                    || code == RUNTIME_ACTION_RESULT_UNAVAILABLE_CODE
+            }
         }
     }
 }
@@ -87,11 +105,32 @@ pub struct ProjectObservationPublishParams {
     pub observation: crate::ProjectObservationRequest,
 }
 
-/// Canonical digest of the exact wire action admitted for dispatch.
+/// Canonical digest of the behavior-bearing action admitted for dispatch.
+///
+/// `operation_id` names one runtime-asserted occurrence. It is deliberately
+/// excluded here so recorded-effect identity remains reusable across two
+/// behaviorally identical admitted occurrences. The daemon binds the opaque
+/// occurrence to this independently derived digest in its runtime-action
+/// intent before child contact.
 pub fn dispatch_action_digest(action: &ActionPayload) -> anyhow::Result<String> {
-    let value = serde_json::to_value(action)?;
+    let mut behavior = action.clone();
+    behavior.operation_id = None;
+    let value = serde_json::to_value(behavior)?;
     let canonical = lillux::cas::canonical_json(&value)?;
     Ok(lillux::sha256_hex(canonical.as_bytes()))
+}
+
+/// Whether a runtime action occurrence uses the one canonical wire spelling:
+/// exactly 32 bytes rendered as 64 lowercase hexadecimal characters.
+///
+/// Keep this with [`ActionPayload`] rather than borrowing the CAS path helper:
+/// CAS lookup accepts case-insensitive hexadecimal input, while action
+/// occurrence identity is compared and persisted as an exact protocol value.
+pub fn valid_action_operation_id(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 /// One scalar coordinate in a runtime-owned hook occurrence.
@@ -409,8 +448,10 @@ impl<'de> Deserialize<'de> for TerminalCompletion {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionPayload {
-    /// Stable runtime-occurrence identity. Required for detached actions so a
-    /// daemon crash/retry cannot mint the same logical child twice.
+    /// Stable opaque identity asserted by the admitted runtime for one logical
+    /// action occurrence. Ordinary inline and detached callbacks require it so
+    /// daemon crash/retry cannot execute the occurrence through a second child.
+    /// Admitted hook callbacks use their separate hook occurrence ledger.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
     pub item_id: String,
@@ -526,6 +567,7 @@ pub struct LaunchWindow {
 /// accepts templates inside it — a literal that drifts from the struct is how
 /// `facets` once shipped unresolved.
 pub mod action_keys {
+    pub const OPERATION_ID: &str = "operation_id";
     pub const ITEM_ID: &str = "item_id";
     pub const REF_BINDINGS: &str = "ref_bindings";
     pub const PARAMS: &str = "params";
@@ -618,6 +660,26 @@ pub trait RuntimeCallbackAPI: Send + Sync {
     -> Result<Value, CallbackError>;
 
     async fn attach_process(&self, thread_id: &str, pid: u32) -> Result<Value, CallbackError>;
+
+    /// Feature-gated daemon crash-qualification seam.
+    ///
+    /// Production daemons do not serve this method. A runtime calls it only
+    /// when an explicit test-only phase selection is present; the qualifying
+    /// daemon reports that exact boundary to its parent and deliberately never
+    /// answers. Keeping the vocabulary opaque here prevents the callback
+    /// substrate from learning runtime- or kind-specific phases.
+    #[doc(hidden)]
+    async fn reach_test_phase_cut(
+        &self,
+        _thread_id: &str,
+        _phase: &str,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message: "runtime phase cuts require an explicit daemon test-support build".to_string(),
+            retryable: false,
+        })
+    }
 
     async fn start_dedicated_session(
         &self,
@@ -1174,6 +1236,55 @@ mod tests {
         let wire = serde_json::to_value(&request).unwrap();
         let round_trip: DispatchActionRequest = serde_json::from_value(wire).unwrap();
         assert_eq!(round_trip.hook_dispatch, request.hook_dispatch);
+    }
+
+    #[test]
+    fn action_digest_excludes_occurrence_but_binds_behavior() {
+        let action = ActionPayload {
+            operation_id: Some("1".repeat(64)),
+            item_id: "tool:test/mutate".to_string(),
+            ref_bindings: BTreeMap::new(),
+            params: json!({"value": 1}),
+            thread: "inline".to_string(),
+            call: None,
+            facets: None,
+            launch_window: None,
+        };
+        let original = dispatch_action_digest(&action).unwrap();
+
+        let mut different_occurrence = action.clone();
+        different_occurrence.operation_id = Some("2".repeat(64));
+        assert_eq!(
+            dispatch_action_digest(&different_occurrence).unwrap(),
+            original
+        );
+
+        let mut different_behavior = action;
+        different_behavior.params = json!({"value": 2});
+        assert_ne!(
+            dispatch_action_digest(&different_behavior).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn action_operation_id_has_one_canonical_wire_spelling() {
+        assert!(valid_action_operation_id(&"0".repeat(64)));
+        assert!(valid_action_operation_id(&("abcdef".repeat(10) + "abcd")));
+        assert!(!valid_action_operation_id(&"A".repeat(64)));
+        assert!(!valid_action_operation_id(&"g".repeat(64)));
+        assert!(!valid_action_operation_id(&"0".repeat(63)));
+    }
+
+    #[test]
+    fn unavailable_runtime_action_result_requires_recovery() {
+        let error = CallbackError::ActionFailed {
+            code: RUNTIME_ACTION_RESULT_UNAVAILABLE_CODE.to_owned(),
+            message: "the retained body was intentionally discarded".to_owned(),
+            retryable: false,
+        };
+        assert!(error.runtime_action_outcome_unknown());
+        assert!(!error.retryable());
     }
 
     #[test]

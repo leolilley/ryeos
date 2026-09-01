@@ -4,17 +4,20 @@ use serde_json::{Value, json};
 
 use crate::budget::BudgetTracker;
 use crate::continuation::ContinuationCheck;
-use crate::directive::{ExecutionConfig, FinishReason, ProviderMessage, StreamEvent, ToolSchema};
+use crate::directive::{
+    DIRECTIVE_RETURN_TOOL, ExecutionConfig, FinishReason, ProviderMessage, StreamEvent, ToolSchema,
+};
 use crate::dispatcher::{DispatchKind, Dispatcher};
 use crate::harness::{Harness, HookAction};
 use crate::result_guard::ResultGuard;
-use crate::resume::ResumeState;
+use crate::resume::{ResumeDisposition, ResumeState};
 use ryeos_accounting::{
     AttemptBudgetState, BillableDimension, ChargeReconciliationAuthority, HexDigest,
     ProviderAccountingAuthority, ProviderAttemptGetParams, ProviderAttemptMarkIssuedParams,
     ProviderAttemptPrepareParams, ProviderAttemptPrepareResponse,
-    ProviderAttemptReleaseUnissuedParams, ProviderAttemptSettleParams, ReconciliationReason,
-    SpendAccounting, SpendBoundAuthority, TokenAccounting, UnitCount, VerifiedPreparedSpendBound,
+    ProviderAttemptReleaseUnissuedParams, ProviderAttemptSettleParams, ProviderRetryAdvance,
+    ProviderRetryDecision, ProviderRetryReason, ReconciliationReason, SpendAccounting,
+    SpendBoundAuthority, TokenAccounting, UnitCount, VerifiedPreparedSpendBound,
 };
 use ryeos_directive_definition::{
     ContinuationConfig, OutputSpec, ProviderConfig, ReasoningConfig, ReturnNudge, SamplingConfig,
@@ -40,6 +43,28 @@ use request_context::{initial_messages, visible_provider_tools};
 /// enum.
 const CONTINUATION_LOG_REASON: &str = "context_window";
 
+/// Restart seam used only when a feature-built daemon explicitly forwards the
+/// reserved selection. Recovery authority remains the retained
+/// event/effect/child state; this merely reaches the daemon-owned test gate
+/// after a named durable boundary so the test can kill the daemon at that
+/// exact cut.
+const DIRECTIVE_TEST_BLOCK_AT_ENV: &str = "RYEOS_DIRECTIVE_TEST_BLOCK_AT";
+
+async fn block_at_directive_recovery_test_cut(callback: &CallbackClient, stage: &str) {
+    if !ryeos_runtime::CheckpointWriter::is_resume()
+        && std::env::var(DIRECTIVE_TEST_BLOCK_AT_ENV).ok().as_deref() == Some(stage)
+    {
+        tracing::info!(stage, "directive recovery test cut reached");
+        // The feature-only daemon endpoint reports the exact phase to its
+        // parent and intentionally never answers. A production daemon rejects
+        // the method; return in that case instead of letting an injected
+        // environment value wedge a production runtime.
+        if let Err(error) = callback.reach_test_phase_cut(stage).await {
+            tracing::warn!(stage, error = %error, "directive recovery test cut rejected");
+        }
+    }
+}
+
 /// Rendered model-visible tool result plus SSE emission metadata. Shared by
 /// the serial and batch dispatch paths so their emitted shapes cannot diverge.
 #[derive(Debug)]
@@ -47,17 +72,36 @@ struct RenderedToolResult {
     tool: String,
     content: String,
     raw_size: u64,
-    result_guard_truncated: bool,
+    truncated: bool,
     duplicate_of: Option<String>,
-    truncated_reason_override: Option<&'static str>,
+    truncated_reason: Option<&'static str>,
+}
+
+/// One model-proposed call paired with its RyeOS logical occurrence.
+/// Provider call IDs remain transcript data and may be missing or repeated;
+/// `operation_id` is derived from the emitting thread, turn, and ordered call
+/// index and is the callback reservation key.
+#[derive(Debug, Clone)]
+pub(crate) struct ToolOccurrence {
+    pub call: crate::directive::ToolCall,
+    pub operation_id: String,
+    /// The braid already contains this occurrence's `tool_call_start`.
+    pub start_recorded: bool,
+    /// The harness already charged this proposed non-lifecycle tool call.
+    pub counted: bool,
+    /// A recovered child-bearing start already charged the spawn-attempt
+    /// counter reconstructed from the signed tool catalog.
+    pub spawn_counted: bool,
 }
 
 /// Whether one assistant message's tool-call batch carries the
 /// `directive_return` lifecycle signal. Lifecycle-bearing batches must run
 /// through the strict serial dispatch path; only plain batches are eligible
 /// for the bounded concurrent window.
-fn batch_is_lifecycle_bearing(calls: &[crate::directive::ToolCall]) -> bool {
-    calls.iter().any(|tc| tc.name == "directive_return")
+fn batch_is_lifecycle_bearing(calls: &[ToolOccurrence]) -> bool {
+    calls
+        .iter()
+        .any(|occurrence| occurrence.call.name == DIRECTIVE_RETURN_TOOL)
 }
 
 fn tool_call_limit_error() -> String {
@@ -72,8 +116,91 @@ fn tool_call_limit_error() -> String {
     })
 }
 
+/// Error observations are model-visible transcript data. Keep them useful but
+/// bounded independently of successful tool output, and never copy a daemon
+/// error message (which can contain filesystem, credential, or policy detail)
+/// into the provider transcript.
+const MAX_ERROR_ENVELOPE_BYTES: usize = 32 * 1024;
+
+fn callback_error_envelope(error: &ryeos_runtime::callback::CallbackError) -> String {
+    let (code, retryable) = match error {
+        ryeos_runtime::callback::CallbackError::ActionFailed {
+            code, retryable, ..
+        } => {
+            let safe = code.len() <= 128
+                && !code.is_empty()
+                && code.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':')
+                });
+            (
+                if safe { code.as_str() } else { "action_failed" },
+                *retryable,
+            )
+        }
+        ryeos_runtime::callback::CallbackError::Transport(_) => {
+            ("runtime_action_outcome_unknown", false)
+        }
+    };
+    serde_json::to_string(&json!({
+        "error": {
+            "code": code,
+            "message": "The RyeOS execution boundary refused the action.",
+            "retryable": retryable,
+        }
+    }))
+    .expect("fixed callback error envelope serializes")
+}
+
+fn directive_output_validation_error(
+    outputs: Option<&[OutputSpec]>,
+    arguments: &Value,
+) -> Option<String> {
+    outputs.and_then(|outputs| {
+        outputs.iter().find_map(|output| {
+            arguments
+                .get(&output.name)
+                .is_none_or(Value::is_null)
+                .then(|| {
+                    format!(
+                        "directive_return: missing required output '{}'",
+                        output.name
+                    )
+                })
+        })
+    })
+}
+
+fn recovered_return_nudge_seen(
+    messages: &[ProviderMessage],
+    return_nudge: &ReturnNudge,
+    outputs: Option<&[OutputSpec]>,
+) -> bool {
+    if !return_nudge.enabled() {
+        return false;
+    }
+    let declared = outputs
+        .unwrap_or_default()
+        .iter()
+        .map(|output| output.name.clone())
+        .collect::<Vec<_>>();
+    if declared.is_empty() {
+        return false;
+    }
+    let expected = return_nudge.message(&declared);
+    let Some(last_assistant) = messages
+        .iter()
+        .rposition(|message| message.role == "assistant")
+    else {
+        return false;
+    };
+    messages[last_assistant + 1..].iter().any(|message| {
+        message.role == "user"
+            && message.content.as_ref().and_then(Value::as_str) == Some(expected.as_str())
+    })
+}
+
 fn state_after_serial_tool_result(
-    pending: Vec<crate::directive::ToolCall>,
+    pending: Vec<ToolOccurrence>,
     index: usize,
     turn: u32,
     definition_ref: &str,
@@ -102,24 +229,6 @@ fn state_after_serial_tool_result(
     }
 }
 
-/// The pure emission decision for one rendered tool result:
-/// `(body_is_inline, truncated, truncated_reason)`. Ordering of the checks is
-/// contract: the inline size cap dominates, then guard truncation, then an
-/// error-envelope override, then the clean case.
-fn result_emission_flags(rendered: &RenderedToolResult) -> (bool, bool, Option<&'static str>) {
-    let inline_capped =
-        rendered.content.len() > ryeos_runtime::callback_client::TOOL_RESULT_INLINE_MAX_BYTES;
-    if inline_capped {
-        (false, true, Some("size_cap_exceeded"))
-    } else if rendered.result_guard_truncated {
-        (true, true, Some("result_guard"))
-    } else if let Some(reason) = rendered.truncated_reason_override {
-        (true, false, Some(reason))
-    } else {
-        (true, false, None)
-    }
-}
-
 #[derive(Debug)]
 pub enum State {
     CheckingLimits,
@@ -134,21 +243,23 @@ pub enum State {
     },
     ParsingResponse,
     DispatchingTools {
-        pending: Vec<crate::directive::ToolCall>,
+        pending: Vec<ToolOccurrence>,
         index: usize,
     },
     /// One assistant message's plain tool-call batch (no `directive_return`),
     /// dispatched concurrently through a bounded window and folded back in
     /// call order. Lifecycle-bearing batches use `DispatchingTools`.
     DispatchingToolBatch {
-        pending: Vec<crate::directive::ToolCall>,
+        pending: Vec<ToolOccurrence>,
     },
     ProcessingToolResult {
         call_id: String,
         tool_name: String,
+        operation_id: String,
         raw_args: String,
-        pending: Vec<crate::directive::ToolCall>,
+        pending: Vec<ToolOccurrence>,
         index: usize,
+        spawn_counted: bool,
     },
     /// directive_return lifecycle signal: the LLM invoked
     /// `directive_return` (a provider-API tool-call convention, not
@@ -158,6 +269,7 @@ pub enum State {
     /// visibility, publishes the artifact, and finalizes the thread.
     ProcessingDirectiveReturn {
         call_id: String,
+        operation_id: String,
         raw_args: String,
     },
     FiringHooks {
@@ -170,8 +282,17 @@ pub enum State {
     Finalizing {
         result: Value,
     },
+    FinalizingDirectiveReturn {
+        outputs: Value,
+    },
     Continued,
     Errored {
+        error: String,
+    },
+    /// An acknowledged outcome is unavailable after a resume-critical daemon
+    /// callback. The process exits non-terminally; native resume reconstructs
+    /// the braid and re-drives the same logical operation.
+    RecoveryRequired {
         error: String,
     },
     Cancelled,
@@ -238,6 +359,10 @@ pub struct Runner {
     /// Shared HTTP client — created once and reused across all turns.
     /// Connection pooling keeps TCP/TLS handshakes to a minimum.
     http_client: reqwest::Client,
+    resume_pending_tools: Vec<ToolOccurrence>,
+    resume_disposition: ResumeDisposition,
+    resume_active_provider_turn: Option<u32>,
+    provider_retry_testimony_digests: std::collections::BTreeSet<String>,
 }
 
 struct RunGuard {
@@ -256,6 +381,68 @@ const LEDGER_RPC_RETRIES: usize = 2;
 /// meaningfully delaying the failure path.
 async fn ledger_retry_backoff(retry: usize) {
     tokio::time::sleep(std::time::Duration::from_millis(250 * (retry as u64 + 1))).await;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderRetryWaitOutcome {
+    DeadlineReached,
+    Cancelled,
+    Interrupted,
+}
+
+/// Wait for a daemon-admitted durable retry deadline while retaining live
+/// cancel/interrupt responsiveness. Lillux owns the wall-clock read and the
+/// persisted `not_before_ms` owns retry admission; Tokio only schedules this
+/// process-local wait and can never move the authoritative deadline.
+async fn wait_for_provider_retry_deadline(
+    not_before_ms: i64,
+    cancel_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    interrupt_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> ProviderRetryWaitOutcome {
+    use std::sync::atomic::Ordering;
+
+    let remaining_ms = not_before_ms.saturating_sub(lillux::time::timestamp_millis());
+    let remaining = std::time::Duration::from_millis(u64::try_from(remaining_ms).unwrap_or(0));
+    tokio::select! {
+        _ = tokio::time::sleep(remaining) => ProviderRetryWaitOutcome::DeadlineReached,
+        _ = async {
+            while !cancel_flag.load(Ordering::Relaxed) {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        } => ProviderRetryWaitOutcome::Cancelled,
+        _ = async {
+            while !interrupt_flag.load(Ordering::Relaxed) {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        } => ProviderRetryWaitOutcome::Interrupted,
+    }
+}
+
+fn provider_retry_wait_terminal(
+    outcome: ProviderRetryWaitOutcome,
+) -> Option<crate::provider_adapter::StreamOutcome> {
+    let empty_attempt = || crate::provider_adapter::streaming::CutAttemptState {
+        usage: None,
+        generation_header_id: None,
+        response_id: None,
+        requested_output_tokens: None,
+        observed_output: Default::default(),
+    };
+    match outcome {
+        ProviderRetryWaitOutcome::DeadlineReached => None,
+        ProviderRetryWaitOutcome::Cancelled => {
+            Some(crate::provider_adapter::StreamOutcome::Cancelled {
+                attempt: empty_attempt(),
+            })
+        }
+        ProviderRetryWaitOutcome::Interrupted => {
+            Some(crate::provider_adapter::StreamOutcome::Interrupted {
+                partial_cognition: crate::provider_adapter::InterruptedCognition::default(),
+                events: Vec::new(),
+                attempt: empty_attempt(),
+            })
+        }
+    }
 }
 
 /// Live handle to one daemon-admitted provider attempt reservation. Mirrors
@@ -281,6 +468,13 @@ enum LedgerAdmission {
         record_hash: String,
         response: crate::provider_adapter::http::AdapterResponse,
     },
+    /// The requested predecessor coordinate is already terminal and its
+    /// settlement atomically authorized exactly one successor. No contact is
+    /// permitted until the runtime validates and testifies this advancement.
+    RetryAdvanced(ProviderRetryAdvance),
+    /// The requested successor is exact, but the ledger-owned earliest
+    /// admission deadline has not arrived yet.
+    RetryNotBefore(ProviderRetryAdvance),
     /// Reserved and durably issued: the exact prepared bytes may be sent.
     Admitted(LedgerAttempt),
     /// The daemon durably denied the reservation (insufficient budget).
@@ -378,39 +572,113 @@ struct CostBreakdown {
 /// codes as strings) is an absolute denylist that overrides
 /// `retry_status_codes`. Backoff is exponential from `backoff_base_ms`
 /// (`base * 2^attempt`).
+#[cfg(test)]
 fn retry_backoff(
     err: &anyhow::Error,
     attempt: u32,
     execution: &ExecutionConfig,
 ) -> Option<std::time::Duration> {
+    retry_classification(err, attempt, execution).map(|(delay, _)| delay)
+}
+
+fn retry_classification(
+    err: &anyhow::Error,
+    attempt: u32,
+    execution: &ExecutionConfig,
+) -> Option<(std::time::Duration, ProviderRetryReason)> {
     use crate::provider_adapter::ProviderStreamError;
 
-    if attempt >= execution.retries {
-        return None;
-    }
-    let retryable = match err.downcast_ref::<ProviderStreamError>() {
+    let reason = match err.downcast_ref::<ProviderStreamError>() {
         Some(ProviderStreamError::Status { code, .. }) => {
-            !execution.never_retry.contains(&code.to_string())
-                && execution.retry_status_codes.contains(code)
+            ProviderRetryReason::Status { code: *code }
         }
-        Some(ProviderStreamError::Timeout { .. }) => execution.retry_on_timeout,
+        Some(ProviderStreamError::Timeout { .. }) => ProviderRetryReason::Timeout,
         // A pre-stream `.send()` transport failure (DNS/connect/TLS/reset) is
         // always retry-safe — no cognition_out was emitted. Retry it under the
         // shared `execution.retries` budget so a burst-fanout connect blip backs
         // off and re-attempts instead of surfacing as a fatal generic error.
-        Some(ProviderStreamError::Send { .. }) => true,
+        Some(ProviderStreamError::Send { connect, .. }) => ProviderRetryReason::Send {
+            connect_phase: *connect,
+        },
         // The stream died mid-read (chunk timeout/reset). The request is
         // idempotent; the durable `provider_retry` event records the count of
         // live/ephemeral deltas emitted before the cut.
-        Some(ProviderStreamError::MidStream(_)) => execution.retry_mid_stream,
-        None => false,
+        Some(ProviderStreamError::MidStream(mid_stream)) => ProviderRetryReason::MidStream {
+            live_output_events_emitted: u64::try_from(mid_stream.live_output_events_emitted)
+                .ok()?,
+        },
+        None => return None,
     };
-    if !retryable {
+    retry_delay_for_reason(&reason, attempt.checked_add(1)?, execution).map(|delay| (delay, reason))
+}
+
+fn retry_delay_for_reason(
+    reason: &ProviderRetryReason,
+    failed_attempt_number: u32,
+    execution: &ExecutionConfig,
+) -> Option<std::time::Duration> {
+    let attempt = failed_attempt_number.checked_sub(1)?;
+    if attempt >= execution.retries {
+        return None;
+    }
+    let admitted = match reason {
+        ProviderRetryReason::Status { code } => {
+            !execution.never_retry.contains(&code.to_string())
+                && execution.retry_status_codes.contains(code)
+        }
+        ProviderRetryReason::Timeout => execution.retry_on_timeout,
+        ProviderRetryReason::Send { .. } => true,
+        ProviderRetryReason::MidStream { .. } => execution.retry_mid_stream,
+    };
+    if !admitted {
         return None;
     }
     let factor = 1u64 << attempt.min(16);
     let delay_ms = execution.backoff_base_ms.saturating_mul(factor);
     Some(std::time::Duration::from_millis(delay_ms))
+}
+
+fn retry_policy_digest(execution: &ExecutionConfig) -> anyhow::Result<HexDigest> {
+    let value = json!({
+        "schema": "ryeos.directive.provider-retry-policy.v1",
+        "retries": execution.retries,
+        "retry_status_codes": execution.retry_status_codes,
+        "never_retry": execution.never_retry,
+        "backoff_base_ms": execution.backoff_base_ms,
+        "retry_on_timeout": execution.retry_on_timeout,
+        "retry_mid_stream": execution.retry_mid_stream,
+        "accounting": execution.accounting,
+    });
+    let canonical = lillux::canonical_json(&value)?;
+    HexDigest::new(lillux::sha256_hex(canonical.as_bytes()))
+        .map_err(|error| anyhow::anyhow!("provider retry policy digest: {error}"))
+}
+
+fn provider_retry_decision(
+    turn: u32,
+    failed_attempt_number: u32,
+    delay: std::time::Duration,
+    reason: ProviderRetryReason,
+    error: &anyhow::Error,
+    execution: &ExecutionConfig,
+) -> anyhow::Result<ProviderRetryDecision> {
+    let decision = ProviderRetryDecision {
+        turn,
+        failed_attempt_number,
+        next_attempt_number: failed_attempt_number
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("provider retry attempt coordinate overflow"))?,
+        backoff_ms: u64::try_from(delay.as_millis())
+            .map_err(|_| anyhow::anyhow!("provider retry backoff exceeds u64"))?,
+        reason,
+        failure_digest: HexDigest::new(lillux::sha256_hex(format!("{error:#}").as_bytes()))
+            .map_err(|digest_error| anyhow::anyhow!("provider failure digest: {digest_error}"))?,
+        retry_policy_digest: retry_policy_digest(execution)?,
+    };
+    decision
+        .validate()
+        .map_err(|validation| anyhow::anyhow!(validation))?;
+    Ok(decision)
 }
 
 /// Reservation intent hash (§9.3): binds the attempt coordinate, provider
@@ -724,41 +992,128 @@ impl Runner {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("reqwest client builder"),
+            resume_pending_tools: Vec::new(),
+            resume_disposition: ResumeDisposition::ContinueProvider,
+            resume_active_provider_turn: None,
+            provider_retry_testimony_digests: std::collections::BTreeSet::new(),
         }
     }
 
     pub fn from_resume(resume: ResumeState, mut config: RunnerConfig) -> anyhow::Result<Self> {
-        if let Some(ref usage) = resume.thread_usage {
-            let resumed_tokens = usage
-                .input_tokens
-                .checked_add(usage.output_tokens)
-                .ok_or_else(|| anyhow::anyhow!("resume usage token count overflow"))?;
-            let resumed_cost = RuntimeCost {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                total_usd: usage.spend_usd,
-                basis: None,
-            };
-            resumed_cost
-                .validate()
-                .map_err(|error| anyhow::anyhow!("invalid resume usage: {error}"))?;
-            config.harness.reseed(
-                usage.completed_turns,
-                resumed_tokens,
-                usage.spend_usd,
-                usage.spawns_used,
-            );
-            config
-                .budget
-                .reseed(usage.input_tokens, usage.output_tokens, usage.spend_usd)
-                .map_err(|error| anyhow::anyhow!("invalid resume budget: {error}"))?;
+        let (input_tokens, output_tokens, spend_usd, retained_spawns) = resume
+            .thread_usage
+            .as_ref()
+            .map(|usage| {
+                (
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.spend_usd,
+                    usage.spawns_used,
+                )
+            })
+            .unwrap_or((0, 0, ryeos_runtime::envelope::UsdNanos::ZERO, 0));
+        let resumed_tokens = input_tokens
+            .checked_add(output_tokens)
+            .ok_or_else(|| anyhow::anyhow!("resume usage token count overflow"))?;
+        RuntimeCost {
+            input_tokens,
+            output_tokens,
+            total_usd: spend_usd,
+            basis: None,
         }
+        .validate()
+        .map_err(|error| anyhow::anyhow!("invalid resume usage: {error}"))?;
         config
-            .harness
-            .reseed_tool_calls(resume.tool_calls_completed);
+            .budget
+            .reseed(input_tokens, output_tokens, spend_usd)
+            .map_err(|error| anyhow::anyhow!("invalid resume budget: {error}"))?;
+        let result_guard = resume.result_guard;
         config.messages = resume.messages;
+        let mut pending_tools = resume.pending_tools;
+        let started_tool_occurrences = resume.started_tool_occurrences;
+        let resume_disposition = resume.disposition;
+        let resume_active_provider_turn = resume.active_provider_turn;
+        let provider_retry_testimony_digests = resume.provider_retry_testimony_digests;
+        let last_turn_coordinate = resume.last_turn_coordinate;
+        if let Some(active_turn) = resume_active_provider_turn {
+            let expected = last_turn_coordinate
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("resume provider-turn coordinate overflow"))?;
+            if active_turn != expected
+                || !pending_tools.is_empty()
+                || !matches!(resume_disposition, ResumeDisposition::ContinueProvider)
+            {
+                anyhow::bail!(
+                    "resume active provider turn {active_turn} contradicts retained runtime state"
+                );
+            }
+        }
         let mut runner = Self::new(config);
-        runner.initial_turn = resume.turns_completed;
+        runner.result_guard = result_guard;
+        if let ResumeDisposition::FinalizeDirectiveReturn { outputs } = &resume_disposition
+            && let Some(error) =
+                directive_output_validation_error(runner.directive_outputs.as_deref(), outputs)
+        {
+            anyhow::bail!("resume: settled directive_return no longer validates: {error}");
+        }
+        let started_count = u32::try_from(started_tool_occurrences.len())
+            .map_err(|_| anyhow::anyhow!("resume tool-start count exceeds u32"))?;
+        let admitted_count = runner
+            .harness
+            .recover_admitted_tool_call_count(started_count);
+        let admitted_len = usize::try_from(admitted_count)
+            .expect("u32 admitted tool count always fits usize on supported targets");
+        let mut admitted_operations = std::collections::BTreeSet::new();
+        let mut spawn_counted_operations = std::collections::BTreeSet::new();
+        let mut derived_spawns = 0u32;
+        for started in &started_tool_occurrences[..admitted_len] {
+            admitted_operations.insert(started.operation_id.clone());
+            let Ok(resolved) = runner.dispatcher.resolve(
+                &started.call.name,
+                &started.call.arguments.to_string(),
+                started.call.id.clone(),
+            ) else {
+                continue;
+            };
+            if matches!(
+                resolved.dispatch_kind,
+                DispatchKind::DirectiveChild | DispatchKind::GraphChild
+            ) {
+                derived_spawns = derived_spawns
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("resume spawn counter overflow"))?;
+                spawn_counted_operations.insert(started.operation_id.clone());
+            }
+        }
+        if derived_spawns < retained_spawns {
+            anyhow::bail!(
+                "resume event braid accounts for {derived_spawns} child starts, below retained usage authority {retained_spawns}"
+            );
+        }
+        runner.harness.reseed(
+            resume.turns_completed,
+            resumed_tokens,
+            spend_usd,
+            derived_spawns,
+        );
+        runner.harness.reseed_tool_calls(admitted_count);
+        for occurrence in &mut pending_tools {
+            if occurrence.start_recorded && occurrence.call.name != DIRECTIVE_RETURN_TOOL {
+                occurrence.counted = admitted_operations.contains(&occurrence.operation_id);
+                occurrence.spawn_counted =
+                    spawn_counted_operations.contains(&occurrence.operation_id);
+            }
+        }
+        runner.initial_turn = last_turn_coordinate;
+        runner.resume_pending_tools = pending_tools;
+        runner.resume_disposition = resume_disposition;
+        runner.resume_active_provider_turn = resume_active_provider_turn;
+        runner.provider_retry_testimony_digests = provider_retry_testimony_digests;
+        runner.return_nudge_sent = recovered_return_nudge_seen(
+            &runner.messages,
+            &runner.return_nudge,
+            runner.directive_outputs.as_deref(),
+        );
         Ok(runner)
     }
 
@@ -833,7 +1188,7 @@ impl Runner {
         }
     }
 
-    pub async fn run(&mut self) -> RuntimeResult {
+    pub async fn run(&mut self) -> anyhow::Result<RuntimeResult> {
         let mut guard = RunGuard { finalized: false };
         // The entrypoint has already attached the process and durably moved
         // the thread to running before it constructs the runner.
@@ -871,8 +1226,40 @@ impl Runner {
                         route is advisory-only"
                     .to_string(),
             }
+        } else if self.resume_active_provider_turn.is_some() && ledger_authority.is_none() {
+            State::Errored {
+                error: "provider_attempt_outcome_unknown: an unfinished provider turn has no \
+                        daemon-owned attempt ledger; native recovery refuses a second contact"
+                    .to_string(),
+            }
+        } else if !self.resume_pending_tools.is_empty() {
+            let pending = std::mem::take(&mut self.resume_pending_tools);
+            if batch_is_lifecycle_bearing(&pending) {
+                State::DispatchingTools { pending, index: 0 }
+            } else {
+                State::DispatchingToolBatch { pending }
+            }
         } else {
-            State::CheckingLimits
+            match std::mem::take(&mut self.resume_disposition) {
+                ResumeDisposition::ContinueProvider => State::CheckingLimits,
+                ResumeDisposition::ParseRetainedResponse => State::ParsingResponse,
+                ResumeDisposition::AfterSettledToolBatch { turn } => State::FiringHooks {
+                    occurrence: ryeos_runtime::callback::HookDispatchOccurrence::new(
+                        "directive",
+                        "after_step",
+                        self.definition_ref.clone(),
+                        self.root_raw_content_digest.clone(),
+                        self.effective_definition_digest.clone(),
+                    )
+                    .with_counter_coordinate("turn", turn),
+                    context: json!({"turn": turn}),
+                    resume_to: Box::new(State::CheckingContinuation),
+                },
+                ResumeDisposition::CheckContinuation => State::CheckingContinuation,
+                ResumeDisposition::FinalizeDirectiveReturn { outputs } => {
+                    State::FinalizingDirectiveReturn { outputs }
+                }
+            }
         };
         let mut turn = self.initial_turn;
         // Diagnostic locator for terminal failure payloads: the most recent
@@ -911,9 +1298,11 @@ impl Runner {
                     // Limits already passed above, so a turn WILL start — a fold
                     // here is always answered. Resume-critical: a poll error stops
                     // the loop rather than answering with input we may have dropped.
-                    if let Err(e) = self.poll_pending_input().await {
-                        state = State::Errored { error: e };
-                        continue;
+                    if self.resume_active_provider_turn.is_none() {
+                        if let Err(e) = self.poll_pending_input().await {
+                            state = State::RecoveryRequired { error: e };
+                            continue;
+                        }
                     }
                     State::CallingProvider
                 }
@@ -921,13 +1310,18 @@ impl Runner {
                 State::CallingProvider => {
                     let turn_start = Instant::now();
                     self.harness.record_turn();
-                    turn += 1;
-
-                    if let Err(e) = self.callback.emit_turn_start(turn).await {
-                        state = State::Errored {
-                            error: format!("resume-critical callback emit_turn_start failed: {e}"),
-                        };
-                        continue;
+                    if let Some(active_turn) = self.resume_active_provider_turn.take() {
+                        turn = active_turn;
+                    } else {
+                        turn += 1;
+                        if let Err(e) = self.callback.emit_turn_start(turn).await {
+                            state = State::RecoveryRequired {
+                                error: format!(
+                                    "resume-critical callback emit_turn_start failed: {e}"
+                                ),
+                            };
+                            continue;
+                        }
                     }
 
                     let cancel_flag = self.harness.cancelled_flag();
@@ -978,7 +1372,12 @@ impl Runner {
                                 "provider attempt refused by effective resource limits: {limit}"
                             ));
                         }
-                        let attempt_number = attempt + 1;
+                        let attempt_number = match attempt.checked_add(1) {
+                            Some(attempt_number) => attempt_number,
+                            None => {
+                                break Err(anyhow::anyhow!("provider attempt coordinate overflow"));
+                            }
+                        };
                         last_attempt_id =
                             Some(format!("{}:{turn}:{attempt_number}", self.thread_id));
                         let call_input = crate::provider_adapter::StreamingCallInput {
@@ -1050,6 +1449,89 @@ impl Runner {
                                     ledger_attempt = Some(ledger);
                                     None
                                 }
+                                Ok(LedgerAdmission::RetryAdvanced(advance)) => {
+                                    if let Err(error) =
+                                        self.validate_retry_advance(&advance, turn, attempt_number)
+                                    {
+                                        break Err(error);
+                                    }
+                                    last_attempt_id = Some(advance.prior_attempt_id.clone());
+                                    if let Err(error) =
+                                        self.emit_provider_retry_testimony(&advance).await
+                                    {
+                                        tracing::warn!(
+                                            decision_digest = %advance.decision_digest.as_str(),
+                                            %error,
+                                            "recovered provider retry testimony outcome is unknown; requesting same-thread recovery"
+                                        );
+                                        return Err(ryeos_runtime::process_outcome::RuntimeRecoveryRequired::retained_progress_outcome_unknown(
+                                            self.thread_id.clone(),
+                                        ).into());
+                                    }
+                                    attempt = advance.decision.failed_attempt_number;
+                                    tracing::warn!(
+                                        turn,
+                                        attempt,
+                                        next_attempt = advance.decision.next_attempt_number,
+                                        backoff_ms = advance.decision.backoff_ms,
+                                        decision_digest = %advance.decision_digest.as_str(),
+                                        "recovered the exact durable provider retry advancement"
+                                    );
+                                    if let Some(terminal) = provider_retry_wait_terminal(
+                                        wait_for_provider_retry_deadline(
+                                            advance.not_before_ms,
+                                            &cancel_flag,
+                                            &interrupt_flag,
+                                        )
+                                        .await,
+                                    ) {
+                                        break Ok(terminal);
+                                    }
+                                    continue;
+                                }
+                                Ok(LedgerAdmission::RetryNotBefore(advance)) => {
+                                    let failed_attempt_number =
+                                        attempt_number.checked_sub(1).ok_or_else(|| {
+                                            anyhow::anyhow!(
+                                                "provider retry successor has no predecessor"
+                                            )
+                                        })?;
+                                    if let Err(error) = self.validate_retry_advance(
+                                        &advance,
+                                        turn,
+                                        failed_attempt_number,
+                                    ) {
+                                        break Err(error);
+                                    }
+                                    if advance.decision.next_attempt_number != attempt_number {
+                                        break Err(anyhow::anyhow!(
+                                            "provider retry deadline contradicts requested successor attempt {attempt_number}"
+                                        ));
+                                    }
+                                    if let Err(error) =
+                                        self.emit_provider_retry_testimony(&advance).await
+                                    {
+                                        tracing::warn!(
+                                            decision_digest = %advance.decision_digest.as_str(),
+                                            %error,
+                                            "provider retry testimony outcome is unknown while waiting for ledger deadline"
+                                        );
+                                        return Err(ryeos_runtime::process_outcome::RuntimeRecoveryRequired::retained_progress_outcome_unknown(
+                                            self.thread_id.clone(),
+                                        ).into());
+                                    }
+                                    if let Some(terminal) = provider_retry_wait_terminal(
+                                        wait_for_provider_retry_deadline(
+                                            advance.not_before_ms,
+                                            &cancel_flag,
+                                            &interrupt_flag,
+                                        )
+                                        .await,
+                                    ) {
+                                        break Ok(terminal);
+                                    }
+                                    continue;
+                                }
                                 Ok(LedgerAdmission::Denied) => {
                                     break Err(anyhow::anyhow!(
                                         "budget_exceeded: the daemon ledger denied the provider \
@@ -1072,13 +1554,8 @@ impl Runner {
                                 }
                                 Ok(LedgerAdmission::InterruptedBeforeIssue) => {
                                     break Ok(crate::provider_adapter::StreamOutcome::Interrupted {
-                                        partial_message: ProviderMessage {
-                                            role: "assistant".to_string(),
-                                            content: None,
-                                            tool_calls: None,
-                                            tool_call_id: None,
-                                            reasoning_content: None,
-                                        },
+                                        partial_cognition:
+                                            crate::provider_adapter::InterruptedCognition::default(),
                                         events: Vec::new(),
                                         attempt:
                                             crate::provider_adapter::streaming::CutAttemptState {
@@ -1105,7 +1582,11 @@ impl Runner {
                         turn_replayed_from = replayed
                             .as_ref()
                             .map(|(record_hash, _)| record_hash.clone());
-                        let call = if let Some((record_hash, response)) = replayed {
+                        let (call, durable_retry_advance, prepared_retry) = if let Some((
+                            record_hash,
+                            response,
+                        )) = replayed
+                        {
                             tracing::info!(
                                 %record_hash,
                                 turn,
@@ -1133,10 +1614,14 @@ impl Runner {
                                     )
                                     .await;
                             }
-                            Ok(crate::provider_adapter::StreamOutcome::Completed {
-                                response,
-                                events: Vec::new(),
-                            })
+                            (
+                                Ok(crate::provider_adapter::StreamOutcome::Completed {
+                                    response,
+                                    events: Vec::new(),
+                                }),
+                                None,
+                                None,
+                            )
                         } else {
                             // Send the exact prepared bytes.
                             let call = match &prepared.transport {
@@ -1165,10 +1650,83 @@ impl Runner {
                                     )),
                                 },
                             };
-                            // One terminal daemon settlement per issued attempt,
-                            // BEFORE retry classification: a retry is a NEW attempt
-                            // and may only be admitted after its predecessor's
-                            // financial state is durable (§9.4).
+                            // Classify and close every retry prerequisite before
+                            // settlement. The resulting closed decision is then
+                            // committed atomically with the predecessor's terminal
+                            // financial state; no post-settlement event append is
+                            // allowed to become retry authority.
+                            let mut prepared_retry = if let Err(error) = &call {
+                                if let Some((delay, reason)) =
+                                    retry_classification(error, attempt, &self.execution)
+                                {
+                                    let usage_required = self.accounting_fail_closed();
+                                    let ambiguous_without_accounting = error
+                                        .downcast_ref::<crate::provider_adapter::ProviderStreamError>()
+                                        .is_some_and(|error| matches!(
+                                            error,
+                                            crate::provider_adapter::ProviderStreamError::Timeout { .. }
+                                                | crate::provider_adapter::ProviderStreamError::Send {
+                                                    connect: false,
+                                                    ..
+                                                }
+                                        ));
+                                    if usage_required && ambiguous_without_accounting {
+                                        break Err(anyhow::anyhow!(
+                                            "provider_accounting_invalid: refusing an ambiguous retry because the provider may have accepted work but required attempt usage is unavailable; original error: {error:#}"
+                                        ));
+                                    }
+                                    let mid_stream_usage = error
+                                        .downcast_ref::<crate::provider_adapter::ProviderStreamError>()
+                                        .and_then(|error| match error {
+                                            crate::provider_adapter::ProviderStreamError::MidStream(
+                                                mid_stream,
+                                            ) => Some(mid_stream.usage.as_ref()),
+                                            _ => None,
+                                        });
+                                    if let Some(usage) = mid_stream_usage {
+                                        self.settle_available_attempt_accounting(
+                                            turn,
+                                            usage,
+                                            turn_start.elapsed().as_millis() as u64,
+                                        )
+                                        .await
+                                        .map_err(|settlement_error| {
+                                            anyhow::anyhow!(
+                                                "provider attempt accounting settlement failed before retry: {settlement_error:#}"
+                                            )
+                                        })?;
+                                        if usage_required
+                                            && !usage.is_some_and(|usage| usage.is_valid())
+                                        {
+                                            break Err(anyhow::anyhow!(
+                                                "provider_accounting_invalid: mid-stream attempt cannot be retried because required final usage is unavailable; original error: {error:#}"
+                                            ));
+                                        }
+                                    }
+                                    if let Err(limit) = self.harness.check_retry_limits() {
+                                        break Err(anyhow::anyhow!(
+                                            "provider retry refused after closing the prior attempt: {limit}; original error: {error:#}"
+                                        ));
+                                    }
+                                    Some(provider_retry_decision(
+                                        turn,
+                                        attempt_number,
+                                        delay,
+                                        reason,
+                                        error,
+                                        &self.execution,
+                                    )?)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+
+                            // One terminal daemon settlement per issued attempt.
+                            // A retry is a new physical attempt and its exact
+                            // successor coordinate is stored in this same commit.
+                            let mut durable_retry_advance = None;
                             if let Some(ledger) = ledger_attempt {
                                 let (stream_completed, ledger_usage, ledger_diag): (
                                     bool,
@@ -1225,228 +1783,108 @@ impl Runner {
                                     },
                                     _ => None,
                                 };
-                                if let Err(settle_error) = self
-                                    .settle_ledger_attempt(&ledger, spend, tokens, answer)
+                                durable_retry_advance = match self
+                                    .settle_ledger_attempt(
+                                        &ledger,
+                                        spend,
+                                        tokens,
+                                        answer,
+                                        prepared_retry.clone(),
+                                    )
                                     .await
                                 {
-                                    // Terminal settlement unprovable: no retry,
-                                    // fail-safe termination.
-                                    break Err(anyhow::anyhow!(
-                                        "provider_attempt_settlement_unprovable: {settle_error:#}"
-                                    ));
+                                    Ok(advance) => advance,
+                                    Err(settle_error) => {
+                                        // Terminal settlement unprovable: no
+                                        // retry, fail-safe native recovery.
+                                        break Err(anyhow::anyhow!(
+                                            "provider_attempt_settlement_unprovable: {settle_error:#}"
+                                        ));
+                                    }
+                                };
+                                if prepared_retry.is_some() && durable_retry_advance.is_none() {
+                                    // The ledger may refuse advancement when
+                                    // settlement disproves/quarantines its
+                                    // authority. The attempt remains honestly
+                                    // terminal, but the original provider error
+                                    // is not retryable anymore.
+                                    prepared_retry = None;
                                 }
                             }
-                            call
+                            (call, durable_retry_advance, prepared_retry)
                         };
                         match call {
-                            Err(e) => match retry_backoff(&e, attempt, &self.execution) {
-                                Some(delay) => {
-                                    let usage_required = self.accounting_fail_closed();
-                                    let ambiguous_without_accounting = e
-                                        .downcast_ref::<crate::provider_adapter::ProviderStreamError>()
-                                        .is_some_and(|error| matches!(
-                                            error,
-                                            crate::provider_adapter::ProviderStreamError::Timeout { .. }
-                                                | crate::provider_adapter::ProviderStreamError::Send {
-                                                    connect: false,
-                                                    ..
-                                                }
-                                        ));
-                                    if usage_required && ambiguous_without_accounting {
-                                        break Err(anyhow::anyhow!(
-                                            "provider_accounting_invalid: refusing an ambiguous retry because the provider may have accepted work but required attempt usage is unavailable; original error: {e:#}"
-                                        ));
-                                    }
-                                    let mid_stream_attempt = e
-                                        .downcast_ref::<crate::provider_adapter::ProviderStreamError>()
-                                        .and_then(|error| match error {
-                                            crate::provider_adapter::ProviderStreamError::MidStream(
-                                                mid_stream,
-                                            ) => Some((
-                                                mid_stream.accepted_bytes,
-                                                mid_stream.accepted_output_events,
-                                                mid_stream.live_output_events_emitted,
-                                                mid_stream.usage.clone(),
-                                                mid_stream.generation_header_id.clone(),
-                                                mid_stream.response_id.clone(),
-                                                mid_stream.requested_output_tokens,
-                                            )),
-                                            _ => None,
-                                        });
-                                    let usage_valid = mid_stream_attempt
-                                        .as_ref()
-                                        .and_then(|(_, _, _, usage, _, _, _)| usage.as_ref())
-                                        .is_some_and(|usage| usage.is_valid());
-                                    if let Some((_, _, _, usage, _, _, _)) =
-                                        mid_stream_attempt.as_ref()
-                                    {
-                                        let settlement_result = self
-                                            .settle_available_attempt_accounting(
-                                                turn,
-                                                usage.as_ref(),
-                                                turn_start.elapsed().as_millis() as u64,
-                                            )
-                                            .await;
-                                        if let Err(settlement_error) = settlement_result {
-                                            break Err(anyhow::anyhow!(
-                                                "provider attempt accounting settlement failed before retry: {settlement_error:#}"
-                                            ));
-                                        }
-                                    }
-                                    if usage_required
-                                        && mid_stream_attempt.is_some()
-                                        && !usage_valid
-                                    {
-                                        break Err(anyhow::anyhow!(
-                                            "provider_accounting_invalid: mid-stream attempt cannot be retried because required final usage is unavailable; original error: {e:#}"
-                                        ));
-                                    }
-                                    if let Err(limit) = self.harness.check_retry_limits() {
-                                        break Err(anyhow::anyhow!(
-                                            "provider retry refused after settling the prior attempt: {limit}; original error: {e:#}"
-                                        ));
-                                    }
-                                    attempt += 1;
-                                    // Surface whether this was a connect-phase
-                                    // transport failure (`Some(true)`) vs another
-                                    // pre-stream send/reset (`Some(false)`) vs a
-                                    // status/timeout retry (`None`) — the signal
-                                    // for telling burst-fanout connect blips apart
-                                    // from real provider throttling.
-                                    let send_connect_phase = e
-                                        .downcast_ref::<crate::provider_adapter::ProviderStreamError>(
-                                        )
-                                        .and_then(|pe| match pe {
-                                            crate::provider_adapter::ProviderStreamError::Send {
-                                                connect,
-                                                ..
-                                            } => Some(*connect),
-                                            _ => None,
-                                        });
-                                    // A mid-stream cut abandons partial
-                                    // live/ephemeral output; carry how much was
-                                    // acknowledged so
-                                    // the retry marker quantifies the attempt.
-                                    let mid_stream_live_output_events_emitted = e
-                                        .downcast_ref::<crate::provider_adapter::ProviderStreamError>(
-                                        )
-                                        .and_then(|pe| match pe {
-                                            crate::provider_adapter::ProviderStreamError::MidStream(
-                                                mid_stream,
-                                            ) => Some(mid_stream.live_output_events_emitted),
-                                            _ => None,
-                                        });
-                                    tracing::warn!(
-                                        turn,
-                                        attempt,
-                                        max_retries = self.execution.retries,
-                                        backoff_ms = delay.as_millis() as u64,
-                                        send_connect_phase = ?send_connect_phase,
-                                        error = %e,
-                                        "provider call failed with a retryable error; \
-                                         backing off before retry"
-                                    );
-                                    warnings.push(format!(
-                                        "provider retry {attempt}/{max} on turn {turn} \
-                                         after {ms}ms backoff: {e:#}",
-                                        max = self.execution.retries,
-                                        ms = delay.as_millis(),
+                            Err(e) => {
+                                let Some(decision) = prepared_retry else {
+                                    break Err(e);
+                                };
+                                let Some(advance) = durable_retry_advance else {
+                                    break Err(anyhow::anyhow!(
+                                        "provider_retry_requires_durable_attempt_authority: the provider failure was retryable, but no atomic ledger advancement exists; original failure digest={}",
+                                        decision.failure_digest.as_str()
                                     ));
-                                    // Durable braid record so the stall shows in
-                                    // the timeline, not just the terminal warning
-                                    // summary. `provider_retry` is a canonical
-                                    // RuntimeEventType (ryeos-runtime events.rs).
-                                    record_callback_warning(
-                                        &mut warnings,
-                                        "provider_retry",
-                                        self.callback
-                                            .append_runtime_event(
-                                                ryeos_runtime::RuntimeEventType::ProviderRetry,
-                                                json!({
-                                                    "turn": turn,
-                                                    "attempt": attempt,
-                                                    "max_retries": self.execution.retries,
-                                                    "backoff_ms": delay.as_millis() as u64,
-                                                    "send_connect_phase": send_connect_phase,
-                                                    "mid_stream_live_output_events_emitted":
-                                                        mid_stream_live_output_events_emitted,
-                                                    "provider_attempt": mid_stream_attempt.as_ref().map(|(
-                                                        accepted_bytes,
-                                                        accepted_output_events,
-                                                        live_output_events_emitted,
-                                                        usage,
-                                                        generation_header_id,
-                                                        response_id,
-                                                        requested_output_tokens,
-                                                    )| json!({
-                                                        "attempt_id": format!("{}:{turn}:{attempt}", self.thread_id),
-                                                        "attempt_number": attempt,
-                                                        "accepted_bytes": accepted_bytes,
-                                                        "accepted_output_events": accepted_output_events,
-                                                        "live_output_events_emitted": live_output_events_emitted,
-                                                        "usage": usage,
-                                                        "generation_header_id": generation_header_id,
-                                                        "response_id": response_id,
-                                                        "requested_output_tokens": requested_output_tokens,
-                                                        "accounting_status": usage.as_ref().map(|usage| if usage.is_valid() {
-                                                            "reported"
-                                                        } else {
-                                                            "malformed"
-                                                        }).unwrap_or("unavailable"),
-                                                    })),
-                                                    "error": format!("{e:#}"),
-                                                }),
-                                            )
-                                            .await,
+                                };
+                                self.validate_retry_advance(&advance, turn, attempt_number)?;
+                                block_at_directive_recovery_test_cut(
+                                    &self.callback,
+                                    "provider_retry_settled",
+                                )
+                                .await;
+                                if let Err(error) =
+                                    self.emit_provider_retry_testimony(&advance).await
+                                {
+                                    tracing::warn!(
+                                        decision_digest = %advance.decision_digest.as_str(),
+                                        %error,
+                                        "provider retry testimony outcome is unknown; requesting same-thread recovery"
                                     );
-                                    tokio::select! {
-                                        _ = tokio::time::sleep(delay) => {}
-                                        _ = async {
-                                            while !cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                                            }
-                                        } => {
-                                            break Ok(crate::provider_adapter::StreamOutcome::Cancelled {
-                                                attempt: crate::provider_adapter::streaming::CutAttemptState {
-                                                    usage: None,
-                                                    generation_header_id: None,
-                                                    response_id: None,
-                                                    requested_output_tokens: None,
-                                                    observed_output: Default::default(),
-                                                },
-                                            });
-                                        }
-                                        _ = async {
-                                            while !interrupt_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                                            }
-                                        } => {
-                                            break Ok(crate::provider_adapter::StreamOutcome::Interrupted {
-                                                partial_message: ProviderMessage {
-                                                    role: "assistant".to_string(),
-                                                    content: None,
-                                                    tool_calls: None,
-                                                    tool_call_id: None,
-                                                    reasoning_content: None,
-                                                },
-                                                events: Vec::new(),
-                                                attempt: crate::provider_adapter::streaming::CutAttemptState {
-                                                    usage: None,
-                                                    generation_header_id: None,
-                                                    response_id: None,
-                                                    requested_output_tokens: None,
-                                                    observed_output: Default::default(),
-                                                },
-                                            });
-                                        }
-                                    }
-                                    continue;
+                                    return Err(ryeos_runtime::process_outcome::RuntimeRecoveryRequired::retained_progress_outcome_unknown(
+                                        self.thread_id.clone(),
+                                    ).into());
                                 }
-                                None => break Err(e),
-                            },
+                                attempt = advance.decision.failed_attempt_number;
+                                tracing::warn!(
+                                    turn,
+                                    attempt,
+                                    max_retries = self.execution.retries,
+                                    backoff_ms = advance.decision.backoff_ms,
+                                    reason = ?advance.decision.reason,
+                                    failure_digest = %advance.decision.failure_digest.as_str(),
+                                    "provider call failed with a durably admitted retry; backing off before the exact successor"
+                                );
+                                warnings.push(format!(
+                                    "provider retry {attempt}/{max} on turn {turn} after {ms}ms backoff (decision {decision_digest})",
+                                    max = self.execution.retries,
+                                    ms = advance.decision.backoff_ms,
+                                    decision_digest = advance.decision_digest.as_str(),
+                                ));
+                                if let Some(terminal) = provider_retry_wait_terminal(
+                                    wait_for_provider_retry_deadline(
+                                        advance.not_before_ms,
+                                        &cancel_flag,
+                                        &interrupt_flag,
+                                    )
+                                    .await,
+                                ) {
+                                    break Ok(terminal);
+                                }
+                                continue;
+                            }
                             ok => break ok,
                         }
                     };
+                    if self.provider_effects_recorded
+                        && matches!(
+                            &stream_result,
+                            Ok(crate::provider_adapter::StreamOutcome::Completed { .. })
+                        )
+                    {
+                        block_at_directive_recovery_test_cut(
+                            &self.callback,
+                            "provider_effect_settled",
+                        )
+                        .await;
+                    }
                     match stream_result {
                         Ok(crate::provider_adapter::StreamOutcome::Completed {
                             response: resp,
@@ -1743,13 +2181,18 @@ impl Runner {
                                 };
                                 continue;
                             }
-                            self.messages.push(resp.message.clone());
-                            let assistant_message = match serde_json::to_value(&resp.message) {
+                            let cognition_tool_calls = match resp
+                                .message
+                                .tool_calls
+                                .as_ref()
+                                .map(serde_json::to_value)
+                                .transpose()
+                            {
                                 Ok(value) => value,
                                 Err(e) => {
                                     state = State::Errored {
                                         error: format!(
-                                            "serialize assistant message for turn completion: {e}"
+                                            "serialize cognition tool calls for turn completion: {e}"
                                         ),
                                     };
                                     continue;
@@ -1784,17 +2227,38 @@ impl Runner {
                                 .emit_turn_complete(
                                     turn,
                                     token_counts,
-                                    Some(assistant_message),
+                                    resp.message.content.clone(),
+                                    cognition_tool_calls,
+                                    resp.message.reasoning_content.clone(),
                                     provider_accounting,
                                 )
                                 .await
                             {
-                                state = State::Errored {
+                                state = State::RecoveryRequired {
                                     error: format!(
                                         "resume-critical callback emit_turn_complete failed: {e}"
                                     ),
                                 };
                                 continue;
+                            }
+                            self.messages.push(resp.message.clone());
+                            if resp
+                                .message
+                                .tool_calls
+                                .as_ref()
+                                .is_some_and(|calls| !calls.is_empty())
+                            {
+                                block_at_directive_recovery_test_cut(
+                                    &self.callback,
+                                    "tool_proposal_recorded",
+                                )
+                                .await;
+                            } else if resp.message.content.is_some() {
+                                block_at_directive_recovery_test_cut(
+                                    &self.callback,
+                                    "final_cognition_recorded",
+                                )
+                                .await;
                             }
                             if let Some(ref reason) = resp.finish_reason {
                                 tracing::debug!(finish_reason = %reason, "provider response");
@@ -1835,25 +2299,10 @@ impl Runner {
                             State::Cancelled
                         }
                         Ok(crate::provider_adapter::StreamOutcome::Interrupted {
-                            partial_message,
+                            partial_cognition,
                             events,
                             attempt: cut,
                         }) => {
-                            if let Err(error) = self
-                                .settle_available_attempt_accounting(
-                                    turn,
-                                    cut.usage.as_ref(),
-                                    turn_start.elapsed().as_millis() as u64,
-                                )
-                                .await
-                            {
-                                state = State::Errored {
-                                    error: format!(
-                                        "interrupted provider attempt accounting settlement failed: {error:#}"
-                                    ),
-                                };
-                                continue;
-                            }
                             // Live interrupt (SIGUSR1) cut the in-flight cognition.
                             // Surface any provider warnings from the partial stream
                             // (the diagnostic State::Streaming pass is skipped on the
@@ -1882,36 +2331,51 @@ impl Runner {
                                 };
                                 continue;
                             }
+                            // Account any provider usage only after refunding
+                            // the logical turn. The cumulative usage snapshot
+                            // must retain the charge while honestly showing
+                            // that an interrupted cognition did not consume a
+                            // completed-turn slot.
+                            if let Err(error) = self
+                                .settle_available_attempt_accounting(
+                                    turn,
+                                    cut.usage.as_ref(),
+                                    turn_start.elapsed().as_millis() as u64,
+                                )
+                                .await
+                            {
+                                state = State::Errored {
+                                    error: format!(
+                                        "interrupted provider attempt accounting settlement failed: {error:#}"
+                                    ),
+                                };
+                                continue;
+                            }
 
                             // Seal the partial as a transcript-bearing
                             // cognition_out{interrupted:true} (content/reasoning
                             // only, no tool_calls) so the braid holds an honest,
-                            // foldable consequence — then mirror it into the live
-                            // wire-fold so the redirect has context.
-                            let partial_value = match serde_json::to_value(&partial_message) {
-                                Ok(v) => Some(v),
-                                Err(e) => {
-                                    state = State::Errored {
-                                        error: format!(
-                                            "serialize interrupted partial message: {e}"
-                                        ),
-                                    };
-                                    continue;
-                                }
-                            };
+                            // foldable consequence. Only after that RyeOS
+                            // boundary do we render it as the provider-wire
+                            // assistant message needed by the redirected call.
                             if let Err(e) = self
                                 .callback
-                                .emit_turn_interrupted(turn, partial_value)
+                                .emit_turn_interrupted(
+                                    turn,
+                                    partial_cognition.content.clone(),
+                                    partial_cognition.reasoning_content.clone(),
+                                )
                                 .await
                             {
-                                state = State::Errored {
+                                state = State::RecoveryRequired {
                                     error: format!(
                                         "resume-critical callback emit_turn_interrupted failed: {e}"
                                     ),
                                 };
                                 continue;
                             }
-                            self.messages.push(partial_message);
+                            self.messages
+                                .push(partial_cognition.into_provider_message());
 
                             // Back to the between-turns boundary: CheckingLimits
                             // folds the queued input (DECISION 2: if the poll is
@@ -2278,17 +2742,33 @@ impl Runner {
 
                             if has_tool_calls {
                                 if let Some(ref tool_calls) = msg.tool_calls {
+                                    let occurrences = tool_calls
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(call_index, call)| ToolOccurrence {
+                                            call: call.clone(),
+                                            operation_id:
+                                                crate::resume::directive_tool_operation_id(
+                                                    &self.thread_id,
+                                                    turn,
+                                                    call_index,
+                                                ),
+                                            start_recorded: false,
+                                            counted: false,
+                                            spawn_counted: false,
+                                        })
+                                        .collect::<Vec<_>>();
                                     // Lifecycle-bearing batches keep the
                                     // strict serial path; plain batches
                                     // dispatch through the bounded window.
-                                    if batch_is_lifecycle_bearing(tool_calls) {
+                                    if batch_is_lifecycle_bearing(&occurrences) {
                                         State::DispatchingTools {
-                                            pending: tool_calls.clone(),
+                                            pending: occurrences,
                                             index: 0,
                                         }
                                     } else {
                                         State::DispatchingToolBatch {
-                                            pending: tool_calls.clone(),
+                                            pending: occurrences,
                                         }
                                     }
                                 } else {
@@ -2315,7 +2795,7 @@ impl Runner {
                                     match self.poll_pending_input().await {
                                         Ok(true) => State::CheckingLimits,
                                         Ok(false) => State::Finalizing { result: content },
-                                        Err(e) => State::Errored { error: e },
+                                        Err(e) => State::RecoveryRequired { error: e },
                                     }
                                 } else {
                                     State::Finalizing { result: content }
@@ -2338,40 +2818,57 @@ impl Runner {
                     if index >= pending.len() {
                         State::CheckingContinuation
                     } else {
-                        let tc = &pending[index];
-                        if let Err(e) = self
-                            .callback
-                            .emit_tool_dispatch(
-                                &tc.name,
-                                tc.id.as_deref(),
-                                self.harness.effective_caps(),
-                            )
-                            .await
-                        {
-                            state = State::Errored {
-                                error: format!(
-                                    "resume-critical callback emit_tool_dispatch failed: {e}"
-                                ),
-                            };
-                            continue;
+                        let occurrence = pending[index].clone();
+                        let tc = &occurrence.call;
+                        if !occurrence.start_recorded {
+                            if let Err(e) = self
+                                .callback
+                                .emit_tool_dispatch(
+                                    &occurrence.operation_id,
+                                    &tc.name,
+                                    tc.id.as_deref(),
+                                    self.harness.effective_caps(),
+                                )
+                                .await
+                            {
+                                state = State::RecoveryRequired {
+                                    error: format!(
+                                        "resume-critical callback emit_tool_dispatch failed: {e}"
+                                    ),
+                                };
+                                continue;
+                            }
+                            if tc.name != DIRECTIVE_RETURN_TOOL
+                                && !self.harness.tool_calls_available()
+                            {
+                                block_at_directive_recovery_test_cut(
+                                    &self.callback,
+                                    "tool_limit_refusal_start_recorded",
+                                )
+                                .await;
+                            }
                         }
 
                         // directive_return: lifecycle signal, not a tool.
                         // Bypass permission check and dispatch entirely;
                         // the runner handles output validation,
                         // event emission, and finalization inline.
-                        if tc.name == "directive_return" {
+                        if tc.name == DIRECTIVE_RETURN_TOOL {
                             State::ProcessingDirectiveReturn {
                                 call_id: tc.id.clone().unwrap_or_default(),
+                                operation_id: occurrence.operation_id,
                                 raw_args: tc.arguments.to_string(),
                             }
-                        } else if !self.harness.try_record_tool_call() {
+                        } else if !occurrence.counted && !self.harness.try_record_tool_call() {
                             let call_id = tc.id.clone().unwrap_or_default();
                             let tool_name = tc.name.clone();
                             let rendered =
                                 Self::rendered_error_envelope(&tool_name, tool_call_limit_error());
-                            if let Err(error) = self.settle_tool_result(call_id, rendered).await {
-                                state = State::Errored { error };
+                            if let Err(error) = self
+                                .settle_tool_result(occurrence.operation_id, call_id, rendered)
+                                .await
+                            {
+                                state = State::RecoveryRequired { error };
                                 continue;
                             }
                             state_after_serial_tool_result(
@@ -2389,9 +2886,11 @@ impl Runner {
                             State::ProcessingToolResult {
                                 call_id: tc.id.clone().unwrap_or_default(),
                                 tool_name: tc.name.clone(),
+                                operation_id: occurrence.operation_id,
                                 raw_args: tc.arguments.to_string(),
                                 pending,
                                 index,
+                                spawn_counted: occurrence.spawn_counted,
                             }
                         }
                     }
@@ -2400,30 +2899,52 @@ impl Runner {
                 State::ProcessingToolResult {
                     call_id,
                     tool_name,
+                    operation_id,
                     raw_args,
                     pending,
                     index,
+                    spawn_counted,
                 } => {
                     let tool_result: RenderedToolResult = match self
-                        .preflight_tool_call(&tool_name, &raw_args, &call_id, &mut warnings)
+                        .preflight_tool_call(
+                            &operation_id,
+                            &tool_name,
+                            &raw_args,
+                            &call_id,
+                            spawn_counted,
+                        )
                         .await
                     {
                         Ok(request) => match self.callback.dispatch_action(*request).await {
-                            Ok(response) => self.rendered_success(&tool_name, &response.result),
-                            Err(e) => {
-                                let body_str =
-                                    serde_json::to_string(&json!({"error": format!("{e:#}")}))
-                                        .unwrap_or_else(|_| {
-                                            "{\"error\":\"dispatch failed\"}".to_string()
-                                        });
-                                Self::rendered_error_envelope(&tool_name, body_str)
+                            Ok(response) => {
+                                block_at_directive_recovery_test_cut(
+                                    &self.callback,
+                                    "tool_settled",
+                                )
+                                .await;
+                                self.rendered_success(&tool_name, &response.result)
                             }
+                            Err(e) if e.runtime_action_outcome_unknown() => {
+                                state = State::RecoveryRequired {
+                                    error: format!(
+                                        "runtime action {operation_id} outcome is unknown: {e}"
+                                    ),
+                                };
+                                continue;
+                            }
+                            Err(e) => Self::rendered_error_envelope(
+                                &tool_name,
+                                callback_error_envelope(&e),
+                            ),
                         },
                         Err(body) => Self::rendered_error_envelope(&tool_name, body),
                     };
 
-                    if let Err(error) = self.settle_tool_result(call_id, tool_result).await {
-                        state = State::Errored { error };
+                    if let Err(error) = self
+                        .settle_tool_result(operation_id, call_id, tool_result)
+                        .await
+                    {
+                        state = State::RecoveryRequired { error };
                         continue;
                     }
 
@@ -2454,34 +2975,53 @@ impl Runner {
                         /// passes the result guard, exactly like the serial path.
                         Immediate(String),
                     }
-                    let mut prepared: Vec<(String, String, BatchWork)> =
+                    let mut prepared: Vec<(String, String, String, BatchWork)> =
                         Vec::with_capacity(pending.len());
-                    let mut fatal: Option<String> = None;
+                    let mut recovery_required: Option<String> = None;
                     let mut admission_cancelled = false;
-                    for tc in &pending {
+                    for occurrence in &pending {
+                        let tc = &occurrence.call;
                         if self.harness.is_cancelled() {
                             admission_cancelled = true;
                             break;
                         }
-                        if let Err(e) = self
-                            .callback
-                            .emit_tool_dispatch(
-                                &tc.name,
-                                tc.id.as_deref(),
-                                self.harness.effective_caps(),
-                            )
-                            .await
-                        {
-                            fatal = Some(format!(
-                                "resume-critical callback emit_tool_dispatch failed: {e}"
-                            ));
-                            break;
+                        if !occurrence.start_recorded {
+                            if let Err(e) = self
+                                .callback
+                                .emit_tool_dispatch(
+                                    &occurrence.operation_id,
+                                    &tc.name,
+                                    tc.id.as_deref(),
+                                    self.harness.effective_caps(),
+                                )
+                                .await
+                            {
+                                recovery_required = Some(format!(
+                                    "resume-critical callback emit_tool_dispatch failed: {e}"
+                                ));
+                                break;
+                            }
+                            if tc.name != DIRECTIVE_RETURN_TOOL
+                                && !self.harness.tool_calls_available()
+                            {
+                                block_at_directive_recovery_test_cut(
+                                    &self.callback,
+                                    "tool_limit_refusal_start_recorded",
+                                )
+                                .await;
+                            }
                         }
                         let call_id = tc.id.clone().unwrap_or_default();
                         let raw_args = tc.arguments.to_string();
-                        let work = if self.harness.try_record_tool_call() {
+                        let work = if occurrence.counted || self.harness.try_record_tool_call() {
                             match self
-                                .preflight_tool_call(&tc.name, &raw_args, &call_id, &mut warnings)
+                                .preflight_tool_call(
+                                    &occurrence.operation_id,
+                                    &tc.name,
+                                    &raw_args,
+                                    &call_id,
+                                    occurrence.spawn_counted,
+                                )
                                 .await
                             {
                                 Ok(request) => BatchWork::Dispatch(Some(request)),
@@ -2490,13 +3030,17 @@ impl Runner {
                         } else {
                             BatchWork::Immediate(tool_call_limit_error())
                         };
-                        prepared.push((call_id, tc.name.clone(), work));
+                        prepared.push((
+                            occurrence.operation_id.clone(),
+                            call_id,
+                            tc.name.clone(),
+                            work,
+                        ));
                     }
-                    if let Some(error) = fatal {
-                        state = State::Errored { error };
+                    if let Some(error) = recovery_required {
+                        state = State::RecoveryRequired { error };
                         continue;
                     }
-
                     // Phase B — bounded concurrent dispatch. Each task owns a
                     // callback clone and its sealed request; no task touches
                     // runner state. Cancellation stops admission; in-flight
@@ -2507,13 +3051,16 @@ impl Runner {
                     let dispatch_indices: Vec<usize> = prepared
                         .iter()
                         .enumerate()
-                        .filter_map(|(index, (_, _, work))| {
+                        .filter_map(|(index, (_, _, _, work))| {
                             matches!(work, BatchWork::Dispatch(_)).then_some(index)
                         })
                         .collect();
                     let mut outcomes: std::collections::BTreeMap<
                         usize,
-                        Result<ryeos_runtime::callback_contract::CallbackDispatchResponse, String>,
+                        Result<
+                            ryeos_runtime::callback_contract::CallbackDispatchResponse,
+                            ryeos_runtime::callback::CallbackError,
+                        >,
                     > = std::collections::BTreeMap::new();
                     {
                         let mut join = tokio::task::JoinSet::new();
@@ -2529,7 +3076,7 @@ impl Runner {
                                 }
                                 let index = dispatch_indices[next];
                                 next += 1;
-                                let request = match &mut prepared[index].2 {
+                                let request = match &mut prepared[index].3 {
                                     BatchWork::Dispatch(slot) => {
                                         slot.take().expect("dispatch slot spawns once")
                                     }
@@ -2540,10 +3087,7 @@ impl Runner {
                                 let callback = self.callback.clone();
                                 join.spawn(tracing::Instrument::instrument(
                                     async move {
-                                        let result = callback
-                                            .dispatch_action(*request)
-                                            .await
-                                            .map_err(|e| format!("{e:#}"));
+                                        let result = callback.dispatch_action(*request).await;
                                         (index, result)
                                     },
                                     tracing::Span::current(),
@@ -2560,7 +3104,7 @@ impl Runner {
                                     // work still folds: stop admitting, keep
                                     // draining, and settle every gathered
                                     // outcome before erroring.
-                                    fatal.get_or_insert(format!(
+                                    recovery_required.get_or_insert(format!(
                                         "tool dispatch task failed: {join_error}"
                                     ));
                                     admission_cancelled = true;
@@ -2577,29 +3121,36 @@ impl Runner {
                     // cancellation only calls that actually dispatched fold;
                     // unadmitted calls are dropped exactly as the serial path
                     // drops undispatched ones.
-                    for (index, (call_id, tool_name, work)) in prepared.into_iter().enumerate() {
+                    for (index, (operation_id, call_id, tool_name, work)) in
+                        prepared.into_iter().enumerate()
+                    {
                         let rendered = match work {
                             BatchWork::Immediate(body) => {
                                 Self::rendered_error_envelope(&tool_name, body)
                             }
-                            BatchWork::Dispatch(_) => match outcomes.remove(&index) {
+                            BatchWork::Dispatch(unstarted_request) => match outcomes.remove(&index)
+                            {
                                 Some(Ok(response)) => {
+                                    block_at_directive_recovery_test_cut(
+                                        &self.callback,
+                                        "tool_settled",
+                                    )
+                                    .await;
                                     self.rendered_success(&tool_name, &response.result)
                                 }
-                                Some(Err(e)) => {
-                                    let body = serde_json::to_string(&json!({ "error": e }))
-                                        .unwrap_or_else(|_| {
-                                            "{\"error\":\"dispatch failed\"}".to_string()
-                                        });
-                                    Self::rendered_error_envelope(&tool_name, body)
+                                Some(Err(error)) if error.runtime_action_outcome_unknown() => {
+                                    recovery_required = Some(format!(
+                                        "runtime action {operation_id} outcome is unknown: {error}"
+                                    ));
+                                    break;
                                 }
-                                None => {
-                                    // Never admitted (cancellation or a batch
-                                    // abort stopped the window). Settle an
-                                    // explicit error envelope so every emitted
-                                    // dispatch intent pairs with exactly one
-                                    // result — the transcript never carries a
-                                    // non-suffix hole.
+                                Some(Err(e)) => Self::rendered_error_envelope(
+                                    &tool_name,
+                                    callback_error_envelope(&e),
+                                ),
+                                None if unstarted_request.is_some() => {
+                                    // The request remained in its slot, proving
+                                    // no callback task contacted the daemon.
                                     let body = serde_json::to_string(&json!({
                                         "error": "batch aborted before this call dispatched"
                                     }))
@@ -2608,15 +3159,24 @@ impl Runner {
                                     });
                                     Self::rendered_error_envelope(&tool_name, body)
                                 }
+                                None => {
+                                    recovery_required = Some(format!(
+                                        "runtime action {operation_id} task ended without a provable outcome"
+                                    ));
+                                    break;
+                                }
                             },
                         };
-                        if let Err(error) = self.settle_tool_result(call_id, rendered).await {
-                            fatal.get_or_insert(error);
+                        if let Err(error) = self
+                            .settle_tool_result(operation_id, call_id, rendered)
+                            .await
+                        {
+                            recovery_required.get_or_insert(error);
                             break;
                         }
                     }
-                    if let Some(error) = fatal {
-                        state = State::Errored { error };
+                    if let Some(error) = recovery_required {
+                        state = State::RecoveryRequired { error };
                         continue;
                     }
                     if admission_cancelled || self.harness.is_cancelled() {
@@ -2637,7 +3197,11 @@ impl Runner {
                     }
                 }
 
-                State::ProcessingDirectiveReturn { call_id, raw_args } => {
+                State::ProcessingDirectiveReturn {
+                    call_id,
+                    operation_id,
+                    raw_args,
+                } => {
                     // directive_return is a lifecycle signal, not a
                     // dispatchable tool. The LLM calls it using the
                     // provider's tool-call convention; the runtime
@@ -2650,19 +3214,10 @@ impl Runner {
                     let tool_result_content = match crate::adapter::parse_tool_arguments(&raw_args)
                     {
                         Ok(args) => {
-                            // Validate declared outputs
-                            let mut validation_error = None;
-                            if let Some(ref outputs) = self.directive_outputs {
-                                for output in outputs {
-                                    if args.get(&output.name).is_none_or(|v| v.is_null()) {
-                                        validation_error = Some(format!(
-                                            "directive_return: missing required output '{}'",
-                                            output.name
-                                        ));
-                                        break;
-                                    }
-                                }
-                            }
+                            let validation_error = directive_output_validation_error(
+                                self.directive_outputs.as_deref(),
+                                &args,
+                            );
 
                             if let Some(err) = validation_error {
                                 serde_json::to_string(&json!({"error": err})).unwrap_or_else(|_| {
@@ -2687,9 +3242,10 @@ impl Runner {
                                 if let Err(e) = self
                                     .callback
                                     .emit_tool_result(
+                                        &operation_id,
                                         &call_id,
-                                        "directive_return",
-                                        Some(&outputs_json),
+                                        DIRECTIVE_RETURN_TOOL,
+                                        &outputs_json,
                                         false,
                                         None,
                                         outputs_size,
@@ -2697,56 +3253,20 @@ impl Runner {
                                     )
                                     .await
                                 {
-                                    state = State::Errored {
+                                    state = State::RecoveryRequired {
                                         error: format!(
                                             "resume-critical callback emit_tool_result failed: {e}"
                                         ),
                                     };
                                     continue;
                                 }
-
-                                // Finalize thread. The persisted result mirrors
-                                // the live RuntimeResult.result here (the
-                                // `directive_return` sentinel); the structured
-                                // outputs travel in `outputs` + the published
-                                // artifact, so /execute and threads.get agree.
-                                let completion = TerminalCompletion {
-                                    status: ThreadTerminalStatus::Completed,
-                                    outcome_code: Some("success".to_string()),
-                                    result: Some(json!("directive_return")),
-                                    error: None,
-                                    cost: Some(
-                                        serde_json::to_value(self.budget.cost()).expect(
-                                            "validated directive cost must serialize for terminal settlement",
-                                        ),
-                                    ),
-                                    // The structured return lives in `outputs`, not
-                                    // `result` — carry it so a follow parent can
-                                    // consume `${result.outputs.*}` on resume.
-                                    outputs: args.clone(),
-                                    warnings: warnings.clone(),
-                                };
-                                if let Err(e) = self.callback.finalize_thread(completion).await {
-                                    guard.finalized = true;
-                                    return Self::attach_warnings(
-                                        RuntimeResult {
-                                            success: false,
-                                            status: RuntimeResultStatus::Failed,
-                                            thread_id: self.thread_id.clone(),
-                                            result: Some(json!(format!(
-                                                "resume-critical callback finalize_thread failed: {e}"
-                                            ))),
-                                            outputs: json!({}),
-                                            cost: Some(self.budget.cost()),
-                                            warnings: std::mem::take(&mut warnings),
-                                        },
-                                        &mut warnings,
-                                    );
-                                }
-                                let mut result = self.finalize(json!("directive_return"));
-                                result.outputs = args;
-                                guard.finalized = true;
-                                return Self::attach_warnings(result, &mut warnings);
+                                block_at_directive_recovery_test_cut(
+                                    &self.callback,
+                                    "directive_return_recorded",
+                                )
+                                .await;
+                                state = State::FinalizingDirectiveReturn { outputs: args };
+                                continue;
                             }
                         }
                         Err(e) => serde_json::to_string(&json!({"error": e}))
@@ -2760,9 +3280,10 @@ impl Runner {
                     if let Err(e) = self
                         .callback
                         .emit_tool_result(
+                            &operation_id,
                             &call_id,
-                            "directive_return",
-                            Some(&tool_result_content),
+                            DIRECTIVE_RETURN_TOOL,
+                            &tool_result_content,
                             false,
                             Some("error_envelope"),
                             failure_size,
@@ -2770,7 +3291,7 @@ impl Runner {
                         )
                         .await
                     {
-                        state = State::Errored {
+                        state = State::RecoveryRequired {
                             error: format!("resume-critical callback emit_tool_result failed: {e}"),
                         };
                         continue;
@@ -2967,8 +3488,7 @@ impl Runner {
 
                 State::Finalizing { result } => {
                     // Reaching Finalizing means no successful `directive_return`
-                    // this segment (success finalizes inside
-                    // ProcessingDirectiveReturn). When outputs are declared:
+                    // this segment. When outputs are declared:
                     // with `return_nudge: true`, grant ONE corrective turn
                     // naming the missing call; otherwise (or after the nudge)
                     // settle with empty outputs and a recorded warning.
@@ -2987,13 +3507,14 @@ impl Runner {
                             self.return_nudge_sent = true;
                             let nudge = self.return_nudge.message(&declared_outputs);
                             // Durable stimulus so the corrective turn is
-                            // braid-visible; a failed append degrades to an
-                            // unrecorded nudge rather than failing the run.
+                            // braid-visible and exactly reconstructable.
                             if let Err(e) = self.callback.emit_stimulus(&nudge).await {
-                                tracing::warn!(
-                                    error = %e,
-                                    "return_nudge stimulus append failed; nudge turn proceeds unrecorded"
-                                );
+                                state = State::RecoveryRequired {
+                                    error: format!(
+                                        "resume-critical return_nudge stimulus append failed: {e}"
+                                    ),
+                                };
+                                continue;
                             }
                             self.messages.push(ProviderMessage {
                                 role: "user".to_string(),
@@ -3035,11 +3556,44 @@ impl Runner {
                             warnings: Vec::new(),
                         };
                         guard.finalized = true;
-                        return Self::attach_warnings(runtime_result, &mut warnings);
+                        return Ok(Self::attach_warnings(runtime_result, &mut warnings));
                     }
                     let runtime_result = self.finalize(result);
                     guard.finalized = true;
-                    return Self::attach_warnings(runtime_result, &mut warnings);
+                    return Ok(Self::attach_warnings(runtime_result, &mut warnings));
+                }
+
+                State::FinalizingDirectiveReturn { outputs } => {
+                    let completion = TerminalCompletion {
+                        status: ThreadTerminalStatus::Completed,
+                        outcome_code: Some("success".to_string()),
+                        result: Some(json!(DIRECTIVE_RETURN_TOOL)),
+                        error: None,
+                        cost: Some(serde_json::to_value(self.budget.cost()).expect(
+                            "validated directive cost must serialize for terminal settlement",
+                        )),
+                        outputs: outputs.clone(),
+                        warnings: warnings.clone(),
+                    };
+                    if let Err(e) = self.callback.finalize_thread(completion).await {
+                        let runtime_result = RuntimeResult {
+                            success: false,
+                            status: RuntimeResultStatus::Failed,
+                            thread_id: self.thread_id.clone(),
+                            result: Some(json!(format!(
+                                "resume-critical callback finalize_thread failed: {e}"
+                            ))),
+                            outputs: json!({}),
+                            cost: Some(self.budget.cost()),
+                            warnings: Vec::new(),
+                        };
+                        guard.finalized = true;
+                        return Ok(Self::attach_warnings(runtime_result, &mut warnings));
+                    }
+                    let mut runtime_result = self.finalize(json!(DIRECTIVE_RETURN_TOOL));
+                    runtime_result.outputs = outputs;
+                    guard.finalized = true;
+                    return Ok(Self::attach_warnings(runtime_result, &mut warnings));
                 }
 
                 State::Continued => {
@@ -3087,11 +3641,11 @@ impl Runner {
                             warnings: Vec::new(),
                         };
                         guard.finalized = true;
-                        return Self::attach_warnings(runtime_result, &mut warnings);
+                        return Ok(Self::attach_warnings(runtime_result, &mut warnings));
                     }
 
                     guard.finalized = true;
-                    return Self::attach_warnings(runtime_result, &mut warnings);
+                    return Ok(Self::attach_warnings(runtime_result, &mut warnings));
                 }
 
                 State::Errored { error } => {
@@ -3133,7 +3687,17 @@ impl Runner {
                         warnings: Vec::new(),
                     };
                     guard.finalized = true;
-                    return Self::attach_warnings(runtime_result, &mut warnings);
+                    return Ok(Self::attach_warnings(runtime_result, &mut warnings));
+                }
+
+                State::RecoveryRequired { error } => {
+                    tracing::warn!(%error, "directive requires same-thread native recovery");
+                    return Err(
+                        ryeos_runtime::process_outcome::RuntimeRecoveryRequired::retained_progress_outcome_unknown(
+                            self.thread_id.clone(),
+                        )
+                        .into(),
+                    );
                 }
 
                 State::Cancelled => {
@@ -3147,7 +3711,7 @@ impl Runner {
                         warnings: Vec::new(),
                     };
                     guard.finalized = true;
-                    return Self::attach_warnings(runtime_result, &mut warnings);
+                    return Ok(Self::attach_warnings(runtime_result, &mut warnings));
                 }
             };
         }
@@ -3160,10 +3724,11 @@ impl Runner {
     /// lives on the harness; MUST run in call order.
     async fn preflight_tool_call(
         &mut self,
+        operation_id: &str,
         tool_name: &str,
         raw_args: &str,
         call_id: &str,
-        warnings: &mut Vec<String>,
+        spawn_already_counted: bool,
     ) -> Result<Box<ryeos_runtime::callback::DispatchActionRequest>, String> {
         match self
             .dispatcher
@@ -3172,9 +3737,12 @@ impl Runner {
             Ok(dispatch_result) => {
                 // Record spawn for child executions (directive/graph)
                 match dispatch_result.dispatch_kind {
-                    DispatchKind::DirectiveChild | DispatchKind::GraphChild => {
+                    DispatchKind::DirectiveChild | DispatchKind::GraphChild
+                        if !spawn_already_counted =>
+                    {
                         self.harness.record_spawn();
                     }
+                    DispatchKind::DirectiveChild | DispatchKind::GraphChild => {}
                     DispatchKind::Tool => {}
                 }
 
@@ -3196,31 +3764,12 @@ impl Runner {
                         )
                     }))
                     .unwrap_or_else(|_| "{\"error\":\"blocked\"}".to_string());
-                    // Risk-policy block surfaces as a `tool_call_result` with a
-                    // `blocked` status payload so the daemon's event-store
-                    // validator (which has no `risk_blocked` name) accepts it.
-                    record_callback_warning(
-                        warnings,
-                        "tool_call_result(blocked)",
-                        self.callback
-                            .append_runtime_event(
-                                RuntimeEventType::ToolCallResult,
-                                json!({
-                                    "tool": dispatch_result.canonical_ref,
-                                    "call_id": dispatch_result.call_id,
-                                    "blocked": true,
-                                    "level": risk.level,
-                                    "requires_ack": risk.requires_ack,
-                                }),
-                            )
-                            .await,
-                    );
                     Err(body_str)
                 } else {
                     Ok(Box::new(ryeos_runtime::callback::DispatchActionRequest {
                         thread_id: self.thread_id.clone(),
                         action: ryeos_runtime::callback::ActionPayload {
-                            operation_id: None,
+                            operation_id: Some(operation_id.to_string()),
                             item_id: dispatch_result.canonical_ref.clone(),
                             ref_bindings: std::collections::BTreeMap::new(),
                             params: dispatch_result.arguments.clone(),
@@ -3259,22 +3808,39 @@ impl Runner {
             tool: tool_name.to_string(),
             content: String::from_utf8_lossy(&guarded.bytes).to_string(),
             raw_size,
-            result_guard_truncated: guarded.truncated,
+            truncated: guarded.truncated,
             duplicate_of: guarded.duplicate_of,
-            truncated_reason_override: None,
+            truncated_reason: guarded.truncated.then_some("result_guard"),
         }
     }
 
     /// Render a preflight or dispatch failure as the standard error envelope
     /// the model sees. Error envelopes never pass the result guard.
     fn rendered_error_envelope(tool_name: &str, body: String) -> RenderedToolResult {
+        let raw_size = body.len() as u64;
+        let (content, truncated) = if body.len() <= MAX_ERROR_ENVELOPE_BYTES {
+            (body, false)
+        } else {
+            let digest = lillux::sha256_hex(body.as_bytes());
+            (
+                serde_json::to_string(&json!({
+                    "error": {
+                        "code": "error_envelope_truncated",
+                        "message": "The action failed with an oversized error response.",
+                        "response_digest": digest,
+                    }
+                }))
+                .expect("fixed oversized error envelope serializes"),
+                true,
+            )
+        };
         RenderedToolResult {
             tool: tool_name.to_string(),
-            raw_size: body.len() as u64,
-            content: body,
-            result_guard_truncated: false,
+            raw_size,
+            content,
+            truncated,
             duplicate_of: None,
-            truncated_reason_override: Some("error_envelope"),
+            truncated_reason: Some("error_envelope"),
         }
     }
 
@@ -3284,23 +3850,24 @@ impl Runner {
     /// resume-critical and returned as the run-fatal error string.
     async fn settle_tool_result(
         &mut self,
+        operation_id: String,
         call_id: String,
         rendered: RenderedToolResult,
     ) -> Result<(), String> {
-        let (inline_body, truncated, truncated_reason) = result_emission_flags(&rendered);
-        let body = inline_body.then_some(rendered.content.as_str());
         self.callback
             .emit_tool_result(
+                &operation_id,
                 &call_id,
                 &rendered.tool,
-                body,
-                truncated,
-                truncated_reason,
+                &rendered.content,
+                rendered.truncated,
+                rendered.truncated_reason,
                 rendered.raw_size,
                 rendered.duplicate_of.as_deref(),
             )
             .await
             .map_err(|e| format!("resume-critical callback emit_tool_result failed: {e}"))?;
+        block_at_directive_recovery_test_cut(&self.callback, "tool_observation_recorded").await;
         self.messages.push(ProviderMessage {
             role: "tool".to_string(),
             content: Some(json!(rendered.content)),
@@ -3461,6 +4028,12 @@ impl Runner {
                             observed_output: Default::default(),
                         },
                     });
+                }
+                ProviderAttemptPrepareResponse::RetryAdvanced { advance } => {
+                    return Ok(LedgerAdmission::RetryAdvanced(advance));
+                }
+                ProviderAttemptPrepareResponse::RetryNotBefore { advance } => {
+                    return Ok(LedgerAdmission::RetryNotBefore(advance));
                 }
                 ProviderAttemptPrepareResponse::ReservationDenied { .. } => {
                     return Ok(LedgerAdmission::Denied);
@@ -3688,6 +4261,72 @@ impl Runner {
         }
     }
 
+    fn validate_retry_advance(
+        &self,
+        advance: &ProviderRetryAdvance,
+        turn: u32,
+        failed_attempt_number: u32,
+    ) -> anyhow::Result<()> {
+        advance
+            .validate()
+            .map_err(|error| anyhow::anyhow!("invalid provider retry advancement: {error}"))?;
+        if advance.decision.turn != turn
+            || advance.decision.failed_attempt_number != failed_attempt_number
+            || advance.decision.next_attempt_number
+                != failed_attempt_number
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("provider retry coordinate overflow"))?
+        {
+            anyhow::bail!(
+                "provider retry advancement contradicts active turn {turn} attempt {failed_attempt_number}"
+            );
+        }
+        let policy_digest = retry_policy_digest(&self.execution)?;
+        if advance.decision.retry_policy_digest != policy_digest {
+            anyhow::bail!(
+                "provider retry advancement was admitted under a different execution policy"
+            );
+        }
+        let expected_delay = retry_delay_for_reason(
+            &advance.decision.reason,
+            failed_attempt_number,
+            &self.execution,
+        )
+        .ok_or_else(|| {
+            anyhow::anyhow!("provider retry advancement is forbidden by the exact execution policy")
+        })?;
+        if u64::try_from(expected_delay.as_millis()).ok() != Some(advance.decision.backoff_ms) {
+            anyhow::bail!("provider retry advancement backoff contradicts execution policy");
+        }
+        Ok(())
+    }
+
+    async fn emit_provider_retry_testimony(
+        &mut self,
+        advance: &ProviderRetryAdvance,
+    ) -> anyhow::Result<()> {
+        let digest = advance.decision_digest.as_str();
+        if self.provider_retry_testimony_digests.contains(digest) {
+            return Ok(());
+        }
+        self.callback
+            .append_runtime_event(
+                ryeos_runtime::RuntimeEventType::ProviderRetry,
+                json!({
+                    "turn": advance.decision.turn,
+                    "attempt": advance.decision.failed_attempt_number,
+                    "max_retries": self.execution.retries,
+                    "backoff_ms": advance.decision.backoff_ms,
+                    "decision_digest": digest,
+                    "retry_advance": advance,
+                }),
+            )
+            .await?;
+        self.provider_retry_testimony_digests
+            .insert(digest.to_string());
+        Ok(())
+    }
+
     /// Settle the issued attempt with bounded exact-retry recovery, then a
     /// recorded-state read. A terminal settlement that cannot be proven is an
     /// error — the caller must fail safe without admitting a retry.
@@ -3697,7 +4336,8 @@ impl Runner {
         spend: SpendAccounting,
         tokens: TokenAccounting,
         answer: Option<ryeos_provider_contract::ProviderCallAnswer>,
-    ) -> anyhow::Result<()> {
+        retry: Option<ProviderRetryDecision>,
+    ) -> anyhow::Result<Option<ProviderRetryAdvance>> {
         let params = ProviderAttemptSettleParams {
             thread_id: self.thread_id.clone(),
             attempt_id: ledger.attempt_id.clone(),
@@ -3707,6 +4347,7 @@ impl Runner {
             spend,
             tokens,
             answer,
+            retry,
         };
         let required_publication = params
             .answer
@@ -3741,7 +4382,7 @@ impl Runner {
                             ledger.attempt_id
                         );
                     }
-                    return Ok(());
+                    return Ok(response.retry_advance);
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -3787,7 +4428,7 @@ impl Runner {
                     state = record.state.as_str(),
                     "settlement replies were lost; recorded terminal state proven by read"
                 );
-                Ok(())
+                Ok(record.retry_advance)
             }
             Ok(Some(record)) => Err(anyhow::anyhow!(
                 "terminal settlement unprovable: attempt {} recorded state `{}`",
@@ -4257,11 +4898,17 @@ mod tests {
         ryeos_accounting::UsdNanos::parse_canonical(canonical).unwrap()
     }
 
-    fn tool_call(name: &str) -> crate::directive::ToolCall {
-        crate::directive::ToolCall {
-            id: Some(format!("call-{name}")),
-            name: name.to_string(),
-            arguments: serde_json::json!({}),
+    fn tool_call(name: &str) -> ToolOccurrence {
+        ToolOccurrence {
+            call: crate::directive::ToolCall {
+                id: Some(format!("call-{name}")),
+                name: name.to_string(),
+                arguments: serde_json::json!({}),
+            },
+            operation_id: "1".repeat(64),
+            start_recorded: false,
+            counted: false,
+            spawn_counted: false,
         }
     }
 
@@ -4272,68 +4919,50 @@ mod tests {
             tool_call("a"),
             tool_call("b")
         ]));
-        assert!(batch_is_lifecycle_bearing(&[tool_call("directive_return")]));
+        assert!(batch_is_lifecycle_bearing(&[tool_call(
+            DIRECTIVE_RETURN_TOOL
+        )]));
         assert!(batch_is_lifecycle_bearing(&[
             tool_call("a"),
-            tool_call("directive_return"),
+            tool_call(DIRECTIVE_RETURN_TOOL),
             tool_call("b"),
         ]));
     }
 
     #[test]
-    fn result_emission_flags_precedence_matches_the_serial_contract() {
-        let clean = RenderedToolResult {
-            tool: "t".to_string(),
-            content: "ok".to_string(),
-            raw_size: 2,
-            result_guard_truncated: false,
-            duplicate_of: None,
-            truncated_reason_override: None,
-        };
-        assert_eq!(result_emission_flags(&clean), (true, false, None));
+    fn error_envelopes_are_bounded_and_retain_honest_metadata() {
+        let small = Runner::rendered_error_envelope("t", "{\"error\":\"no\"}".to_string());
+        assert!(!small.truncated);
+        assert_eq!(small.truncated_reason, Some("error_envelope"));
+        assert_eq!(small.raw_size, small.content.len() as u64);
 
-        let error_envelope = RenderedToolResult {
-            truncated_reason_override: Some("error_envelope"),
-            ..clean_clone(&clean)
-        };
-        assert_eq!(
-            result_emission_flags(&error_envelope),
-            (true, false, Some("error_envelope"))
-        );
-
-        let guard_truncated = RenderedToolResult {
-            result_guard_truncated: true,
-            // Guard truncation dominates an override.
-            truncated_reason_override: Some("error_envelope"),
-            ..clean_clone(&clean)
-        };
-        assert_eq!(
-            result_emission_flags(&guard_truncated),
-            (true, true, Some("result_guard"))
-        );
-
-        let over_cap = RenderedToolResult {
-            content: "x".repeat(ryeos_runtime::callback_client::TOOL_RESULT_INLINE_MAX_BYTES + 1),
-            // The size cap dominates everything.
-            result_guard_truncated: true,
-            truncated_reason_override: Some("error_envelope"),
-            ..clean_clone(&clean)
-        };
-        assert_eq!(
-            result_emission_flags(&over_cap),
-            (false, true, Some("size_cap_exceeded"))
-        );
+        let oversized_body = "secret".repeat(MAX_ERROR_ENVELOPE_BYTES);
+        let oversized = Runner::rendered_error_envelope("t", oversized_body.clone());
+        assert!(oversized.truncated);
+        assert_eq!(oversized.truncated_reason, Some("error_envelope"));
+        assert_eq!(oversized.raw_size, oversized_body.len() as u64);
+        assert!(oversized.content.len() < MAX_ERROR_ENVELOPE_BYTES);
+        assert!(!oversized.content.contains("secretsecret"));
+        let parsed: Value = serde_json::from_str(&oversized.content).unwrap();
+        assert_eq!(parsed["error"]["code"], "error_envelope_truncated");
+        assert!(lillux::valid_hash(
+            parsed["error"]["response_digest"].as_str().unwrap()
+        ));
     }
 
-    fn clean_clone(r: &RenderedToolResult) -> RenderedToolResult {
-        RenderedToolResult {
-            tool: r.tool.clone(),
-            content: r.content.clone(),
-            raw_size: r.raw_size,
-            result_guard_truncated: r.result_guard_truncated,
-            duplicate_of: r.duplicate_of.clone(),
-            truncated_reason_override: r.truncated_reason_override,
-        }
+    #[test]
+    fn callback_error_envelope_does_not_expose_daemon_message() {
+        let error = ryeos_runtime::callback::CallbackError::ActionFailed {
+            code: "policy_denied".to_string(),
+            message: "vault token and /private/path".to_string(),
+            retryable: false,
+        };
+        let body = callback_error_envelope(&error);
+        assert!(!body.contains("vault token"));
+        assert!(!body.contains("/private/path"));
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["error"]["code"], "policy_denied");
+        assert_eq!(parsed["error"]["retryable"], false);
     }
 
     #[test]
@@ -4359,18 +4988,11 @@ mod tests {
 
     #[test]
     fn serial_limit_result_preserves_remaining_call_order() {
-        let pending = vec![
-            crate::directive::ToolCall {
-                id: Some("first".to_string()),
-                name: "one".to_string(),
-                arguments: json!({}),
-            },
-            crate::directive::ToolCall {
-                id: Some("second".to_string()),
-                name: "two".to_string(),
-                arguments: json!({}),
-            },
-        ];
+        let mut first = tool_call("one");
+        first.call.id = Some("first".to_string());
+        let mut second = tool_call("two");
+        second.call.id = Some("second".to_string());
+        let pending = vec![first, second];
         match state_after_serial_tool_result(
             pending,
             0,
@@ -4381,7 +5003,7 @@ mod tests {
         ) {
             State::DispatchingTools { pending, index } => {
                 assert_eq!(index, 1);
-                assert_eq!(pending[index].id.as_deref(), Some("second"));
+                assert_eq!(pending[index].call.id.as_deref(), Some("second"));
             }
             _ => panic!("first settled call must advance to the next call"),
         }
@@ -4389,11 +5011,9 @@ mod tests {
 
     #[test]
     fn serial_limit_final_result_builds_generic_after_step_occurrence() {
-        let pending = vec![crate::directive::ToolCall {
-            id: Some("only".to_string()),
-            name: "one".to_string(),
-            arguments: json!({}),
-        }];
+        let mut only = tool_call("one");
+        only.call.id = Some("only".to_string());
+        let pending = vec![only];
         match state_after_serial_tool_result(
             pending,
             0,
@@ -6295,6 +6915,7 @@ mod tests {
                 SpendAccounting::ExplicitlyFree,
                 TokenAccounting::Unavailable,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -6328,6 +6949,7 @@ mod tests {
                 },
                 TokenAccounting::Unavailable,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -6353,6 +6975,7 @@ mod tests {
                 &test_ledger_attempt(&authority),
                 SpendAccounting::ExplicitlyFree,
                 TokenAccounting::Unavailable,
+                None,
                 None,
             )
             .await

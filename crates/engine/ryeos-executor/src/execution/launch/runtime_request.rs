@@ -8,6 +8,7 @@ use ryeos_engine::canonical_ref::CanonicalRef;
 
 use super::{EnvelopeCallback, LaunchEnvelope, RuntimeResult};
 use ryeos_runtime::envelope::RuntimeResultStatus;
+use ryeos_runtime::process_outcome::RuntimeProcessOutcome;
 
 pub(super) struct SpawnRuntimeParams<'a> {
     pub state: &'a ryeos_app::state::AppState,
@@ -67,9 +68,9 @@ pub(super) struct SpawnedRuntime {
 }
 
 impl SpawnedRuntime {
-    pub(super) fn wait(mut self) -> Result<RuntimeResult> {
+    pub(super) fn wait(mut self) -> Result<RuntimeProcessOutcome> {
         if let Some(result) = self.immediate_result.take() {
-            return Ok(result);
+            return Ok(RuntimeProcessOutcome::Terminal(result));
         }
         let process = self
             .process
@@ -88,11 +89,11 @@ impl SpawnedRuntime {
         drop(self.external_realizations.take());
         drop(self.source_closure.take());
         if !result.success {
-            return Ok(runtime_failure_result(
+            return Ok(RuntimeProcessOutcome::Terminal(runtime_failure_result(
                 &result.stderr,
                 result.timed_out,
                 result.output_limit_exceeded.map(|limit| limit.as_str()),
-            ));
+            )));
         }
         decode_runtime_stdout(&result.stdout)
     }
@@ -595,8 +596,8 @@ fn runtime_failure_result(
     }
 }
 
-fn decode_runtime_stdout(stdout: &str) -> Result<RuntimeResult> {
-    serde_json::from_str(stdout).map_err(|error| {
+fn decode_runtime_stdout(stdout: &str) -> Result<RuntimeProcessOutcome> {
+    ryeos_runtime::process_outcome::decode_runtime_process_stdout(stdout).map_err(|error| {
         anyhow::anyhow!(
             "failed to parse runtime stdout: {}\nstdout: {}",
             error,

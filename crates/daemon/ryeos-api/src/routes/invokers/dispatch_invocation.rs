@@ -219,13 +219,27 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             effect_authority: None,
         };
 
-        let result = ryeos_executor::dispatch::dispatch(
-            item_ref.as_str(),
-            &dispatch_req,
-            &exec_ctx,
-            &ctx.state,
-        )
-        .await
+        let result = match ctx.principal.as_ref() {
+            Some(principal) => {
+                ryeos_executor::dispatch::dispatch_with_handler_context(
+                    item_ref.as_str(),
+                    principal.handler_context(),
+                    &dispatch_req,
+                    &exec_ctx,
+                    &ctx.state,
+                )
+                .await
+            }
+            None => {
+                ryeos_executor::dispatch::dispatch(
+                    item_ref.as_str(),
+                    &dispatch_req,
+                    &exec_ctx,
+                    &ctx.state,
+                )
+                .await
+            }
+        }
         .map_err(|e| RouteDispatchError::Internal(format!("dispatch failed: {e}")))?;
 
         Ok(RouteInvocationResult::Json {

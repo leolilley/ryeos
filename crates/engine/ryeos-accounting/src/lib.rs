@@ -38,12 +38,12 @@ pub use rpc::{
     ProviderAttemptPrepareParams, ProviderAttemptPrepareResponse,
     ProviderAttemptReleaseUnissuedParams, ProviderAttemptReleaseUnissuedResponse,
     ProviderAttemptSettleParams, ProviderAttemptSettleResponse, ProviderCallPublication,
-    ProviderCallPublicationProof, RUNTIME_PROVIDER_ATTEMPT_GET,
-    RUNTIME_PROVIDER_ATTEMPT_LOCAL_STREAM_CONTROL, RUNTIME_PROVIDER_ATTEMPT_LOCAL_STREAM_NEXT,
-    RUNTIME_PROVIDER_ATTEMPT_LOCAL_STREAM_START, RUNTIME_PROVIDER_ATTEMPT_MARK_ISSUED,
-    RUNTIME_PROVIDER_ATTEMPT_PREPARE, RUNTIME_PROVIDER_ATTEMPT_RELEASE_UNISSUED,
-    RUNTIME_PROVIDER_ATTEMPT_SETTLE, SpendAccounting, SpendBoundCommitments, TokenAccounting,
-    UnitCount, VerifiedPreparedSpendBound,
+    ProviderCallPublicationProof, ProviderRetryAdvance, ProviderRetryDecision, ProviderRetryReason,
+    RUNTIME_PROVIDER_ATTEMPT_GET, RUNTIME_PROVIDER_ATTEMPT_LOCAL_STREAM_CONTROL,
+    RUNTIME_PROVIDER_ATTEMPT_LOCAL_STREAM_NEXT, RUNTIME_PROVIDER_ATTEMPT_LOCAL_STREAM_START,
+    RUNTIME_PROVIDER_ATTEMPT_MARK_ISSUED, RUNTIME_PROVIDER_ATTEMPT_PREPARE,
+    RUNTIME_PROVIDER_ATTEMPT_RELEASE_UNISSUED, RUNTIME_PROVIDER_ATTEMPT_SETTLE, SpendAccounting,
+    SpendBoundCommitments, TokenAccounting, UnitCount, VerifiedPreparedSpendBound,
 };
 pub use state::{
     AccountHealth, AttemptBudgetState, AuthorityHealth, ChargeBasis, ReconciliationReason,

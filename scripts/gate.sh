@@ -113,3 +113,16 @@ test_threads_args=()
 gate_info "cargo nextest run --workspace --no-fail-fast (build_jobs=${build_jobs}, test_threads=${test_threads}) ${nextest_args[*]:-}"
 "$CARGO" nextest run --workspace --no-fail-fast \
     "${cargo_jobs_args[@]}" "${test_threads_args[@]}" "${nextest_args[@]:-}"
+
+# A production daemon must not expose the crash-cut endpoint, so this matrix
+# cannot be part of the default-feature workspace binary. A full, explicitly
+# refreshed source gate has the exact signed runtime bytes required by the
+# process-kill qualification and must execute every durable cut before release.
+if [[ "$refresh_bundles" == "1" && "$bundle_set" == "full" && ${#nextest_args[@]} -eq 0 ]]; then
+    gate_info "qualifying directive native-resume crash cuts"
+    RYEOS_TEST_SKIP_BUNDLE_REFRESH=1 \
+        "$CARGO" nextest run -p ryeosd \
+        --features crash-qualification-test-support \
+        --test directive_crash_recovery_e2e \
+        "${cargo_jobs_args[@]}" --test-threads 1
+fi

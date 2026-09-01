@@ -605,7 +605,8 @@ pub fn register_config_fixture_bundle(
 /// Write a `kind: node` bundle record pointing at
 /// `bundles/standard`, signed with the publisher key. Use this
 /// when a test needs the standard bundle's runtime/directive YAMLs in
-/// the daemon's effective bundle roots.
+/// the daemon's effective bundle roots. This mirrors the `standard` bundle
+/// set exactly; UI tests must register `ryeos-ui` explicitly.
 pub fn register_standard_bundle(state_path: &Path, fixture: &FastFixture) -> Result<()> {
     super::ensure_bundles_fresh();
     let standard = super::workspace_root().join("bundles/standard");
@@ -619,9 +620,6 @@ pub fn register_standard_bundle(state_path: &Path, fixture: &FastFixture) -> Res
     let signed =
         lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
     fs::write(dir.join("standard.yaml"), signed)?;
-    // RyeOS UI bundle was split from standard — tests that register
-    // standard also need RyeOS UI for the UI service catalog self-check.
-    register_ryeos_ui_bundle(state_path, fixture)?;
     Ok(())
 }
 

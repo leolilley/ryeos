@@ -16,14 +16,14 @@ use crate::sqlite_schema;
 
 const OPERATIONAL_APP_ID: i32 = 0x5259_4f50; // "RYOP"
 const OPERATIONAL_SCHEMA_VERSION: i32 = 6;
-// Dispatch-effect records retain the complete admitted execution closure,
-// including the exact admitted-launch-capsule contract. Epoch 5 is the
-// clean-cut activation for launch-capsule schema 15: predecessor effect rows
-// must be retired rather than keeping schema-13/14 capsules as GC roots.
-// Provider-call records do not carry that dependency and remain current.
-const REPLAY_INDEX_EPOCH: i32 = 5;
+// Dispatch-effect records retain complete launch and caller authority. Epoch 6
+// is the clean-cut activation for effect-record/key schema 4 and launch-capsule
+// schema 16: predecessor rows omit caller/project/lifecycle/accounting
+// authority from their reusable key and must be retired. Provider-call records
+// do not carry that dependency and remain current.
+const REPLAY_INDEX_EPOCH: i32 = 6;
 #[cfg(test)]
-const DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA: u32 = 15;
+const DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA: u32 = 16;
 pub const OPERATIONAL_DB_FILENAME: &str = "operational.sqlite3";
 pub(crate) const OPERATIONAL_INITIALIZED_FILENAME: &str = "operational.initialized";
 const OPERATIONAL_INITIALIZED_CONTENT: &[u8] = b"ryeos-operational-v1\n";
@@ -132,7 +132,7 @@ CREATE TABLE replay_index_epoch (
     epoch INTEGER NOT NULL CHECK (epoch > 0)
 );
 
-INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 5);
+INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 6);
 
 CREATE TABLE credential_profiles (
     profile_id TEXT PRIMARY KEY,
@@ -293,12 +293,12 @@ CREATE TABLE replay_index_epoch (
 INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 4);
 "#;
 
-/// Exact epoch-4 → epoch-5 cut: the dispatch-effect closure contract changed
-/// with admitted-launch-capsule schema 15. Provider-call evidence remains
-/// current and must survive this activation.
+/// Exact epoch-5 → epoch-6 cut: dispatch effects now bind complete launch and
+/// authenticated caller authority. Provider-call evidence remains current and
+/// must survive this activation.
 const REPLAY_INDEX_RESET_DDL: &str = r#"
 DELETE FROM replay_records WHERE namespace = 'dispatch.effect';
-UPDATE replay_index_epoch SET epoch = 5 WHERE singleton = 1;
+UPDATE replay_index_epoch SET epoch = 6 WHERE singleton = 1;
 "#;
 
 /// A store upgraded directly from the pre-unified operational layout has no
@@ -322,7 +322,7 @@ CREATE INDEX idx_replay_records_retention
     ON replay_records(namespace, last_replayed_at, produced_at, cache_key);
 CREATE INDEX idx_replay_records_record_hash ON replay_records(record_hash);
 
-UPDATE replay_index_epoch SET epoch = 5 WHERE singleton = 1;
+UPDATE replay_index_epoch SET epoch = 6 WHERE singleton = 1;
 "#;
 
 fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
@@ -3586,27 +3586,58 @@ impl OperationalDb {
         operation_type: &str,
         limit: usize,
     ) -> Result<Vec<SyncJobRecord>> {
+        self.list_active_sync_jobs_by_operation_type_after(operation_type, None, limit)
+    }
+
+    /// Keyset-paginated active recovery scan. The cursor is the exact
+    /// `(created_at, job_id)` pair from the preceding page's last row; both
+    /// columns are immutable, so state transitions during recovery cannot
+    /// make later jobs disappear or make an earlier row repeat.
+    pub fn list_active_sync_jobs_by_operation_type_after(
+        &self,
+        operation_type: &str,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> Result<Vec<SyncJobRecord>> {
         validate_non_empty_label("operation_type", operation_type)?;
-        let limit = limit.clamp(1, 500);
-        let mut stmt = self
-            .conn
-            .prepare_cached(
-                "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
-                    uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
-                    last_error, result_json, created_at, updated_at, finished_at
-                 FROM sync_jobs
-                 WHERE operation_type = ?1 AND state IN ('planned','running','retryable')
-                 ORDER BY created_at ASC, job_id ASC LIMIT ?2",
-            )
-            .context("failed to prepare active sync operation recovery query")?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params![operation_type, i64::try_from(limit)?],
-                sync_job_from_row,
-            )
-            .context("failed to query active sync operation jobs")?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to collect active sync operation jobs")
+        let limit = i64::try_from(limit.clamp(1, 500))?;
+        let rows = match after {
+            Some((created_at, job_id)) => {
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+                            uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
+                            last_error, result_json, created_at, updated_at, finished_at
+                         FROM sync_jobs
+                         WHERE operation_type = ?1 AND state IN ('planned','running','retryable')
+                           AND (created_at > ?2 OR (created_at = ?2 AND job_id > ?3))
+                         ORDER BY created_at ASC, job_id ASC LIMIT ?4",
+                    )
+                    .context("failed to prepare paged active sync recovery query")?;
+                stmt.query_map(
+                    rusqlite::params![operation_type, created_at, job_id, limit],
+                    sync_job_from_row,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+            }
+            None => {
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+                            uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
+                            last_error, result_json, created_at, updated_at, finished_at
+                         FROM sync_jobs
+                         WHERE operation_type = ?1 AND state IN ('planned','running','retryable')
+                         ORDER BY created_at ASC, job_id ASC LIMIT ?2",
+                    )
+                    .context("failed to prepare active sync operation recovery query")?;
+                stmt.query_map(rusqlite::params![operation_type, limit], sync_job_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            }
+        };
+        Ok(rows)
     }
 
     /// Oldest-first bounded scan for one exact operation family and state.
@@ -3618,27 +3649,61 @@ impl OperationalDb {
         state: SyncJobState,
         limit: usize,
     ) -> Result<Vec<SyncJobRecord>> {
+        self.list_sync_jobs_by_operation_type_and_state_after(operation_type, state, None, limit)
+    }
+
+    /// Keyset-paginated oldest-first scan for one exact operation family and
+    /// state. This is the terminal-state counterpart of
+    /// [`Self::list_active_sync_jobs_by_operation_type_after`].
+    pub fn list_sync_jobs_by_operation_type_and_state_after(
+        &self,
+        operation_type: &str,
+        state: SyncJobState,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> Result<Vec<SyncJobRecord>> {
         validate_non_empty_label("operation_type", operation_type)?;
-        let limit = limit.clamp(1, 500);
-        let mut stmt = self
-            .conn
-            .prepare_cached(
-                "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
-                    uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
-                    last_error, result_json, created_at, updated_at, finished_at
-                 FROM sync_jobs
-                 WHERE operation_type = ?1 AND state = ?2
-                 ORDER BY created_at ASC, job_id ASC LIMIT ?3",
-            )
-            .context("failed to prepare exact sync operation state query")?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params![operation_type, state.as_str(), i64::try_from(limit)?],
-                sync_job_from_row,
-            )
-            .context("failed to query exact sync operation state jobs")?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to collect exact sync operation state jobs")
+        let limit = i64::try_from(limit.clamp(1, 500))?;
+        let rows = match after {
+            Some((created_at, job_id)) => {
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+                            uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
+                            last_error, result_json, created_at, updated_at, finished_at
+                         FROM sync_jobs
+                         WHERE operation_type = ?1 AND state = ?2
+                           AND (created_at > ?3 OR (created_at = ?3 AND job_id > ?4))
+                         ORDER BY created_at ASC, job_id ASC LIMIT ?5",
+                    )
+                    .context("failed to prepare paged exact sync operation state query")?;
+                stmt.query_map(
+                    rusqlite::params![operation_type, state.as_str(), created_at, job_id, limit],
+                    sync_job_from_row,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+            }
+            None => {
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT job_id, operation_type, operation_json, peer, state, phase, roots_json, heads_json,
+                            uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
+                            last_error, result_json, created_at, updated_at, finished_at
+                         FROM sync_jobs
+                         WHERE operation_type = ?1 AND state = ?2
+                         ORDER BY created_at ASC, job_id ASC LIMIT ?3",
+                    )
+                    .context("failed to prepare exact sync operation state query")?;
+                stmt.query_map(
+                    rusqlite::params![operation_type, state.as_str(), limit],
+                    sync_job_from_row,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+            }
+        };
+        Ok(rows)
     }
 
     pub fn count_active_sync_jobs(&self) -> Result<u64> {
@@ -4155,14 +4220,14 @@ mod tests {
     #[test]
     fn fresh_schema_declares_only_the_current_replay_epoch() {
         assert!(SCHEMA_SQL.contains("answer_digest TEXT NOT NULL"));
-        assert!(SCHEMA_SQL.contains("VALUES (1, 5)"));
-        assert!(!SCHEMA_SQL.contains("VALUES (1, 4)"));
+        assert!(SCHEMA_SQL.contains("VALUES (1, 6)"));
+        assert!(!SCHEMA_SQL.contains("VALUES (1, 5)"));
     }
 
     #[test]
     fn replay_epoch_fences_the_current_dispatch_effect_capsule_contract() {
-        assert_eq!(REPLAY_INDEX_EPOCH, 5);
-        assert_eq!(DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA, 15);
+        assert_eq!(REPLAY_INDEX_EPOCH, 6);
+        assert_eq!(DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA, 16);
         assert_eq!(
             DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA,
             crate::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
@@ -5203,6 +5268,93 @@ mod tests {
         assert_eq!(completed_jobs.len(), 1);
         assert_eq!(completed_jobs[0].job_id, "job:alpha");
         assert_eq!(db.count_active_sync_jobs().unwrap(), 0);
+    }
+
+    #[test]
+    fn active_operation_recovery_keyset_reaches_more_than_one_page() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let db = OperationalDb::open(&tempdir.path().join("operational.sqlite3")).unwrap();
+        for index in 0..70 {
+            db.create_sync_job(&NewSyncJob {
+                job_id: format!("job:paged:{index:03}"),
+                operation_type: "managed_activation".to_string(),
+                operation: serde_json::json!({
+                    "schema": 1,
+                    "operation_type": "managed_activation",
+                    "index": index,
+                }),
+                peer: None,
+                roots: vec![],
+                heads: vec![],
+                max_attempts: 1,
+            })
+            .unwrap();
+        }
+
+        let mut cursor: Option<(String, String)> = None;
+        let mut observed = Vec::new();
+        loop {
+            let page = db
+                .list_active_sync_jobs_by_operation_type_after(
+                    "managed_activation",
+                    cursor
+                        .as_ref()
+                        .map(|(created_at, job_id)| (created_at.as_str(), job_id.as_str())),
+                    11,
+                )
+                .unwrap();
+            let Some(last) = page.last() else {
+                break;
+            };
+            cursor = Some((last.created_at.clone(), last.job_id.clone()));
+            observed.extend(page.into_iter().map(|job| job.job_id));
+        }
+
+        assert_eq!(observed.len(), 70);
+        observed.sort();
+        observed.dedup();
+        assert_eq!(observed.len(), 70);
+        assert_eq!(observed.first().unwrap(), "job:paged:000");
+        assert_eq!(observed.last().unwrap(), "job:paged:069");
+
+        for job_id in &observed {
+            db.update_sync_job(
+                job_id,
+                &SyncJobUpdate {
+                    state: SyncJobState::Failed,
+                    phase: "recoverable_terminal_cleanup".to_string(),
+                    roots: None,
+                    heads: None,
+                    uploaded_hashes: vec![],
+                    fetched_hashes: vec![],
+                    last_error: Some("fixture".to_string()),
+                    result: None,
+                },
+            )
+            .unwrap();
+        }
+        let mut cursor: Option<(String, String)> = None;
+        let mut failed = Vec::new();
+        loop {
+            let page = db
+                .list_sync_jobs_by_operation_type_and_state_after(
+                    "managed_activation",
+                    SyncJobState::Failed,
+                    cursor
+                        .as_ref()
+                        .map(|(created_at, job_id)| (created_at.as_str(), job_id.as_str())),
+                    13,
+                )
+                .unwrap();
+            let Some(last) = page.last() else {
+                break;
+            };
+            cursor = Some((last.created_at.clone(), last.job_id.clone()));
+            failed.extend(page.into_iter().map(|job| job.job_id));
+        }
+        failed.sort();
+        failed.dedup();
+        assert_eq!(failed, observed);
     }
 
     #[test]

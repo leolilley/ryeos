@@ -4,6 +4,13 @@ use ryeos_directive_definition::{ContinuationConfig, OutputSpec, ReturnNudge};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Provider-facing lifecycle tool intercepted by the directive runtime.
+///
+/// This is not a dispatchable RyeOS item. Keep its wire name centralized so
+/// tool exposure, lifecycle detection, event recording, and replay cannot
+/// silently diverge.
+pub(crate) const DIRECTIVE_RETURN_TOOL: &str = "directive_return";
+
 /// Directive-runtime continuation *behavior* config, loaded by the runtime from
 /// `ryeos-runtime/continuation` (defaults if absent) — the same mechanism as
 /// `ryeos-runtime/execution`. These govern the runtime's continuation boundary

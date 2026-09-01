@@ -8,6 +8,10 @@ license.workspace = true
 default = []
 test-support = []
 latency-profiling = []
+# Allows an exact runtime-owned phase to be selected by the daemon's
+# process-kill qualification harness. Production daemon builds never enable
+# this environment channel.
+crash-qualification-test-support = []
 
 [dependencies]
 anyhow = { workspace = true }

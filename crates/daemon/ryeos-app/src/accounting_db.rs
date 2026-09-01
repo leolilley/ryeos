@@ -46,8 +46,9 @@ use ryeos_accounting::{
     ChargeReconciliationAuthority, HexDigest, MAX_RAW_DECIMAL_LEN, MoneyError,
     PROVIDER_ATTEMPT_BUDGET_TRANSITION_VERSION, ProviderAccountingAuthority,
     ProviderAttemptBudgetRecord, ProviderAttemptBudgetTransitionV1, ProviderCallPublicationProof,
-    ReconciliationReason, SpendAccounting, SpendBoundAuthority, SpendBoundCertificate,
-    SpendTariffDocument, TokenAccounting, UsdNanos, VerifiedPreparedSpendBound, transition_id,
+    ProviderRetryAdvance, ProviderRetryDecision, ReconciliationReason, SpendAccounting,
+    SpendBoundAuthority, SpendBoundCertificate, SpendTariffDocument, TokenAccounting, UsdNanos,
+    VerifiedPreparedSpendBound, transition_id,
 };
 use ryeos_state::sqlite_schema;
 
@@ -468,6 +469,10 @@ pub struct ReserveArgs<'a> {
     pub turn: u32,
     pub attempt_number: u32,
     pub request_hash: &'a str,
+    /// Exact provider behavior/effect coordinate derived by the daemon before
+    /// reservation. Retry successors retain this byte-for-byte; only their
+    /// physical attempt number changes.
+    pub provider_coordinate_key: &'a str,
     pub config_hash: &'a str,
     pub verified_bound: &'a VerifiedPreparedSpendBound,
     /// The server-side sealed accounting authority for the resolved route.
@@ -493,6 +498,14 @@ pub enum ReserveOutcome {
         attempt_id: String,
         replayed: bool,
     },
+    RetryAdvanced {
+        advance: ProviderRetryAdvance,
+    },
+    /// The exact predecessor authorized this successor, but its durable
+    /// earliest-admission time has not arrived. No reservation was created.
+    RetryNotBefore {
+        advance: ProviderRetryAdvance,
+    },
 }
 
 /// Outcome of an issue-marker request.
@@ -509,13 +522,14 @@ pub enum IssueOutcome {
 }
 
 /// Outcome of a settlement request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettleOutcome {
     pub state: AttemptBudgetState,
     pub budget_charge: UsdNanos,
     pub released: UsdNanos,
     pub charge_basis: ChargeBasis,
     pub replayed: bool,
+    pub retry_advance: Option<ProviderRetryAdvance>,
 }
 
 /// Outcome of fencing a launch generation.
@@ -810,7 +824,7 @@ fn attempt_key(thread_id: &str, launch_generation: &str, turn: u32, attempt_numb
 }
 
 fn wall_clock_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
+    lillux::time::timestamp_millis()
 }
 
 /// Bounded audit retention of provider raw decimal text (always ASCII when
@@ -1765,6 +1779,9 @@ impl AccountingDb {
     }
 
     fn reserve_in_tx(&self, conn: &Connection, args: &ReserveArgs<'_>) -> Result<ReserveOutcome> {
+        if !lillux::valid_hash(args.provider_coordinate_key) {
+            bail!("provider reservation coordinate key is not a canonical digest");
+        }
         let key = attempt_key(
             args.thread_id,
             args.launch_generation,
@@ -1779,16 +1796,7 @@ impl AccountingDb {
                      contradictory replay as an integrity conflict"
                 );
             }
-            let (digest, response) = self
-                .load_operation(conn, &existing.attempt_id, "reserve", 1)?
-                .ok_or_else(|| {
-                    anyhow::anyhow!("attempt {key} exists without its recorded reserve operation")
-                })?;
-            if digest != args.request_hash {
-                bail!("attempt {key} reserve operation digest conflicts with its row");
-            }
-            let stored: StoredReserveResponse =
-                serde_json::from_str(&response).context("decode recorded reserve response")?;
+            let stored = self.load_stored_reserve_response(conn, &existing)?;
             self.bump_recovery_count(conn, &existing.attempt_id, "reserve", 1)?;
             return Ok(if stored.denied {
                 ReserveOutcome::Denied {
@@ -1803,6 +1811,189 @@ impl AccountingDb {
                     replayed: true,
                 }
             });
+        }
+
+        // A fresh mutation belongs only to the exact live launch generation.
+        // Keep this immediately after idempotent replay so a stale owner is
+        // fenced before any cross-generation recovery or retry-successor
+        // authority is considered.
+        let gate = self
+            .load_gate(conn, args.thread_id, args.launch_generation)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "launch accounting gate {}/{} is absent; reserve fails closed",
+                    args.thread_id,
+                    args.launch_generation
+                )
+            })?;
+        if gate.state != "open" {
+            bail!(
+                "launch accounting gate {}/{} is fenced; reserve rejects",
+                args.thread_id,
+                args.launch_generation
+            );
+        }
+        if gate.execution_budget_id != args.execution_budget_id {
+            bail!(
+                "launch gate binds execution {} but reserve names {}",
+                gate.execution_budget_id,
+                args.execution_budget_id
+            );
+        }
+        if gate.audit_chain_root_id != args.audit_chain_root_id {
+            bail!(
+                "launch gate binds audit chain {} but reserve names {}",
+                gate.audit_chain_root_id,
+                args.audit_chain_root_id
+            );
+        }
+
+        // A launch generation owns mutation of an attempt, but it is not the
+        // logical provider-contact identity. Native resume deliberately keeps
+        // the same (thread, turn, attempt_number). Before a new generation can
+        // reserve that coordinate, inspect every predecessor generation:
+        //
+        // - released_unissued proves provider contact did not occur and may be
+        //   retried under the live owner;
+        // - reservation_denied is an already-recorded idempotent answer;
+        // - every other state either remains live or has crossed the durable
+        //   Issued boundary. Without a provider-call replay (checked by the
+        //   caller before entering the ledger), its external outcome is
+        //   unknown and a second contact is forbidden.
+        for predecessor in self.load_reservations_by_coordinate(
+            conn,
+            args.thread_id,
+            args.turn,
+            args.attempt_number,
+        )? {
+            if predecessor.request_hash != args.request_hash {
+                bail!(
+                    "provider attempt coordinate {}/{}/{} was recorded with a different request hash; refusing contradictory cross-generation replay",
+                    args.thread_id,
+                    args.turn,
+                    args.attempt_number
+                );
+            }
+            match predecessor.state {
+                AttemptBudgetState::ReleasedUnissued => continue,
+                AttemptBudgetState::ReservationDenied => {
+                    let stored = self.load_stored_reserve_response(conn, &predecessor)?;
+                    if !stored.denied {
+                        bail!(
+                            "denied provider attempt {} has a contradictory reserve response",
+                            predecessor.attempt_id
+                        );
+                    }
+                    self.bump_recovery_count(conn, &predecessor.attempt_id, "reserve", 1)?;
+                    return Ok(ReserveOutcome::Denied {
+                        attempt_id: predecessor.attempt_id,
+                        replayed: true,
+                    });
+                }
+                state if state.is_terminal() => {
+                    if let Some(advance) = self.load_retry_advance(conn, &predecessor)? {
+                        if advance.decision.turn != args.turn
+                            || advance.decision.failed_attempt_number != args.attempt_number
+                            || advance.provider_coordinate_key != args.provider_coordinate_key
+                        {
+                            bail!(
+                                "provider retry advancement for {} contradicts requested coordinate {}/{}/{}",
+                                predecessor.attempt_id,
+                                args.thread_id,
+                                args.turn,
+                                args.attempt_number
+                            );
+                        }
+                        return Ok(ReserveOutcome::RetryAdvanced { advance });
+                    }
+                    bail!(
+                        "provider attempt coordinate {}/{}/{} settled under predecessor launch generation {} without a retry advancement; its external outcome is unknown for retry authority and provider contact is refused",
+                        args.thread_id,
+                        args.turn,
+                        args.attempt_number,
+                        predecessor.launch_generation
+                    );
+                }
+                state => {
+                    bail!(
+                        "provider attempt coordinate {}/{}/{} is retained in state {} under predecessor launch generation {}; no completed provider replay is available, so external outcome is unknown and provider contact is refused",
+                        args.thread_id,
+                        args.turn,
+                        args.attempt_number,
+                        state.as_str(),
+                        predecessor.launch_generation
+                    );
+                }
+            }
+        }
+
+        // Attempt one is the only fresh provider-contact coordinate. Every
+        // later physical attempt must be named by the immediately preceding
+        // attempt's atomic terminal retry advancement and must retain the same
+        // provider behavior/effect coordinate. The runtime's in-memory counter
+        // is therefore never retry authority.
+        if args.attempt_number > 1 {
+            let predecessor_number = args.attempt_number - 1;
+            let mut admitted_predecessor: Option<ProviderRetryAdvance> = None;
+            for predecessor in self.load_reservations_by_coordinate(
+                conn,
+                args.thread_id,
+                args.turn,
+                predecessor_number,
+            )? {
+                match predecessor.state {
+                    AttemptBudgetState::ReleasedUnissued => continue,
+                    AttemptBudgetState::ReservationDenied => {
+                        bail!(
+                            "provider retry attempt {} is forbidden because predecessor attempt {} was denied before contact",
+                            args.attempt_number,
+                            predecessor_number
+                        );
+                    }
+                    state if state.is_terminal() => {
+                        let Some(advance) = self.load_retry_advance(conn, &predecessor)? else {
+                            bail!(
+                                "provider retry attempt {} has no atomic advancement from terminal predecessor attempt {}",
+                                args.attempt_number,
+                                predecessor_number
+                            );
+                        };
+                        if advance.decision.turn != args.turn
+                            || advance.decision.failed_attempt_number != predecessor_number
+                            || advance.decision.next_attempt_number != args.attempt_number
+                            || advance.provider_coordinate_key != args.provider_coordinate_key
+                        {
+                            bail!(
+                                "provider retry attempt {} contradicts its predecessor advancement or provider behavior coordinate",
+                                args.attempt_number
+                            );
+                        }
+                        if admitted_predecessor.replace(advance).is_some() {
+                            bail!(
+                                "provider retry attempt {} has multiple terminal predecessor authorities",
+                                args.attempt_number
+                            );
+                        }
+                    }
+                    state => {
+                        bail!(
+                            "provider retry attempt {} is forbidden while predecessor attempt {} remains {}",
+                            args.attempt_number,
+                            predecessor_number,
+                            state.as_str()
+                        );
+                    }
+                }
+            }
+            let advance = admitted_predecessor.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "provider retry attempt {} has no atomic predecessor advancement",
+                    args.attempt_number
+                )
+            })?;
+            if args.now_ms < advance.not_before_ms {
+                return Ok(ReserveOutcome::RetryNotBefore { advance });
+            }
         }
 
         if !self.hard_admission_enabled() {
@@ -1987,38 +2178,6 @@ impl AccountingDb {
             bail!(
                 "accounting authority {authority_digest} is {state}; reservations under a \
                  quarantined or violated authority fail closed"
-            );
-        }
-
-        // Gate: the exact (thread, generation) must be open.
-        let gate = self
-            .load_gate(conn, args.thread_id, args.launch_generation)?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "launch accounting gate {}/{} is absent; reserve fails closed",
-                    args.thread_id,
-                    args.launch_generation
-                )
-            })?;
-        if gate.state != "open" {
-            bail!(
-                "launch accounting gate {}/{} is fenced; reserve rejects",
-                args.thread_id,
-                args.launch_generation
-            );
-        }
-        if gate.execution_budget_id != args.execution_budget_id {
-            bail!(
-                "launch gate binds execution {} but reserve names {}",
-                gate.execution_budget_id,
-                args.execution_budget_id
-            );
-        }
-        if gate.audit_chain_root_id != args.audit_chain_root_id {
-            bail!(
-                "launch gate binds audit chain {} but reserve names {}",
-                gate.audit_chain_root_id,
-                args.audit_chain_root_id
             );
         }
 
@@ -2599,8 +2758,10 @@ impl AccountingDb {
         launch_generation: &str,
         attempt_id: &str,
         request_hash: &str,
+        provider_coordinate_key: &str,
         spend: &SpendAccounting,
         tokens: &TokenAccounting,
+        retry: Option<&ProviderRetryDecision>,
         authority_digest: &str,
         now_ms: i64,
     ) -> Result<SettleOutcome> {
@@ -2613,8 +2774,10 @@ impl AccountingDb {
                     launch_generation,
                     attempt_id,
                     request_hash,
+                    provider_coordinate_key,
                     spend,
                     tokens,
+                    retry,
                     authority_digest,
                     now_ms,
                 )
@@ -2634,8 +2797,10 @@ impl AccountingDb {
         launch_generation: &str,
         attempt_id: &str,
         request_hash: &str,
+        provider_coordinate_key: &str,
         spend: &SpendAccounting,
         tokens: &TokenAccounting,
+        retry: Option<&ProviderRetryDecision>,
         authority_digest: &str,
         now_ms: i64,
     ) -> Result<(SettleOutcome, AnchorAction, bool)> {
@@ -2645,12 +2810,36 @@ impl AccountingDb {
         if row.thread_id != thread_id {
             bail!("attempt {attempt_id} belongs to thread {}", row.thread_id);
         }
+        if !lillux::valid_hash(provider_coordinate_key) {
+            bail!("provider settlement coordinate key is not a canonical digest");
+        }
         let request_digest = canonical_fingerprint(&serde_json::json!({
             "request_hash": request_hash,
+            "provider_coordinate_key": provider_coordinate_key,
             "authority_digest": authority_digest,
             "spend": serde_json::to_value(spend).context("encode spend accounting")?,
             "tokens": serde_json::to_value(tokens).context("encode token accounting")?,
+            "retry": serde_json::to_value(retry).context("encode provider retry decision")?,
         }))?;
+        if let Some(retry) = retry {
+            retry
+                .validate()
+                .map_err(|error| anyhow::anyhow!("invalid provider retry decision: {error}"))?;
+            if retry.turn != row.turn
+                || retry.failed_attempt_number != row.attempt_number
+                || retry.next_attempt_number
+                    != row.attempt_number.checked_add(1).ok_or_else(|| {
+                        anyhow::anyhow!("provider retry attempt coordinate overflow")
+                    })?
+            {
+                bail!(
+                    "provider retry decision contradicts attempt {} coordinate turn={} attempt={}",
+                    attempt_id,
+                    row.turn,
+                    row.attempt_number
+                );
+            }
+        }
         // §7.8 ordering: an exact recorded settlement wins over stale
         // expected state — this makes a lost reply recoverable after the
         // row is already terminal.
@@ -2671,6 +2860,7 @@ impl AccountingDb {
                         .map_err(|error| anyhow::anyhow!("recorded release: {error}"))?,
                     charge_basis,
                     replayed: true,
+                    retry_advance: self.load_retry_advance(conn, &row)?,
                 };
                 let action = stored
                     .financial_sequence
@@ -2707,6 +2897,7 @@ impl AccountingDb {
                         .map_err(|error| anyhow::anyhow!("recorded release: {error}"))?,
                     charge_basis,
                     replayed: true,
+                    retry_advance: None,
                 };
                 let action = stored
                     .financial_sequence
@@ -2737,6 +2928,11 @@ impl AccountingDb {
             );
         }
         if row.state == AttemptBudgetState::ChargedReservedMaximum {
+            if retry.is_some() {
+                bail!(
+                    "provider retry advancement cannot attach through a late settlement observation"
+                );
+            }
             // §7.2: a late authoritative actual attaches to the conservative
             // terminal as a monotonic observation. It never reopens issue or
             // refunds budget; an over-reserved actual commits truthful extra
@@ -2958,6 +3154,36 @@ impl AccountingDb {
             &request_digest,
             &serde_json::to_string(&stored).context("encode settle response")?,
         )?;
+        let retry_advance = if matches!(anchored, SettleAnchoring::None)
+            && matches!(
+                terminal,
+                AttemptBudgetState::Reconciled | AttemptBudgetState::ChargedReservedMaximum
+            ) {
+            retry
+                .map(|decision| {
+                    ProviderRetryAdvance::build(
+                        attempt_id.to_string(),
+                        request_hash.to_string(),
+                        provider_coordinate_key.to_string(),
+                        decision.clone(),
+                        now_ms,
+                    )
+                    .map_err(|error| anyhow::anyhow!(error))
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        if let Some(advance) = retry_advance.as_ref() {
+            self.insert_operation(
+                conn,
+                attempt_id,
+                "retry_advance",
+                1,
+                advance.decision_digest.as_str(),
+                &serde_json::to_string(advance).context("encode provider retry advancement")?,
+            )?;
+        }
         let outcome = SettleOutcome {
             state: terminal,
             budget_charge: UsdNanos::from_nanos(charge_nanos)
@@ -2966,6 +3192,7 @@ impl AccountingDb {
                 .map_err(|error| anyhow::anyhow!("settled release: {error}"))?,
             charge_basis: basis,
             replayed: false,
+            retry_advance,
         };
         Ok((outcome, action, disable_admission))
     }
@@ -3000,6 +3227,7 @@ impl AccountingDb {
                 released: UsdNanos::ZERO,
                 charge_basis: ChargeBasis::ReservedMaximum,
                 replayed,
+                retry_advance: None,
             })
         };
 
@@ -3206,6 +3434,7 @@ impl AccountingDb {
             released: UsdNanos::ZERO,
             charge_basis: basis,
             replayed: false,
+            retry_advance: None,
         };
         Ok((outcome, action, disable_admission))
     }
@@ -3338,6 +3567,7 @@ impl AccountingDb {
                     .context("decode provider-call publication proof on attempt read")
             })
             .transpose()?;
+        let retry_advance = self.load_retry_advance(&conn, &row)?;
         Ok(Some(ProviderAttemptBudgetRecord {
             attempt_id: row.attempt_id,
             turn: row.turn,
@@ -3359,11 +3589,13 @@ impl AccountingDb {
                 .as_deref()
                 .and_then(ReconciliationReason::parse),
             publication_proof,
+            retry_advance,
         }))
     }
 }
 
 /// Which anchored obligation a settlement produced.
+#[derive(Clone, Copy)]
 enum SettleAnchoring {
     None,
     BoundViolation,
@@ -4250,6 +4482,30 @@ impl AccountingDb {
         .context("load reservation by attempt key")
     }
 
+    fn load_reservations_by_coordinate(
+        &self,
+        conn: &Connection,
+        thread_id: &str,
+        turn: u32,
+        attempt_number: u32,
+    ) -> Result<Vec<ReservationRow>> {
+        let mut statement = conn
+            .prepare(&format!(
+                "SELECT {RESERVATION_COLUMNS} FROM provider_attempt_reservation
+                 WHERE thread_id = ?1 AND turn = ?2 AND attempt_number = ?3
+                 ORDER BY created_at_ms, attempt_id"
+            ))
+            .context("prepare provider attempt coordinate scan")?;
+        statement
+            .query_map(
+                rusqlite::params![thread_id, i64::from(turn), i64::from(attempt_number)],
+                reservation_from_row,
+            )
+            .context("scan provider attempt coordinate")?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("collect provider attempt coordinate")
+    }
+
     fn load_reservation_by_id(
         &self,
         conn: &Connection,
@@ -4610,6 +4866,65 @@ impl AccountingDb {
         )
         .optional()
         .context("load recorded accounting operation")
+    }
+
+    fn load_retry_advance(
+        &self,
+        conn: &Connection,
+        row: &ReservationRow,
+    ) -> Result<Option<ProviderRetryAdvance>> {
+        let Some((decision_digest, response)) =
+            self.load_operation(conn, &row.attempt_id, "retry_advance", 1)?
+        else {
+            return Ok(None);
+        };
+        let advance: ProviderRetryAdvance = serde_json::from_str(&response)
+            .context("decode recorded provider retry advancement")?;
+        advance
+            .validate()
+            .map_err(|error| anyhow::anyhow!("invalid provider retry advancement: {error}"))?;
+        if decision_digest != advance.decision_digest.as_str()
+            || advance.prior_attempt_id != row.attempt_id
+            || advance.prior_request_hash != row.request_hash
+            || advance.decision.turn != row.turn
+            || advance.decision.failed_attempt_number != row.attempt_number
+        {
+            bail!(
+                "recorded provider retry advancement contradicts attempt {}",
+                row.attempt_id
+            );
+        }
+        Ok(Some(advance))
+    }
+
+    fn load_stored_reserve_response(
+        &self,
+        conn: &Connection,
+        row: &ReservationRow,
+    ) -> Result<StoredReserveResponse> {
+        let (request_digest, response) = self
+            .load_operation(conn, &row.attempt_id, "reserve", 1)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "provider attempt {} has no recorded reserve operation",
+                    row.attempt_id
+                )
+            })?;
+        if request_digest != row.request_hash {
+            bail!(
+                "provider attempt {} reserve operation digest conflicts with its row",
+                row.attempt_id
+            );
+        }
+        let stored: StoredReserveResponse =
+            serde_json::from_str(&response).context("decode recorded provider reserve response")?;
+        if stored.attempt_id != row.attempt_id {
+            bail!(
+                "recorded reserve response contradicts provider attempt {}",
+                row.attempt_id
+            );
+        }
+        Ok(stored)
     }
 
     fn insert_operation(
@@ -5519,6 +5834,8 @@ mod tests {
     const GENERATION: &str = "G-1";
     const EXEC: &str = "B-exec-1";
     const DIRECTIVE: &str = "B-dir-1";
+    const PROVIDER_COORDINATE_KEY: &str =
+        "1111111111111111111111111111111111111111111111111111111111111111";
 
     fn digest_of(tag: &str) -> HexDigest {
         HexDigest::new(lillux::cas::sha256_hex(tag.as_bytes())).unwrap()
@@ -5770,6 +6087,62 @@ mod tests {
         exec: &str,
         directive: Option<&str>,
     ) -> Result<ReserveOutcome> {
+        reserve_with_provider_coordinate(
+            db,
+            thread,
+            generation,
+            turn,
+            attempt_number,
+            request_hash,
+            PROVIDER_COORDINATE_KEY,
+            authority,
+            exec,
+            directive,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reserve_with_provider_coordinate(
+        db: &AccountingDb,
+        thread: &str,
+        generation: &str,
+        turn: u32,
+        attempt_number: u32,
+        request_hash: &str,
+        provider_coordinate_key: &str,
+        authority: &ProviderAccountingAuthority,
+        exec: &str,
+        directive: Option<&str>,
+    ) -> Result<ReserveOutcome> {
+        reserve_with_provider_coordinate_at(
+            db,
+            thread,
+            generation,
+            turn,
+            attempt_number,
+            request_hash,
+            provider_coordinate_key,
+            authority,
+            exec,
+            directive,
+            NOW,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reserve_with_provider_coordinate_at(
+        db: &AccountingDb,
+        thread: &str,
+        generation: &str,
+        turn: u32,
+        attempt_number: u32,
+        request_hash: &str,
+        provider_coordinate_key: &str,
+        authority: &ProviderAccountingAuthority,
+        exec: &str,
+        directive: Option<&str>,
+        now_ms: i64,
+    ) -> Result<ReserveOutcome> {
         let bound = bound_for(authority);
         db.reserve_provider_attempt(ReserveArgs {
             thread_id: thread,
@@ -5777,6 +6150,7 @@ mod tests {
             turn,
             attempt_number,
             request_hash,
+            provider_coordinate_key,
             config_hash: "cfg",
             verified_bound: &bound,
             authority,
@@ -5784,7 +6158,7 @@ mod tests {
             directive_budget_id: directive,
             root_chain_id: "root-chain",
             audit_chain_root_id: "audit-chain",
-            now_ms: NOW,
+            now_ms,
         })
     }
 
@@ -5818,11 +6192,25 @@ mod tests {
             GENERATION,
             attempt_id,
             request_hash,
+            PROVIDER_COORDINATE_KEY,
             &spend,
             &TokenAccounting::Unavailable,
+            None,
             authority.authority_digest.as_str(),
             NOW + 10,
         )
+    }
+
+    fn retry_decision(turn: u32, failed_attempt_number: u32) -> ProviderRetryDecision {
+        ProviderRetryDecision {
+            turn,
+            failed_attempt_number,
+            next_attempt_number: failed_attempt_number.checked_add(1).unwrap(),
+            backoff_ms: 250,
+            reason: ryeos_accounting::ProviderRetryReason::Status { code: 503 },
+            failure_digest: digest_of("provider-failure"),
+            retry_policy_digest: digest_of("retry-policy"),
+        }
     }
 
     fn account(db: &AccountingDb, exec: &str, kind: &str) -> AccountRow {
@@ -6087,7 +6475,7 @@ mod tests {
         let first = reserve(&db, THREAD, GENERATION, 1, 1, "h1", &authority, EXEC, None).unwrap();
         assert!(matches!(first, ReserveOutcome::Reserved { .. }));
         // 0.8 - 0.5 held leaves 0.3 available: the second 0.5 must deny.
-        let second = reserve(&db, THREAD, GENERATION, 1, 2, "h2", &authority, EXEC, None).unwrap();
+        let second = reserve(&db, THREAD, GENERATION, 2, 1, "h2", &authority, EXEC, None).unwrap();
         assert!(matches!(second, ReserveOutcome::Denied { .. }));
         assert_amounts(&db, EXEC, "execution", "0", "0.5");
         assert_healthy_verify(&db);
@@ -6927,7 +7315,7 @@ mod tests {
             &reserve(&db, THREAD, GENERATION, 1, 1, "h1", &authority, EXEC, None).unwrap(),
         );
         let issued_attempt = reserved_id(
-            &reserve(&db, THREAD, GENERATION, 1, 2, "h2", &authority, EXEC, None).unwrap(),
+            &reserve(&db, THREAD, GENERATION, 2, 1, "h2", &authority, EXEC, None).unwrap(),
         );
         issue(&db, &issued_attempt, "h2").unwrap();
 
@@ -6950,12 +7338,253 @@ mod tests {
         // so the live generation draws on a truthful allowance.
         assert_amounts(&db, EXEC, "execution", "0.5", "0");
         let error =
-            reserve(&db, THREAD, GENERATION, 2, 1, "h3", &authority, EXEC, None).unwrap_err();
+            reserve(&db, THREAD, GENERATION, 3, 1, "h3", &authority, EXEC, None).unwrap_err();
         assert!(format!("{error:#}").contains("fenced"));
         assert!(matches!(
-            reserve(&db, THREAD, "G-resumed", 2, 1, "h4", &authority, EXEC, None).unwrap(),
+            reserve(&db, THREAD, "G-resumed", 3, 1, "h4", &authority, EXEC, None).unwrap(),
             ReserveOutcome::Reserved { .. }
         ));
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn resumed_generation_retries_only_coordinates_proved_unissued() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, Some("10"));
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let authority = reported_authority("a", "0.5", 9, false);
+        let released_attempt = reserved_id(
+            &reserve(&db, THREAD, GENERATION, 1, 1, "h1", &authority, EXEC, None).unwrap(),
+        );
+        let issued_attempt = reserved_id(
+            &reserve(&db, THREAD, GENERATION, 2, 1, "h2", &authority, EXEC, None).unwrap(),
+        );
+        issue(&db, &issued_attempt, "h2").unwrap();
+
+        open_gate(&db, THREAD, "G-resumed", EXEC);
+
+        let retried = reserved_id(
+            &reserve(&db, THREAD, "G-resumed", 1, 1, "h1", &authority, EXEC, None).unwrap(),
+        );
+        assert_ne!(retried, released_attempt);
+
+        let error =
+            reserve(&db, THREAD, "G-resumed", 2, 1, "h2", &authority, EXEC, None).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("external outcome is unknown"), "{message}");
+        assert!(message.contains("provider contact is refused"), "{message}");
+        assert_amounts(&db, EXEC, "execution", "0.5", "0.5");
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn terminal_settlement_atomically_authorizes_one_exact_retry_successor() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, Some("10"));
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let authority = reported_authority("a", "0.5", 9, false);
+        let request_hash = lillux::sha256_hex(b"attempt-one");
+        let attempt_id = reserved_id(
+            &reserve(
+                &db,
+                THREAD,
+                GENERATION,
+                1,
+                1,
+                &request_hash,
+                &authority,
+                EXEC,
+                None,
+            )
+            .unwrap(),
+        );
+        issue(&db, &attempt_id, &request_hash).unwrap();
+        let successor_hash = lillux::sha256_hex(b"attempt-two");
+        let premature = reserve(
+            &db,
+            THREAD,
+            GENERATION,
+            1,
+            2,
+            &successor_hash,
+            &authority,
+            EXEC,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{premature:#}").contains("predecessor attempt 1 remains issued"),
+            "{premature:#}"
+        );
+        let decision = retry_decision(1, 1);
+
+        let first = db
+            .settle_provider_attempt(
+                THREAD,
+                GENERATION,
+                &attempt_id,
+                &request_hash,
+                PROVIDER_COORDINATE_KEY,
+                &SpendAccounting::ProviderReportedFinal {
+                    raw_decimal: "0.1".to_string(),
+                },
+                &TokenAccounting::Unavailable,
+                Some(&decision),
+                authority.authority_digest.as_str(),
+                NOW + 10,
+            )
+            .unwrap();
+        assert!(!first.replayed);
+        let advance = first
+            .retry_advance
+            .clone()
+            .expect("terminal settlement must carry its retry advancement");
+        assert_eq!(advance.prior_attempt_id, attempt_id);
+        assert_eq!(advance.prior_request_hash, request_hash);
+        assert_eq!(advance.decision, decision);
+        assert_eq!(advance.not_before_ms, NOW + 260);
+
+        let replay = db
+            .settle_provider_attempt(
+                THREAD,
+                GENERATION,
+                &attempt_id,
+                &request_hash,
+                PROVIDER_COORDINATE_KEY,
+                &SpendAccounting::ProviderReportedFinal {
+                    raw_decimal: "0.1".to_string(),
+                },
+                &TokenAccounting::Unavailable,
+                Some(&decision),
+                authority.authority_digest.as_str(),
+                NOW + 10,
+            )
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.retry_advance, Some(advance.clone()));
+        assert_eq!(
+            db.get_provider_attempt(THREAD, &attempt_id)
+                .unwrap()
+                .unwrap()
+                .retry_advance,
+            Some(advance.clone())
+        );
+
+        open_gate(&db, THREAD, "G-resumed", EXEC);
+        assert_eq!(
+            reserve(
+                &db,
+                THREAD,
+                "G-resumed",
+                1,
+                1,
+                &request_hash,
+                &authority,
+                EXEC,
+                None,
+            )
+            .unwrap(),
+            ReserveOutcome::RetryAdvanced {
+                advance: advance.clone(),
+            }
+        );
+        let drifted_coordinate = "22".repeat(32);
+        let drift = reserve_with_provider_coordinate(
+            &db,
+            THREAD,
+            "G-resumed",
+            1,
+            2,
+            &successor_hash,
+            &drifted_coordinate,
+            &authority,
+            EXEC,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{drift:#}").contains("provider behavior coordinate"),
+            "{drift:#}"
+        );
+        assert_eq!(
+            reserve(
+                &db,
+                THREAD,
+                "G-resumed",
+                1,
+                2,
+                &successor_hash,
+                &authority,
+                EXEC,
+                None,
+            )
+            .unwrap(),
+            ReserveOutcome::RetryNotBefore {
+                advance: advance.clone(),
+            }
+        );
+        assert_eq!(
+            reserve_with_provider_coordinate_at(
+                &db,
+                THREAD,
+                "G-resumed",
+                1,
+                2,
+                &successor_hash,
+                PROVIDER_COORDINATE_KEY,
+                &authority,
+                EXEC,
+                None,
+                advance.not_before_ms - 1,
+            )
+            .unwrap(),
+            ReserveOutcome::RetryNotBefore {
+                advance: advance.clone(),
+            }
+        );
+        assert!(matches!(
+            reserve_with_provider_coordinate_at(
+                &db,
+                THREAD,
+                "G-resumed",
+                1,
+                2,
+                &successor_hash,
+                PROVIDER_COORDINATE_KEY,
+                &authority,
+                EXEC,
+                None,
+                advance.not_before_ms,
+            )
+            .unwrap(),
+            ReserveOutcome::Reserved { .. }
+        ));
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn denied_provider_coordinate_replays_across_launch_generation() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, Some("0"));
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let authority = reported_authority("a", "0.5", 9, false);
+        let ReserveOutcome::Denied {
+            attempt_id,
+            replayed: false,
+        } = reserve(&db, THREAD, GENERATION, 1, 1, "h1", &authority, EXEC, None).unwrap()
+        else {
+            panic!("zero allowance must deny the first coordinate");
+        };
+
+        open_gate(&db, THREAD, "G-resumed", EXEC);
+        assert_eq!(
+            reserve(&db, THREAD, "G-resumed", 1, 1, "h1", &authority, EXEC, None,).unwrap(),
+            ReserveOutcome::Denied {
+                attempt_id,
+                replayed: true,
+            }
+        );
+        assert_amounts(&db, EXEC, "execution", "0", "0");
         assert_healthy_verify(&db);
     }
 

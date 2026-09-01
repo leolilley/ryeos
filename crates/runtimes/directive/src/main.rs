@@ -139,12 +139,7 @@ fn main() {
 
     let result = run_directive();
     startup_timing::emit_process_exit_summary();
-    let exit_code = match &result {
-        Ok(_) => 0,
-        Err(_) => 1,
-    };
-
-    match result {
+    let exit_code = match result {
         Ok(runtime_result) => {
             let output = serde_json::to_string(&runtime_result).unwrap_or_else(|e| {
                 serde_json::to_string(&json!({
@@ -159,8 +154,16 @@ fn main() {
                 .unwrap()
             });
             println!("{}", output);
+            0
         }
         Err(err) => {
+            if let Some(recovery) = ryeos_runtime::process_outcome::recovery_required_in_chain(&err)
+            {
+                let output = serde_json::to_string(&recovery.control())
+                    .expect("typed runtime process-control envelope serializes");
+                println!("{output}");
+                return;
+            }
             // Bootstrap / I/O failures pre-runner. Surface the full error
             // chain on stderr — the daemon captures stderr into the
             // RuntimeResult fallback path (`launch.rs` !result.success
@@ -169,8 +172,9 @@ fn main() {
             // as opaque "runtime exited non-zero" with only the early
             // tracing lines visible (oracle-flagged P3b.4 diagnostic gap).
             eprintln!("ryeos-directive-runtime fatal: {err:#}");
+            1
         }
-    }
+    };
 
     std::process::exit(exit_code);
 }
@@ -432,59 +436,42 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     // launch, or operator follow-up). A MACHINE continuation suppresses it
     // entirely and never renders — a changed/broken prompt template must not be
     // able to abort a cut-off task that asks for nothing new.
-    let mut runner_inst = if let Some(ref resume_id) = envelope.request.previous_thread_id {
+    // A daemon native-resume respawns this exact thread. Its original launch
+    // envelope may still name a continuation predecessor, but replay authority
+    // is the current thread's full upstream path, not that stale predecessor.
+    let same_thread_resume = ryeos_runtime::CheckpointWriter::is_resume();
+    let resume_id = if same_thread_resume {
+        Some(envelope.thread_id.clone())
+    } else {
+        envelope.request.previous_thread_id.clone()
+    };
+    let mut runner_inst = if let Some(ref resume_id) = resume_id {
         let carry_turns = bootstrap_output
             .config
             .continuation_runtime
             .resolve_carry_turns(bootstrap_output.config.continuation.declared_carry_turns());
-        let mut resume_state = resume::load_resume_state(&callback, resume_id, carry_turns).await?;
+        let resume_mode = if same_thread_resume {
+            resume::ResumeMode::NativeSameThread
+        } else {
+            resume::ResumeMode::Continuation
+        };
+        let mut resume_state =
+            resume::load_resume_state(&callback, resume_id, carry_turns, resume_mode).await?;
 
-        // R5: Resume gate — refuse resume if the prior thread has no
-        // settled `thread_usage` event in the replay stream. Without
-        // prior budget data, the runtime cannot reseed BudgetTracker
-        // or Harness, so resuming would silently start from zero.
-        if !resume_state.has_thread_usage_event {
-            return Ok(RuntimeResult {
-                success: false,
-                status: RuntimeResultStatus::Failed,
-                thread_id: envelope.thread_id.clone(),
-                result: Some(json!(
-                    "resume prerequisites unmet: no thread_usage event found in prior thread"
-                )),
-                outputs: json!({}),
-                cost: None,
-                warnings: Vec::new(),
-            });
-        }
-        // A usage event that exists but fails to decode must fail the resume
-        // closed, exactly like its absence: reseeding is impossible either
-        // way, and proceeding would silently restart spend from zero.
-        if resume_state.thread_usage.is_none() {
-            return Ok(RuntimeResult {
-                success: false,
-                status: RuntimeResultStatus::Failed,
-                thread_id: envelope.thread_id.clone(),
-                result: Some(json!(
-                    "resume prerequisites unmet: prior thread_usage event failed to decode; budget cannot be reseeded"
-                )),
-                outputs: json!({}),
-                cost: None,
-                warnings: Vec::new(),
-            });
-        }
-
-        if let Err(e) = callback
-            .append_runtime_event(
-                RuntimeEventType::ThreadContinued,
-                json!({"previous_thread_id": resume_id}),
-            )
-            .await
-        {
-            tracing::warn!(
-                thread_id = %envelope.thread_id,
-                error = %e,
-                "callback append_event(thread_continued) failed"
-            );
+        if !same_thread_resume {
+            if let Err(e) = callback
+                .append_runtime_event(
+                    RuntimeEventType::ThreadContinued,
+                    json!({"previous_thread_id": resume_id}),
+                )
+                .await
+            {
+                tracing::warn!(
+                    thread_id = %envelope.thread_id,
+                    error = %e,
+                    "callback append_event(thread_continued) failed"
+                );
+            }
         }
 
         // Operator follow-up: emit the new stimulus as a `cognition_in` AFTER
@@ -496,7 +483,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         // chain and resumes the cut-off task with nothing new asked — `inputs`
         // are the source's originals, already present in the folded chain, so
         // re-injecting them would double the opening stimulus.
-        if !envelope.request.suppress_stimulus {
+        if !same_thread_resume && !envelope.request.suppress_stimulus {
             let rendered_prompt = render_stimulus(
                 &bootstrap_output.config.user_prompt,
                 &envelope.request.inputs,
@@ -634,8 +621,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
             reasoning,
         })
     };
-    let result = runner_inst.run().await;
-    Ok(result)
+    runner_inst.run().await
 }
 
 #[cfg(test)]

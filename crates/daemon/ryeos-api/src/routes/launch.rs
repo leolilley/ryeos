@@ -139,6 +139,9 @@ fn abort_launch_task_with_typed_error(
 /// item_ref/project/parameters identity.
 pub(crate) struct DispatchLaunchOptions {
     pub ref_bindings: BTreeMap<String, String>,
+    /// Exact ingress-authenticated authority. `None` is retained for
+    /// node-internal launches and must never be upgraded during recovery.
+    pub handler_context: Option<ryeos_app::handler_context::HandlerContext>,
     /// Caller response mode (`"wait"` or `"detached"`).
     pub launch_mode: String,
     /// Target site id for remote forwarding. `None` means local execution.
@@ -181,9 +184,28 @@ impl DispatchLaunchOptions {
         execution_workspace: &std::path::Path,
         ref_bindings: BTreeMap<String, String>,
         lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
+        handler_context: Option<ryeos_app::handler_context::HandlerContext>,
     ) -> anyhow::Result<Self> {
         root_admission.validate()?;
         lifecycle_authority.validate()?;
+        if let Some(context) = handler_context.as_ref() {
+            let plan = root_admission.plan_context();
+            let (principal, scopes) = match &plan.requested_by {
+                ryeos_engine::contracts::EffectivePrincipal::Local(principal) => {
+                    (principal.fingerprint.as_str(), principal.scopes.as_slice())
+                }
+                ryeos_engine::contracts::EffectivePrincipal::Delegated(principal) => (
+                    principal.caller_fingerprint.as_str(),
+                    principal.delegated_scopes.as_slice(),
+                ),
+            };
+            context.validate_execution_authority(
+                principal,
+                scopes,
+                &plan.current_site_id,
+                &plan.origin_site_id,
+            )?;
+        }
         if root_admission.ref_bindings() != &ref_bindings {
             anyhow::bail!("dispatch launch secondary identities do not match sealed admission");
         }
@@ -204,6 +226,7 @@ impl DispatchLaunchOptions {
         }
         Ok(Self {
             ref_bindings,
+            handler_context,
             launch_mode: "wait".to_string(),
             target_site_id: None,
             validate_only: false,
@@ -502,6 +525,7 @@ fn spawn_dispatch_launch_inner(
     let root_admission = options.root_admission;
     let root_dispatch_evidence = options.root_dispatch_evidence;
     let ref_bindings = options.ref_bindings;
+    let handler_context = options.handler_context;
     let captured_generation = options.captured_generation;
     let first_poll_timer = launch_timings.as_ref().map(|timings| {
         timings.mark("background_task_scheduled");
@@ -572,6 +596,7 @@ fn spawn_dispatch_launch_inner(
             Some(handoff) => {
                 ryeos_executor::dispatch::dispatch_with_launch_handoff(
                     item_ref.as_str(),
+                    handler_context,
                     &dispatch_req,
                     &exec_ctx,
                     &state_clone,
@@ -579,15 +604,27 @@ fn spawn_dispatch_launch_inner(
                 )
                 .await
             }
-            None => {
-                ryeos_executor::dispatch::dispatch(
-                    item_ref.as_str(),
-                    &dispatch_req,
-                    &exec_ctx,
-                    &state_clone,
-                )
-                .await
-            }
+            None => match handler_context {
+                Some(context) => {
+                    ryeos_executor::dispatch::dispatch_with_handler_context(
+                        item_ref.as_str(),
+                        context,
+                        &dispatch_req,
+                        &exec_ctx,
+                        &state_clone,
+                    )
+                    .await
+                }
+                None => {
+                    ryeos_executor::dispatch::dispatch(
+                        item_ref.as_str(),
+                        &dispatch_req,
+                        &exec_ctx,
+                        &state_clone,
+                    )
+                    .await
+                }
+            },
         };
         if dispatched.is_err()
             && let Some(timings) = launch_timings.as_ref()

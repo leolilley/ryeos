@@ -139,6 +139,15 @@ pub enum ProviderAttemptPrepareResponse {
         execution_budget_id: String,
         replayed: bool,
     },
+    /// The requested coordinate already settled under a predecessor launch
+    /// generation with an atomic retry decision. No reservation or provider
+    /// contact is permitted at this coordinate; the runtime must validate the
+    /// decision against its exact policy and prepare only the named successor.
+    RetryAdvanced { advance: ProviderRetryAdvance },
+    /// The requested successor is structurally authorized, but the daemon's
+    /// durable earliest-admission time has not arrived. The runtime may wait
+    /// responsively, then prepare this same successor coordinate again.
+    RetryNotBefore { advance: ProviderRetryAdvance },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,6 +212,140 @@ pub enum TokenAccounting {
     Unavailable,
 }
 
+/// Closed provider/transport classification that the trusted runtime used to
+/// authorize one retry. Diagnostics are represented only by a digest in the
+/// surrounding decision; raw provider text is not retry authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderRetryReason {
+    Status { code: u16 },
+    Timeout,
+    Send { connect_phase: bool },
+    MidStream { live_output_events_emitted: u64 },
+}
+
+/// Exact runtime decision to advance one failed physical provider attempt.
+/// The daemon validates the current coordinate from its reservation row and
+/// persists this decision in the same transaction as terminal settlement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderRetryDecision {
+    pub turn: u32,
+    pub failed_attempt_number: u32,
+    pub next_attempt_number: u32,
+    pub backoff_ms: u64,
+    pub reason: ProviderRetryReason,
+    pub failure_digest: HexDigest,
+    pub retry_policy_digest: HexDigest,
+}
+
+impl ProviderRetryDecision {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.turn == 0 || self.failed_attempt_number == 0 {
+            return Err("retry decision coordinates are 1-based".to_string());
+        }
+        if self.next_attempt_number
+            != self
+                .failed_attempt_number
+                .checked_add(1)
+                .ok_or_else(|| "retry decision attempt coordinate overflow".to_string())?
+        {
+            return Err("retry decision must advance exactly one attempt".to_string());
+        }
+        if self.backoff_ms > i64::MAX as u64 {
+            return Err("retry decision backoff is outside the durable clock range".to_string());
+        }
+        if let ProviderRetryReason::Status { code } = self.reason
+            && !(100..=599).contains(&code)
+        {
+            return Err("retry status code is outside the HTTP status range".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> Result<HexDigest, String> {
+        self.validate()?;
+        let value = serde_json::to_value(self)
+            .map_err(|error| format!("encode provider retry decision: {error}"))?;
+        let canonical = lillux::canonical_json(&value)
+            .map_err(|error| format!("canonicalize provider retry decision: {error}"))?;
+        HexDigest::new(lillux::sha256_hex(canonical.as_bytes()))
+            .map_err(|error| format!("provider retry decision digest: {error}"))
+    }
+}
+
+/// Daemon-stamped durable advancement recovered from the provider-attempt
+/// ledger. `decision_digest` makes timeline testimony and recovery compare an
+/// exact closed value; `not_before_ms` preserves the original backoff across a
+/// process restart without extending it on each replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderRetryAdvance {
+    pub prior_attempt_id: String,
+    pub prior_request_hash: String,
+    /// Daemon-derived provider behavior/effect coordinate. Every successor
+    /// attempt must reproduce it exactly; the physical attempt number is the
+    /// only coordinate permitted to advance.
+    pub provider_coordinate_key: String,
+    pub decision: ProviderRetryDecision,
+    pub decision_digest: HexDigest,
+    pub not_before_ms: i64,
+}
+
+impl ProviderRetryAdvance {
+    pub fn build(
+        prior_attempt_id: String,
+        prior_request_hash: String,
+        provider_coordinate_key: String,
+        decision: ProviderRetryDecision,
+        settled_at_ms: i64,
+    ) -> Result<Self, String> {
+        decision.validate()?;
+        if prior_attempt_id.is_empty()
+            || !lillux::valid_hash(&prior_request_hash)
+            || !lillux::valid_hash(&provider_coordinate_key)
+        {
+            return Err("retry advancement has an invalid prior-attempt binding".to_string());
+        }
+        if settled_at_ms < 0 {
+            return Err("retry advancement has a negative settlement time".to_string());
+        }
+        let backoff_ms = i64::try_from(decision.backoff_ms)
+            .map_err(|_| "retry backoff is outside the durable clock range".to_string())?;
+        let not_before_ms = settled_at_ms
+            .checked_add(backoff_ms)
+            .ok_or_else(|| "retry not-before time overflow".to_string())?;
+        let decision_digest = decision.digest()?;
+        let advance = Self {
+            prior_attempt_id,
+            prior_request_hash,
+            provider_coordinate_key,
+            decision,
+            decision_digest,
+            not_before_ms,
+        };
+        advance.validate()?;
+        Ok(advance)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.prior_attempt_id.is_empty()
+            || !lillux::valid_hash(&self.prior_request_hash)
+            || !lillux::valid_hash(&self.provider_coordinate_key)
+        {
+            return Err("retry advancement has an invalid prior-attempt binding".to_string());
+        }
+        self.decision.validate()?;
+        if self.decision.digest()? != self.decision_digest {
+            return Err("retry advancement decision digest mismatch".to_string());
+        }
+        if self.not_before_ms < 0 {
+            return Err("retry advancement has a negative not-before time".to_string());
+        }
+        Ok(())
+    }
+}
+
 impl TokenAccounting {
     pub fn validate(&self) -> Result<(), String> {
         match self {
@@ -229,6 +372,11 @@ pub struct ProviderAttemptSettleParams {
     /// financially but cannot publish replay evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<ryeos_provider_contract::ProviderCallAnswer>,
+    /// Present only for a failed attempt that the trusted runtime classified
+    /// as retryable under its exact signed execution policy. Settlement and
+    /// advancement become one daemon transaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<ProviderRetryDecision>,
 }
 
 impl ProviderAttemptSettleParams {
@@ -237,10 +385,15 @@ impl ProviderAttemptSettleParams {
             .validate()
             .map_err(|error| error.to_string())?;
         self.spend.validate()?;
-        self.tokens.validate().and_then(|()| {
-            self.answer.as_ref().map_or(Ok(()), |answer| {
-                answer.validate().map_err(|error| error.to_string())
-            })
+        self.tokens.validate()?;
+        if self.answer.is_some() && self.retry.is_some() {
+            return Err("a completed provider answer cannot also advance a retry".to_string());
+        }
+        if let Some(retry) = &self.retry {
+            retry.validate()?;
+        }
+        self.answer.as_ref().map_or(Ok(()), |answer| {
+            answer.validate().map_err(|error| error.to_string())
         })
     }
 }
@@ -255,6 +408,8 @@ pub struct ProviderAttemptSettleResponse {
     pub replayed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication: Option<ProviderCallPublication>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_advance: Option<ProviderRetryAdvance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -461,6 +616,8 @@ pub struct ProviderAttemptBudgetRecord {
     pub reason: Option<ReconciliationReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication_proof: Option<ProviderCallPublicationProof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_advance: Option<ProviderRetryAdvance>,
 }
 
 /// Reservation intent hash (§9.3), shared between the runtime that reserves
@@ -590,5 +747,102 @@ mod tests {
             raw_decimal: "1".repeat(MAX_RAW_DECIMAL_LEN + 1),
         };
         assert!(spend.validate().is_err());
+    }
+
+    #[test]
+    fn retry_decision_is_closed_exactly_one_step_and_digest_bound() {
+        let decision = ProviderRetryDecision {
+            turn: 3,
+            failed_attempt_number: 2,
+            next_attempt_number: 3,
+            backoff_ms: 750,
+            reason: ProviderRetryReason::Status { code: 503 },
+            failure_digest: digest_of("failure"),
+            retry_policy_digest: digest_of("policy"),
+        };
+        decision.validate().unwrap();
+        assert_eq!(decision.digest().unwrap(), decision.digest().unwrap());
+
+        let advance = ProviderRetryAdvance::build(
+            "A-attempt".to_string(),
+            lillux::sha256_hex(b"request"),
+            lillux::sha256_hex(b"provider-coordinate"),
+            decision.clone(),
+            1_000,
+        )
+        .unwrap();
+        assert_eq!(advance.not_before_ms, 1_750);
+        advance.validate().unwrap();
+
+        let mut skipped = decision.clone();
+        skipped.next_attempt_number = 4;
+        assert!(skipped.validate().is_err());
+        let mut invalid_status = decision;
+        invalid_status.reason = ProviderRetryReason::Status { code: 42 };
+        assert!(invalid_status.validate().is_err());
+
+        let mut drifted = advance;
+        drifted.decision.backoff_ms = 751;
+        assert!(drifted.validate().is_err());
+    }
+
+    #[test]
+    fn settlement_cannot_carry_both_answer_and_retry() {
+        let answer = ryeos_provider_contract::ProviderCallAnswer {
+            message: ryeos_provider_contract::RecordedMessage {
+                role: "assistant".to_string(),
+                content: Some(serde_json::json!("done")),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            finish_reason: Some("stop".to_string()),
+        };
+        let params = ProviderAttemptSettleParams {
+            thread_id: "T-1".to_string(),
+            attempt_id: "A-1".to_string(),
+            request_hash: lillux::sha256_hex(b"request"),
+            authority_digest: digest_of("authority"),
+            coordinate: ryeos_provider_contract::RequestCoordinate::build(
+                ryeos_provider_contract::RequestAuthority {
+                    outer_effective_definition_digest: lillux::sha256_hex(b"outer"),
+                    provider_family: "chat".to_string(),
+                    provider_config_hash: lillux::sha256_hex(b"config"),
+                    provider_config_value_digest: lillux::sha256_hex(b"config-value"),
+                    provider_id: "provider".to_string(),
+                    profile_id: None,
+                    model_name: "model".to_string(),
+                    credential_binding_hmac: lillux::sha256_hex(b"credential"),
+                    credential_authority_generation: "generation-1".to_string(),
+                    authority_digest: lillux::sha256_hex(b"authority"),
+                    admitted_effect_class: None,
+                },
+                ryeos_provider_contract::TransportCoordinate::RemoteHttp {
+                    method: "POST".to_string(),
+                    url: "https://provider.invalid/v1".to_string(),
+                },
+                ryeos_provider_contract::PreparedRequestProjection::from_coordinates(
+                    Vec::new(),
+                    Vec::new(),
+                    lillux::sha256_hex(b"{}"),
+                    64,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            spend: SpendAccounting::ExplicitlyFree,
+            tokens: TokenAccounting::Unavailable,
+            answer: Some(answer),
+            retry: Some(ProviderRetryDecision {
+                turn: 1,
+                failed_attempt_number: 1,
+                next_attempt_number: 2,
+                backoff_ms: 10,
+                reason: ProviderRetryReason::Timeout,
+                failure_digest: digest_of("failure"),
+                retry_policy_digest: digest_of("policy"),
+            }),
+        };
+        assert!(params.validate().is_err());
     }
 }

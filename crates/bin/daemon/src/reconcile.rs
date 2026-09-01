@@ -1118,7 +1118,7 @@ async fn reconcile_active_threads_inner(
         }
         reconcile_dedicated_worker_startup(state).await?;
     }
-    repair_detached_spawn_links(state)?;
+    repair_detached_runtime_action_links(state)?;
     reconcile_accounting(state)?;
     let blocked_freezes = reconcile_execution_workspaces(state, mode)?;
     if mode == ActiveReconcileMode::Startup {
@@ -2334,8 +2334,11 @@ fn quiesce_dedicated_workers(state: &AppState) -> Result<()> {
     Ok(())
 }
 
-fn repair_detached_spawn_links(state: &AppState) -> Result<()> {
-    for intent in state.state_store.detached_spawn_intents()? {
+fn repair_detached_runtime_action_links(state: &AppState) -> Result<()> {
+    for intent in state.state_store.runtime_action_intents()? {
+        if intent.mode != ryeos_app::runtime_db::RuntimeActionMode::Detached {
+            continue;
+        }
         if let Some(incompatible) = &intent.incompatible_launch_metadata {
             tracing::warn!(
                 operation_id = %intent.operation_id,
@@ -2355,15 +2358,19 @@ fn repair_detached_spawn_links(state: &AppState) -> Result<()> {
                     intent.launch_metadata.as_ref(),
                     intent.initial_events.as_ref(),
                 ) else {
-                    if state
-                        .state_store
-                        .abort_unsealed_detached_spawn_intent(&intent.operation_id)?
-                    {
-                        tracing::warn!(
-                            operation_id = %intent.operation_id,
-                            "aborted detached reservation that never crossed its sealed authority boundary"
-                        );
-                    }
+                    // Reservation is already the one-child authority for this
+                    // logical operation. Preserve it across restart so an
+                    // authenticated retry re-drives the safe pre-contact
+                    // phases with the same child identity (and reuses any
+                    // project authority already bound). Deleting this row
+                    // would permit a different child and a later project
+                    // generation to be minted for the same operation.
+                    tracing::warn!(
+                        operation_id = %intent.operation_id,
+                        child_thread_id = %intent.child_thread_id,
+                        project_authority_bound = intent.child_project_authority.is_some(),
+                        "preserving incomplete detached reservation for exact-operation replay"
+                    );
                     continue;
                 };
                 let resume = metadata.resume_context.as_ref().ok_or_else(|| {
@@ -2432,7 +2439,7 @@ fn repair_detached_spawn_links(state: &AppState) -> Result<()> {
             );
         }
         let _inherited_stop = state.state_store.record_child_link(
-            &intent.parent_thread_id,
+            &intent.first_caller_thread_id,
             &intent.child_thread_id,
             "dispatch",
         )?;

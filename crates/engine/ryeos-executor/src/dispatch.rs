@@ -400,6 +400,7 @@ pub(crate) struct SubprocessDispatchContext<'a> {
     request: &'a DispatchRequest<'a>,
     ctx: &'a ExecutionContext,
     state: &'a AppState,
+    handler_context: Option<ryeos_app::handler_context::HandlerContext>,
     role: &'a SubprocessRole,
     root_subject: Option<RootSubject>,
     hop_runtime: Option<VerifiedRuntime>,
@@ -1795,6 +1796,7 @@ pub(crate) async fn dispatch_method(
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
+    handler_context: Option<ryeos_app::handler_context::HandlerContext>,
     launch_handoff: Option<&crate::execution::launch::LaunchHandoff>,
 ) -> Result<Value, DispatchError> {
     if request.effect_authority.is_some() {
@@ -2226,14 +2228,36 @@ pub(crate) async fn dispatch_method(
             injection.source
                 == ryeos_engine::protocol_vocabulary::EnvInjectionSource::ThreadAuthToken
         });
-    let thread_auth = needs_thread_auth.then(|| {
-        state.thread_auth.mint(
-            &thread_id,
-            request.acting_principal.to_string(),
-            ctx.caller_scopes.clone(),
-            ttl,
+    let thread_auth = if needs_thread_auth {
+        let callback_scopes = Vec::new();
+        let callback_handler_context = handler_context
+            .as_ref()
+            .map(|context| {
+                context.narrowed_for_execution(
+                    callback_scopes.clone(),
+                    &ctx.plan_ctx.current_site_id,
+                    &ctx.plan_ctx.origin_site_id,
+                )
+            })
+            .transpose()
+            .map_err(DispatchError::Internal)?;
+        Some(
+            state
+                .thread_auth
+                .mint(
+                    &thread_id,
+                    request.acting_principal.to_string(),
+                    callback_scopes,
+                    callback_handler_context,
+                    &ctx.plan_ctx.current_site_id,
+                    &ctx.plan_ctx.origin_site_id,
+                    ttl,
+                )
+                .map_err(DispatchError::Internal)?,
         )
-    });
+    } else {
+        None
+    };
     if let Some(thread_auth) = &thread_auth {
         lifecycle_owner.track_thread_auth_token(thread_auth.token.clone());
     }
@@ -2992,6 +3016,7 @@ pub async fn dispatch_service(
                     usage_subject: request.usage_subject.as_ref(),
                     usage_subject_asserted_by: request.usage_subject_asserted_by.as_deref(),
                 },
+                request.root_admission.clone(),
                 request.pre_minted_thread_id.as_deref(),
                 local_handler_context,
             )
@@ -3176,6 +3201,7 @@ async fn dispatch_via_method_executor(
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
+    handler_context: Option<ryeos_app::handler_context::HandlerContext>,
     launch_handoff: Option<&crate::execution::launch::LaunchHandoff>,
 ) -> Result<Value, DispatchError> {
     let wrapper_ref = resolved.item_ref.as_str();
@@ -3256,7 +3282,7 @@ async fn dispatch_via_method_executor(
     let result = Box::pin(dispatch_inner(
         &target_ref,
         None,
-        None,
+        handler_context,
         &dispatch_req,
         &exec_ctx,
         state,
@@ -3759,6 +3785,7 @@ pub async fn dispatch_with_handler_context(
     {
         return dispatch_daemon_owned_inner(
             item_ref,
+            None,
             Some(local_handler_context),
             request,
             ctx,
@@ -3796,11 +3823,12 @@ pub fn dispatch_daemon_owned(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> tokio::task::JoinHandle<Result<Value, DispatchError>> {
-    dispatch_daemon_owned_inner(item_ref, None, request, ctx, state)
+    dispatch_daemon_owned_inner(item_ref, None, None, request, ctx, state)
 }
 
 fn dispatch_daemon_owned_inner(
     item_ref: &str,
+    verified_root: Option<VerifiedItem>,
     local_handler_context: Option<ryeos_app::handler_context::HandlerContext>,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
@@ -3826,6 +3854,7 @@ fn dispatch_daemon_owned_inner(
     let root_dispatch_evidence = request.root_dispatch_evidence.clone();
     let parent_execution_context = request.parent_execution_context.clone();
     let effect_authority = request.effect_authority.clone();
+    let verified_root = verified_root.clone();
     let ctx = ExecutionContext {
         principal_fingerprint: ctx.principal_fingerprint.clone(),
         caller_scopes: ctx.caller_scopes.clone(),
@@ -3859,7 +3888,7 @@ fn dispatch_daemon_owned_inner(
         };
         let result = Box::pin(dispatch_inner(
             &item_ref,
-            None,
+            verified_root,
             local_handler_context,
             &request,
             &ctx,
@@ -3880,6 +3909,7 @@ fn dispatch_daemon_owned_inner(
 /// publish the signal; unsupported in-process paths never do.
 pub async fn dispatch_with_launch_handoff(
     item_ref: &str,
+    handler_context: Option<ryeos_app::handler_context::HandlerContext>,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
@@ -3888,7 +3918,7 @@ pub async fn dispatch_with_launch_handoff(
     let result = Box::pin(dispatch_inner(
         item_ref,
         None,
-        None,
+        handler_context,
         request,
         ctx,
         state,
@@ -3918,6 +3948,17 @@ pub async fn dispatch_verified(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<Value, DispatchError> {
+    if request.lifecycle_authority.ownership
+        == ryeos_state::objects::ExecutionOwnershipAuthority::DaemonOwned
+    {
+        return dispatch_daemon_owned_inner(item_ref, Some(verified), None, request, ctx, state)
+            .await
+            .map_err(|error| {
+                DispatchError::Internal(anyhow::anyhow!(
+                    "daemon-owned verified dispatch task ended before settlement: {error}"
+                ))
+            })?;
+    }
     Box::pin(dispatch_inner(
         item_ref,
         Some(verified),
@@ -3941,6 +3982,24 @@ pub async fn dispatch_verified_with_handler_context(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<Value, DispatchError> {
+    if request.lifecycle_authority.ownership
+        == ryeos_state::objects::ExecutionOwnershipAuthority::DaemonOwned
+    {
+        return dispatch_daemon_owned_inner(
+            item_ref,
+            Some(verified),
+            Some(local_handler_context),
+            request,
+            ctx,
+            state,
+        )
+        .await
+        .map_err(|error| {
+            DispatchError::Internal(anyhow::anyhow!(
+                "daemon-owned verified dispatch task ended before settlement: {error}"
+            ))
+        })?;
+    }
     Box::pin(dispatch_inner(
         item_ref,
         Some(verified),
@@ -4215,6 +4274,7 @@ async fn dispatch_inner(
                     request,
                     ctx,
                     state,
+                    local_handler_context,
                     launch_handoff,
                 ))
                 .await;
@@ -5966,6 +6026,7 @@ async fn dispatch_by(
                 request,
                 ctx,
                 state,
+                handler_context: local_handler_context,
                 role,
                 root_subject,
                 hop_runtime: runtime,
@@ -5977,11 +6038,6 @@ async fn dispatch_by(
             registry: InProcessRegistryKind::Services,
             ..
         } => {
-            if request.root_admission.is_some() && request.pre_minted_thread_id.is_some() {
-                return Err(DispatchError::Internal(anyhow::anyhow!(
-                    "threaded root admission resolved to an in-process terminator; refusing to acknowledge a pre-minted id without its admitted row"
-                )));
-            }
             let tp = thread_profile.ok_or_else(|| DispatchError::SchemaMisconfigured {
                 kind: canonical_ref.kind.clone(),
                 detail: "service terminator has no thread_profile".into(),

@@ -226,6 +226,24 @@ fn validate_runtime_event_batch(events: &[EventAppendItem]) -> Result<()> {
                 "event append refused: `state_anchor` milestones are daemon-authored through runtime.publish_state_anchor"
             );
         }
+        if matches!(
+            event.event_type.as_str(),
+            ryeos_state::event_types::TOOL_CALL_START | ryeos_state::event_types::TOOL_CALL_RESULT
+        ) {
+            let operation_id = event
+                .payload
+                .get("operation_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("event '{}' requires operation_id", event.event_type)
+                })?;
+            if !ryeos_runtime::callback::valid_action_operation_id(operation_id) {
+                bail!(
+                    "event '{}' operation_id must be a canonical lowercase SHA-256 digest",
+                    event.event_type
+                );
+            }
+        }
         let payload_bytes = serde_json::to_vec(&event.payload)?.len();
         if payload_bytes > MAX_RUNTIME_EVENT_PAYLOAD_BYTES {
             bail!(
@@ -366,6 +384,47 @@ mod tests {
             assert!(validate_event_storage_class("cognition_out", "ephemeral", &payload).is_err());
             // Indexed is always fine.
             assert!(validate_event_storage_class("cognition_out", "indexed", &payload).is_ok());
+        }
+    }
+
+    #[test]
+    fn tool_lifecycle_events_require_one_canonical_operation_identity() {
+        for event_type in [
+            ryeos_state::event_types::TOOL_CALL_START,
+            ryeos_state::event_types::TOOL_CALL_RESULT,
+        ] {
+            let event = |payload| EventAppendItem {
+                event_type: event_type.to_string(),
+                storage_class: "indexed".to_string(),
+                payload,
+            };
+            assert!(
+                validate_runtime_event_batch(&[event(json!({
+                    "operation_id": "a".repeat(64),
+                    "tool": "tool:test/echo",
+                    "call_id": "call-1"
+                }))])
+                .is_ok()
+            );
+            assert!(
+                validate_runtime_event_batch(&[event(json!({
+                    "tool": "tool:test/echo",
+                    "call_id": "call-1"
+                }))])
+                .unwrap_err()
+                .to_string()
+                .contains("requires operation_id")
+            );
+            assert!(
+                validate_runtime_event_batch(&[event(json!({
+                    "operation_id": "NOT-A-HASH",
+                    "tool": "tool:test/echo",
+                    "call_id": "call-1"
+                }))])
+                .unwrap_err()
+                .to_string()
+                .contains("canonical lowercase")
+            );
         }
     }
 

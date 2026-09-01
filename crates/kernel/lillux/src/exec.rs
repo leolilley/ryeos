@@ -436,8 +436,9 @@ struct LauncherRefusalDocument {
 }
 
 /// Validate retained descriptors and make them inheritable only inside this
-/// command's forked child. Callers must keep the Arc handles alive through
-/// `spawn`/`status`.
+/// command's forked child. The command's pre-exec closure owns cloned handles,
+/// so the exact descriptors remain live until the command is spawned or
+/// discarded.
 pub fn configure_inherited_fds(
     command: &mut process::Command,
     inherited_fds: &[std::sync::Arc<std::fs::File>],
@@ -456,7 +457,7 @@ pub fn configure_inherited_fds(
         use std::os::fd::AsRawFd as _;
         use std::os::unix::process::CommandExt as _;
 
-        let mut raw = Vec::with_capacity(inherited_fds.len());
+        let mut retained = Vec::with_capacity(inherited_fds.len());
         for file in inherited_fds {
             let fd = file.as_raw_fd();
             if fd <= libc::STDERR_FILENO {
@@ -474,13 +475,14 @@ pub fn configure_inherited_fds(
                     "inherited descriptor {fd} is not protected by FD_CLOEXEC"
                 ));
             }
-            raw.push(fd);
+            retained.push(std::sync::Arc::clone(file));
         }
         unsafe {
             command.pre_exec(move || {
-                for fd in &raw {
-                    let flags = libc::fcntl(*fd, libc::F_GETFD);
-                    if flags < 0 || libc::fcntl(*fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                for file in &retained {
+                    let fd = file.as_raw_fd();
+                    let flags = libc::fcntl(fd, libc::F_GETFD);
+                    if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
                         return Err(std::io::Error::last_os_error());
                     }
                 }
@@ -583,6 +585,69 @@ pub fn protect_descriptor_from_exec<T: std::os::fd::AsRawFd>(descriptor: &T) -> 
 pub struct InheritedDuplexChannel {
     #[cfg(unix)]
     stream: std::os::unix::net::UnixStream,
+}
+
+/// Child-side authority for one connected inherited duplex channel.
+///
+/// The descriptor stays close-on-exec in the parent. Consuming this authority
+/// binds both the hidden descriptor value and its inheritance to exactly one
+/// command. Raw descriptor mechanics never leave Lillux.
+pub struct InheritedDuplexChannelChildAuthority {
+    channel: std::sync::Arc<std::fs::File>,
+}
+
+impl InheritedDuplexChannelChildAuthority {
+    /// Consume this authority into one child command. The exact descriptor is
+    /// both retained by the command and installed under `descriptor_env_name`;
+    /// callers cannot split or replay those two operations.
+    pub fn bind_to_command(
+        self,
+        command: &mut process::Command,
+        descriptor_env_name: &str,
+    ) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+            let descriptor = self.channel.as_raw_fd();
+            if descriptor <= libc::STDERR_FILENO {
+                return Err("inherited duplex channel overlaps standard I/O".to_owned());
+            }
+            configure_inherited_fds(command, std::slice::from_ref(&self.channel))?;
+            command.env(descriptor_env_name, descriptor.to_string());
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = command;
+            let _ = descriptor_env_name;
+            Err("inherited duplex channels are unavailable on this platform".to_owned())
+        }
+    }
+}
+
+/// Create one connected, atomically close-on-exec duplex channel pair for a
+/// parent and one explicitly configured child.
+#[cfg(unix)]
+pub fn inherited_duplex_channel_pair()
+-> Result<(InheritedDuplexChannel, InheritedDuplexChannelChildAuthority), String> {
+    use std::os::fd::OwnedFd;
+
+    let (parent, child) = std::os::unix::net::UnixStream::pair()
+        .map_err(|error| format!("create inherited duplex channel: {error}"))?;
+    protect_descriptor_from_exec(&parent)?;
+    protect_descriptor_from_exec(&child)?;
+    Ok((
+        InheritedDuplexChannel { stream: parent },
+        InheritedDuplexChannelChildAuthority {
+            channel: std::sync::Arc::new(std::fs::File::from(OwnedFd::from(child))),
+        },
+    ))
+}
+
+#[cfg(not(unix))]
+pub fn inherited_duplex_channel_pair()
+-> Result<(InheritedDuplexChannel, InheritedDuplexChannelChildAuthority), String> {
+    Err("inherited duplex channels are unavailable on this platform".to_owned())
 }
 
 impl InheritedDuplexChannel {
@@ -731,6 +796,21 @@ mod inherited_unix_stream_tests {
     use super::*;
     use std::os::fd::IntoRawFd as _;
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn typed_duplex_pair_is_connected_and_close_on_exec() {
+        let (mut parent, child) = inherited_duplex_channel_pair().unwrap();
+        let descriptor = child.channel.as_raw_fd();
+        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+        assert!(flags >= 0);
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+
+        let mut writer = child.channel.try_clone().unwrap();
+        writer.write_all(b"phase\n").unwrap();
+        let mut observed = [0u8; 6];
+        parent.read_exact(&mut observed).unwrap();
+        assert_eq!(&observed, b"phase\n");
+    }
 
     #[test]
     fn inherited_stream_is_immediately_close_on_exec() {

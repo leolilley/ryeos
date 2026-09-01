@@ -979,6 +979,7 @@ fn start_capsule_process(
         socket: held.socket,
         lifelines: held.lifelines,
         expected_boot_identity: None,
+        observation_sink: None,
     })
 }
 
@@ -1212,6 +1213,7 @@ pub fn start_exclusive_capsule(
     state_root: Option<&Path>,
     runtime_environment: &BTreeMap<String, String>,
     identity: &ExclusivePersistentSessionIdentity,
+    observation_sink: ryeos_app::persistent_session::PersistentSessionObservationSink,
 ) -> Result<()> {
     let capsule = load_capsule(state, capsule_hash)?;
     validate_capsule_current_trust(&state.engine, &capsule)?;
@@ -1322,34 +1324,38 @@ pub fn start_exclusive_capsule(
         socket: held.socket,
         lifelines: held.lifelines,
         expected_boot_identity: Some(identity.boot_identity_hash.clone()),
+        observation_sink: Some(observation_sink),
     };
-    if let Err(error) = reservation.bind(started) {
-        let cleanup_unproved = error
-            .downcast_ref::<ryeos_app::persistent_session::PersistentSessionCleanupUnproved>()
-            .is_some();
-        let cleanup_state = if cleanup_unproved {
-            "unproved"
-        } else {
-            "reaped"
-        };
-        let mut error = error;
-        if let Err(settlement) = state.state_store.settle_worker_process(
-            &identity.worker_instance_id,
-            &identity.placement_thread_id,
-            identity.boot_epoch,
-            cleanup_state,
-            "exclusive worker readiness failed",
-        ) {
-            error = error.context(format!(
-                "persist exclusive readiness cleanup also failed: {settlement:#}"
-            ));
+    let start_guard = match reservation.bind(started) {
+        Ok(start_guard) => start_guard,
+        Err(error) => {
+            let cleanup_unproved = error
+                .downcast_ref::<ryeos_app::persistent_session::PersistentSessionCleanupUnproved>()
+                .is_some();
+            let cleanup_state = if cleanup_unproved {
+                "unproved"
+            } else {
+                "reaped"
+            };
+            let mut error = error;
+            if let Err(settlement) = state.state_store.settle_worker_process(
+                &identity.worker_instance_id,
+                &identity.placement_thread_id,
+                identity.boot_epoch,
+                cleanup_state,
+                "exclusive worker readiness failed",
+            ) {
+                error = error.context(format!(
+                    "persist exclusive readiness cleanup also failed: {settlement:#}"
+                ));
+            }
+            return Err(if cleanup_unproved {
+                error.context(ExclusiveWorkerCleanupUnproved)
+            } else {
+                error
+            });
         }
-        return Err(if cleanup_unproved {
-            error.context(ExclusiveWorkerCleanupUnproved)
-        } else {
-            error
-        });
-    }
+    };
     if let Err(error) = state.state_store.complete_worker_binding(
         &identity.worker_instance_id,
         &identity.placement_thread_id,
@@ -1386,6 +1392,7 @@ pub fn start_exclusive_capsule(
             error.context(ExclusiveWorkerCleanupUnproved)
         });
     }
+    drop(start_guard);
     // Wake attachment-gated controllers only after the held process has been
     // released, the exclusive transport is bound, and the durable worker row
     // is live. The projection remains the authority; this process-local signal

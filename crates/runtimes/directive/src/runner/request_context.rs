@@ -1,6 +1,6 @@
 use serde_json::{Map, Value, json};
 
-use crate::directive::{ProviderMessage, ToolSchema};
+use crate::directive::{DIRECTIVE_RETURN_TOOL, ProviderMessage, ToolSchema};
 use ryeos_directive_definition::OutputSpec;
 
 pub(super) fn initial_messages(
@@ -70,7 +70,7 @@ fn build_directive_return_tool(outputs: &[OutputSpec]) -> ToolSchema {
     schema.insert("properties".to_string(), Value::Object(props));
     schema.insert("required".to_string(), Value::Array(required));
     ToolSchema {
-        name: "directive_return".to_string(),
+        name: DIRECTIVE_RETURN_TOOL.to_string(),
         item_id: "lifecycle:directive_return".to_string(),
         description: Some(
             "Return final structured outputs and finish the directive. \
@@ -119,7 +119,7 @@ mod tests {
             },
         ]);
 
-        assert_eq!(tool.name, "directive_return");
+        assert_eq!(tool.name, DIRECTIVE_RETURN_TOOL);
         assert_eq!(tool.item_id, "lifecycle:directive_return");
         let schema = tool.input_schema.expect("directive return schema");
         assert_eq!(schema["required"], json!(["answer", "confidence"]));
@@ -156,6 +156,6 @@ mod tests {
             false,
         );
         assert_eq!(visible.len(), 1);
-        assert_eq!(visible[0].name, "directive_return");
+        assert_eq!(visible[0].name, DIRECTIVE_RETURN_TOOL);
     }
 }

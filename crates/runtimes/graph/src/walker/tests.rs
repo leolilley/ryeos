@@ -65,6 +65,16 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for MockClient {
                     message: "simulated transient dispatch failure".to_string(),
                     retryable: true,
                 })
+            } else if result.get("__unknown_dispatch_error").is_some() {
+                Err(CallbackError::ActionFailed {
+                    code: ryeos_runtime::callback::RUNTIME_ACTION_OUTCOME_UNKNOWN_CODE.to_string(),
+                    message: "simulated retained operation with unavailable reply".to_string(),
+                    retryable: false,
+                })
+            } else if result.get("__transport_dispatch_error").is_some() {
+                Err(CallbackError::Transport(anyhow::anyhow!(
+                    "simulated transport loss after send"
+                )))
             } else {
                 Ok(live_dispatch_response(result))
             }
@@ -368,6 +378,28 @@ config:
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].action.params["step"], 0);
     assert_eq!(requests[1].action.params["step"], 1);
+    let first_operation = requests[0]
+        .action
+        .operation_id
+        .as_deref()
+        .expect("first graph action operation");
+    let retry_operation = requests[1]
+        .action
+        .operation_id
+        .as_deref()
+        .expect("retry graph action operation");
+    assert!(ryeos_runtime::callback::valid_action_operation_id(
+        first_operation
+    ));
+    assert_ne!(first_operation, retry_operation);
+    assert_eq!(
+        first_operation,
+        crate::dispatch::graph_action_operation_id("gr-run-loop", "loop", 0, None, None)
+    );
+    assert_eq!(
+        retry_operation,
+        crate::dispatch::graph_action_operation_id("gr-run-loop", "loop", 1, None, None)
+    );
     assert_eq!(result.result.expect("return output")["step"], 2);
 }
 
@@ -2369,6 +2401,28 @@ fn cache_result_replays_within_one_execution_cache() {
     assert_eq!(cached, val);
 }
 
+#[test]
+fn cache_identity_excludes_runtime_action_occurrence() {
+    let mut first = json!({
+        "item_id": "tool:test/echo",
+        "ref_bindings": {},
+        "params": {"value": "same behavior"}
+    });
+    let mut later = first.clone();
+    first[ryeos_runtime::callback::action_keys::OPERATION_ID] = Value::String(
+        crate::dispatch::graph_action_operation_id("gr-cache", "cached", 1, None, None),
+    );
+    later[ryeos_runtime::callback::action_keys::OPERATION_ID] = Value::String(
+        crate::dispatch::graph_action_operation_id("gr-cache", "cached", 9, None, None),
+    );
+
+    let first_key = compute_cache_key("definition-hash", "cache-graph", "cached", &first)
+        .expect("first cache identity");
+    let later_key = compute_cache_key("definition-hash", "cache-graph", "cached", &later)
+        .expect("later cache identity");
+    assert_eq!(first_key, later_key);
+}
+
 // ── warning accumulator ─────────────────────────────────────────
 //
 // `record_callback_warning` MUST push exactly one labelled string per
@@ -2602,6 +2656,11 @@ struct RecordingMockClient {
     /// Count of `dispatch_action` calls (to prove a follow resume re-dispatches
     /// nothing).
     dispatch_count: Mutex<usize>,
+    /// Test-only model of the daemon's at-most-once action reservation: the
+    /// first terminal envelope for an operation is replayed on every repeated
+    /// contact with that exact operation ID.
+    retain_by_operation: bool,
+    retained_dispatch_results: Mutex<std::collections::BTreeMap<String, Value>>,
 }
 
 impl RecordingMockClient {
@@ -2618,7 +2677,15 @@ impl RecordingMockClient {
             follow_requests: Mutex::new(Vec::new()),
             follow_should_fail: false,
             dispatch_count: Mutex::new(0),
+            retain_by_operation: false,
+            retained_dispatch_results: Mutex::new(std::collections::BTreeMap::new()),
         }
+    }
+
+    fn new_at_most_once(dispatch_results: Vec<Value>) -> Self {
+        let mut client = Self::new(dispatch_results);
+        client.retain_by_operation = true;
+        client
     }
 
     fn recorded_events(&self) -> Vec<(String, String, Value, String)> {
@@ -2657,7 +2724,19 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for RecordingMockClient {
         request: DispatchActionRequest,
     ) -> Result<Value, CallbackError> {
         *self.dispatch_count.lock().unwrap() += 1;
+        let operation_id = request.action.operation_id.clone();
         self.dispatch_requests.lock().unwrap().push(request);
+        if self.retain_by_operation
+            && let Some(operation_id) = operation_id.as_deref()
+            && let Some(retained) = self
+                .retained_dispatch_results
+                .lock()
+                .unwrap()
+                .get(operation_id)
+                .cloned()
+        {
+            return Ok(live_dispatch_response(retained));
+        }
         let mut results = self.dispatch_results.lock().unwrap();
         if results.is_empty() {
             Ok(live_dispatch_response(json!({})))
@@ -2669,7 +2748,25 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for RecordingMockClient {
                     message: "simulated transient dispatch failure".to_string(),
                     retryable: true,
                 })
+            } else if result.get("__unknown_dispatch_error").is_some() {
+                Err(CallbackError::ActionFailed {
+                    code: ryeos_runtime::callback::RUNTIME_ACTION_OUTCOME_UNKNOWN_CODE.to_string(),
+                    message: "simulated retained operation with unavailable reply".to_string(),
+                    retryable: false,
+                })
+            } else if result.get("__transport_dispatch_error").is_some() {
+                Err(CallbackError::Transport(anyhow::anyhow!(
+                    "simulated transport loss after send"
+                )))
             } else {
+                if self.retain_by_operation
+                    && let Some(operation_id) = operation_id
+                {
+                    self.retained_dispatch_results
+                        .lock()
+                        .unwrap()
+                        .insert(operation_id, result.clone());
+                }
                 Ok(live_dispatch_response(result))
             }
         }
@@ -2841,6 +2938,29 @@ fn make_recording_walker(
     (w, recorder)
 }
 
+fn make_at_most_once_recording_walker(
+    graph: GraphDefinition,
+    results: Vec<Value>,
+) -> (Walker, Arc<RecordingMockClient>) {
+    let inner = Arc::new(RecordingMockClient::new_at_most_once(results));
+    let callback = CallbackClient::from_inner(
+        inner.clone(),
+        "thread-test",
+        "/tmp/test-project",
+        "tat-test",
+    );
+    (
+        Walker::new(
+            graph,
+            "/tmp/test-project".to_string(),
+            "thread-test".to_string(),
+            callback,
+            None,
+        ),
+        inner,
+    )
+}
+
 // ── §A per-step retry ────────────────────────────────────────────
 
 const RETRY_YAML: &str = r#"
@@ -2874,6 +2994,27 @@ fn subprocess_success() -> Value {
 
 fn retryable_dispatch_failure() -> Value {
     json!({"__retryable_dispatch_error": true})
+}
+
+fn retryable_retained_leaf_failure() -> Value {
+    json!({
+        "success": false,
+        "status": "failed",
+        "result": {
+            "kind": "runtime_failure",
+            "version": 1,
+            "code": "temporary_child_failure",
+            "summary": "retryable retained child failure",
+            "diagnostic_locator": {
+                "thread_id": "T-retryable-child",
+                "event_type": "thread_failed"
+            },
+            "retryable": true
+        },
+        "outputs": {},
+        "warnings": [],
+        "cost": null
+    })
 }
 
 #[tokio::test]
@@ -2949,6 +3090,12 @@ config:
     let requests = recorder.recorded_dispatch_requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].action.params["step"], 7);
+    let expected_operation =
+        crate::dispatch::graph_action_operation_id("gr-run-resume", "capture", 7, None, None);
+    assert_eq!(
+        requests[0].action.operation_id.as_deref(),
+        Some(expected_operation.as_str())
+    );
     assert_eq!(result.result.expect("return output")["step"], 8);
 }
 
@@ -2970,6 +3117,143 @@ async fn retry_redispatches_until_success() {
     );
     // A recovered retry leaves no suppressed error behind.
     assert!(result.errors.is_none(), "recovered retry records no error");
+}
+
+#[tokio::test]
+async fn unknown_unary_dispatch_outcome_exits_without_step_commit_or_authored_retry() {
+    let graph = make_graph(RETRY_YAML);
+    for (label, marker) in [
+        ("explicit", json!({"__unknown_dispatch_error":true})),
+        ("transport", json!({"__transport_dispatch_error":true})),
+    ] {
+        let (walker, recorder) = make_recording_walker(graph.clone(), vec![marker], None);
+        let error = walker
+            .execute_recoverable(json!({}), Some(format!("gr-unknown-{label}")))
+            .await
+            .unwrap_err();
+        assert!(
+            ryeos_runtime::process_outcome::recovery_required_in_chain(&error).is_some(),
+            "{label}: {error:#}"
+        );
+        assert_eq!(recorder.dispatch_count(), 1, "{label}");
+        assert!(recorder.recorded_finalizations().is_empty(), "{label}");
+        assert!(
+            recorder.recorded_events().iter().all(|(_, event, _, _)| {
+                event != "graph_step_started"
+                    && event != "tool_call_result"
+                    && event != "graph_node_retry"
+                    && event != "graph_completed"
+            }),
+            "{label}: an ambiguous occurrence must leave no committed step"
+        );
+    }
+}
+
+#[tokio::test]
+async fn foreach_retry_uses_a_new_attempt_scoped_operation() {
+    let graph = make_graph(
+        r#"
+version: "1.0.0"
+category: test
+config:
+  start: iterate
+  nodes:
+    iterate:
+      node_type: foreach
+      over: "${state.items}"
+      as: elem
+      action: {item_id: "tool:test/flaky", ref_bindings: {}, params: {value: "${elem}"}}
+      retry: {attempts: 2, backoff_ms: 1}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#,
+    );
+    let (walker, recorder) = make_at_most_once_recording_walker(
+        graph,
+        vec![retryable_retained_leaf_failure(), subprocess_success()],
+    );
+    let result = walker
+        .execute(
+            json!({"inject_state":{"items":["one"]}}),
+            Some("gr-foreach-retry-operation".to_string()),
+        )
+        .await;
+    assert!(result.success, "{result:?}");
+    let requests = recorder.recorded_dispatch_requests();
+    assert_eq!(requests.len(), 2);
+    let first = requests[0]
+        .action
+        .operation_id
+        .as_deref()
+        .expect("first attempt operation");
+    let retry = requests[1]
+        .action
+        .operation_id
+        .as_deref()
+        .expect("retry operation");
+    assert_ne!(first, retry);
+    assert_eq!(
+        first,
+        crate::dispatch::graph_action_operation_id(
+            "gr-foreach-retry-operation",
+            "iterate",
+            0,
+            Some(0),
+            Some(1),
+        )
+    );
+    assert_eq!(
+        retry,
+        crate::dispatch::graph_action_operation_id(
+            "gr-foreach-retry-operation",
+            "iterate",
+            0,
+            Some(0),
+            Some(2),
+        )
+    );
+}
+
+#[tokio::test]
+async fn unknown_foreach_dispatch_outcome_leaves_the_node_uncommitted() {
+    let graph = make_graph(
+        r#"
+version: "1.0.0"
+category: test
+config:
+  start: iterate
+  on_error: continue
+  nodes:
+    iterate:
+      node_type: foreach
+      over: "${state.items}"
+      as: elem
+      parallel: true
+      max_concurrency: 2
+      action: {item_id: "tool:test/unknown", ref_bindings: {}}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#,
+    );
+    let (walker, recorder) =
+        make_recording_walker(graph, vec![json!({"__unknown_dispatch_error":true})], None);
+    let error = walker
+        .execute_recoverable(
+            json!({"inject_state":{"items":["one"]}}),
+            Some("gr-foreach-unknown".to_string()),
+        )
+        .await
+        .unwrap_err();
+    assert!(ryeos_runtime::process_outcome::recovery_required_in_chain(&error).is_some());
+    assert!(recorder.recorded_finalizations().is_empty());
+    assert!(
+        recorder
+            .recorded_events()
+            .iter()
+            .all(|(_, event, _, _)| event != "graph_step_completed")
+    );
 }
 
 #[tokio::test]
@@ -3891,7 +4175,6 @@ async fn follow_resume_success_accounts_cost() {
     // child cost in graph accounting, exactly like a live native dispatch.
     let graph = make_graph(FOLLOW_YAML);
     let mut envelope = follow_terminal_envelope(RuntimeResultStatus::Completed, json!("child_ok"));
-    envelope["outputs"] = json!({"x": 1});
     envelope["cost"] = json!({"input_tokens": 120, "output_tokens": 45, "total_usd": "0.0012"});
     let params = follow_resume_params(&graph, Some(envelope));
     let (w, rec) = make_recording_walker(graph, vec![], None);
@@ -4504,21 +4787,19 @@ async fn follow_fanout_error_redirect_rolls_back_collected_candidate() {
         "statuses": [FanoutItemStatus::Completed, FanoutItemStatus::Failed],
         "items":[
             {
+                "projection": ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION,
                 "success": true,
                 "child_thread_id": "T-follow-child-1",
                 "status": RuntimeResultStatus::Completed,
                 "result": {"ok": 1},
-                "outputs": null,
-                "warnings": [],
                 "cost": {"input_tokens":3,"output_tokens":1,"total_usd": "0.1"},
             },
             {
+                "projection": ryeos_runtime::envelope::FOLLOW_ACTION_RESULT_PROJECTION,
                 "success": false,
                 "child_thread_id": "T-follow-child-2",
                 "status": RuntimeResultStatus::Failed,
                 "result": {"error":"boom"},
-                "outputs": null,
-                "warnings": [],
                 "cost": {"input_tokens":4,"output_tokens":0,"total_usd": "0.2"},
             },
         ]

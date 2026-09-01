@@ -2015,7 +2015,7 @@ async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
     if recovered_activations != 0 {
         tracing::info!(
             recovered_activations,
-            "periodic recovery completed managed external-content activations"
+            "periodic recovery advanced managed external-content activations"
         );
     }
     let recovered_project_heads = recover_durable_project_head_reconciliations(state)
@@ -2308,11 +2308,17 @@ async fn drain_running_threads(state: &AppState) -> bool {
         attached.push((thread_id, thread.status, identity, action));
     }
 
+    // Close the generic persistent-session pool first. Pooled request workers
+    // have no durable per-process row, so the pool itself is their only exact
+    // shutdown owner. Exclusive workers are reaped through the same boundary,
+    // then their durable identities are fenced below.
+    let persistent_session_pool_drained = drain_persistent_session_pool(state).await;
+
     // Exclusive persistent-session workers are independent process groups,
-    // not descendants represented by `thread_runtime`. Retire and durably
-    // fence those exact worker epochs before draining their root controllers.
-    // This releases the workspace/profile lease only after process death is
-    // proved and leaves the session in the ordinary restart-recovery state.
+    // not descendants represented by `thread_runtime`. Durably fence those
+    // exact worker epochs before draining their root controllers. This
+    // releases the workspace/profile lease only after process death is proved
+    // and leaves the session in the ordinary restart-recovery state.
     let persistent_session_workers_drained = drain_persistent_session_workers(state).await;
 
     let drain_deadline = Instant::now()
@@ -2500,11 +2506,44 @@ async fn drain_running_threads(state: &AppState) -> bool {
             }
         }
     };
-    persistent_session_workers_drained
+    persistent_session_pool_drained
+        && persistent_session_workers_drained
         && attached_snapshot_clean
         && attached_drained
         && in_process_drained
         && in_process_authoritative_clean
+}
+
+async fn drain_persistent_session_pool(state: &AppState) -> bool {
+    let pool = Arc::clone(&state.persistent_sessions);
+    match tokio::task::spawn_blocking(move || {
+        pool.shutdown_and_reap_all(Duration::from_secs(
+            process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS,
+        ))
+    })
+    .await
+    {
+        Ok(Ok(reaped)) => {
+            if reaped != 0 {
+                tracing::info!(reaped, "reaped persistent-session pool before daemon exit");
+            }
+            true
+        }
+        Ok(Err(error)) => {
+            tracing::error!(
+                error = %error,
+                "persistent-session pool shutdown cleanup remains unproved"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "persistent-session pool shutdown task panicked"
+            );
+            false
+        }
+    }
 }
 
 async fn drain_persistent_session_workers(state: &AppState) -> bool {

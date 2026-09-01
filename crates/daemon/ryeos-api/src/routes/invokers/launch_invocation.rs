@@ -161,6 +161,9 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             effective_project.as_path(),
             ref_bindings,
             resolved_authority.lifecycle,
+            ctx.principal
+                .as_ref()
+                .map(|principal| principal.handler_context()),
         )
         .map_err(|error| {
             RouteDispatchError::Internal(format!(

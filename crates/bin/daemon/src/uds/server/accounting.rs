@@ -12,7 +12,6 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use ryeos_accounting::{
     ProviderAccountingAuthority, ProviderAttemptGetParams, ProviderAttemptLocalStreamControl,
@@ -40,10 +39,7 @@ use ryeos_provider_contract::{
 };
 
 fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as i64)
-        .unwrap_or(0)
+    lillux::time::timestamp_millis()
 }
 
 fn accounting(state: &AppState) -> Result<&Arc<AccountingDb>> {
@@ -370,6 +366,7 @@ pub(super) fn handle_provider_attempt_prepare(
         turn: request.turn,
         attempt_number: request.attempt_number,
         request_hash: &request_hash,
+        provider_coordinate_key: &coordinate_key,
         config_hash: &authority.config_hash,
         verified_bound: &request.verified_bound,
         authority,
@@ -404,6 +401,12 @@ pub(super) fn handle_provider_attempt_prepare(
             execution_budget_id: scope.execution_budget_id.clone(),
             replayed,
         },
+        ReserveOutcome::RetryAdvanced { advance } => {
+            ProviderAttemptPrepareResponse::RetryAdvanced { advance }
+        }
+        ReserveOutcome::RetryNotBefore { advance } => {
+            ProviderAttemptPrepareResponse::RetryNotBefore { advance }
+        }
     };
     Ok(serde_json::to_value(response)?)
 }
@@ -505,6 +508,9 @@ pub(super) fn handle_provider_attempt_settle(
     if request.thread_id != cap.thread_id {
         anyhow::bail!("provider_attempt_settle thread does not match callback capability");
     }
+    if request.retry.is_some() && request.answer.is_some() {
+        anyhow::bail!("a completed provider answer cannot also authorize a retry");
+    }
     let ledger = accounting(state)?;
     request.coordinate.validate()?;
     let sealed = sealed_financial_authority(state, &cap.thread_id)?;
@@ -594,8 +600,10 @@ pub(super) fn handle_provider_attempt_settle(
         launch_owner,
         &request.attempt_id,
         &request.request_hash,
+        &coordinate_key,
         &request.spend,
         &request.tokens,
+        request.retry.as_ref(),
         request.authority_digest.as_str(),
         now_ms(),
     )?;
@@ -659,6 +667,7 @@ pub(super) fn handle_provider_attempt_settle(
         charge_basis: outcome.charge_basis,
         replayed: outcome.replayed,
         publication,
+        retry_advance: outcome.retry_advance,
     };
     Ok(serde_json::to_value(response)?)
 }
@@ -1587,6 +1596,7 @@ mod tests {
                 turn: 1,
                 attempt_number: 1,
                 request_hash: &request_hash,
+                provider_coordinate_key: &lillux::sha256_hex(b"provider-coordinate"),
                 config_hash: &authority.config_hash,
                 verified_bound: &bound,
                 authority: &authority,
@@ -1617,8 +1627,10 @@ mod tests {
                 generation,
                 &attempt_id,
                 &request_hash,
+                &lillux::sha256_hex(b"provider-coordinate"),
                 &SpendAccounting::ExplicitlyFree,
                 &TokenAccounting::Unavailable,
+                None,
                 authority.authority_digest.as_str(),
                 3,
             )

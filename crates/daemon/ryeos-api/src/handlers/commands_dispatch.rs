@@ -160,9 +160,15 @@ pub async fn handle(
         effect_authority: None,
     };
 
-    let result = ryeos_executor::dispatch::dispatch(&item_ref, &dispatch_req, &exec_ctx, &state)
-        .await
-        .map_err(|e| HandlerError::Internal(format!("dispatch failed: {e}")));
+    let result = ryeos_executor::dispatch::dispatch_with_handler_context(
+        &item_ref,
+        ctx.clone(),
+        &dispatch_req,
+        &exec_ctx,
+        &state,
+    )
+    .await
+    .map_err(|e| HandlerError::Internal(format!("dispatch failed: {e}")));
     drop(dispatch_req);
     drop(exec_ctx);
     result

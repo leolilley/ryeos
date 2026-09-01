@@ -40,6 +40,8 @@ use ryeos_runtime::callback_client::MAX_RUNTIME_REPLAY_PAGE_LIMIT;
 mod accounting;
 mod dedicated_sessions;
 mod routing;
+#[cfg(feature = "crash-qualification-test-support")]
+mod runtime_phase_cut;
 mod transport;
 
 #[cfg(test)]
@@ -121,6 +123,9 @@ pub async fn serve(listener: UnixListener, state: Arc<AppState>) -> Result<()> {
 }
 
 pub async fn serve_dynamic(listener: UnixListener, state: DynamicServerState) -> Result<()> {
+    #[cfg(feature = "crash-qualification-test-support")]
+    runtime_phase_cut::initialize_from_env()?;
+
     let mut connections = tokio::task::JoinSet::new();
     let connection_slots = Arc::new(Semaphore::new(MAX_UDS_CONNECTIONS));
     let frame_bytes = Arc::new(Semaphore::new(MAX_UDS_IN_FLIGHT_FRAME_BYTES));
@@ -584,6 +589,8 @@ pub(crate) async fn dispatch_runtime_method(
             })?;
             accounting::handle_provider_attempt_local_stream_control(&clean_params, state, cap)
         }
+        #[cfg(feature = "crash-qualification-test-support")]
+        "runtime.test_phase_cut" => runtime_phase_cut::reach(&clean_params).await,
         other => anyhow::bail!("unknown runtime method: {other}"),
     }
 }
@@ -616,6 +623,10 @@ fn enforce_runtime_callback_admission(
 }
 
 fn is_running_runtime_mutation(method: &str) -> bool {
+    #[cfg(feature = "crash-qualification-test-support")]
+    if method == "runtime.test_phase_cut" {
+        return true;
+    }
     matches!(
         method,
         "runtime.append_event"
@@ -4674,8 +4685,8 @@ mod tests {
                 "callback_token": cbt.token,
                 "thread_id": "T-stream-2",
                 "events": [
-                    {"event_type": "tool_call_start",  "payload": {"i": 1}, "storage_class": "indexed"},
-                    {"event_type": "tool_call_result", "payload": {"i": 2}, "storage_class": "indexed"},
+                    {"event_type": "tool_call_start",  "payload": {"i": 1, "operation_id": "a".repeat(64)}, "storage_class": "indexed"},
+                    {"event_type": "tool_call_result", "payload": {"i": 2, "operation_id": "a".repeat(64)}, "storage_class": "indexed"},
                     {"event_type": "stream_closed",    "payload": {"i": 3}, "storage_class": "indexed"},
                 ],
             })),
@@ -5214,6 +5225,7 @@ mod tests {
                     "callback_token": cbt.token,
                     "thread_id": "T-tat-missing",
                     "action": {
+                        "operation_id": "1".repeat(64),
                         "item_id": "directive:ryeos/agent/core/base",
                         "ref_bindings": {},
                         "thread": "inline",
@@ -5255,6 +5267,7 @@ mod tests {
                 "thread_id": "T-tat-wrong",
                 "thread_auth_token": "tat-deadbeef0000000000000000000000000000000000000000000000000000",
                 "action": {
+                    "operation_id": "1".repeat(64),
                     "item_id": "directive:ryeos/agent/core/base",
                     "ref_bindings": {},
                     "thread": "inline",
@@ -5308,6 +5321,7 @@ mod tests {
                     "thread_auth_token": tat.token.clone(),
                     "acting_principal": "fp:attacker-spoofed-principal",
                     "action": {
+                        "operation_id": "1".repeat(64),
                         "item_id": "directive:ryeos/agent/core/base",
                         "ref_bindings": {},
                         "thread": "inline",
@@ -5340,6 +5354,7 @@ mod tests {
                     "thread_id": "T-tat-ok",
                     "thread_auth_token": tat.token,
                     "action": {
+                        "operation_id": "1".repeat(64),
                         "item_id": "directive:ryeos/agent/core/base",
                         "ref_bindings": {},
                         "thread": "inline",
@@ -5386,6 +5401,7 @@ mod tests {
                     "thread_id": "T-caps-empty",
                     "thread_auth_token": tat.token,
                     "action": {
+                        "operation_id": "1".repeat(64),
                         "item_id": "directive:ryeos/agent/core/base",
                         "ref_bindings": {},
                         "thread": "inline",
@@ -5433,6 +5449,7 @@ mod tests {
                     "thread_id": "T-caps-wild",
                     "thread_auth_token": tat.token,
                     "action": {
+                        "operation_id": "1".repeat(64),
                         "item_id": "directive:ryeos/agent/core/base",
                         "ref_bindings": {},
                         "thread": "inline",

@@ -122,10 +122,10 @@ where
     serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 
-/// v7 seals subject-resolution authority independently for the project
-/// binding, admitted resolution closure, resolved root item, and the complete
-/// typed executor route selected at admission.
-pub(super) const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 10;
+/// v11 additionally seals the optional ingress-authenticated handler context.
+/// Its absence is meaningful: node-internal execution must not manufacture a
+/// verified transport principal during recovery or callback dispatch.
+pub(super) const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 11;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -519,6 +519,8 @@ pub struct SealedRootExecutionRequest {
     current_site_id: String,
     origin_site_id: String,
     #[serde(deserialize_with = "deserialize_required_nullable")]
+    handler_context: Option<crate::handler_context::HandlerContext>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     target_site_id: Option<String>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     requested_by: Option<String>,
@@ -555,8 +557,15 @@ impl SealedRootExecutionRequest {
         request: &ResolvedExecutionRequest,
         runtime_ref: String,
         program: &ryeos_engine::effective_program::FinalizedEffectiveProgram,
+        handler_context: Option<&crate::handler_context::HandlerContext>,
     ) -> Result<Self> {
-        Self::capture_finalized_with_ref_bindings(request, runtime_ref, program, BTreeMap::new())
+        Self::capture_finalized_with_ref_bindings(
+            request,
+            runtime_ref,
+            program,
+            BTreeMap::new(),
+            handler_context,
+        )
     }
 
     /// Seal a managed launch together with the exact, engine-resolved binding
@@ -568,6 +577,7 @@ impl SealedRootExecutionRequest {
         runtime_ref: String,
         program: &ryeos_engine::effective_program::FinalizedEffectiveProgram,
         resolved_ref_bindings: BTreeMap<String, Value>,
+        handler_context: Option<&crate::handler_context::HandlerContext>,
     ) -> Result<Self> {
         Self::capture_with_effective_parts(
             request,
@@ -575,6 +585,7 @@ impl SealedRootExecutionRequest {
             program.resolution().clone(),
             program.effective_definition_digest().clone(),
             resolved_ref_bindings,
+            handler_context,
         )
     }
 
@@ -584,12 +595,30 @@ impl SealedRootExecutionRequest {
         resolution_output: ryeos_engine::resolution::ResolutionOutput,
         effective_definition_digest: ryeos_engine::resolution::EffectiveDefinitionDigest,
         resolved_ref_bindings: BTreeMap<String, Value>,
+        handler_context: Option<&crate::handler_context::HandlerContext>,
     ) -> Result<Self> {
         let admission = request.root_admission.as_ref().ok_or_else(|| {
             anyhow!("cannot seal a root execution request without root admission")
         })?;
         admission.validate()?;
         admission.ensure_matches_request(request)?;
+        let (principal, scopes) = match &admission.plan_context.requested_by {
+            EffectivePrincipal::Local(principal) => {
+                (principal.fingerprint.as_str(), principal.scopes.as_slice())
+            }
+            EffectivePrincipal::Delegated(principal) => (
+                principal.caller_fingerprint.as_str(),
+                principal.delegated_scopes.as_slice(),
+            ),
+        };
+        if let Some(context) = handler_context {
+            context.validate_execution_authority(
+                principal,
+                scopes,
+                &request.current_site_id,
+                &request.origin_site_id,
+            )?;
+        }
         validate_launch_mode(&request.launch_mode)?;
         if runtime_ref.trim().is_empty() || runtime_ref.trim() != runtime_ref {
             bail!("sealed root execution runtime ref must be non-empty and trimmed");
@@ -665,6 +694,7 @@ impl SealedRootExecutionRequest {
             launch_mode: request.launch_mode.clone(),
             current_site_id: request.current_site_id.clone(),
             origin_site_id: request.origin_site_id.clone(),
+            handler_context: handler_context.cloned(),
             target_site_id: request.target_site_id.clone(),
             requested_by: request.requested_by.clone(),
             usage_subject: request.usage_subject.clone(),
@@ -833,11 +863,39 @@ impl SealedRootExecutionRequest {
     }
 
     /// Rebind only the invocation envelope of an exact admitted program for a
-    /// continuation segment. Program bytes, composed resolution, runtime
-    /// identity, and trust facts remain byte-for-byte inherited.
+    /// machine continuation segment. Program bytes, composed resolution,
+    /// runtime identity, trust facts, and ingress authority remain
+    /// byte-for-byte inherited.
     pub fn for_continuation_invocation(
         &self,
         resume: &crate::launch_metadata::ResumeContext,
+    ) -> Result<Self> {
+        if self.requested_by.as_deref() != Some(resume.principal_identifier())
+            || self.planning_principal != SealedPrincipal::from(&resume.requested_by)
+        {
+            bail!(
+                "machine continuation cannot replace the admitted execution principal for {}",
+                resume.item_ref
+            );
+        }
+        self.rebind_continuation_invocation(resume, self.handler_context.clone())
+    }
+
+    /// Rebind an operator continuation to the exact handler authority that
+    /// authenticated the new stimulus. This is the sole ordinary continuation
+    /// path allowed to replace the predecessor's execution principal.
+    pub fn for_operator_continuation_invocation(
+        &self,
+        resume: &crate::launch_metadata::ResumeContext,
+        handler_context: &crate::handler_context::HandlerContext,
+    ) -> Result<Self> {
+        self.rebind_continuation_invocation(resume, Some(handler_context.clone()))
+    }
+
+    fn rebind_continuation_invocation(
+        &self,
+        resume: &crate::launch_metadata::ResumeContext,
+        handler_context: Option<crate::handler_context::HandlerContext>,
     ) -> Result<Self> {
         if self.kind != resume.kind
             || self.item_ref != resume.item_ref
@@ -858,6 +916,7 @@ impl SealedRootExecutionRequest {
         successor.parameters = resume.parameters.clone();
         successor.requested_by = Some(resume.principal_identifier().to_string());
         successor.planning_principal = SealedPrincipal::from(&resume.requested_by);
+        successor.handler_context = handler_context;
         successor.project_context = resume.project_context.clone();
         successor.project_authority = resume.project_authority.clone();
         successor.project_binding_subject_authority = continued_binding_subject_authority(
@@ -865,6 +924,7 @@ impl SealedRootExecutionRequest {
             &resume.project_authority,
         )?;
         successor.execution_hints = resume.execution_hints.values.clone();
+        successor.validate_handler_context()?;
         successor
             .validate_invocation_against_resume(resume)
             .context("continuation invocation rebind validation")?;
@@ -906,6 +966,12 @@ impl SealedRootExecutionRequest {
         let mut target = self.clone();
         target.current_site_id = rebind.target_site_id.clone();
         target.target_site_id = Some(rebind.target_site_id.clone());
+        // Transport authentication is node-local authority. The source
+        // capsule proves the portable program and owner, but no target-local
+        // admission in this protocol re-authenticates the original handler.
+        // Clear it rather than upgrading source testimony into target handler
+        // authority. A later authenticated operator continuation may rebind it.
+        target.handler_context = None;
         target.parameters = target_resume.parameters.clone();
         target.project_context = target_resume.project_context.clone();
         target.project_authority = target_resume.project_authority.clone();
@@ -920,6 +986,33 @@ impl SealedRootExecutionRequest {
             bail!("remote worker invocation rebind changed immutable admitted program identity");
         }
         Ok(target)
+    }
+
+    pub fn handler_context(&self) -> Option<&crate::handler_context::HandlerContext> {
+        self.handler_context.as_ref()
+    }
+
+    fn validate_handler_context(&self) -> Result<()> {
+        let Some(context) = self.handler_context.as_ref() else {
+            return Ok(());
+        };
+        let (principal, scopes) = match &self.planning_principal {
+            SealedPrincipal::Local {
+                fingerprint,
+                scopes,
+            } => (fingerprint.as_str(), scopes.as_slice()),
+            SealedPrincipal::Delegated {
+                caller_fingerprint,
+                delegated_scopes,
+                ..
+            } => (caller_fingerprint.as_str(), delegated_scopes.as_slice()),
+        };
+        context.validate_execution_authority(
+            principal,
+            scopes,
+            &self.current_site_id,
+            &self.origin_site_id,
+        )
     }
 
     /// Exact captured policy carried by the synthetic storage fixture.
@@ -987,6 +1080,7 @@ impl SealedRootExecutionRequest {
             launch_mode: "detached".to_string(),
             current_site_id: "site:test".to_string(),
             origin_site_id: "site:test".to_string(),
+            handler_context: None,
             target_site_id: None,
             requested_by: Some("session:test".to_string()),
             usage_subject: None,
@@ -1113,6 +1207,8 @@ impl SealedRootExecutionRequest {
         if self.validate_only {
             bail!("persisted root execution request cannot be validate-only");
         }
+        self.validate_handler_context()
+            .context("validate sealed root handler authority")?;
         let requested_by = self.planning_principal.restore()?;
         let observed_effective_digest = self.resolution_output.effective_definition_digest()?;
         if observed_effective_digest != self.effective_definition_digest {
@@ -1596,6 +1692,26 @@ mod authority_tests {
         );
     }
 
+    #[test]
+    fn sealed_remote_operator_handler_authority_round_trips_exactly() {
+        let mut fixture = SealedRootExecutionRequest::storage_test_fixture();
+        fixture.current_site_id = "site:target".to_string();
+        fixture.origin_site_id = "site:source".to_string();
+        fixture.handler_context = Some(crate::handler_context::HandlerContext::new_with_authority(
+            "session:test".to_string(),
+            Vec::new(),
+            true,
+            Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some("site:source".to_string()),
+        ));
+        fixture.validate_handler_context().unwrap();
+
+        let round_trip: SealedRootExecutionRequest =
+            serde_json::from_value(serde_json::to_value(&fixture).unwrap()).unwrap();
+        round_trip.validate_handler_context().unwrap();
+        assert_eq!(round_trip.handler_context, fixture.handler_context);
+    }
+
     fn cow_authority(base: &str, current: &str) -> ryeos_state::objects::ExecutionProjectAuthority {
         let authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
             "test-project".to_string(),
@@ -1650,6 +1766,166 @@ mod authority_tests {
             executor_ref: Some("native:storage-fixture".to_string()),
             runtime_ref: Some("runtime:storage-fixture".to_string()),
         }
+    }
+
+    #[test]
+    fn operator_continuation_rebinds_exact_authenticated_principal() {
+        let fixture = SealedRootExecutionRequest::storage_test_fixture();
+        let mut resume = continuation_resume(
+            "/unused",
+            ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+        );
+        resume.project_context = ProjectContext::None;
+        resume.requested_by = EffectivePrincipal::Local(Principal {
+            fingerprint: "session:operator".to_string(),
+            scopes: vec!["threads.execute".to_string()],
+        });
+        let handler = crate::handler_context::HandlerContext::new_with_authority(
+            "session:operator".to_string(),
+            vec!["threads.execute".to_string()],
+            true,
+            Some(crate::identity::AuthorizedKeyPrincipalClass::LocalClient),
+            None,
+        );
+
+        let rebound = fixture
+            .for_operator_continuation_invocation(&resume, &handler)
+            .unwrap();
+        assert_eq!(rebound.handler_context(), Some(&handler));
+        assert_eq!(rebound.requested_by.as_deref(), Some("session:operator"));
+        assert_eq!(
+            rebound.planning_principal,
+            SealedPrincipal::Local {
+                fingerprint: "session:operator".to_string(),
+                scopes: vec!["threads.execute".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn machine_continuation_cannot_replace_execution_principal() {
+        let fixture = SealedRootExecutionRequest::storage_test_fixture();
+        let mut resume = continuation_resume(
+            "/unused",
+            ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+        );
+        resume.project_context = ProjectContext::None;
+        resume.requested_by = EffectivePrincipal::Local(Principal {
+            fingerprint: "session:other".to_string(),
+            scopes: Vec::new(),
+        });
+
+        assert!(
+            fixture
+                .for_continuation_invocation(&resume)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot replace the admitted execution principal")
+        );
+    }
+
+    #[test]
+    fn remote_worker_adoption_clears_source_transport_authentication() {
+        use crate::worker_handoff::{CredentialGenerationReservation, RemoteResumeContextRebind};
+        use ryeos_state::objects::{EnvironmentAuthority, PinnedProjectRealization};
+
+        let base = "a".repeat(64);
+        let target_generation = "b".repeat(64);
+        let source_path = PathBuf::from("/source/project");
+        let target_path = PathBuf::from("/target/project");
+        let source_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "project:test".to_string(),
+            Some(source_path.clone()),
+            base.clone(),
+            PinnedProjectRealization::Cow {
+                terminal_publication: ryeos_state::objects::PinnedTerminalPublication::Discard,
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let mut fixture = SealedRootExecutionRequest::storage_test_fixture_with_project_identity(
+            ProjectContext::SnapshotHash { hash: base.clone() },
+            source_authority.clone(),
+        );
+        fixture.current_site_id = "site:source".to_string();
+        fixture.origin_site_id = "site:source".to_string();
+        fixture.parameters = json!({"credential_profile_id":"source-profile"});
+        fixture.handler_context = Some(crate::handler_context::HandlerContext::new_with_authority(
+            "session:test".to_string(),
+            Vec::new(),
+            true,
+            Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some("site:source".to_string()),
+        ));
+        fixture.validate_handler_context().unwrap();
+
+        let mut source_resume = continuation_resume("/source/project", source_authority);
+        source_resume.project_context = ProjectContext::SnapshotHash { hash: base.clone() };
+        source_resume.stable_project_identity = Some(
+            crate::launch_metadata::StableProjectIdentity::from_path(&source_path, "site:source")
+                .unwrap(),
+        );
+        source_resume.original_snapshot_hash = Some(base.clone());
+        source_resume.current_site_id = "site:source".to_string();
+        source_resume.origin_site_id = "site:source".to_string();
+        source_resume.parameters = fixture.parameters.clone();
+        let target_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "project:test".to_string(),
+            Some(target_path.clone()),
+            base.clone(),
+            PinnedProjectRealization::Cow {
+                terminal_publication: ryeos_state::objects::PinnedTerminalPublication::Discard,
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap()
+        .transition_operational_generation(
+            ryeos_state::objects::OperationalProjectAuthorityTransition::AdvancePinnedCowContinuation {
+                result_snapshot_hash: &target_generation,
+            },
+        )
+        .unwrap();
+        let rebind = RemoteResumeContextRebind {
+            source_site_id: "site:source".to_string(),
+            target_site_id: "site:target".to_string(),
+            target_project_context: ProjectContext::LocalPath {
+                path: target_path.clone(),
+            },
+            target_project_authority: target_authority,
+            target_stable_project_identity: Some(
+                crate::launch_metadata::StableProjectIdentity::from_path(
+                    &target_path,
+                    "site:target",
+                )
+                .unwrap(),
+            ),
+            target_local_overlay_root: None,
+            target_original_snapshot_hash: Some(target_generation.clone()),
+            target_original_pushed_head_ref: None,
+            target_state_root: None,
+            source_credential_profile_id: "source-profile".to_string(),
+            credential_reservation: CredentialGenerationReservation {
+                profile_id: "target-profile".to_string(),
+                owner_principal: "session:test".to_string(),
+                generation: 1,
+                reservation_id: "reservation:test".to_string(),
+                upstream_session_id: "upstream:test".to_string(),
+                subject_contract_digest: "c".repeat(64),
+                subject_digest: "d".repeat(64),
+            },
+        };
+        let target_resume = source_resume.for_remote_worker_adoption(&rebind).unwrap();
+
+        let target = fixture
+            .for_remote_worker_adoption_invocation(&source_resume, &target_resume, &rebind)
+            .unwrap();
+        assert!(target.handler_context().is_none());
+        assert_eq!(
+            target.admitted_program_value().unwrap(),
+            fixture.admitted_program_value().unwrap()
+        );
     }
 
     #[test]

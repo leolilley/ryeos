@@ -409,6 +409,11 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             }
         }
     };
+    let child_handler_context = thread_auth.narrowed_handler_context(
+        cap.effective_caps.clone(),
+        &parent.current_site_id,
+        &parent.origin_site_id,
+    )?;
     let child_plan_context = ryeos_engine::contracts::PlanContext {
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
@@ -419,7 +424,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         project_context: child_project_context.clone(),
         subject_resolution_authority: admission_provenance.subject_resolution_authority(),
         current_site_id: parent.current_site_id.clone(),
-        origin_site_id: parent.current_site_id.clone(),
+        origin_site_id: parent.origin_site_id.clone(),
         execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
         validate_only: false,
     };
@@ -609,6 +614,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         &parent.origin_site_id,
         parent_lifecycle_authority,
         &thread_auth.acting_principal,
+        child_handler_context,
         &cap,
         resolution_engine,
     )
@@ -1127,6 +1133,7 @@ async fn prepare_follow_children(
     parent_origin_site_id: &str,
     parent_lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
     acting_principal: &str,
+    child_handler_context: Option<ryeos_app::handler_context::HandlerContext>,
     cap: &ryeos_app::callback_token::CallbackCapability,
     resolution_engine: &std::sync::Arc<ryeos_engine::engine::Engine>,
 ) -> Result<PreparedFollowChildren> {
@@ -1345,6 +1352,7 @@ async fn prepare_follow_children(
                 })?,
                 launch_provenance,
                 launch_parent_context.clone(),
+                child_handler_context.clone(),
             )
             .await?
         };

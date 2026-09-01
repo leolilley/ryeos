@@ -153,22 +153,19 @@ impl Walker {
                 });
             }
         };
-        if rendered_action.get("thread").and_then(Value::as_str) == Some("detached") {
-            let operation = lillux::canonical_json(&json!({
-                "graph_run_id": graph_run_id,
-                "node": current,
-                "step": step,
-                "kind": "detached_action"
-            }))
-            .expect("fixed detached operation identity is canonical JSON");
-            rendered_action
-                .as_object_mut()
-                .expect("rendered action is validated as an object")
-                .insert(
-                    "operation_id".to_string(),
-                    Value::String(lillux::sha256_hex(operation.as_bytes())),
-                );
-        }
+        rendered_action
+            .as_object_mut()
+            .expect("rendered action is validated as an object")
+            .insert(
+                ryeos_runtime::callback::action_keys::OPERATION_ID.to_string(),
+                Value::String(crate::dispatch::graph_action_operation_id(
+                    graph_run_id,
+                    current,
+                    step,
+                    None,
+                    None,
+                )),
+            );
 
         // Missing paths fail or are handled explicitly by `??`; authored
         // `null` is data and must survive dispatch unchanged.
@@ -421,6 +418,11 @@ impl Walker {
 
         match outcome {
             Err(dispatch_error) => {
+                if dispatch_error.outcome_unknown {
+                    return StepOutcome::RecoveryRequired {
+                        error: dispatch_error.diagnostic,
+                    };
+                }
                 // A transport/dispatch failure with retry attempts remaining
                 // reschedules a fresh-step re-dispatch; exhausted → on_error.
                 if dispatch_error.retryable

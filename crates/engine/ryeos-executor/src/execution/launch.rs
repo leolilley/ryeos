@@ -10,7 +10,9 @@ use rand::Rng;
 use serde_json::{Value, json};
 
 use super::arch_check;
-use super::launch_claim::{ThreadLaunchClaim, ThreadLaunchClaimOutcome};
+use super::launch_claim::{
+    RuntimeRecoveryClaimRotation, ThreadLaunchClaim, ThreadLaunchClaimOutcome,
+};
 use super::launch_envelope::{
     EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, HardLimits, LaunchEnvelope,
     LaunchEnvelopeBuilder, RuntimeResult,
@@ -34,6 +36,7 @@ use ryeos_runtime::checkpoint::{
     FanoutItemStatus, checkpoint_shape_limits, validate_checkpoint_shape,
 };
 use ryeos_runtime::events::RuntimeEventType;
+use ryeos_runtime::process_outcome::RuntimeProcessOutcome;
 
 mod runtime_request;
 mod terminal;
@@ -3396,6 +3399,9 @@ pub struct BuildAndLaunchParams<'a> {
     /// reattaches the same runtime identity rather than re-resolving the default.
     pub runtime_ref: Option<&'a str>,
     pub acting_principal: &'a str,
+    /// Exact ingress-authenticated handler authority when one admitted this
+    /// execution. Absence remains absence across recovery and callbacks.
+    pub handler_context: Option<&'a ryeos_app::handler_context::HandlerContext>,
     pub resolved: &'a ResolvedExecutionRequest,
     pub project_path: &'a Path,
     pub provenance: &'a ryeos_app::execution_provenance::ExecutionProvenance,
@@ -4336,6 +4342,7 @@ async fn prepare_managed_launch_authority(
                     params.provenance,
                     &params.resolved.plan_context,
                     params.acting_principal,
+                    params.handler_context,
                     params.state,
                     params.launch_timings.as_ref(),
                     params
@@ -5191,6 +5198,7 @@ async fn build_and_launch_inner(
             authority.selected_runtime.canonical_ref.to_string(),
             &authority.effective_program,
             sealed_ref_binding_records(&authority.prepared_launch)?,
+            params.handler_context,
         )?;
     authority
         .launch_metadata
@@ -5475,6 +5483,7 @@ async fn run_claimed_thread_row_inner(
         launch_timings,
         runtime_ref: _,
         acting_principal,
+        handler_context,
         resolved,
         project_path,
         provenance,
@@ -6243,7 +6252,7 @@ async fn run_claimed_thread_row_inner(
             suppress_stimulus,
         },
         EnvelopePolicy {
-            effective_caps,
+            effective_caps: effective_caps.clone(),
             hard_limits: hard_limits.clone(),
         },
         EnvelopeCallback {
@@ -6335,6 +6344,16 @@ async fn run_claimed_thread_row_inner(
             detail: "durable stop intent won after authoritative thread creation".to_string(),
         });
     }
+    let callback_handler_context = handler_context
+        .map(|context| {
+            context.narrowed_for_execution(
+                effective_caps.clone(),
+                &resolved.current_site_id,
+                &resolved.origin_site_id,
+            )
+        })
+        .transpose()
+        .map_err(BuildAndLaunchError::Internal)?;
     let thread_auth = descriptor_clone
         .env_injections
         .iter()
@@ -6343,13 +6362,20 @@ async fn run_claimed_thread_row_inner(
                 == ryeos_engine::protocol_vocabulary::EnvInjectionSource::ThreadAuthToken
         })
         .then(|| {
-            state.thread_auth.mint(
-                &thread_id,
-                acting_principal.to_string(),
-                vec!["execute".to_string()],
-                ttl,
-            )
-        });
+            state
+                .thread_auth
+                .mint(
+                    &thread_id,
+                    acting_principal.to_string(),
+                    effective_caps.clone(),
+                    callback_handler_context,
+                    &resolved.current_site_id,
+                    &resolved.origin_site_id,
+                    ttl,
+                )
+                .map_err(BuildAndLaunchError::Internal)
+        })
+        .transpose()?;
     let tat_owned = thread_auth
         .as_ref()
         .map(|auth| auth.token.clone())
@@ -6502,9 +6528,11 @@ async fn run_claimed_thread_row_inner(
         tracing::debug!(pruned, "cleaned up expired callback capabilities");
     }
 
-    // 11. Handle spawn result
-    let mut runtime_result = match spawn_result {
-        Ok(result) => result,
+    // 11. Handle the process outcome. A recovery request is a typed,
+    // nonterminal control envelope; it never enters RuntimeResult's closed
+    // terminal status domain.
+    let process_outcome = match spawn_result {
+        Ok(outcome) => outcome,
         Err(err) => {
             if super::process_attachment::finalize_requested_stop_if_present(state, &thread_id)? {
                 return Err(BuildAndLaunchError::Internal(err));
@@ -6548,6 +6576,95 @@ async fn run_claimed_thread_row_inner(
                 identity,
             );
             return Err(BuildAndLaunchError::Internal(err));
+        }
+    };
+
+    let mut runtime_result = match process_outcome {
+        RuntimeProcessOutcome::Terminal(result) => result,
+        RuntimeProcessOutcome::RecoveryRequired {
+            thread_id: reported_thread_id,
+            reason,
+        } => {
+            if reported_thread_id != thread_id {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "runtime recovery control named thread {reported_thread_id}, expected {thread_id}"
+                )));
+            }
+            if super::process_attachment::finalize_requested_stop_if_present(state, &thread_id)? {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "runtime requested recovery after a durable stop won"
+                )));
+            }
+            let launch_metadata = state
+                .state_store
+                .get_launch_metadata(&thread_id)?
+                .ok_or_else(|| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "runtime recovery target has no launch metadata"
+                    ))
+                })?;
+            let resume_policy = launch_metadata.native_resume.as_ref().ok_or_else(|| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "runtime requested recovery without admitted native-resume policy"
+                ))
+            })?;
+            if launch_metadata.resume_context.is_none() {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "runtime requested recovery without captured resume authority"
+                )));
+            }
+            match ThreadLaunchClaim::rotate_after_runtime_recovery(
+                state,
+                &thread_id,
+                launch_owner,
+                resume_policy.max_auto_resume_attempts,
+            )? {
+                RuntimeRecoveryClaimRotation::Exhausted { attempts } => RuntimeResult {
+                    success: false,
+                    status: ryeos_runtime::envelope::RuntimeResultStatus::Failed,
+                    thread_id: thread_id.clone(),
+                    result: Some(json!({
+                        "code": "runtime_recovery_exhausted",
+                        "attempts": attempts,
+                        "maximum": resume_policy.max_auto_resume_attempts,
+                    })),
+                    outputs: Value::Null,
+                    cost: None,
+                    warnings: Vec::new(),
+                },
+                RuntimeRecoveryClaimRotation::LostOwner => {
+                    return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "same-thread recovery lost its exact active launch owner"
+                    )));
+                }
+                RuntimeRecoveryClaimRotation::Rotated {
+                    claim: next_claim,
+                    next_attempt,
+                } => {
+                    tracing::warn!(
+                        thread_id = %thread_id,
+                        ?reason,
+                        attempt = next_attempt,
+                        maximum = resume_policy.max_auto_resume_attempts,
+                        "runtime requested exact same-thread recovery"
+                    );
+                    let next_owner = next_claim.canonical_owner()?;
+                    let current_thread =
+                        state.threads.get_thread(&thread_id)?.ok_or_else(|| {
+                            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                                "runtime recovery target disappeared"
+                            ))
+                        })?;
+                    let resumed = Box::pin(launch_claimed_native_resume(
+                        state,
+                        current_thread,
+                        &next_owner,
+                    ))
+                    .await;
+                    drop(next_claim);
+                    return resumed;
+                }
+            }
         }
     };
 
@@ -7111,12 +7228,14 @@ pub async fn prepare_follow_child_launch(
     admitted_request: ResolvedExecutionRequest,
     provenance: ryeos_app::execution_provenance::ExecutionProvenance,
     parent_context: crate::dispatch::ParentExecutionContext,
+    handler_context: Option<ryeos_app::handler_context::HandlerContext>,
 ) -> Result<PreparedFollowChildLaunch, BuildAndLaunchError> {
     prepare_follow_child_launch_inner(
         state,
         thread_id,
         launch_metadata,
         Some(admitted_request),
+        handler_context,
         provenance,
         parent_context,
         true,
@@ -7154,6 +7273,7 @@ pub async fn prepare_existing_follow_child_launch(
         thread_id,
         launch_metadata,
         None,
+        None,
         provenance,
         parent_context,
         false,
@@ -7166,6 +7286,7 @@ async fn prepare_follow_child_launch_inner(
     thread_id: &str,
     launch_metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
     fresh_admitted_request: Option<ResolvedExecutionRequest>,
+    fresh_handler_context: Option<ryeos_app::handler_context::HandlerContext>,
     provenance: ryeos_app::execution_provenance::ExecutionProvenance,
     parent_context: crate::dispatch::ParentExecutionContext,
     capture_project_snapshot: bool,
@@ -7178,7 +7299,7 @@ async fn prepare_follow_child_launch_inner(
     // reconstruction first could consult the daemon's current engine or create
     // a second snapshot checkout, neither of which is the admitted child source.
     let engine = provenance.request_engine();
-    let (admitted_request, admitted_runtime_ref) = match fresh_admitted_request {
+    let (admitted_request, admitted_runtime_ref, handler_context) = match fresh_admitted_request {
         Some(request) => {
             let request_authority = request
                 .root_admission
@@ -7197,7 +7318,7 @@ async fn prepare_follow_child_launch_inner(
             let runtime_ref = resume.runtime_ref.clone().ok_or_else(|| {
                 anyhow::anyhow!("fresh follow-child resume has no admitted runtime ref")
             })?;
-            (request, runtime_ref)
+            (request, runtime_ref, fresh_handler_context)
         }
         None => {
             let sealed_request = launch_metadata
@@ -7227,7 +7348,11 @@ async fn prepare_follow_child_launch_inner(
                     &provenance,
                 )
                 .context("restore follow-child sealed root request")?;
-            (request, sealed_request.runtime_ref().to_string())
+            (
+                request,
+                sealed_request.runtime_ref().to_string(),
+                sealed_request.handler_context().cloned(),
+            )
         }
     };
     let mut operational_resume = resume.clone();
@@ -7257,6 +7382,7 @@ async fn prepare_follow_child_launch_inner(
     let execution = crate::execution::runner::ExecutionParams {
         resolved: admitted_request,
         acting_principal,
+        handler_context,
         vault_bindings: HashMap::new(),
         parameters: resume.parameters.clone(),
         pre_minted_thread_id: None,
@@ -7277,6 +7403,7 @@ async fn prepare_follow_child_launch_inner(
             launch_timings: None,
             runtime_ref: resume.runtime_ref.as_deref(),
             acting_principal: &execution.acting_principal,
+            handler_context: execution.handler_context.as_ref(),
             resolved: &execution.resolved,
             project_path: &project_path,
             provenance: &execution.provenance,
@@ -7340,6 +7467,7 @@ async fn prepare_follow_child_launch_inner(
                     authority.selected_runtime.canonical_ref.to_string(),
                     &authority.effective_program,
                     sealed_ref_binding_records(&authority.prepared_launch)?,
+                    execution.handler_context.as_ref(),
                 )?;
             prepared.set_sealed_root_request(augmented_sealed_request);
             let realization_contract_ref = authority.selected_runtime.canonical_ref.to_string();
@@ -7466,6 +7594,7 @@ async fn prepare_successor_launch(
             launch_timings: None,
             runtime_ref: resume.runtime_ref.as_deref(),
             acting_principal: &execution.acting_principal,
+            handler_context: execution.handler_context.as_ref(),
             resolved: &execution.resolved,
             project_path: &project_path,
             provenance: &execution.provenance,
@@ -7537,6 +7666,7 @@ pub async fn prepare_operator_successor_launch(
     successor_thread_id: &str,
     resume: &ryeos_app::launch_metadata::ResumeContext,
     source_thread_id: &str,
+    handler_context: &ryeos_app::handler_context::HandlerContext,
 ) -> Result<PreparedOperatorSuccessorLaunch, BuildAndLaunchError> {
     let source_metadata = state
         .state_store
@@ -7546,7 +7676,7 @@ pub async fn prepare_operator_successor_launch(
         .sealed_root_request
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("source {source_thread_id} has no admitted launch capsule"))?
-        .for_continuation_invocation(resume)?;
+        .for_operator_continuation_invocation(resume, handler_context)?;
     let successor_metadata = source_metadata
         .continuation_successor_seed(resume.clone())
         .with_continuation_source(source_thread_id)
@@ -8257,6 +8387,7 @@ async fn launch_claimed_successor(
         // re-seeds the same runtime for the NEXT continuation turn.
         runtime_ref: resume.runtime_ref.as_deref(),
         acting_principal: &params.acting_principal,
+        handler_context: params.handler_context.as_ref(),
         resolved: &params.resolved,
         project_path: &project_path,
         provenance: &params.provenance,
@@ -8557,6 +8688,7 @@ async fn launch_claimed_native_resume(
             launch_timings: None,
             runtime_ref: resume.runtime_ref.as_deref(),
             acting_principal: &params.acting_principal,
+            handler_context: params.handler_context.as_ref(),
             resolved: &params.resolved,
             project_path: &project_path,
             provenance: &params.provenance,
@@ -8798,6 +8930,7 @@ async fn launch_admitted_root_with_claim(
             launch_timings: None,
             runtime_ref: resume.runtime_ref.as_deref(),
             acting_principal: &execution.acting_principal,
+            handler_context: execution.handler_context.as_ref(),
             resolved: &execution.resolved,
             project_path: &project_path,
             provenance: &execution.provenance,
@@ -9018,6 +9151,7 @@ async fn launch_claimed_follow_child(
         launch_timings: None,
         runtime_ref: identity.runtime_ref.as_deref(),
         acting_principal: &params.acting_principal,
+        handler_context: params.handler_context.as_ref(),
         resolved: &params.resolved,
         project_path: &project_path,
         provenance: &params.provenance,

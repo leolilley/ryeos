@@ -13,6 +13,10 @@ fn graph_call_id(graph_run_id: &str, step: u32, node: &str) -> String {
     format!("{graph_run_id}:{step}:{node}")
 }
 
+fn graph_operation_id(graph_run_id: &str, step: u32, node: &str) -> String {
+    crate::dispatch::graph_action_operation_id(graph_run_id, node, step, None, None)
+}
+
 impl Walker {
     /// Publish the already-completed action's opening/result testimony as one
     /// ordered state transaction. Dispatch happens before commit, so no
@@ -26,6 +30,7 @@ impl Walker {
         status: GraphToolCallStatus,
     ) {
         let call_id = graph_call_id(graph_run_id, step, current);
+        let operation_id = graph_operation_id(graph_run_id, step, current);
         let node_ref = node_ref(&self.graph.definition_ref, current);
         let events = vec![
             (
@@ -42,6 +47,7 @@ impl Walker {
             (
                 RuntimeEventType::ToolCallStart,
                 json!({
+                    "operation_id": &operation_id,
                     "tool": item_id,
                     "call_id": &call_id,
                     "graph_run_id": graph_run_id,
@@ -56,6 +62,7 @@ impl Walker {
             (
                 RuntimeEventType::ToolCallResult,
                 json!({
+                    "operation_id": &operation_id,
                     "tool": item_id,
                     "call_id": &call_id,
                     "graph_run_id": graph_run_id,
@@ -176,11 +183,13 @@ impl Walker {
         current: &str,
         item_id: &str,
     ) {
+        let operation_id = graph_operation_id(graph_run_id, step, current);
         let r = self
             .client
             .append_runtime_event(
                 RuntimeEventType::ToolCallStart,
                 json!({
+                    "operation_id": operation_id,
                     "tool": item_id,
                     "call_id": graph_call_id(graph_run_id, step, current),
                     "graph_run_id": graph_run_id,
@@ -204,11 +213,13 @@ impl Walker {
         item_id: &str,
         status: GraphToolCallStatus,
     ) {
+        let operation_id = graph_operation_id(graph_run_id, step, current);
         let r = self
             .client
             .append_runtime_event(
                 RuntimeEventType::ToolCallResult,
                 json!({
+                    "operation_id": operation_id,
                     "tool": item_id,
                     "call_id": graph_call_id(graph_run_id, step, current),
                     "graph_run_id": graph_run_id,

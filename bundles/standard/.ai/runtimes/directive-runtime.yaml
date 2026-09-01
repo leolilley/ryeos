@@ -1,9 +1,10 @@
-# ryeos:signed:2026-08-27T09:11:06Z:620ea95716fa7cbe3d0899927944e1ba34033e18cecd8db321b526543be92122:NjM3PkEeZKAYzSs2X8Um5DiJxUkvlezd4vRzacCSANSstvZs6IRyiLMPbQ2pOCEKtASqRilv+jpGI3EdO8vxAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-01T00:15:48Z:35a31f321759af37f5af4b1755b80774a1680bfff94a21c8382812badef04c9e:5BNKvD+MgtyP2hjfgELhBncg4GRVzVeTjsC3OE/MMfLvaqK5GP312KlZHfxErCQ880Y3znWn5rHVXScO06q6CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: directive
 default: true
 binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-directive-runtime
 abi_version: "v3"
+native_resume: true
 required_caps:
   - runtime.execute
 launch_contract:
